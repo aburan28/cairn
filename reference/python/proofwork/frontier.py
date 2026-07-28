@@ -41,6 +41,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .canonical import MAX_SCORE, MAX_UNITS, MIN_SCORE
+
 MAXIMIZE = "maximize"
 MINIMIZE = "minimize"
 
@@ -71,6 +73,17 @@ class Ratchet:
                 raise RatchetError(f"{name} must be an integer")
         if self.reward < 0:
             raise RatchetError("reward must be non-negative")
+        if self.reward > MAX_UNITS:
+            raise RatchetError(
+                f"reward {self.reward} exceeds the format maximum {MAX_UNITS}"
+            )
+        for name in ("baseline", "target"):
+            value = getattr(self, name)
+            if not MIN_SCORE <= value <= MAX_SCORE:
+                raise RatchetError(
+                    f"{name} {value} is outside the signed 64-bit score range; "
+                    "a fixed-width implementation could not read this record"
+                )
         if self.min_improvement < 1:
             raise RatchetError("min_improvement must be at least 1")
         if self.direction == MAXIMIZE and self.target <= self.baseline:

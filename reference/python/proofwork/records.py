@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .canonical import digest, digest_bytes
+from .canonical import MAX_UNITS, digest, digest_bytes
 
 
 class RecordError(ValueError):
@@ -53,6 +53,11 @@ class Objective:
             raise RecordError("reward must be an integer unit count")
         if self.reward < 0:
             raise RecordError("reward must be non-negative")
+        if self.reward > MAX_UNITS:
+            raise RecordError(
+                f"reward {self.reward} exceeds the format maximum {MAX_UNITS}; "
+                "a record above it cannot be read by a 64-bit implementation"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {
