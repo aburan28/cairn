@@ -1,0 +1,42 @@
+[package]
+name = "proofwork"
+version = "0.2.0"
+edition = "2021"
+# Verified, not asserted: `cargo +1.85.0 check --all-targets` passes and 1.75
+# provably does not -- transitive dependencies now require edition2024, which
+# stabilized in 1.85. CI pins this exact toolchain so the claim stays true.
+rust-version = "1.85"
+description = "A research network where verified results are the unit of account: pinned verifiers, an auditable log, and citation-flow attribution."
+license = "Apache-2.0"
+repository = "https://github.com/aburan28/proofwork"
+readme = "README.md"
+
+[dependencies]
+# Parsing untrusted JSON only. Canonical *output* is written by this crate's own
+# encoder -- see src/canonical.rs for why the two are deliberately separate.
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+sha2 = "0.10"
+hmac = "0.12"
+
+# Confidentiality layer. Censorship resistance needs unlinkable, sealed
+# submissions that can be revealed WITHOUT the submitter being online -- see
+# docs/censorship.md. Threshold secret sharing is implemented in-crate over
+# GF(2^8) rather than pulled in, so the reconstruction path is auditable here.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
+
+[dev-dependencies]
+
+[lib]
+name = "proofwork"
+path = "src/lib.rs"
+
+[[bin]]
+name = "proofwork"
+path = "src/main.rs"
+
+[profile.release]
+overflow-checks = true   # money arithmetic must never wrap silently

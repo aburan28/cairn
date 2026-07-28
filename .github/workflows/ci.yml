@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+      # The demos are part of the contract: if the documented walkthrough stops
+      # working, the README is lying.
+      - run: cargo build --release
+      - run: ./scripts/demo.sh
+      - run: ./scripts/ratchet-demo.sh
+
+  reference-python:
+    # The Python reference is what conformance/vectors.json is generated from.
+    # If it drifts, the cross-implementation contract silently stops meaning
+    # anything -- so it is tested, and the vectors are checked to be current.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "./reference/python[dev]"
+      - run: cd reference/python && pytest -q
+      - name: conformance vectors are up to date
+        run: |
+          python3 scripts/gen_conformance.py
+          git diff --exit-code conformance/vectors.json \
+            || (echo "::error::conformance/vectors.json is stale; re-run scripts/gen_conformance.py" && exit 1)
+
+  msrv:
+    # The crate claims rust-version 1.85. An unchecked MSRV is a claim, not a
+    # fact, and downstream users are the ones who find out. 1.75 was the original
+    # claim and was measurably false: transitive deps need edition2024.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets
+
+  interop:
+    # The strongest check in the repo. "Anyone can independently re-derive every
+    # settled result" is worth nothing if it means "anyone running my code". Two
+    # implementations, written separately in different languages, must agree on
+    # every id and every Merkle root, and each must be able to audit a log the
+    # other produced. This is what catches a canonical-encoding drift before it
+    # silently forks the network's identity scheme.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "./reference/python[dev]"
+      - run: cargo build --release
+      - run: ./scripts/interop.sh

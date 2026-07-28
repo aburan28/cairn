@@ -1,0 +1,4065 @@
+{
+  "_comment": "Cross-implementation conformance vectors generated from the Python reference implementation. Any implementation that disagrees with these bytes cannot interoperate: two parties would compute different ids for the same object and silently fail to agree on what was settled.",
+  "attribution": {
+    "cases": [
+      {
+        "amount": 1,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 1,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 1,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 1,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 1,
+          "dave": 1
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 1,
+          "dave": 1
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 1,
+          "dave": 1
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 1,
+          "dave": 1
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 1,
+          "dave": 1
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 1,
+          "dave": 1
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 2
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 1,
+          "carol": 1,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 1,
+          "bob": 1,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 2,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 1,
+          "bob": 1,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 1,
+          "dave": 2
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 1,
+          "dave": 2
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 1,
+          "dave": 2
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 1,
+          "dave": 2
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 1,
+          "dave": 2
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 1,
+          "dave": 2
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 1,
+          "carol": 1,
+          "dave": 1
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 1,
+          "carol": 1,
+          "dave": 1
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 1,
+          "carol": 1,
+          "dave": 1
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 3
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 2,
+          "carol": 1,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 2,
+          "bob": 1,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 3,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 2,
+          "bob": 1,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 7
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 7
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 7
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 7
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 7
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 1,
+          "carol": 1,
+          "dave": 5
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 1,
+          "carol": 1,
+          "dave": 5
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 1,
+          "carol": 1,
+          "dave": 5
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 7
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 1,
+          "dave": 6
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 1,
+          "dave": 6
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 1,
+          "dave": 6
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 7
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 2,
+          "carol": 1,
+          "dave": 4
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 2,
+          "carol": 1,
+          "dave": 4
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 2,
+          "carol": 1,
+          "dave": 4
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 7
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 2,
+          "carol": 2,
+          "dave": 3
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 2,
+          "bob": 1,
+          "carol": 1,
+          "dave": 3
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 2,
+          "bob": 1,
+          "carol": 1,
+          "dave": 3
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 7
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 4,
+          "carol": 3,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 5,
+          "bob": 2,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 7,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 5,
+          "bob": 2,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 999
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 999
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 999
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 999
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 999
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 167,
+          "carol": 166,
+          "dave": 666
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 194,
+          "bob": 28,
+          "carol": 111,
+          "dave": 666
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 194,
+          "bob": 28,
+          "carol": 111,
+          "dave": 666
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 999
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 125,
+          "carol": 124,
+          "dave": 750
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 140,
+          "bob": 16,
+          "carol": 93,
+          "dave": 750
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 140,
+          "bob": 16,
+          "carol": 93,
+          "dave": 750
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 999
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 250,
+          "carol": 249,
+          "dave": 500
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 312,
+          "bob": 62,
+          "carol": 125,
+          "dave": 500
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 312,
+          "bob": 62,
+          "carol": 125,
+          "dave": 500
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 999
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 333,
+          "carol": 333,
+          "dave": 333
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 444,
+          "bob": 111,
+          "carol": 111,
+          "dave": 333
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 444,
+          "bob": 111,
+          "carol": 111,
+          "dave": 333
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 999
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 500,
+          "carol": 499,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 749,
+          "bob": 250,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 999,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 749,
+          "bob": 250,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 1000
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 1000
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 1000
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 167,
+          "carol": 166,
+          "dave": 667
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 194,
+          "bob": 28,
+          "carol": 111,
+          "dave": 667
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 194,
+          "bob": 28,
+          "carol": 111,
+          "dave": 667
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 125,
+          "carol": 125,
+          "dave": 750
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 140,
+          "bob": 16,
+          "carol": 94,
+          "dave": 750
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 140,
+          "bob": 16,
+          "carol": 94,
+          "dave": 750
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 250,
+          "carol": 250,
+          "dave": 500
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 312,
+          "bob": 63,
+          "carol": 125,
+          "dave": 500
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 312,
+          "bob": 63,
+          "carol": 125,
+          "dave": 500
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 333,
+          "carol": 333,
+          "dave": 334
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 444,
+          "bob": 111,
+          "carol": 111,
+          "dave": 334
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 444,
+          "bob": 111,
+          "carol": 111,
+          "dave": 334
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 500,
+          "carol": 500,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 750,
+          "bob": 250,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1000,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 750,
+          "bob": 250,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 1000000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 1000000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 1000000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 166667,
+          "carol": 166666,
+          "dave": 666667
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 194444,
+          "bob": 27778,
+          "carol": 111111,
+          "dave": 666667
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 194444,
+          "bob": 27778,
+          "carol": 111111,
+          "dave": 666667
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 125000,
+          "carol": 125000,
+          "dave": 750000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 140625,
+          "bob": 15625,
+          "carol": 93750,
+          "dave": 750000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 140625,
+          "bob": 15625,
+          "carol": 93750,
+          "dave": 750000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 250000,
+          "carol": 250000,
+          "dave": 500000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 312500,
+          "bob": 62500,
+          "carol": 125000,
+          "dave": 500000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 312500,
+          "bob": 62500,
+          "carol": 125000,
+          "dave": 500000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 333333,
+          "carol": 333333,
+          "dave": 333334
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 444444,
+          "bob": 111111,
+          "carol": 111111,
+          "dave": 333334
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 444444,
+          "bob": 111111,
+          "carol": 111111,
+          "dave": 333334
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 500000,
+          "carol": 500000,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 750000,
+          "bob": 250000,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1000000,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 750000,
+          "bob": 250000,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000007
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 1,
+        "payouts": {
+          "dave": 1000000007
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 2,
+        "payouts": {
+          "dave": 1000000007
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 1,
+        "delta_num": 0,
+        "max_depth": 8,
+        "payouts": {
+          "dave": 1000000007
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000007
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 166666668,
+          "carol": 166666667,
+          "dave": 666666672
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 194444445,
+          "bob": 27777778,
+          "carol": 111111112,
+          "dave": 666666672
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 3,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 194444445,
+          "bob": 27777778,
+          "carol": 111111112,
+          "dave": 666666672
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000007
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 125000001,
+          "carol": 125000000,
+          "dave": 750000006
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 140625001,
+          "bob": 15625000,
+          "carol": 93750000,
+          "dave": 750000006
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 4,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 140625001,
+          "bob": 15625000,
+          "carol": 93750000,
+          "dave": 750000006
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000007
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 250000002,
+          "carol": 250000001,
+          "dave": 500000004
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 312500002,
+          "bob": 62500000,
+          "carol": 125000001,
+          "dave": 500000004
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 2,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 312500002,
+          "bob": 62500000,
+          "carol": 125000001,
+          "dave": 500000004
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000007
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 333333336,
+          "carol": 333333335,
+          "dave": 333333336
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 444444447,
+          "bob": 111111112,
+          "carol": 111111112,
+          "dave": 333333336
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 3,
+        "delta_num": 2,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 444444447,
+          "bob": 111111112,
+          "carol": 111111112,
+          "dave": 333333336
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 0,
+        "payouts": {
+          "dave": 1000000007
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 1,
+        "payouts": {
+          "alice": 500000004,
+          "carol": 500000003,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 2,
+        "payouts": {
+          "alice": 750000005,
+          "bob": 250000002,
+          "carol": 0,
+          "dave": 0
+        }
+      },
+      {
+        "amount": 1000000007,
+        "delta_den": 1,
+        "delta_num": 1,
+        "max_depth": 8,
+        "payouts": {
+          "alice": 750000005,
+          "bob": 250000002,
+          "carol": 0,
+          "dave": 0
+        }
+      }
+    ],
+    "claim_ids": {
+      "alice": "sha256:3309b131b0b8ca11d4475558f473da1e68f370cda5f4d627557648b59092e8e5",
+      "bob": "sha256:14a70eb3be885e51357f2aa0f0bd3b66ef8263d2956a82d0f7566a38ea959f2e",
+      "carol": "sha256:f587b461c7ff8250790391751258944089b7f9015f726c42d80b7630bf79396d",
+      "dave": "sha256:21e564b772226eb6b3dab2f6f52179db882196c31a3c65bb78a86fb0f670ddad"
+    },
+    "claims": [
+      {
+        "artifact": {
+          "who": "alice"
+        },
+        "cites": [],
+        "created_at": "2026-07-28T00:00:00+00:00",
+        "nonce": "n",
+        "objective_id": "obj",
+        "submitter": "alice",
+        "type": "claim"
+      },
+      {
+        "artifact": {
+          "who": "bob"
+        },
+        "cites": [],
+        "created_at": "2026-07-28T00:00:00+00:00",
+        "nonce": "n",
+        "objective_id": "obj",
+        "submitter": "bob",
+        "type": "claim"
+      },
+      {
+        "artifact": {
+          "who": "carol"
+        },
+        "cites": [
+          "sha256:3309b131b0b8ca11d4475558f473da1e68f370cda5f4d627557648b59092e8e5",
+          "sha256:14a70eb3be885e51357f2aa0f0bd3b66ef8263d2956a82d0f7566a38ea959f2e"
+        ],
+        "created_at": "2026-07-28T00:00:00+00:00",
+        "nonce": "n",
+        "objective_id": "obj",
+        "submitter": "carol",
+        "type": "claim"
+      },
+      {
+        "artifact": {
+          "who": "dave"
+        },
+        "cites": [
+          "sha256:f587b461c7ff8250790391751258944089b7f9015f726c42d80b7630bf79396d",
+          "sha256:3309b131b0b8ca11d4475558f473da1e68f370cda5f4d627557648b59092e8e5"
+        ],
+        "created_at": "2026-07-28T00:00:00+00:00",
+        "nonce": "n",
+        "objective_id": "obj",
+        "submitter": "dave",
+        "type": "claim"
+      }
+    ],
+    "root": "sha256:21e564b772226eb6b3dab2f6f52179db882196c31a3c65bb78a86fb0f670ddad"
+  },
+  "canonical": [
+    {
+      "canonical_hex": "7b7d",
+      "canonical_utf8": "{}",
+      "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "value": {}
+    },
+    {
+      "canonical_hex": "7b2261223a312c2262223a327d",
+      "canonical_utf8": "{\"a\":1,\"b\":2}",
+      "digest": "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
+      "value": {
+        "a": 1,
+        "b": 2
+      }
+    },
+    {
+      "canonical_hex": "7b2261223a312c2262223a327d",
+      "canonical_utf8": "{\"a\":1,\"b\":2}",
+      "digest": "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
+      "value": {
+        "a": 1,
+        "b": 2
+      }
+    },
+    {
+      "canonical_hex": "7b226e6573746564223a7b2261223a6e756c6c2c227a223a5b312c7b2261223a322c2262223a317d5d7d7d",
+      "canonical_utf8": "{\"nested\":{\"a\":null,\"z\":[1,{\"a\":2,\"b\":1}]}}",
+      "digest": "sha256:90cbcc5398117eb55be74ab3f888c07a622bf359053119bd00d2319f91818315",
+      "value": {
+        "nested": {
+          "a": null,
+          "z": [
+            1,
+            {
+              "a": 2,
+              "b": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "canonical_hex": "7b22626f6f6c73223a5b747275652c66616c73655d2c226e756c6c223a6e756c6c7d",
+      "canonical_utf8": "{\"bools\":[true,false],\"null\":null}",
+      "digest": "sha256:3e47efcc798b1f8ad3085d3f774806ace610a8934a539a31a53d25ec19476376",
+      "value": {
+        "bools": [
+          true,
+          false
+        ],
+        "null": null
+      }
+    },
+    {
+      "canonical_hex": "7b226936346d6178223a393232333337323033363835343737353830372c226936346d696e223a2d393232333337323033363835343737353830382c226e6567223a2d313138303539313632303731373431313330333432347d",
+      "canonical_utf8": "{\"i64max\":9223372036854775807,\"i64min\":-9223372036854775808,\"neg\":-1180591620717411303424}",
+      "digest": "sha256:441a8557b772eb3a92da1b71d54acf827a3379adaf0c079f793cecc8446ce729",
+      "value": {
+        "i64max": 9223372036854775807,
+        "i64min": -9223372036854775808,
+        "neg": -1180591620717411303424
+      }
+    },
+    {
+      "canonical_hex": "7b22693132386d6178223a3137303134313138333436303436393233313733313638373330333731353838343130353732372c22693132386d696e223a2d3137303134313138333436303436393233313733313638373330333731353838343130353732387d",
+      "canonical_utf8": "{\"i128max\":170141183460469231731687303715884105727,\"i128min\":-170141183460469231731687303715884105728}",
+      "digest": "sha256:afd6b365b8876fca67c048b871da7d0ae1f4e31b5da547731f0d4004c1e1086d",
+      "value": {
+        "i128max": 170141183460469231731687303715884105727,
+        "i128min": -170141183460469231731687303715884105728
+      }
+    },
+    {
+      "canonical_hex": "7b226e65677a65726f223a302c227a65726f223a307d",
+      "canonical_utf8": "{\"negzero\":0,\"zero\":0}",
+      "digest": "sha256:bdd750a3cfb926d414a673126db7f7642edc6eb3b2eaa37dba8b602cf2716726",
+      "value": {
+        "negzero": 0,
+        "zero": 0
+      }
+    },
+    {
+      "canonical_hex": "7b22656d7074795f6c697374223a5b5d2c22656d7074795f6f626a223a7b7d7d",
+      "canonical_utf8": "{\"empty_list\":[],\"empty_obj\":{}}",
+      "digest": "sha256:273bc55eda9af5c7ecbbb2d0ebc67ba0a722a495afc03f3d171e7b305de5642e",
+      "value": {
+        "empty_list": [],
+        "empty_obj": {}
+      }
+    },
+    {
+      "canonical_hex": "7b2264656570223a5b5b5b5b5b315d5d5d5d5d7d",
+      "canonical_utf8": "{\"deep\":[[[[[1]]]]]}",
+      "digest": "sha256:3409f9797caac6ed0aac59afcb9f25e29f16cb6b69941248149f583ffbc801d6",
+      "value": {
+        "deep": [
+          [
+            [
+              [
+                [
+                  1
+                ]
+              ]
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "canonical_hex": "7b2261737472616c223a22f09f9880f09d94b8222c226261636b736c617368223a22615c5c62222c22636a6b223a22e697a5e69cace8aa9e222c22636f6e74726f6c223a225c75303030305c75303030315c7530303166222c2264656c223a227f222c22656d707479223a22222c226c6174696e223a22636166c3a9222c2271756f7465223a22615c2262222c2273686f727473223a225c625c745c6e5c665c72222c22736f6c69647573223a22612f62227d",
+      "canonical_utf8": "{\"astral\":\"😀𝔸\",\"backslash\":\"a\\\\b\",\"cjk\":\"日本語\",\"control\":\"\\u0000\\u0001\\u001f\",\"del\":\"\",\"empty\":\"\",\"latin\":\"café\",\"quote\":\"a\\\"b\",\"shorts\":\"\\b\\t\\n\\f\\r\",\"solidus\":\"a/b\"}",
+      "digest": "sha256:e876a09497a4bd08b0049c2c9f8a234aa5bd13f28c241ecc6573c5d9afa95046",
+      "value": {
+        "astral": "😀𝔸",
+        "backslash": "a\\b",
+        "cjk": "日本語",
+        "control": "\u0000\u0001\u001f",
+        "del": "",
+        "empty": "",
+        "latin": "café",
+        "quote": "a\"b",
+        "shorts": "\b\t\n\f\r",
+        "solidus": "a/b"
+      }
+    },
+    {
+      "canonical_hex": "7b22756e69636f64655f6b6579735f736f7274223a7b2241223a342c225a223a352c2261223a322c2262223a312c22c3a9223a337d7d",
+      "canonical_utf8": "{\"unicode_keys_sort\":{\"A\":4,\"Z\":5,\"a\":2,\"b\":1,\"é\":3}}",
+      "digest": "sha256:38d5e620ea9fff572e756630a5eb12996ea683b4f0c636e36001090081249cc9",
+      "value": {
+        "unicode_keys_sort": {
+          "A": 4,
+          "Z": 5,
+          "a": 2,
+          "b": 1,
+          "é": 3
+        }
+      }
+    }
+  ],
+  "gossip": [
+    {
+      "artifact_id": "sha256:031d1cbb9c7cc8dbbf4fa4be6e7592429d508c4c02d231de7a4eee1b4a5c23ff",
+      "candidate": {
+        "artifact": {
+          "tag": "a"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 0
+      },
+      "id": "sha256:75fdfc69b4066436e9d7dbb0d65e772a2161de6105e0c7bdbe50d999ef5475c0",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 63,
+        "8": 7
+      }
+    },
+    {
+      "artifact_id": "sha256:10b4f93e2b65938b308749f7f145db7d2218f1cb7510eca513c4d38b7d2e6d97",
+      "candidate": {
+        "artifact": {
+          "tag": "bb"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 0
+      },
+      "id": "sha256:7ad2c5e7ca0f21c9c71c26e917e9b9c91b30f8a248c7c8f58ec043d5e9d44340",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 23,
+        "8": 7
+      }
+    },
+    {
+      "artifact_id": "sha256:171803c5dc3f3205b785fea93cb2a901d2103ea5d3a5154bf7bce9347f35b4eb",
+      "candidate": {
+        "artifact": {
+          "tag": "😀"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 0
+      },
+      "id": "sha256:48dad7304ba6c53be9c275b2c37a10e56aa8a79e2f14285a5747ec9b6e4ee57c",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 43,
+        "8": 3
+      }
+    },
+    {
+      "artifact_id": "sha256:031d1cbb9c7cc8dbbf4fa4be6e7592429d508c4c02d231de7a4eee1b4a5c23ff",
+      "candidate": {
+        "artifact": {
+          "tag": "a"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 1
+      },
+      "id": "sha256:c5435bbea36612d90f2058189d33fef7f4c6f313dee44304a92b37523ce9d8a2",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 63,
+        "8": 7
+      }
+    },
+    {
+      "artifact_id": "sha256:10b4f93e2b65938b308749f7f145db7d2218f1cb7510eca513c4d38b7d2e6d97",
+      "candidate": {
+        "artifact": {
+          "tag": "bb"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 1
+      },
+      "id": "sha256:837fb8b7f0e3bd22ef69eae9065b230e31389b5dfa32129f8e0319f0d8678099",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 23,
+        "8": 7
+      }
+    },
+    {
+      "artifact_id": "sha256:171803c5dc3f3205b785fea93cb2a901d2103ea5d3a5154bf7bce9347f35b4eb",
+      "candidate": {
+        "artifact": {
+          "tag": "😀"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 1
+      },
+      "id": "sha256:499853148c7b1e5a7e147dab4c0d2f460aedd451ce242f47652155d75a4b8fa3",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 43,
+        "8": 3
+      }
+    },
+    {
+      "artifact_id": "sha256:031d1cbb9c7cc8dbbf4fa4be6e7592429d508c4c02d231de7a4eee1b4a5c23ff",
+      "candidate": {
+        "artifact": {
+          "tag": "a"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 999
+      },
+      "id": "sha256:fd560e3e327dd7e152991e5ee8a342893da61fc154e23b7b7f61d0e5d0300ff4",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 63,
+        "8": 7
+      }
+    },
+    {
+      "artifact_id": "sha256:10b4f93e2b65938b308749f7f145db7d2218f1cb7510eca513c4d38b7d2e6d97",
+      "candidate": {
+        "artifact": {
+          "tag": "bb"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 999
+      },
+      "id": "sha256:a72512debab5b1d9ed4872baa9253d8b78787eaab6c604b2f4c27d847a391151",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 23,
+        "8": 7
+      }
+    },
+    {
+      "artifact_id": "sha256:171803c5dc3f3205b785fea93cb2a901d2103ea5d3a5154bf7bce9347f35b4eb",
+      "candidate": {
+        "artifact": {
+          "tag": "😀"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 999
+      },
+      "id": "sha256:930ea97eb8d178d3935e6ad098cf33569ea2437b3d171a8242c6cf2b8a5070f6",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 43,
+        "8": 3
+      }
+    },
+    {
+      "artifact_id": "sha256:031d1cbb9c7cc8dbbf4fa4be6e7592429d508c4c02d231de7a4eee1b4a5c23ff",
+      "candidate": {
+        "artifact": {
+          "tag": "a"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 1000000000000
+      },
+      "id": "sha256:baeb74b4f384b1fd1c3b67c2f55e07b277eec5d6d9dfb45e9cd7275831da5082",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 63,
+        "8": 7
+      }
+    },
+    {
+      "artifact_id": "sha256:10b4f93e2b65938b308749f7f145db7d2218f1cb7510eca513c4d38b7d2e6d97",
+      "candidate": {
+        "artifact": {
+          "tag": "bb"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 1000000000000
+      },
+      "id": "sha256:cf06521a5a19e6554a479a85db3e3b421221d5f34847f9fffd8cfe687fc7788e",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 23,
+        "8": 7
+      }
+    },
+    {
+      "artifact_id": "sha256:171803c5dc3f3205b785fea93cb2a901d2103ea5d3a5154bf7bce9347f35b4eb",
+      "candidate": {
+        "artifact": {
+          "tag": "😀"
+        },
+        "objective_id": "obj",
+        "origin": "n0",
+        "score": 1000000000000
+      },
+      "id": "sha256:3e8ebf36cb95cbcd3510a84c052e4d56f87bfce1f631ec4aa42f3b94870e8be8",
+      "islands": {
+        "1": 0,
+        "2": 1,
+        "4": 3,
+        "64": 43,
+        "8": 3
+      }
+    }
+  ],
+  "merkle": [
+    {
+      "leaves": [],
+      "root": null
+    },
+    {
+      "leaves": [
+        "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65"
+      ],
+      "root": "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65"
+    },
+    {
+      "leaves": [
+        "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65",
+        "sha256:0b549edd218c251f511934cc2f3bc5c7f4780e27af6b8ab4ae8d92cd94121b4a"
+      ],
+      "root": "sha256:59e012752038c1e357258057913f8a13f88cb1ee144807892cfe62de036eef56"
+    },
+    {
+      "leaves": [
+        "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65",
+        "sha256:0b549edd218c251f511934cc2f3bc5c7f4780e27af6b8ab4ae8d92cd94121b4a",
+        "sha256:38f38fbef725fffb9fa39683d9e50f05ca8c61130c2da2322f9e9021007a2abf"
+      ],
+      "root": "sha256:675151025d264b1aa0c42ac7d4a8bf0f3da81f5f41e9a3b666e0d3e981def522"
+    },
+    {
+      "leaves": [
+        "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65",
+        "sha256:0b549edd218c251f511934cc2f3bc5c7f4780e27af6b8ab4ae8d92cd94121b4a",
+        "sha256:38f38fbef725fffb9fa39683d9e50f05ca8c61130c2da2322f9e9021007a2abf",
+        "sha256:6867a9ad5ed5490cad237e5a82ff1c3f3a6858a7ec42be49b40b12a65911dcd7"
+      ],
+      "root": "sha256:9604c5198e43b36bec6463b6826118fc6e6826c17ace2eb567f5cc52aaeddf44"
+    },
+    {
+      "leaves": [
+        "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65",
+        "sha256:0b549edd218c251f511934cc2f3bc5c7f4780e27af6b8ab4ae8d92cd94121b4a",
+        "sha256:38f38fbef725fffb9fa39683d9e50f05ca8c61130c2da2322f9e9021007a2abf",
+        "sha256:6867a9ad5ed5490cad237e5a82ff1c3f3a6858a7ec42be49b40b12a65911dcd7",
+        "sha256:83f0969936f48733b59108ddca066bbfb311bd59b4074351193833026bd18de2"
+      ],
+      "root": "sha256:cbf2f403bd2659bb603a35f2ed0dc8d5aef3f9f6ce70a33d66f624fc0b27ee22"
+    },
+    {
+      "leaves": [
+        "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65",
+        "sha256:0b549edd218c251f511934cc2f3bc5c7f4780e27af6b8ab4ae8d92cd94121b4a",
+        "sha256:38f38fbef725fffb9fa39683d9e50f05ca8c61130c2da2322f9e9021007a2abf",
+        "sha256:6867a9ad5ed5490cad237e5a82ff1c3f3a6858a7ec42be49b40b12a65911dcd7",
+        "sha256:83f0969936f48733b59108ddca066bbfb311bd59b4074351193833026bd18de2",
+        "sha256:acc9fab930ed3c234a2df51460c9a799c09134d307d5101deedccdc481558eb2"
+      ],
+      "root": "sha256:693b7946029b503ca57875a4e0fb956af9068d7259b686e1485afde0d7e86015"
+    },
+    {
+      "leaves": [
+        "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65",
+        "sha256:0b549edd218c251f511934cc2f3bc5c7f4780e27af6b8ab4ae8d92cd94121b4a",
+        "sha256:38f38fbef725fffb9fa39683d9e50f05ca8c61130c2da2322f9e9021007a2abf",
+        "sha256:6867a9ad5ed5490cad237e5a82ff1c3f3a6858a7ec42be49b40b12a65911dcd7",
+        "sha256:83f0969936f48733b59108ddca066bbfb311bd59b4074351193833026bd18de2",
+        "sha256:acc9fab930ed3c234a2df51460c9a799c09134d307d5101deedccdc481558eb2",
+        "sha256:39cb40def8ceab345e59cef6e9954e42e28bba6c34903220fcea0dca919d4e83"
+      ],
+      "root": "sha256:da017f37990224d8af521b742dc28f18abd498ea3143638487df5c59ca6398ef"
+    },
+    {
+      "leaves": [
+        "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65",
+        "sha256:0b549edd218c251f511934cc2f3bc5c7f4780e27af6b8ab4ae8d92cd94121b4a",
+        "sha256:38f38fbef725fffb9fa39683d9e50f05ca8c61130c2da2322f9e9021007a2abf",
+        "sha256:6867a9ad5ed5490cad237e5a82ff1c3f3a6858a7ec42be49b40b12a65911dcd7",
+        "sha256:83f0969936f48733b59108ddca066bbfb311bd59b4074351193833026bd18de2",
+        "sha256:acc9fab930ed3c234a2df51460c9a799c09134d307d5101deedccdc481558eb2",
+        "sha256:39cb40def8ceab345e59cef6e9954e42e28bba6c34903220fcea0dca919d4e83",
+        "sha256:a361a366dc1d1ed246247a4799037dd3d231fe3a71ffe3920c382e700dc9a13d"
+      ],
+      "root": "sha256:fa0cb71a4579e80baa8a6ff7aa07caed27a703cfeb1646e1faf023aec18fcac3"
+    },
+    {
+      "leaves": [
+        "sha256:e9f74e715a1806aa651489dcf176e77013b3c851dbc114cc9c24f2fe9d411d65",
+        "sha256:0b549edd218c251f511934cc2f3bc5c7f4780e27af6b8ab4ae8d92cd94121b4a",
+        "sha256:38f38fbef725fffb9fa39683d9e50f05ca8c61130c2da2322f9e9021007a2abf",
+        "sha256:38f38fbef725fffb9fa39683d9e50f05ca8c61130c2da2322f9e9021007a2abf"
+      ],
+      "root": "sha256:95af95f7135a4b0272176d3fd22c08ae677225a32c34f19bca71ab37772412a7"
+    }
+  ],
+  "partition": [
+    {
+      "anchor": "anchor",
+      "assignments": [
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 14,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 534,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 11,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 635,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 681,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 786,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 5,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 117,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 14,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 462,
+          "partitions": 1000
+        }
+      ],
+      "beacon": "9de02baf354f5febe994ef9a2cc33459a670db2774a9e39e87ba26143b4a157c",
+      "epoch": 0
+    },
+    {
+      "anchor": "sha256:abababababababababababababababababababababababababababababababab",
+      "assignments": [
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 10,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 930,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 10,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 266,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 891,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 12,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 716,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 6,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 902,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 13,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 581,
+          "partitions": 1000
+        }
+      ],
+      "beacon": "2e945634d6e0d0b86ddb4010dc9cd87ed17afce3ee39dc0b81c4de3832959356",
+      "epoch": 0
+    },
+    {
+      "anchor": "anchor",
+      "assignments": [
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 5,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 773,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 12,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 220,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 12,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 732,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 4,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 612,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 14,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 502,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 5,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 5,
+          "partitions": 1000
+        }
+      ],
+      "beacon": "e0dcc9fe12107126e483bedee84959f6dc16673c19245d67e0c33d1e8ba131ba",
+      "epoch": 1
+    },
+    {
+      "anchor": "sha256:abababababababababababababababababababababababababababababababab",
+      "assignments": [
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 706,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 211,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 5,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 989,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 14,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 270,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 15,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 711,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 7,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 599,
+          "partitions": 1000
+        }
+      ],
+      "beacon": "b0a22c0f0b8689662b9f53401d7aefde4a8cfeb44ed99c939bab225466c06be6",
+      "epoch": 1
+    },
+    {
+      "anchor": "anchor",
+      "assignments": [
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 7,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 503,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 14,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 438,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 14,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 54,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 7,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 903,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 10,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 458,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 5,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 549,
+          "partitions": 1000
+        }
+      ],
+      "beacon": "64e64e8b52a0bbb0e36273551c75084ab5f64601fec998eaf9b1eab9dd7a13f7",
+      "epoch": 42
+    },
+    {
+      "anchor": "sha256:abababababababababababababababababababababababababababababababab",
+      "assignments": [
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 12,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 100,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 107,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 10,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 386,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 8,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 848,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 9,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 577,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 920,
+          "partitions": 1000
+        }
+      ],
+      "beacon": "9e772efb56f4ee619962a4f6c4e73d7de8ddebfcd124af7ac2e8c7376a3bb444",
+      "epoch": 42
+    },
+    {
+      "anchor": "anchor",
+      "assignments": [
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 120,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 153,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 11,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 779,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 4,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 804,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 4,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 412,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 18,
+          "partitions": 1000
+        }
+      ],
+      "beacon": "33807a207ba181d6f649b707f14b7062b8d198b3e6d5d8e57aa3e66918261cf5",
+      "epoch": 1000000
+    },
+    {
+      "anchor": "sha256:abababababababababababababababababababababababababababababababab",
+      "assignments": [
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 11,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-0",
+          "objective_id": "obj",
+          "partition": 747,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 11,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-1",
+          "objective_id": "obj",
+          "partition": 939,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 10,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-2",
+          "objective_id": "obj",
+          "partition": 890,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 2,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 14,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-3",
+          "objective_id": "obj",
+          "partition": 406,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 3,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-4",
+          "objective_id": "obj",
+          "partition": 291,
+          "partitions": 1000
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 0,
+          "partitions": 1
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 1,
+          "partitions": 4
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 9,
+          "partitions": 16
+        },
+        {
+          "node_id": "node-5",
+          "objective_id": "obj",
+          "partition": 841,
+          "partitions": 1000
+        }
+      ],
+      "beacon": "8d87e6961620381d18a76abd9b05e3690a51bd8369ef1ac3711bbda6d9f86d63",
+      "epoch": 1000000
+    }
+  ],
+  "ratchet": [
+    {
+      "points": [
+        {
+          "cumulative": 0,
+          "progress": 0,
+          "score": 0
+        },
+        {
+          "cumulative": 10000,
+          "progress": 1,
+          "score": 1
+        },
+        {
+          "cumulative": 330000,
+          "progress": 33,
+          "score": 33
+        },
+        {
+          "cumulative": 500000,
+          "progress": 50,
+          "score": 50
+        },
+        {
+          "cumulative": 990000,
+          "progress": 99,
+          "score": 99
+        },
+        {
+          "cumulative": 1000000,
+          "progress": 100,
+          "score": 100
+        },
+        {
+          "cumulative": 1000000,
+          "progress": 100,
+          "score": 105
+        }
+      ],
+      "ratchet": {
+        "baseline": 0,
+        "direction": "maximize",
+        "reward": 1000000,
+        "target": 100
+      }
+    },
+    {
+      "points": [
+        {
+          "cumulative": 0,
+          "progress": 0,
+          "score": 9
+        },
+        {
+          "cumulative": 100000,
+          "progress": 1,
+          "score": 10
+        },
+        {
+          "cumulative": 300000,
+          "progress": 3,
+          "score": 12
+        },
+        {
+          "cumulative": 500000,
+          "progress": 5,
+          "score": 14
+        },
+        {
+          "cumulative": 1000000,
+          "progress": 10,
+          "score": 19
+        },
+        {
+          "cumulative": 1100000,
+          "progress": 11,
+          "score": 20
+        },
+        {
+          "cumulative": 1100000,
+          "progress": 11,
+          "score": 25
+        }
+      ],
+      "ratchet": {
+        "baseline": 9,
+        "direction": "maximize",
+        "reward": 1100000,
+        "target": 20
+      }
+    },
+    {
+      "points": [
+        {
+          "cumulative": 0,
+          "progress": 0,
+          "score": 100
+        },
+        {
+          "cumulative": 10,
+          "progress": 1,
+          "score": 99
+        },
+        {
+          "cumulative": 330,
+          "progress": 33,
+          "score": 67
+        },
+        {
+          "cumulative": 500,
+          "progress": 50,
+          "score": 50
+        },
+        {
+          "cumulative": 990,
+          "progress": 99,
+          "score": 1
+        },
+        {
+          "cumulative": 1000,
+          "progress": 100,
+          "score": 0
+        },
+        {
+          "cumulative": 1000,
+          "progress": 100,
+          "score": -5
+        }
+      ],
+      "ratchet": {
+        "baseline": 100,
+        "direction": "minimize",
+        "reward": 1000,
+        "target": 0
+      }
+    },
+    {
+      "points": [
+        {
+          "cumulative": 0,
+          "progress": 0,
+          "score": 0
+        },
+        {
+          "cumulative": 1,
+          "progress": 1,
+          "score": 1
+        },
+        {
+          "cumulative": 2,
+          "progress": 2,
+          "score": 2
+        },
+        {
+          "cumulative": 4,
+          "progress": 3,
+          "score": 3
+        },
+        {
+          "cumulative": 8,
+          "progress": 6,
+          "score": 6
+        },
+        {
+          "cumulative": 10,
+          "progress": 7,
+          "score": 7
+        },
+        {
+          "cumulative": 10,
+          "progress": 7,
+          "score": 12
+        }
+      ],
+      "ratchet": {
+        "baseline": 0,
+        "direction": "maximize",
+        "reward": 10,
+        "target": 7
+      }
+    },
+    {
+      "points": [
+        {
+          "cumulative": 0,
+          "progress": 0,
+          "score": 0
+        },
+        {
+          "cumulative": 333333333333333333,
+          "progress": 1,
+          "score": 1
+        },
+        {
+          "cumulative": 666666666666666666,
+          "progress": 2,
+          "score": 2
+        },
+        {
+          "cumulative": 1000000000000000000,
+          "progress": 3,
+          "score": 3
+        },
+        {
+          "cumulative": 1000000000000000000,
+          "progress": 3,
+          "score": 8
+        }
+      ],
+      "ratchet": {
+        "baseline": 0,
+        "direction": "maximize",
+        "reward": 1000000000000000000,
+        "target": 3
+      }
+    }
+  ],
+  "records": {
+    "claims": [
+      {
+        "artifact_id": "sha256:49620d2cbd95777da46e1c3d34793a4926d2f61f6ca2121bac91011e8613de4e",
+        "commitment_hash": "sha256:4a1cf72173356258ac7b068cefa3a29e8e90b0e59c82ceb23207932210e1cf13",
+        "id": "sha256:51b216380d88cf32e1e179dc8c52336c26e2aac447045dc4079f3a24bdeb334e",
+        "record": {
+          "artifact": {
+            "n": 42
+          },
+          "cites": [],
+          "created_at": "2026-07-28T00:00:00+00:00",
+          "nonce": "nonce-1",
+          "objective_id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+          "submitter": "alice",
+          "type": "claim"
+        }
+      },
+      {
+        "artifact_id": "sha256:bf5d31f7fdaa4742e81515a8e60bc980fe9949878fded9aede8fbedcc4e896dd",
+        "commitment_hash": "sha256:ac3e67c18598ba104830eb4ee2c4f21d60d5e2b3b51ad71925d94b7c52691180",
+        "id": "sha256:b9ec4fb44ea9cda9ec1a5ca32ab41deb02abea633505fbaa41851ba81a28f60c",
+        "record": {
+          "artifact": {
+            "n": 43
+          },
+          "cites": [
+            "sha256:51b216380d88cf32e1e179dc8c52336c26e2aac447045dc4079f3a24bdeb334e"
+          ],
+          "created_at": "2026-07-28T00:00:00+00:00",
+          "nonce": "nonce-2",
+          "objective_id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+          "submitter": "bob",
+          "type": "claim"
+        }
+      }
+    ],
+    "commitment_hash_cases": [
+      {
+        "artifact": {
+          "n": 42
+        },
+        "hash": "sha256:c4b7d428439e598333b066afb7eeddb2dbdc8f1e1a914ed639885740b1d5ff5e",
+        "nonce": "n1",
+        "objective_id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+        "submitter": "alice"
+      },
+      {
+        "artifact": {
+          "n": 42
+        },
+        "hash": "sha256:26287c0f8f805964d6772500fff3d5600e150977fd3ebb6bec4f8c088f86163d",
+        "nonce": "n1",
+        "objective_id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+        "submitter": "bob"
+      },
+      {
+        "artifact": {
+          "n": 43
+        },
+        "hash": "sha256:b5eef7ee4abaad1c787adf592778a6aec83cb8c5e7d84efe5a692eaeccec2552",
+        "nonce": "n1",
+        "objective_id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+        "submitter": "alice"
+      },
+      {
+        "artifact": {
+          "n": 42
+        },
+        "hash": "sha256:105a49b7816cfe2564c122a1b0e816f9539ee01bde503ec8d5a2b4055669e06e",
+        "nonce": "n2",
+        "objective_id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+        "submitter": "alice"
+      },
+      {
+        "artifact": {},
+        "hash": "sha256:a081aaf9fef8ef92875521f0b864f2cb79ec6a19488df81ab5bde777425f9fa7",
+        "nonce": "",
+        "objective_id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+        "submitter": ""
+      }
+    ],
+    "commitments": [
+      {
+        "id": "sha256:e86a6262807b107542f64d05900e54906dbebdd1a0e48e2e8d812b06bb900c28",
+        "record": {
+          "created_at": "2026-07-28T00:00:00+00:00",
+          "hash": "sha256:4a1cf72173356258ac7b068cefa3a29e8e90b0e59c82ceb23207932210e1cf13",
+          "objective_id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+          "submitter": "alice",
+          "type": "commitment"
+        }
+      }
+    ],
+    "objectives": [
+      {
+        "id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+        "record": {
+          "created_at": "2026-07-28T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-x",
+          "reward": 1000,
+          "statement": "find it",
+          "type": "objective",
+          "verifier": {
+            "checker": "c.py",
+            "checker_sha256": "abababababababababababababababababababababababababababababababab",
+            "entrypoint": "check",
+            "kind": "certificate"
+          }
+        }
+      },
+      {
+        "id": "sha256:963b51817b25a73e371736c38235dc6ef603f81fe765b41010ed1b89001d76f5",
+        "record": {
+          "created_at": "2026-07-28T00:00:00+00:00",
+          "deadline": "2026-12-31T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-x",
+          "reward": 1000,
+          "statement": "find it",
+          "type": "objective",
+          "verifier": {
+            "checker": "c.py",
+            "checker_sha256": "abababababababababababababababababababababababababababababababab",
+            "entrypoint": "check",
+            "kind": "certificate"
+          }
+        }
+      },
+      {
+        "id": "sha256:7aa80a57f7c916ba0bcff805b4a2fec9ee9c6b4fcccc1e9321d724c2d92922e4",
+        "record": {
+          "created_at": "2026-07-28T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-x",
+          "ratchet": {
+            "baseline": 9,
+            "direction": "maximize",
+            "min_improvement": 1,
+            "reward": 1100,
+            "target": 20
+          },
+          "reward": 1100,
+          "statement": "climb",
+          "type": "objective",
+          "verifier": {
+            "kind": "evaluator",
+            "threshold": 0
+          }
+        }
+      }
+    ]
+  }
+}

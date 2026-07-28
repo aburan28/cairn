@@ -1,0 +1,1073 @@
+//! The three records the network is built from: [`Objective`], [`Commitment`],
+//! [`Claim`].
+//!
+//! Every record is content-addressed: its id *is* the hash of its canonical
+//! form. Two consequences carry most of the design's weight.
+//!
+//! 1. **The verifier is part of the objective's identity.** Editing an
+//!    evaluator does not silently rescore work already done against it -- it
+//!    produces a different objective id. There is no such thing as changing the
+//!    rules of a funded objective; there is only forking it and funding the
+//!    fork.
+//!
+//! 2. **A claim names the claims it built on.** The result is a hash-linked
+//!    DAG, which is what makes automatic attribution computable (see
+//!    `attribution`).
+//!
+//! # Optional fields are omitted, never nulled
+//!
+//! `deadline` and `ratchet` appear in the record only when they are set.
+//! Emitting them as `null` would be a different byte string, hence a different
+//! digest, hence a different objective -- every id ever issued would move. The
+//! same reasoning applies to any field added later: absent and null are not
+//! interchangeable in a content-addressed format.
+//!
+//! # Validation is explicit here, unlike in the reference implementation
+//!
+//! Python validates inside `__post_init__`, so a record cannot exist unchecked.
+//! Rust struct literals have no such hook, so the invariants live in
+//! [`Objective::validate`] and [`Claim::validate`]. Both `from_value`
+//! constructors and the `new` constructors run them; code that builds a record
+//! by hand from untrusted input must call `validate` before trusting it. The
+//! invariants that *can* be moved into the type system have been: `reward` is
+//! `u64`, so "reward must be a non-negative integer" is unrepresentable rather
+//! than checked, and [`canonical::Value`](crate::canonical::Value) has no float
+//! variant, so no record can carry one.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+use crate::canonical::{digest_bytes, Value};
+
+/// The `type` tag every record carries in its canonical form.
+///
+/// The tag is what lets a reader of the append-only log tell an objective from
+/// a claim without consulting anything outside the bytes. Keeping it an enum
+/// keeps the three spellings in one place instead of scattered string literals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RecordKind {
+    Objective,
+    Commitment,
+    Claim,
+}
+
+impl RecordKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RecordKind::Objective => "objective",
+            RecordKind::Commitment => "commitment",
+            RecordKind::Claim => "claim",
+        }
+    }
+}
+
+impl fmt::Display for RecordKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A record is structurally invalid, or a value cannot be read as one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordError {
+    /// The value being decoded is not an object at all.
+    NotAnObject { record: &'static str },
+    /// A required field is absent. The reference implementation raises
+    /// `KeyError` here; a typed error is the Rust equivalent.
+    MissingField {
+        record: &'static str,
+        field: &'static str,
+    },
+    /// A field is present with the wrong shape.
+    InvalidField {
+        record: &'static str,
+        field: &'static str,
+        expected: &'static str,
+    },
+    /// An objective with no statement is not a question anyone can answer.
+    EmptyStatement,
+    /// An objective whose verifier has no `kind` cannot be routed to a checker,
+    /// so its payout would be somebody's opinion.
+    VerifierWithoutKind,
+    /// `reward` is an integer in the smallest unit of account, and this crate
+    /// carries it as `u64`. Python's bignums have no upper bound, so a record
+    /// written by the reference implementation with a reward above
+    /// `u64::MAX` -- or a negative one, which it rejects at construction --
+    /// is refused here rather than silently truncated.
+    RewardOutOfRange { reward: i128 },
+    /// Citations are a set. A repeated edge would otherwise be counted twice by
+    /// attribution, which is a way of paying yourself for the same input.
+    DuplicateCitation { id: String },
+}
+
+impl fmt::Display for RecordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecordError::NotAnObject { record } => {
+                write!(f, "{record}: record must be an object")
+            }
+            RecordError::MissingField { record, field } => {
+                write!(f, "{record}: missing required field {field:?}")
+            }
+            RecordError::InvalidField {
+                record,
+                field,
+                expected,
+            } => write!(f, "{record}: field {field:?} must be {expected}"),
+            RecordError::EmptyStatement => f.write_str("objective needs a statement"),
+            RecordError::VerifierWithoutKind => {
+                f.write_str("objective needs a verifier with a 'kind'")
+            }
+            RecordError::RewardOutOfRange { reward } => write!(
+                f,
+                "reward {reward} is outside the representable range \
+                 (0..=18446744073709551615 units)"
+            ),
+            RecordError::DuplicateCitation { id } => {
+                write!(f, "duplicate citation {id:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RecordError {}
+
+// -- helpers ---------------------------------------------------------------
+
+fn expect_object<'a>(value: &'a Value, record: &'static str) -> Result<&'a Value, RecordError> {
+    match value {
+        Value::Object(_) => Ok(value),
+        _ => Err(RecordError::NotAnObject { record }),
+    }
+}
+
+fn required<'a>(
+    value: &'a Value,
+    record: &'static str,
+    field: &'static str,
+) -> Result<&'a Value, RecordError> {
+    value
+        .get(field)
+        .ok_or(RecordError::MissingField { record, field })
+}
+
+fn required_string(
+    value: &Value,
+    record: &'static str,
+    field: &'static str,
+) -> Result<String, RecordError> {
+    match required(value, record, field)? {
+        Value::String(s) => Ok(s.clone()),
+        _ => Err(RecordError::InvalidField {
+            record,
+            field,
+            expected: "a string",
+        }),
+    }
+}
+
+/// Absent and explicitly-null both read as `None`, matching the reference
+/// implementation's `data.get(...)`. Note the asymmetry with output: a record
+/// carrying `"deadline": null` decodes to `deadline: None` and re-encodes
+/// *without* the key, so its id changes. That is the reference behaviour, and
+/// it is why nothing in this crate ever writes a null optional field.
+fn optional_string(
+    value: &Value,
+    record: &'static str,
+    field: &'static str,
+) -> Result<Option<String>, RecordError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(RecordError::InvalidField {
+            record,
+            field,
+            expected: "a string",
+        }),
+    }
+}
+
+// -- objective -------------------------------------------------------------
+
+/// A funded, checkable question.
+///
+/// `reward` is an integer count of the smallest unit of account. No floats
+/// anywhere near money -- and here the type system enforces it, since
+/// [`Value`] cannot hold one.
+///
+/// The id covers the verifier and the ratchet block. That is the whole point:
+/// an objective is the question *plus* the machine that settles it, so changing
+/// the machine yields a different objective rather than a re-scoring of work
+/// already submitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Objective {
+    pub goal: String,
+    pub statement: String,
+    /// The pinned evaluator specification. Must be an object carrying a `kind`
+    /// that some registered verifier answers to.
+    pub verifier: Value,
+    pub reward: u64,
+    pub funder: String,
+    pub created_at: String,
+    pub deadline: Option<String>,
+    /// Optional progressive-bounty parameters (see `frontier::Ratchet`). When
+    /// present the objective pays out along an improvement curve instead of
+    /// once to a single winner, which is what makes immediate publication the
+    /// profitable move rather than a gift to your competitors.
+    pub ratchet: Option<Value>,
+}
+
+impl Objective {
+    /// Build a validated objective. Prefer this to a struct literal when the
+    /// inputs are not already known-good; a literal skips [`validate`].
+    ///
+    /// [`validate`]: Objective::validate
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        goal: impl Into<String>,
+        statement: impl Into<String>,
+        verifier: Value,
+        reward: u64,
+        funder: impl Into<String>,
+        created_at: impl Into<String>,
+        deadline: Option<String>,
+        ratchet: Option<Value>,
+    ) -> Result<Objective, RecordError> {
+        let objective = Objective {
+            goal: goal.into(),
+            statement: statement.into(),
+            verifier,
+            reward,
+            funder: funder.into(),
+            created_at: created_at.into(),
+            deadline,
+            ratchet,
+        };
+        objective.validate()?;
+        Ok(objective)
+    }
+
+    /// The structural invariants the reference implementation checks in
+    /// `__post_init__`.
+    ///
+    /// "reward is a non-negative integer" is absent because `u64` already says
+    /// it; the equivalent check now happens once, at the decoding boundary in
+    /// [`Objective::from_value`].
+    pub fn validate(&self) -> Result<(), RecordError> {
+        if self.statement.trim().is_empty() {
+            return Err(RecordError::EmptyStatement);
+        }
+        match &self.verifier {
+            Value::Object(map) if map.contains_key("kind") => {}
+            _ => return Err(RecordError::VerifierWithoutKind),
+        }
+        if let Some(ratchet) = &self.ratchet {
+            if ratchet.as_object().is_none() {
+                return Err(RecordError::InvalidField {
+                    record: "objective",
+                    field: "ratchet",
+                    expected: "an object",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The verifier `kind`, if the verifier is well formed. Callers route on
+    /// this to find a registered checker; an objective with no answering
+    /// verifier must be refused rather than posted.
+    pub fn verifier_kind(&self) -> Option<&str> {
+        self.verifier.get("kind").and_then(Value::as_str)
+    }
+
+    /// Canonical form. Optional fields are omitted when unset -- see the module
+    /// docs for why nulling them instead would reissue every id in the network.
+    pub fn to_value(&self) -> Value {
+        let mut body: BTreeMap<String, Value> = BTreeMap::new();
+        body.insert(
+            "type".to_string(),
+            Value::string(RecordKind::Objective.as_str()),
+        );
+        body.insert("goal".to_string(), Value::string(self.goal.clone()));
+        body.insert(
+            "statement".to_string(),
+            Value::string(self.statement.clone()),
+        );
+        body.insert("verifier".to_string(), self.verifier.clone());
+        // Widening u64 -> i128 is total, so no check is needed on the way out.
+        // The only place reward arithmetic can fail is the way in.
+        body.insert("reward".to_string(), Value::Int(i128::from(self.reward)));
+        body.insert("funder".to_string(), Value::string(self.funder.clone()));
+        body.insert(
+            "created_at".to_string(),
+            Value::string(self.created_at.clone()),
+        );
+        if let Some(deadline) = &self.deadline {
+            body.insert("deadline".to_string(), Value::string(deadline.clone()));
+        }
+        if let Some(ratchet) = &self.ratchet {
+            body.insert("ratchet".to_string(), ratchet.clone());
+        }
+        Value::Object(body)
+    }
+
+    /// Content address of the whole record, verifier and ratchet included.
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Decode a record. The `type` tag is not required or checked, matching the
+    /// reference implementation: the log has already dispatched on entry kind
+    /// by the time this runs, and the shipped `examples/*/objective.json` files
+    /// carry no tag at all.
+    pub fn from_value(value: &Value) -> Result<Objective, RecordError> {
+        const RECORD: &str = "objective";
+        let value = expect_object(value, RECORD)?;
+
+        let raw_reward = required(value, RECORD, "reward")?;
+        // `as_i128` returns None for booleans, which is what rejects Python's
+        // `isinstance(reward, bool)` case -- `True` is not one unit of money.
+        let reward = raw_reward.as_i128().ok_or(RecordError::InvalidField {
+            record: RECORD,
+            field: "reward",
+            expected: "an integer unit count",
+        })?;
+        let reward = u64::try_from(reward).map_err(|_| RecordError::RewardOutOfRange { reward })?;
+
+        let ratchet = match value.get("ratchet") {
+            None | Some(Value::Null) => None,
+            Some(other) => Some(other.clone()),
+        };
+
+        let objective = Objective {
+            goal: required_string(value, RECORD, "goal")?,
+            statement: required_string(value, RECORD, "statement")?,
+            verifier: required(value, RECORD, "verifier")?.clone(),
+            reward,
+            funder: required_string(value, RECORD, "funder")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+            deadline: optional_string(value, RECORD, "deadline")?,
+            ratchet,
+        };
+        objective.validate()?;
+        Ok(objective)
+    }
+}
+
+// -- commitment ------------------------------------------------------------
+
+/// Binding commitment to an artifact, revealed later.
+///
+/// Without this, a plaintext artifact is stolen by the first party who sees it
+/// -- the solver does the work and someone else collects. The submitter is
+/// bound into the hash so the commitment cannot be replayed by an observer
+/// under their own name; the nonce keeps a guessable artifact (`{"n": 42}`)
+/// from being brute-forced out of the commitment before it is revealed.
+///
+/// The construction is `sha256(digest({objective_id, artifact}) | submitter |
+/// nonce)`, with literal `|` bytes between the three parts. The inner digest is
+/// taken first so the outer input is fixed-length in its artifact component,
+/// and the separators keep `("ab", "c")` from colliding with `("a", "bc")`.
+/// These bytes are consensus-critical: see `commitment_hash_cases` in
+/// `conformance/vectors.json`.
+pub fn commitment_hash(
+    objective_id: &str,
+    submitter: &str,
+    artifact: &Value,
+    nonce: &str,
+) -> String {
+    let inner = Value::Object(BTreeMap::from([
+        (
+            "objective_id".to_string(),
+            Value::string(objective_id.to_string()),
+        ),
+        ("artifact".to_string(), artifact.clone()),
+    ]))
+    .digest();
+
+    let mut buf = Vec::with_capacity(inner.len() + submitter.len() + nonce.len() + 2);
+    buf.extend_from_slice(inner.as_bytes());
+    buf.push(b'|');
+    buf.extend_from_slice(submitter.as_bytes());
+    buf.push(b'|');
+    buf.extend_from_slice(nonce.as_bytes());
+    digest_bytes(&buf)
+}
+
+/// Phase 1: bind to an artifact without revealing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commitment {
+    pub objective_id: String,
+    pub submitter: String,
+    /// Output of [`commitment_hash`]. Opaque to the ledger until the matching
+    /// [`Claim`] reproduces it.
+    pub hash: String,
+    pub created_at: String,
+}
+
+impl Commitment {
+    pub fn new(
+        objective_id: impl Into<String>,
+        submitter: impl Into<String>,
+        hash: impl Into<String>,
+        created_at: impl Into<String>,
+    ) -> Commitment {
+        Commitment {
+            objective_id: objective_id.into(),
+            submitter: submitter.into(),
+            hash: hash.into(),
+            created_at: created_at.into(),
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::Commitment.as_str())),
+            ("objective_id", Value::string(self.objective_id.clone())),
+            ("submitter", Value::string(self.submitter.clone())),
+            ("hash", Value::string(self.hash.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+        ])
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Decode a commitment from a log payload. The reference implementation
+    /// reads these payloads as raw dicts; a typed decoder is the Rust-side
+    /// equivalent and keeps the field names in one place.
+    pub fn from_value(value: &Value) -> Result<Commitment, RecordError> {
+        const RECORD: &str = "commitment";
+        let value = expect_object(value, RECORD)?;
+        Ok(Commitment {
+            objective_id: required_string(value, RECORD, "objective_id")?,
+            submitter: required_string(value, RECORD, "submitter")?,
+            hash: required_string(value, RECORD, "hash")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+        })
+    }
+}
+
+// -- claim -----------------------------------------------------------------
+
+/// Phase 2: reveal the artifact, with the citations it builds on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claim {
+    pub objective_id: String,
+    pub submitter: String,
+    /// The revealed work. An object, so that a verifier reads named fields
+    /// rather than guessing at a bare scalar.
+    pub artifact: Value,
+    pub nonce: String,
+    pub created_at: String,
+    /// Claim ids this one builds on. A set, not a list: duplicates are refused.
+    pub cites: Vec<String>,
+}
+
+impl Claim {
+    /// Build a validated claim. Argument order matches the reference
+    /// implementation's positional constructor.
+    pub fn new(
+        objective_id: impl Into<String>,
+        submitter: impl Into<String>,
+        artifact: Value,
+        nonce: impl Into<String>,
+        created_at: impl Into<String>,
+        cites: Vec<String>,
+    ) -> Result<Claim, RecordError> {
+        let claim = Claim {
+            objective_id: objective_id.into(),
+            submitter: submitter.into(),
+            artifact,
+            nonce: nonce.into(),
+            created_at: created_at.into(),
+            cites,
+        };
+        claim.validate()?;
+        Ok(claim)
+    }
+
+    /// Reject a malformed artifact and repeated citations.
+    ///
+    /// The duplicate check is not tidiness. Attribution walks the citation DAG
+    /// and splits credit across a claim's edges; the same parent listed twice
+    /// would draw twice the flow, which is a way of paying yourself for one
+    /// input.
+    pub fn validate(&self) -> Result<(), RecordError> {
+        if self.artifact.as_object().is_none() {
+            return Err(RecordError::InvalidField {
+                record: "claim",
+                field: "artifact",
+                expected: "an object",
+            });
+        }
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for cited in &self.cites {
+            if !seen.insert(cited.as_str()) {
+                return Err(RecordError::DuplicateCitation { id: cited.clone() });
+            }
+        }
+        Ok(())
+    }
+
+    /// Canonical form. `cites` is always present, empty list included: it is
+    /// not an optional field, and omitting it when empty would give the same
+    /// claim two different ids depending on how it was built.
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::Claim.as_str())),
+            ("objective_id", Value::string(self.objective_id.clone())),
+            ("submitter", Value::string(self.submitter.clone())),
+            ("artifact", self.artifact.clone()),
+            ("nonce", Value::string(self.nonce.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            (
+                "cites",
+                Value::Array(
+                    self.cites
+                        .iter()
+                        .map(|c| Value::String(c.clone()))
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Identity of the artifact alone -- used to detect duplicate submissions.
+    ///
+    /// Scoped by objective, so the same artifact answering two different
+    /// questions is two distinct results. Submitter and nonce are deliberately
+    /// excluded: that is what makes a copied artifact recognisable as the same
+    /// work no matter who reveals it.
+    pub fn artifact_id(&self) -> String {
+        Value::Object(BTreeMap::from([
+            (
+                "objective_id".to_string(),
+                Value::string(self.objective_id.clone()),
+            ),
+            ("artifact".to_string(), self.artifact.clone()),
+        ]))
+        .digest()
+    }
+
+    /// The commitment this claim opens. A reveal is accepted only when this
+    /// reproduces a commitment already in the log.
+    pub fn commitment_hash(&self) -> String {
+        commitment_hash(
+            &self.objective_id,
+            &self.submitter,
+            &self.artifact,
+            &self.nonce,
+        )
+    }
+
+    /// Decode a record. Missing `cites` reads as empty; a present but non-array
+    /// `cites` -- null included -- is an error, since the reference
+    /// implementation cannot build a tuple from it either.
+    pub fn from_value(value: &Value) -> Result<Claim, RecordError> {
+        const RECORD: &str = "claim";
+        let value = expect_object(value, RECORD)?;
+
+        let cites = match value.get("cites") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    match item.as_str() {
+                        Some(s) => out.push(s.to_string()),
+                        None => {
+                            return Err(RecordError::InvalidField {
+                                record: RECORD,
+                                field: "cites",
+                                expected: "an array of claim ids",
+                            })
+                        }
+                    }
+                }
+                out
+            }
+            Some(_) => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "cites",
+                    expected: "an array of claim ids",
+                })
+            }
+        };
+
+        let claim = Claim {
+            objective_id: required_string(value, RECORD, "objective_id")?,
+            submitter: required_string(value, RECORD, "submitter")?,
+            artifact: required(value, RECORD, "artifact")?.clone(),
+            nonce: required_string(value, RECORD, "nonce")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+            cites,
+        };
+        claim.validate()?;
+        Ok(claim)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TS: &str = "2026-07-28T00:00:00+00:00";
+    // Ids pinned by conformance/vectors.json, section "records".
+    const OBJ_PLAIN: &str =
+        "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711";
+    const OBJ_DEADLINE: &str =
+        "sha256:963b51817b25a73e371736c38235dc6ef603f81fe765b41010ed1b89001d76f5";
+    const OBJ_RATCHET: &str =
+        "sha256:7aa80a57f7c916ba0bcff805b4a2fec9ee9c6b4fcccc1e9321d724c2d92922e4";
+
+    fn certificate_verifier() -> Value {
+        Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("c.py")),
+            ("entrypoint", Value::string("check")),
+            ("checker_sha256", Value::string("ab".repeat(32))),
+        ])
+    }
+
+    fn objective() -> Objective {
+        Objective {
+            goal: "GOAL-x".to_string(),
+            statement: "find it".to_string(),
+            verifier: certificate_verifier(),
+            reward: 1000,
+            funder: "treasury".to_string(),
+            created_at: TS.to_string(),
+            deadline: None,
+            ratchet: None,
+        }
+    }
+
+    fn artifact(n: i128) -> Value {
+        Value::object([("n", Value::Int(n))])
+    }
+
+    // -- conformance vectors ------------------------------------------------
+
+    #[test]
+    fn objective_ids_match_the_reference_implementation() {
+        assert_eq!(objective().id(), OBJ_PLAIN);
+
+        let with_deadline = Objective {
+            deadline: Some("2026-12-31T00:00:00+00:00".to_string()),
+            ..objective()
+        };
+        assert_eq!(with_deadline.id(), OBJ_DEADLINE);
+
+        let ratcheted = Objective {
+            statement: "climb".to_string(),
+            verifier: Value::object([
+                ("kind", Value::string("evaluator")),
+                ("threshold", Value::Int(0)),
+            ]),
+            reward: 1100,
+            ratchet: Some(Value::object([
+                ("baseline", Value::Int(9)),
+                ("target", Value::Int(20)),
+                ("reward", Value::Int(1100)),
+                ("direction", Value::string("maximize")),
+                ("min_improvement", Value::Int(1)),
+            ])),
+            ..objective()
+        };
+        assert_eq!(ratcheted.id(), OBJ_RATCHET);
+    }
+
+    #[test]
+    fn claim_ids_match_the_reference_implementation() {
+        let first = Claim::new(OBJ_PLAIN, "alice", artifact(42), "nonce-1", TS, vec![]).unwrap();
+        assert_eq!(
+            first.id(),
+            "sha256:51b216380d88cf32e1e179dc8c52336c26e2aac447045dc4079f3a24bdeb334e"
+        );
+        assert_eq!(
+            first.artifact_id(),
+            "sha256:49620d2cbd95777da46e1c3d34793a4926d2f61f6ca2121bac91011e8613de4e"
+        );
+        assert_eq!(
+            first.commitment_hash(),
+            "sha256:4a1cf72173356258ac7b068cefa3a29e8e90b0e59c82ceb23207932210e1cf13"
+        );
+
+        let second = Claim::new(
+            OBJ_PLAIN,
+            "bob",
+            artifact(43),
+            "nonce-2",
+            TS,
+            vec![first.id()],
+        )
+        .unwrap();
+        assert_eq!(
+            second.id(),
+            "sha256:b9ec4fb44ea9cda9ec1a5ca32ab41deb02abea633505fbaa41851ba81a28f60c"
+        );
+        assert_eq!(
+            second.artifact_id(),
+            "sha256:bf5d31f7fdaa4742e81515a8e60bc980fe9949878fded9aede8fbedcc4e896dd"
+        );
+        assert_eq!(
+            second.commitment_hash(),
+            "sha256:ac3e67c18598ba104830eb4ee2c4f21d60d5e2b3b51ad71925d94b7c52691180"
+        );
+    }
+
+    #[test]
+    fn commitment_id_matches_the_reference_implementation() {
+        let commitment = Commitment::new(
+            OBJ_PLAIN,
+            "alice",
+            "sha256:4a1cf72173356258ac7b068cefa3a29e8e90b0e59c82ceb23207932210e1cf13",
+            TS,
+        );
+        assert_eq!(
+            commitment.id(),
+            "sha256:e86a6262807b107542f64d05900e54906dbebdd1a0e48e2e8d812b06bb900c28"
+        );
+    }
+
+    #[test]
+    fn commitment_hash_cases_match_the_reference_implementation() {
+        // Each case differs from the first in exactly one input, so these also
+        // demonstrate that submitter, nonce and artifact are all bound in.
+        assert_eq!(
+            commitment_hash(OBJ_PLAIN, "alice", &artifact(42), "n1"),
+            "sha256:c4b7d428439e598333b066afb7eeddb2dbdc8f1e1a914ed639885740b1d5ff5e"
+        );
+        assert_eq!(
+            commitment_hash(OBJ_PLAIN, "bob", &artifact(42), "n1"),
+            "sha256:26287c0f8f805964d6772500fff3d5600e150977fd3ebb6bec4f8c088f86163d"
+        );
+        assert_eq!(
+            commitment_hash(OBJ_PLAIN, "alice", &artifact(43), "n1"),
+            "sha256:b5eef7ee4abaad1c787adf592778a6aec83cb8c5e7d84efe5a692eaeccec2552"
+        );
+        assert_eq!(
+            commitment_hash(OBJ_PLAIN, "alice", &artifact(42), "n2"),
+            "sha256:105a49b7816cfe2564c122a1b0e816f9539ee01bde503ec8d5a2b4055669e06e"
+        );
+        assert_eq!(
+            commitment_hash(OBJ_PLAIN, "", &Value::Object(BTreeMap::new()), ""),
+            "sha256:a081aaf9fef8ef92875521f0b864f2cb79ec6a19488df81ab5bde777425f9fa7"
+        );
+    }
+
+    #[test]
+    fn separators_stop_submitter_nonce_confusion() {
+        // Without the '|' bytes, ("ab", "") and ("a", "b") would collide.
+        assert_ne!(
+            commitment_hash(OBJ_PLAIN, "ab", &artifact(1), ""),
+            commitment_hash(OBJ_PLAIN, "a", &artifact(1), "b")
+        );
+    }
+
+    // -- identity semantics -------------------------------------------------
+
+    #[test]
+    fn editing_the_verifier_forks_the_objective() {
+        let a = objective();
+        let b = Objective {
+            verifier: Value::object([
+                ("kind", Value::string("evaluator")),
+                ("threshold", Value::Int(11)),
+            ]),
+            ..objective()
+        };
+        assert_ne!(a.id(), b.id());
+    }
+
+    #[test]
+    fn editing_the_ratchet_forks_the_objective() {
+        let with_ratchet = Objective {
+            ratchet: Some(Value::object([("baseline", Value::Int(9))])),
+            ..objective()
+        };
+        assert_ne!(with_ratchet.id(), objective().id());
+    }
+
+    #[test]
+    fn unset_optionals_are_omitted_not_nulled() {
+        let value = objective().to_value();
+        assert!(value.get("deadline").is_none());
+        assert!(value.get("ratchet").is_none());
+        // The null-bearing spelling is a different record; if to_value ever
+        // emitted it, every id in the network would move.
+        let mut nulled = match value.clone() {
+            Value::Object(map) => map,
+            _ => unreachable!(),
+        };
+        nulled.insert("deadline".to_string(), Value::Null);
+        assert_ne!(Value::Object(nulled).digest(), value.digest());
+    }
+
+    #[test]
+    fn empty_cites_is_present_in_the_canonical_form() {
+        let claim = Claim::new(OBJ_PLAIN, "alice", artifact(1), "n", TS, vec![]).unwrap();
+        assert_eq!(claim.to_value().get("cites"), Some(&Value::Array(vec![])));
+    }
+
+    // -- decoding -----------------------------------------------------------
+
+    #[test]
+    fn objective_round_trips() {
+        let original = Objective {
+            deadline: Some("2026-12-31T00:00:00+00:00".to_string()),
+            ratchet: Some(Value::object([("baseline", Value::Int(9))])),
+            ..objective()
+        };
+        let decoded = Objective::from_value(&original.to_value()).unwrap();
+        assert_eq!(decoded, original);
+        assert_eq!(decoded.id(), original.id());
+    }
+
+    #[test]
+    fn claim_round_trips() {
+        let original = Claim::new(
+            OBJ_PLAIN,
+            "bob",
+            artifact(43),
+            "n",
+            TS,
+            vec!["sha256:aa".to_string(), "sha256:bb".to_string()],
+        )
+        .unwrap();
+        let decoded = Claim::from_value(&original.to_value()).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn commitment_round_trips() {
+        let original = Commitment::new(OBJ_PLAIN, "alice", "sha256:ff", TS);
+        assert_eq!(
+            Commitment::from_value(&original.to_value()).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn an_untagged_objective_decodes() {
+        // examples/*/objective.json carry no "type" field.
+        let text = r#"{"created_at":"2026-07-28T00:00:00+00:00","funder":"treasury",
+            "goal":"G","reward":100000,"statement":"do it",
+            "verifier":{"kind":"certificate"}}"#;
+        let value = Value::from_json(text).unwrap();
+        assert_eq!(Objective::from_value(&value).unwrap().reward, 100_000);
+    }
+
+    #[test]
+    fn a_null_deadline_decodes_as_absent() {
+        let mut body = match objective().to_value() {
+            Value::Object(map) => map,
+            _ => unreachable!(),
+        };
+        body.insert("deadline".to_string(), Value::Null);
+        let decoded = Objective::from_value(&Value::Object(body)).unwrap();
+        assert_eq!(decoded.deadline, None);
+        assert_eq!(decoded.id(), OBJ_PLAIN);
+    }
+
+    #[test]
+    fn missing_and_mistyped_fields_are_named() {
+        let mut body = match objective().to_value() {
+            Value::Object(map) => map,
+            _ => unreachable!(),
+        };
+        body.remove("funder");
+        assert_eq!(
+            Objective::from_value(&Value::Object(body.clone())),
+            Err(RecordError::MissingField {
+                record: "objective",
+                field: "funder"
+            })
+        );
+        body.insert("funder".to_string(), Value::Int(7));
+        assert_eq!(
+            Objective::from_value(&Value::Object(body)),
+            Err(RecordError::InvalidField {
+                record: "objective",
+                field: "funder",
+                expected: "a string"
+            })
+        );
+    }
+
+    #[test]
+    fn a_non_object_is_not_a_record() {
+        assert_eq!(
+            Objective::from_value(&Value::Array(vec![])),
+            Err(RecordError::NotAnObject {
+                record: "objective"
+            })
+        );
+    }
+
+    // -- reward range -------------------------------------------------------
+
+    #[test]
+    fn the_largest_representable_reward_round_trips() {
+        let big = Objective {
+            reward: u64::MAX,
+            ..objective()
+        };
+        let value = big.to_value();
+        assert_eq!(value.get("reward"), Some(&Value::Int(i128::from(u64::MAX))));
+        assert_eq!(Objective::from_value(&value).unwrap().reward, u64::MAX);
+    }
+
+    #[test]
+    fn rewards_outside_u64_are_refused_not_truncated() {
+        // Python has bignums; this crate does not. Silently wrapping such a
+        // record would mean two implementations disagreeing about how much
+        // money an objective holds.
+        let too_big = i128::from(u64::MAX) + 1;
+        let mut body = match objective().to_value() {
+            Value::Object(map) => map,
+            _ => unreachable!(),
+        };
+        body.insert("reward".to_string(), Value::Int(too_big));
+        assert_eq!(
+            Objective::from_value(&Value::Object(body.clone())),
+            Err(RecordError::RewardOutOfRange { reward: too_big })
+        );
+
+        body.insert("reward".to_string(), Value::Int(-1));
+        assert_eq!(
+            Objective::from_value(&Value::Object(body)),
+            Err(RecordError::RewardOutOfRange { reward: -1 })
+        );
+    }
+
+    #[test]
+    fn a_boolean_is_not_a_reward() {
+        let mut body = match objective().to_value() {
+            Value::Object(map) => map,
+            _ => unreachable!(),
+        };
+        body.insert("reward".to_string(), Value::Bool(true));
+        assert_eq!(
+            Objective::from_value(&Value::Object(body)),
+            Err(RecordError::InvalidField {
+                record: "objective",
+                field: "reward",
+                expected: "an integer unit count"
+            })
+        );
+    }
+
+    // -- validation ---------------------------------------------------------
+
+    #[test]
+    fn an_objective_needs_a_statement() {
+        let blank = Objective {
+            statement: "   \n".to_string(),
+            ..objective()
+        };
+        assert_eq!(blank.validate(), Err(RecordError::EmptyStatement));
+    }
+
+    #[test]
+    fn an_objective_needs_a_verifier_with_a_kind() {
+        let no_kind = Objective {
+            verifier: Value::object([("checker", Value::string("c.py"))]),
+            ..objective()
+        };
+        assert_eq!(no_kind.validate(), Err(RecordError::VerifierWithoutKind));
+
+        let not_an_object = Objective {
+            verifier: Value::string("certificate"),
+            ..objective()
+        };
+        assert_eq!(
+            not_an_object.validate(),
+            Err(RecordError::VerifierWithoutKind)
+        );
+    }
+
+    #[test]
+    fn a_ratchet_must_be_an_object() {
+        let bad = Objective {
+            ratchet: Some(Value::Int(3)),
+            ..objective()
+        };
+        assert_eq!(
+            bad.validate(),
+            Err(RecordError::InvalidField {
+                record: "objective",
+                field: "ratchet",
+                expected: "an object"
+            })
+        );
+    }
+
+    #[test]
+    fn duplicate_citations_are_refused() {
+        let dup = Claim::new(
+            OBJ_PLAIN,
+            "alice",
+            artifact(1),
+            "n",
+            TS,
+            vec!["sha256:aa".to_string(), "sha256:aa".to_string()],
+        );
+        assert_eq!(
+            dup,
+            Err(RecordError::DuplicateCitation {
+                id: "sha256:aa".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn an_artifact_must_be_an_object() {
+        let bad = Claim::new(OBJ_PLAIN, "alice", Value::Int(42), "n", TS, vec![]);
+        assert_eq!(
+            bad,
+            Err(RecordError::InvalidField {
+                record: "claim",
+                field: "artifact",
+                expected: "an object"
+            })
+        );
+    }
+
+    #[test]
+    fn cites_must_be_an_array_of_strings() {
+        let mut body = match Claim::new(OBJ_PLAIN, "alice", artifact(1), "n", TS, vec![])
+            .unwrap()
+            .to_value()
+        {
+            Value::Object(map) => map,
+            _ => unreachable!(),
+        };
+        body.insert("cites".to_string(), Value::Array(vec![Value::Int(1)]));
+        assert!(Claim::from_value(&Value::Object(body.clone())).is_err());
+        body.insert("cites".to_string(), Value::Null);
+        assert!(Claim::from_value(&Value::Object(body.clone())).is_err());
+        body.remove("cites");
+        assert_eq!(
+            Claim::from_value(&Value::Object(body)).unwrap().cites,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn errors_display_usefully() {
+        assert_eq!(
+            RecordError::EmptyStatement.to_string(),
+            "objective needs a statement"
+        );
+        assert!((RecordError::RewardOutOfRange { reward: -1 })
+            .to_string()
+            .contains("-1"));
+    }
+}

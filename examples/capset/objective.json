@@ -1,0 +1,15 @@
+{
+  "created_at": "2026-07-28T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-capset-lower-bounds",
+  "reward": 250000,
+  "statement": "Exhibit a cap set in F_3^4 of size at least 20 (no three distinct points collinear). Score is the set size; the maximum is known to be 20.",
+  "verifier": {
+    "direction": "maximize",
+    "entrypoint": "score",
+    "evaluator": "examples/capset/evaluators/cap_set.py",
+    "evaluator_sha256": "05ad14fa10bd3055a8f3b1962a6a909832887676558035e40e44c4bd0aa271c4",
+    "kind": "evaluator",
+    "threshold": 20
+  }
+}

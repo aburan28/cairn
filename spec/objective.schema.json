@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aburan28/proofwork/spec/objective.schema.json",
+  "title": "Objective",
+  "description": "A funded, checkable question. The record's SHA-256 over its canonical serialization IS its id, so the verifier block is part of the objective's identity: editing an evaluator forks the objective rather than rescoring work already done against it.",
+  "type": "object",
+  "required": ["goal", "statement", "verifier", "reward", "funder", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "objective" },
+    "goal": {
+      "type": "string",
+      "description": "Identifier of the parent goal this objective decomposes."
+    },
+    "statement": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What is being asked, in prose, precisely enough that the verifier is recognisably a faithful encoding of it."
+    },
+    "verifier": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["certificate", "evaluator", "lean", "replay"]
+        }
+      },
+      "$comment": "Per-kind fields are validated by the verifier itself, which returns INVALID_SPEC rather than a settling verdict when the spec is malformed."
+    },
+    "reward": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Integer units of account. Never a float -- floats do not round-trip identically across implementations."
+    },
+    "funder": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "deadline": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

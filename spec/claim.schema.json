@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aburan28/proofwork/spec/claim.schema.json",
+  "title": "Claim",
+  "description": "A revealed artifact submitted against an objective, with the claims it built on. Revealing requires a prior commitment to H(artifact | submitter | nonce); without one, whoever sees the reveal first could resubmit it as their own.",
+  "type": "object",
+  "required": ["objective_id", "submitter", "artifact", "nonce", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "claim" },
+    "objective_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "submitter": { "type": "string", "minLength": 1 },
+    "artifact": {
+      "type": "object",
+      "description": "The thing being verified. Its shape is whatever the objective's verifier expects. Floats are refused at the serialization layer."
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Secret until reveal; binds this artifact to this submitter's commitment."
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "cites": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+      "description": "Accepted claims this one builds on. Citations point backwards only, which keeps the DAG acyclic and citation-flow attribution terminating."
+    }
+  }
+}
