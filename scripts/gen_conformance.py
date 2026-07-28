@@ -107,13 +107,25 @@ def record_vectors():
         ratchet={"baseline": 9, "target": 20, "reward": 1100, "direction": "maximize",
                  "min_improvement": 1},
     )
+    # An explicit "public" must produce byte-identical output to omitting the
+    # field, or the default would fork every objective written before the field
+    # existed. Same record as `objective`, so its id must match exactly.
+    explicit_public = Objective(
+        goal="GOAL-x", statement="find it", verifier=objective.verifier, reward=1000,
+        funder="treasury", created_at=TS, confidentiality="public",
+    )
+    assert explicit_public.id == objective.id, "explicit public must not fork the id"
+    with_embargo = Objective(
+        goal="GOAL-x", statement="find it", verifier=objective.verifier, reward=1000,
+        funder="treasury", created_at=TS, confidentiality="embargoed",
+    )
     claim = Claim(objective.id, "alice", {"n": 42}, "nonce-1", TS, ())
     cited = Claim(objective.id, "bob", {"n": 43}, "nonce-2", TS, (claim.id,))
     commitment = Commitment(objective.id, "alice", claim.commitment_hash(), TS)
     return {
         "objectives": [
             {"record": o.to_dict(), "id": o.id}
-            for o in (objective, with_deadline, with_ratchet)
+            for o in (objective, with_deadline, with_ratchet, explicit_public, with_embargo)
         ],
         "claims": [
             {"record": c.to_dict(), "id": c.id, "artifact_id": c.artifact_id,

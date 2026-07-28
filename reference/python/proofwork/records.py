@@ -23,6 +23,25 @@ class RecordError(ValueError):
     """A record is structurally invalid."""
 
 
+#: When an objective's settled artifacts become public -- never *whether*.
+#:
+#: The guarantee this system makes is that anyone can re-derive every settled
+#: result, and that requires settled artifacts to be readable. A class moves the
+#: moment of disclosure; it cannot remove it.
+#:
+#: - ``public``    revealed at epoch end. The default.
+#: - ``embargoed`` revealed later, with priority timestamped immediately by the
+#:                 commitment. This is what coordinated disclosure needs, and it
+#:                 breaks the implication "settled result => published result".
+#: - ``sealed``    never revealed. Requires zero-knowledge verification and is
+#:                 **refused** below; it exists here so the limitation is
+#:                 explicit rather than discovered after an objective is funded.
+CONFIDENTIALITY_CLASSES = ("public", "embargoed", "sealed")
+
+#: Omitted from the canonical form, so adding this field reissued no ids.
+DEFAULT_CONFIDENTIALITY = "public"
+
+
 @dataclass(frozen=True)
 class Objective:
     """A funded, checkable question.
@@ -43,6 +62,11 @@ class Objective:
     #: once to a single winner, which is what makes immediate publication the
     #: profitable move rather than a gift to your competitors.
     ratchet: dict[str, Any] | None = None
+    #: When settled artifacts become public. See CONFIDENTIALITY_CLASSES.
+    #: Omitted from the canonical form when "public", exactly like ``deadline``
+    #: and ``ratchet`` when unset, so adding this field did not change the id of
+    #: a single existing objective.
+    confidentiality: str = DEFAULT_CONFIDENTIALITY
 
     def __post_init__(self) -> None:
         if not self.statement.strip():
@@ -53,6 +77,22 @@ class Objective:
             raise RecordError("reward must be an integer unit count")
         if self.reward < 0:
             raise RecordError("reward must be non-negative")
+        # Unknown classes are refused, never defaulted: guessing here decides
+        # disclosure on the funder's behalf.
+        if self.confidentiality not in CONFIDENTIALITY_CLASSES:
+            raise RecordError(
+                f"unknown confidentiality class {self.confidentiality!r} "
+                f"(expected one of {', '.join(map(repr, CONFIDENTIALITY_CLASSES))})"
+            )
+        # Refused, not downgraded. Paying for an artifact nobody may read needs
+        # a zero-knowledge proof that the pinned verifier accepts it. Quietly
+        # treating the request as "embargoed" would tell a funder their result
+        # stays secret when it does not.
+        if self.confidentiality == "sealed":
+            raise RecordError(
+                'confidentiality "sealed" requires zero-knowledge verification, '
+                'which is not implemented; use "embargoed" for delayed disclosure'
+            )
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -68,6 +108,12 @@ class Objective:
             body["deadline"] = self.deadline
         if self.ratchet is not None:
             body["ratchet"] = self.ratchet
+        # Omitted when "public" for the same reason the optional fields above
+        # are omitted when unset: emitting the default would change the digest
+        # of every objective ever written, break the conformance vectors, and
+        # orphan every claim already posted against a live bounty.
+        if self.confidentiality != DEFAULT_CONFIDENTIALITY:
+            body["confidentiality"] = self.confidentiality
         return body
 
     @property
@@ -85,6 +131,9 @@ class Objective:
             created_at=data["created_at"],
             deadline=data.get("deadline"),
             ratchet=data.get("ratchet"),
+            # `or` rather than a default argument: a record carrying an
+            # explicit null means "unset", same as an absent key.
+            confidentiality=data.get("confidentiality") or DEFAULT_CONFIDENTIALITY,
         )
 
 

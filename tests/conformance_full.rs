@@ -114,7 +114,7 @@ fn every_section_this_file_covers_is_present_and_populated() {
     // let every loop below iterate zero times and report success.
     let v = vectors();
     let records = section(&v, "records");
-    assert_eq!(list_of(records, "objectives").len(), 3);
+    assert_eq!(list_of(records, "objectives").len(), 5);
     assert_eq!(list_of(records, "claims").len(), 2);
     assert_eq!(list_of(records, "commitments").len(), 1);
     assert_eq!(list_of(records, "commitment_hash_cases").len(), 5);
@@ -131,6 +131,7 @@ fn objective_ids_match_the_reference_implementation() {
     let v = vectors();
     let cases = list_of(section(&v, "records"), "objectives");
     let mut ids: BTreeSet<String> = BTreeSet::new();
+    let mut canonical_forms: BTreeSet<String> = BTreeSet::new();
 
     for (i, case) in cases.iter().enumerate() {
         let record = field(case, "record");
@@ -154,6 +155,11 @@ fn objective_ids_match_the_reference_implementation() {
             objective.deadline.clone(),
             objective.ratchet.clone(),
         )
+        // `new` defaults to `Public`, so an embargoed objective is only
+        // reproducible from parts via the builder. Chaining it here is what
+        // keeps this check honest: without it the test would pass on the
+        // public vectors and silently stop covering the embargoed one.
+        .and_then(|o| o.with_confidentiality(objective.confidentiality))
         .unwrap_or_else(|e| panic!("objective {i} fails its own validation: {e}"));
         assert_eq!(
             rebuilt.id(),
@@ -173,16 +179,29 @@ fn objective_ids_match_the_reference_implementation() {
         }
 
         ids.insert(objective.id());
+        canonical_forms.insert(objective.to_value().canonical_string());
     }
 
-    // The three fixtures differ only in deadline, verifier and ratchet. Equal
-    // ids here would mean one of those had fallen out of the identity, which is
-    // exactly how "editing an evaluator silently rescores finished work" gets
-    // in.
+    // The fixtures differ in deadline, verifier, ratchet and confidentiality.
+    // An id shared by two *different* records would mean one of those fields
+    // had fallen out of the identity, which is exactly how "editing an
+    // evaluator silently rescores finished work" gets in.
+    //
+    // Counting distinct canonical forms rather than fixtures is what lets the
+    // explicit-`public` fixture exist: it is byte-identical to the fixture that
+    // omits the field, so sharing an id is the property under test rather than
+    // a failure. Anything that is *not* byte-identical must still get its own
+    // id, so this is stricter than the fixture count it replaces, not looser.
     assert_eq!(
         ids.len(),
-        cases.len(),
+        canonical_forms.len(),
         "objective identity is not covering every field"
+    );
+    assert!(
+        canonical_forms.len() < cases.len(),
+        "the explicit-public fixture should collide with the omitted one; \
+         if it no longer does, the default is being serialised and every \
+         pre-existing objective id has changed"
     );
 }
 

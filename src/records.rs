@@ -22,6 +22,14 @@
 //! same reasoning applies to any field added later: absent and null are not
 //! interchangeable in a content-addressed format.
 //!
+//! [`Objective::confidentiality`] is the first field added under that rule, and
+//! it shows the shape the rule forces. It is not an `Option` -- every objective
+//! has a class -- so the omission is keyed on the *default* instead:
+//! [`Confidentiality::Public`] serialises to nothing. A field with a default
+//! must therefore choose its default to be whatever every pre-existing record
+//! meant by its absence, or it cannot be added at all without reissuing the
+//! network's ids.
+//!
 //! # Validation is explicit here, unlike in the reference implementation
 //!
 //! Python validates inside `__post_init__`, so a record cannot exist unchecked.
@@ -98,6 +106,20 @@ pub enum RecordError {
     /// Citations are a set. A repeated edge would otherwise be counted twice by
     /// attribution, which is a way of paying yourself for the same input.
     DuplicateCitation { id: String },
+    /// `confidentiality` carried a value outside the declared classes.
+    ///
+    /// Refused rather than defaulted, because every wrong guess here is a
+    /// disclosure decision made on the submitter's behalf.
+    UnknownConfidentiality { value: String },
+    /// `confidentiality: "sealed"` was requested. The class is declared in the
+    /// schema so its cost is explicit, but paying for an artifact nobody may
+    /// read requires a zero-knowledge proof that the pinned verifier accepts
+    /// it, which is not implemented.
+    ///
+    /// Refused rather than silently downgraded to `embargoed`: a submitter who
+    /// asked for "never revealed" and got "revealed later" would be misled
+    /// about the one thing they cared about.
+    SealedNotImplemented,
 }
 
 impl fmt::Display for RecordError {
@@ -126,6 +148,15 @@ impl fmt::Display for RecordError {
             RecordError::DuplicateCitation { id } => {
                 write!(f, "duplicate citation {id:?}")
             }
+            RecordError::UnknownConfidentiality { value } => write!(
+                f,
+                "unknown confidentiality class {value:?} (expected \
+                 \"public\", \"embargoed\", or \"sealed\")"
+            ),
+            RecordError::SealedNotImplemented => f.write_str(
+                "confidentiality \"sealed\" requires zero-knowledge verification, \
+                 which is not implemented; use \"embargoed\" for delayed disclosure",
+            ),
         }
     }
 }
@@ -187,6 +218,76 @@ fn optional_string(
     }
 }
 
+// -- confidentiality -------------------------------------------------------
+
+/// When an objective's settled artifacts become public.
+///
+/// Never *whether*. The guarantee this system exists to make is that anyone can
+/// re-derive every settled result, and that requires settled artifacts to be
+/// readable. A class moves the moment of disclosure; it cannot remove it. The
+/// one class that would — [`Sealed`](Confidentiality::Sealed) — is refused by
+/// [`Objective::validate`] rather than silently weakened.
+///
+/// Declared per objective rather than applied as a blanket default, because
+/// each class trades away a different amount of public verifiability and the
+/// funder is the only party positioned to make that trade. See
+/// `docs/censorship.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Confidentiality {
+    /// Revealed at epoch end. The default, and what the guarantee is written
+    /// for.
+    #[default]
+    Public,
+    /// Revealed after an embargo. Priority is timestamped immediately by the
+    /// commitment while the content stays sealed.
+    ///
+    /// The important class, and nearly free: it is what coordinated disclosure
+    /// needs, and it breaks the implication "settled result ⇒ published result"
+    /// that makes an auto-publishing bounty an auto-publishing zero-day
+    /// pipeline.
+    Embargoed,
+    /// Never revealed; settlement by zero-knowledge proof only.
+    ///
+    /// **Not implemented**, and refused at validation. Present in the type and
+    /// the schema so the limitation is explicit rather than discovered by
+    /// someone who already funded an objective.
+    Sealed,
+}
+
+impl Confidentiality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Confidentiality::Public => "public",
+            Confidentiality::Embargoed => "embargoed",
+            Confidentiality::Sealed => "sealed",
+        }
+    }
+
+    /// Parse a class name. Unknown values are an error, never a default —
+    /// guessing here would decide disclosure on the submitter's behalf.
+    pub fn parse(s: &str) -> Result<Confidentiality, RecordError> {
+        match s {
+            "public" => Ok(Confidentiality::Public),
+            "embargoed" => Ok(Confidentiality::Embargoed),
+            "sealed" => Ok(Confidentiality::Sealed),
+            other => Err(RecordError::UnknownConfidentiality {
+                value: other.to_string(),
+            }),
+        }
+    }
+
+    /// Whether artifacts under this class are readable as soon as they settle.
+    pub fn reveals_at_settlement(self) -> bool {
+        matches!(self, Confidentiality::Public)
+    }
+}
+
+impl fmt::Display for Confidentiality {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // -- objective -------------------------------------------------------------
 
 /// A funded, checkable question.
@@ -215,6 +316,14 @@ pub struct Objective {
     /// once to a single winner, which is what makes immediate publication the
     /// profitable move rather than a gift to your competitors.
     pub ratchet: Option<Value>,
+    /// When settled artifacts become public. Defaults to
+    /// [`Confidentiality::Public`].
+    ///
+    /// Omitted from the canonical form when `Public`, exactly like `deadline`
+    /// and `ratchet`, so adding this field did not reissue the id of a single
+    /// existing objective. The conformance vectors that predate it still pass
+    /// unchanged, which is the check that this is true rather than intended.
+    pub confidentiality: Confidentiality,
 }
 
 impl Objective {
@@ -242,9 +351,24 @@ impl Objective {
             created_at: created_at.into(),
             deadline,
             ratchet,
+            confidentiality: Confidentiality::Public,
         };
         objective.validate()?;
         Ok(objective)
+    }
+
+    /// Set the confidentiality class, re-validating.
+    ///
+    /// A builder step rather than a ninth positional argument to
+    /// [`new`](Objective::new): every existing caller keeps the default, and
+    /// the one call site that wants something else says so by name.
+    pub fn with_confidentiality(
+        mut self,
+        confidentiality: Confidentiality,
+    ) -> Result<Objective, RecordError> {
+        self.confidentiality = confidentiality;
+        self.validate()?;
+        Ok(self)
     }
 
     /// The structural invariants the reference implementation checks in
@@ -269,6 +393,13 @@ impl Objective {
                     expected: "an object",
                 });
             }
+        }
+        // Refused, not downgraded. Paying for an artifact nobody may read needs
+        // a ZK proof that the pinned verifier accepts it; quietly treating the
+        // request as `embargoed` would tell a funder their result stays secret
+        // when it does not.
+        if self.confidentiality == Confidentiality::Sealed {
+            return Err(RecordError::SealedNotImplemented);
         }
         Ok(())
     }
@@ -308,6 +439,16 @@ impl Objective {
         if let Some(ratchet) = &self.ratchet {
             body.insert("ratchet".to_string(), ratchet.clone());
         }
+        // Omitted when `Public`, for the same reason `deadline` and `ratchet`
+        // are omitted when unset: emitting the default would change the digest
+        // of every objective ever written, breaking the conformance vectors and
+        // orphaning every claim already posted against a live bounty.
+        if self.confidentiality != Confidentiality::Public {
+            body.insert(
+                "confidentiality".to_string(),
+                Value::string(self.confidentiality.as_str()),
+            );
+        }
         Value::Object(body)
     }
 
@@ -339,6 +480,18 @@ impl Objective {
             Some(other) => Some(other.clone()),
         };
 
+        let confidentiality = match value.get("confidentiality") {
+            None | Some(Value::Null) => Confidentiality::Public,
+            Some(Value::String(s)) => Confidentiality::parse(s)?,
+            Some(_) => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "confidentiality",
+                    expected: "a string naming a confidentiality class",
+                })
+            }
+        };
+
         let objective = Objective {
             goal: required_string(value, RECORD, "goal")?,
             statement: required_string(value, RECORD, "statement")?,
@@ -348,6 +501,7 @@ impl Objective {
             created_at: required_string(value, RECORD, "created_at")?,
             deadline: optional_string(value, RECORD, "deadline")?,
             ratchet,
+            confidentiality,
         };
         objective.validate()?;
         Ok(objective)
@@ -645,6 +799,7 @@ mod tests {
             created_at: TS.to_string(),
             deadline: None,
             ratchet: None,
+            confidentiality: Confidentiality::Public,
         }
     }
 
@@ -828,6 +983,122 @@ mod tests {
         let decoded = Objective::from_value(&original.to_value()).unwrap();
         assert_eq!(decoded, original);
         assert_eq!(decoded.id(), original.id());
+    }
+
+    // -- confidentiality ----------------------------------------------------
+
+    #[test]
+    fn a_public_objective_keeps_the_id_it_had_before_the_field_existed() {
+        // The reason `Public` is omitted from the canonical form. If this ever
+        // fails, every objective in every deployed log has been reissued and
+        // every claim against a live bounty has been orphaned.
+        //
+        // `objective_ids_match_the_reference_implementation` is the stronger
+        // version of this check, since those digests were computed before the
+        // field existed; this states the intent locally.
+        let public = objective();
+        assert_eq!(public.confidentiality, Confidentiality::Public);
+        assert!(
+            public.to_value().get("confidentiality").is_none(),
+            "the default class must not appear in the canonical form"
+        );
+    }
+
+    #[test]
+    fn an_embargoed_objective_is_a_different_objective() {
+        // Confidentiality is part of the funded question, so changing it forks
+        // the objective exactly as changing the verifier does. A funder cannot
+        // move a live bounty from public to embargoed after work has started.
+        let public = objective();
+        let embargoed = public
+            .clone()
+            .with_confidentiality(Confidentiality::Embargoed)
+            .unwrap();
+        assert_ne!(public.id(), embargoed.id());
+        assert_eq!(
+            embargoed.to_value().get("confidentiality").unwrap(),
+            &Value::string("embargoed")
+        );
+    }
+
+    #[test]
+    fn sealed_is_refused_rather_than_downgraded() {
+        // A submitter who asked for "never revealed" and silently got
+        // "revealed later" would be misled about the only thing they cared
+        // about, so this is an error rather than a fallback.
+        let err = objective()
+            .with_confidentiality(Confidentiality::Sealed)
+            .unwrap_err();
+        assert_eq!(err, RecordError::SealedNotImplemented);
+        assert!(err.to_string().contains("zero-knowledge"), "{err}");
+
+        // And it cannot be smuggled in through the decoder either.
+        let mut body = objective().to_value().as_object().unwrap().clone();
+        body.insert("confidentiality".to_string(), Value::string("sealed"));
+        assert_eq!(
+            Objective::from_value(&Value::Object(body)).unwrap_err(),
+            RecordError::SealedNotImplemented
+        );
+    }
+
+    #[test]
+    fn an_unknown_class_is_refused_never_defaulted() {
+        // Defaulting an unrecognised class to `public` would publish an
+        // artifact whose funder asked for something else.
+        let mut body = objective().to_value().as_object().unwrap().clone();
+        body.insert("confidentiality".to_string(), Value::string("secret"));
+        assert_eq!(
+            Objective::from_value(&Value::Object(body)).unwrap_err(),
+            RecordError::UnknownConfidentiality {
+                value: "secret".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_non_string_class_is_refused() {
+        let mut body = objective().to_value().as_object().unwrap().clone();
+        body.insert("confidentiality".to_string(), Value::Int(1));
+        assert!(matches!(
+            Objective::from_value(&Value::Object(body)).unwrap_err(),
+            RecordError::InvalidField {
+                field: "confidentiality",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_absent_or_null_class_decodes_as_public() {
+        // Absent is the common case: every record written before this field
+        // existed. Null is what a lax writer emits for "unset".
+        for body in [None, Some(Value::Null)] {
+            let mut raw = objective().to_value().as_object().unwrap().clone();
+            if let Some(v) = body {
+                raw.insert("confidentiality".to_string(), v);
+            }
+            let decoded = Objective::from_value(&Value::Object(raw)).unwrap();
+            assert_eq!(decoded.confidentiality, Confidentiality::Public);
+            assert_eq!(decoded.id(), objective().id());
+        }
+    }
+
+    #[test]
+    fn every_valid_class_round_trips() {
+        for class in [Confidentiality::Public, Confidentiality::Embargoed] {
+            let original = objective().with_confidentiality(class).unwrap();
+            let decoded = Objective::from_value(&original.to_value()).unwrap();
+            assert_eq!(decoded, original);
+            assert_eq!(decoded.id(), original.id());
+            assert_eq!(Confidentiality::parse(class.as_str()).unwrap(), class);
+        }
+    }
+
+    #[test]
+    fn only_public_reveals_at_settlement() {
+        assert!(Confidentiality::Public.reveals_at_settlement());
+        assert!(!Confidentiality::Embargoed.reveals_at_settlement());
+        assert!(!Confidentiality::Sealed.reveals_at_settlement());
     }
 
     #[test]
