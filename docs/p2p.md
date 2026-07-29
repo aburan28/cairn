@@ -1,9 +1,10 @@
 # Peer-to-peer
 
 Stage 0 runs one operator and one append-only file. This document is the design
-for removing the operator. Part of it is built; the rest is specified here and
-marked as not built, because a p2p design that is half-implemented and fully
-described reads as finished if you don't say which half.
+for removing the operator. The transport handshake and set reconciliation are
+built; peer sampling and frontier-conflict surfacing are not, and are marked as
+such — a p2p design that is half-implemented and fully described reads as
+finished if you do not say which half.
 
 ## What actually needs agreement
 
@@ -15,7 +16,7 @@ Three kinds of state, three requirements — the same split as
 
 | state | needs agreement? | why | status |
 |---|---|---|---|
-| records — objectives, commitments, claims | **no** | content-addressed, and verification is a pure function of pinned inputs. Two honest peers holding the same claim reach the same verdict without talking | merge law built (`gossip.rs`), transport not |
+| records — objectives, commitments, claims | **no** | content-addressed, and verification is a pure function of pinned inputs. Two honest peers holding the same claim reach the same verdict without talking | built (`p2p/sync.rs`) |
 | candidate population | **no** | order-irrelevant, and divergence is *useful* — the island model preserves search diversity | built (`gossip.rs`) |
 | work assignment | **no** | a pure function of an epoch beacon; overlap wastes compute and self-corrects | built (`partition.rs`) |
 | **frontier order** — who improved first | **yes** | payment depends on it | **not solved p2p** |
@@ -104,39 +105,77 @@ connections are many.
   the module does this for you**, and exposing `accept` to open traffic without
   it is a mistake.
 
-## Set reconciliation — *not built*
+## Set reconciliation
 
-The remaining piece, and the one [`roadmap.md`](roadmap.md) names: "the wire
-protocol (peer sampling, anti-entropy, digest reconciliation) is not written."
+Built: [`src/p2p/sync.rs`](../src/p2p/sync.rs).
 
-The intended shape, so it is on record:
+### Records cross the wire; entries do not
+
+A `Ledger` entry's hash covers its `seq` and its `prev`, so it is
+position-dependent: two peers holding the same records in different orders
+compute different entry hashes for all of them. Entries are therefore not the
+exchangeable unit. The unit is a **record** — a `(kind, payload)` pair whose id
+is the payload's own content address, independent of where anyone filed it.
+
+### Only inputs are exchanged
+
+| kind | crosses the wire? | why |
+|---|---|---|
+| `objective`, `commitment`, `claim` | **yes** | primary inputs |
+| `verdict`, `settlement`, `frontier` | **no** | derived by replaying the inputs |
+
+This is the security argument of the whole layer. Importing a peer's verdict
+would mean trusting its verification, which is exactly the trust this system
+exists to remove. A peer that ships a `verdict` is confused or lying, and
+`Peer::ingest` refuses it either way — as does `Peer::insert`, so the rule
+cannot be dodged by seeding the set locally.
+
+`tests/p2p_convergence.rs` checks the consequence end to end: a node given only
+inputs re-derives every verdict, reward and settlement itself, and lands
+byte-for-byte where the sender did — having been told none of it. It reaches
+the same state whatever order the records arrive in, because a set has no
+order.
+
+### The exchange
 
 ```
-Hello      { peer_id }                     — 32 bytes; key fetched separately if unknown
-Inventory  { buckets: [(prefix, count, digest)] }
-Want       { ids: [...] }
-Records    { entries: [...] }
+A -> B   Inventory   256 x (count, xor)   fixed size, sparse on the wire
+B -> A   Inventory
+         BucketIds   only for buckets that differ
+A -> B   Want        ids A lacks
+B -> A   Records     the bodies
 ```
 
-- **Bucketed digests.** Group record ids by leading byte; exchange 256
-  `(count, xor-of-ids)` pairs. Buckets that match are skipped entirely, so the
-  common case — peers already in sync — costs one small message each way rather
-  than a full id list.
-- **Verify on ingest, never trust.** A received record is re-verified locally
-  before it counts, exactly as `gossip::ingest` re-scores a candidate rather
-  than believing a peer's claimed score. A peer's verdict is an assertion; the
-  pinned verifier is the fact.
-- **Merge is union.** No conflict resolution is needed for records, because
-  content addressing means two peers holding "the same" record hold identical
-  bytes.
+Ids are SHA-256 digests and so uniformly distributed; bucket by leading byte and
+summarise each bucket with a count and an XOR of its ids. Peers already in sync
+exchange two fixed-size messages and stop — the common case costs no per-record
+traffic. Only buckets that actually differ escalate to id lists. Empty buckets
+are omitted, so a peer with three records sends three bucket entries, not 256.
 
-Open questions worth settling before writing it:
+The XOR digest is an **optimisation, not a security boundary**. It reliably
+catches accidental divergence; a malicious peer could craft a colliding bucket
+and thereby hide its own records from you, which costs it its own gossip and
+gains it nothing. Correctness rests on re-verification, never on the digest.
+
+### Refusing a bad peer
+
+- **Unsolicited records are refused**, even when they would verify. Otherwise a
+  peer pushes whatever it likes at whatever volume. There is deliberately no
+  separate "wrong body for this id" error: a record is keyed by the digest of
+  the bytes actually received, so substitution produces an id that was never
+  requested and surfaces as unsolicited. A distinct variant could never fire.
+- **Message ceilings** on ids and records, checked before allocation.
+- **One bad record does not poison a batch** — the rest still land.
+
+## Still open
 
 - **Peer sampling.** Random sampling is simple and Sybil-vulnerable; structured
-  overlays resist that and are more work.
-- **Frontier conflict surfacing.** The set merges cleanly, but two valid claims
-  can each look like the first improvement. The layer should expose that rather
-  than pick, and the exposure format is undesigned.
+  overlays resist that and are more work. Undecided, and the reason there is no
+  socket driver yet: the transport is the easy half.
+- **Frontier conflict surfacing.** The record set merges cleanly, but two valid
+  claims can each look like the first improvement. The layer should expose that
+  rather than pick one, and the exposure format is undesigned. This is the piece
+  that genuinely needs the base layer.
 - **Record availability.** Content addressing makes withholding *detectable* —
   the id is known and the bytes are missing — but nothing here replicates
   aggressively enough to make it *hard*.

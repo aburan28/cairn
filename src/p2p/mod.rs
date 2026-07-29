@@ -5,3 +5,4 @@
 //! about *validity* — only about *order*, and only for the frontier.
 
 pub mod handshake;
+pub mod sync;

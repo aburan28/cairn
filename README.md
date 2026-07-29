@@ -54,7 +54,7 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 570 tests, no network required
+cargo test                    # 597 tests, no network required
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
