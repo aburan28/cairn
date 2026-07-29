@@ -28,7 +28,7 @@ for solved.
 | **in-flight front-running** — watch a submission land, submit marginally better | `min_improvement` raises the bar. Epoch-batched commit-reveal is designed, not built | partial |
 | **censorship** — withhold a competitor's reveal past a deadline | none at Stage 0: one sequencer, no forced-inclusion path. This is the *primary* security property and the main argument for anchoring to a base layer | not handled |
 | **malicious objective code** — author ships a checker that attacks contributors | **not handled.** Pinned code runs in-process. Sandbox required before objective authorship opens | launch blocker |
-| **statement-borne prompt injection** — an objective's `statement` tells an agent reading it to cite the author's claim, or to submit elsewhere | partial. `proofwork-mcp` returns statements fenced and labelled as untrusted, and flattens control characters so a statement cannot forge extra rows in a list. The agent still reads them. The structural fix — `submit_claim` refusing a citation the submitter did not actually build on — is **not built** | partial |
+| **statement-borne prompt injection** — an objective's `statement` tells an agent reading it to cite the author's claim, or to submit elsewhere | `proofwork-mcp` tracks provenance: a claim id offered through a structured field is citable, an id seen only inside a rendered statement is not, and `submit_claim` refuses the difference. Statements are also fenced, labelled untrusted, and flattened so they cannot forge rows. This removes the path by which an attacker *plants* a citation; it does not make citations earned (see **spurious citations**) | handled |
 | **verifier gaming** — satisfy the checker, miss the goal | partly: per-verifier screens (Lean escape hatches, invalid-input scoring). Structurally needs adversarial review of every verifier *before* funding, plus held-out tests and a paid red team | partial |
 | **spurious citations** — cite everything to farm attribution | δ decays with depth, bounding the payoff. Validators slashing bad edges is designed, not built | partial |
 | **self-dealing** — fund a bounty you have already solved | statement commitment must predate any witness; funder ≠ solver for protocol pools. Not enforced here (no identity layer) | not handled |
@@ -52,7 +52,10 @@ made larger:
 - **Statement-borne prompt injection.** Under citation flow this is a financial
   attack: injected text that gets an agent to cite the attacker's claim routes
   real money upstream. It needs no code execution, so the verifier sandbox does
-  not address it.
+  not address it. Handled by provenance tracking in the MCP server — an id that
+  appeared only in attacker-controlled prose cannot become a citation. Note the
+  boundary: this stops a citation being *planted*, and says nothing about
+  whether a citation the agent chose itself was earned.
 - **Secrets in transcripts.** Agents log what they see. The MCP server therefore
   generates and consumes the commit–reveal nonce internally and never returns
   it; a nonce in a transcript is a broken commitment. The same argument will

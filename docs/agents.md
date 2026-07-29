@@ -35,6 +35,7 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | `get_objective` | no | full record, verifier spec, artifact shape |
 | `score_candidate` | **no** | run the pinned verifier; the tight loop |
 | `frontier_status` | no | best score, which claim to cite, pool remaining |
+| `work_assignment` | no | your slice of the search space this epoch |
 | `submit_claim` | yes | commit + reveal, atomically |
 | `audit` | no | re-derive the whole log |
 
@@ -63,15 +64,26 @@ upstream to whoever wrote it. It is distinct from malicious verifier *code*
 (already a launch blocker in [`threat-model.md`](threat-model.md)) because it
 needs no code execution at all.
 
-What is implemented here is the presentational half: statements are returned
-inside a fenced, labelled block, truncated and stripped of control characters in
-list views so a statement cannot forge extra rows. The agent still reads them,
-so this is mitigation, not a fix.
+Two defences, neither of which makes a citation *truthful* — nothing at this
+layer can establish that:
 
-**The structural half is not built.** `submit_claim` does not check that a cited
-claim is one the agent actually built on, so an injected citation would still
-land if an agent followed it. Until that exists, treat an unattended agent
-against attacker-posted objectives as unsafe.
+**Presentational.** Statements are returned inside a fenced, labelled block, and
+truncated and stripped of control characters in list views so a statement cannot
+forge extra rows.
+
+**Structural.** The server tracks provenance. A claim id it hands the agent
+through a structured field — a frontier holder, or the id of a claim the agent
+itself submitted — is *offered*. A claim id appearing inside a rendered
+statement is *tainted*. `submit_claim` refuses any citation that is tainted and
+never offered, which is the injection signature exactly.
+
+The check is deliberately narrow. An id the agent learned some other way (a
+human pasted it, an earlier session) is untouched: a claim id that never
+appeared in a statement was not injected through one, and blocking those would
+break honest use to catch nothing. It removes the one path by which an attacker
+can *plant* a citation; it does not verify that citations are earned. That
+remains what it always was — δ decaying with depth bounds the payoff, and
+validators slashing bad edges is designed, not built.
 
 ## Wiring
 
