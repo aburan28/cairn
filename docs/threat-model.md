@@ -28,6 +28,7 @@ for solved.
 | **in-flight front-running** — watch a submission land, submit marginally better | `min_improvement` raises the bar. Epoch-batched commit-reveal is designed, not built | partial |
 | **censorship** — withhold a competitor's reveal past a deadline | none at Stage 0: one sequencer, no forced-inclusion path. This is the *primary* security property and the main argument for anchoring to a base layer | not handled |
 | **malicious objective code** — author ships a checker that attacks contributors | **not handled.** Pinned code runs in-process. Sandbox required before objective authorship opens | launch blocker |
+| **statement-borne prompt injection** — an objective's `statement` tells an agent reading it to cite the author's claim, or to submit elsewhere | partial. `proofwork-mcp` returns statements fenced and labelled as untrusted, and flattens control characters so a statement cannot forge extra rows in a list. The agent still reads them. The structural fix — `submit_claim` refusing a citation the submitter did not actually build on — is **not built** | partial |
 | **verifier gaming** — satisfy the checker, miss the goal | partly: per-verifier screens (Lean escape hatches, invalid-input scoring). Structurally needs adversarial review of every verifier *before* funding, plus held-out tests and a paid red team | partial |
 | **spurious citations** — cite everything to farm attribution | δ decays with depth, bounding the payoff. Validators slashing bad edges is designed, not built | partial |
 | **self-dealing** — fund a bounty you have already solved | statement commitment must predate any witness; funder ≠ solver for protocol pools. Not enforced here (no identity layer) | not handled |
@@ -35,6 +36,30 @@ for solved.
 | **rubber-stamp verification** — attest without checking (verifier's dilemma) | canaries, bonded challenge windows, interactive fraud proofs. Only arises when verification is expensive, i.e. Stage 2+ | out of scope at Stage 0 |
 | **result withholding** — find something extraordinary and walk away | escrow makes it cost the bounty. Nothing makes it impossible | unsolvable |
 | **post-hoc statistics** — choose the success criterion after seeing data | test statistic and threshold registered with the objective. V3 not implemented | design only |
+
+## Agents as contributors
+
+`proofwork-mcp` lets an agent pull objectives and submit against them. That is
+mostly *good* for this threat model: an agent that hallucinates an answer gets a
+`REJECT`, earns zero, and costs the network nothing. The design never needed the
+contributor to be reliable — only the checker to be pinned — and a language
+model is exactly the high-volume, sometimes-wrong producer it was built to
+absorb.
+
+Two things do get worse, and both are new rows above rather than existing ones
+made larger:
+
+- **Statement-borne prompt injection.** Under citation flow this is a financial
+  attack: injected text that gets an agent to cite the attacker's claim routes
+  real money upstream. It needs no code execution, so the verifier sandbox does
+  not address it.
+- **Secrets in transcripts.** Agents log what they see. The MCP server therefore
+  generates and consumes the commit–reveal nonce internally and never returns
+  it; a nonce in a transcript is a broken commitment. The same argument will
+  apply to signing keys when the identity layer lands — they must live behind
+  the server, never in an agent's context.
+
+See [agents.md](agents.md).
 
 ## Sensitive results
 

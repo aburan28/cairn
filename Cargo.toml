@@ -38,5 +38,10 @@ path = "src/lib.rs"
 name = "proofwork"
 path = "src/main.rs"
 
+# One MCP server, so Claude Code / Codex / OpenCode need no bespoke client each.
+[[bin]]
+name = "proofwork-mcp"
+path = "src/bin/mcp.rs"
+
 [profile.release]
 overflow-checks = true   # money arithmetic must never wrap silently

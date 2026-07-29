@@ -54,10 +54,11 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 526 tests, no network required
+cargo test                    # 549 tests, no network required
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
+./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
 ```
 
 Rust 1.85+ (verified in CI, not asserted). No network access needed at runtime.
@@ -267,6 +268,7 @@ examples/            worked objectives with real artifacts
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
+- [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
 - [conformance/README.md](conformance/README.md) — the cross-implementation contract
 
