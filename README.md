@@ -54,7 +54,7 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 556 tests, no network required
+cargo test                    # 570 tests, no network required
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
@@ -268,6 +268,7 @@ examples/            worked objectives with real artifacts
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
+- [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
 - [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
 - [AGENTS.md](AGENTS.md) — instructions agents read: contributing here, and contributing *to* the network
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing

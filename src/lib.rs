@@ -25,6 +25,7 @@ pub mod frontier;
 pub mod gossip;
 pub mod ledger;
 pub mod node;
+pub mod p2p;
 pub mod partition;
 pub mod records;
 pub mod sealed;
