@@ -199,6 +199,33 @@ That is feasible for simple arithmetic certificate checkers and infeasible today
 for a Lean kernel or an arbitrary evaluator. The class exists in the schema so
 the limitation is explicit rather than discovered later.
 
+### Status
+
+Implemented as `Objective.confidentiality` in both implementations
+(`records.rs`, `records.py`) and in `spec/objective.schema.json`. Three
+properties are worth stating because each is a decision rather than a detail:
+
+- **`sealed` is refused, not downgraded.** `validate` errors rather than
+  quietly treating the request as `embargoed`. A funder who asked for "never
+  revealed" and silently got "revealed later" would be misled about the only
+  thing they cared about.
+- **An unknown class is refused, not defaulted.** Falling back to `public`
+  would publish an artifact whose funder asked for something else, so an
+  unrecognised value is an error on both the constructor and the decoder path.
+- **The default is omitted from the canonical form.** `public` serialises to
+  nothing, exactly like an unset `deadline` or `ratchet`. Emitting it would have
+  changed the digest of every objective ever written — breaking the conformance
+  vectors and orphaning every claim already posted against a live bounty. The
+  conformance vectors pin this directly: one fixture writes `"public"`
+  explicitly and must produce an id byte-identical to the fixture that omits it.
+
+What is *not* implemented is any enforcement of the embargo itself. The class is
+recorded in the objective's identity, so it cannot be changed mid-bounty, but
+nothing in Stage 0 withholds an `embargoed` artifact at the appropriate time —
+that needs the epoch machinery in `sealed.rs` wired to the class. Declaring the
+class is the part that had to come first, because it is part of the objective's
+id and therefore cannot be retrofitted onto objectives already funded.
+
 ## 7. What encryption cannot fix
 
 - **A sequencer that includes nothing.** Blind inclusion stops *targeted*

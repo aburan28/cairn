@@ -4059,6 +4059,41 @@
             "threshold": 0
           }
         }
+      },
+      {
+        "id": "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+        "record": {
+          "created_at": "2026-07-28T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-x",
+          "reward": 1000,
+          "statement": "find it",
+          "type": "objective",
+          "verifier": {
+            "checker": "c.py",
+            "checker_sha256": "abababababababababababababababababababababababababababababababab",
+            "entrypoint": "check",
+            "kind": "certificate"
+          }
+        }
+      },
+      {
+        "id": "sha256:f88e3d6374aca66458167766a398aedb154831c85c9b3729890a1c5512c79060",
+        "record": {
+          "confidentiality": "embargoed",
+          "created_at": "2026-07-28T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-x",
+          "reward": 1000,
+          "statement": "find it",
+          "type": "objective",
+          "verifier": {
+            "checker": "c.py",
+            "checker_sha256": "abababababababababababababababababababababababababababababababab",
+            "entrypoint": "check",
+            "kind": "certificate"
+          }
+        }
       }
     ]
   }

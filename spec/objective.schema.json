@@ -35,6 +35,17 @@
     },
     "funder": { "type": "string" },
     "created_at": { "type": "string", "format": "date-time" },
-    "deadline": { "type": ["string", "null"], "format": "date-time" }
+    "deadline": { "type": ["string", "null"], "format": "date-time" },
+    "ratchet": {
+      "type": ["object", "null"],
+      "description": "Progressive-bounty parameters. When present the objective pays along an improvement curve instead of once to a single winner. Part of the id, like the verifier.",
+      "$comment": "Field shape is validated by frontier::Ratchet, which reports a malformed block rather than settling on it."
+    },
+    "confidentiality": {
+      "type": ["string", "null"],
+      "enum": ["public", "embargoed", "sealed", null],
+      "default": "public",
+      "description": "When settled artifacts become public -- never whether. Omitted or null means 'public', and writing it explicitly produces byte-identical output, so this field did not reissue any pre-existing objective id. 'sealed' is declared so its cost is explicit but is refused at validation: paying for an artifact nobody may read requires a zero-knowledge proof that the pinned verifier accepts it, which is not implemented. Use 'embargoed' for delayed disclosure."
+    }
   }
 }

@@ -48,6 +48,17 @@ onto an immutable settlement layer. Stage 0 has one operator and a private log,
 which is the only reason this is not yet urgent — it becomes urgent the moment
 anything is published or permissionless.
 
+**Partly addressed.** An objective now declares a confidentiality class
+(`public` / `embargoed` / `sealed`) that is part of its content-addressed id, so
+it cannot be changed mid-bounty and cannot be retrofitted — which is exactly why
+it had to land before objectives are funded rather than after. `sealed` is
+refused at validation rather than silently downgraded, so its cost is explicit.
+
+What remains unbuilt is enforcement: nothing yet withholds an `embargoed`
+artifact at settlement time. The class is declared and binding; the mechanism
+that honours it is not wired up. Until it is, this row is **partial**, and an
+`embargoed` objective offers a promise the code does not yet keep.
+
 ## What Stage 0 explicitly does not defend
 
 There is no identity layer, no stake, no dispute mechanism, and no consensus.
