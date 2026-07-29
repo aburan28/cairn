@@ -24,6 +24,22 @@ from typing import Any
 
 DIGEST_PREFIX = "sha256:"
 
+#: Largest value any unit-of-account field may carry.
+#:
+#: Python has bignums and other implementations do not, so "what is a valid
+#: record" would otherwise depend on which implementation you asked -- and a
+#: reward of 2**70 produced here is a log a 64-bit implementation cannot audit.
+#: That is an interop break, not a difference of opinion: it silently splits the
+#: network into readers who accept a record and readers who cannot. The *format*
+#: therefore declares the bound and every implementation enforces it.
+MAX_UNITS = 2**64 - 1
+
+#: Range any score-like field may occupy. Same reasoning as MAX_UNITS: scores
+#: are signed 64-bit in a fixed-width implementation, so a score outside this
+#: range is a record only a bignum language can read.
+MIN_SCORE = -(2**63)
+MAX_SCORE = 2**63 - 1
+
 
 class CanonicalizationError(ValueError):
     """An object cannot be canonically serialized."""

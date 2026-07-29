@@ -37,6 +37,26 @@ against these vectors rather than against each other's behaviour.
   not; rather than pull arbitrary precision into a field no record needs, the
   *format* declares the bound and both implementations enforce it. The
   boundaries are pinned so neither drifts.
+- **Units of account are bounded to unsigned 64 bits** (`MAX_UNITS = 2^64 - 1`)
+  and **scores to signed 64 bits**. Same reasoning, one level up.
+
+### How the unit bound was found
+
+It was a real interop break, caught by testing rather than by reasoning. The
+Python reference happily accepted `reward = 2**70` and wrote it to a log; the
+Rust implementation then refused to audit that log, correctly reporting the
+reward as outside the representable range. Both implementations were internally
+consistent and behaving sensibly -- and between them, "what is a valid record"
+depended on which one you asked.
+
+That is exactly the failure this directory exists to prevent, and it is worth
+noting that it did **not** show up as a hash mismatch. Canonical bytes agreed
+perfectly. The divergence was in *validity*, not encoding, which is why the
+contract has to cover field ranges and not only serialization.
+
+The fix has the same shape as every other bound here: the format declares the
+limit, both implementations enforce it, and a record one accepts the other
+accepts. Regression tests live in `reference/python/tests/test_records.py`.
 
 Key sorting agrees across languages for free: Python sorts `str` by code point,
 Rust's `BTreeMap<String, _>` sorts by UTF-8 byte order, and UTF-8 is constructed
