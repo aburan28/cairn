@@ -28,6 +28,7 @@ pub mod node;
 pub mod partition;
 pub mod records;
 pub mod sealed;
+pub mod time;
 pub mod verifiers;
 
 pub use attribution::{flow, FlowParams};
