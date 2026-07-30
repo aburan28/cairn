@@ -165,6 +165,12 @@ impl PeerIdentity {
         &self.public
     }
 
+    /// Secret key material for an explicitly persisted node identity.
+    /// Callers must protect the returned bytes like any other private key.
+    pub fn secret_key(&self) -> &[u8; CRYPTO_SECRETKEYBYTES] {
+        self.secret.as_array()
+    }
+
     /// What other peers hold about this one.
     pub fn to_public(&self) -> PeerPublic {
         PeerPublic {

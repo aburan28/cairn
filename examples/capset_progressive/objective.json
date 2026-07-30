@@ -5,7 +5,7 @@
   "ratchet": {
     "baseline": 9,
     "direction": "maximize",
-    "min_improvement": 1,
+    "min_improvement": 3,
     "reward": 1100000,
     "target": 20
   },

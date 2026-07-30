@@ -403,10 +403,36 @@ impl Message {
     }
 }
 
-/// What an ingest actually did.
+/// Where a held record stands with *this* node.
+///
+/// Admission and verification are separate on purpose. A record is
+/// content-addressed, so storing and relaying one is safe whatever it says —
+/// you cannot be made to misrepresent it, because its id is the hash of its
+/// bytes. Running a verifier over it is a different act with a different cost,
+/// and for some objectives that cost is minutes of CPU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Standing {
+    /// Admitted and relayable. Says nothing about whether it is any good.
+    Unverified,
+    /// This node ran the check and accepted it. Only these may be used to
+    /// derive settlement.
+    Verified,
+    /// This node ran the check and refused it. Kept, because a peer may ask
+    /// for it and the refusal is this node's opinion, not a fact about the
+    /// bytes — another node with a different verifier may conclude otherwise.
+    Refused(String),
+}
+
+impl Standing {
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Standing::Verified)
+    }
+}
+
+/// What an admission actually did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestReport {
-    /// Records accepted and added.
+    /// Records admitted and added, in [`Standing::Unverified`].
     pub accepted: Vec<String>,
     /// Records already held.
     pub duplicates: usize,
@@ -445,6 +471,9 @@ impl Default for Limits {
 pub struct Peer {
     /// Records this side holds, by id.
     held: BTreeMap<String, Record>,
+    /// Where each held record stands with this node. Every id in `held` has an
+    /// entry; a record is admitted long before it is checked, if it ever is.
+    standing: BTreeMap<String, Standing>,
     /// Ids this side has asked for and not yet received. A record arriving
     /// outside this set is unsolicited and refused, so a peer cannot push
     /// unbounded data by volunteering it.
@@ -460,6 +489,7 @@ impl Peer {
     pub fn with_limits(limits: Limits) -> Peer {
         Peer {
             held: BTreeMap::new(),
+            standing: BTreeMap::new(),
             outstanding: BTreeSet::new(),
             limits,
         }
@@ -474,6 +504,9 @@ impl Peer {
         }
         let id = record.id();
         self.held.insert(id.clone(), record);
+        self.standing
+            .entry(id.clone())
+            .or_insert(Standing::Unverified);
         Ok(id)
     }
 

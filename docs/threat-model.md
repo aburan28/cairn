@@ -12,6 +12,7 @@ for solved.
 | **log tampering** — rewrite a settled result | hash-linked entries; `audit` recomputes every hash and re-runs every settled verifier | handled |
 | **paying an unaccepted claim** | `audit` cross-checks every settlement against its recorded verdict | handled |
 | **verifier-offline attack** — take checkers down so honest submissions "fail" | `UNAVAILABLE` never settles and never refutes; the objective stays open | handled |
+| **verifier removal** — the *funder* deletes the pinned checker so nothing can ever settle | **not handled.** Pinning by hash prevents substitution, not removal. The checker is referenced by path, so a funder who deletes it makes every claim `UNAVAILABLE` and the escrow is never released. "The objective stays open" is the mitigation against one attacker and the attack itself from the other side. Fix: content-address pinned code and let anyone serve it | **not handled** |
 | **impure verifier** — a checker reading unpinned external state passes today, fails tomorrow at the same hash | `audit` flags a settled claim that no longer re-verifies rather than reporting success | handled |
 | **float divergence** — two honest nodes disagree on identity or on a threshold comparison | floats refused in canonical encoding and in evaluator scores/thresholds | handled |
 | **time-as-evidence** — settle a cost claim denominated in wall-clock | `replay` refuses machine-dependent reproducible fields | handled |
@@ -19,10 +20,15 @@ for solved.
 | **Merkle second-preimage** — two leaf sets, one root | odd nodes are promoted, not duplicated (Bitcoin CVE-2012-2459) | handled |
 | **hoarding** — hide improvements so a competitor cannot extend them | progressive bounties pay for distance moved, so publishing is the profitable move and copying earns zero | handled |
 | **frontier theft** — take credit for an improvement built on someone else's | an improvement must cite the frontier it beat, enforced at submission; citation flow pays the previous holder | handled |
-| **epsilon-farming** — split one improvement into many to extract more | payouts telescope on a cumulative curve, so the pool is identical however the curve is chopped; `min_improvement` sets a floor | handled |
+| **epsilon-farming** — split one improvement into many to extract more *direct reward* | payouts telescope on a cumulative curve, so the pool is identical however the curve is chopped; `min_improvement` sets a floor | handled |
+| **citation-flow dilution** — split one improvement into many to starve the contributor you built on | **not handled.** Telescoping protects the *direct* reward only. Citation flow decays per *hop*, not per unit of progress, so chopping is free in direct reward and strictly profitable in flow. On the README's own example, bob slicing 12→16 into four 1-point steps moves 91,408 from alice to himself — a 24% raise for work he had already done — and overturns the documented result that alice ends up ahead. Sixteen slices cost the upstream contributor 92% of their flow. `max_depth` is not a defence: decay is geometric *within* the chain, and depth 6 and 64 differ by under 0.1%. Raising δ does not help either. Pinned in `tests/incentives.rs`; the fix is distance-weighted attribution (see below) | **not handled** |
 | **frontier rollback** — replay an old lower score as the current best | `audit` rejects a frontier that moves backwards, and a pool paid beyond its size | handled |
 | **gossip score inflation** — assert a huge score to evict real candidates from a bounded population | `gossip.ingest` re-scores locally and drops what does not reproduce; verification costs one evaluation | handled |
 | **CRDT divergence** — nodes silently disagree after seeing the same messages | merge is commutative/associative/idempotent with pruning proven safe; identity includes the claimed score so disagreement is representable rather than order-resolved | handled |
+| **verification-cost amplification** — offer a peer many records whose verifier is expensive | **partial.** `p2p::sync` caps records per message, but runs the verifier on every one. With a minutes-long verifier (the ECDLP cost challenge builds Rust and runs 32 trials) a single 512-record message buys hours of CPU. Relaying does not require verification — content addressing makes it safe — so the fix is to separate accept-for-relay from verify-for-settlement | partial |
+| **handshake CPU amplification** — send cheap KEM ciphertexts to make a listener decapsulate | `p2p::transport` bounds frames, but the listener must rate-limit or authenticate sources before `accept`; the 12 ms McEliece decapsulation cost is intentionally not hidden in the library | partial |
+| **unauthenticated initiator claim** — claim another peer id when opening an inbound stream | the KEM authenticates the responder only. `Service` exposes the claimed id and leaves admission to the deployment; signed mutual authentication is not wired in | partial |
+| **verifier code unavailable to a peer** — a peer holds the objective but not the pinned checker | **not handled.** `p2p::sync` exchanges `objective`, `commitment` and `claim`; it does not exchange verifier code, which is referenced by local path. A peer without the file returns `UNAVAILABLE` and cannot derive settlement at all. `tests/p2p_convergence.rs` passes only because both nodes share a filesystem root — it demonstrates convergence *given* shared code, not code distribution | **not handled** |
 | **region squatting** — grind an identity onto a region and leave it unsearched | assignment mixes a per-epoch beacon, so squatting costs a fresh grind every epoch | partial |
 | **beacon grinding** — a sequencer picks the epoch anchor to place itself favourably | none. The beacon is derived from ledger heads and is grindable by a sequencer free to choose them. Needs a VDF or threshold signature | not handled |
 | **in-flight front-running** — watch a submission land, submit marginally better | `min_improvement` raises the bar. Epoch-batched commit-reveal is designed, not built | partial |
@@ -36,6 +42,43 @@ for solved.
 | **rubber-stamp verification** — attest without checking (verifier's dilemma) | canaries, bonded challenge windows, interactive fraud proofs. Only arises when verification is expensive, i.e. Stage 2+ | out of scope at Stage 0 |
 | **result withholding** — find something extraordinary and walk away | escrow makes it cost the bounty. Nothing makes it impossible | unsolvable |
 | **post-hoc statistics** — choose the success criterion after seeing data | test statistic and threshold registered with the objective. V3 not implemented | design only |
+
+## Slicing, and why telescoping is not enough
+
+The ratchet was built on a specific promise: **chopping an improvement into
+small steps pays exactly what one big step pays**, so publishing partial results
+early costs nothing and the hoarding incentive disappears. `frontier.rs` proves
+that for the direct reward, and the proof is correct.
+
+It is only half the mechanism. A settled claim also *sends* value upstream, and
+that flow decays per citation **hop**. Chopping adds hops. So:
+
+| | alice | bob | carol |
+|---|---|---|---|
+| as published in the README | 425,000 | 375,000 | 300,000 |
+| bob slices 12→16 into four 1-point steps | 333,592 | **466,408** | 300,000 |
+
+bob does identical work for an identical direct reward and takes 91,408 from
+alice. He is not exploiting a bug in the arithmetic — every claim is a genuine
+improvement and every payment is conserved. He is responding to the incentive
+the mechanism actually creates, which is not the one it was designed to create.
+A participant who declines to slice is leaving money on the table, so this is
+the dominant strategy rather than an exotic attack.
+
+**The fix, and what it costs.** Attribution asks the citation DAG "how many hops
+back?", when for a ratcheted objective the frontier ledger already records the
+better answer: `(claim_id, holder, score, paid_cumulative)` gives the *distance*
+each submitter moved, and distance is invariant to chopping by construction.
+Weighting flow by distance rather than hop count makes slicing neutral, which is
+what telescoping was already committed to.
+
+The cost is that distance-weighting must aggregate per **submitter** to stop a
+slicer's own steps paying each other — and that requires an identity layer.
+Under sybils, one participant can present as several and the aggregation fails.
+So this is a case where the roadmap ordering is load-bearing rather than
+cosmetic: **identity is a prerequisite for fair attribution, not a later
+convenience.** Slicing-invariance and sybil-resistance cannot both be had
+without it.
 
 ## Agents as contributors
 

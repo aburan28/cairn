@@ -1,10 +1,11 @@
 # Peer-to-peer
 
 Stage 0 runs one operator and one append-only file. This document is the design
-for removing the operator. The transport handshake and set reconciliation are
-built; peer sampling and frontier-conflict surfacing are not, and are marked as
-such — a p2p design that is half-implemented and fully described reads as
-finished if you do not say which half.
+for removing the operator. The transport handshake, TCP framing, static
+bootstrap address book, and set reconciliation are built. Dynamic peer
+sampling and frontier-conflict surfacing are not, and are marked as such — a
+p2p design that is half-implemented and fully described reads as finished if
+you do not say which half.
 
 ## What actually needs agreement
 
@@ -167,11 +168,39 @@ gains it nothing. Correctness rests on re-verification, never on the digest.
 - **Message ceilings** on ids and records, checked before allocation.
 - **One bad record does not poison a batch** — the rest still land.
 
+## Implemented baseline
+
+`p2p::discovery::AddressBook` stores non-consensus `PeerId` to socket-address
+hints. `p2p::transport` performs the 32-byte-id/96-byte-ciphertext handshake and
+length-bounded encrypted framing. `p2p::session` drives the inventory,
+bucket-id, want, records, and done exchange, while `p2p::service::Service`
+connects those pieces for bootstrap dialing and inbound accepts. The service
+does one anti-entropy round at a time; a daemon can schedule retries and peer
+sampling around it without changing the protocol.
+
+The responder still cannot authenticate the initiator from the KEM alone. A
+deployment that needs mutual authentication must restrict inbound ids to its
+discovery/address-book policy or add a signed session greeting. The listener
+also remains responsible for rate limiting before calling the expensive
+McEliece decapsulation.
+
+The `proofwork-p2p` binary is the runnable daemon wrapper. It persists a local
+McEliece identity, opens the node ledger, accepts inbound sessions, periodically
+dials every `--bootstrap` endpoint, and replays newly admitted objectives,
+commitments, and claims through `Node`; verdicts and settlements are always
+re-derived locally. A bootstrap file is canonical JSON of the form
+`{"addr":"127.0.0.1:9001","public":"<hex public key>"}`.
+
+```text
+proofwork-p2p --identity node.json --listen 127.0.0.1:9000 \
+  --log proofwork.jsonl --root . --bootstrap peer.json
+```
+
 ## Still open
 
 - **Peer sampling.** Random sampling is simple and Sybil-vulnerable; structured
-  overlays resist that and are more work. Undecided, and the reason there is no
-  socket driver yet: the transport is the easy half.
+  overlays resist that and are more work. The shipped service accepts static
+  bootstrap endpoints, but does not choose or refresh a dynamic peer set.
 - **Frontier conflict surfacing.** The record set merges cleanly, but two valid
   claims can each look like the first improvement. The layer should expose that
   rather than pick one, and the exposure format is undesigned. This is the piece

@@ -157,3 +157,11 @@ are not. This is the judgement problem from
 and it is the part of scientific collaboration this design captures worst.
 Discussion, intuition, and negative results shared in passing — the things that
 make a research group more than the sum of its members — remain unpriced.
+
+## Known gap: telescoping does not cover citation flow
+
+Everything above is about the *direct* reward, where telescoping holds exactly.
+Citation flow decays per hop, so chopping an improvement is free in direct
+reward and strictly profitable in flow — it starves whoever you built on. See
+**Slicing, and why telescoping is not enough** in [threat-model.md](threat-model.md),
+and `tests/incentives.rs`, which pins the numbers.
