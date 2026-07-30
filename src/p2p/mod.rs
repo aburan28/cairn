@@ -6,6 +6,7 @@
 
 pub mod discovery;
 pub mod handshake;
+pub mod pop;
 pub mod service;
 pub mod session;
 pub mod sync;

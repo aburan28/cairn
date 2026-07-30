@@ -1,11 +1,13 @@
 """End-to-end rules: commit-reveal, novelty, settlement, and the audit."""
 import hashlib
+from datetime import datetime, timezone
 
 import pytest
 
 from proofwork import verifiers
 from proofwork.ledger import Ledger
 from proofwork.node import Node, RuleViolation
+from proofwork.partition import epoch_of, settlement_rank
 from proofwork.records import Claim, Commitment, Objective, commitment_hash
 from proofwork.verifiers import Status
 
@@ -15,6 +17,13 @@ def check(artifact):
 '''
 
 TS = "2026-07-28T00:00:00+00:00"
+#: Seconds since the Unix epoch for :data:`TS`, and the length of one epoch.
+BASE = 1_785_196_800
+EPOCH = 600
+
+
+def stamp(offset: int) -> str:
+    return datetime.fromtimestamp(BASE + offset, timezone.utc).isoformat(timespec="seconds")
 
 
 @pytest.fixture
@@ -41,11 +50,30 @@ def env(tmp_path):
 
 
 def submit(node, objective, submitter, artifact, nonce="n1", cites=(), commit=True):
+    """Commit, then reveal, then close the batch.
+
+    Three epochs, not one, and they cannot be collapsed: a reveal must be in a
+    strictly later epoch than its commitment, and a batch settles only once its
+    epoch is over. The offsets come off the ledger length so successive
+    submissions land in successive epochs -- an epoch whose batch has already
+    been paid refuses further reveals, which is the point.
+
+    Returns the *final* outcome, so a caller can still ask "what did this
+    submission earn" in one line.
+    """
+    step = len(node.ledger) * 4 * EPOCH
     if commit:
         digest = commitment_hash(objective.id, submitter, artifact, nonce)
-        node.commit(Commitment(objective.id, submitter, digest, TS), ts=TS)
+        node.commit(Commitment(objective.id, submitter, digest, stamp(step)), ts=stamp(step))
     claim = Claim(objective.id, submitter, artifact, nonce, TS, tuple(cites))
-    return node.reveal(claim, ts=TS)
+    outcome = node.reveal(claim, ts=stamp(step + EPOCH))
+    if not outcome.is_pending:
+        return outcome
+    settled = node.settle_at(stamp(step + 2 * EPOCH))
+    for candidate in settled:
+        if candidate.claim_id == outcome.claim_id:
+            return candidate
+    return outcome
 
 
 def test_accepted_claim_settles(env):
@@ -75,46 +103,73 @@ def test_commitment_does_not_transfer_between_submitters(env):
     node, objective = env
     artifact = {"n": 42}
     digest = commitment_hash(objective.id, "alice", artifact, "n1")
-    node.commit(Commitment(objective.id, "alice", digest, TS), ts=TS)
+    node.commit(Commitment(objective.id, "alice", digest, stamp(0)), ts=stamp(0))
     # Eve saw alice's commitment but cannot reveal against it under her name.
     with pytest.raises(RuleViolation):
-        node.reveal(Claim(objective.id, "eve", artifact, "n1", TS), ts=TS)
+        node.reveal(Claim(objective.id, "eve", artifact, "n1", TS), ts=stamp(EPOCH))
 
 
 def test_wrong_nonce_does_not_match_the_commitment(env):
     node, objective = env
     artifact = {"n": 42}
     digest = commitment_hash(objective.id, "alice", artifact, "right")
-    node.commit(Commitment(objective.id, "alice", digest, TS), ts=TS)
+    node.commit(Commitment(objective.id, "alice", digest, stamp(0)), ts=stamp(0))
     with pytest.raises(RuleViolation):
-        node.reveal(Claim(objective.id, "alice", artifact, "wrong", TS), ts=TS)
+        node.reveal(Claim(objective.id, "alice", artifact, "wrong", TS), ts=stamp(EPOCH))
 
 
 def test_duplicate_artifact_verifies_but_mints_nothing(env):
     # Novelty is necessary, never sufficient. Both parties commit while the
-    # objective is open (the realistic race); alice reveals first and settles,
-    # and bob's identical artifact then verifies for a payout of zero.
+    # objective is open (the realistic race) and both reveal in the same epoch,
+    # so this is also the test that the batch pays exactly one of them -- and
+    # pays the one the beacon picks, not the one that arrived first.
     node, objective = env
     artifact = {"n": 42}
     for who, nonce in (("alice", "a"), ("bob", "b")):
         digest = commitment_hash(objective.id, who, artifact, nonce)
-        node.commit(Commitment(objective.id, who, digest, TS), ts=TS)
+        node.commit(Commitment(objective.id, who, digest, stamp(0)), ts=stamp(0))
 
-    first = node.reveal(Claim(objective.id, "alice", artifact, "a", TS), ts=TS)
-    assert first.settled and first.reward == 1000
+    alice = node.reveal(Claim(objective.id, "alice", artifact, "a", TS), ts=stamp(EPOCH))
+    bob = node.reveal(Claim(objective.id, "bob", artifact, "b", TS), ts=stamp(EPOCH))
+    assert alice.is_pending and bob.is_pending
+    assert node.ledger.entries("settlement") == []
 
-    second = node.reveal(Claim(objective.id, "bob", artifact, "b", TS), ts=TS)
-    assert second.verdict.status is Status.ACCEPT
-    assert not second.settled and second.reward == 0
-    assert "duplicate" in second.note
+    batch = node.settle_at(stamp(2 * EPOCH))
+    assert len(batch) == 2
+    paid = [o for o in batch if o.settled]
+    unpaid = [o for o in batch if not o.settled]
+    assert len(paid) == 1 and paid[0].reward == 1000
+    assert unpaid[0].verdict.status is Status.ACCEPT
+    assert unpaid[0].reward == 0
+    # The note names the real reason: the copy would earn nothing even against
+    # an open objective, so "duplicate" beats "already settled".
+    assert "duplicate" in unpaid[0].note
+    assert len(node.ledger.entries("settlement")) == 1
+
+    # The winner is whoever the beacon ranks first, and the log records the
+    # order so an auditor reaches the same answer.
+    epoch = epoch_of(BASE + EPOCH, EPOCH)
+    anchor = node._anchor_of_epoch(epoch)
+    # Ranked on the commitment hash, which was fixed an epoch before the anchor
+    # existed -- not on the claim id, which a submitter can still grind at
+    # reveal time by choosing a different `created_at`.
+    ranked = min(
+        (("alice", "a", alice.claim_id), ("bob", "b", bob.claim_id)),
+        key=lambda row: settlement_rank(
+            epoch, anchor, commitment_hash(objective.id, row[0], artifact, row[1])
+        ),
+    )
+    assert paid[0].claim_id == ranked[2]
+    assert node.audit(rerun=True) == []
 
 
 def test_commitments_are_refused_once_an_objective_is_settled(env):
     node, objective = env
     submit(node, objective, "alice", {"n": 42}, nonce="a")
     digest = commitment_hash(objective.id, "bob", {"n": 42}, "b")
+    later = stamp(len(node.ledger) * 4 * EPOCH)
     with pytest.raises(RuleViolation, match="already settled"):
-        node.commit(Commitment(objective.id, "bob", digest, TS), ts=TS)
+        node.commit(Commitment(objective.id, "bob", digest, later), ts=later)
 
 
 def test_objective_settles_only_once(env):

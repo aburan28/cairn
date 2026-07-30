@@ -46,6 +46,22 @@ variant, deliberately. Do not add one.
 **Money arithmetic is checked.** `overflow-checks` is on in release too. Use
 `u128` intermediates and return errors rather than wrapping.
 
+**An epoch comes from the record, never from a clock.** A commitment's epoch is
+derived from its own `created_at` and a reveal's from the reveal's timestamp,
+both of which are in the log. Stamp a replayed record with the local clock
+instead and every commitment and its claim land in the same epoch, so every
+replayed reveal is refused and record sync silently stops importing work. That
+bug is invisible: sync succeeds, the log just stops growing.
+`PROOFWORK_EPOCH_SECONDS` changes the epoch length for demos and changes no
+record bytes — epochs are derived, never stored.
+
+**Settlement order is keyed on the commitment hash, not the claim id.** A batch
+settles in order of `H(beacon(epoch, anchor) ‖ commitment_hash)`. The anchor is
+public by the time anyone reveals, so any part of that key a submitter can still
+choose is a part they can re-roll until it sorts first — and a claim's id covers
+`created_at` and `cites`, neither of which the commitment binds. Key it on the
+claim and you hand every submitter a free lottery ticket per restamp.
+
 ## Before you claim something works
 
 - `cargo test --all-targets` and `cd reference/python && pytest -q`
@@ -53,6 +69,9 @@ variant, deliberately. Do not add one.
 - `./scripts/interop.sh` — the strongest check in the repo: each implementation
   audits a log the other produced
 - `./scripts/mcp-smoke.sh` if you touched `src/bin/mcp.rs`
+- `./scripts/demo.sh` and `./scripts/ratchet-demo.sh` if you touched the CLI or
+  the rules; they are the only checks that exercise epoch boundaries against a
+  real clock rather than a fixture timestamp
 
 ## House style
 
@@ -76,8 +95,20 @@ detail in [docs/agents.md](docs/agents.md).
 ## The loop
 
 ```
-list_objectives → get_objective → generate → score_candidate ×N → submit_claim
+list_objectives → get_objective → generate → score_candidate ×N
+                → submit_claim (commits) → …epoch turns… → submit_claim (reveals)
 ```
+
+**Submitting takes two calls.** A reveal must land in a strictly later epoch
+than its commitment, so `submit_claim` commits the first time and reveals the
+second — same objective, same artifact, after the epoch turns. The server tells
+you which epoch it is waiting for. This is not a retry; calling once and walking
+away leaves a commitment nobody ever opened, and you are paid for reveals.
+
+**An accepted claim is not a paid claim yet.** Settlement is deferred to the
+close of the reveal epoch and the batch is ordered by the epoch beacon, so
+`settled: false` on an `accept` means *not yet*, not *rejected*. Nobody, the
+operator included, chooses who in a batch is paid first.
 
 **Score before you submit, always.** `score_candidate` runs the objective's
 pinned verifier and records nothing. It is free, it is ground truth, and it is

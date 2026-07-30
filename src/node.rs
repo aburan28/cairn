@@ -51,6 +51,7 @@ use std::path::{Path, PathBuf};
 use crate::canonical::{short, Value};
 use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
 use crate::ledger::{Ledger, LedgerError};
+use crate::partition::{epoch_of, epoch_seconds, settlement_rank};
 use crate::records::{Claim, Commitment, Objective};
 use crate::verifiers::{Kind, Status, Verdict, VerifierRegistry};
 
@@ -63,6 +64,8 @@ const CLAIM: &str = "claim";
 const VERDICT: &str = "verdict";
 const SETTLEMENT: &str = "settlement";
 const FRONTIER: &str = "frontier";
+/// Marks one reveal epoch as drained. See [`Node::settle_due`].
+const BATCH: &str = "batch";
 
 // ---------------------------------------------------------------------------
 // Rule violations
@@ -151,6 +154,32 @@ pub enum RuleViolation {
     /// would waive the citation requirement and restart the payout curve at
     /// zero, so "I cannot read it" must not be worth money.
     MalformedFrontier(RatchetError),
+    /// A timestamp that decides an epoch cannot be read as one.
+    ///
+    /// Refused rather than defaulted. A record whose epoch is unknown cannot be
+    /// placed in a settlement batch, and guessing one -- "treat it as now" --
+    /// would hand a submitter a free choice of batch by writing garbage.
+    MalformedTimestamp { record: &'static str, value: String },
+    /// A reveal into an epoch whose settlement batch has already been paid.
+    ///
+    /// Refused rather than queued for the next batch. An epoch's batch is
+    /// defined as *every* accepted claim revealed in it, ordered by beacon;
+    /// admitting a latecomer would either silently strand the claim (it belongs
+    /// to a batch that is over) or split the epoch into two orderings, which is
+    /// a lever on settlement order handed back to whoever controls arrival.
+    EpochAlreadySettled { epoch: u64 },
+    /// A reveal in the same epoch as (or earlier than) its own commitment.
+    ///
+    /// The commitment already hides the artifact, but it does not stop the
+    /// *sequencer* -- who sees reveals before anyone else -- from opening a
+    /// commitment of its own in the same breath. Requiring a strictly later
+    /// epoch means the reveal that would be copied is public before a
+    /// competitor's commitment can be written, so there is nothing left to
+    /// front-run.
+    RevealBeforeEpoch {
+        commit_epoch: u64,
+        reveal_epoch: u64,
+    },
     /// The record could not be appended to the log.
     Ledger(LedgerError),
 }
@@ -217,6 +246,24 @@ impl fmt::Display for RuleViolation {
                 f,
                 "the objective's latest frontier entry cannot be read: {source}"
             ),
+            RuleViolation::MalformedTimestamp { record, value } => write!(
+                f,
+                "{record} timestamp {value:?} is not an RFC-3339 instant, so the \
+                 epoch it settles in cannot be derived"
+            ),
+            RuleViolation::EpochAlreadySettled { epoch } => write!(
+                f,
+                "epoch {epoch} has already settled; a reveal cannot join a batch \
+                 that has been paid"
+            ),
+            RuleViolation::RevealBeforeEpoch {
+                commit_epoch,
+                reveal_epoch,
+            } => write!(
+                f,
+                "reveal is in epoch {reveal_epoch} but its commitment is in epoch \
+                 {commit_epoch}; a reveal must wait for a strictly later epoch"
+            ),
             RuleViolation::Ledger(source) => write!(f, "cannot record: {source}"),
         }
     }
@@ -254,6 +301,12 @@ pub struct Outcome {
     /// zero, when truncation eats a small step on a large curve.
     pub settled: bool,
     pub reward: u64,
+    /// The reveal epoch this claim will settle in, when it is accepted but its
+    /// epoch has not closed yet. `None` once the answer is final.
+    ///
+    /// A caller must not read `settled == false` as "earned nothing" while this
+    /// is set: the batch has not run. See [`Node::settle_due`].
+    pub pending_epoch: Option<u64>,
     /// Human-readable reason. Never load-bearing; the ledger is.
     pub note: String,
 }
@@ -267,8 +320,26 @@ impl Outcome {
             verdict,
             settled: false,
             reward: 0,
+            pending_epoch: None,
             note: note.into(),
         }
+    }
+
+    /// Accepted, recorded, and waiting for its epoch to close.
+    fn pending(claim_id: String, verdict: Verdict, epoch: u64) -> Outcome {
+        Outcome {
+            claim_id,
+            verdict,
+            settled: false,
+            reward: 0,
+            pending_epoch: Some(epoch),
+            note: format!("accepted; settles when epoch {epoch} closes"),
+        }
+    }
+
+    /// Whether the claim is accepted and waiting rather than finished.
+    pub fn is_pending(&self) -> bool {
+        self.pending_epoch.is_some()
     }
 }
 
@@ -430,6 +501,16 @@ impl Node {
     /// A **progressive** objective does not: it stays open until its pool is
     /// exhausted, because the whole point is that improvements keep arriving.
     pub fn commit(&mut self, commitment: &Commitment, ts: &str) -> Result<String, RuleViolation> {
+        // Refused here rather than at reveal. The commitment's `created_at` is
+        // what fixes the epoch a reveal must beat, so a commitment whose
+        // timestamp cannot be read is a commitment that can never be opened --
+        // better to say so now than to accept it and strand the submitter.
+        epoch_of_timestamp("commitment", &commitment.created_at)?;
+        // Draining on the way in keeps `already settled` honest: a commitment
+        // against an objective whose winner is sitting in an unsettled batch
+        // would otherwise be admitted as though the objective were still open.
+        self.settle_due(epoch_of_timestamp("commit", ts)?, ts)?;
+
         let objectives = self.objectives();
         let objective = objectives.get(&commitment.objective_id).ok_or_else(|| {
             RuleViolation::UnknownObjective {
@@ -452,28 +533,12 @@ impl Node {
     /// acceptance -- the failure direction that refuses a citation rather than
     /// admitting one.
     pub fn accepted_claims(&self) -> BTreeMap<String, Claim> {
-        let mut accepted: BTreeSet<&str> = BTreeSet::new();
-        for entry in self.ledger.entries_of_kind(VERDICT) {
-            let claim_id = match payload_str(&entry.payload, "claim_id") {
-                Some(claim_id) => claim_id,
-                None => continue,
-            };
-            let is_accept = entry
-                .payload
-                .get("verdict")
-                .and_then(Verdict::from_value)
-                .map(|verdict| verdict.accepted())
-                .unwrap_or(false);
-            if is_accept {
-                accepted.insert(claim_id);
-            }
-        }
-
+        let accepted = self.accepted_claim_ids();
         let mut out = BTreeMap::new();
         for entry in self.ledger.entries_of_kind(CLAIM) {
             if let Ok(claim) = Claim::from_value(&entry.payload) {
                 let id = claim.id();
-                if accepted.contains(id.as_str()) {
+                if accepted.contains(&id) {
                     out.insert(id, claim);
                 }
             }
@@ -501,7 +566,28 @@ impl Node {
     /// then is settlement considered. Recording the attempt is not a courtesy:
     /// it is what lets an auditor re-derive every decision, including the ones
     /// that paid nothing.
+    ///
+    /// # Settlement is deferred to the close of the reveal epoch
+    ///
+    /// An accepted claim comes back [`Outcome::pending`], not settled. That is
+    /// not a caching decision -- it falls out of the ordering rule and cannot be
+    /// avoided. Settlement order inside an epoch is
+    /// `H(beacon(epoch, anchor) ‖ claim_id)`, which is a function of the *set*
+    /// of claims in the epoch, and that set is not known until the epoch is
+    /// over. Paying the first arrival and re-ordering afterwards is impossible
+    /// in an append-only log, so the payment waits instead.
+    ///
+    /// The batch runs on the next call that carries a later timestamp -- any
+    /// reveal, commit, post, or an explicit [`Node::settle_due`]. Nothing is
+    /// lost by waiting: the claim and its verdict are already in the log and
+    /// already public.
     pub fn reveal(&mut self, claim: &Claim, ts: &str) -> Result<Outcome, RuleViolation> {
+        let reveal_epoch = epoch_of_timestamp("reveal", ts)?;
+        // Drain first. An epoch that closed while this node was idle must
+        // settle *before* this claim's admission checks read the frontier, or
+        // an improvement would be measured against a stale one.
+        self.settle_due(reveal_epoch, ts)?;
+
         let objectives = self.objectives();
         let objective = objectives
             .get(&claim.objective_id)
@@ -511,15 +597,23 @@ impl Node {
             })?
             .clone();
 
-        if self.matching_commitment(claim).is_none() {
-            return Err(RuleViolation::NoMatchingCommitment);
+        let commitment = match self.matching_commitment(claim) {
+            Some(commitment) => commitment.clone(),
+            None => return Err(RuleViolation::NoMatchingCommitment),
+        };
+        let created_at = payload_str(&commitment, "created_at").unwrap_or_default();
+        let commit_epoch = epoch_of_timestamp("commitment", created_at)?;
+        if reveal_epoch <= commit_epoch {
+            return Err(RuleViolation::RevealBeforeEpoch {
+                commit_epoch,
+                reveal_epoch,
+            });
         }
-
-        // Computed *before* the claim is appended, or every claim would be its
-        // own duplicate.
-        let duplicate = self
-            .known_artifact_ids(&claim.objective_id)
-            .contains(&claim.artifact_id());
+        if self.epoch_is_drained(reveal_epoch) {
+            return Err(RuleViolation::EpochAlreadySettled {
+                epoch: reveal_epoch,
+            });
+        }
 
         let accepted = self.accepted_claims();
         for cited in &claim.cites {
@@ -530,26 +624,22 @@ impl Node {
             }
         }
 
-        let ratchet = match &objective.ratchet {
-            Some(block) => {
-                Some(Ratchet::from_value(block).map_err(RuleViolation::MalformedRatchet)?)
-            }
-            None => None,
-        };
-        let held = if ratchet.is_some() {
-            self.latest_frontier(&claim.objective_id)?
-        } else {
-            None
-        };
-        if let Some(frontier) = &held {
-            if !claim.cites.iter().any(|cited| cited == &frontier.claim_id) {
-                return Err(RuleViolation::MissingFrontierCitation {
-                    claim_id: frontier.claim_id.clone(),
-                });
+        // The frontier citation is an *admission* rule and stays here, at
+        // reveal time, rather than moving into the batch: a submitter can only
+        // cite what was public when they built, and holding them to a frontier
+        // that advanced while their commitment was sealed would make the rule
+        // impossible to satisfy. Whether the claim actually improves on the
+        // frontier is a settlement question and is asked later, against
+        // whatever the frontier is by then.
+        if objective.ratchet.is_some() {
+            if let Some(frontier) = self.latest_frontier(&claim.objective_id)? {
+                if !claim.cites.iter().any(|cited| cited == &frontier.claim_id) {
+                    return Err(RuleViolation::MissingFrontierCitation {
+                        claim_id: frontier.claim_id.clone(),
+                    });
+                }
             }
         }
-
-        let already_settled = self.settlement_of(&claim.objective_id).is_some();
 
         let claim_id = claim.id();
         self.append(CLAIM, claim.to_value(), ts)?;
@@ -575,25 +665,260 @@ impl Node {
         if !verdict.accepted() {
             return Ok(Outcome::unsettled(claim_id, verdict, "rejected"));
         }
+        Ok(Outcome::pending(claim_id, verdict, reveal_epoch))
+    }
 
-        if let Some(ratchet) = ratchet {
+    /// Settle every reveal epoch that has closed, in beacon order.
+    ///
+    /// "Closed" means strictly before `now_epoch`. Claims accepted in an epoch
+    /// that is still open are left alone, because the set they will be ordered
+    /// against is not complete yet.
+    ///
+    /// Inside one epoch the order is `H(beacon(epoch, anchor) ‖ commitment)`
+    /// ascending, where `anchor` is the log head as of the epoch's start. Append
+    /// order is the sequencer's to choose, and on a progressive objective the
+    /// order two improvements settle in decides which is paid for the whole span
+    /// and which for the remainder -- so leaving it to the sequencer is leaving
+    /// them a lever on other people's money. The beacon was fixed before the
+    /// epoch opened, so the operator would have to choose the anchor before
+    /// knowing who would reveal.
+    ///
+    /// # Why the key is the commitment hash and not the claim id
+    ///
+    /// The design note for this work says `claim_id`, and that is grindable. By
+    /// reveal time the anchor is public, and a claim id covers `created_at` and
+    /// `cites` -- fields the commitment does not bind and nothing here checks
+    /// against the reveal. A submitter could simply try timestamps until one
+    /// sorted first, which would make the ordering rule decorative against
+    /// exactly the people it needs to bind. The commitment hash covers only
+    /// what was frozen an epoch earlier, before this anchor existed.
+    ///
+    /// The residual gap, which is real: the anchor is the last entry of the
+    /// previous epoch, so a submitter who lands the final append of their commit
+    /// epoch influences both halves of their own rank at once and can grind the
+    /// pair. It is a race they have to win against every other appender, not a
+    /// free choice, and closing it properly needs an unpredictable beacon (a VDF
+    /// or a threshold signature) rather than the log head. `docs/threat-model.md`
+    /// carries the row.
+    ///
+    /// A `batch` record is appended per drained epoch, holding the anchor used
+    /// and the resulting order. That record is what makes the drain idempotent
+    /// (a second call skips an epoch already named by one) and what lets an
+    /// auditor recompute the ordering without guessing which anchor was in
+    /// force.
+    ///
+    /// Rule failures inside a batch -- an unreadable ratchet, an overflowing
+    /// payout -- become unsettled outcomes rather than aborting the drain. A
+    /// single bad objective must not be able to wedge settlement for every
+    /// other objective in the same epoch, which is what propagating would do.
+    /// Only a failed *append* propagates, because at that point the log is not
+    /// being written and nothing further can be trusted.
+    pub fn settle_due(&mut self, now_epoch: u64, ts: &str) -> Result<Vec<Outcome>, RuleViolation> {
+        let mut outcomes = Vec::new();
+        for epoch in self.due_epochs(now_epoch) {
+            let anchor = self.anchor_of_epoch(epoch);
+            let mut batch = self.accepted_in_epoch(epoch);
+            // Sorting by (rank, id) rather than rank alone: two claims with the
+            // same rank would otherwise keep append order, quietly restoring
+            // the lever this function exists to remove. A collision needs a
+            // SHA-256 preimage, but "unreachable" is not a tie-break rule.
+            batch.sort_by(|(a_id, a), (b_id, b)| {
+                let ra = settlement_rank(epoch, &anchor, &a.commitment_hash());
+                let rb = settlement_rank(epoch, &anchor, &b.commitment_hash());
+                (ra, a_id).cmp(&(rb, b_id))
+            });
+
+            let mut order = Vec::with_capacity(batch.len());
+            // Artifacts already spoken for earlier in *this* batch. Without
+            // this the duplicate rule would fall back on append order for two
+            // identical artifacts revealed in the same epoch, which is the one
+            // thing the beacon ordering exists to prevent.
+            let mut consumed: BTreeSet<String> = BTreeSet::new();
+            for (claim_id, claim) in batch {
+                order.push(Value::string(claim_id.clone()));
+                outcomes.push(self.settle_one(&claim_id, &claim, epoch, &consumed, ts)?);
+                consumed.insert(claim.artifact_id());
+            }
+            let record = Value::object([
+                ("epoch", Value::Int(i128::from(epoch))),
+                ("anchor", Value::string(anchor)),
+                ("claims", Value::Array(order)),
+            ]);
+            self.append(BATCH, record, ts)?;
+        }
+        Ok(outcomes)
+    }
+
+    /// Settle a batch for the epoch containing `ts`, and every earlier one.
+    ///
+    /// The convenience wrapper the CLI and the daemon use, so neither has to
+    /// know the epoch length.
+    pub fn settle_at(&mut self, ts: &str) -> Result<Vec<Outcome>, RuleViolation> {
+        let now = epoch_of_timestamp("settle", ts)?;
+        self.settle_due(now, ts)
+    }
+
+    /// Epochs a `batch` record already covers.
+    fn drained_epochs(&self) -> BTreeSet<u64> {
+        self.ledger
+            .entries_of_kind(BATCH)
+            .iter()
+            .filter_map(|entry| entry.payload.get("epoch").and_then(Value::as_u64))
+            .collect()
+    }
+
+    /// Has this epoch's batch already been paid?
+    pub fn epoch_is_drained(&self, epoch: u64) -> bool {
+        self.drained_epochs().contains(&epoch)
+    }
+
+    /// Closed reveal epochs with accepted claims that no `batch` record covers.
+    fn due_epochs(&self, now_epoch: u64) -> Vec<u64> {
+        let drained = self.drained_epochs();
+        let mut due: BTreeSet<u64> = BTreeSet::new();
+        for (epoch, _) in self.accepted_claims_by_epoch() {
+            if epoch < now_epoch && !drained.contains(&epoch) {
+                due.insert(epoch);
+            }
+        }
+        due.into_iter().collect()
+    }
+
+    /// The log head as of the start of `epoch`: the hash of the last entry
+    /// stamped in an earlier epoch, or the empty string when there is none.
+    ///
+    /// Derived from the log rather than from a clock, so an auditor reaches the
+    /// same value. It is also recorded in the `batch` entry, because a
+    /// back-dated append after the fact could otherwise change what this
+    /// function returns for an epoch that already settled -- [`Node::audit`]
+    /// compares the two and reports a divergence.
+    fn anchor_of_epoch(&self, epoch: u64) -> String {
+        let mut anchor = String::new();
+        for entry in self.ledger.entries() {
+            match crate::time::parse_rfc3339(&entry.ts) {
+                Some(seconds) if seconds >= 0 => {
+                    if epoch_of(seconds as u64, epoch_seconds()) < epoch {
+                        anchor = entry.hash.clone();
+                    }
+                }
+                // An entry this node cannot place in time is not evidence about
+                // where the epoch boundary was, so it does not move the anchor.
+                _ => continue,
+            }
+        }
+        anchor
+    }
+
+    /// Accepted claims that have not settled, paired with the epoch they were
+    /// revealed in.
+    fn accepted_claims_by_epoch(&self) -> Vec<(u64, (String, Claim))> {
+        let accepted = self.accepted_claim_ids();
+        let mut out = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            let claim = match Claim::from_value(&entry.payload) {
+                Ok(claim) => claim,
+                Err(_) => continue,
+            };
+            let claim_id = claim.id();
+            if !accepted.contains(&claim_id) || !seen.insert(claim_id.clone()) {
+                continue;
+            }
+            let epoch = match crate::time::parse_rfc3339(&entry.ts) {
+                Some(seconds) if seconds >= 0 => epoch_of(seconds as u64, epoch_seconds()),
+                // Skipped rather than settled into some default epoch: a claim
+                // whose epoch cannot be derived cannot be ordered against its
+                // peers, and paying it out of order is worse than not paying it.
+                // `audit` reports it.
+                _ => continue,
+            };
+            out.push((epoch, (claim_id, claim)));
+        }
+        out
+    }
+
+    fn accepted_in_epoch(&self, epoch: u64) -> Vec<(String, Claim)> {
+        self.accepted_claims_by_epoch()
+            .into_iter()
+            .filter(|(candidate, _)| *candidate == epoch)
+            .map(|(_, pair)| pair)
+            .collect()
+    }
+
+    /// Apply the settlement rules to one accepted claim of a closed batch.
+    fn settle_one(
+        &mut self,
+        claim_id: &str,
+        claim: &Claim,
+        epoch: u64,
+        consumed: &BTreeSet<String>,
+        ts: &str,
+    ) -> Result<Outcome, RuleViolation> {
+        // The verdict is re-read from the log rather than re-run: this claim
+        // was accepted when it was revealed, and re-running here would let a
+        // verifier that has since gone unavailable retract a payment nobody
+        // disputed. `audit --rerun` is where re-verification belongs.
+        let verdict = self
+            .recorded_verdict(claim_id)
+            .unwrap_or_else(|| Verdict::accept("recorded acceptance"));
+
+        let objectives = self.objectives();
+        let objective = match objectives.get(&claim.objective_id) {
+            Some(objective) => objective.clone(),
+            None => {
+                return Ok(Outcome::unsettled(
+                    claim_id.to_string(),
+                    verdict,
+                    "objective is no longer readable",
+                ))
+            }
+        };
+
+        if let Some(block) = &objective.ratchet {
+            let ratchet = match Ratchet::from_value(block) {
+                Ok(ratchet) => ratchet,
+                Err(error) => {
+                    return Ok(Outcome::unsettled(
+                        claim_id.to_string(),
+                        verdict,
+                        format!("objective carries an unusable ratchet: {error}"),
+                    ))
+                }
+            };
+            let held = match self.latest_frontier(&claim.objective_id) {
+                Ok(held) => held,
+                Err(error) => {
+                    return Ok(Outcome::unsettled(
+                        claim_id.to_string(),
+                        verdict,
+                        error.to_string(),
+                    ))
+                }
+            };
             return self.settle_improvement(claim, verdict, &ratchet, held.as_ref(), ts);
         }
 
-        if duplicate {
-            // Novelty is necessary but never sufficient. Resubmitting an
-            // artifact already in the log verifies fine and mints zero. Checked
-            // before the already-settled case so the note names the real reason:
-            // the copy would earn nothing even against an open objective.
+        // Novelty is necessary but never sufficient. Resubmitting an artifact
+        // already in the log verifies fine and mints zero. Checked before the
+        // already-settled case so the note names the real reason: the copy
+        // would earn nothing even against an open objective.
+        //
+        // "Already in the log" means revealed *strictly earlier* than this
+        // claim, which inside a batch means earlier in beacon order -- the same
+        // rule the batch uses for everything else, rather than append order
+        // sneaking back in through the duplicate check.
+        let artifact_id = claim.artifact_id();
+        let earlier = self.artifact_ids_before(&claim.objective_id, epoch);
+        if consumed.contains(&artifact_id) || earlier.contains(&artifact_id) {
             return Ok(Outcome::unsettled(
-                claim_id,
+                claim_id.to_string(),
                 verdict,
                 "duplicate artifact mints nothing",
             ));
         }
-        if already_settled {
+        if self.settlement_of(&claim.objective_id).is_some() {
             return Ok(Outcome::unsettled(
-                claim_id,
+                claim_id.to_string(),
                 verdict,
                 "objective already settled",
             ));
@@ -601,16 +926,17 @@ impl Node {
 
         let settlement = Value::object([
             ("objective_id", Value::string(claim.objective_id.clone())),
-            ("claim_id", Value::string(claim_id.clone())),
+            ("claim_id", Value::string(claim_id.to_string())),
             ("submitter", Value::string(claim.submitter.clone())),
             ("reward", Value::Int(i128::from(objective.reward))),
         ]);
         self.append(SETTLEMENT, settlement, ts)?;
         Ok(Outcome {
-            claim_id,
+            claim_id: claim_id.to_string(),
             verdict,
             settled: true,
             reward: objective.reward,
+            pending_epoch: None,
             note: String::from("settled"),
         })
     }
@@ -708,6 +1034,7 @@ impl Node {
             verdict,
             settled: true,
             reward,
+            pending_epoch: None,
             note,
         })
     }
@@ -898,6 +1225,8 @@ impl Node {
             }
         }
 
+        problems.append(&mut self.audit_batches());
+
         for (objective_id, objective) in &objectives {
             let block = match &objective.ratchet {
                 Some(block) => block,
@@ -939,6 +1268,84 @@ impl Node {
             }
         }
 
+        problems
+    }
+
+    /// Re-derive every settlement batch's ordering from the log.
+    ///
+    /// This is the check that makes beacon ordering worth having. The rule
+    /// itself constrains an honest node; only an auditor recomputing
+    /// `H(beacon(epoch, anchor) ‖ commitment_hash)` over the epoch's accepted
+    /// claims constrains a dishonest one. Three ways a batch can be wrong, and
+    /// all three are somebody being paid out of turn:
+    ///
+    /// - the recorded anchor is not the log head at the epoch's start, which is
+    ///   how a sequencer would grind an ordering after seeing the reveals;
+    /// - the recorded order is not the beacon order for that anchor;
+    /// - an accepted claim from the epoch is missing, which is censorship by
+    ///   omission and pays whoever was behind it.
+    fn audit_batches(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(BATCH) {
+            let epoch = match entry.payload.get("epoch").and_then(Value::as_u64) {
+                Some(epoch) => epoch,
+                None => {
+                    problems.push(format!("batch at entry {}: no epoch", entry.seq));
+                    continue;
+                }
+            };
+            if !seen.insert(epoch) {
+                problems.push(format!("epoch {epoch}: settled in more than one batch"));
+            }
+
+            let recorded_anchor = payload_str(&entry.payload, "anchor").unwrap_or("");
+            let derived_anchor = self.anchor_of_epoch(epoch);
+            if recorded_anchor != derived_anchor {
+                problems.push(format!(
+                    "batch for epoch {epoch}: anchor {} is not the log head at the \
+                     epoch's start ({})",
+                    short(recorded_anchor),
+                    short(&derived_anchor)
+                ));
+            }
+
+            let recorded: Vec<String> = match entry.payload.get("claims") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect(),
+                _ => {
+                    problems.push(format!("batch for epoch {epoch}: no claim list"));
+                    continue;
+                }
+            };
+
+            // Recomputed against the *recorded* anchor: if that anchor is
+            // wrong the line above already says so, and re-deriving the order
+            // from a different anchor would report the same fault twice under
+            // two names.
+            let mut ranked: Vec<(String, String)> = self
+                .accepted_in_epoch(epoch)
+                .into_iter()
+                .map(|(claim_id, claim)| {
+                    (
+                        settlement_rank(epoch, recorded_anchor, &claim.commitment_hash()),
+                        claim_id,
+                    )
+                })
+                .collect();
+            ranked.sort();
+            let expected: Vec<String> = ranked.into_iter().map(|(_, id)| id).collect();
+            if recorded != expected {
+                problems.push(format!(
+                    "batch for epoch {epoch}: settled {} claim(s) in an order the \
+                     beacon does not produce",
+                    recorded.len()
+                ));
+            }
+        }
         problems
     }
 
@@ -1011,14 +1418,25 @@ impl Node {
         None
     }
 
-    /// Artifact identities already revealed against an objective.
+    /// Artifact identities revealed against an objective before `epoch`.
     ///
     /// Deliberately not filtered by verdict: an artifact that was *rejected* is
     /// still not novel, and re-revealing it must not become a way to mint on the
     /// second try if the objective's verifier later starts accepting it.
-    fn known_artifact_ids(&self, objective_id: &str) -> BTreeSet<String> {
+    ///
+    /// Cut at the epoch boundary rather than at "everything in the log", so a
+    /// claim is never made a duplicate of one revealed in its own batch by
+    /// arrival order; that comparison belongs to the beacon ordering.
+    fn artifact_ids_before(&self, objective_id: &str, epoch: u64) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         for entry in self.ledger.entries_of_kind(CLAIM) {
+            let earlier = match crate::time::parse_rfc3339(&entry.ts) {
+                Some(seconds) if seconds >= 0 => epoch_of(seconds as u64, epoch_seconds()) < epoch,
+                _ => false,
+            };
+            if !earlier {
+                continue;
+            }
             if let Ok(claim) = Claim::from_value(&entry.payload) {
                 if claim.objective_id == objective_id {
                     out.insert(claim.artifact_id());
@@ -1026,6 +1444,43 @@ impl Node {
             }
         }
         out
+    }
+
+    /// Ids of claims whose recorded verdict was `accept`.
+    fn accepted_claim_ids(&self) -> BTreeSet<String> {
+        let mut accepted = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(VERDICT) {
+            let claim_id = match payload_str(&entry.payload, "claim_id") {
+                Some(claim_id) => claim_id,
+                None => continue,
+            };
+            let is_accept = entry
+                .payload
+                .get("verdict")
+                .and_then(Verdict::from_value)
+                .map(|verdict| verdict.accepted())
+                .unwrap_or(false);
+            if is_accept {
+                accepted.insert(claim_id.to_string());
+            } else {
+                // A later verdict supersedes an earlier one, including a later
+                // *non*-acceptance. Leaving the id in the set would keep paying
+                // a claim whose acceptance was withdrawn.
+                accepted.remove(claim_id);
+            }
+        }
+        accepted
+    }
+
+    /// The verdict last recorded for a claim.
+    fn recorded_verdict(&self, claim_id: &str) -> Option<Verdict> {
+        let mut found = None;
+        for entry in self.ledger.entries_of_kind(VERDICT) {
+            if payload_str(&entry.payload, "claim_id") == Some(claim_id) {
+                found = entry.payload.get("verdict").and_then(Verdict::from_value);
+            }
+        }
+        found
     }
 
     /// The strict frontier reader used by the rules path: the latest entry for
@@ -1052,6 +1507,22 @@ impl Node {
 
 fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(Value::as_str)
+}
+
+/// Which epoch an RFC-3339 instant falls in.
+///
+/// Pre-1970 instants are refused along with unparsable ones. Epochs are `u64`
+/// because they key a beacon, and there is no sensible epoch number for a
+/// record dated before the Unix epoch -- a record this network could not have
+/// produced.
+fn epoch_of_timestamp(record: &'static str, ts: &str) -> Result<u64, RuleViolation> {
+    match crate::time::parse_rfc3339(ts) {
+        Some(seconds) if seconds >= 0 => Ok(epoch_of(seconds as u64, epoch_seconds())),
+        _ => Err(RuleViolation::MalformedTimestamp {
+            record,
+            value: ts.to_string(),
+        }),
+    }
 }
 
 fn status_of(verdict: &Value) -> Option<&str> {
@@ -1202,7 +1673,25 @@ mod tests {
         Claim::new(objective.id(), who, artifact, nonce, TS, vec![]).expect("valid claim")
     }
 
-    /// Commit, then reveal, the way an honest submitter does.
+    /// Seconds since the Unix epoch for [`TS`], and the length of one epoch.
+    const BASE: i64 = 1_785_196_800;
+    const EPOCH: i64 = crate::partition::EPOCH_SECONDS as i64;
+
+    fn stamp(offset: i64) -> String {
+        crate::time::format_iso8601_utc(BASE + offset)
+    }
+
+    /// Commit, then reveal, then close the batch -- the way an honest submitter
+    /// and an honest operator do it between them.
+    ///
+    /// Three epochs, not one, and they cannot be collapsed: a reveal must be in
+    /// a strictly later epoch than its commitment, and a batch settles only
+    /// once its epoch is over. The offsets come off the ledger length so that
+    /// successive submissions land in successive epochs -- an epoch whose batch
+    /// has already been paid refuses further reveals, which is the point.
+    ///
+    /// Returns the *final* outcome for the claim, so a caller can still ask
+    /// "what did this submission earn" in one line.
     fn submit(
         node: &mut Node,
         objective: &Objective,
@@ -1211,12 +1700,24 @@ mod tests {
         nonce: &str,
         cites: Vec<String>,
     ) -> Result<Outcome, RuleViolation> {
+        let step = node.ledger().len() as i64 * 4 * EPOCH;
         let hash = commitment_hash(&objective.id(), who, &artifact, nonce);
-        node.commit(&Commitment::new(objective.id(), who, hash, TS), TS)
-            .expect("commit");
+        node.commit(
+            &Commitment::new(objective.id(), who, hash, stamp(step)),
+            &stamp(step),
+        )
+        .expect("commit");
         let claim =
             Claim::new(objective.id(), who, artifact, nonce, TS, cites).expect("valid claim");
-        node.reveal(&claim, TS)
+        let outcome = node.reveal(&claim, &stamp(step + EPOCH))?;
+        if !outcome.is_pending() {
+            return Ok(outcome);
+        }
+        let settled = node.settle_at(&stamp(step + 2 * EPOCH))?;
+        Ok(settled
+            .into_iter()
+            .find(|candidate| candidate.claim_id == outcome.claim_id)
+            .unwrap_or(outcome))
     }
 
     /// `echo` is used to build a *replay* objective that accepts without any
@@ -1666,8 +2167,10 @@ mod tests {
     #[test]
     fn a_duplicate_artifact_verifies_but_mints_nothing() {
         // Novelty is necessary, never sufficient. Both parties commit while the
-        // objective is open (the realistic race); alice reveals first and
-        // settles, and bob's identical artifact then verifies for zero.
+        // objective is open (the realistic race) and both reveal in the same
+        // epoch, so this is also the test that the batch pays exactly one of
+        // them -- and pays the one the beacon picks, not the one that arrived
+        // first.
         let dir = TempDir::new("duplicate-artifact");
         let objective = match replay_objective(1000) {
             Some(objective) => objective,
@@ -1678,25 +2181,193 @@ mod tests {
 
         for (who, nonce) in [("alice", "a"), ("bob", "b")] {
             let hash = commitment_hash(&objective.id(), who, &results(1), nonce);
-            node.commit(&Commitment::new(objective.id(), who, hash, TS), TS)
-                .expect("commit");
+            node.commit(
+                &Commitment::new(objective.id(), who, hash, stamp(0)),
+                &stamp(0),
+            )
+            .expect("commit");
         }
 
-        let first = node
-            .reveal(&claim_for(&objective, "alice", results(1), "a"), TS)
+        let alice = node
+            .reveal(
+                &claim_for(&objective, "alice", results(1), "a"),
+                &stamp(EPOCH),
+            )
             .expect("reveal");
-        assert!(first.settled && first.reward == 1000);
+        let bob = node
+            .reveal(
+                &claim_for(&objective, "bob", results(1), "b"),
+                &stamp(EPOCH),
+            )
+            .expect("reveal");
+        assert!(alice.is_pending() && bob.is_pending());
+        assert_eq!(node.ledger().entries_of_kind(SETTLEMENT).len(), 0);
 
-        let second = node
-            .reveal(&claim_for(&objective, "bob", results(1), "b"), TS)
-            .expect("reveal");
-        assert_eq!(second.verdict.status, Status::Accept);
-        assert!(!second.settled);
-        assert_eq!(second.reward, 0);
+        let batch = node.settle_at(&stamp(2 * EPOCH)).expect("settle");
+        assert_eq!(batch.len(), 2);
+        let paid: Vec<&Outcome> = batch.iter().filter(|o| o.settled).collect();
+        assert_eq!(paid.len(), 1, "{batch:?}");
+        assert_eq!(paid[0].reward, 1000);
+        let unpaid: Vec<&Outcome> = batch.iter().filter(|o| !o.settled).collect();
+        assert_eq!(unpaid[0].reward, 0);
         // The note names the real reason: the copy would earn nothing even
         // against an open objective, so "duplicate" beats "already settled".
-        assert!(second.note.contains("duplicate"), "{}", second.note);
+        assert!(unpaid[0].note.contains("duplicate"), "{}", unpaid[0].note);
         assert_eq!(node.ledger().entries_of_kind(SETTLEMENT).len(), 1);
+
+        // The winner is whoever the beacon ranks first, and the log records the
+        // order so an auditor reaches the same answer.
+        let anchor = node.anchor_of_epoch(epoch_of(
+            crate::time::parse_rfc3339(&stamp(EPOCH)).expect("parses") as u64,
+            crate::partition::EPOCH_SECONDS,
+        ));
+        let epoch = epoch_of(
+            crate::time::parse_rfc3339(&stamp(EPOCH)).expect("parses") as u64,
+            crate::partition::EPOCH_SECONDS,
+        );
+        let rank_of = |who: &str, nonce: &str| {
+            let claim = claim_for(&objective, who, results(1), nonce);
+            settlement_rank(epoch, &anchor, &claim.commitment_hash())
+        };
+        let expected = if rank_of("alice", "a") < rank_of("bob", "b") {
+            &alice.claim_id
+        } else {
+            &bob.claim_id
+        };
+        assert_eq!(&paid[0].claim_id, expected);
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_reveal_cannot_join_a_batch_that_has_already_been_paid() {
+        // Otherwise the claim would sit accepted and unsettled forever: its
+        // epoch is drained, so no future drain would ever look at it again.
+        let dir = TempDir::new("late-reveal");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        for (who, nonce, artifact) in [("alice", "a", results(1)), ("bob", "b", results(2))] {
+            let hash = commitment_hash(&objective.id(), who, &artifact, nonce);
+            node.commit(
+                &Commitment::new(objective.id(), who, hash, stamp(0)),
+                &stamp(0),
+            )
+            .expect("commit");
+        }
+        node.reveal(
+            &claim_for(&objective, "alice", results(1), "a"),
+            &stamp(EPOCH),
+        )
+        .expect("reveal");
+        node.settle_at(&stamp(2 * EPOCH)).expect("settle");
+
+        let late = node.reveal(
+            &claim_for(&objective, "bob", results(2), "b"),
+            &stamp(EPOCH),
+        );
+        assert!(
+            matches!(late, Err(RuleViolation::EpochAlreadySettled { .. })),
+            "{late:?}"
+        );
+    }
+
+    #[test]
+    fn a_reveal_must_wait_for_an_epoch_after_its_commitment() {
+        let dir = TempDir::new("same-epoch-reveal");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        let hash = commitment_hash(&objective.id(), "alice", &results(1), "a");
+        node.commit(
+            &Commitment::new(objective.id(), "alice", hash, stamp(0)),
+            &stamp(0),
+        )
+        .expect("commit");
+
+        // Same epoch: refused, and nothing is written.
+        let before = node.ledger().len();
+        let too_soon = node.reveal(
+            &claim_for(&objective, "alice", results(1), "a"),
+            &stamp(EPOCH - 1),
+        );
+        assert!(
+            matches!(too_soon, Err(RuleViolation::RevealBeforeEpoch { .. })),
+            "{too_soon:?}"
+        );
+        assert_eq!(node.ledger().len(), before, "a refusal wrote to the log");
+
+        // One second later, in the next epoch: admitted.
+        node.reveal(
+            &claim_for(&objective, "alice", results(1), "a"),
+            &stamp(EPOCH),
+        )
+        .expect("reveal");
+    }
+
+    #[test]
+    fn a_timestamp_that_names_no_instant_is_refused_rather_than_defaulted() {
+        let dir = TempDir::new("bad-timestamp");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        let hash = commitment_hash(&objective.id(), "alice", &results(1), "a");
+        let refused = node.commit(
+            &Commitment::new(objective.id(), "alice", hash, "whenever"),
+            &stamp(0),
+        );
+        assert!(
+            matches!(refused, Err(RuleViolation::MalformedTimestamp { .. })),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn settlement_order_cannot_be_ground_out_at_reveal_time() {
+        // The anchor is public by the time anyone reveals, so any part of the
+        // ordering key a submitter can still choose is a part they can try
+        // until it sorts first. `created_at` and `cites` are exactly that --
+        // the commitment binds neither, and nothing checks them against the
+        // reveal. Ranking on the commitment hash is what makes them inert.
+        let objective = ratchet_objective();
+        let artifact = Value::object([("s", Value::Int(1))]);
+        let anchor = "sha256:anchor";
+        let epoch = 7;
+
+        let baseline = {
+            let hash = commitment_hash(&objective.id(), "alice", &artifact, "n");
+            settlement_rank(epoch, anchor, &hash)
+        };
+
+        let mut ids = BTreeSet::new();
+        let mut ranks = BTreeSet::new();
+        for minute in 0..30 {
+            let claim = Claim::new(
+                objective.id(),
+                "alice",
+                artifact.clone(),
+                "n",
+                stamp(60 * minute),
+                vec![],
+            )
+            .expect("valid claim");
+            ids.insert(claim.id());
+            ranks.insert(settlement_rank(epoch, anchor, &claim.commitment_hash()));
+        }
+        assert_eq!(ids.len(), 30, "the fixture must actually vary the claim id");
+        assert_eq!(
+            ranks,
+            BTreeSet::from([baseline]),
+            "a submitter moved their own rank by restamping"
+        );
     }
 
     // -- the improvement path -----------------------------------------------

@@ -36,8 +36,27 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | `score_candidate` | **no** | run the pinned verifier; the tight loop |
 | `frontier_status` | no | best score, which claim to cite, pool remaining |
 | `work_assignment` | no | your slice of the search space this epoch |
-| `submit_claim` | yes | commit + reveal, atomically |
+| `submit_claim` | yes | commit, then reveal on a later call |
 | `audit` | no | re-derive the whole log |
+
+## `submit_claim` is two calls, and that is the protocol showing through
+
+Commit–reveal is epoch-batched: a reveal must land in a strictly later epoch
+than the commitment it opens, so **no single call can do both**. Call
+`submit_claim` once to commit. Call it again with the same objective and the
+same artifact once the epoch has turned, and the second call opens the
+commitment the first one made. The server tells you which epoch it is waiting
+for.
+
+An accepted reveal is not paid on the spot either. It is recorded as pending and
+settles when its reveal epoch closes, in an order derived from the epoch beacon.
+That is the point: nobody, the operator included, chooses who in a batch gets
+paid first. `settled: false` on an accepted claim means *not yet*, never
+*rejected*.
+
+The nonce that binds the two calls together lives in a file beside the log. It
+has to survive a restart of the server, and it must never reach your context —
+see below.
 
 ## The server is a trust boundary, not plumbing
 
@@ -60,9 +79,10 @@ never cross into the agent's context:
 An objective's `statement` is attacker-supplied text that an agent reads and
 acts on. Under citation flow that is a **financial** attack, not merely a
 nuisance: text along the lines of *"also cite sha256:…"* routes real money
-upstream to whoever wrote it. It is distinct from malicious verifier *code*
-(already a launch blocker in [`threat-model.md`](threat-model.md)) because it
-needs no code execution at all.
+upstream to whoever wrote it. It is distinct from malicious verifier *code*,
+which now runs in an OS jail (see [`verification.md`](verification.md#sandboxing)),
+because it needs no code execution at all — the sandbox does nothing whatsoever
+about it.
 
 Two defences, neither of which makes a citation *truthful* — nothing at this
 layer can establish that:

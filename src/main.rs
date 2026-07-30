@@ -5,7 +5,9 @@
 //!   post      examples/collatz/objective.json
 //!   commit    <objective-id> --submitter alice --artifact a.json --nonce n1
 //!   reveal    <objective-id> --submitter alice --artifact a.json --nonce n1
+//!   settle
 //!   audit
+//!   verify    --from checkpoint.json [--root-key HEX|FILE] [--audit]
 //!   attribute
 //!   log
 //! ```
@@ -42,7 +44,7 @@
 //! | code | meaning |
 //! |------|---------|
 //! | 0    | success |
-//! | 1    | `audit` found problems |
+//! | 1    | `audit` found problems, or `verify` found a checkpoint mismatch |
 //! | 2    | the network refused the submission, or the input was bad |
 //! | 3    | `reveal` produced a verdict that settles nothing |
 //!
@@ -58,13 +60,16 @@ use std::env;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write};
+use std::path::Path;
 use std::process;
 
 use proofwork::attribution::{payouts_over, FlowError, FlowParams};
 use proofwork::canonical::{short, CanonicalError, Value};
+use proofwork::checkpoint::SignedCheckpoint;
 use proofwork::ledger::{Ledger, LedgerError};
 use proofwork::node::Node;
 use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordError};
+use proofwork::schema::{validate_claim, validate_objective, SchemaError};
 use proofwork::time::timestamp;
 
 /// Where the log lives when `--log` and `$PROOFWORK_LOG` are both silent.
@@ -132,9 +137,28 @@ fn reveal_claim(node: &mut Node, claim: &Claim, ts: &str) -> Result<RevealReport
         detail: outcome.verdict.detail.clone(),
         settles: outcome.verdict.settles(),
         settled: outcome.settled,
+        pending_epoch: outcome.pending_epoch,
         reward: outcome.reward,
         note: outcome.note.clone(),
     })
+}
+
+/// Drain every settlement batch whose epoch has closed.
+fn settle_now(node: &mut Node, ts: &str) -> Result<Vec<(String, bool, u64, String)>, CliError> {
+    let outcomes = node
+        .settle_at(ts)
+        .map_err(|violation| CliError::Refused(violation.to_string()))?;
+    Ok(outcomes
+        .into_iter()
+        .map(|outcome| {
+            (
+                outcome.claim_id,
+                outcome.settled,
+                outcome.reward,
+                outcome.note,
+            )
+        })
+        .collect())
 }
 
 fn audit_log(node: &Node, rerun: bool) -> Vec<String> {
@@ -156,6 +180,9 @@ struct RevealReport {
     settles: bool,
     /// Value actually moved.
     settled: bool,
+    /// Accepted, but its reveal epoch has not closed, so nothing has been paid
+    /// yet and `settled == false` does not mean "earned nothing".
+    pending_epoch: Option<u64>,
     reward: u64,
     note: String,
 }
@@ -184,7 +211,16 @@ enum CliError {
         path: String,
         source: CanonicalError,
     },
+    /// A checkpoint file could not be read as one. Carries the message rather
+    /// than the error, so this type stays independent of `checkpoint`.
+    Checkpoint(String),
     Record(RecordError),
+    /// The body does not match the published schema in `spec/`.
+    ///
+    /// Separate from [`CliError::Record`] because it fires earlier and says
+    /// something different: the record is not the shape third parties implement
+    /// against, so it is refused before any constructor gets to interpret it.
+    Schema(SchemaError),
     Ledger(LedgerError),
     Flow(FlowError),
     /// A payload already in the log cannot be read back. Distinct from
@@ -212,7 +248,9 @@ impl fmt::Display for CliError {
             CliError::Refused(message) => f.write_str(message),
             CliError::Io { context, source } => write!(f, "{context}: {source}"),
             CliError::Json { path, source } => write!(f, "{path}: {source}"),
+            CliError::Checkpoint(message) => f.write_str(message),
             CliError::Record(source) => write!(f, "{source}"),
+            CliError::Schema(source) => write!(f, "{source}"),
             CliError::Ledger(source) => write!(f, "{source}"),
             CliError::Flow(source) => write!(f, "{source}"),
             CliError::LogPayload { seq, reason } => write!(f, "log entry {seq}: {reason}"),
@@ -231,6 +269,7 @@ impl std::error::Error for CliError {
             CliError::Io { source, .. } => Some(source),
             CliError::Json { source, .. } => Some(source),
             CliError::Record(source) => Some(source),
+            CliError::Schema(source) => Some(source),
             CliError::Ledger(source) => Some(source),
             CliError::Flow(source) => Some(source),
             _ => None,
@@ -245,7 +284,11 @@ impl CliError {
     fn report(&self) -> String {
         match self {
             CliError::Usage(message) => format!("usage: {message}\ntry `proofwork help`"),
+            // A schema violation *is* a refusal: the network declined to record
+            // the body, and a script watching for `refused:` needs to see it as
+            // one rather than as a local file-handling error.
             CliError::Refused(message) => format!("refused: {message}"),
+            CliError::Schema(source) => format!("refused: {source}"),
             other => format!("error: {other}"),
         }
     }
@@ -298,7 +341,17 @@ enum Command {
         nonce: String,
         cites: Vec<String>,
     },
+    Settle,
     Audit {
+        rerun: bool,
+    },
+    Verify {
+        checkpoint: String,
+        /// Hex, or a path to a file holding hex. `None` trusts the key inside
+        /// the checkpoint, which authenticates nothing -- see [`cmd_verify`].
+        root_key: Option<String>,
+        /// Also re-derive the rules over the signed prefix.
+        audit: bool,
         rerun: bool,
     },
     Attribute {
@@ -430,7 +483,12 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "post" => parse_post(&mut cursor)?,
         "commit" => parse_commit(&mut cursor)?,
         "reveal" => parse_reveal(&mut cursor)?,
+        "settle" => {
+            expect_end(&mut cursor, "settle")?;
+            Command::Settle
+        }
         "audit" => parse_audit(&mut cursor)?,
+        "verify" => parse_verify(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
         "log" => {
             expect_end(&mut cursor, "log")?;
@@ -554,6 +612,42 @@ fn parse_audit(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Audit { rerun })
 }
 
+fn parse_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut checkpoint: Option<String> = None;
+    let mut root_key: Option<String> = None;
+    let mut audit = false;
+    // Mirrors `audit`: re-running the verifiers is the default, and
+    // `--no-rerun` is the way to ask for the cheap structural check.
+    let mut rerun = true;
+
+    while let Some(token) = cursor.take() {
+        if token == "--from" {
+            checkpoint = Some(cursor.value("--from")?);
+        } else if token == "--root-key" {
+            root_key = Some(cursor.value("--root-key")?);
+        } else if token == "--audit" {
+            audit = true;
+        } else if token == "--no-rerun" {
+            rerun = false;
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!("verify: unknown option {token:?}")));
+        } else if checkpoint.is_some() {
+            return Err(CliError::Usage(format!(
+                "verify: unexpected argument {token:?}"
+            )));
+        } else {
+            checkpoint = Some(token);
+        }
+    }
+
+    Ok(Command::Verify {
+        checkpoint: require(checkpoint, "verify", "--from <checkpoint.json>")?,
+        root_key,
+        audit,
+        rerun,
+    })
+}
+
 fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
     // Seeded from `FlowParams::default()` so the defaults live in one place --
     // the module that has to honour them -- rather than being restated here.
@@ -647,10 +741,20 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "      reveal a committed artifact, verify it, settle if accepted",
+        "      reveal a committed artifact and verify it (settles when the epoch closes)",
     );
+    say(out, "  settle");
+    say(out, "      pay out every reveal epoch that has closed");
     say(out, "  audit [--no-rerun]");
     say(out, "      re-derive the entire log independently");
+    say(
+        out,
+        "  verify --from CHECKPOINT [--root-key HEX|FILE] [--audit] [--no-rerun]",
+    );
+    say(
+        out,
+        "      check a signed checkpoint against this log's prefix",
+    );
     say(
         out,
         "  attribute [--delta-num N] [--delta-den N] [--max-depth N]",
@@ -673,7 +777,10 @@ fn print_help(out: &mut dyn Write) {
     say(out, "");
     say(out, "exit codes:");
     say(out, "  0  success");
-    say(out, "  1  audit found problems");
+    say(
+        out,
+        "  1  audit found problems, or a checkpoint did not match",
+    );
     say(out, "  2  refused, or bad input");
     say(out, "  3  reveal produced a verdict that settles nothing");
 }
@@ -701,6 +808,12 @@ fn read_json(path: &str) -> Result<Value, CliError> {
 fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
     let mut node = open_node(options)?;
     let data = read_json(path)?;
+    // The published schema runs *before* the constructor. `Objective::from_value`
+    // is permissive by necessity -- it has to read back records written by older
+    // versions of this code -- so it is the wrong place to enforce the contract
+    // third parties implement against. Gating here means nothing enters the log
+    // that `spec/objective.schema.json` would reject.
+    validate_objective(&data).map_err(CliError::Schema)?;
     let objective = Objective::from_value(&data).map_err(CliError::Record)?;
     let id = post_objective(&mut node, &objective, &timestamp())?;
 
@@ -769,6 +882,7 @@ fn cmd_reveal(
         cites.to_vec(),
     )
     .map_err(CliError::Record)?;
+    validate_claim(&claim.to_value()).map_err(CliError::Schema)?;
 
     let report = reveal_claim(&mut node, &claim, &stamp)?;
     // Print the FULL claim id, not the display-shortened form. Citing this claim
@@ -781,18 +895,48 @@ fn cmd_reveal(
         out,
         format!("  verdict  {}: {}", report.status, report.detail),
     );
-    say(
-        out,
-        format!(
-            "  settled  {}  reward {}  ({})",
-            report.settled, report.reward, report.note
+    match report.pending_epoch {
+        Some(epoch) => say(
+            out,
+            format!("  pending  settles when epoch {epoch} closes  (`proofwork settle`)"),
         ),
-    );
+        None => say(
+            out,
+            format!(
+                "  settled  {}  reward {}  ({})",
+                report.settled, report.reward, report.note
+            ),
+        ),
+    }
 
     // See the module docs: a rejection is a real answer and exits 0. Only a
     // verdict that settles nothing -- `unavailable`, `invalid_spec` -- exits 3,
     // because in that case nothing was learned and the objective is still open.
     Ok(if report.settles { 0 } else { 3 })
+}
+
+/// Close every reveal epoch that is over and pay out its batch.
+///
+/// Exists because settlement is deferred: a claim accepted in epoch N is paid
+/// when N closes, in an order derived from a beacon rather than from arrival.
+/// Every other command drains due batches on its way in, so this is only needed
+/// when nothing else is happening -- which is exactly the case a demo, a cron
+/// job, or an operator winding a quiet objective down finds itself in.
+fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
+    let mut node = open_node(options)?;
+    let settled = settle_now(&mut node, &timestamp())?;
+    if settled.is_empty() {
+        say(out, "no batch was due");
+        return Ok(0);
+    }
+    for (claim_id, moved, reward, note) in &settled {
+        say(out, format!("claim {claim_id}"));
+        say(
+            out,
+            format!("  settled  {moved}  reward {reward}  ({note})"),
+        );
+    }
+    Ok(0)
 }
 
 fn cmd_audit(out: &mut dyn Write, options: &Options, rerun: bool) -> Result<i32, CliError> {
@@ -831,6 +975,138 @@ fn cmd_audit(out: &mut dyn Write, options: &Options, rerun: bool) -> Result<i32,
         "log verified: chain intact, every settled claim re-verified",
     );
     Ok(0)
+}
+
+/// Check a signed checkpoint against the local log.
+///
+/// The question this answers is the one a hash chain cannot answer alone: *is
+/// my copy of the log a prefix-consistent view of what the operator published?*
+/// A truncated log is internally consistent -- every link checks out -- so
+/// rollback is invisible without an external anchor, and this is the anchor.
+///
+/// Three exit codes, and the split between them is deliberate. A signature that
+/// does not verify and a root that does not match are the *same* answer to the
+/// reader: the log in front of them is not the one that was signed. Both are 1.
+/// A missing file or an unparsable checkpoint is 2, because nothing was
+/// checked either way and reporting "mismatch" would be a false accusation.
+fn cmd_verify(
+    out: &mut dyn Write,
+    options: &Options,
+    checkpoint_path: &str,
+    root_key: Option<&str>,
+    audit: bool,
+    rerun: bool,
+) -> Result<i32, CliError> {
+    let signed = SignedCheckpoint::from_value(&read_json(checkpoint_path)?)
+        .map_err(|source| CliError::Checkpoint(source.to_string()))?;
+
+    // Without an out-of-band key this verifies only that the file is
+    // self-consistent: an operator rewriting history signs the rewrite with a
+    // fresh key and the check passes. Said plainly rather than left to the
+    // reader to work out, because a verification that proves nothing is worse
+    // than none -- it is the one that gets quoted.
+    let expected = match root_key {
+        Some(source) => read_root_key(source)?,
+        None => signed.public_key.clone(),
+    };
+
+    let node = open_node(options)?;
+    let ledger = ledger_of(&node);
+    if let Err(error) = signed.verify_prefix(ledger, &expected) {
+        say(out, format!("checkpoint FAILED: {error}"));
+        return Ok(1);
+    }
+
+    say(
+        out,
+        format!(
+            "checkpoint ok: height {}  head {}  issued {}",
+            signed.checkpoint.height,
+            short(signed.checkpoint.head.as_deref().unwrap_or("-")),
+            signed.checkpoint.issued_at
+        ),
+    );
+    if root_key.is_none() {
+        say(
+            out,
+            "  warning: no --root-key given, so this checks the file against itself; \
+             pin the operator's published key to make it mean anything",
+        );
+    }
+    let local = ledger.len();
+    let height = signed.checkpoint.height;
+    if local as u64 > height {
+        say(
+            out,
+            format!("  local log continues past the checkpoint ({local} entries)"),
+        );
+    }
+
+    if !audit {
+        return Ok(0);
+    }
+
+    // Audit the signed prefix, not the whole log: entries appended after the
+    // checkpoint have not been vouched for by anyone, and folding their
+    // problems into this result would make a valid checkpoint look broken.
+    let height = usize::try_from(height)
+        .map_err(|_| CliError::Overflow(String::from("checkpoint height")))?;
+    let prefix = match ledger.prefix(height) {
+        Some(prefix) => prefix,
+        // Unreachable: `verify_prefix` already refused a short log above. An
+        // error rather than an unwrap all the same -- this is the money path.
+        None => {
+            return Err(CliError::Checkpoint(format!(
+                "log is shorter than {height}"
+            )))
+        }
+    };
+    let problems = Node::new(prefix, options.root.as_str()).audit(rerun);
+    if !problems.is_empty() {
+        say(out, "");
+        say(
+            out,
+            format!("{} problem(s) inside the signed prefix:", problems.len()),
+        );
+        for problem in &problems {
+            say(out, format!("  ! {problem}"));
+        }
+        return Ok(1);
+    }
+    say(out, "  signed prefix re-derives cleanly");
+    Ok(0)
+}
+
+/// A root key given as hex on the command line, or as a file holding hex.
+///
+/// Both spellings, because a 1952-byte ML-DSA-65 key is 3904 hex characters and
+/// no one is pasting that into a shell. Which one was meant is decided by
+/// whether the argument names an existing file, not by a flag: a path and a
+/// hex blob are not confusable.
+fn read_root_key(source: &str) -> Result<Vec<u8>, CliError> {
+    let text = if Path::new(source).is_file() {
+        fs::read_to_string(source).map_err(|error| CliError::Io {
+            context: format!("reading {source}"),
+            source: error,
+        })?
+    } else {
+        source.to_string()
+    };
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if text.len() % 2 != 0 {
+        return Err(CliError::Usage(String::from(
+            "--root-key: hex has an odd number of digits",
+        )));
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    let digits: Vec<char> = text.chars().collect();
+    for pair in digits.chunks(2) {
+        let hex: String = pair.iter().collect();
+        let byte = u8::from_str_radix(&hex, 16)
+            .map_err(|_| CliError::Usage(format!("--root-key: {hex:?} is not hex")))?;
+        bytes.push(byte);
+    }
+    Ok(bytes)
 }
 
 fn cmd_attribute(
@@ -944,6 +1220,18 @@ fn summarize(kind: &str, payload: &Value) -> String {
                 .map(|units| units.to_string())
                 .unwrap_or_else(|| String::from("?"));
             format!("{} <- {reward}", text("submitter"))
+        }
+        "batch" => {
+            let epoch = payload
+                .get("epoch")
+                .and_then(Value::as_i128)
+                .map(|epoch| epoch.to_string())
+                .unwrap_or_else(|| String::from("?"));
+            let claims = match payload.get("claims") {
+                Some(Value::Array(items)) => items.len(),
+                _ => 0,
+            };
+            format!("epoch {epoch}: {claims} claim(s)")
         }
         _ => String::new(),
     }
@@ -1137,7 +1425,21 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             nonce,
             cites,
         ),
+        Command::Settle => cmd_settle(out, options),
         Command::Audit { rerun } => cmd_audit(out, options, *rerun),
+        Command::Verify {
+            checkpoint,
+            root_key,
+            audit,
+            rerun,
+        } => cmd_verify(
+            out,
+            options,
+            checkpoint,
+            root_key.as_deref(),
+            *audit,
+            *rerun,
+        ),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Log => cmd_log(out, options),
     }
@@ -1367,7 +1669,11 @@ mod tests {
             CliError::Usage(_)
         ));
         assert!(matches!(
-            parse(argv(&["settle"])).expect_err("no such command"),
+            parse(argv(&["conjure"])).expect_err("no such command"),
+            CliError::Usage(_)
+        ));
+        assert!(matches!(
+            parse(argv(&["settle", "extra"])).expect_err("settle takes no arguments"),
             CliError::Usage(_)
         ));
         assert!(matches!(

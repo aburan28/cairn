@@ -1,0 +1,17 @@
+{
+  "created_at": "2026-07-28T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-latency-intervention",
+  "reward": 50000,
+  "statement": "Submit at least 20 paired [control, treatment] latency measurements in integer microseconds for an intervention on the same workload. Accepted when the pinned two-sided paired permutation test, run with seed 0 over 20000 rounds, reports p <= 0.01 -- that is, a statistic of at most 10000 parts per million. The test and the threshold are fixed by this objective and cannot be renegotiated after the measurements exist.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "statistic",
+    "kind": "statistical",
+    "statistic": {
+      "path": "examples/permutation/statistics/paired_permutation.py",
+      "sha256": "933f87d71812f8f12bc49b3742c89c5ddf0883647f39eeb8f4723b7c36208fff"
+    },
+    "threshold": 10000
+  }
+}

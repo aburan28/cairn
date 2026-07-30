@@ -119,13 +119,27 @@ def record_vectors():
         goal="GOAL-x", statement="find it", verifier=objective.verifier, reward=1000,
         funder="treasury", created_at=TS, confidentiality="embargoed",
     )
+    # A statistical objective pins the test statistic, the rejection threshold
+    # AND the seed inside the verifier block, so all three are part of the
+    # objective's id. That is the whole point of the kind: moving the threshold
+    # after the fact would be re-grading settled work, and here it forks the
+    # objective instead. Appended last so no pre-existing vector shifts.
+    statistical = Objective(
+        goal="GOAL-x", statement="beat the null", reward=500, funder="treasury",
+        created_at=TS,
+        verifier={"kind": "statistical",
+                  "statistic": {"path": "s.py", "sha256": "cd" * 32},
+                  "entrypoint": "statistic",
+                  "threshold": 50_000, "direction": "minimize", "seed": 7},
+    )
     claim = Claim(objective.id, "alice", {"n": 42}, "nonce-1", TS, ())
     cited = Claim(objective.id, "bob", {"n": 43}, "nonce-2", TS, (claim.id,))
     commitment = Commitment(objective.id, "alice", claim.commitment_hash(), TS)
     return {
         "objectives": [
             {"record": o.to_dict(), "id": o.id}
-            for o in (objective, with_deadline, with_ratchet, explicit_public, with_embargo)
+            for o in (objective, with_deadline, with_ratchet, explicit_public,
+                      with_embargo, statistical)
         ],
         "claims": [
             {"record": c.to_dict(), "id": c.id, "artifact_id": c.artifact_id,

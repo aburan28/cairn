@@ -87,9 +87,12 @@ It buys three things at once, which is why it is worth the complexity:
 
 - **Reveal-window censorship dies.** Nothing is required of the submitter after
   commit.
-- **In-flight front-running dies.** Nobody — including the sequencer and the
-  committee members individually — sees your artifact while they could still act
-  on it. This was an open item in `coordination.md`.
+- **In-flight front-running dies at the source.** Epoch-batched commit–reveal
+  already stops a competitor *acting* on what they see, because a reveal in
+  epoch N+1 cannot be committed against until N+2. Sealing goes further: nobody
+  — including the sequencer and the committee members individually — sees the
+  artifact at all until it is too late to matter. The difference is whether the
+  sequencer gets to know what it is about to settle.
 - **Selective censorship becomes visible.** A sequencer cannot see what it is
   dropping, so it cannot drop *only* the submissions it dislikes. It must include
   everything or censor indiscriminately, and indiscriminate censorship is
@@ -221,10 +224,13 @@ properties are worth stating because each is a decision rather than a detail:
 
 What is *not* implemented is any enforcement of the embargo itself. The class is
 recorded in the objective's identity, so it cannot be changed mid-bounty, but
-nothing in Stage 0 withholds an `embargoed` artifact at the appropriate time —
-that needs the epoch machinery in `sealed.rs` wired to the class. Declaring the
-class is the part that had to come first, because it is part of the objective's
-id and therefore cannot be retrofitted onto objectives already funded.
+nothing in Stage 0 withholds an `embargoed` artifact at the appropriate time.
+The hook it needs now exists: settlement is deferred to the close of the reveal
+epoch and drains in batches, so "hold this one for N more epochs" has somewhere
+to live that it did not before. Wiring `sealed.rs` and the class into that
+drain is the remaining work. Declaring the class is the part that had to come
+first, because it is part of the objective's id and therefore cannot be
+retrofitted onto objectives already funded.
 
 ## 7. What encryption cannot fix
 

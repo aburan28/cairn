@@ -28,7 +28,7 @@ fn claim(who: &str, n: i128, cites: Vec<String>) -> Claim {
         OBJ,
         who,
         Value::object([("n", Value::Int(n))]),
-        &format!("nonce-{n}"),
+        format!("nonce-{n}"),
         TS,
         cites,
     )
@@ -163,8 +163,14 @@ fn max_depth_does_not_defend_against_slicing() {
         sliced.push(("bob", 50_000));
     }
 
-    let shallow = take(&payouts(&sliced, &FlowParams::new(1, 4, 6).unwrap()), "alice");
-    let deep = take(&payouts(&sliced, &FlowParams::new(1, 4, 64).unwrap()), "alice");
+    let shallow = take(
+        &payouts(&sliced, &FlowParams::new(1, 4, 6).unwrap()),
+        "alice",
+    );
+    let deep = take(
+        &payouts(&sliced, &FlowParams::new(1, 4, 64).unwrap()),
+        "alice",
+    );
     let difference = shallow.abs_diff(deep);
     assert!(
         difference * 1000 < shallow,

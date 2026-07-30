@@ -74,9 +74,9 @@ use serde_json::{json, Map, Value as Json};
 use proofwork::canonical::Value;
 use proofwork::ledger::Ledger;
 use proofwork::node::Node;
-use proofwork::partition::{assignment_for, epoch_of};
+use proofwork::partition::{assignment_for, epoch_of, epoch_seconds};
 use proofwork::records::{commitment_hash, Claim, Commitment, Objective};
-use proofwork::time::timestamp;
+use proofwork::time::{parse_rfc3339, timestamp};
 
 /// Protocol versions this server implements. The first is the default when a
 /// client asks for something unrecognised.
@@ -160,6 +160,137 @@ fn fail(message: &str) -> ! {
     std::process::exit(2);
 }
 
+/// A commitment this server made whose reveal is still an epoch away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pending {
+    objective_id: String,
+    submitter: String,
+    /// The artifact's canonical bytes as text, so a second `submit_claim` with
+    /// the same artifact is recognised as the same submission whatever key
+    /// order the client sent it in.
+    artifact_digest: String,
+    /// Never returned to the agent, never written to the ledger.
+    nonce: String,
+    /// Epoch of the commitment. The reveal must be strictly later.
+    epoch: u64,
+}
+
+/// Commitments awaiting their reveal epoch.
+///
+/// Backed by a file beside the log because the nonce has to survive a restart
+/// of this process: losing it strands a real commitment in the ledger with no
+/// way to open it, and the agent has no copy -- deliberately. The file holds
+/// secrets and is created private; it is in the operator's trust domain, which
+/// is the same one the log is in.
+struct PendingStore {
+    path: PathBuf,
+    entries: Vec<Pending>,
+}
+
+impl PendingStore {
+    fn load(log: &std::path::Path) -> PendingStore {
+        let path = log.with_extension("pending.json");
+        let entries = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Json>(&text).ok())
+            .and_then(|value| value.as_array().cloned())
+            .map(|items| items.iter().filter_map(Pending::from_json).collect())
+            .unwrap_or_default();
+        PendingStore { path, entries }
+    }
+
+    fn remember(&mut self, pending: Pending) {
+        self.entries.push(pending);
+    }
+
+    fn forget(&mut self, pending: &Pending) {
+        self.entries.retain(|entry| entry != pending);
+    }
+
+    fn find(&self, objective_id: &str, submitter: &str, artifact: &Value) -> Option<&Pending> {
+        let key = artifact.canonical_string();
+        self.entries.iter().find(|entry| {
+            entry.objective_id == objective_id
+                && entry.submitter == submitter
+                && entry.artifact_digest == key
+        })
+    }
+
+    /// The commitment for this submission if its epoch has passed.
+    fn take_ready(
+        &self,
+        objective_id: &str,
+        submitter: &str,
+        artifact: &Value,
+        now: u64,
+    ) -> Option<Pending> {
+        self.find(objective_id, submitter, artifact)
+            .filter(|pending| now > pending.epoch)
+            .cloned()
+    }
+
+    /// The commitment for this submission if it is still inside its own epoch.
+    fn waiting(&self, objective_id: &str, submitter: &str, artifact: &Value) -> Option<Pending> {
+        self.find(objective_id, submitter, artifact).cloned()
+    }
+
+    /// Best effort. A write that fails is reported on stderr and nowhere else:
+    /// stdout is the JSON-RPC frame stream, and a stray line there corrupts it.
+    fn save(&self) {
+        let items: Vec<Json> = self.entries.iter().map(Pending::to_json).collect();
+        let text = match serde_json::to_string_pretty(&Json::Array(items)) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("proofwork-mcp: cannot serialize pending commitments: {error}");
+                return;
+            }
+        };
+        if let Err(error) = write_private(&self.path, &text) {
+            eprintln!(
+                "proofwork-mcp: cannot save pending commitments to {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+impl Pending {
+    fn to_json(&self) -> Json {
+        json!({
+            "objective_id": self.objective_id,
+            "submitter": self.submitter,
+            "artifact": self.artifact_digest,
+            "nonce": self.nonce,
+            "epoch": self.epoch,
+        })
+    }
+
+    fn from_json(value: &Json) -> Option<Pending> {
+        Some(Pending {
+            objective_id: value.get("objective_id")?.as_str()?.to_string(),
+            submitter: value.get("submitter")?.as_str()?.to_string(),
+            artifact_digest: value.get("artifact")?.as_str()?.to_string(),
+            nonce: value.get("nonce")?.as_str()?.to_string(),
+            epoch: value.get("epoch")?.as_u64()?,
+        })
+    }
+}
+
+/// Write a file only the owner can read. The nonces inside are the whole
+/// hiding property of every commitment this server has open.
+fn write_private(path: &std::path::Path, text: &str) -> io::Result<()> {
+    use std::fs::OpenOptions;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(text.as_bytes())
+}
+
 struct Server {
     node: Node,
     /// Claim ids this server handed the agent through a *structured* field —
@@ -171,14 +302,18 @@ struct Server {
     /// Claim ids that appeared inside an objective *statement* this server
     /// rendered. Attacker-controlled prose.
     tainted: BTreeSet<String>,
+    /// Commitments waiting for their reveal epoch. See [`PendingStore`].
+    pending: PendingStore,
 }
 
 impl Server {
     fn new(node: Node) -> Server {
+        let pending = PendingStore::load(node.ledger().path());
         Server {
             node,
             offered: BTreeSet::new(),
             tainted: BTreeSet::new(),
+            pending,
         }
     }
 
@@ -699,52 +834,102 @@ impl Server {
             }
         }
 
+        let ts = timestamp();
+        let now = epoch_of(unix_seconds(&ts)?, epoch_seconds());
+
+        // Two calls, not one, and that is the epoch rule showing through rather
+        // than an API preference. A reveal must land in a strictly later epoch
+        // than its own commitment, so no single call can do both. The agent
+        // calls this once to commit and again -- same objective, same artifact
+        // -- after the epoch turns, and the second call opens the commitment
+        // the first one made.
+        //
+        // The nonce lives in a sidecar file beside the log for the same reason
+        // it is generated here: it must survive a restart of this process but
+        // must never reach the agent's context. Returning it would undo the
+        // commitment's hiding property, and a transcript is not a secret.
+        if let Some(pending) = self
+            .pending
+            .take_ready(&objective_id, &submitter, &artifact, now)
+        {
+            let claim = Claim::new(
+                &objective_id,
+                &submitter,
+                artifact,
+                &pending.nonce,
+                &ts,
+                cites.clone(),
+            )
+            .map_err(|e| format!("claim is malformed: {e}"))?;
+
+            let outcome = self
+                .node
+                .reveal(&claim, &ts)
+                .map_err(|e| format!("reveal refused: {e}"))?;
+            self.pending.forget(&pending);
+            self.pending.save();
+
+            // The agent's own claim id: legitimate provenance for a later
+            // citation by the same agent building on its own work.
+            self.offer(&outcome.claim_id);
+
+            let mut out = format!(
+                "claim {}\nverdict: {}: {}\nsettled: {}\nreward: {}\n{}\n",
+                outcome.claim_id,
+                outcome.verdict.status.as_str(),
+                outcome.verdict.detail,
+                outcome.settled,
+                outcome.reward,
+                outcome.note,
+            );
+            if outcome.is_pending() {
+                out.push_str(
+                    "Accepted and recorded. Payment happens when the epoch closes and the \
+                     batch settles in beacon order, which is what stops the operator \
+                     choosing who gets paid first.\n",
+                );
+            } else if outcome.reward == 0 && outcome.verdict.accepted() {
+                out.push_str(
+                    "Verified but paid nothing -- it did not move the frontier. That is the \
+                     mechanism pricing a duplicate, not a bug.\n",
+                );
+            }
+            return Ok(out);
+        }
+
+        if let Some(waiting) = self.pending.waiting(&objective_id, &submitter, &artifact) {
+            return Ok(format!(
+                "Already committed, in epoch {}. Call submit_claim again with the same \
+                 objective and artifact once epoch {} has started; the reveal happens then. \
+                 Nothing further was recorded.\n",
+                waiting.epoch,
+                waiting.epoch.saturating_add(1)
+            ));
+        }
+
         // Generated here and dropped here. Returning it, or logging it, would
         // undo the commitment's hiding property.
         let nonce = fresh_nonce();
         let hash = commitment_hash(&objective_id, &submitter, &artifact, &nonce);
-        let ts = timestamp();
-
         let commitment = Commitment::new(&objective_id, &submitter, &hash, &ts);
         self.node
             .commit(&commitment, &ts)
             .map_err(|e| format!("commit refused: {e}"))?;
+        self.pending.remember(Pending {
+            objective_id,
+            submitter,
+            artifact_digest: artifact.canonical_string(),
+            nonce,
+            epoch: now,
+        });
+        self.pending.save();
 
-        let claim = Claim::new(
-            &objective_id,
-            &submitter,
-            artifact,
-            &nonce,
-            &ts,
-            cites.clone(),
-        )
-        .map_err(|e| format!("claim is malformed: {e}"))?;
-
-        let outcome = self
-            .node
-            .reveal(&claim, &ts)
-            .map_err(|e| format!("reveal refused: {e}"))?;
-
-        // The agent's own claim id: legitimate provenance for a later citation
-        // by the same agent building on its own work.
-        self.offer(&outcome.claim_id);
-
-        let mut out = format!(
-            "claim {}\nverdict: {}: {}\nsettled: {}\nreward: {}\n{}\n",
-            outcome.claim_id,
-            outcome.verdict.status.as_str(),
-            outcome.verdict.detail,
-            outcome.settled,
-            outcome.reward,
-            outcome.note,
-        );
-        if outcome.reward == 0 && outcome.verdict.accepted() {
-            out.push_str(
-                "Verified but paid nothing -- it did not move the frontier. That is the \
-                 mechanism pricing a duplicate, not a bug.\n",
-            );
-        }
-        Ok(out)
+        Ok(format!(
+            "Committed in epoch {now}. Your artifact is bound but hidden; nobody can copy \
+             it, and nobody can front-run it. Call submit_claim again with the same \
+             objective and artifact from epoch {} onwards to reveal it.\n",
+            now.saturating_add(1)
+        ))
     }
 
     /// Which slice of the search space this node should work, this epoch.
@@ -829,6 +1014,14 @@ impl Server {
 }
 
 // -- helpers ---------------------------------------------------------------
+
+/// Seconds since the Unix epoch for a timestamp this process just produced.
+fn unix_seconds(ts: &str) -> Result<u64, String> {
+    match parse_rfc3339(ts) {
+        Some(seconds) if seconds >= 0 => Ok(seconds as u64),
+        _ => Err(format!("cannot read the current time {ts:?} as an instant")),
+    }
+}
 
 fn fresh_nonce() -> String {
     let mut bytes = [0u8; NONCE_BYTES];

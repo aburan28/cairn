@@ -1,11 +1,11 @@
 # Peer-to-peer
 
 Stage 0 runs one operator and one append-only file. This document is the design
-for removing the operator. The transport handshake, TCP framing, static
-bootstrap address book, and set reconciliation are built. Dynamic peer
-sampling and frontier-conflict surfacing are not, and are marked as such — a
-p2p design that is half-implemented and fully described reads as finished if
-you do not say which half.
+for removing the operator. The transport handshake, TCP framing, address book,
+set reconciliation, population anti-entropy, and per-tick random peer sampling
+are built. Peer *discovery* and frontier-conflict surfacing are not, and are
+marked as such — a p2p design that is half-implemented and fully described
+reads as finished if you do not say which half.
 
 ## What actually needs agreement
 
@@ -18,7 +18,7 @@ Three kinds of state, three requirements — the same split as
 | state | needs agreement? | why | status |
 |---|---|---|---|
 | records — objectives, commitments, claims | **no** | content-addressed, and verification is a pure function of pinned inputs. Two honest peers holding the same claim reach the same verdict without talking | built (`p2p/sync.rs`) |
-| candidate population | **no** | order-irrelevant, and divergence is *useful* — the island model preserves search diversity | built (`gossip.rs`) |
+| candidate population | **no** | order-irrelevant, and divergence is *useful* — the island model preserves search diversity | built (`gossip.rs`, on the wire in `p2p/pop.rs`) |
 | work assignment | **no** | a pure function of an epoch beacon; overlap wastes compute and self-corrects | built (`partition.rs`) |
 | **frontier order** — who improved first | **yes** | payment depends on it | **not solved p2p** |
 
@@ -168,15 +168,89 @@ gains it nothing. Correctness rests on re-verification, never on the digest.
 - **Message ceilings** on ids and records, checked before allocation.
 - **One bad record does not poison a batch** — the rest still land.
 
+## Population anti-entropy
+
+Built: [`src/p2p/pop.rs`](../src/p2p/pop.rs).
+
+Candidates travel on the same session as records and share nothing else with
+them. That separation is a security boundary, not tidiness.
+
+```
+A -> B   PopDigest   population digest + every candidate id
+B -> A   PopDigest   equal digests: stop here
+A -> B   PopWant     ids A lacks
+B -> A   PopWant
+A -> B   PopRecords  the bodies B asked for
+B -> A   PopRecords
+```
+
+**Why not more record kinds.** The record path refuses `verdict`, `settlement`
+and `frontier` outright, because importing a peer's conclusion is the trust this
+project exists to remove. A shared message enum would mean one decoder, one set
+of ceilings and one `match` covering both families, and the next person to add a
+variant would have to notice that half of them must never reach the record path.
+So: separate type, separate limits, and a **separate AEAD context string**, which
+means a frame sealed for one family cannot be opened as the other even by a peer
+that wants to. `candidate` is also not an exchangeable record kind, so a body
+that somehow arrived on the record path is refused there too. Both halves are
+tested.
+
+**No bucket scheme.** A population holds at most `islands × capacity`
+candidates by construction — 256 with the defaults — so the whole id list fits
+in one message and the XOR-bucket summary the record protocol needs would be
+pure overhead. The digest still goes first, so two peers already in sync
+exchange one message each way and stop.
+
+**Scores are re-derived, never imported.** Every arriving candidate is re-scored
+locally and dropped if the number does not reproduce, which is affordable for
+the same reason everything else here is: checking costs one evaluation. A scorer
+that *cannot* answer is a refusal, not an acceptance — the population layer's
+version of `UNAVAILABLE` is never `ACCEPT`.
+
+Two ordering facts that are easy to get wrong:
+
+- **Records reconcile first, populations second, on the same connection.**
+  Candidates are scored against objectives, so a node that has not yet heard of
+  an objective cannot usefully score candidates for it.
+- **A population failure does not undo the record round.** Gossiped candidates
+  are a search optimisation; a peer that mishandles them must not cost this node
+  the records it already imported. Likewise a candidate that fails to re-score
+  drops the candidate and keeps the session — tearing the connection down over
+  one bad candidate would be a cheap way to censor by annoyance.
+
+## Peer sampling
+
+Built: `AddressBook::sample`, used by `proofwork-p2p` each tick.
+
+The daemon used to dial every endpoint in its book on every tick. That does not
+survive a book of any size: the traffic is quadratic in the network, and the
+last peer in a fixed iteration order is always the last to hear anything.
+Sampling a random subset (default fanout 3, `--fanout` to change it) makes the
+per-tick cost constant and the propagation delay logarithmic in the usual
+epidemic way. One endpoint per peer, not per address — two addresses for one key
+are two routes to one node.
+
+The sample is drawn from the OS entropy source, and indices come from rejection
+sampling rather than `next_u64() % n`. A modulo bias here would be tiny and
+would still mean a peer-selection routine that quietly prefers the front of the
+book, which is the failure it was written to avoid, only harder to notice.
+
+**This is not Sybil resistance.** The sample is uniform over the book, so an
+attacker holding *n* of the *m* entries gets *n/m* of every node's connections
+and with enough entries eclipses a node outright. Uniform sampling is a
+*liveness* mechanism. It fixes "who do I talk to this tick", not "who is allowed
+in the book" — and see **Still open** below for the fact that nothing yet adds
+anyone to the book but the operator.
+
 ## Implemented baseline
 
 `p2p::discovery::AddressBook` stores non-consensus `PeerId` to socket-address
 hints. `p2p::transport` performs the 32-byte-id/96-byte-ciphertext handshake and
 length-bounded encrypted framing. `p2p::session` drives the inventory,
-bucket-id, want, records, and done exchange, while `p2p::service::Service`
-connects those pieces for bootstrap dialing and inbound accepts. The service
-does one anti-entropy round at a time; a daemon can schedule retries and peer
-sampling around it without changing the protocol.
+bucket-id, want, records, and done exchange — and, separately, the population
+digest/want/records exchange — while `p2p::service::Service` connects those
+pieces for dialing and inbound accepts. The service does one anti-entropy round
+at a time; a daemon schedules retries around it without changing the protocol.
 
 The responder still cannot authenticate the initiator from the KEM alone. A
 deployment that needs mutual authentication must restrict inbound ids to its
@@ -185,23 +259,49 @@ also remains responsible for rate limiting before calling the expensive
 McEliece decapsulation.
 
 The `proofwork-p2p` binary is the runnable daemon wrapper. It persists a local
-McEliece identity, opens the node ledger, accepts inbound sessions, periodically
-dials every `--bootstrap` endpoint, and replays newly admitted objectives,
-commitments, and claims through `Node`; verdicts and settlements are always
-re-derived locally. It also persists a separate FIPS 204 ML-DSA-65 root key and
-writes a signed checkpoint after each successful sync. A bootstrap file is canonical JSON of the form
+McEliece identity, opens the node ledger, accepts inbound sessions, dials a
+random subset of its address book each tick, and replays newly admitted
+objectives, commitments, and claims through `Node`; verdicts and settlements are
+always re-derived locally. It also persists a separate FIPS 204 ML-DSA-65 root
+key and writes a signed checkpoint after each successful sync. A bootstrap file
+is canonical JSON of the form
 `{"addr":"127.0.0.1:9001","public":"<hex public key>"}`.
 
 ```text
 proofwork-p2p --identity node.json --listen 127.0.0.1:9000 \
-  --log proofwork.jsonl --root . --bootstrap peer.json
+  --log proofwork.jsonl --root . --bootstrap peer.json \
+  --population population.json --fanout 3
 ```
+
+`--population` is optional and turns on the second half of each round. Given it,
+the daemon loads the file at startup, reconciles populations after records on
+every session, and writes the file back afterwards. Without it, no population
+crosses the wire — a node that only audits has no candidates to offer and no use
+for anyone else's. A missing file is a first run; a corrupt one is fatal at
+startup rather than silently discarded, because throwing away a node's search
+state is not something to do quietly.
+
+The daemon re-scores arriving candidates with the objectives in its own log,
+snapshotted after the record round so that candidates for an objective learned
+in the same round can still be scored. A candidate for an objective this node
+has never seen is refused, and reappears on a later tick once the objective
+does.
 
 ## Still open
 
-- **Peer sampling.** Random sampling is simple and Sybil-vulnerable; structured
-  overlays resist that and are more work. The shipped service accepts static
-  bootstrap endpoints, but does not choose or refresh a dynamic peer set.
+- **Peer discovery.** Sampling chooses *among* the peers the address book
+  already holds; nothing adds to it but `--bootstrap` files the operator wrote.
+  The design calls for a signed, size-capped peer-list exchange, and that is not
+  built. Until it is, the peer set is an operator configuration decision, which
+  is a real limit and also the only thing currently standing between this node
+  and an eclipse: uniform sampling over a book an attacker can fill is uniform
+  sampling over the attacker. Structured overlays with identities that cost
+  something are Stage 2, and no amount of better sampling substitutes for them.
+- **Settlement order across peers.** Records converge and every node re-derives
+  its own verdicts, but a batch's settlement order is keyed on that node's
+  ledger head at the epoch boundary, and two independently ordered logs do not
+  share one. Stage 0 has a single sequencer, so there is one order that matters;
+  removing the sequencer means this needs the same answer as frontier order.
 - **Frontier conflict surfacing.** The record set merges cleanly, but two valid
   claims can each look like the first improvement. The layer should expose that
   rather than pick one, and the exposure format is undesigned. This is the piece

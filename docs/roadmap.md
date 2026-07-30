@@ -14,24 +14,45 @@ and coordinator-free work assignment (`partition.py`).
 The property this buys is not "no one is in charge". It is **anyone can check**
 — and that is most of the value of decentralization, at none of the cost.
 
-Remaining before Stage 0 is usable by anyone but its author:
+The list below is what stood between Stage 0 and being usable by anyone but its
+author. All of it is now built; what each item does *not* cover is stated on the
+item rather than left to be discovered. Whether each rule is also *modelled* —
+the third acceptance condition in `docs/design-stage0-completion.md` — is
+tracked separately in [formal-model.md](formal-model.md); a box below means the
+behaviour ships and is tested, not that TLC has checked it.
 
-- [ ] **Sandbox verifier execution** (container/WASM, no network, wall-clock cap).
-      Launch blocker for third-party objectives.
+- [x] **Sandbox verifier execution.** Every spawn of objective-authored code
+      runs in an OS jail — bubblewrap on Linux, a seatbelt profile on macOS —
+      with no network, writes confined to a scratch directory, a wall-clock
+      deadline, and best-effort `RLIMIT_CPU`/`RLIMIT_AS`. This is not the
+      container/WASM boundary this line originally asked for: a kernel bug is
+      still an escape, and on macOS reads are not confined. `PROOFWORK_REQUIRE_SANDBOX=1`
+      turns a host with no jail mechanism into `UNAVAILABLE` rather than a
+      silent unconfined run. [verification.md](verification.md#sandboxing) and
+      the threat-model row name the four remaining gaps; VM-class isolation is
+      Stage 2.
 - [x] Signed checkpoints: publish `(merkle_root, height, signature)` with a
       separate FIPS 204 ML-DSA-65 root key so a reader can pin what the operator
       claimed at a point in time and detect a rewrite. The daemon writes one
       after each successful p2p synchronization.
-- [ ] `proofwork verify --from <checkpoint>` for readers who only have a log
-      fragment.
-- [ ] Objective schemas in `spec/` wired into `post` as a hard validation gate.
-- [ ] A V3 statistical verifier with the test statistic and rejection threshold
+- [x] `proofwork verify --from <checkpoint>` for readers who only have a log
+      fragment: verifies the signature against a pinned root key, then recomputes
+      head and Merkle root over the prefix of length `height`. A longer local log
+      passes, a shorter one fails, and `--audit` re-derives the settlements in
+      that prefix.
+- [x] Objective schemas in `spec/` wired into `post` as a hard validation gate.
+      The schema documents are the validator: both implementations interpret
+      `spec/*.json` rather than reimplementing them, so the two cannot drift.
+- [x] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
-- [ ] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while
+- [x] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while
       they can still act on it and the sequencer cannot reorder for profit.
-- [ ] A gossip transport. `gossip.py` is the merge law and the data structure;
-      the wire protocol (peer sampling, anti-entropy, digest reconciliation) is
-      not written.
+- [x] A gossip transport. The wire protocol is written: anti-entropy and digest
+      reconciliation for candidate populations on the existing McEliece sessions,
+      and per-tick random peer sampling. Sampling chooses among the peers the
+      address book already knows; **learning** new peers is still bootstrap-file
+      only, and uniform sampling is not Sybil resistance. See
+      [p2p.md](p2p.md#still-open).
 
 ## Stage 1 — bounty market, real contributors
 
@@ -63,6 +84,9 @@ downstream is unbacked.
 - [ ] Claim assets typed by verification tier, non-fungible across tiers.
 - [ ] A real randomness beacon (VDF or threshold signature) replacing the
       ledger-head derivation in `partition.py`, which a sequencer can grind.
+      This got more load-bearing when epoch-batched settlement started ordering
+      a batch by that beacon: grinding the anchor now moves money, not just
+      work assignment.
 - [ ] Forced inclusion via a base layer. Censorship is the primary threat --
       withholding a reveal steals a bounty -- and Stage 0 has no defence.
 

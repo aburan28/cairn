@@ -1,0 +1,534 @@
+//! An OS jail around every process that runs objective-authored code.
+//!
+//! The verifier module spawns three kinds of child: pinned checker/evaluator/
+//! statistic source, a `replay` command, and `lean` on a submitted proof. All
+//! three execute code that somebody other than the node operator wrote, so all
+//! three go through here.
+//!
+//! # What this is and is not
+//!
+//! It is a *kernel-enforced* boundary: no network, and no writes outside a
+//! scratch directory that is deleted when the check finishes. It is not a VM
+//! and not a container image. A kernel bug or a sandbox-policy bug is still an
+//! escape. See [`super::SANDBOXING`] for the enforced/not-enforced list that is
+//! kept honest against the threat model.
+//!
+//! # Why the mechanism is probed rather than assumed
+//!
+//! `bwrap` being installed does not mean it works: unprivileged user namespaces
+//! are disabled outright on some distributions and inside many container
+//! runtimes, and the failure looks like a spawn error at verification time
+//! rather than at startup. Probing once and caching the answer means a host
+//! where the jail cannot work degrades to the documented fallback instead of
+//! reporting every artifact `Unavailable`.
+//!
+//! # The one rule
+//!
+//! Nothing in this module may produce a rejection. A jail that will not start,
+//! a mechanism that is absent, a limit that cannot be set — every one of those
+//! is a fact about this node, and the caller turns it into
+//! [`super::Status::Unavailable`]. A sandbox that could reject would hand an
+//! attacker a way to fail honest submissions by breaking a host.
+
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+
+use super::which;
+
+/// Set to `1` to refuse to run objective code at all without a working jail.
+///
+/// The right setting for a node that verifies objectives it did not write. It
+/// is not the default because that would turn every macOS/Linux host without a
+/// jail mechanism into a node that answers `Unavailable` to everything, and a
+/// network of nodes that cannot verify is worse than one that verifies in a
+/// documented weaker mode.
+pub const REQUIRE_ENV: &str = "PROOFWORK_REQUIRE_SANDBOX";
+
+/// Address-space cap for pinned pure functions, in MiB. `0` disables it.
+pub const MEMORY_ENV: &str = "PROOFWORK_SANDBOX_MEMORY_MB";
+
+/// Default address-space cap. A pinned `check`/`score`/`statistic` that needs
+/// more than this is not a verifier anyone should be running synchronously.
+const DEFAULT_MEMORY_MB: u64 = 4096;
+
+/// Which jail this host can actually use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mechanism {
+    /// `bwrap`, at the resolved path. Linux.
+    Bubblewrap(PathBuf),
+    /// `sandbox-exec`, at the resolved path. macOS seatbelt.
+    Seatbelt(PathBuf),
+    /// Nothing available. Carries why, for the evidence field.
+    None(&'static str),
+}
+
+impl Mechanism {
+    /// The name recorded in verdict evidence. Auditors compare verdicts across
+    /// nodes; knowing a disagreeing node ran unjailed is the first question.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Mechanism::Bubblewrap(_) => "bwrap",
+            Mechanism::Seatbelt(_) => "sandbox-exec",
+            Mechanism::None(_) => "none",
+        }
+    }
+
+    pub fn is_jail(&self) -> bool {
+        !matches!(self, Mechanism::None(_))
+    }
+}
+
+/// What the child is allowed to touch.
+pub struct Confinement<'a> {
+    /// Scratch directory. Always writable, always the child's `$TMPDIR`.
+    pub workdir: &'a Path,
+    /// Where the child starts. Must be readable; need not be writable.
+    pub cwd: &'a Path,
+    /// Extra paths the child must be able to read.
+    pub readable: Vec<PathBuf>,
+    /// Extra paths the child must be able to write. Empty is the normal case.
+    pub writable: Vec<PathBuf>,
+    /// Replace the environment with a minimal one. Off for `replay` and
+    /// `lean`, whose toolchains are configured through the environment the
+    /// operator set up; see the module docs in [`super`].
+    pub scrub_env: bool,
+    /// `RLIMIT_CPU`, seconds. Complements the wall-clock kill: a child that
+    /// spins in a tight loop hits this first and dies on `SIGXCPU`.
+    pub cpu_seconds: u64,
+    /// `RLIMIT_AS`, MiB. `0` leaves the address space unbounded.
+    pub memory_mb: u64,
+}
+
+impl<'a> Confinement<'a> {
+    pub fn new(workdir: &'a Path, cwd: &'a Path, cpu_seconds: u64) -> Confinement<'a> {
+        Confinement {
+            workdir,
+            cwd,
+            readable: Vec::new(),
+            writable: Vec::new(),
+            scrub_env: false,
+            cpu_seconds,
+            memory_mb: 0,
+        }
+    }
+
+    pub fn reading(mut self, path: impl Into<PathBuf>) -> Confinement<'a> {
+        self.readable.push(path.into());
+        self
+    }
+
+    pub fn writing(mut self, path: impl Into<PathBuf>) -> Confinement<'a> {
+        self.writable.push(path.into());
+        self
+    }
+
+    pub fn scrubbed(mut self) -> Confinement<'a> {
+        self.scrub_env = true;
+        self
+    }
+
+    pub fn capped_memory(mut self) -> Confinement<'a> {
+        self.memory_mb = configured_memory_mb();
+        self
+    }
+}
+
+/// A [`Command`] that will run confined, plus the mechanism that confines it.
+pub struct Jailed {
+    pub command: Command,
+    pub mechanism: &'static str,
+}
+
+/// Why a jail could not be built. Always becomes `Unavailable`, never a
+/// rejection — hence a plain reason string rather than a status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unavailable(pub String);
+
+/// Build the command that runs `program args…` under whatever jail this host
+/// has.
+///
+/// `program` must already be an absolute path: resolving a name through `PATH`
+/// inside the jail would pick a different binary than the one the caller
+/// checked, and under `bwrap` it would usually not resolve at all.
+pub fn confine(
+    program: &Path,
+    args: &[OsString],
+    plan: &Confinement<'_>,
+) -> Result<Jailed, Unavailable> {
+    let mechanism = mechanism();
+    let required = std::env::var(REQUIRE_ENV)
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    match mechanism {
+        Mechanism::None(why) if required => Err(Unavailable(format!(
+            "{REQUIRE_ENV}=1 and no sandbox mechanism is usable here ({why}); \
+             refusing to run objective-authored code unjailed"
+        ))),
+        Mechanism::None(_) => Ok(Jailed {
+            command: bare(program, args, plan),
+            mechanism: "none",
+        }),
+        Mechanism::Bubblewrap(bwrap) => Ok(Jailed {
+            command: bubblewrap(bwrap, program, args, plan),
+            mechanism: "bwrap",
+        }),
+        Mechanism::Seatbelt(sandbox_exec) => seatbelt(sandbox_exec, program, args, plan),
+    }
+}
+
+/// The jail this host can use, probed once.
+pub fn mechanism() -> Mechanism {
+    static CACHED: OnceLock<Mechanism> = OnceLock::new();
+    CACHED.get_or_init(probe).clone()
+}
+
+fn probe() -> Mechanism {
+    if cfg!(target_os = "linux") {
+        if let Some(bwrap) = which("bwrap") {
+            // `bwrap` installs fine on hosts where unprivileged user
+            // namespaces are switched off; only running it tells you.
+            let ok = Command::new(&bwrap)
+                .args(["--ro-bind", "/", "/", "--unshare-net", "--", "/bin/true"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if ok {
+                return Mechanism::Bubblewrap(bwrap);
+            }
+            return Mechanism::None(
+                "bwrap is installed but cannot create a namespace on this host",
+            );
+        }
+        return Mechanism::None("bwrap is not installed");
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(sandbox_exec) = which("sandbox-exec") {
+            let ok = Command::new(&sandbox_exec)
+                .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if ok {
+                return Mechanism::Seatbelt(sandbox_exec);
+            }
+            return Mechanism::None("sandbox-exec is present but refused a trivial profile");
+        }
+        return Mechanism::None("sandbox-exec is not available");
+    }
+    Mechanism::None("no jail mechanism is implemented for this platform")
+}
+
+fn configured_memory_mb() -> u64 {
+    match std::env::var(MEMORY_ENV) {
+        Ok(text) => text.trim().parse::<u64>().unwrap_or(DEFAULT_MEMORY_MB),
+        Err(_) => DEFAULT_MEMORY_MB,
+    }
+}
+
+/// Unjailed fallback: still resource-limited, still on a scratch cwd.
+fn bare(program: &Path, args: &[OsString], plan: &Confinement<'_>) -> Command {
+    let (bin, argv) = with_limits(program, args, plan);
+    let mut command = Command::new(bin);
+    command.args(argv).current_dir(plan.cwd);
+    apply_env(&mut command, plan);
+    command
+}
+
+fn bubblewrap(
+    bwrap: PathBuf,
+    program: &Path,
+    args: &[OsString],
+    plan: &Confinement<'_>,
+) -> Command {
+    let mut command = Command::new(bwrap);
+    command.args([
+        // The point of the exercise: objective code cannot phone home, and it
+        // cannot see or signal anything else on the box.
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-pid",
+        // Without this a child that outlives a killed node keeps running with
+        // its jail intact and nobody watching it.
+        "--die-with-parent",
+        // Detach the controlling terminal so the child cannot inject keystrokes
+        // into the operator's shell with TIOCSTI.
+        "--new-session",
+    ]);
+    command.args(["--proc", "/proc"]);
+    command.args(["--dev", "/dev"]);
+    command.args(["--tmpfs", "/tmp"]);
+
+    // System directories, read only. `/bin` and friends are symlinks into
+    // `/usr` on merged-usr distributions; binding a symlink source as a
+    // directory fails, so recreate the link instead.
+    for top in ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc"] {
+        let path = Path::new(top);
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if let Ok(target) = std::fs::read_link(path) {
+                    command.arg("--symlink").arg(target).arg(top);
+                }
+            }
+            Ok(_) => {
+                command.arg("--ro-bind").arg(top).arg(top);
+            }
+            Err(_) => {}
+        }
+    }
+
+    for path in &plan.readable {
+        if path.exists() {
+            command.arg("--ro-bind").arg(path).arg(path);
+        }
+    }
+    // After the read-only binds, so an entry in both lists ends up writable.
+    command.arg("--bind").arg(plan.workdir).arg(plan.workdir);
+    for path in &plan.writable {
+        if path.exists() {
+            command.arg("--bind").arg(path).arg(path);
+        }
+    }
+    if plan.cwd.exists() {
+        command.arg("--ro-bind-try").arg(plan.cwd).arg(plan.cwd);
+    }
+    command.arg("--chdir").arg(plan.cwd);
+
+    if plan.scrub_env {
+        command.arg("--clearenv");
+        for (key, value) in minimal_env(plan) {
+            command.arg("--setenv").arg(key).arg(value);
+        }
+    } else {
+        command.arg("--setenv").arg("TMPDIR").arg(plan.workdir);
+    }
+
+    let (bin, argv) = with_limits(program, args, plan);
+    command.arg("--").arg(bin).args(argv);
+    // bwrap itself must start in a directory that exists outside the jail.
+    command.current_dir(plan.workdir);
+    apply_env(&mut command, plan);
+    command
+}
+
+fn seatbelt(
+    sandbox_exec: PathBuf,
+    program: &Path,
+    args: &[OsString],
+    plan: &Confinement<'_>,
+) -> Result<Jailed, Unavailable> {
+    // Seatbelt matches on fully resolved paths. `/tmp` is a symlink to
+    // `/private/tmp` on macOS and `$TMPDIR` lives under `/var/folders`, which
+    // is also symlinked, so an unresolved subpath silently allows nothing and
+    // every write fails. Cost of getting this wrong: the jail looks like it
+    // works and instead makes the node useless.
+    let mut writable = vec![resolve(plan.workdir)];
+    for path in &plan.writable {
+        writable.push(resolve(path));
+    }
+
+    let mut profile = String::from("(version 1)\n(allow default)\n(deny network*)\n");
+    profile.push_str("(deny file-write*)\n");
+    for path in &writable {
+        let text = path.to_string_lossy();
+        profile.push_str(&format!(
+            "(allow file-write* (subpath \"{}\"))\n",
+            escape(&text)
+        ));
+    }
+    // A child that cannot write to /dev/null fails in ways that look like the
+    // artifact's fault rather than the jail's.
+    profile.push_str("(allow file-write-data (literal \"/dev/null\"))\n");
+    profile.push_str("(allow file-write-data (literal \"/dev/dtracehelper\"))\n");
+
+    if profile.contains('\0') {
+        return Err(Unavailable(
+            "sandbox profile contains a NUL byte; refusing to run unjailed".into(),
+        ));
+    }
+
+    let mut command = Command::new(sandbox_exec);
+    command.arg("-p").arg(&profile);
+    let (bin, argv) = with_limits(program, args, plan);
+    command.arg(bin).args(argv);
+    command.current_dir(plan.cwd);
+    apply_env(&mut command, plan);
+    Ok(Jailed {
+        command,
+        mechanism: "sandbox-exec",
+    })
+}
+
+/// Prefix the child with a shell that sets `ulimit`s, when a shell exists.
+///
+/// `std::process::Command` has no portable hook for `setrlimit` between fork
+/// and exec, and this crate does not depend on `libc`. `sh -c 'ulimit …; exec
+/// "$@"'` gets the same limits applied in the same place at the cost of one
+/// short-lived process. Each `ulimit` is allowed to fail — macOS has no
+/// `RLIMIT_AS` — because a limit that cannot be set is best-effort by
+/// specification, not a reason to refuse to verify.
+fn with_limits(
+    program: &Path,
+    args: &[OsString],
+    plan: &Confinement<'_>,
+) -> (OsString, Vec<OsString>) {
+    let shell = Path::new("/bin/sh");
+    let wanted = plan.cpu_seconds > 0 || plan.memory_mb > 0;
+    if !wanted || !shell.exists() {
+        let mut argv = Vec::with_capacity(args.len());
+        argv.extend_from_slice(args);
+        return (program.as_os_str().to_os_string(), argv);
+    }
+
+    let mut script = String::new();
+    if plan.cpu_seconds > 0 {
+        script.push_str(&format!("ulimit -t {} 2>/dev/null;", plan.cpu_seconds));
+    }
+    if plan.memory_mb > 0 {
+        // `ulimit -v` is in kibibytes. Saturating: an operator who asks for
+        // an absurd cap gets no cap rather than an overflow.
+        let kib = plan.memory_mb.saturating_mul(1024);
+        script.push_str(&format!("ulimit -v {kib} 2>/dev/null;"));
+    }
+    script.push_str(" exec \"$@\"");
+
+    let mut argv: Vec<OsString> = vec![
+        OsString::from("-c"),
+        OsString::from(script),
+        // `$0` for the shell; `$@` starts at the program.
+        OsString::from("proofwork-jail"),
+        program.as_os_str().to_os_string(),
+    ];
+    argv.extend_from_slice(args);
+    (shell.as_os_str().to_os_string(), argv)
+}
+
+fn apply_env(command: &mut Command, plan: &Confinement<'_>) {
+    if plan.scrub_env {
+        command.env_clear();
+        for (key, value) in minimal_env(plan) {
+            command.env(key, value);
+        }
+    } else {
+        command.env("TMPDIR", plan.workdir);
+    }
+}
+
+/// The environment a pinned pure function gets.
+///
+/// `PATH` survives because interpreters are routinely shims that re-exec
+/// themselves through it (pyenv, asdf, `/usr/bin/env`), and losing it turns a
+/// working node into one that reports `Unavailable` for everything. Everything
+/// else goes: an objective's checker has no business reading the operator's
+/// tokens out of the environment, and it is the one exfiltration channel that
+/// survives having no network.
+fn minimal_env(plan: &Confinement<'_>) -> Vec<(OsString, OsString)> {
+    let path =
+        std::env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/local/bin:/usr/bin:/bin"));
+    vec![
+        (OsString::from("PATH"), path),
+        (OsString::from("LANG"), OsString::from("C.UTF-8")),
+        (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+        (
+            OsString::from("HOME"),
+            plan.workdir.as_os_str().to_os_string(),
+        ),
+        (
+            OsString::from("TMPDIR"),
+            plan.workdir.as_os_str().to_os_string(),
+        ),
+        // Bytecode caching writes next to the source, which is read-only here;
+        // Python tolerates the failure but the wasted syscalls are noise.
+        (
+            OsString::from("PYTHONDONTWRITEBYTECODE"),
+            OsString::from("1"),
+        ),
+    ]
+}
+
+fn resolve(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Convenience for callers assembling `argv` out of `&str` and `&Path`.
+pub fn argv<I, S>(parts: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    parts
+        .into_iter()
+        .map(|part| part.as_ref().to_os_string())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_probe_is_stable_and_names_itself() {
+        let first = mechanism();
+        assert_eq!(first, mechanism());
+        assert!(!first.as_str().is_empty());
+        // On the two platforms this crate targets a jail should be reachable.
+        // Anywhere else the fallback is expected, so this is not an assertion
+        // about the mechanism, only that the answer is one of the three.
+        assert!(matches!(
+            first,
+            Mechanism::Bubblewrap(_) | Mechanism::Seatbelt(_) | Mechanism::None(_)
+        ));
+    }
+
+    #[test]
+    fn a_scrubbed_environment_keeps_path_and_drops_secrets() {
+        let dir = PathBuf::from("/tmp/proofwork-env-test");
+        let plan = Confinement::new(&dir, &dir, 1).scrubbed();
+        let env = minimal_env(&plan);
+        let keys: Vec<String> = env
+            .iter()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert!(keys.contains(&"PATH".to_string()));
+        assert!(!keys
+            .iter()
+            .any(|k| k.contains("TOKEN") || k.contains("KEY")));
+    }
+
+    #[test]
+    fn profile_paths_with_quotes_cannot_break_out_of_the_sexp() {
+        assert_eq!(escape(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn limits_wrap_through_a_shell_only_when_a_limit_is_asked_for() {
+        let dir = PathBuf::from("/tmp/proofwork-limit-test");
+        let none = Confinement::new(&dir, &dir, 0);
+        let (bin, argv) = with_limits(Path::new("/usr/bin/true"), &[], &none);
+        assert_eq!(bin, OsString::from("/usr/bin/true"));
+        assert!(argv.is_empty());
+
+        let capped = Confinement::new(&dir, &dir, 5);
+        let (bin, argv) = with_limits(Path::new("/usr/bin/true"), &[], &capped);
+        if Path::new("/bin/sh").exists() {
+            assert_eq!(bin, OsString::from("/bin/sh"));
+            assert!(argv
+                .iter()
+                .any(|a| a.to_string_lossy().contains("ulimit -t 5")));
+            assert_eq!(argv.last(), Some(&OsString::from("/usr/bin/true")));
+        }
+    }
+}

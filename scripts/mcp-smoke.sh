@@ -27,7 +27,7 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 
 LOG=$(mktemp -u /tmp/pw-mcp-XXXXXX.jsonl)
 OUT=$(mktemp -u /tmp/pw-mcp-out-XXXXXX.jsonl)
-trap 'rm -f "$LOG" "$OUT"' EXIT
+trap 'rm -f "$LOG" "$OUT" "${LOG%.jsonl}.pending.json"' EXIT
 
 rule "post an objective with the CLI"
 OID=$("$RUST" --log "$LOG" --root . post examples/capset_progressive/objective.json \
@@ -102,7 +102,8 @@ echo "  ledger still holds 1 entry (the objective)"
 rule "an objective statement that tries to plant a citation"
 HOSTILE=$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX.json)
 HOSTILE_LOG=$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX.jsonl)
-trap 'rm -f "$LOG" "$OUT" "$HOSTILE" "$HOSTILE_LOG"' EXIT
+# The MCP server keeps unrevealed nonces in a sidecar beside the log.
+trap 'rm -f "$LOG" "$OUT" "$HOSTILE" "$HOSTILE_LOG" "${LOG%.jsonl}.pending.json" "${HOSTILE_LOG%.jsonl}.pending.json"' EXIT
 
 PLANTED="sha256:$(printf 'b%.0s' $(seq 64))"
 python3 - "$HOSTILE" "$PLANTED" <<'PY'
@@ -167,5 +168,53 @@ PY
 ENTRIES=$(grep -c . "$HOSTILE_LOG")
 [ "$ENTRIES" = "1" ] || fail "a refused submission wrote to the log ($ENTRIES entries)"
 echo "  ledger still holds 1 entry: the refusal cost nothing"
+
+# --------------------------------------------------------------------------
+# Two-phase submit_claim, across a restart of the server.
+#
+# A reveal must land in a strictly later epoch than its commitment, so
+# `submit_claim` cannot commit and reveal in one call. The agent calls it twice
+# with the same objective and artifact. The nonce is generated inside the server
+# and never returned -- returning it would undo the commitment's hiding property
+# -- so it has to survive in a sidecar file. Restarting the process between the
+# two calls is the only way to check that it does.
+# --------------------------------------------------------------------------
+export PROOFWORK_EPOCH_SECONDS=1
+rule "submit_claim commits, then reveals an epoch later"
+
+call_submit() {
+  printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_claim","arguments":{"objective_id":"%s","submitter":"agent","artifact":%s}}}\n' \
+    "$OID" "$ARTIFACT" | "$MCP" --log "$LOG" --root . 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["result"]["content"][0]["text"])'
+}
+
+FIRST=$(call_submit)
+echo "$FIRST" | sed 's/^/  /'
+echo "$FIRST" | grep -q "Committed in epoch" || fail "first submit_claim did not commit"
+grep -q '"kind": *"commitment"' "$LOG" || fail "no commitment reached the log"
+grep -q '"kind": *"claim"' "$LOG" && fail "the artifact was revealed in the same epoch as its commitment"
+
+# Same epoch, same artifact: the server must recognise its own outstanding
+# commitment rather than making a second one the agent can never open.
+SAME=$(call_submit)
+echo "$SAME" | grep -q "Already committed" || fail "a repeat call in the same epoch made a second commitment"
+[ "$(grep -c '"kind": *"commitment"' "$LOG")" = "1" ] || fail "a repeat call wrote a second commitment"
+echo "  a repeat inside the same epoch is a no-op, not a second commitment"
+
+sleep 1.1
+SECOND=$(call_submit)
+echo "$SECOND" | sed 's/^/  /'
+echo "$SECOND" | grep -q "^claim sha256:" || fail "second submit_claim did not reveal"
+echo "$SECOND" | grep -q "verdict: accept" || fail "the revealed claim did not verify"
+echo "$SECOND" | grep -q "beacon order" || fail "the agent was not told why payment is deferred"
+echo "  the nonce survived a restart of the server and opened the commitment"
+
+rule "the epoch closes and the batch settles"
+sleep 1.1
+"$RUST" --log "$LOG" --root . settle | sed 's/^/  /'
+grep -q '"kind": *"batch"' "$LOG" || fail "no batch record was written"
+"$RUST" --log "$LOG" --root . audit | grep -q "log verified" \
+  || fail "the log the MCP server produced does not audit"
+echo "  audit re-derived the batch's beacon order"
 
 printf '\n\033[32mMCP SMOKE OK\033[0m\n'

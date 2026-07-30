@@ -35,9 +35,36 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 from dataclasses import dataclass
 
 EPOCH_SECONDS = 600
+
+#: Overrides :data:`EPOCH_SECONDS` for a local demo. Never set in production.
+EPOCH_SECONDS_ENV = "PROOFWORK_EPOCH_SECONDS"
+
+
+def epoch_seconds() -> int:
+    """The epoch length in force for this process.
+
+    Ten minutes makes the commit-in-N/reveal-in-N+1 rule impossible to
+    demonstrate in a shell script that has to finish, which is the only reason
+    the override exists.
+
+    Two nodes with different settings disagree about which epoch a record is in
+    and therefore about which reveals were legal -- so this is a *policy*
+    parameter, not a format one. It changes no canonical bytes: nothing derived
+    from it enters a record. A malformed or zero value falls back to the default
+    rather than producing an epoch length of nothing.
+    """
+    raw = os.environ.get(EPOCH_SECONDS_ENV)
+    if raw is None:
+        return EPOCH_SECONDS
+    try:
+        seconds = int(raw.strip())
+    except ValueError:
+        return EPOCH_SECONDS
+    return seconds if seconds > 0 else EPOCH_SECONDS
 
 
 def beacon(epoch: int, anchor: str) -> str:
@@ -57,6 +84,26 @@ def assign(node_id: str, objective_id: str, epoch_beacon: str, partitions: int) 
 
 def epoch_of(timestamp_seconds: int, epoch_seconds: int = EPOCH_SECONDS) -> int:
     return timestamp_seconds // epoch_seconds
+
+
+def settlement_rank(epoch: int, anchor: str, key: str) -> str:
+    """The order acceptable reveals settle in, inside one reveal epoch.
+
+    ``H(beacon(epoch, anchor) ‖ key)``, ascending. Append order is the
+    sequencer's to choose, and on a progressive objective the order two
+    improvements settle in decides which of them is paid for the whole span and
+    which for the remainder -- so leaving settlement order to the sequencer is
+    leaving them a lever on other people's money. Sorting by a value derived
+    from a beacon fixed *before the epoch opened* takes the lever away.
+
+    ``key`` must be fixed before the anchor is public, and callers therefore
+    pass the **commitment hash** rather than the claim id. By reveal time every
+    submitter can compute the anchor, and a claim id covers ``created_at`` and
+    ``cites`` -- fields the commitment does not bind and nothing checks against
+    the reveal, so a submitter could try timestamps until one sorted first. See
+    ``Node.settle_due`` for the residual gap.
+    """
+    return hashlib.sha256(f"{beacon(epoch, anchor)}{key}".encode()).hexdigest()
 
 
 @dataclass(frozen=True)

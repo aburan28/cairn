@@ -26,6 +26,18 @@ pub enum CheckpointError {
         expected: String,
         actual: String,
     },
+    /// The local log does not reach the checkpoint's height.
+    ///
+    /// Distinct from [`CheckpointError::Mismatch`] on `height` because it is a
+    /// different accusation. A *longer* log is the normal case -- the signer
+    /// checkpointed at height `h` and the reader has since caught up past it --
+    /// so `verify_prefix` compares over the first `h` entries. A *shorter* log
+    /// is either a rollback or a sync that has not finished, and either way the
+    /// reader has nothing to check the signed root against.
+    ShortLog {
+        height: u64,
+        local: u64,
+    },
 }
 
 impl fmt::Display for CheckpointError {
@@ -46,6 +58,11 @@ impl fmt::Display for CheckpointError {
                     "checkpoint {field} mismatch: expected {expected}, got {actual}"
                 )
             }
+            CheckpointError::ShortLog { height, local } => write!(
+                f,
+                "local log has {local} entries but the checkpoint covers {height}; \
+                 it cannot confirm a root it does not reach"
+            ),
         }
     }
 }
@@ -260,6 +277,33 @@ impl SignedCheckpoint {
             }
         }
         Ok(())
+    }
+
+    /// Verify against the first `height` entries of a log that may be longer.
+    ///
+    /// [`SignedCheckpoint::verify_against`] is the equality check: it answers
+    /// "is my log exactly what was signed?", which is the wrong question for a
+    /// reader who has kept syncing. What a reader needs to know is whether the
+    /// signed prefix is *contained* in the log it holds. Because the chain is
+    /// hash-linked, agreeing on the head at height `h` means agreeing on every
+    /// entry below it, so this is the full-strength check and not a weakened
+    /// one -- an operator who rewrote entry 3 cannot reproduce the signed head
+    /// at height 400.
+    pub fn verify_prefix(
+        &self,
+        ledger: &Ledger,
+        expected_key: &[u8],
+    ) -> Result<(), CheckpointError> {
+        self.verify(expected_key)?;
+        let height = usize::try_from(self.checkpoint.height)
+            .map_err(|_| CheckpointError::Invalid("height exceeds this platform".into()))?;
+        let prefix = ledger
+            .prefix(height)
+            .ok_or_else(|| CheckpointError::ShortLog {
+                height: self.checkpoint.height,
+                local: ledger.len() as u64,
+            })?;
+        self.verify_against(&prefix, expected_key)
     }
 }
 
