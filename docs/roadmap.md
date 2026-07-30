@@ -18,8 +18,10 @@ Remaining before Stage 0 is usable by anyone but its author:
 
 - [ ] **Sandbox verifier execution** (container/WASM, no network, wall-clock cap).
       Launch blocker for third-party objectives.
-- [ ] Signed checkpoints: publish `(merkle_root, height, signature)` so a reader
-      can pin what the operator claimed at a point in time and detect a rewrite.
+- [x] Signed checkpoints: publish `(merkle_root, height, signature)` with a
+      separate FIPS 204 ML-DSA-65 root key so a reader can pin what the operator
+      claimed at a point in time and detect a rewrite. The daemon writes one
+      after each successful p2p synchronization.
 - [ ] `proofwork verify --from <checkpoint>` for readers who only have a log
       fragment.
 - [ ] Objective schemas in `spec/` wired into `post` as a hard validation gate.

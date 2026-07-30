@@ -28,6 +28,7 @@ chacha20poly1305 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
 classic-mceliece-rust = { version = "3.1.0", default-features = false, features = ["mceliece348864", "zeroize", "alloc"] }
+ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
 
 [dev-dependencies]
 rand = "0.8"

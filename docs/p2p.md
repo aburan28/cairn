@@ -188,7 +188,8 @@ The `proofwork-p2p` binary is the runnable daemon wrapper. It persists a local
 McEliece identity, opens the node ledger, accepts inbound sessions, periodically
 dials every `--bootstrap` endpoint, and replays newly admitted objectives,
 commitments, and claims through `Node`; verdicts and settlements are always
-re-derived locally. A bootstrap file is canonical JSON of the form
+re-derived locally. It also persists a separate FIPS 204 ML-DSA-65 root key and
+writes a signed checkpoint after each successful sync. A bootstrap file is canonical JSON of the form
 `{"addr":"127.0.0.1:9001","public":"<hex public key>"}`.
 
 ```text

@@ -20,6 +20,7 @@
 
 pub mod attribution;
 pub mod canonical;
+pub mod checkpoint;
 pub mod crypto;
 pub mod frontier;
 pub mod gossip;

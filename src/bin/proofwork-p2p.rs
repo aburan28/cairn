@@ -4,6 +4,7 @@
 //! placed in the append-only ledger.
 
 use proofwork::canonical::Value;
+use proofwork::checkpoint::RootKey;
 use proofwork::ledger::Ledger;
 use proofwork::node::Node;
 use proofwork::p2p::discovery::Endpoint;
@@ -18,7 +19,7 @@ use std::thread;
 use std::time::Duration;
 
 fn usage() -> ! {
-    eprintln!("usage: proofwork-p2p --identity FILE --listen ADDR --log FILE --root DIR [--bootstrap FILE ...]");
+    eprintln!("usage: proofwork-p2p --identity FILE --root-key FILE --checkpoint FILE --listen ADDR --log FILE --root DIR [--bootstrap FILE ...]");
     std::process::exit(2);
 }
 
@@ -83,8 +84,48 @@ fn load_endpoint(path: &Path) -> Result<Endpoint, String> {
     Ok(Endpoint::new(addr, peer))
 }
 
+fn load_root_key(path: &Path) -> Result<RootKey, String> {
+    if !path.exists() {
+        let key = RootKey::generate();
+        let value = Value::object([
+            ("public", Value::string(hex_encode(&key.public_key()))),
+            (
+                "secret",
+                Value::string(hex_encode(&key.to_secret_bytes()[..])),
+            ),
+        ]);
+        fs::write(path, value.canonical_string()).map_err(|e| e.to_string())?;
+        return Ok(key);
+    }
+    let value = Value::from_json(&fs::read_to_string(path).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let secret = hex_decode(
+        value
+            .get("secret")
+            .and_then(Value::as_str)
+            .ok_or("root-key.secret missing")?,
+    )?;
+    let bytes: [u8; 32] = secret
+        .try_into()
+        .map_err(|_| "root-key.secret must be 32 bytes")?;
+    let key = RootKey::from_secret_bytes(bytes);
+    if let Some(public) = value.get("public").and_then(Value::as_str) {
+        if hex_decode(public).map_err(|_| "invalid root-key.public")? != key.public_key() {
+            return Err("root-key public does not match secret".into());
+        }
+    }
+    Ok(key)
+}
+
+fn write_checkpoint(path: &Path, key: &RootKey, node: &Node) -> Result<(), String> {
+    let signed = key.sign_ledger(node.ledger(), proofwork::time::timestamp());
+    fs::write(path, signed.to_value().canonical_string()).map_err(|e| e.to_string())
+}
+
 fn main() {
     let mut identity_path = None;
+    let mut root_key_path = None;
+    let mut checkpoint_path = None;
     let mut listen_addr = None;
     let mut log = None;
     let mut root = None;
@@ -93,6 +134,8 @@ fn main() {
     while let Some(arg) = args.next() {
         let slot = match arg.as_str() {
             "--identity" => &mut identity_path,
+            "--root-key" => &mut root_key_path,
+            "--checkpoint" => &mut checkpoint_path,
             "--listen" => &mut listen_addr,
             "--log" => &mut log,
             "--root" => &mut root,
@@ -105,6 +148,8 @@ fn main() {
         *slot = Some(args.next().unwrap_or_else(|| usage()));
     }
     let identity_path = identity_path.unwrap_or_else(|| usage());
+    let root_key_path = root_key_path.unwrap_or_else(|| usage());
+    let checkpoint_path = checkpoint_path.unwrap_or_else(|| usage());
     let listen_addr = listen_addr
         .unwrap_or_else(|| usage())
         .parse::<SocketAddr>()
@@ -114,6 +159,12 @@ fn main() {
     let identity = Arc::new(
         load_identity(Path::new(&identity_path)).unwrap_or_else(|e| {
             eprintln!("identity: {e}");
+            std::process::exit(2)
+        }),
+    );
+    let root_key = Arc::new(
+        load_root_key(Path::new(&root_key_path)).unwrap_or_else(|e| {
+            eprintln!("root key: {e}");
             std::process::exit(2)
         }),
     );
@@ -138,15 +189,31 @@ fn main() {
         }),
         root,
     )));
+    {
+        let guard = node.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(error) = write_checkpoint(Path::new(&checkpoint_path), &root_key, &guard) {
+            eprintln!("checkpoint: {error}");
+            std::process::exit(2);
+        }
+    }
     let service = Arc::new(service);
     let accept_service = Arc::clone(&service);
     let accept_node = Arc::clone(&node);
+    let accept_root_key = Arc::clone(&root_key);
+    let accept_checkpoint_path = checkpoint_path.clone();
     thread::spawn(move || loop {
         let mut guard = accept_node
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Err(error) = accept_service.accept_node_once(&listener, &mut guard) {
-            eprintln!("inbound session: {error}");
+        match accept_service.accept_node_once(&listener, &mut guard) {
+            Ok(_) => {
+                if let Err(error) =
+                    write_checkpoint(Path::new(&accept_checkpoint_path), &accept_root_key, &guard)
+                {
+                    eprintln!("checkpoint: {error}");
+                }
+            }
+            Err(error) => eprintln!("inbound session: {error}"),
         }
     });
 
@@ -158,8 +225,15 @@ fn main() {
             .collect::<Vec<_>>()
         {
             let mut guard = node.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Err(error) = service.dial_node_once(&endpoint, &mut guard) {
-                eprintln!("outbound session: {error}");
+            match service.dial_node_once(&endpoint, &mut guard) {
+                Ok(()) => {
+                    if let Err(error) =
+                        write_checkpoint(Path::new(&checkpoint_path), &root_key, &guard)
+                    {
+                        eprintln!("checkpoint: {error}");
+                    }
+                }
+                Err(error) => eprintln!("outbound session: {error}"),
             }
         }
         thread::sleep(Duration::from_secs(5));
