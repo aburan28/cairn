@@ -755,9 +755,11 @@ impl Server {
                 // Maximize assumed `score > best`; minimize objectives (ecdsa.fail-
                 // shaped) need the ratchet's notion of progress or they are told
                 // a worse product "improves" the frontier.
-                let improves = match objective.ratchet.as_ref().and_then(|block| {
-                    Ratchet::from_value(block).ok()
-                }) {
+                let improves = match objective
+                    .ratchet
+                    .as_ref()
+                    .and_then(|block| Ratchet::from_value(block).ok())
+                {
                     Some(ratchet) => ratchet.improves(Some(f.score), score),
                     None => score > f.score,
                 };
