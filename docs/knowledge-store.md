@@ -198,21 +198,81 @@ The cost is honest and stated where the set is computed: it only grows, so a
 node's floor grows with the number of objectives it has ever seen. The alternative
 is a store that cannot re-derive its own history.
 
+### Fetching one — `src/swarm/`
+
+`sync` copies a whole store between two directories one operator controls.
+Between strangers there was nothing, so a node that knew it was missing an
+evaluator could name the gap and not close it.
+
+`src/swarm/` is that, in the BitTorrent shape, because the problem is
+BitTorrent's: many peers, none trusted, each holding part of a file everybody
+wants, and no server worth paying for.
+
+```sh
+proofwork blob serve --listen 0.0.0.0:9797
+proofwork blob fetch <digest> --peer host:port [--peer …]
+```
+
+Pieces of 256 KiB, a manifest of piece hashes, bitfields, rarest-first
+selection, bounded pipelining, tit-for-tat choking with a rotating optimistic
+slot, and endgame duplication with cancels.
+
+**BitTorrent's weakest joint is the one this network does not have.** A
+`.torrent` must be obtained out of band and *believed* — the infohash is the
+root of trust and nothing in the protocol establishes it, which is why
+trackers, signed feeds and magnet links all exist and all pass the problem
+somewhere else. Here the objective already commits to `evaluator_sha256` as
+part of its content-addressed id, so **the ledger is the tracker** and it did
+the job before this module existed. A manifest is fetched from a stranger and
+checked against a digest the log already fixed; a peer offering a manifest for
+other content is dropped on arrival rather than after a download.
+
+Be precise about what piece hashes buy, because it is *not* trust — anyone can
+compute a manifest for any bytes:
+
+> **The whole-blob digest is the ground truth. Piece hashes buy blame.**
+
+A peer that sends a piece not matching the manifest has provably misbehaved on
+*that piece*, so it is dropped and its bytes discarded while the rest of the
+transfer continues. Without them one bad peer costs the whole download and
+leaves no evidence about who. That matters more here than in BitTorrent,
+because this network pays for availability — attributable failure is the
+currency [node-incentives.md](node-incentives.md) runs on.
+
+Rarest-first is worth the same kind of second look. It reads as a throughput
+optimisation and it is really a *durability* rule: it stops a swarm converging
+on a state where one piece lives on a single node whose departure strands
+everybody. The last-copy problem the availability mechanism pays to prevent,
+avoided for free by choosing what to ask for.
+
+**The split that keeps it testable.** `Swarm` is a pure state machine —
+messages in, actions out, no clock, no randomness, no sockets. BitTorrent picks
+its optimistic unchoke at random; this rotates it by round number, which gives
+every peer the same eventual turn and makes a transfer a pure function of the
+messages that arrived. So rarest-first, endgame and choking are tested by
+asserting on exact output rather than by running a network and hoping.
+`swarm::tcp` holds the sockets, the threads and the timeouts, and it is the
+only part that can fail for reasons that are nobody's fault — which is the same
+rule as `Unavailable` never settling. A peer that cannot be reached has not
+misbehaved.
+
 ### Still not built
 
 **The `blob` record kind.** `Entry::kind` is an open set of strings, so a record
-announcing `{sha256, size, media_type}` costs the ledger nothing — but an
-announcement is only worth something to a network that can act on it, and there is
-no transport. Building it now would be machinery for a message nobody sends.
+announcing `{sha256, size, media_type}` costs the ledger nothing. It is still
+not there, and now for a sharper reason than "no transport": what a node
+actually needs is not an announcement that a blob exists — the objective
+already says that — but an announcement of *who has it*. That is peer
+discovery, and it is the real gap.
 
-**Fetch.** This is where a blob lives once a node has it; nothing here goes and
-gets one. A blob arrives by `blob put`, or by `sync` carrying a store that already
-had it.
+**Peer discovery.** `blob fetch` takes `--peer` addresses because there is
+nowhere to look them up. BitTorrent solved this with trackers, then DHT, then
+peer exchange; this network has a log every node already reads, which is a
+better place to put it and a decision worth making deliberately rather than by
+reaching for a DHT.
 
-**`post` requiring referenced blobs to be announced.** The right admission gate
-once the record exists — checkable, unlike requiring them to be locally present —
-and it changes which objectives are admissible, so it belongs with the schema work
-in §5 rather than arriving on its own.
+**`post` requiring referenced blobs to be announced.** Waits on the record, and
+on the admission gate in §5.
 
 
 ### Which knowledge goes where
@@ -314,16 +374,19 @@ require them to be locally present, which is not.
       cannot be met without one is refused rather than met.
 - [x] `proofwork blob put | ls | verify`, with `ls` naming the blobs the log needs
       and does not have.
-- [ ] `blob` record kind: `{sha256, size, media_type}` announced in the log.
-      Waiting on a transport — an announcement is worth nothing to a network that
-      cannot act on it.
+- [x] **Peer-to-peer transfer** (`src/swarm/`): pieces, manifests, bitfields,
+      rarest-first, choking, endgame, and a TCP driver. `blob serve` and
+      `blob fetch`.
+- [ ] `blob` record kind: `{sha256, size, media_type}` announced in the log —
+      and, more usefully, *who has it*. See peer discovery below.
 - [ ] `post` requires referenced blobs to be *announced*, not present. Waits on
       the record, and on the admission gate above.
 
 **Then, and not before.**
 
-- [ ] Blob fetch over the gossip transport (which does not exist yet — the merge
-      law does, the wire protocol does not).
+- [ ] **Peer discovery.** `blob fetch --peer host:port` is the honest interface
+      for a network with nowhere to look an address up. The log is a better place
+      to put that than a DHT, and it is a decision to make deliberately.
 - [ ] Sandboxed verifier execution. Still the launch blocker, and now more urgent
       rather than less: a blob store makes distributing untrusted code *easier*,
       which is the whole point and also the risk. Materializing blob-resolved code
@@ -333,11 +396,24 @@ require them to be locally present, which is not.
 ## Where this is wrong
 
 - **Content addressing solves naming, not availability.** A blob store makes the
-  bytes findable by hash and identical everywhere; it does nothing to guarantee
-  anyone still has them. That is the availability service in
-  [node-incentives.md](node-incentives.md), and it is the cheap half — the
-  protocol holds a Merkle root, so a node that cannot answer has proved something
-  about itself — but it is a separate mechanism and it is not built.
+  bytes findable by hash and identical everywhere; `src/swarm/` makes them
+  *movable*. Neither guarantees anyone still has them. That is the availability
+  service in [node-incentives.md](node-incentives.md), and it is the cheap half —
+  the protocol holds a Merkle root, so a node that cannot answer has proved
+  something about itself — but it is a separate mechanism and it is not built.
+- **Seeding is unpaid, and choking cannot fix that.** Tit-for-tat works while a
+  peer still wants something; a node that has finished gets nothing back, so
+  serving is altruism and the dominant move is to stop. `src/swarm/` implements
+  choking because it is free and helps during the download phase. The seeding
+  half is the public-goods problem in [node-incentives.md](node-incentives.md),
+  and this module does not solve it — a swarm of pure leeches is a swarm that
+  transfers nothing, and nothing here prevents one.
+- **A peer that lies about what it holds costs a round trip, every time.**
+  Bitfields and `have` messages are unverified claims — the protocol only catches
+  a lie when a piece arrives wrong or fails to arrive at all. Rarest-first is
+  computed from those claims, so a peer that advertises everything and serves
+  nothing distorts the schedule of every node that believes it. Timeouts bound
+  the damage; nothing attributes it.
 - **The pin set never shrinks.** The lifetime was chosen from what `audit --rerun`
   needs rather than from what settlement needs, which is the right call and has a
   price: a node's disk floor grows with every objective it has ever seen, and

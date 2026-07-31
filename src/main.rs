@@ -58,6 +58,7 @@ use std::env;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write};
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,6 +73,7 @@ use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordEr
 use proofwork::store::atrest::{AtRestError, Cipher};
 use proofwork::store::blobs::BlobStore;
 use proofwork::store::{mirror, quota, Store, StoreError};
+use proofwork::swarm;
 use proofwork::verifiers::VerifierRegistry;
 
 /// Where the log lives when `--log` and `$PROOFWORK_LOG` are both silent.
@@ -454,6 +456,14 @@ enum BlobAction {
     List,
     /// Re-hash everything and report what does not match its name.
     Verify,
+    /// Serve the store's blobs to peers until interrupted.
+    Serve { listen: String },
+    /// Pull a blob from peers into the store.
+    Fetch {
+        digest: String,
+        peers: Vec<String>,
+        seconds: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -863,9 +873,58 @@ fn parse_blob(cursor: &mut Cursor) -> Result<Command, CliError> {
                 .ok_or_else(|| CliError::Usage(String::from("blob put: needs a file to store")))?;
             BlobAction::Put { path }
         }
+        Some("serve") => {
+            let mut listen = String::from("0.0.0.0:9797");
+            while let Some(token) = cursor.take() {
+                if token == "--listen" {
+                    listen = cursor.value("--listen")?;
+                } else {
+                    return Err(CliError::Usage(format!(
+                        "blob serve: unknown option {token:?}"
+                    )));
+                }
+            }
+            return Ok(Command::Blob {
+                action: BlobAction::Serve { listen },
+            });
+        }
+        Some("fetch") => {
+            let digest = cursor.take().ok_or_else(|| {
+                CliError::Usage(String::from("blob fetch: needs a digest to fetch"))
+            })?;
+            let mut peers: Vec<String> = Vec::new();
+            let mut seconds = 120;
+            while let Some(token) = cursor.take() {
+                if token == "--peer" {
+                    peers.push(cursor.value("--peer")?);
+                } else if token == "--timeout" {
+                    seconds = cursor
+                        .value("--timeout")?
+                        .parse()
+                        .map_err(|_| CliError::Usage(String::from("--timeout wants seconds")))?;
+                } else {
+                    return Err(CliError::Usage(format!(
+                        "blob fetch: unknown option {token:?}"
+                    )));
+                }
+            }
+            if peers.is_empty() {
+                return Err(CliError::Usage(String::from(
+                    "blob fetch: needs at least one --peer host:port. There is no \
+                     peer discovery yet, so addresses come from you",
+                )));
+            }
+            return Ok(Command::Blob {
+                action: BlobAction::Fetch {
+                    digest,
+                    peers,
+                    seconds,
+                },
+            });
+        }
         Some(other) => {
             return Err(CliError::Usage(format!(
-                "blob: unknown action {other:?}; try put, ls, or verify"
+                "blob: unknown action {other:?}; try put, ls, verify, serve, or fetch"
             )))
         }
     };
@@ -1026,6 +1085,13 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      the content-addressed store pinned checkers resolve from",
     );
+    say(out, "  blob serve [--listen ADDR]");
+    say(out, "      seed this store's blobs to peers");
+    say(
+        out,
+        "  blob fetch <digest> --peer HOST:PORT [--peer ...] [--timeout SECS]",
+    );
+    say(out, "      pull a blob from peers, verified piece by piece");
     say(out, "  sync <dir> [--prune] [--dry-run]");
     say(
         out,
@@ -1419,13 +1485,75 @@ fn cmd_blob(out: &mut dyn Write, options: &Options, action: &BlobAction) -> Resu
                     out,
                     format!(
                         "{} of {} blobs the log needs are absent; \
-                         `proofwork blob put <file>` files one by its digest",
+                         `blob put <file>` files one from disk, \
+                         `blob fetch <digest> --peer HOST:PORT` pulls one from a peer",
                         missing.len(),
                         needed.len()
                     ),
                 );
             }
             Ok(if missing.is_empty() { 0 } else { 1 })
+        }
+        BlobAction::Serve { listen } => {
+            blobs.prepare().map_err(CliError::Store)?;
+            let held = blobs.list().map_err(CliError::Store)?;
+            let listener = swarm::serve(listen.as_str(), blobs, swarm::Limits::default())
+                .map_err(|error| CliError::Refused(format!("cannot serve on {listen}: {error}")))?;
+            say(
+                out,
+                format!("serving {} blobs on {}", held.len(), listener.addr()),
+            );
+            say(
+                out,
+                "  peers ask by digest; a digest this store does not hold is answered by hanging up",
+            );
+            say(out, "  ctrl-c to stop");
+            // Nothing to wait on but the accept loop, which owns its own thread.
+            // Parking rather than spinning: this process exists to be a server.
+            loop {
+                std::thread::park();
+            }
+        }
+        BlobAction::Fetch {
+            digest,
+            peers,
+            seconds,
+        } => {
+            blobs.prepare().map_err(CliError::Store)?;
+            let mut addrs = Vec::new();
+            for peer in peers {
+                let resolved: Vec<std::net::SocketAddr> = peer
+                    .to_socket_addrs()
+                    .map_err(|error| CliError::Usage(format!("{peer}: {error}")))?
+                    .collect();
+                if resolved.is_empty() {
+                    return Err(CliError::Usage(format!("{peer} resolves to no address")));
+                }
+                addrs.extend(resolved);
+            }
+            if blobs.has(digest) {
+                say(out, format!("blob {} already held", short(digest)));
+                return Ok(0);
+            }
+            let bytes = swarm::fetch(
+                digest,
+                &addrs,
+                &blobs,
+                swarm::Limits::default(),
+                std::time::Duration::from_secs(*seconds),
+            )
+            .map_err(|error| CliError::Refused(error.to_string()))?;
+            say(out, format!("blob {}", short(digest)));
+            say(
+                out,
+                format!(
+                    "  {} from {} peer(s) -> {}",
+                    proofwork::store::format_size(bytes.len() as u64),
+                    addrs.len(),
+                    blobs.root().display()
+                ),
+            );
+            Ok(0)
         }
         BlobAction::Verify => {
             let corrupt = blobs.verify().map_err(CliError::Store)?;

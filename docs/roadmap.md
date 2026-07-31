@@ -43,16 +43,28 @@ Remaining before Stage 0 is usable by anyone but its author:
       hash before path, `proofwork blob put | ls | verify` manages the store, and
       the quota pins what the log needs so `gc` cannot evict an evaluator the node
       must still be able to run. Changed no id and no conformance vector.
-- [ ] A `blob` record kind announcing `{sha256, size, media_type}`, and `post`
-      requiring an objective's blobs to be announced. Both wait on a transport:
-      an announcement is worth nothing to a network that cannot act on it.
+- [x] **Peer-to-peer blob transfer** (`src/swarm/`), in the BitTorrent shape:
+      pieces, a manifest of piece hashes, bitfields, rarest-first, bounded
+      pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver.
+      `blob serve` and `blob fetch`. The objective's digest *is* the swarm id, so
+      the ledger does the tracker's job and there is nothing to sign.
+- [ ] **Peer discovery.** `blob fetch --peer host:port` is honest about a network
+      with nowhere to look an address up. The log is a better place for that than
+      a DHT, and it is a decision to make deliberately rather than by reflex.
+- [ ] A `blob` record kind announcing who holds what, which is the useful half —
+      that a blob exists is already implied by the objective.
+- [ ] Pay for seeding. Tit-for-tat covers the download phase and nothing covers
+      a node that has finished; a swarm of pure leeches transfers nothing. This
+      is the availability service in [node-incentives.md](node-incentives.md).
 - [ ] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [ ] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while
       they can still act on it and the sequencer cannot reorder for profit.
-- [ ] A gossip transport. `gossip.py` is the merge law and the data structure;
-      the wire protocol (peer sampling, anti-entropy, digest reconciliation) is
-      not written.
+- [ ] A gossip transport for the *candidate population*. `gossip.py` is the merge
+      law and the data structure; the wire protocol (peer sampling, anti-entropy,
+      digest reconciliation) is not written. `src/swarm/` moves blobs, which is a
+      different problem with a different shape — one known digest, many peers —
+      and does not subsume this.
 
 ## Stage 1 — bounty market, real contributors
 

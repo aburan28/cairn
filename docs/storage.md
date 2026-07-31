@@ -163,9 +163,21 @@ blobs behaves exactly as it did before. A blob that is present but *corrupt* is
 fact about that disk, and letting it refute honest work would be the same mistake
 as letting a missing Lean toolchain refute a proof.
 
-Nothing here fetches a blob. This is where one lives once a node has it; the wire
-protocol that would go and get it does not exist. See
-[knowledge-store.md](knowledge-store.md).
+### Moving one between peers
+
+```sh
+proofwork blob serve --listen 0.0.0.0:9797
+proofwork blob fetch <digest> --peer host:port
+```
+
+`src/swarm/` transfers blobs in the BitTorrent shape — pieces, manifests,
+bitfields, rarest-first, choking, endgame. The digest an objective already
+commits to *is* the swarm id, so there is no tracker and nothing to sign: a
+manifest arrives from a stranger and is checked against a digest the log fixed
+before the transfer started. See [knowledge-store.md](knowledge-store.md).
+
+There is no peer discovery. `--peer` takes addresses because there is nowhere to
+look one up yet.
 
 ## The size cap
 

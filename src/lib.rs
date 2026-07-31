@@ -30,6 +30,7 @@ pub mod partition;
 pub mod records;
 pub mod sealed;
 pub mod store;
+pub mod swarm;
 pub mod verifiers;
 
 pub use attribution::{flow, FlowParams};

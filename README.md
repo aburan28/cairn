@@ -54,14 +54,15 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 770 tests, no network required
+cargo test                    # 812 tests, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
 proofwork incentives          # evaluate the node-operator game
 ```
 
-Rust 1.85+ (verified in CI, not asserted). No network access needed at runtime.
+Rust 1.85+ (verified in CI, not asserted). No outbound network access needed at
+runtime; the peer-to-peer tests use loopback.
 
 ## How it works
 
@@ -338,8 +339,68 @@ needs it.** Every posted objective counts, settled or not, because `audit --reru
 re-verifies settled claims — a node that dropped an evaluator when its objective
 closed would keep the ability to earn and lose the ability to prove.
 
-Nothing fetches a blob yet. This is where one lives once a node has it; `sync`
-carries them, and the wire protocol that would go and get one does not exist.
+### Getting one: peer-to-peer, in the torrent shape
+
+`sync` copies a whole store between two directories one operator controls.
+Between strangers there was nothing, so a node could name its gap and not close
+it. `src/swarm/` closes it, and the shape is BitTorrent's because the problem is
+BitTorrent's: many peers, none trusted, each holding part of a file everybody
+wants, and no server worth paying for.
+
+```sh
+proofwork blob serve --listen 0.0.0.0:9797
+proofwork blob fetch <digest> --peer host:port [--peer ...]
+```
+
+Pieces, a manifest of piece hashes, bitfields, rarest-first selection, bounded
+pipelining, tit-for-tat choking with a rotating optimistic slot, endgame
+duplication with cancels.
+
+**The joint BitTorrent gets wrong is the one this network doesn't have.** A
+`.torrent` must be obtained out of band and *believed* — the infohash is the root
+of trust and nothing in the protocol establishes it, which is why trackers,
+signed feeds and magnet links all exist and all pass the problem somewhere else.
+Here the objective already commits to `evaluator_sha256` as part of its
+content-addressed id, so
+
+> **the ledger is the tracker**, and it did the job before this module existed.
+
+A manifest is fetched from a stranger and checked against a digest the log fixed
+before the transfer started. A peer offering a manifest for other content is
+dropped on arrival rather than after a download.
+
+Be precise about what piece hashes buy, because it is *not* trust — anyone can
+compute a manifest for any bytes:
+
+> **The whole-blob digest is the ground truth. Piece hashes buy blame.**
+
+A peer that sends a bad piece has provably misbehaved on *that piece*, so it is
+dropped and its bytes discarded while the rest of the transfer continues. Without
+them one bad peer costs the whole download and leaves no evidence about who —
+and attributable failure is exactly the currency the availability mechanism runs
+on.
+
+Rarest-first deserves the same second look. It reads as a throughput trick and is
+really a **durability** rule: it stops a swarm converging on a state where one
+piece lives on a single node whose departure strands everybody. That is the
+last-copy problem `src/incentive/` pays to prevent, avoided for free by choosing
+what to ask for.
+
+`Swarm` is a pure state machine — no clock, no randomness, no sockets — so
+rarest-first, endgame and choking are tested by asserting on exact output rather
+than by running a network and hoping. BitTorrent picks its optimistic unchoke at
+random; this rotates it by round number, which buys the same eventual-turn
+property and keeps a transfer reproducible from its message history.
+`swarm::tcp` holds the threads and timeouts, and is the only part that can fail
+for reasons that are nobody's fault — the same rule as `Unavailable` never
+settling. **A peer that cannot be reached has not misbehaved.**
+
+Two things it does not do. **Seeding is unpaid**: tit-for-tat works while a peer
+still wants something, and a node that has finished gets nothing back, so a swarm
+of pure leeches transfers nothing and no code here prevents one. And **there is
+no peer discovery** — `--peer` takes addresses because there is nowhere to look
+one up. The log is a better place to put that than a DHT, and it is a decision
+worth making deliberately.
 
 **At rest, the log is sealed line by line** with ChaCha20-Poly1305. Per line, not
 per file, because the log is append-only and encrypting it as a unit would make
@@ -456,6 +517,7 @@ src/                 Rust implementation (primary)
   sealed.rs          sealed submissions, openable without the submitter
   incentive/         the node-operator mechanism, and the harness that evaluates it
   store/             at-rest encryption, the data directory, content-addressed blobs, the size cap, the mirror
+  swarm/             peer-to-peer blob transfer: pieces, rarest-first, choking, endgame
 reference/python/    Python reference implementation (183 tests)
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
@@ -467,7 +529,7 @@ examples/            worked objectives with real artifacts
 - [diagrams.md](docs/diagrams.md) — architecture and detailed design, drawn from the code
 - [architecture.md](docs/architecture.md) — the full design and which work shapes fit
 - [verification.md](docs/verification.md) — the verification ladder; authoring verifiers
-- [knowledge-store.md](docs/knowledge-store.md) — how a challenge is submitted, where every byte of it is stored, and how the format extends
+- [knowledge-store.md](docs/knowledge-store.md) — how a challenge is submitted, where every byte of it is stored, how it moves between peers, and how the format extends
 - [economics.md](docs/economics.md) — what mints, why demand-gating, citation flow
 - [coordination.md](docs/coordination.md) — the hoarding trap, the ratchet, CRDT gossip
 - [agent-market.md](docs/agent-market.md) — agent-to-agent rewards: what a peer-to-peer mechanism would be, and what it breaks
