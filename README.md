@@ -179,6 +179,58 @@ a bug — it's the island model preserving search diversity. **Gossip is
 untrusted**: a peer asserting `score = 10^12` would evict every real candidate, so
 `ingest()` re-scores locally and drops what doesn't reproduce.
 
+## Agents paying agents
+
+Every payment above points the same way: a funder escrows, an artifact verifies,
+settlement releases, citation flow moves a fraction of that same money backwards.
+Every unit that reaches a participant entered as somebody's bounty. Nothing pays
+an agent for something another *agent* wanted — a decomposition, a sub-frontier
+candidate, a branch somebody else explored.
+
+The scope for closing that is [agent-market.md](docs/agent-market.md), and its
+conclusion is that **the mechanism is already here**. `Objective::funder` is a
+string, there is no balance and no transfer primitive anywhere in `src/`, and an
+agent-to-agent payment is best expressed as an objective rather than a transfer:
+escrow, verification, settlement, audit and citation flow then apply unchanged,
+and fair exchange falls out instead of needing its own protocol.
+
+What makes it tractable at all is an asymmetry that inverts the verifier's
+dilemma. Nobody holds the right answer about an artifact, which is why
+verification needs canaries — but
+
+> **the buyer is the oracle.** An agent spending its own money on a good it wants
+> is motivated to price it correctly, so the protocol enforces atomicity and never
+> valuation.
+
+That survives exactly one rule: **no protocol payment may ever be a function of
+trade volume.** A sybil pair trades at any price for free, so a fee rebate or a
+reputation that pays is the grinding attack with a market around it.
+
+Three results the scope pins down:
+
+- **The market cannot outbid the ratchet.** A buyer will not pay more than what
+  publishing is worth to it, so `π < Δ + φ` and selling is dominated for anyone
+  with standing to move the frontier. The market's whole domain is the goods the
+  ratchet prices at *zero* — which is a boundary the payoffs already draw rather
+  than one anybody has to enforce.
+- **Even-splitting δ stops being safe.** Citation flow divides evenly across a
+  claim's citations, which is fine while citable claims are scarce and is a free
+  attack once an agent can fund cheap objectives its own identities settle. At
+  δ = 1/4 and five citations, four fifths of what the ratchet promised the
+  frontier holder is recoverable. This has to be fixed *before* agent funding,
+  not after.
+- **Decomposition has a floor, and it is high.** A sub-objective the network
+  verifies for more than it settles is subsidized by everything else. At the
+  reference parameters that break-even is 800,000 units per artifact under full
+  redundancy, or 8,000·k under k-fold sampling — so subcontracting should be
+  coarse, and sampled verification stops being optional.
+
+And one risk that decides whether it is worth building at all: candidates
+currently circulate through gossip *because* nothing prices them. Price them and
+gossiping is giving away inventory, so a market for candidates may starve the
+population the island model runs on. That is a payoff question, it is the highest-
+value item in the scope, and it belongs in the harness before it belongs in code.
+
 ## Why anyone runs a node
 
 Everything above pays *submitters*. Nothing in it pays the machines that re-run
@@ -381,6 +433,7 @@ examples/            worked objectives with real artifacts
 - [verification.md](docs/verification.md) — the verification ladder; authoring verifiers
 - [economics.md](docs/economics.md) — what mints, why demand-gating, citation flow
 - [coordination.md](docs/coordination.md) — the hoarding trap, the ratchet, CRDT gossip
+- [agent-market.md](docs/agent-market.md) — agent-to-agent rewards: what a peer-to-peer mechanism would be, and what it breaks
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
