@@ -40,6 +40,25 @@ for solved.
 | **result withholding** — find something extraordinary and walk away | escrow makes it cost the bounty. Nothing makes it impossible | unsolvable |
 | **post-hoc statistics** — choose the success criterion after seeing data | test statistic and threshold registered with the objective. V3 not implemented | design only |
 
+## The operator's own disk
+
+Five rows above concern what the network can do to a node. These concern what
+happens to a node's data when it stops being only on that node's disk -- a
+backup, a synced folder, an external drive, a machine that is sold.
+
+| attack | mechanism | status |
+|---|---|---|
+| **disk at rest** — a copy of the data directory is read by someone who should not | log sealed line-wise with ChaCha20-Poly1305; the chain still covers plaintext, so no hash, root or audit result changes | handled |
+| **ciphertext reordering / splicing** — rearrange sealed lines, or graft one in from another log | the AEAD's associated data binds each line's position, so it fails to decrypt at that line rather than merely failing the chain afterwards | handled |
+| **nonce reuse after truncation** — restore a backup, append again, reuse a nonce under one key | nonces are random per line and stored, never derived from the index. Deriving them would be smaller and would collapse the cipher on any truncate-and-reappend | handled |
+| **the key travels with the data** — a key file copied into the same backup that holds the ciphertext | the default key path is *outside* the data directory; `sync` withholds key files, detected by content rather than filename, and reports them. `keygen` warns if you place one inside anyway | handled |
+| **plaintext residue** — `store encrypt` leaves the unconverted original behind, and the mirror copies it | `sync` withholds `*.plaintext.bak`. **This was a real bug** in the first draft: the backup that made conversion safe was undoing the conversion at the destination | handled |
+| **quota-driven data loss** — a size cap smaller than the log prunes the log to fit | the log is never an eviction candidate; the cap is refused, naming the pinned bytes, and refused *before* anything is deleted | handled |
+| **live attacker on a running node** | none, and none is possible: the key must be readable for the node to work. At-rest encryption protects copies that leave the machine, and nothing else | out of scope |
+| **key loss** | none. There is no recovery path, `keygen` says so, and adding an escrow would reintroduce the party the encryption exists to exclude | unsolvable |
+| **key rotation** | not implemented. Re-keying means decrypting and re-sealing the whole log | design only |
+| **two nodes on one synced folder** | none. One `Ledger` handle per log is the existing contract; a shared folder violates it and nothing detects that | not handled |
+
 ## Sensitive results
 
 A network pointed at cryptographic or biological problems will eventually

@@ -54,7 +54,7 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 677 tests, no network required
+cargo test                    # 747 tests, no network required
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
@@ -241,6 +241,57 @@ collude is behaviourally identical to an honest one, so the custody equilibrium
 is **weak at every parameter set** and no bond makes it strict. What the bond
 buys is that reaching the threshold does not pay.
 
+## Local storage: encrypted, bounded, yours
+
+Where a node's data lives is the operator's choice, and what leaks off their disk
+is their risk. Three things, one command each:
+
+```sh
+proofwork keygen                                   # 32-byte key at ~/.proofwork/key, 0600
+proofwork --data-dir /Volumes/ext/pw audit         # data wherever you want it
+proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
+proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
+```
+
+**At rest, the log is sealed line by line** with ChaCha20-Poly1305. Per line, not
+per file, because the log is append-only and encrypting it as a unit would make
+every append an `O(n)` rewrite. The AEAD's associated data binds each line's
+position, so a reordered or spliced log fails to decrypt at the exact line rather
+than merely failing the chain later.
+
+This does not contradict public verifiability, and the distinction is *whose
+copy*: artifacts the network publishes stay readable — encrypt those and you are
+back to trusting an operator — while a node's own disk is its own business. An
+encrypting node serves exactly what a non-encrypting one serves, and
+
+> **encryption changes no hash, no `prev` link, no Merkle root, and no audit
+> result.** The chain covers plaintext; sealing is storage.
+
+**The key defaults to outside the data directory** (`~/.proofwork/key`), because
+a key beside its ciphertext looks fine right up until the folder is synced
+somewhere else — and then it was never encryption. `sync` refuses to copy a key
+it finds inside a store, detecting them by content rather than filename, and
+withholds the plaintext backup `store encrypt` leaves behind. Optional argon2id
+passphrase wrapping, with the cost parameters stored in the file so raising the
+defaults later does not orphan existing keys.
+
+**The size cap never evicts the log.** A cap on a store holding the only copy of
+a hash-linked log is an instruction to destroy evidence, and "delete the oldest
+thing" would eat the log first. Eviction touches re-fetchable content only; when
+that is not enough the answer is a refusal, *before* anything is deleted:
+
+```
+error: store limit of 100 B cannot hold 1.8 KiB of data that must not be deleted
+(the log and anything beside it). Raise the limit or move the store; proofwork
+will not prune a hash-linked log to fit
+```
+
+A cap smaller than your log stops your node. It does not prune your log.
+
+And the cost of eviction is not disk — it is that evicted content can no longer
+answer an availability challenge, which in a network that pays for availability
+is a slash. `store gc` names every path it dropped for exactly that reason.
+
 ## Censorship resistance
 
 Assume censorship. But separate four properties that get bundled under "encrypt
@@ -316,6 +367,7 @@ src/                 Rust implementation (primary)
   crypto/            Shamir, sealed envelopes, pseudonymous identity
   sealed.rs          sealed submissions, openable without the submitter
   incentive/         the node-operator mechanism, and the harness that evaluates it
+  store/             at-rest encryption, the data directory, the size cap, the mirror
 reference/python/    Python reference implementation (183 tests)
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
@@ -324,6 +376,7 @@ examples/            worked objectives with real artifacts
 
 ## Docs
 
+- [diagrams.md](docs/diagrams.md) — architecture and detailed design, drawn from the code
 - [architecture.md](docs/architecture.md) — the full design and which work shapes fit
 - [verification.md](docs/verification.md) — the verification ladder; authoring verifiers
 - [economics.md](docs/economics.md) — what mints, why demand-gating, citation flow
@@ -331,6 +384,7 @@ examples/            worked objectives with real artifacts
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
+- [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
 - [conformance/README.md](conformance/README.md) — the cross-implementation contract
