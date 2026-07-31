@@ -63,6 +63,14 @@ pub struct Report {
     pub skipped_plaintext: Vec<PathBuf>,
     /// Bytes written.
     pub bytes: u64,
+    /// Files whose modification time could not be carried to the destination.
+    ///
+    /// Not a failure -- the bytes arrived -- but each one will be recopied on
+    /// the next run, so a destination filesystem that cannot hold timestamps
+    /// turns an incremental mirror into a full one. Counted rather than
+    /// swallowed, because "my backup takes an hour every time" is otherwise a
+    /// mystery.
+    pub undated: u64,
     /// True if any copied file was in the clear.
     ///
     /// Not an error: an operator may be mirroring an unencrypted store to a
@@ -106,6 +114,13 @@ impl Report {
             for path in &self.skipped_plaintext {
                 lines.push(format!("  skipped {}", path.display()));
             }
+        }
+        if self.undated > 0 {
+            lines.push(format!(
+                "note: {} file(s) could not keep their modification time at the \
+                 destination, so they will be copied again next run",
+                self.undated
+            ));
         }
         if self.plaintext {
             lines.push(String::from(
@@ -188,6 +203,9 @@ pub fn mirror(store: &Store, destination: &Path, options: Options) -> Result<Rep
                 context: format!("copying {} to {}", file.path.display(), target.display()),
                 source,
             })?;
+            if !preserve_modified(&file.path, &target) {
+                report.undated = report.undated.saturating_add(1);
+            }
         }
         report.bytes = report.bytes.saturating_add(file.bytes);
         report.copied.push(target);
@@ -312,7 +330,36 @@ fn first_chunk(path: &Path) -> Option<Vec<u8>> {
     Some(head)
 }
 
+/// Give the copy the source's modification time.
+///
+/// Without this the mirror is not idempotent, and the platform decides whether
+/// anyone notices. `fs::copy` copies contents and permissions -- it says nothing
+/// about timestamps, and on Linux it preserves none, so every destination file
+/// lands with *now* as its mtime, [`same_file`] never matches, and each run
+/// recopies the entire store. macOS's `copyfile` happens to carry the timestamp
+/// across, which hid the bug locally and let CI find it.
+///
+/// Returns false if the timestamp could not be set. That is not fatal -- the
+/// bytes arrived, which is what a backup is for -- but it does mean the file
+/// will be recopied next time, so the count is reported rather than swallowed.
+fn preserve_modified(source: &Path, target: &Path) -> bool {
+    let Ok(modified) = fs::metadata(source).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    let Ok(handle) = fs::File::options().write(true).open(target) else {
+        return false;
+    };
+    handle
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .is_ok()
+}
+
 /// Same size and same modification time.
+///
+/// Deliberately not a content hash. Hashing a hundred gigabytes to discover
+/// that nothing changed is the reason people stop running their backups, and
+/// the case this misses -- same size, same mtime, different bytes -- is one the
+/// ledger's own hash chain catches on the next `audit`.
 fn same_file(source: &Path, target: &Path) -> bool {
     let (Ok(left), Ok(right)) = (fs::metadata(source), fs::metadata(target)) else {
         return false;
@@ -545,6 +592,39 @@ mod tests {
             mirror(&store, &blocker, Options::default()).expect_err("not a dir"),
             StoreError::NotADirectory(_)
         ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_copy_keeps_the_source_modification_time() {
+        // Regression, and the bug was invisible on the machine it was written
+        // on. `fs::copy` copies contents and permissions and says nothing about
+        // timestamps: on Linux the destination lands with *now*, so `same_file`
+        // never matches and every run recopies the whole store. macOS's
+        // `copyfile` carries the timestamp across, which hid it locally until
+        // CI ran on ubuntu.
+        //
+        // Asserting the timestamp directly -- rather than only asserting
+        // idempotence -- is what makes this catch the bug on either platform.
+        let (dir, store) = sealed_store("mtime");
+        let destination = dir.join("mirror");
+        let report = mirror(&store, &destination, Options::default()).expect("mirrors");
+        assert_eq!(report.undated, 0, "the platform refused to set a timestamp");
+
+        for relative in ["log/proofwork.jsonl", "cache/blob"] {
+            let source = store.root().join(relative);
+            let target = destination.join(relative);
+            let left = fs::metadata(&source)
+                .expect("stat")
+                .modified()
+                .expect("mtime");
+            let right = fs::metadata(&target)
+                .expect("stat")
+                .modified()
+                .expect("mtime");
+            assert_eq!(left, right, "{relative} did not keep its modification time");
+            assert!(same_file(&source, &target));
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

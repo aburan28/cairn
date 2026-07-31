@@ -202,6 +202,15 @@ resumes rather than restarting. Size-and-mtime rather than hashing every file,
 because hashing a hundred gigabytes to learn that nothing changed is why people
 stop running their backups — and the case it could miss is one `audit` catches.
 
+That means the copy has to **keep the source's modification time**, which
+`fs::copy` does not do: it copies contents and permissions and says nothing about
+timestamps. On Linux the destination lands with *now*, so nothing ever matches
+and every run recopies the whole store; macOS's `copyfile` happens to carry the
+timestamp across, which is why this was invisible until CI ran on ubuntu. The
+timestamp is now set explicitly, and a destination filesystem that refuses one is
+counted and reported rather than silently turning an incremental mirror into a
+full one.
+
 Three things it does that `cp -r` does not:
 
 **It never decrypts.** It copies bytes and has no field to put a key in.
