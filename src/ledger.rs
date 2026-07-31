@@ -26,7 +26,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use rand_core::OsRng;
+
 use crate::canonical::{merkle_root, CanonicalError, Value};
+use crate::store::atrest::Cipher;
 
 /// A single record in the log.
 ///
@@ -195,6 +198,19 @@ pub enum LedgerError {
         location: String,
         source: CanonicalError,
     },
+    /// A stored line could not be decrypted, or was encrypted when no key was
+    /// supplied.
+    ///
+    /// Kept distinct from [`LedgerError::Malformed`] because the two send a
+    /// reader in opposite directions. "Malformed" means the log is damaged and
+    /// the bytes are the problem; this means the bytes are probably fine and the
+    /// *key* is the problem -- a different key, a key file that was not
+    /// restored alongside the data, or no key at all. Collapsing them would
+    /// have an operator hunting for corruption that is not there.
+    Sealed {
+        location: String,
+        source: crate::store::atrest::AtRestError,
+    },
 }
 
 impl fmt::Display for LedgerError {
@@ -203,6 +219,7 @@ impl fmt::Display for LedgerError {
             LedgerError::Io { context, source } => write!(f, "{context}: {source}"),
             LedgerError::Malformed { location, reason } => write!(f, "{location}: {reason}"),
             LedgerError::Canonical { location, source } => write!(f, "{location}: {source}"),
+            LedgerError::Sealed { location, source } => write!(f, "{location}: {source}"),
         }
     }
 }
@@ -212,6 +229,7 @@ impl std::error::Error for LedgerError {
         match self {
             LedgerError::Io { source, .. } => Some(source),
             LedgerError::Canonical { source, .. } => Some(source),
+            LedgerError::Sealed { source, .. } => Some(source),
             LedgerError::Malformed { .. } => None,
         }
     }
@@ -235,6 +253,75 @@ fn io_error(context: impl Into<String>, source: std::io::Error) -> LedgerError {
 pub struct Ledger {
     path: PathBuf,
     entries: Vec<Entry>,
+    codec: Codec,
+}
+
+/// How lines are written to and read from the file.
+///
+/// Encryption is a *storage* concern and the hash chain is an *integrity* one,
+/// and this type is where the separation is enforced. Everything above it --
+/// [`Entry::body`], [`Entry::recompute_hash`], [`Ledger::verify_chain`],
+/// [`Ledger::root`] -- works on plaintext and did not change when encryption
+/// arrived. That is why an encrypted log and a plaintext one holding the same
+/// records have the same entry hashes and the same Merkle root, which is what
+/// `an_encrypted_log_has_the_same_root_as_a_plaintext_one` pins.
+#[derive(Debug, Default)]
+pub enum Codec {
+    /// JSONL, one record per line. The format every existing log is in, and the
+    /// one the Python reference reads.
+    #[default]
+    Plain,
+    /// Each line sealed with ChaCha20-Poly1305 under a local key.
+    ///
+    /// Boxed because a [`Cipher`] is much larger than a unit variant and a
+    /// plaintext ledger should not carry the weight of a key it does not have.
+    Sealed(Box<Cipher>),
+}
+
+impl Codec {
+    /// Encode one line for storage. `index` is its zero-based position.
+    fn encode(&self, index: u64, line: &str) -> Result<String, LedgerError> {
+        match self {
+            Codec::Plain => Ok(line.to_string()),
+            Codec::Sealed(cipher) => cipher
+                .seal_line(index, line.as_bytes(), &mut OsRng)
+                .map_err(|source| LedgerError::Sealed {
+                    location: format!("line {index}"),
+                    source,
+                }),
+        }
+    }
+
+    /// Decode one stored line back to JSON text.
+    fn decode(&self, index: u64, location: &str, line: &str) -> Result<String, LedgerError> {
+        match self {
+            Codec::Plain => {
+                // The one case worth a bespoke diagnostic: a sealed log opened
+                // without a key parses as garbage JSON, and "malformed" would
+                // send the reader looking for corruption instead of for a key.
+                if crate::store::atrest::is_sealed_line(line) {
+                    return Err(LedgerError::Sealed {
+                        location: location.to_string(),
+                        source: crate::store::atrest::AtRestError::Undecryptable { line: index },
+                    });
+                }
+                Ok(line.to_string())
+            }
+            Codec::Sealed(cipher) => {
+                let bytes =
+                    cipher
+                        .open_line(index, line)
+                        .map_err(|source| LedgerError::Sealed {
+                            location: location.to_string(),
+                            source,
+                        })?;
+                String::from_utf8(bytes).map_err(|_| LedgerError::Malformed {
+                    location: location.to_string(),
+                    reason: String::from("decrypted line is not valid UTF-8"),
+                })
+            }
+        }
+    }
 }
 
 impl Ledger {
@@ -246,14 +333,33 @@ impl Ledger {
     /// [`verify_chain`](Ledger::verify_chain), and a caller repairing a damaged
     /// log needs to be able to read it first.
     pub fn open(path: impl Into<PathBuf>) -> Result<Ledger, LedgerError> {
+        Ledger::open_with(path, Codec::Plain)
+    }
+
+    /// Open the log at `path`, reading it through `codec`.
+    ///
+    /// The codec is fixed for the life of the handle and is not inferred from
+    /// the file, deliberately. Sniffing would be convenient and wrong: a log
+    /// whose first line happens to be plaintext and whose rest is sealed is a
+    /// log somebody has interfered with, and a reader that silently coped with
+    /// it would hide exactly the event worth noticing. A caller states which
+    /// form it expects, and a mismatch is [`LedgerError::Sealed`] at the line
+    /// where the two disagree.
+    pub fn open_with(path: impl Into<PathBuf>, codec: Codec) -> Result<Ledger, LedgerError> {
         let mut ledger = Ledger {
             path: path.into(),
             entries: Vec::new(),
+            codec,
         };
         if ledger.path.exists() {
             ledger.load()?;
         }
         Ok(ledger)
+    }
+
+    /// Whether this handle seals what it writes.
+    pub fn is_sealed(&self) -> bool {
+        matches!(self.codec, Codec::Sealed(_))
     }
 
     // -- storage ---------------------------------------------------------
@@ -275,6 +381,12 @@ impl Ledger {
                 continue;
             }
             let location = format!("{where_}:{lineno}");
+            // The associated data binds an entry's position among *entries*,
+            // not among lines, so blank lines -- which `lines()` skips above --
+            // do not shift it. `self.entries.len()` is that position, because
+            // an entry is pushed only once its predecessors are all in.
+            let position = self.entries.len() as u64;
+            let line = &self.codec.decode(position, &location, line)?;
             let value = Value::from_json(line).map_err(|e| match e {
                 CanonicalError::Malformed(why) => LedgerError::Malformed {
                     location: location.clone(),
@@ -326,7 +438,10 @@ impl Ledger {
         // Safe to fill in afterwards precisely because the hash does not cover
         // itself -- `body()` ignores the field being assigned here.
         entry.hash = entry.recompute_hash();
-        let line = format!("{}\n", entry.to_json_line());
+        // Encoded before the file is touched, for the same reason the record is
+        // serialized before the file is touched: a line that cannot be produced
+        // must not leave a half-written one behind.
+        let line = format!("{}\n", self.codec.encode(seq, &entry.to_json_line())?);
 
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -931,6 +1046,7 @@ mod tests {
         let ledger = Ledger {
             path: PathBuf::from("unused"),
             entries: vec![Entry { hash, ..entry }],
+            codec: Codec::Plain,
         };
         let problems = ledger.verify_chain();
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -1034,6 +1150,178 @@ mod tests {
         assert!(ledger.entries_of_kind("settlement").is_empty());
         assert_eq!(ledger.entries().len(), 3);
         assert_eq!((&ledger).into_iter().count(), 3);
+    }
+
+    // -- at-rest encryption -------------------------------------------------
+
+    fn sealed_codec() -> Codec {
+        Codec::Sealed(Box::new(Cipher::from_bytes([9u8; 32])))
+    }
+
+    #[test]
+    fn a_sealed_log_round_trips_through_a_reopen() {
+        let dir = TempDir::new("sealed-roundtrip");
+        let path = dir.path.join("log.jsonl");
+        {
+            let mut ledger = Ledger::open_with(&path, sealed_codec()).expect("opens an absent log");
+            assert!(ledger.is_sealed());
+            for i in 0..5 {
+                ledger.append("note", note(i), "t").expect("appends");
+            }
+        }
+        let reopened = Ledger::open_with(&path, sealed_codec()).expect("reopens");
+        assert_eq!(reopened.len(), 5);
+        assert_eq!(reopened.entries()[3].payload, note(3));
+        assert!(reopened.verify_chain().is_empty());
+    }
+
+    #[test]
+    fn a_sealed_log_reveals_nothing_on_disk() {
+        let dir = TempDir::new("sealed-opaque");
+        let path = dir.path.join("log.jsonl");
+        let mut ledger = Ledger::open_with(&path, sealed_codec()).expect("opens");
+        ledger
+            .append(
+                "claim",
+                Value::object([("secret", Value::string("hunter2"))]),
+                "t",
+            )
+            .expect("appends");
+        let raw = fs::read_to_string(&path).expect("read");
+        assert!(!raw.contains("hunter2"), "the payload is readable on disk");
+        assert!(!raw.contains("claim"), "even the record kind is readable");
+        assert!(!raw.contains("sha256:"), "the entry hash is readable");
+        assert!(raw.starts_with("pwenc1:"));
+    }
+
+    #[test]
+    fn an_encrypted_log_has_the_same_root_as_a_plaintext_one() {
+        // The separation of concerns, made checkable: the chain covers
+        // plaintext, so sealing the storage changes no hash, no `prev` link and
+        // no Merkle root. An auditor comparing roots across two nodes cannot
+        // tell -- and should not be able to tell -- whether either encrypted its
+        // local copy.
+        let dir = TempDir::new("sealed-root");
+        let plain_path = dir.path.join("plain.jsonl");
+        let sealed_path = dir.path.join("sealed.jsonl");
+        let mut plain = Ledger::open(&plain_path).expect("opens");
+        let mut sealed = Ledger::open_with(&sealed_path, sealed_codec()).expect("opens");
+        for i in 0..4 {
+            plain.append("note", note(i), "t").expect("appends");
+            sealed.append("note", note(i), "t").expect("appends");
+        }
+        assert_eq!(plain.root(), sealed.root());
+        assert_eq!(plain.head(), sealed.head());
+        assert_eq!(plain.entries(), sealed.entries());
+        // And the bytes on disk are nothing like each other.
+        assert_ne!(
+            fs::read(&plain_path).expect("read"),
+            fs::read(&sealed_path).expect("read")
+        );
+    }
+
+    #[test]
+    fn opening_a_sealed_log_without_a_key_says_so() {
+        // The diagnostic an operator actually hits: they restored the data and
+        // forgot the key file. "Malformed JSON" would send them hunting for
+        // corruption that is not there.
+        let dir = TempDir::new("sealed-nokey");
+        let path = dir.path.join("log.jsonl");
+        let mut ledger = Ledger::open_with(&path, sealed_codec()).expect("opens");
+        ledger.append("note", note(0), "t").expect("appends");
+        let error = Ledger::open(&path).expect_err("cannot read a sealed log in the clear");
+        assert!(matches!(error, LedgerError::Sealed { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn opening_a_plaintext_log_with_a_key_says_that_too() {
+        let dir = TempDir::new("plain-withkey");
+        let path = dir.path.join("log.jsonl");
+        let mut ledger = Ledger::open(&path).expect("opens");
+        ledger.append("note", note(0), "t").expect("appends");
+        let error =
+            Ledger::open_with(&path, sealed_codec()).expect_err("this log is not encrypted");
+        match error {
+            LedgerError::Sealed { source, .. } => assert_eq!(
+                source,
+                crate::store::atrest::AtRestError::NotEncrypted { line: 0 }
+            ),
+            other => panic!("expected a Sealed error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_wrong_key_does_not_silently_produce_a_different_log() {
+        let dir = TempDir::new("sealed-wrongkey");
+        let path = dir.path.join("log.jsonl");
+        let mut ledger = Ledger::open_with(&path, sealed_codec()).expect("opens");
+        ledger.append("note", note(0), "t").expect("appends");
+        let other = Codec::Sealed(Box::new(Cipher::from_bytes([1u8; 32])));
+        let error = Ledger::open_with(&path, other).expect_err("wrong key");
+        assert!(matches!(error, LedgerError::Sealed { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn reordering_sealed_lines_fails_to_decrypt_rather_than_merely_failing_the_chain() {
+        // Two independent defences, and this checks the cheaper one fires
+        // first. The hash chain would catch a swap after decryption; binding
+        // the position into the AEAD catches it at the line, without needing
+        // anyone to run verify_chain.
+        let dir = TempDir::new("sealed-reorder");
+        let path = dir.path.join("log.jsonl");
+        let mut ledger = Ledger::open_with(&path, sealed_codec()).expect("opens");
+        for i in 0..3 {
+            ledger.append("note", note(i), "t").expect("appends");
+        }
+        let text = fs::read_to_string(&path).expect("read");
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines.swap(0, 1);
+        fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
+        let error = Ledger::open_with(&path, sealed_codec()).expect_err("a swap must not open");
+        assert!(matches!(error, LedgerError::Sealed { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_sealed_line_cannot_be_spliced_in_from_another_log() {
+        // Same key, different log, same position. The AEAD alone does not stop
+        // this -- position matches -- so the hash chain is what refuses it, and
+        // this pins that the two defences together leave no gap.
+        let dir = TempDir::new("sealed-splice");
+        let source_path = dir.path.join("source.jsonl");
+        let target_path = dir.path.join("target.jsonl");
+        let mut source = Ledger::open_with(&source_path, sealed_codec()).expect("opens");
+        source.append("note", note(99), "t").expect("appends");
+        let mut target = Ledger::open_with(&target_path, sealed_codec()).expect("opens");
+        target.append("note", note(0), "t").expect("appends");
+        target.append("note", note(1), "t").expect("appends");
+
+        let donor = fs::read_to_string(&source_path).expect("read");
+        let victim = fs::read_to_string(&target_path).expect("read");
+        let donor_line = donor.lines().next().expect("one line");
+        let tail = victim.lines().nth(1).expect("two lines");
+        fs::write(&target_path, format!("{donor_line}\n{tail}\n")).expect("write");
+
+        let spliced = Ledger::open_with(&target_path, sealed_codec()).expect("it does decrypt");
+        let problems = spliced.verify_chain();
+        assert!(!problems.is_empty(), "the chain must refuse the splice");
+    }
+
+    #[test]
+    fn appending_to_a_sealed_log_stays_an_append() {
+        // The property the per-line format exists to preserve. Sealing the file
+        // as a unit would mean rewriting it on every record; this checks the
+        // earlier bytes are untouched by a later append.
+        let dir = TempDir::new("sealed-append");
+        let path = dir.path.join("log.jsonl");
+        let mut ledger = Ledger::open_with(&path, sealed_codec()).expect("opens");
+        ledger.append("note", note(0), "t").expect("appends");
+        let after_one = fs::read(&path).expect("read");
+        ledger.append("note", note(1), "t").expect("appends");
+        let after_two = fs::read(&path).expect("read");
+        assert!(
+            after_two.starts_with(&after_one),
+            "an append rewrote earlier bytes"
+        );
     }
 
     #[test]

@@ -18,6 +18,13 @@ Remaining before Stage 0 is usable by anyone but its author:
 
 - [ ] **Sandbox verifier execution** (container/WASM, no network, wall-clock cap).
       Launch blocker for third-party objectives.
+- [x] **Local store: encryption at rest, a chosen data directory, and a size
+      cap** (`src/store/`). The log is sealed line-wise so appends stay appends,
+      the key defaults to outside the data directory, `sync` mirrors ciphertext
+      without ever carrying the key, and the cap refuses rather than pruning a
+      hash-linked log. See [storage.md](storage.md).
+- [ ] Key rotation: re-key an existing store without a manual decrypt and
+      re-seal. Cheap to add, and not yet needed by anyone.
 - [ ] Signed checkpoints: publish `(merkle_root, height, signature)` so a reader
       can pin what the operator claimed at a point in time and detect a rewrite.
 - [ ] `proofwork verify --from <checkpoint>` for readers who only have a log
