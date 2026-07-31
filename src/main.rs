@@ -66,6 +66,8 @@ use std::process;
 use proofwork::attribution::{payouts_over, FlowError, FlowParams};
 use proofwork::canonical::{short, CanonicalError, Value};
 use proofwork::checkpoint::SignedCheckpoint;
+use proofwork::incentive::design::Report as IncentiveReport;
+use proofwork::incentive::{NodeParams, ParamError, Rat};
 use proofwork::ledger::{Ledger, LedgerError};
 use proofwork::node::Node;
 use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordError};
@@ -237,6 +239,8 @@ enum CliError {
     Overflow(String),
     /// No operating-system entropy for a nonce.
     Entropy(String),
+    /// A set of incentive parameters that is not a network.
+    Params(ParamError),
     /// An argument is not valid UTF-8. `std::env::args` would panic on this.
     NotUnicode(usize),
 }
@@ -245,6 +249,7 @@ impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CliError::Usage(message) => f.write_str(message),
+            CliError::Params(error) => write!(f, "{error}"),
             CliError::Refused(message) => f.write_str(message),
             CliError::Io { context, source } => write!(f, "{context}: {source}"),
             CliError::Json { path, source } => write!(f, "{path}: {source}"),
@@ -356,6 +361,14 @@ enum Command {
     },
     Attribute {
         params: FlowParams,
+    },
+    /// Evaluate the node-operator incentives at a parameter set.
+    ///
+    /// The only command that reads no log. It answers a question about the
+    /// *rules* rather than about anything that has happened, so it takes its
+    /// whole input from flags and is safe to run anywhere.
+    Incentives {
+        params: Box<NodeParams>,
     },
     Log,
     Help,
@@ -490,6 +503,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "audit" => parse_audit(&mut cursor)?,
         "verify" => parse_verify(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
+        "incentives" => parse_incentives(&mut cursor)?,
         "log" => {
             expect_end(&mut cursor, "log")?;
             Command::Log
@@ -648,6 +662,103 @@ fn parse_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
     })
 }
 
+/// `incentives [--nodes N] [--settled N] [--stake N] [--fee N/D] ...`
+///
+/// Every flag overrides one field of [`NodeParams::reference`], so an analyst
+/// changes the number they care about and inherits a coherent set for the rest.
+/// The alternative -- requiring all twenty-odd -- would make the command
+/// unusable, and defaulting the ones the user forgot to zero would silently
+/// produce an answer about a different network.
+///
+/// Rates are written as exact fractions (`1/100`), never as decimals. That is
+/// not fussiness: the whole harness exists to make equilibrium comparisons
+/// decidable, and accepting `0.01` here would mean parsing it into a float and
+/// throwing that away at the first threshold comparison.
+fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut params = NodeParams::reference();
+
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--nodes" => params.nodes = parse_u32(&cursor.value("--nodes")?, "--nodes")?,
+            "--settled" => {
+                params.settled_value = parse_u64(&cursor.value("--settled")?, "--settled")?
+            }
+            "--fee" => params.fee = parse_rate(&cursor.value("--fee")?, "--fee")?,
+            "--stake" => params.stake = parse_u64(&cursor.value("--stake")?, "--stake")?,
+            "--slash-rate" => {
+                params.slash_rate = parse_rate(&cursor.value("--slash-rate")?, "--slash-rate")?
+            }
+            "--verify-cost" => {
+                params.verify_cost = parse_u64(&cursor.value("--verify-cost")?, "--verify-cost")?
+            }
+            "--storage-cost" => {
+                params.storage_cost = parse_u64(&cursor.value("--storage-cost")?, "--storage-cost")?
+            }
+            "--operating-cost" => {
+                params.operating_cost =
+                    parse_u64(&cursor.value("--operating-cost")?, "--operating-cost")?
+            }
+            "--canary-rate" => {
+                params.canary_rate = parse_rate(&cursor.value("--canary-rate")?, "--canary-rate")?
+            }
+            "--canary-leak" => {
+                params.canary_leak = parse_rate(&cursor.value("--canary-leak")?, "--canary-leak")?
+            }
+            "--fraud-rate" => {
+                params.fraud_rate = parse_rate(&cursor.value("--fraud-rate")?, "--fraud-rate")?
+            }
+            "--catch-bounty" => {
+                params.catch_bounty = parse_u64(&cursor.value("--catch-bounty")?, "--catch-bounty")?
+            }
+            "--audit-rate" => {
+                params.audit_rate = parse_rate(&cursor.value("--audit-rate")?, "--audit-rate")?
+            }
+            "--committee" => {
+                params.committee = parse_u32(&cursor.value("--committee")?, "--committee")?
+            }
+            "--threshold" => {
+                params.threshold = parse_u32(&cursor.value("--threshold")?, "--threshold")?
+            }
+            "--sealed-value" => {
+                params.sealed_value = parse_u64(&cursor.value("--sealed-value")?, "--sealed-value")?
+            }
+            "--detection-rate" => {
+                params.detection_rate =
+                    parse_rate(&cursor.value("--detection-rate")?, "--detection-rate")?
+            }
+            "--per-node-rewards" => params.reward_rule = proofwork::incentive::RewardRule::PerNode,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "incentives: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+
+    // Validated here so a nonsense network is a command line error rather than
+    // a surprise partway through a report.
+    params.validate().map_err(CliError::Params)?;
+    Ok(Command::Incentives {
+        params: Box::new(params),
+    })
+}
+
+/// A rate as an exact fraction: `1/100`, or a bare `0` or `1`.
+fn parse_rate(text: &str, flag: &str) -> Result<Rat, CliError> {
+    let bad = || {
+        CliError::Usage(format!(
+            "{flag}: expected an exact fraction in [0, 1] such as 1/100, got {text:?}"
+        ))
+    };
+    let (num, den) = match text.split_once('/') {
+        Some((num, den)) => (num, den),
+        None => (text, "1"),
+    };
+    let num: u32 = num.trim().parse().map_err(|_| bad())?;
+    let den: u32 = den.trim().parse().map_err(|_| bad())?;
+    Rat::rate(num, den).ok_or_else(bad)
+}
+
 fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
     // Seeded from `FlowParams::default()` so the defaults live in one place --
     // the module that has to honour them -- rather than being restated here.
@@ -760,6 +871,14 @@ fn print_help(out: &mut dyn Write) {
         "  attribute [--delta-num N] [--delta-den N] [--max-depth N]",
     );
     say(out, "      compute citation-flow payouts");
+    say(
+        out,
+        "  incentives [--nodes N] [--settled N] [--canary-rate N/D] ...",
+    );
+    say(
+        out,
+        "      evaluate the node-operator game at a parameter set",
+    );
     say(out, "  log");
     say(out, "      print the log");
     say(out, "  help");
@@ -779,7 +898,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "  0  success");
     say(
         out,
-        "  1  audit found problems, or a checkpoint did not match",
+        "  1  audit found problems, a checkpoint did not match, or incentives do not hold",
     );
     say(out, "  2  refused, or bad input");
     say(out, "  3  reveal produced a verdict that settles nothing");
@@ -1126,6 +1245,20 @@ fn cmd_attribute(
     Ok(0)
 }
 
+/// Print the incentive report and say whether the mechanism holds.
+///
+/// Exit code 1 when it does not, matching `audit`: both are "the tool ran fine
+/// and the answer is bad news", which a script has to be able to tell from "the
+/// tool could not run". A failing report is still printed in full -- the useful
+/// part is *which* line failed.
+fn cmd_incentives(out: &mut dyn Write, params: &NodeParams) -> Result<i32, CliError> {
+    let report = IncentiveReport::of(params).map_err(|error| CliError::Usage(error.to_string()))?;
+    for line in report.to_string().lines() {
+        say(out, line);
+    }
+    Ok(if report.passes() { 0 } else { 1 })
+}
+
 fn cmd_log(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
     let node = open_node(options)?;
     for entry in ledger_of(&node).entries() {
@@ -1441,6 +1574,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             *rerun,
         ),
         Command::Attribute { params } => cmd_attribute(out, options, params),
+        Command::Incentives { params } => cmd_incentives(out, params),
         Command::Log => cmd_log(out, options),
     }
 }
@@ -1636,6 +1770,65 @@ mod tests {
                 params: FlowParams::default()
             }
         );
+    }
+
+    #[test]
+    fn incentives_defaults_to_the_reference_network() {
+        let parsed = parse(argv(&["incentives"])).expect("parses");
+        assert_eq!(
+            parsed.command,
+            Command::Incentives {
+                params: Box::new(NodeParams::reference())
+            }
+        );
+    }
+
+    #[test]
+    fn incentives_overrides_one_field_and_inherits_the_rest() {
+        // The property that makes the command usable: an analyst changes the
+        // number they care about without restating twenty others, and does not
+        // silently get a different network for the ones they left out.
+        let parsed =
+            parse(argv(&["incentives", "--canary-rate", "0", "--nodes", "40"])).expect("parses");
+        match parsed.command {
+            Command::Incentives { params } => {
+                assert_eq!(params.canary_rate, Rat::ZERO);
+                assert_eq!(params.nodes, 40);
+                assert_eq!(params.stake, NodeParams::reference().stake);
+                assert_eq!(params.fee, NodeParams::reference().fee);
+            }
+            other => panic!("expected an incentives command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rates_are_exact_fractions_and_decimals_are_refused() {
+        // Accepting "0.01" would mean parsing a float and throwing it away at
+        // the first threshold comparison, which is the one thing the harness
+        // exists to avoid.
+        assert_eq!(
+            parse_rate("1/100", "--canary-rate").expect("parses"),
+            Rat::rate(1, 100).expect("a valid rate")
+        );
+        assert_eq!(parse_rate("0", "--fee").expect("parses"), Rat::ZERO);
+        assert_eq!(parse_rate("1", "--fee").expect("parses"), Rat::ONE);
+        assert!(parse_rate("0.01", "--fee").is_err());
+        assert!(parse_rate("3/2", "--fee").is_err(), "above one");
+        assert!(parse_rate("1/0", "--fee").is_err(), "no answer");
+        assert!(parse_rate("-1/2", "--fee").is_err());
+        assert!(parse_rate("", "--fee").is_err());
+    }
+
+    #[test]
+    fn an_impossible_committee_is_refused_before_any_report_is_printed() {
+        let error = parse(argv(&["incentives", "--threshold", "99"]))
+            .expect_err("a threshold above the committee is not a t-of-n");
+        assert!(matches!(error, CliError::Params(_)), "got {error:?}");
+        // Cross-field, too: shrinking the network below the committee it
+        // inherited is caught here rather than deep inside a payoff function.
+        let error = parse(argv(&["incentives", "--nodes", "7"]))
+            .expect_err("a committee cannot be larger than the network");
+        assert!(matches!(error, CliError::Params(_)), "got {error:?}");
     }
 
     #[test]

@@ -79,8 +79,21 @@ downstream is unbacked.
 - [ ] Bonded challenge windows and interactive fraud proofs over the replay
       trace (the manifest already pins command, seed, and environment, which is
       what makes a trace bisectable).
+- [x] **Node-operator incentives designed and evaluated** (`src/incentive/`).
+      Canaried bonded verification, availability sampling, and bonded share
+      custody, with a harness that solves for the minimum canary rate, bond and
+      committee shape. See [node-incentives.md](node-incentives.md).
 - [ ] Canary objectives with known-invalid artifacts, so checking is the
-      profitable strategy rather than the altruistic one.
+      profitable strategy rather than the altruistic one. The mechanism and its
+      parameters exist; the generator, which must produce canaries a node cannot
+      tell from real submissions, does not. That indistinguishability is the
+      whole assumption -- at `canary_leak = 1` the harness reports that no
+      canary rate works at all.
+- [ ] Availability sampling: Merkle challenges against a published checkpoint
+      root, which is the cheap half of node incentives and needs the signed
+      checkpoints in Stage 0 first.
+- [ ] Bonded share custody, with the committee sized against the largest sealed
+      bounty rather than fixed.
 - [ ] Claim assets typed by verification tier, non-fungible across tiers.
 - [ ] A real randomness beacon (VDF or threshold signature) replacing the
       ledger-head derivation in `partition.py`, which a sequencer can grind.

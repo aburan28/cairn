@@ -1,222 +1,433 @@
-//! Adversarial tests on the payment mechanism.
+//! End-to-end tests for the node-incentive harness.
 //!
-//! The ratchet's telescoping property is stated as "the pool is identical
-//! however the curve is chopped", and `frontier.rs` proves that for the
-//! **direct** reward. These tests ask the question that guarantee does not
-//! answer: what happens to **citation flow** when an improver chops?
+//! The unit tests inside `src/incentive/` check each piece against the algebra
+//! it implements. These check the claims the README and the docs make, from
+//! outside the crate and through the public API only -- because a design
+//! document that says "rubber-stamping stops being an equilibrium" is a claim
+//! about the shipped mechanism, and the place to pin it is where a reader can
+//! find it.
 //!
-//! The answer, pinned below, is that hop-count decay makes chopping strictly
-//! profitable at the upstream contributor's expense — for free, because the
-//! improver already holds the result and telescoping protects the direct
-//! reward. A participant who declines to slice is leaving money on the table,
-//! which makes slicing the dominant strategy rather than an exotic attack.
-//!
-//! The numbers are asserted exactly. If a change to attribution moves them,
-//! that is a change to who gets paid and it should require editing this file.
+//! Every test here is a sentence somebody could write in a paper, restated so a
+//! machine can refuse it.
 
-use std::collections::BTreeMap;
+use proofwork::incentive::design::{
+    committee_window, minimum_audit_rate, minimum_canary_rate, minimum_stake_for_custody,
+    participation, Report,
+};
+use proofwork::incentive::dynamics::tipping_point;
+use proofwork::incentive::game::{
+    everyone, invasion, sybil_gain, symmetric_stability, Invades, Stability,
+};
+use proofwork::incentive::mechanism::{
+    Attest, Availability, Custody, RewardRule, Serve, Share, SplitIdentities, Verification,
+};
+use proofwork::incentive::{NodeParams, ParamError, Rat};
 
-use proofwork::attribution::{payouts_over, FlowParams};
-use proofwork::canonical::Value;
-use proofwork::records::Claim;
+fn reference() -> NodeParams {
+    NodeParams::reference()
+}
 
-const TS: &str = "2026-07-29T00:00:00+00:00";
-const OBJ: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+fn rate(num: u32, den: u32) -> Rat {
+    Rat::rate(num, den).expect("a valid rate")
+}
 
-fn claim(who: &str, n: i128, cites: Vec<String>) -> Claim {
-    Claim::new(
-        OBJ,
-        who,
-        Value::object([("n", Value::Int(n))]),
-        format!("nonce-{n}"),
-        TS,
-        cites,
+// ---------------------------------------------------------------------------
+// The headline claims
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_reference_mechanism_holds_at_every_rung() {
+    let report = Report::of(&reference()).expect("the reference network validates");
+    assert!(report.passes(), "reference report:\n{report}");
+    for service in &report.services {
+        assert!(
+            service.exact,
+            "{} used saturated arithmetic",
+            service.service
+        );
+        assert!(
+            service.stability.is_some(),
+            "{} honest profile is not an equilibrium",
+            service.service
+        );
+        assert!(
+            service.defection.is_none(),
+            "{} has a profitable defection",
+            service.service
+        );
+        assert!(
+            service.rivals.is_empty(),
+            "{} has a rival strict equilibrium",
+            service.service
+        );
+    }
+}
+
+#[test]
+fn rubber_stamping_survives_any_penalty_when_the_trigger_is_conditional() {
+    // The claim the whole mechanism is built around, and the one that makes
+    // canaries structural rather than a tuning knob. If a node is punished for
+    // accepting bad work only when somebody *else* proves it bad, then a
+    // population in which nobody checks punishes nobody -- at any stake, at any
+    // slash rate, at any bounty.
+    for stake in [1_000u64, 1_000_000, 1_000_000_000, 1 << 40] {
+        for bounty in [0u64, 1_000_000, 1 << 40] {
+            let params = NodeParams {
+                canary_rate: Rat::ZERO,
+                stake,
+                slash_rate: Rat::ONE,
+                catch_bounty: bounty,
+                ..reference()
+            };
+            let game = Verification::new(&params).expect("validated");
+            let trap = everyone(&game, Attest::Stamp.index());
+            let held = symmetric_stability(&game, &trap).expect("valid counts");
+            // A bounty above cost/fraud-rate is the one escape, and it is the
+            // expensive one: at these parameters it takes 200_000 units of
+            // bounty to buy a 200-unit check.
+            let bounty_escape =
+                Rat::units(bounty) * params.fraud_rate > Rat::units(params.verify_cost);
+            if bounty_escape {
+                assert_eq!(held, None, "a huge bounty does break the trap");
+            } else {
+                assert!(
+                    held.is_some(),
+                    "the trap survived stake {stake} bounty {bounty}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn canaries_are_the_cheap_escape_and_the_harness_prices_both() {
+    let params = NodeParams {
+        canary_rate: Rat::ZERO,
+        canary_leak: Rat::ZERO,
+        ..reference()
+    };
+    let needed = minimum_canary_rate(&params)
+        .expect("validated")
+        .expect("a rate exists");
+    // One canary in fourteen hundred, against a bounty of two hundred thousand
+    // units to achieve the same thing. That ratio is the argument.
+    assert!(needed < rate(1, 1_000));
+    let fixed = NodeParams {
+        canary_rate: rate(1, 100),
+        ..params.clone()
+    };
+    let game = Verification::new(&fixed).expect("validated");
+    assert_eq!(
+        symmetric_stability(&game, &everyone(&game, Attest::Stamp.index())).expect("valid counts"),
+        None,
+        "the trap is gone"
+    );
+    assert_eq!(
+        symmetric_stability(&game, &everyone(&game, Attest::Verify.index())).expect("valid counts"),
+        Some(Stability::Strict)
+    );
+}
+
+#[test]
+fn the_more_honest_the_network_the_weaker_a_bounty_only_scheme_is() {
+    // The perverse comparative static: with no canaries the only reason to
+    // check is the chance of catching real fraud, so a network where fraud is
+    // rare is a network nobody checks -- which is exactly the network where an
+    // undetected fraud is worth the most.
+    let honest_rate = rate(1, 100_000);
+    let crooked_rate = rate(1, 10);
+    let needed = |fraud_rate: Rat| {
+        let params = NodeParams {
+            canary_rate: Rat::ZERO,
+            canary_leak: Rat::ZERO,
+            fraud_rate,
+            ..reference()
+        };
+        minimum_canary_rate(&params)
+            .expect("validated")
+            .expect("a rate exists")
+    };
+    assert!(
+        needed(honest_rate) > needed(crooked_rate),
+        "an honest network needs more manufactured fraud, not less"
+    );
+}
+
+#[test]
+fn availability_needs_no_canaries_because_the_protocol_holds_the_answer() {
+    // The contrast that explains why verification is the hard one. A Merkle
+    // challenge is checked against a root the protocol published, so a node
+    // that fails one has proved something about itself with nobody's help.
+    let params = reference();
+    let game = Availability::new(&params).expect("validated");
+    assert_eq!(
+        symmetric_stability(&game, &everyone(&game, Serve::Store.index())).expect("valid counts"),
+        Some(Stability::Strict)
+    );
+    assert_eq!(
+        invasion(
+            &game,
+            Serve::Store.index(),
+            params.nodes,
+            Invades::WeaklyBetter
+        )
+        .expect("valid resident"),
+        None
+    );
+    // And the only thing that can break it is arithmetic, not coordination.
+    let threshold = minimum_audit_rate(&params)
+        .expect("validated")
+        .expect("a rate exists");
+    assert!(params.audit_rate > threshold);
+}
+
+// ---------------------------------------------------------------------------
+// The committee
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_committee_threshold_has_a_window_and_both_walls_are_real() {
+    let params = reference();
+    let window = committee_window(&params).expect("validated");
+    assert!(!window.is_empty(), "the reference committee has a window");
+    let (low, high) = (window[0], window[window.len() - 1]);
+    assert!(low > 1 && high < params.committee, "both walls bind");
+    assert!(
+        window.contains(&params.threshold),
+        "the reference threshold {} is inside {low}..={high}",
+        params.threshold
+    );
+
+    // Below the window: a cartel of `t` opens the envelope early.
+    let too_low = NodeParams {
+        threshold: low - 1,
+        ..params.clone()
+    };
+    let game = Custody::new(&too_low).expect("validated");
+    let found = invasion(
+        &game,
+        Share::Publish.index(),
+        too_low.committee,
+        Invades::StrictlyBetter,
     )
-    .expect("valid claim")
-}
+    .expect("valid resident")
+    .expect("a low threshold is cheap to reach");
+    assert_eq!(found.mutant, Share::OpenEarly.index());
 
-/// Settle `steps` in order, each claim citing the one before it, and return
-/// the citation-flow payouts per submitter.
-fn payouts(steps: &[(&str, u64)], params: &FlowParams) -> BTreeMap<String, u64> {
-    let mut claims = BTreeMap::new();
-    let mut settlements = Vec::new();
-    let mut previous: Option<String> = None;
-    for (i, (who, reward)) in steps.iter().enumerate() {
-        let c = claim(who, i as i128, previous.clone().into_iter().collect());
-        let id = c.id();
-        claims.insert(id.clone(), c);
-        settlements.push((id.clone(), *reward));
-        previous = Some(id);
-    }
-    payouts_over(&settlements, &claims, params).expect("flow succeeds")
-}
-
-fn take(p: &BTreeMap<String, u64>, who: &str) -> u64 {
-    p.get(who).copied().unwrap_or(0)
-}
-
-/// The CLI defaults, and the parameters every number below assumes.
-fn default_params() -> FlowParams {
-    FlowParams::new(1, 4, 6).expect("delta 1/4, depth 6")
-}
-
-/// The README's showcase, unchopped: alice 9->12, bob 12->16, carol 16->20 on
-/// a 1,100,000 pool.
-fn showcase() -> Vec<(&'static str, u64)> {
-    vec![("alice", 300_000), ("bob", 400_000), ("carol", 400_000)]
+    // Above it: a cartel of `n - t + 1` blocks the opening and censors.
+    let too_high = NodeParams {
+        threshold: high + 1,
+        ..params
+    };
+    let game = Custody::new(&too_high).expect("validated");
+    let found = invasion(
+        &game,
+        Share::Publish.index(),
+        too_high.committee,
+        Invades::StrictlyBetter,
+    )
+    .expect("valid resident")
+    .expect("a high threshold is cheap to block");
+    assert_eq!(found.mutant, Share::Withhold.index());
 }
 
 #[test]
-fn the_documented_showcase_still_pays_what_the_readme_says() {
-    // If this fails, the README is wrong, not the test.
-    let p = payouts(&showcase(), &default_params());
-    assert_eq!(take(&p, "alice"), 425_000);
-    assert_eq!(take(&p, "bob"), 375_000);
-    assert_eq!(take(&p, "carol"), 300_000);
-    assert!(
-        take(&p, "alice") > take(&p, "bob"),
-        "the headline claim is that alice ends up ahead of bob"
-    );
-}
-
-#[test]
-fn slicing_an_improvement_transfers_value_from_the_upstream_contributor() {
-    // THE FINDING. bob does exactly the same work for exactly the same direct
-    // reward -- telescoping guarantees that -- but reveals it as four 1-point
-    // steps instead of one 4-point step. He already holds the result, so the
-    // chopping costs him nothing.
-    let mut sliced: Vec<(&str, u64)> = vec![("alice", 300_000)];
-    for _ in 0..4 {
-        sliced.push(("bob", 100_000));
-    }
-    sliced.push(("carol", 400_000));
-
-    let honest = payouts(&showcase(), &default_params());
-    let attack = payouts(&sliced, &default_params());
-
-    // Conservation still holds: this is a transfer, not an inflation.
-    let honest_total: u64 = honest.values().sum();
-    let attack_total: u64 = attack.values().sum();
-    assert_eq!(honest_total, 1_100_000);
-    assert_eq!(attack_total, 1_100_000);
-
-    // Exact, so a change to attribution has to come here and edit them.
-    assert_eq!(take(&attack, "alice"), 333_592);
-    assert_eq!(take(&attack, "bob"), 466_408);
-    assert_eq!(take(&attack, "carol"), 300_000);
-
-    // bob gains precisely what alice loses, and carol is untouched.
-    let gained = take(&attack, "bob") - take(&honest, "bob");
-    let lost = take(&honest, "alice") - take(&attack, "alice");
-    assert_eq!(gained, lost, "the transfer should be exact");
-    assert_eq!(gained, 91_408);
-    assert_eq!(take(&attack, "carol"), take(&honest, "carol"));
-
-    // And it inverts the headline: after slicing, bob is ahead of alice.
-    assert!(
-        take(&attack, "bob") > take(&attack, "alice"),
-        "slicing should overturn the README's showcase result"
-    );
-}
-
-#[test]
-fn the_more_finely_an_improver_slices_the_less_the_upstream_gets() {
-    // Monotone in the number of steps, so there is no threshold below which
-    // slicing is harmless -- every additional cut pays.
-    let params = default_params();
-    // Measure the *flow* alice receives, not her total: her own 300,000 direct
-    // reward is a floor that no amount of slicing can touch, and including it
-    // would understate the effect.
-    const ALICE_DIRECT: u64 = 300_000;
-    let mut previous = u64::MAX;
-    let mut inflow = Vec::new();
-    for steps in [1u64, 2, 4, 8, 16] {
-        let mut curve: Vec<(&str, u64)> = vec![("alice", ALICE_DIRECT)];
-        for _ in 0..steps {
-            curve.push(("bob", 400_000 / steps));
-        }
-        let received = take(&payouts(&curve, &params), "alice") - ALICE_DIRECT;
+fn the_committee_must_grow_with_the_value_it_seals() {
+    // Not a tuning issue: a fixed committee shape that is safe for a small
+    // bounty is corruptible for a large one, and no code changes in between.
+    let base = reference();
+    let mut previous = 0u64;
+    for multiple in [1u64, 2, 4, 8] {
+        let params = NodeParams {
+            sealed_value: base.sealed_value * multiple,
+            ..base.clone()
+        };
+        let needed = minimum_stake_for_custody(&params)
+            .expect("validated")
+            .expect("some bond works at this size");
         assert!(
-            received < previous,
-            "{steps} steps gave alice {received} of flow, not less than {previous}"
+            needed > previous,
+            "a larger sealed value must demand a larger bond"
         );
-        previous = received;
-        inflow.push(received);
-    }
-    // One honest claim pays alice 100,000 of flow; sixteen slices pay 8,329 --
-    // a 92% cut for work bob was going to do anyway.
-    assert_eq!(inflow[0], 100_000);
-    assert_eq!(inflow[4], 8_329);
-    assert!(
-        inflow[4] * 10 < inflow[0],
-        "16 slices should cost alice most of her flow: {inflow:?}"
-    );
-}
-
-#[test]
-fn max_depth_does_not_defend_against_slicing() {
-    // A plausible first instinct is that bounding the walk bounds the damage.
-    // It does not: the decay is geometric *within* the chain, so a deeper cap
-    // changes almost nothing.
-    let mut sliced: Vec<(&str, u64)> = vec![("alice", 300_000)];
-    for _ in 0..8 {
-        sliced.push(("bob", 50_000));
-    }
-
-    let shallow = take(
-        &payouts(&sliced, &FlowParams::new(1, 4, 6).unwrap()),
-        "alice",
-    );
-    let deep = take(
-        &payouts(&sliced, &FlowParams::new(1, 4, 64).unwrap()),
-        "alice",
-    );
-    let difference = shallow.abs_diff(deep);
-    assert!(
-        difference * 1000 < shallow,
-        "raising max_depth from 6 to 64 changed alice's take by {difference}, \
-         which would mean depth is a real defence"
-    );
-}
-
-#[test]
-fn a_larger_delta_does_not_remove_the_incentive_either() {
-    // Turning up the citation share raises alice's take in absolute terms but
-    // leaves slicing strictly profitable, so it is not a fix.
-    for (num, den) in [(1u64, 4u64), (1, 2), (3, 4)] {
-        let params = FlowParams::new(num, den, 6).unwrap();
-
-        let honest = payouts(&showcase(), &params);
-        let mut sliced: Vec<(&str, u64)> = vec![("alice", 300_000)];
-        for _ in 0..4 {
-            sliced.push(("bob", 100_000));
-        }
-        sliced.push(("carol", 400_000));
-        let attack = payouts(&sliced, &params);
-
-        assert!(
-            take(&attack, "bob") > take(&honest, "bob"),
-            "delta {num}/{den}: slicing should still pay bob more"
-        );
-        assert!(
-            take(&attack, "alice") < take(&honest, "alice"),
-            "delta {num}/{den}: slicing should still cost alice"
-        );
+        previous = needed;
     }
 }
 
 #[test]
-fn slicing_gains_nothing_when_there_is_nobody_upstream() {
-    // Confirms the mechanism of the attack: the gain comes entirely from
-    // withholding flow that would have gone upstream, not from the ratchet.
-    // With no upstream contributor there is nothing to withhold.
-    let params = default_params();
-    let one = payouts(&[("bob", 400_000)], &params);
-    let mut many: Vec<(&str, u64)> = Vec::new();
-    for _ in 0..4 {
-        many.push(("bob", 100_000));
+fn standing_ready_to_collude_is_free_and_the_harness_says_so() {
+    // The property no mechanism here can fix, reported rather than hidden: a
+    // committee member below the threshold behaves and is paid exactly like an
+    // honest one, so the honest profile is weak and a cartel assembles at zero
+    // cost. What the bond buys is that reaching the threshold does not pay.
+    let params = reference();
+    let game = Custody::new(&params).expect("validated");
+    assert_eq!(
+        symmetric_stability(&game, &everyone(&game, Share::Publish.index())).expect("valid counts"),
+        Some(Stability::Weak)
+    );
+    let drift = invasion(
+        &game,
+        Share::Publish.index(),
+        params.committee,
+        Invades::WeaklyBetter,
+    )
+    .expect("valid resident")
+    .expect("free drift exists");
+    assert_eq!(drift.gain, Rat::ZERO);
+    assert_eq!(
+        invasion(
+            &game,
+            Share::Publish.index(),
+            params.committee,
+            Invades::StrictlyBetter
+        )
+        .expect("valid resident"),
+        None,
+        "but nobody profits"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Participation and sybils
+// ---------------------------------------------------------------------------
+
+#[test]
+fn security_spend_is_proportional_to_settled_value_including_at_zero() {
+    // The bootstrap problem, exactly as stated in the module docs. Node rewards
+    // are a fee on settlement rather than a mint, which is the right long-run
+    // answer and means a network that has settled nothing pays nobody.
+    let dead = NodeParams {
+        settled_value: 0,
+        ..reference()
+    };
+    let found = participation(&dead).expect("validated");
+    assert!(found.net.is_negative());
+    assert_eq!(found.supports_nodes, None, "no node count is viable");
+    let needed = found
+        .break_even_settled_value
+        .expect("some settlement level works");
+    assert!(needed > 0);
+
+    let alive = NodeParams {
+        settled_value: needed,
+        ..dead
+    };
+    assert!(!participation(&alive).expect("validated").net.is_negative());
+}
+
+#[test]
+fn an_even_per_node_split_pays_for_identities_and_a_stake_split_does_not() {
+    let params = reference();
+    let per_node = SplitIdentities::verification(&params, RewardRule::PerNode).expect("validated");
+    let per_stake =
+        SplitIdentities::verification(&params, RewardRule::PerStake).expect("validated");
+    assert!(sybil_gain(&per_node, 100).gain.is_positive());
+    assert_eq!(sybil_gain(&per_stake, 100).gain, Rat::ZERO);
+
+    // And the report fails the network that chooses the wrong rule.
+    let naive = NodeParams {
+        reward_rule: RewardRule::PerNode,
+        ..params
+    };
+    assert!(!Report::of(&naive).expect("validated").passes());
+}
+
+// ---------------------------------------------------------------------------
+// Dynamics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_reference_network_absorbs_a_shock_of_any_size() {
+    let params = reference();
+    let game = Verification::new(&params).expect("validated");
+    assert_eq!(
+        tipping_point(
+            &game,
+            Attest::Verify.index(),
+            Attest::Stamp.index(),
+            100_000
+        )
+        .expect("valid actions"),
+        None
+    );
+}
+
+#[test]
+fn a_thin_bond_and_no_canaries_makes_the_collapse_gradual() {
+    // Two different failures with two different fixes. Without canaries the
+    // network is bistable -- fine until everyone moves at once. With a thin bond
+    // as well, it erodes one operator at a time, which is far worse and far
+    // easier to see coming.
+    let bistable = NodeParams {
+        canary_rate: Rat::ZERO,
+        ..reference()
+    };
+    let game = Verification::new(&bistable).expect("validated");
+    assert_eq!(
+        tipping_point(
+            &game,
+            Attest::Verify.index(),
+            Attest::Stamp.index(),
+            100_000
+        )
+        .expect("valid actions"),
+        Some(bistable.nodes),
+        "only a total defection reaches the trap"
+    );
+
+    let slope = NodeParams {
+        stake: 1_000,
+        ..bistable
+    };
+    let game = Verification::new(&slope).expect("validated");
+    assert_eq!(
+        tipping_point(
+            &game,
+            Attest::Verify.index(),
+            Attest::Stamp.index(),
+            100_000
+        )
+        .expect("valid actions"),
+        Some(1),
+        "one lazy operator is enough"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The harness refuses rather than guesses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_parameter_set_that_is_not_a_network_is_refused_by_every_entry_point() {
+    let broken = NodeParams {
+        threshold: 0,
+        ..reference()
+    };
+    assert!(matches!(
+        broken.validate(),
+        Err(ParamError::BadThreshold { .. })
+    ));
+    assert!(Verification::new(&broken).is_err());
+    assert!(Custody::new(&broken).is_err());
+    assert!(Availability::new(&broken).is_err());
+    assert!(Report::of(&broken).is_err());
+    assert!(participation(&broken).is_err());
+    assert!(minimum_canary_rate(&broken).is_err());
+}
+
+#[test]
+fn a_report_is_reproducible_to_the_last_character() {
+    // Exact rationals throughout, so two runs of the same analysis produce the
+    // same bytes. Not a given: this is the property a float-based harness
+    // cannot offer, and the reason a report can be checked into a repository
+    // and diffed when a parameter changes.
+    let params = reference();
+    let first = Report::of(&params).expect("validated").to_string();
+    for _ in 0..5 {
+        assert_eq!(Report::of(&params).expect("validated").to_string(), first);
     }
-    let split = payouts(&many, &params);
-    assert_eq!(take(&one, "bob"), 400_000);
-    assert_eq!(take(&split, "bob"), 400_000);
+    assert_eq!(
+        Report::of(&params).expect("validated"),
+        Report::of(&params).expect("validated")
+    );
 }

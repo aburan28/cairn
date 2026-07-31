@@ -23,7 +23,7 @@ for solved.
 | **hoarding** — hide improvements so a competitor cannot extend them | progressive bounties pay for distance moved, so publishing is the profitable move and copying earns zero | handled |
 | **frontier theft** — take credit for an improvement built on someone else's | an improvement must cite the frontier it beat, enforced at submission; citation flow pays the previous holder | handled |
 | **epsilon-farming** — split one improvement into many to extract more *direct reward* | payouts telescope on a cumulative curve, so the pool is identical however the curve is chopped; `min_improvement` sets a floor | handled |
-| **citation-flow dilution** — split one improvement into many to starve the contributor you built on | **not handled.** Telescoping protects the *direct* reward only. Citation flow decays per *hop*, not per unit of progress, so chopping is free in direct reward and strictly profitable in flow. On the README's own example, bob slicing 12→16 into four 1-point steps moves 91,408 from alice to himself — a 24% raise for work he had already done — and overturns the documented result that alice ends up ahead. Sixteen slices cost the upstream contributor 92% of their flow. `max_depth` is not a defence: decay is geometric *within* the chain, and depth 6 and 64 differ by under 0.1%. Raising δ does not help either. Pinned in `tests/incentives.rs`; the fix is distance-weighted attribution (see below) | **not handled** |
+| **citation-flow dilution** — split one improvement into many to starve the contributor you built on | **not handled.** Telescoping protects the *direct* reward only. Citation flow decays per *hop*, not per unit of progress, so chopping is free in direct reward and strictly profitable in flow. On the README's own example, bob slicing 12→16 into four 1-point steps moves 91,408 from alice to himself — a 24% raise for work he had already done — and overturns the documented result that alice ends up ahead. Sixteen slices cost the upstream contributor 92% of their flow. `max_depth` is not a defence: decay is geometric *within* the chain, and depth 6 and 64 differ by under 0.1%. Raising δ does not help either. Pinned in `tests/citation_flow.rs`; the fix is distance-weighted attribution (see below) | **not handled** |
 | **frontier rollback** — replay an old lower score as the current best | `audit` rejects a frontier that moves backwards, and a pool paid beyond its size | handled |
 | **gossip score inflation** — assert a huge score to evict real candidates from a bounded population | `gossip.ingest` re-scores locally and drops what does not reproduce; verification costs one evaluation. Now enforced on the wire too: `p2p::pop` re-scores every arriving candidate and a scorer that cannot answer is a refusal, never an acceptance | handled |
 | **population scoring amplification** — volunteer candidates so a peer burns evaluations on them | only candidates this node explicitly asked for in its `pop_want` are scored; anything else is dropped before the scorer runs, and message ceilings are checked against the declared array length before allocation. The bound that remains is the one the objective sets: a node that *has* asked for 512 candidates for an expensive objective still pays for 512 evaluations | partial |
@@ -45,7 +45,11 @@ for solved.
 | **spurious citations** — cite everything to farm attribution | δ decays with depth, bounding the payoff. Validators slashing bad edges is designed, not built | partial |
 | **self-dealing** — fund a bounty you have already solved | statement commitment must predate any witness; funder ≠ solver for protocol pools. Not enforced here (no identity layer) | not handled |
 | **sybil on judgement stake** | operator attestation, concentration caps. Mitigation, never prevention | out of scope at Stage 0 |
-| **rubber-stamp verification** — attest without checking (verifier's dilemma) | canaries, bonded challenge windows, interactive fraud proofs. Only arises when verification is expensive, i.e. Stage 2+ | out of scope at Stage 0 |
+| **rubber-stamp verification** — attest without checking (verifier's dilemma) | canaries against a bonded stake. Conditional slashing provably cannot work: with no canaries, universal rubber-stamping is a Nash equilibrium at *any* penalty, because nobody is caught when nobody looks. Mechanism designed, parameters solved and tested in `src/incentive/`; not wired into settlement | designed, not built |
+| **blind rejection** — reject everything without checking, collecting canary catches for free | valid canaries, plus the fact that the denied submitter is strictly motivated to dispute. False rejections police themselves; false acceptances do not | designed, not built |
+| **sybil on node rewards** — present one machine as forty | pools split by stake, never per node: stake is conserved when divided, headcount is not. An even split is sybil-attracting by construction | designed, not built |
+| **committee collusion** — `t` share-holders open a sealed submission early and front-run it | bonded custody: unprofitable when `V ≤ t·d·S'`. Note the residual — a sub-threshold cartel is behaviourally identical to honest members, so it assembles at zero cost and the honest profile is only ever a *weak* equilibrium | designed, not built |
+| **committee censorship** — `n − t + 1` share-holders withhold, so the reveal never opens and a rival wins | attributable non-publication is slashable, and the threshold must sit in a window where neither this nor early opening pays. The window is empty for a committee too small for the value it seals | designed, not built |
 | **result withholding** — find something extraordinary and walk away | escrow makes it cost the bounty. Nothing makes it impossible | unsolvable |
 | **post-hoc statistics** — choose the success criterion after seeing data | the `statistical` verifier puts the pinned statistic, its sha256, the threshold, the direction and the seed inside the objective, so all of them are part of its content-addressed id. Picking a criterion after seeing the data means posting a *different* objective with a different id, in public, after the fact | handled |
 | **seed shopping** — rerun a Monte Carlo statistic until one draw clears the threshold | the seed is pinned in the objective and passed to `statistic(artifact, seed)`; the same artifact therefore always produces the same number on every honest node. A submitter can still search *artifacts* against a fixed seed, which is the objective doing its job | handled |
@@ -146,3 +150,20 @@ bad faith. What the operator *cannot* do is lie about a settled result: the log
 is hash-linked and `proofwork audit` re-derives every verdict from the artifacts
 themselves. That is the specific, narrow guarantee this stage makes, and
 overstating it would be the first dishonest thing in the project.
+
+
+## Node operators
+
+Five rows above are new and share a caveat worth stating once rather than five
+times: they are **mechanism, not code**. `src/incentive/` contains the payoff
+model, the solvers, and the parameters that make each attack unprofitable, all
+tested; nothing in it runs at settlement time. A row marked *designed, not
+built* means the attack has a worked answer and an unbuilt implementation --
+which is better than an unanswered attack and considerably worse than a defended
+one.
+
+What the analysis adds beyond "here is a mitigation" is the size of the
+parameters. A bond in the millions, a committee that grows with the largest
+sealed bounty, and a canary pipeline indistinguishable from real submissions are
+requirements that are cheap to discover now and very expensive to discover after
+a network has operators. See [node-incentives.md](node-incentives.md).

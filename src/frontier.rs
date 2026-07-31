@@ -322,7 +322,7 @@ pub struct Ratchet {
     ///
     /// Set it deliberately. The shipped cap-set example ran at `1` over a span
     /// of `11` — eleven slices, the maximally exploitable setting — and is now
-    /// `3`. See `tests/incentives.rs` for the measured cost of getting this
+    /// `3`. See `tests/citation_flow.rs` for the measured cost of getting this
     /// wrong, and "Slicing, and why telescoping is not enough" in
     /// `docs/threat-model.md` for the structural fix that would retire this
     /// parameter as a defence.

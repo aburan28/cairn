@@ -204,4 +204,4 @@ Everything above is about the *direct* reward, where telescoping holds exactly.
 Citation flow decays per hop, so chopping an improvement is free in direct
 reward and strictly profitable in flow — it starves whoever you built on. See
 **Slicing, and why telescoping is not enough** in [threat-model.md](threat-model.md),
-and `tests/incentives.rs`, which pins the numbers.
+and `tests/citation_flow.rs`, which pins the numbers.
