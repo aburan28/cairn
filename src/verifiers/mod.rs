@@ -1461,9 +1461,10 @@ impl VerifierRegistry {
             Ok(source) => {
                 let actual = blobs::address(&source);
                 if actual == declared {
-                    return Ok(full);
+                    Ok(full)
+                } else {
+                    Err(PinFailure::Mismatch { actual })
                 }
-                return Err(PinFailure::Mismatch { actual });
             }
             Err(error) => {
                 // The content-addressed fallback, and the reason this module
