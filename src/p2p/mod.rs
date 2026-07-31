@@ -4,6 +4,7 @@
 //! content-addressed and independently verifiable, so peers need no agreement
 //! about *validity* — only about *order*, and only for the frontier.
 
+pub mod code;
 pub mod discovery;
 pub mod handshake;
 pub mod pop;

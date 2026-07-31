@@ -77,8 +77,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest as _, Sha256};
-
+use crate::blobs::{self, BlobStore};
 use crate::canonical::Value;
 use sandbox::Confinement;
 
@@ -566,13 +565,99 @@ sys.exit(main())
 // Registry
 // ---------------------------------------------------------------------------
 
+/// Why a pin could not be turned into a runnable path on this node.
+///
+/// Internal, and separate from [`Verdict`] on purpose: the same resolution
+/// answers two different questions — "what status does this verification get"
+/// and "which blob should I ask a peer for" — and the second one needs to
+/// distinguish a broken objective (never fetch) from absent code (fetch).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PinFailure {
+    /// The declared path leaves the bundle root. A broken objective, and
+    /// deliberately not rescuable from the store.
+    Escape,
+    /// A bundle file exists and hashes to something else. Not rescuable from
+    /// the store: a cached blob must not shadow an edited bundle file.
+    Mismatch { actual: String },
+    /// Neither the bundle nor the store has a copy. The only fetchable case.
+    Absent { detail: String },
+}
+
+/// A pinned code file named by a verifier spec: where the objective says it is,
+/// and the content address the objective's identity commits to.
+///
+/// Extracted here rather than at each call site because the field names differ
+/// per kind (`checker_sha256`, `evaluator_sha256`, `statistic.sha256`) and three
+/// copies of that knowledge would drift. Every consumer that has to answer
+/// "which blobs does this objective need" — publishing, the wire protocol's want
+/// set, garbage collection — goes through [`pinned_code`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedCode {
+    /// `"checker"`, `"evaluator"`, or `"statistic"`, for diagnostics.
+    pub role: &'static str,
+    /// Bundle-relative path, as written in the objective.
+    pub path: String,
+    /// Bare lowercase hex SHA-256 — the blob's content address.
+    pub sha256: String,
+}
+
+/// Every pinned code file a verifier spec names, in a fixed order.
+///
+/// `replay` and `lean` produce nothing, and that is a real limitation rather
+/// than an oversight: a `replay` spec names a command, and a `lean` spec needs a
+/// proof-assistant toolchain. Neither is a blob, so neither is made portable by
+/// content-addressing the code. `docs/verification.md` says so where an
+/// objective author will read it.
+pub fn pinned_code(spec: &Value) -> Vec<PinnedCode> {
+    let mut out = Vec::new();
+    let mut push = |role: &'static str, path: Option<&str>, sha: Option<&str>| {
+        if let (Some(path), Some(sha)) = (path, sha) {
+            out.push(PinnedCode {
+                role,
+                path: path.to_string(),
+                sha256: sha.to_string(),
+            });
+        }
+    };
+    match spec.get("kind").and_then(Value::as_str) {
+        Some("certificate") => push(
+            "checker",
+            spec.get("checker").and_then(Value::as_str),
+            spec.get("checker_sha256").and_then(Value::as_str),
+        ),
+        Some("evaluator") => push(
+            "evaluator",
+            spec.get("evaluator").and_then(Value::as_str),
+            spec.get("evaluator_sha256").and_then(Value::as_str),
+        ),
+        Some("statistical") => {
+            if let Some(statistic) = spec.get("statistic") {
+                push(
+                    "statistic",
+                    statistic.get("path").and_then(Value::as_str),
+                    statistic.get("sha256").and_then(Value::as_str),
+                );
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Dispatches a verifier spec to the verifier it names.
 ///
 /// `root` is the objective bundle root. Pinned checker and evaluator paths are
 /// resolved against it and may not escape it; see [`VerifierRegistry::pinned`].
+///
+/// `blobs` is the content-addressed fallback for code this node never had a
+/// bundle for — the mechanism that lets a peer holding only the log obtain the
+/// checker and re-derive settlement. It is consulted *after* the bundle, so an
+/// operator editing a checker in place still sees a mismatch reported against
+/// their edit rather than silently shadowed by a cached copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifierRegistry {
     root: PathBuf,
+    blobs: BlobStore,
     lean_binary: String,
     python_binary: String,
 }
@@ -585,8 +670,10 @@ impl Default for VerifierRegistry {
 
 impl VerifierRegistry {
     pub fn new(root: impl Into<PathBuf>) -> VerifierRegistry {
+        let root = root.into();
         VerifierRegistry {
-            root: root.into(),
+            blobs: BlobStore::under(&root),
+            root,
             lean_binary: "lean".to_string(),
             python_binary: "python3".to_string(),
         }
@@ -594,6 +681,20 @@ impl VerifierRegistry {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The blob store this registry falls back to, and publishes into.
+    pub fn blobs(&self) -> &BlobStore {
+        &self.blobs
+    }
+
+    /// Keep the blob cache somewhere other than under the bundle root.
+    ///
+    /// Wanted by a node whose root is read-only, and by tests that need two
+    /// nodes with genuinely separate stores while sharing one checkout.
+    pub fn with_blob_dir(mut self, dir: impl Into<PathBuf>) -> VerifierRegistry {
+        self.blobs = BlobStore::at(dir);
+        self
     }
 
     /// Override the Lean binary. Useful for a node with a pinned toolchain, and
@@ -1287,12 +1388,14 @@ impl VerifierRegistry {
     /// not silently rescore an objective -- it forks it into a different
     /// objective, and the old one now fails this check.
     ///
-    /// Two failure modes, two statuses:
+    /// Three failure modes, two statuses:
     ///
-    /// - a path that escapes the root, or a hash that does not match, means the
-    ///   objective is broken: `InvalidSpec`. A tampered checker is never run.
-    /// - a file this node cannot read means this node cannot verify:
-    ///   `Unavailable`. It says nothing about the artifact.
+    /// - a path that escapes the root, or a hash that does not match with no
+    ///   correct copy available anywhere, means the objective is broken:
+    ///   `InvalidSpec`. A tampered checker is never run.
+    /// - code this node cannot obtain — no bundle file *and* no blob — means
+    ///   this node cannot verify: `Unavailable`. It says nothing about the
+    ///   artifact, and a peer can fix it by sending the blob.
     ///
     /// Both sides of the containment check are made absolute first. A relative
     /// root like `"."` never prefixes a normalized relative join, so the naive
@@ -1304,48 +1407,154 @@ impl VerifierRegistry {
         relative: &str,
         declared_sha256: &str,
     ) -> Result<PathBuf, Verdict> {
-        let root = match absolutize(&self.root) {
-            Ok(root) => root,
-            Err(error) => {
-                return Err(Verdict::unavailable(format!(
-                    "cannot resolve the objective root: {error}"
-                )))
-            }
-        };
-        let full = match absolutize(&root.join(relative)) {
-            Ok(full) => full,
-            Err(error) => {
-                return Err(Verdict::unavailable(format!(
-                    "cannot resolve the pinned {role} path: {error}"
-                )))
-            }
-        };
+        self.resolve_pinned(relative, declared_sha256)
+            .map_err(|failure| match failure {
+                PinFailure::Escape => Verdict::invalid_spec(format!(
+                    "pinned path escapes the objective root: {relative}"
+                )),
+                // Wording unchanged from before the blob store: an operator who
+                // edited a checker in place needs this diagnostic, and a cached
+                // blob must not rescue (or rephrase) the mismatch.
+                PinFailure::Mismatch { actual } => Verdict::invalid_spec(format!(
+                    "pinned code {relative} has sha256 {actual}, objective declares \
+                     {declared_sha256}"
+                )),
+                PinFailure::Absent { detail } => {
+                    Verdict::unavailable(format!("cannot load {role}: {detail}"))
+                }
+            })
+    }
+
+    /// Whether this node can obtain the bytes behind a pin, and if not, why.
+    ///
+    /// Split out from [`VerifierRegistry::pinned`] so the wire protocol can ask
+    /// "which blobs am I missing" using the *same* resolution the verifier will
+    /// use. Two implementations of that question would eventually disagree, and
+    /// the failure would be a node that fetches nothing while reporting
+    /// `Unavailable` forever.
+    fn resolve_pinned(&self, relative: &str, declared: &str) -> Result<PathBuf, PinFailure> {
+        let root = absolutize(&self.root).map_err(|error| PinFailure::Absent {
+            detail: format!("cannot resolve the objective root: {error}"),
+        })?;
+        let full = absolutize(&root.join(relative)).map_err(|error| PinFailure::Absent {
+            detail: format!("cannot resolve the pinned path: {error}"),
+        })?;
         // Component-wise, so `/objective-root-evil` does not count as being
         // inside `/objective-root` the way a string prefix test would.
+        //
+        // Checked before the store is consulted, and that order is deliberate:
+        // a pin whose path leaves the bundle is a malformed objective, and
+        // content-addressing must not rescue it. Otherwise an objective could
+        // name `../../.ssh/id_rsa` with a matching hash, get refused today, and
+        // start resolving tomorrow the moment somebody's node happened to hold a
+        // blob under that address.
         if !full.starts_with(&root) {
-            return Err(Verdict::invalid_spec(format!(
-                "pinned path escapes the objective root: {relative}"
-            )));
+            return Err(PinFailure::Escape);
         }
 
-        let source = match fs::read(&full) {
-            Ok(source) => source,
-            Err(error) => {
-                return Err(Verdict::unavailable(format!(
-                    "cannot load {role}: {error} ({})",
-                    full.display()
-                )))
+        // The bundle is the origin. Consulted first so that an operator who
+        // edits a checker in place is told their edit no longer matches the pin,
+        // rather than having a cached blob silently stand in for the file they
+        // are looking at. Mismatch returns immediately; the store is only for
+        // peers that have no bundle file at all.
+        match fs::read(&full) {
+            Ok(source) => {
+                let actual = blobs::address(&source);
+                if actual == declared {
+                    Ok(full)
+                } else {
+                    Err(PinFailure::Mismatch { actual })
+                }
             }
-        };
-        let mut hasher = Sha256::new();
-        hasher.update(&source);
-        let actual = format!("{:x}", hasher.finalize());
-        if actual != declared_sha256 {
-            return Err(Verdict::invalid_spec(format!(
-                "pinned code {relative} has sha256 {actual}, objective declares {declared_sha256}"
-            )));
+            Err(error) => {
+                // The content-addressed fallback, and the reason this module
+                // exists: a peer that learned the objective over the wire has no
+                // bundle at all, and the blob it fetched is byte-identical by
+                // construction because its filename is the pin.
+                match self.blobs.read(declared) {
+                    Ok(_) => absolutize(&self.blobs.path_of(declared).map_err(|error| {
+                        PinFailure::Absent {
+                            detail: error.to_string(),
+                        }
+                    })?)
+                    .map_err(|error| PinFailure::Absent {
+                        detail: format!("cannot resolve the blob store path: {error}"),
+                    }),
+                    Err(store) => Err(PinFailure::Absent {
+                        detail: format!("{error} ({}); {store}", full.display()),
+                    }),
+                }
+            }
         }
-        Ok(full)
+    }
+
+    /// The content addresses of pinned code this node cannot currently obtain.
+    ///
+    /// Empty for a spec whose code resolves, for a kind with no pinned code, and
+    /// for a pin whose path escapes the root — the last because such an
+    /// objective is broken and fetching its blob would not make it runnable, so
+    /// asking peers for it is pure noise.
+    pub fn missing_code(&self, spec: &Value) -> Vec<String> {
+        let mut out = Vec::new();
+        for pin in pinned_code(spec) {
+            if !blobs::is_address(&pin.sha256) {
+                continue;
+            }
+            match self.resolve_pinned(&pin.path, &pin.sha256) {
+                Ok(_) | Err(PinFailure::Escape) => {}
+                Err(_) => out.push(pin.sha256),
+            }
+        }
+        out
+    }
+
+    /// Copy every pinned file this bundle actually has into the blob store, so
+    /// this node can serve it.
+    ///
+    /// Best effort by construction, and it must stay that way: this runs when an
+    /// objective is admitted, and objectives are admitted during record sync by
+    /// nodes that have never seen the bundle. Returning an error there would
+    /// make a node refuse to import a peer's objective because it could not
+    /// cache code it was never given — sync would stop, silently, exactly the
+    /// class of bug this repository warns about.
+    ///
+    /// Returns the addresses now servable from this node.
+    pub fn publish_code(&self, spec: &Value) -> Vec<String> {
+        let mut published = Vec::new();
+        let Ok(root) = absolutize(&self.root) else {
+            return published;
+        };
+        for pin in pinned_code(spec) {
+            if !blobs::is_address(&pin.sha256) {
+                continue;
+            }
+            if self.blobs.holds(&pin.sha256) {
+                published.push(pin.sha256);
+                continue;
+            }
+            let Ok(full) = absolutize(&root.join(&pin.path)) else {
+                continue;
+            };
+            if !full.starts_with(&root) {
+                continue;
+            }
+            if matches!(self.blobs.publish_file(&full, &pin.sha256), Ok(true)) {
+                published.push(pin.sha256);
+            }
+        }
+        published
+    }
+
+    /// Admit a blob offered by a peer, or say why not.
+    ///
+    /// The verification is [`BlobStore::put`]'s: bytes that do not hash to the
+    /// address never reach a filename under which they could be run. Whether the
+    /// address was one this node *asked for* is a separate check, made by
+    /// [`crate::p2p::code::admit`] against the want set, because that is where
+    /// the want set lives and a disk filled with unrequested blobs is a
+    /// different problem from a blob that lies about its hash.
+    pub fn admit_code(&self, declared: &str, bytes: &[u8]) -> Result<(), blobs::BlobError> {
+        self.blobs.put(declared, bytes).map(|_| ())
     }
 
     /// Run pinned code in a jailed child process and collect its single JSON
@@ -2004,9 +2213,7 @@ mod tests {
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
+        blobs::address(bytes)
     }
 
     fn have(binary: &str) -> bool {

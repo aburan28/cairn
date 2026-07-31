@@ -48,12 +48,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::blobs;
 use crate::canonical::{short, Value};
 use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
 use crate::ledger::{Ledger, LedgerError};
 use crate::partition::{epoch_of, epoch_seconds, settlement_rank};
 use crate::records::{Claim, Commitment, Objective};
-use crate::verifiers::{Kind, Status, Verdict, VerifierRegistry};
+use crate::verifiers::{self, Kind, Status, Verdict, VerifierRegistry};
 
 /// Log entry kinds this module writes and reads. Spelled once so a typo cannot
 /// silently make a query match nothing -- which, for the settlement and frontier
@@ -454,7 +455,68 @@ impl Node {
         }
 
         self.append(OBJECTIVE, objective.to_value(), ts)?;
+        // How pinned code enters the network: the funder has the checker on
+        // disk, and this is the moment their node becomes able to serve it to a
+        // peer that will only ever see the record.
+        //
+        // After the append and deliberately without a `?`. This same method
+        // admits objectives learned from peers during record sync, where there
+        // is no bundle to publish from; a failure to cache code the node was
+        // never given is not a reason to refuse the record. Ignoring it costs a
+        // node the ability to *serve* one blob and costs the network nothing,
+        // because whoever does hold it still can.
+        self.registry.publish_code(&objective.verifier);
         Ok(id)
+    }
+
+    // -- pinned verifier code --------------------------------------------
+
+    /// Every content address of pinned verifier code the log's objectives name.
+    ///
+    /// The reachable set: a blob outside it is pinned by no objective this node
+    /// knows of, which is what `proofwork blob gc` collects. Computed from the
+    /// log rather than remembered, so it cannot drift out of date, and so an
+    /// objective learned a second ago is protected without a bookkeeping step.
+    pub fn pinned_code(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for objective in self.objectives().values() {
+            for pin in verifiers::pinned_code(&objective.verifier) {
+                if blobs::is_address(&pin.sha256) {
+                    out.insert(pin.sha256);
+                }
+            }
+        }
+        out
+    }
+
+    /// Content addresses this node needs and does not have.
+    ///
+    /// Every objective in the log whose pinned code resolves neither in the
+    /// bundle nor in the blob store. This is the want set the code-exchange
+    /// round sends to a peer, and it is a pure function of the log and the
+    /// store — nothing is remembered between rounds, so a node cannot end up
+    /// asking for a blob it already has or forgetting one it still needs.
+    pub fn missing_code(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for objective in self.objectives().values() {
+            out.extend(self.registry.missing_code(&objective.verifier));
+        }
+        out
+    }
+
+    /// Copy every pinned file the bundle has into the store, for every objective
+    /// in the log. Returns how many addresses are now servable.
+    ///
+    /// Idempotent, and worth running at daemon start: a log written before this
+    /// feature existed has objectives whose code was never published, and
+    /// without this their funder would be unable to serve the very blobs their
+    /// peers are about to ask for.
+    pub fn publish_local_code(&self) -> usize {
+        let mut published = BTreeSet::new();
+        for objective in self.objectives().values() {
+            published.extend(self.registry.publish_code(&objective.verifier));
+        }
+        published.len()
     }
 
     /// Every objective in the log, keyed by id.

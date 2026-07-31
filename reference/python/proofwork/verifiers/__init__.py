@@ -10,7 +10,11 @@ from .base import (  # noqa: F401
     get,
     kinds,
     load_pinned,
+    missing_code,
+    pinned_code,
+    publish_code,
     register,
+    resolve_pinned,
     run,
 )
 from . import certificate, evaluator, lean, replay, statistical  # noqa: F401,E402
@@ -24,7 +28,11 @@ __all__ = [
     "get",
     "kinds",
     "load_pinned",
+    "missing_code",
+    "pinned_code",
+    "publish_code",
     "register",
+    "resolve_pinned",
     "run",
     "set_root",
 ]

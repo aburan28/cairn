@@ -440,6 +440,9 @@ enum Command {
     Attribute {
         params: FlowParams,
     },
+    Blob {
+        action: BlobAction,
+    },
     /// Evaluate the node-operator incentives at a parameter set.
     ///
     /// The only command that reads no log. It answers a question about the
@@ -463,6 +466,26 @@ enum Command {
     },
     Log,
     Help,
+}
+
+/// What `proofwork blob` was asked to do.
+///
+/// Collection is a command rather than something a sync round does on its way
+/// past, and that is deliberate: a node cannot distinguish a blob nobody wants
+/// from a blob pinned by an objective it has not synced yet, so a timer-driven
+/// collector would delete exactly the code its peers are about to ask it for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobAction {
+    /// Every content address held.
+    List,
+    /// Pins the log names that this node cannot obtain — why a verdict came
+    /// back `unavailable`.
+    Need,
+    /// Copy every pinned file the bundle has into the store, so peers can fetch
+    /// it. Idempotent, and what a log written before blobs existed needs.
+    Publish,
+    /// Drop blobs no objective in the log pins.
+    Collect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -627,6 +650,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "audit" => parse_audit(&mut cursor)?,
         "verify" => parse_verify(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
+        "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
         "keygen" => parse_keygen(&mut cursor)?,
         "store" => parse_store(&mut cursor)?,
@@ -979,6 +1003,27 @@ fn require(value: Option<String>, command: &str, what: &str) -> Result<String, C
     value.ok_or_else(|| CliError::Usage(format!("{command}: {what} is required")))
 }
 
+fn parse_blob(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = match cursor.take() {
+        // Bare `blob` lists, because "what do I have" is the question an
+        // operator diagnosing an `unavailable` verdict asks first.
+        None => BlobAction::List,
+        Some(word) => match word.as_str() {
+            "ls" | "list" => BlobAction::List,
+            "need" => BlobAction::Need,
+            "publish" => BlobAction::Publish,
+            "gc" => BlobAction::Collect,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "blob: unknown action {other:?}; expected ls, need, publish, or gc"
+                )))
+            }
+        },
+    };
+    expect_end(cursor, "blob")?;
+    Ok(Command::Blob { action })
+}
+
 /// Negative numbers are rejected by the type, not by a range check: `-1` does
 /// not parse as `u64` and never reaches [`FlowParams`].
 fn parse_u64(text: &str, flag: &str) -> Result<u64, CliError> {
@@ -1050,6 +1095,11 @@ fn print_help(out: &mut dyn Write) {
         "  attribute [--delta-num N] [--delta-den N] [--max-depth N]",
     );
     say(out, "      compute citation-flow payouts");
+    say(out, "  blob [ls|need|publish|gc]");
+    say(
+        out,
+        "      inspect the content-addressed store of pinned verifier code",
+    );
     say(
         out,
         "  incentives [--nodes N] [--settled N] [--canary-rate N/D] ...",
@@ -1801,6 +1851,83 @@ fn cmd_log(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
     Ok(0)
 }
 
+/// Inspect and maintain the content-addressed store of pinned verifier code.
+///
+/// Exit code 0 throughout, including for `need` with unmet pins. Missing code is
+/// `Unavailable` — this node cannot check something — and reporting it as a
+/// failure would make a script treat "I have not fetched the checker yet" as "the
+/// log is wrong". `audit` is where a log that does not re-derive is an error.
+fn cmd_blob(out: &mut dyn Write, options: &Options, action: BlobAction) -> Result<i32, CliError> {
+    let node = open_node(options)?;
+    let store = node.registry().blobs();
+    match action {
+        BlobAction::List => {
+            let held = store.addresses();
+            say(
+                out,
+                format!("{} blob(s) in {}", held.len(), store.dir().display()),
+            );
+            let pinned = node.pinned_code();
+            for address in held {
+                // Whether anything in *this* log still wants it, which is what
+                // `gc` would act on.
+                let mark = if pinned.contains(&address) {
+                    "pinned"
+                } else {
+                    "unreferenced"
+                };
+                say(out, format!("  {} {mark}", short_address(&address)));
+            }
+        }
+        BlobAction::Need => {
+            let needs = node.missing_code();
+            if needs.is_empty() {
+                say(
+                    out,
+                    "every pinned verifier in this log is available locally",
+                );
+            } else {
+                say(
+                    out,
+                    format!(
+                        "{} pin(s) unavailable; verdicts against them will be \
+                             'unavailable' until a peer serves them",
+                        needs.len()
+                    ),
+                );
+                for address in &needs {
+                    say(out, format!("  {}", short_address(address)));
+                }
+            }
+        }
+        BlobAction::Publish => {
+            let published = node.publish_local_code();
+            say(
+                out,
+                format!(
+                    "{published} pinned blob(s) servable from {}",
+                    store.dir().display()
+                ),
+            );
+        }
+        BlobAction::Collect => {
+            let dropped = store.retain(&node.pinned_code());
+            say(out, format!("dropped {dropped} unreferenced blob(s)"));
+        }
+    }
+    Ok(0)
+}
+
+/// A content address abbreviated the way [`short`] abbreviates a record hash, so
+/// the two read alike in a terminal. Full addresses are 64 characters and the
+/// prefix identifies a blob among the handful a node holds.
+fn short_address(address: &str) -> String {
+    match address.get(..12) {
+        Some(head) => format!("{head}…"),
+        None => address.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reading the log
 // ---------------------------------------------------------------------------
@@ -2099,6 +2226,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             *rerun,
         ),
         Command::Attribute { params } => cmd_attribute(out, options, params),
+        Command::Blob { action } => cmd_blob(out, options, *action),
         Command::Incentives { params } => cmd_incentives(out, params),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
         Command::Store { action } => cmd_store(out, options, *action),

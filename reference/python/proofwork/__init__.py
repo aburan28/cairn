@@ -13,6 +13,7 @@ what deliberately is not built yet.
 from __future__ import annotations
 
 from .attribution import FlowParams, flow, ledger_payouts
+from .blobs import BlobStore
 from .canonical import canonical_bytes, digest, merkle_root
 from .frontier import FrontierEntry, Ratchet
 from .gossip import Candidate, Population, ingest

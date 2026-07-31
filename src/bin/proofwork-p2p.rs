@@ -294,6 +294,15 @@ fn main() {
         }),
         None => Population::default(),
     };
+    // Publish before serving. A log written before verifier code was
+    // content-addressed has objectives whose checkers were never copied into the
+    // store, and without this their funder would be the one node on the network
+    // unable to serve the very blobs its peers are about to ask it for.
+    // Idempotent, and cheap: one stat per pin already held.
+    let servable = node.publish_local_code();
+    let missing = node.missing_code().len();
+    eprintln!("verifier code: {servable} servable, {missing} unmet");
+
     let registry = node.registry().clone();
     let state = Arc::new(Mutex::new(State { node, population }));
     {

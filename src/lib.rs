@@ -19,6 +19,7 @@
 //!    wrapping, in debug and release alike.
 
 pub mod attribution;
+pub mod blobs;
 pub mod canonical;
 pub mod checkpoint;
 pub mod crypto;
@@ -37,6 +38,7 @@ pub mod time;
 pub mod verifiers;
 
 pub use attribution::{flow, FlowParams};
+pub use blobs::{BlobError, BlobStore};
 pub use canonical::{digest_bytes, merkle_root, CanonicalError, Value};
 pub use frontier::{FrontierEntry, Ratchet, RatchetError};
 pub use gossip::{ingest, Candidate, Population};

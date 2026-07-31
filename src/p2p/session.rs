@@ -1,14 +1,20 @@
 //! Message driver for one encrypted connection.
 //!
-//! Two families run over the same session and never share a frame. Records use
-//! [`RECORD_CONTEXT`], populations use [`super::pop::CONTEXT`], and the AEAD
-//! binds the context into the tag — so a frame sealed for one family cannot be
-//! opened as the other even by a peer that wants to. See [`super::pop`] for why
-//! that separation is a security boundary rather than housekeeping.
+//! Three families run over the same session and never share a frame. Records use
+//! [`RECORD_CONTEXT`], populations use [`super::pop::CONTEXT`], verifier code
+//! uses [`super::code::CONTEXT`], and the AEAD binds the context into the tag —
+//! so a frame sealed for one family cannot be opened as another even by a peer
+//! that wants to. See [`super::pop`] and [`super::code`] for why that separation
+//! is a security boundary rather than housekeeping.
+//!
+//! The order on one connection is records, then code, then populations, and it is
+//! not arbitrary — see [`reconcile_code`].
 
+use super::code::{self, CodeError, CodeLimits, CodeMessage, CodeReport};
 use super::pop::{self, PopError, PopLimits, PopMessage, PopReport};
 use super::sync::{Message, Peer, SyncError};
 use super::transport::{Connection, TransportError};
+use crate::blobs::BlobStore;
 use crate::gossip::{Candidate, Population};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -21,6 +27,7 @@ pub enum SessionError {
     Transport(TransportError),
     Sync(SyncError),
     Pop(PopError),
+    Code(CodeError),
     Protocol(String),
 }
 
@@ -30,6 +37,7 @@ impl fmt::Display for SessionError {
             SessionError::Transport(e) => write!(f, "{e}"),
             SessionError::Sync(e) => write!(f, "sync: {e}"),
             SessionError::Pop(e) => write!(f, "population: {e}"),
+            SessionError::Code(e) => write!(f, "verifier code: {e}"),
             SessionError::Protocol(e) => write!(f, "protocol: {e}"),
         }
     }
@@ -48,6 +56,11 @@ impl From<SyncError> for SessionError {
 impl From<PopError> for SessionError {
     fn from(e: PopError) -> Self {
         Self::Pop(e)
+    }
+}
+impl From<CodeError> for SessionError {
+    fn from(e: CodeError) -> Self {
+        Self::Code(e)
     }
 }
 
@@ -159,6 +172,76 @@ where
     expect(receive(connection)?, "done", |m| {
         matches!(m, Message::Done).then_some(())
     })
+}
+
+fn send_code(connection: &mut Connection, message: CodeMessage) -> Result<(), SessionError> {
+    connection
+        .send(&message.encode(), code::CONTEXT)
+        .map_err(Into::into)
+}
+
+fn receive_code(
+    connection: &mut Connection,
+    limits: CodeLimits,
+) -> Result<CodeMessage, SessionError> {
+    CodeMessage::decode(&connection.receive(code::CONTEXT)?, limits).map_err(Into::into)
+}
+
+/// Run one complete, symmetric verifier-code exchange.
+///
+/// # Why this runs between the record round and the population round
+///
+/// Not because of anything about populations, but because of what happens on
+/// *either* side of it:
+///
+/// - **after records.** The want set is derived from the log's objectives, so it
+///   cannot include an objective this node has not received yet. Fetching code
+///   before reconciling records would ask for last round's pins.
+/// - **before the caller applies claims.** A claim verified while its
+///   objective's checker is still missing gets `Unavailable`, which is correct
+///   but sticky: the claim is in the log with a non-settling verdict and nothing
+///   re-runs it until the next round. Callers that apply records themselves
+///   should therefore reconcile records into a staging peer, run this, and only
+///   then apply — which is exactly what [`super::service`] does.
+///
+/// Symmetric, because both sides may lack code the other holds and a
+/// one-directional fetch would make availability depend on who dialled.
+///
+/// The early-out is *both* want sets being empty, which both sides can see from
+/// the pair of `Want` messages they have already exchanged, so neither is left
+/// waiting for a message the other will not send. There is no digest early-out
+/// as populations have, because holdings are not supposed to converge: an empty
+/// want set is the steady state, not an equal one.
+pub fn reconcile_code(
+    connection: &mut Connection,
+    store: &BlobStore,
+    needs: &BTreeSet<String>,
+    limits: CodeLimits,
+) -> Result<CodeReport, SessionError> {
+    send_code(connection, code::want_message(needs, limits))?;
+    let their_want = match receive_code(connection, limits)? {
+        CodeMessage::Want { addresses } => addresses,
+        _ => return Err(SessionError::Protocol("expected code_want".into())),
+    };
+    if needs.is_empty() && their_want.is_empty() {
+        return Ok(CodeReport::default());
+    }
+
+    let served = code::serve(store, &their_want, limits);
+    let served_count = served.len();
+    send_code(connection, CodeMessage::Blobs { blobs: served })?;
+    let incoming = match receive_code(connection, limits)? {
+        CodeMessage::Blobs { blobs } => blobs,
+        _ => return Err(SessionError::Protocol("expected code_blobs".into())),
+    };
+
+    // A refusal is not a session error, for the same reason as a population
+    // refusal: a peer whose blob does not hash to a pin we asked for has told us
+    // nothing we needed, and tearing the connection down over it would let one
+    // bad blob cost the peer its record sync too.
+    let mut report = code::admit(store, needs, incoming);
+    report.served = served_count;
+    Ok(report)
 }
 
 fn send_pop(connection: &mut Connection, message: PopMessage) -> Result<(), SessionError> {

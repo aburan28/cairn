@@ -22,6 +22,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from .. import blobs
+
 
 class Status(str, enum.Enum):
     ACCEPT = "accept"
@@ -105,6 +107,148 @@ def run(spec: dict[str, Any], artifact: dict[str, Any]) -> Verdict:
 # Checkers and evaluators are ordinary source files pinned by SHA-256. The hash
 # is part of the objective's identity, so editing an evaluator does not silently
 # rescore an objective -- it forks it into a different objective.
+#
+# Two sources, in this order:
+#
+#   1. the bundle file the objective names, relative to the root;
+#   2. the content-addressed blob store under that root (``proofwork.blobs``).
+#
+# The bundle is first so an operator who edits a checker in place is told their
+# edit no longer matches the pin, rather than having a cached blob silently stand
+# in for the file they are looking at. The store is second because a node that
+# received the objective over the network has no bundle at all, and the blob it
+# holds is byte-identical by construction: its filename is the pin.
+
+
+def pinned_code(spec: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Every pinned code file a verifier spec names: ``(role, path, sha256)``.
+
+    Extracted here rather than at each call site because the field names differ
+    per kind and three copies of that knowledge would drift. Everything that has
+    to answer "which blobs does this objective need" -- publishing, garbage
+    collection, the Rust node's want set -- goes through this.
+
+    ``replay`` and ``lean`` produce nothing, and that is a real limitation rather
+    than an oversight: a ``replay`` spec names a command and a ``lean`` spec needs
+    a proof-assistant toolchain. Neither is a blob, so neither is made portable by
+    content-addressing the code. See ``docs/verification.md``.
+    """
+    kind = spec.get("kind")
+    if kind == "certificate":
+        fields = ("checker", "checker", "checker_sha256")
+    elif kind == "evaluator":
+        fields = ("evaluator", "evaluator", "evaluator_sha256")
+    elif kind == "statistical":
+        statistic = spec.get("statistic")
+        if not isinstance(statistic, dict):
+            return []
+        path, sha = statistic.get("path"), statistic.get("sha256")
+        if isinstance(path, str) and isinstance(sha, str):
+            return [("statistic", path, sha)]
+        return []
+    else:
+        return []
+    role, path_key, sha_key = fields
+    path, sha = spec.get(path_key), spec.get(sha_key)
+    if isinstance(path, str) and isinstance(sha, str):
+        return [(role, path, sha)]
+    return []
+
+
+def resolve_pinned(root: str, path: str, expected_sha256: str) -> str:
+    """The file to load for a pin, from the bundle or from the blob store.
+
+    Split out from :func:`load_pinned` so that "which blobs am I missing" can be
+    answered by the *same* resolution the verifier will use. Two implementations
+    of that question would eventually disagree, and the failure would be a node
+    that fetches nothing while reporting UNAVAILABLE forever.
+
+    Raises :class:`PinMismatch` for a broken objective and ``OSError`` for code
+    this node simply does not have -- the split the caller turns into
+    INVALID_SPEC and UNAVAILABLE respectively.
+    """
+    # Resolve both sides to absolute paths before comparing: a relative root
+    # like "." never prefixes a normalized relative join, so a naive check
+    # rejects every legitimate objective.
+    root_abs = os.path.abspath(root)
+    full = os.path.abspath(os.path.join(root_abs, path))
+    # Checked before the store is consulted, and that order is deliberate: a pin
+    # whose path leaves the bundle is a malformed objective, and content
+    # addressing must not rescue it. Otherwise an objective could name
+    # ``../../.ssh/id_rsa`` with a matching hash, be refused today, and start
+    # resolving tomorrow because some node happened to hold that blob.
+    if full != root_abs and not full.startswith(root_abs + os.sep):
+        raise PinMismatch(f"pinned path escapes the objective root: {path}")
+
+    try:
+        with open(full, "rb") as handle:
+            source = handle.read()
+    except OSError as bundle_error:
+        store = blobs.BlobStore.under(root_abs)
+        try:
+            store.read(expected_sha256)
+            return store.path_of(expected_sha256)
+        except blobs.BlobError as store_error:
+            raise FileNotFoundError(f"{bundle_error}; {store_error}") from None
+    else:
+        # Mismatch is raised here, before the store is consulted: a cached blob
+        # must not silently stand in for an edited bundle file (see module
+        # comment above). The store is only for peers that have no bundle file.
+        actual = hashlib.sha256(source).hexdigest()
+        if actual != expected_sha256:
+            raise PinMismatch(
+                f"pinned code {path} has sha256 {actual}, "
+                f"objective declares {expected_sha256}"
+            )
+        return full
+
+
+def missing_code(root: str, spec: dict[str, Any]) -> list[str]:
+    """The content addresses of pinned code this node cannot obtain.
+
+    Empty for a spec whose code resolves, for a kind with no pinned code, and for
+    a pin whose path escapes the root -- the last because such an objective is
+    broken and fetching its blob would not make it runnable.
+    """
+    out = []
+    for _role, path, sha in pinned_code(spec):
+        if not blobs.is_address(sha):
+            continue
+        try:
+            resolve_pinned(root, path, sha)
+        except PinMismatch:
+            continue
+        except OSError:
+            out.append(sha)
+    return out
+
+
+def publish_code(root: str, spec: dict[str, Any]) -> list[str]:
+    """Copy every pinned file this bundle has into the blob store.
+
+    Best effort by construction, and it must stay that way: this runs when an
+    objective is admitted, and an objective may be admitted by a node that has
+    never seen the bundle. Refusing the record because code could not be cached
+    would stop a log from importing objectives.
+    """
+    store = blobs.BlobStore.under(root)
+    published = []
+    root_abs = os.path.abspath(root)
+    for _role, path, sha in pinned_code(spec):
+        if not blobs.is_address(sha):
+            continue
+        if store.holds(sha):
+            published.append(sha)
+            continue
+        full = os.path.abspath(os.path.join(root_abs, path))
+        if full != root_abs and not full.startswith(root_abs + os.sep):
+            continue
+        try:
+            if store.publish_file(full, sha):
+                published.append(sha)
+        except blobs.BlobError:
+            continue
+    return published
 
 
 def load_pinned(root: str, path: str, expected_sha256: str, entrypoint: str) -> Callable:
@@ -113,16 +257,14 @@ def load_pinned(root: str, path: str, expected_sha256: str, entrypoint: str) -> 
     Raises FileNotFoundError / PinMismatch / AttributeError, all of which the
     caller converts into a non-settling verdict.
     """
-    # Resolve both sides to absolute paths before comparing: a relative root
-    # like "." never prefixes a normalized relative join, so a naive check
-    # rejects every legitimate objective.
-    root_abs = os.path.abspath(root)
-    full = os.path.abspath(os.path.join(root_abs, path))
-    if full != root_abs and not full.startswith(root_abs + os.sep):
-        raise PinMismatch(f"pinned path escapes the objective root: {path}")
+    full = resolve_pinned(root, path, expected_sha256)
     with open(full, "rb") as handle:
         source = handle.read()
     actual = hashlib.sha256(source).hexdigest()
+    # Re-checked after resolution rather than trusted from it. Both sources
+    # verified the bytes, but the file could have changed in between and this is
+    # the last moment before ``exec``; a check here costs one hash and removes
+    # any argument about whether the window matters.
     if actual != expected_sha256:
         raise PinMismatch(
             f"pinned code {path} has sha256 {actual}, objective declares {expected_sha256}"
