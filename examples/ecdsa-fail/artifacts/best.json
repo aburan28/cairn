@@ -1,0 +1,5 @@
+{
+  "qubits": 50,
+  "toffoli": 400,
+  "score": 20000
+}
