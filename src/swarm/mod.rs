@@ -83,6 +83,7 @@
 //! [`tcp`] is where the clock, the sockets and the threads live, and it is the
 //! only part of this module that can fail for reasons that are nobody's fault.
 
+pub mod discovery;
 pub mod piece;
 pub mod tcp;
 pub mod wire;
@@ -93,6 +94,7 @@ use std::fmt;
 use piece::{Bitfield, Manifest, PieceError};
 use wire::Message;
 
+pub use discovery::{AddressBook, PeerRecord};
 pub use piece::{Layout, Manifest as PieceManifest, DEFAULT_PIECE_LEN};
 pub use tcp::{fetch, serve, Listener, TransferError};
 pub use wire::{Handshake, WireError};
@@ -433,6 +435,11 @@ impl Swarm {
             Message::Request(index) => self.on_request(peer, index),
             Message::Cancel(_) => Vec::new(),
             Message::Piece { index, bytes } => self.on_piece(peer, index, bytes),
+            // Peer exchange is about the *node*, not about this blob, so it is
+            // handled by the driver that owns the address book. A swarm holding
+            // one would be a per-blob copy of node-wide state, which is how two
+            // views of the same peers start disagreeing.
+            Message::WantPeers | Message::Peers(_) => Vec::new(),
         }
     }
 

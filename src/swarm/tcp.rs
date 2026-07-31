@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::discovery::AddressBook;
 use super::piece::DEFAULT_PIECE_LEN;
 use super::wire::{check_frame_len, Handshake, Message, PEER_ID_LEN};
 use super::{Action, Dropped, Limits, PeerId, Swarm};
@@ -93,6 +94,47 @@ impl From<io::Error> for TransferError {
 /// dispatch cannot be "write to the socket I am reading from".
 type Outbox = Arc<Mutex<BTreeMap<PeerId, Sender<Message>>>>;
 
+/// The node's address book, shared across every connection and every swarm.
+///
+/// Node-wide rather than per-blob on purpose: a peer that has one blob is a peer
+/// worth knowing about for all of them, and a book per swarm would be several
+/// views of the same network that drift apart.
+pub type Book = Arc<Mutex<AddressBook>>;
+
+/// A fresh, empty address book.
+pub fn new_book() -> Book {
+    Arc::new(Mutex::new(AddressBook::new()))
+}
+
+/// Handle peer exchange, which the swarm state machine deliberately does not.
+///
+/// Returns the replies to send. Records are *verified here* -- by
+/// [`AddressBook::offer`], which checks the signature -- so a relayed record is
+/// evidence rather than hearsay and a hostile relay's only power is to withhold
+/// or be out of date.
+fn on_peer_exchange(peer: PeerId, message: &Message, book: &Book) -> Vec<Action> {
+    match message {
+        Message::WantPeers => {
+            let shared = book.lock().unwrap_or_else(|e| e.into_inner()).share("");
+            if shared.is_empty() {
+                return Vec::new();
+            }
+            vec![Action::Send(peer, Message::Peers(shared))]
+        }
+        Message::Peers(records) => {
+            let mut guard = book.lock().unwrap_or_else(|e| e.into_inner());
+            for record in records {
+                // A record that does not verify is dropped and nothing else
+                // happens. It costs the sender nothing and it costs us nothing,
+                // which is the right price for an unverifiable hint.
+                let _ = guard.offer(record);
+            }
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// A running seeder.
 ///
 /// Serves any blob the store holds, to anyone who asks for it by digest. Drop it
@@ -128,6 +170,20 @@ pub fn serve(
     blobs: BlobStore,
     limits: Limits,
 ) -> Result<Listener, TransferError> {
+    serve_with(addr, blobs, limits, new_book())
+}
+
+/// Serve, against an address book the caller owns.
+///
+/// The book is how a seeder learns about other seeders: every connection asks,
+/// and the answers accumulate. A caller that persists it across restarts never
+/// has to be told an address twice.
+pub fn serve_with(
+    addr: impl ToSocketAddrs,
+    blobs: BlobStore,
+    limits: Limits,
+    book: Book,
+) -> Result<Listener, TransferError> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
     listener.set_nonblocking(true)?;
@@ -150,8 +206,9 @@ pub fn serve(
                     let swarms = Arc::clone(&swarms);
                     let outboxes = Arc::clone(&outboxes);
                     let next_peer = Arc::clone(&next_peer);
+                    let book = Arc::clone(&book);
                     thread::spawn(move || {
-                        let _ = serve_one(stream, blobs, swarms, outboxes, next_peer, limits);
+                        let _ = serve_one(stream, blobs, swarms, outboxes, next_peer, limits, book);
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -174,6 +231,7 @@ fn serve_one(
     outboxes: Arc<Mutex<BTreeMap<String, Outbox>>>,
     next_peer: Arc<AtomicU64>,
     limits: Limits,
+    book: Book,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
@@ -189,12 +247,17 @@ fn serve_one(
     };
     stream.write_all(&ours.encode())?;
 
-    // Do we even have it? A digest this store does not hold is answered by
-    // hanging up rather than by an error message: there is nothing useful to
-    // say, and a node that enumerated what it does *not* have would be
-    // volunteering a map of the network's gaps.
+    // Do we even have it? A digest this store does not hold gets no error
+    // message: there is nothing useful to say, and a node that enumerated what
+    // it does *not* have would be volunteering a map of the network's gaps.
+    //
+    // But hanging up here would be wrong, and the reason is the whole of why
+    // discovery is a separate concern from transfer. **The node that does not
+    // have your blob is often the best node to ask who does.** Refusing to talk
+    // to it forfeits exactly the hop that makes bootstrap a once-ever problem.
+    // So: no bytes, no transfer, and peer exchange anyway.
     let Ok(Some(bytes)) = blobs.get(&their.digest) else {
-        return Ok(());
+        return serve_peers_only(stream, &book);
     };
 
     let swarm = {
@@ -239,7 +302,7 @@ fn serve_one(
     });
 
     let peer = PeerId(next_peer.fetch_add(1, Ordering::SeqCst));
-    let result = run_peer(stream, peer, &swarm, &outbox);
+    let result = run_peer(stream, peer, &swarm, &outbox, &book);
     ticking.store(false, Ordering::SeqCst);
     {
         let mut swarm = swarm.lock().unwrap_or_else(|e| e.into_inner());
@@ -250,6 +313,58 @@ fn serve_one(
         .unwrap_or_else(|e| e.into_inner())
         .remove(&peer);
     result
+}
+
+/// Answer peer exchange for a blob this node does not hold, then hang up.
+///
+/// Bounded by a message budget rather than by a timeout alone: a peer that keeps
+/// asking is a peer using this node as a free socket, and there is nothing here
+/// worth more than a handful of frames.
+fn serve_peers_only(mut stream: TcpStream, book: &Book) -> io::Result<()> {
+    const BUDGET: u32 = 4;
+
+    // Ask as well as answer. A node reached by a stranger has just learned that
+    // stranger exists, and the exchange is cheaper in one round trip than two.
+    stream.write_all(&Message::WantPeers.frame())?;
+
+    let mut header = [0u8; 4];
+    for _ in 0..BUDGET {
+        if stream.read_exact(&mut header).is_err() {
+            break;
+        }
+        let Ok(len) = check_frame_len(u32::from_be_bytes(header)) else {
+            break;
+        };
+        let mut body = vec![0u8; len];
+        if stream.read_exact(&mut body).is_err() {
+            break;
+        }
+        // No manifest on this path, so a bitfield cannot be sized and is
+        // refused -- which is correct, because there is no transfer to have.
+        let Ok(message) = Message::decode(&body, None) else {
+            break;
+        };
+        match message {
+            Message::WantPeers => {
+                let shared = book.lock().unwrap_or_else(|e| e.into_inner()).share("");
+                if !shared.is_empty() && stream.write_all(&Message::Peers(shared).frame()).is_err()
+                {
+                    break;
+                }
+            }
+            Message::Peers(records) => {
+                let mut guard = book.lock().unwrap_or_else(|e| e.into_inner());
+                for record in &records {
+                    let _ = guard.offer(record);
+                }
+            }
+            // Anything else on this connection is a transfer message for a blob
+            // this node does not have. Silently ignored: the peer is not
+            // misbehaving, it just asked the wrong node.
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Fetch `digest` from `peers`, writing it into `blobs` on success.
@@ -264,6 +379,30 @@ pub fn fetch(
     limits: Limits,
     deadline: Duration,
 ) -> Result<Vec<u8>, TransferError> {
+    fetch_with(digest, peers, blobs, limits, deadline, new_book())
+}
+
+/// Fetch, against an address book the caller owns.
+///
+/// Addresses already in the book are dialled alongside `peers`, and every peer
+/// reached adds what it knows. So the *second* fetch on a node needs no `--peer`
+/// at all, which is the entire point of peer exchange: bootstrap is a problem
+/// you have once.
+pub fn fetch_with(
+    digest: &str,
+    peers: &[SocketAddr],
+    blobs: &BlobStore,
+    limits: Limits,
+    deadline: Duration,
+    book: Book,
+) -> Result<Vec<u8>, TransferError> {
+    let mut peers: Vec<SocketAddr> = peers.to_vec();
+    for known in book.lock().unwrap_or_else(|e| e.into_inner()).addrs() {
+        if !peers.contains(&known) {
+            peers.push(known);
+        }
+    }
+    let peers = &peers[..];
     if peers.is_empty() {
         return Err(TransferError::NoPeers);
     }
@@ -279,6 +418,7 @@ pub fn fetch(
         let outbox = Arc::clone(&outbox);
         let done = done_tx.clone();
         let connected = Arc::clone(&connected);
+        let book = Arc::clone(&book);
         thread::spawn(move || {
             let Ok(stream) = TcpStream::connect_timeout(&addr, IO_TIMEOUT) else {
                 return;
@@ -312,7 +452,7 @@ pub fn fetch(
             // we dialled. The claimed id in the handshake is never used, because
             // it is self-asserted and free to forge.
             let peer = PeerId(index as u64);
-            let _ = run_peer(stream, peer, &swarm, &outbox);
+            let _ = run_peer(stream, peer, &swarm, &outbox, &book);
             {
                 let mut swarm = swarm.lock().unwrap_or_else(|e| e.into_inner());
                 swarm.remove_peer(peer);
@@ -381,6 +521,7 @@ fn run_peer(
     peer: PeerId,
     swarm: &Arc<Mutex<Swarm>>,
     outbox: &Outbox,
+    book: &Book,
 ) -> io::Result<()> {
     let (tx, rx) = mpsc::channel::<Message>();
     outbox
@@ -400,10 +541,13 @@ fn run_peer(
         let _ = writer.flush();
     });
 
-    let opening = {
+    let mut opening = {
         let mut guard = swarm.lock().unwrap_or_else(|e| e.into_inner());
         guard.add_peer(peer)
     };
+    // Ask on every connection. One answer is what turns bootstrap from a
+    // recurring problem into a once-ever one.
+    opening.push(Action::Send(peer, Message::WantPeers));
     dispatch(&opening, outbox);
 
     let mut reader = stream;
@@ -447,6 +591,10 @@ fn run_peer(
             }
         };
 
+        let exchange = on_peer_exchange(peer, &message, book);
+        if !exchange.is_empty() {
+            dispatch(&exchange, outbox);
+        }
         let actions = {
             let mut guard = swarm.lock().unwrap_or_else(|e| e.into_inner());
             guard.on_message(peer, message)
@@ -650,6 +798,112 @@ mod tests {
             "unexpected {error:?}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_node_learns_addresses_by_asking_and_needs_no_address_the_second_time() {
+        // The claim discovery is for, end to end and over real sockets. Node C
+        // is told about A. A knows about B. C ends up able to fetch a blob only
+        // B has, having never been given B's address by anyone -- which is what
+        // "no hardcoded IPs" means in practice: you are told one thing, once.
+        use crate::crypto::identity::Identity;
+        use crate::swarm::discovery::PeerRecord;
+
+        let dir = scratch("pex");
+        let only_b = evaluator(40_000);
+        let digest = crate::canonical::digest_bytes(&only_b);
+
+        // B holds the blob and serves it.
+        let b_store = store(&dir, "b");
+        b_store.put(&only_b).expect("puts");
+        let b = serve("127.0.0.1:0", b_store, Limits::default()).expect("serves");
+
+        // A holds nothing, but knows where B is -- and will say so when asked.
+        let a_book = new_book();
+        let b_record = PeerRecord::sign(&Identity::from_secret_bytes([9u8; 32]), &[b.addr()], 1)
+            .expect("signs");
+        assert!(a_book
+            .lock()
+            .expect("lock")
+            .offer(&b_record)
+            .expect("verifies"));
+        let a =
+            serve_with("127.0.0.1:0", store(&dir, "a"), Limits::default(), a_book).expect("serves");
+
+        // C is told about A only. A does not have the blob.
+        let c_book = new_book();
+        let c_store = store(&dir, "c");
+        let got = fetch_with(
+            &digest,
+            &[a.addr()],
+            &c_store,
+            Limits::default(),
+            Duration::from_secs(20),
+            Arc::clone(&c_book),
+        );
+
+        // Whether that first attempt completes is a race: C has to hear about B
+        // from A and dial it before the deadline. What must hold either way is
+        // that C now *knows* about B, learned from a signed record it verified.
+        let learned = c_book.lock().expect("lock").addrs();
+        assert!(
+            learned.contains(&b.addr()),
+            "C never learned B's address by asking A"
+        );
+
+        // And with that, C fetches without being given any address at all.
+        let second = fetch_with(
+            &digest,
+            &[],
+            &c_store,
+            Limits::default(),
+            Duration::from_secs(20),
+            c_book,
+        )
+        .expect("the second fetch needs no --peer");
+        assert_eq!(second, only_b);
+        let _ = got;
+
+        a.shutdown();
+        b.shutdown();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_relayed_by_a_stranger_is_verified_rather_than_believed() {
+        // A relay's only power. C is handed a record whose address was edited;
+        // the signature no longer checks out, so it never reaches the book and C
+        // dials nothing.
+        use crate::crypto::identity::Identity;
+        use crate::swarm::discovery::PeerRecord;
+
+        let signed = PeerRecord::sign(
+            &Identity::from_secret_bytes([4u8; 32]),
+            &["127.0.0.1:9999".parse().expect("addr")],
+            1,
+        )
+        .expect("signs");
+        let mut forged = signed.clone();
+        forged.record = crate::canonical::Value::object([
+            ("type", crate::canonical::Value::string("peer")),
+            (
+                "addrs",
+                crate::canonical::Value::array([crate::canonical::Value::string("10.0.0.1:1")]),
+            ),
+            ("seq", crate::canonical::Value::Int(1)),
+        ]);
+
+        let book = new_book();
+        let actions = on_peer_exchange(PeerId(1), &Message::Peers(vec![forged]), &book);
+        assert!(actions.is_empty());
+        assert!(
+            book.lock().expect("lock").is_empty(),
+            "an unverifiable hint costs nothing and buys nothing"
+        );
+
+        // The genuine article does land.
+        on_peer_exchange(PeerId(1), &Message::Peers(vec![signed]), &book);
+        assert_eq!(book.lock().expect("lock").len(), 1);
     }
 
     #[test]

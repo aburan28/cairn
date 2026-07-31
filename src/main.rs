@@ -65,6 +65,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use proofwork::attribution::{payouts_over, FlowError, FlowParams};
 use proofwork::canonical::{short, CanonicalError, Value};
+use proofwork::crypto::identity::Identity;
 use proofwork::incentive::design::Report as IncentiveReport;
 use proofwork::incentive::{NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError};
@@ -73,7 +74,7 @@ use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordEr
 use proofwork::store::atrest::{AtRestError, Cipher};
 use proofwork::store::blobs::BlobStore;
 use proofwork::store::{mirror, quota, Store, StoreError};
-use proofwork::swarm;
+use proofwork::swarm::{self, AddressBook};
 use proofwork::verifiers::VerifierRegistry;
 
 /// Where the log lives when `--log` and `$PROOFWORK_LOG` are both silent.
@@ -459,6 +460,8 @@ enum BlobAction {
     List,
     /// Re-hash everything and report what does not match its name.
     Verify,
+    /// Show the address book: who this node knows how to reach.
+    Peers,
     /// Serve the store's blobs to peers until interrupted.
     Serve { listen: String },
     /// Pull a blob from peers into the store.
@@ -873,6 +876,7 @@ fn parse_blob(cursor: &mut Cursor) -> Result<Command, CliError> {
     let action = match cursor.take().as_deref() {
         Some("ls") | Some("list") | None => BlobAction::List,
         Some("verify") => BlobAction::Verify,
+        Some("peers") => BlobAction::Peers,
         Some("put") => {
             let path = cursor
                 .take()
@@ -914,12 +918,7 @@ fn parse_blob(cursor: &mut Cursor) -> Result<Command, CliError> {
                     )));
                 }
             }
-            if peers.is_empty() {
-                return Err(CliError::Usage(String::from(
-                    "blob fetch: needs at least one --peer host:port. There is no \
-                     peer discovery yet, so addresses come from you",
-                )));
-            }
+
             return Ok(Command::Blob {
                 action: BlobAction::Fetch {
                     digest,
@@ -930,7 +929,7 @@ fn parse_blob(cursor: &mut Cursor) -> Result<Command, CliError> {
         }
         Some(other) => {
             return Err(CliError::Usage(format!(
-                "blob: unknown action {other:?}; try put, ls, verify, serve, or fetch"
+                "blob: unknown action {other:?}; try put, ls, peers, verify, serve, or fetch"
             )))
         }
     };
@@ -1469,6 +1468,81 @@ fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32,
     Ok(0)
 }
 
+/// This node's network identity, created on first use.
+///
+/// Deliberately **not** the at-rest key. That one protects a disk and never
+/// leaves it; this one is published in every peer record and *is* the node's
+/// name on the network. One key doing both jobs would mean rotating a storage
+/// key renames the node, and leaking a network identity exposes the disk.
+fn node_identity(options: &Options) -> Result<Identity, CliError> {
+    let path = options.store().root().join("node.key");
+    if let Ok(bytes) = fs::read(&path) {
+        if bytes.len() == 32 {
+            let mut secret = [0u8; 32];
+            secret.copy_from_slice(&bytes);
+            return Ok(Identity::from_secret_bytes(secret));
+        }
+    }
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let secret = identity.to_secret_bytes();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| CliError::Io {
+            context: format!("creating {}", parent.display()),
+            source,
+        })?;
+    }
+    fs::write(&path, secret.as_slice()).map_err(|source| CliError::Io {
+        context: format!("writing {}", path.display()),
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(identity)
+}
+
+/// A record version derived from the wall clock.
+///
+/// `seq` only has to increase, and seconds-since-epoch does that across
+/// restarts without any state to keep. A clock that goes backwards costs this
+/// node an announcement until it catches up, which is the cheapest possible
+/// failure and is why no attempt is made to do better.
+fn now_seq() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(1)
+}
+
+fn peers_path(options: &Options) -> PathBuf {
+    options.store().root().join("peers.json")
+}
+
+/// Load the address book, keeping whatever verifies.
+///
+/// A missing or corrupt file is an empty book rather than an error: this is a
+/// cache of hints, and refusing to start because a cache is stale would be the
+/// wrong failure by a wide margin.
+fn load_peers(options: &Options) -> AddressBook {
+    match fs::read_to_string(peers_path(options))
+        .ok()
+        .and_then(|text| Value::from_json(&text).ok())
+    {
+        Some(value) => AddressBook::from_value(&value).0,
+        None => AddressBook::new(),
+    }
+}
+
+fn save_peers(options: &Options, book: &AddressBook) -> Result<(), CliError> {
+    let path = peers_path(options);
+    fs::write(&path, book.to_value().canonical_bytes()).map_err(|source| CliError::Io {
+        context: format!("writing {}", path.display()),
+        source,
+    })
+}
+
 fn cmd_blob(out: &mut dyn Write, options: &Options, action: &BlobAction) -> Result<i32, CliError> {
     let store = options.store();
     let blobs = BlobStore::under(&store);
@@ -1538,15 +1612,49 @@ fn cmd_blob(out: &mut dyn Write, options: &Options, action: &BlobAction) -> Resu
         BlobAction::Serve { listen } => {
             blobs.prepare().map_err(CliError::Store)?;
             let held = blobs.list().map_err(CliError::Store)?;
-            let listener = swarm::serve(listen.as_str(), blobs, swarm::Limits::default())
-                .map_err(|error| CliError::Refused(format!("cannot serve on {listen}: {error}")))?;
+            let identity = node_identity(options)?;
+            let mut known = load_peers(options);
+            let book = swarm::tcp::new_book();
+            {
+                let mut guard = book.lock().unwrap_or_else(|e| e.into_inner());
+                for entry in known.entries() {
+                    let _ = guard.offer(&entry.signed);
+                }
+            }
+            let listener = swarm::tcp::serve_with(
+                listen.as_str(),
+                blobs,
+                swarm::Limits::default(),
+                std::sync::Arc::clone(&book),
+            )
+            .map_err(|error| CliError::Refused(format!("cannot serve on {listen}: {error}")))?;
+
+            // Announce where we actually bound, which is not always where we
+            // were asked to -- port 0 is the common case.
+            if let Ok(record) = swarm::PeerRecord::sign(&identity, &[listener.addr()], now_seq()) {
+                let _ = book
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .offer(&record);
+                let _ = known.offer(&record);
+                let _ = save_peers(options, &known);
+            }
+
+            say(out, format!("node {}", &identity.public().to_hex()[..16]));
             say(
                 out,
                 format!("serving {} blobs on {}", held.len(), listener.addr()),
             );
             say(
                 out,
-                "  peers ask by digest; a digest this store does not hold is answered by hanging up",
+                format!(
+                    "  {} peers known; every connection asks for more",
+                    known.len()
+                ),
+            );
+            say(
+                out,
+                "  a digest this store does not hold gets no bytes and peer exchange anyway",
             );
             say(out, "  ctrl-c to stop");
             // Nothing to wait on but the accept loop, which owns its own thread.
@@ -1576,24 +1684,82 @@ fn cmd_blob(out: &mut dyn Write, options: &Options, action: &BlobAction) -> Resu
                 say(out, format!("blob {} already held", short(digest)));
                 return Ok(0);
             }
-            let bytes = swarm::fetch(
+
+            let known = load_peers(options);
+            let book = swarm::tcp::new_book();
+            {
+                let mut guard = book.lock().unwrap_or_else(|e| e.into_inner());
+                for entry in known.entries() {
+                    let _ = guard.offer(&entry.signed);
+                }
+            }
+            if addrs.is_empty() && known.is_empty() {
+                return Err(CliError::Usage(String::from(
+                    "blob fetch: no peers known and none given. Pass --peer HOST:PORT \
+                     once; after that they arrive by asking, and `blob peers` lists them",
+                )));
+            }
+
+            let outcome = swarm::tcp::fetch_with(
                 digest,
                 &addrs,
                 &blobs,
                 swarm::Limits::default(),
                 std::time::Duration::from_secs(*seconds),
-            )
-            .map_err(|error| CliError::Refused(error.to_string()))?;
+                std::sync::Arc::clone(&book),
+            );
+            // Save what was learned even when the transfer failed. A fetch that
+            // found no blob but three peers has still made the next one likelier
+            // to work, and throwing that away on the error path would hide the
+            // one thing that improved.
+            {
+                let guard = book.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = save_peers(options, &guard);
+            }
+            let bytes = outcome.map_err(|error| CliError::Refused(error.to_string()))?;
             say(out, format!("blob {}", short(digest)));
             say(
                 out,
                 format!(
-                    "  {} from {} peer(s) -> {}",
+                    "  {} -> {}",
                     proofwork::store::format_size(bytes.len() as u64),
-                    addrs.len(),
                     blobs.root().display()
                 ),
             );
+            Ok(0)
+        }
+        BlobAction::Peers => {
+            let book = load_peers(options);
+            if book.is_empty() {
+                say(out, "no peers known");
+                say(
+                    out,
+                    "  every source of addresses is equal here, because records are signed:",
+                );
+                say(
+                    out,
+                    "  `blob fetch <digest> --peer HOST:PORT` once, and the rest arrives by asking",
+                );
+                return Ok(0);
+            }
+            for entry in book.entries() {
+                say(
+                    out,
+                    format!(
+                        "{}  seq {}  {}",
+                        &entry.record.peer[..16.min(entry.record.peer.len())],
+                        entry.record.seq,
+                        entry
+                            .record
+                            .addrs
+                            .iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                );
+            }
+            say(out, format!("{} peers known", book.len()));
             Ok(0)
         }
         BlobAction::Verify => {

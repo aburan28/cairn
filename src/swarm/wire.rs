@@ -77,6 +77,8 @@ pub enum WireError {
     BadBitfield,
     /// A manifest that is not valid JSON, or not a valid manifest.
     BadManifest,
+    /// A peer-exchange answer that is not a list of signed records.
+    BadPeers,
     /// A string field that is not UTF-8.
     NotUnicode { message: &'static str },
 }
@@ -103,6 +105,7 @@ impl fmt::Display for WireError {
             ),
             WireError::BadBitfield => write!(f, "bitfield does not match the piece count"),
             WireError::BadManifest => write!(f, "manifest is not decodable"),
+            WireError::BadPeers => write!(f, "peer list is not decodable"),
             WireError::NotUnicode { message } => write!(f, "{message} carried a non-UTF-8 string"),
         }
     }
@@ -197,6 +200,15 @@ pub enum Message {
     Cancel(u32),
     /// "Here it is."
     Piece { index: u32, bytes: Vec<u8> },
+    /// "Tell me about other peers." Peer exchange, which is what reduces
+    /// bootstrap from a recurring problem to a once-ever one.
+    WantPeers,
+    /// Signed peer records, relayable because each one carries its own proof.
+    ///
+    /// Not `Vec<PeerRecord>`: the *signed* form is what travels, so a node that
+    /// relays a record is passing on evidence rather than hearsay. See
+    /// [`super::discovery`].
+    Peers(Vec<crate::crypto::identity::SignedRecord>),
 }
 
 // Tags. Explicit rather than derived from declaration order, because a wire
@@ -213,6 +225,8 @@ const TAG_UNCHOKE: u8 = 8;
 const TAG_REQUEST: u8 = 9;
 const TAG_CANCEL: u8 = 10;
 const TAG_PIECE: u8 = 11;
+const TAG_WANT_PEERS: u8 = 12;
+const TAG_PEERS: u8 = 13;
 
 impl Message {
     /// A name for logs and errors.
@@ -227,6 +241,8 @@ impl Message {
             Message::Request(_) => "request",
             Message::Cancel(_) => "cancel",
             Message::Piece { .. } => "piece",
+            Message::WantPeers => "want-peers",
+            Message::Peers(_) => "peers",
         }
     }
 
@@ -265,6 +281,12 @@ impl Message {
                 out.push(TAG_PIECE);
                 out.extend_from_slice(&index.to_be_bytes());
                 out.extend_from_slice(bytes);
+            }
+            Message::WantPeers => out.push(TAG_WANT_PEERS),
+            Message::Peers(records) => {
+                out.push(TAG_PEERS);
+                let body = Value::array(records.iter().map(|r| r.to_value()));
+                out.extend_from_slice(&body.canonical_bytes());
             }
         }
         out
@@ -325,6 +347,27 @@ impl Message {
                     index,
                     bytes: bytes.to_vec(),
                 })
+            }
+            TAG_WANT_PEERS => empty(rest, "want-peers").map(|()| Message::WantPeers),
+            TAG_PEERS => {
+                let text = std::str::from_utf8(rest).map_err(|_| WireError::BadPeers)?;
+                let value = Value::from_json(text).map_err(|_| WireError::BadPeers)?;
+                let items = value.as_array().ok_or(WireError::BadPeers)?;
+                if items.len() > super::discovery::MAX_SHARED {
+                    return Err(WireError::TooLong {
+                        declared: items.len(),
+                    });
+                }
+                let mut records = Vec::with_capacity(items.len());
+                for item in items {
+                    // Decoded here, *verified* by the address book. Splitting the
+                    // two keeps this codec free of any opinion about trust.
+                    records.push(
+                        crate::crypto::identity::SignedRecord::from_value(item)
+                            .map_err(|_| WireError::BadPeers)?,
+                    );
+                }
+                Ok(Message::Peers(records))
             }
             other => Err(WireError::UnknownTag(other)),
         }

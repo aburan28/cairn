@@ -48,9 +48,21 @@ Remaining before Stage 0 is usable by anyone but its author:
       pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver.
       `blob serve` and `blob fetch`. The objective's digest *is* the swarm id, so
       the ledger does the tracker's job and there is nothing to sign.
-- [ ] **Peer discovery.** `blob fetch --peer host:port` is honest about a network
-      with nowhere to look an address up. The log is a better place for that than
-      a DHT, and it is a decision to make deliberately rather than by reflex.
+- [x] **Peer discovery** (`src/swarm/discovery.rs`). Signed peer records in the
+      ENR shape -- identity is an ed25519 key, location is a hint signed by it,
+      `seq` supersedes -- plus peer exchange, so one address given once
+      accumulates the rest. Every hint source is equal because none is trusted,
+      which is what makes DNS optional rather than load-bearing. See
+      [discovery.md](discovery.md).
+- [ ] Peer identities in the log, so discovery stops being a *separate* bootstrap
+      problem from obtaining the log. Identity is permanent and belongs there;
+      location is ephemeral and does not.
+- [ ] Local multicast as a second hint source: genuinely zero-configuration on a
+      LAN, and cheap now that every source is interchangeable.
+- [ ] NAT traversal. Not discovery, and routinely confused with it -- knowing an
+      address does not mean you can reach it. Until then a node behind a home
+      router can fetch and cannot seed, which makes the network more centralised
+      than the protocol suggests.
 - [ ] A `blob` record kind announcing who holds what, which is the useful half —
       that a blob exists is already implied by the objective.
 - [ ] Pay for seeding. Tit-for-tat covers the download phase and nothing covers

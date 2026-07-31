@@ -54,7 +54,7 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 812 tests, loopback only
+cargo test                    # 832 tests, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
@@ -406,12 +406,57 @@ property and keeps a transfer reproducible from its message history.
 for reasons that are nobody's fault — the same rule as `Unavailable` never
 settling. **A peer that cannot be reached has not misbehaved.**
 
-Two things it does not do. **Seeding is unpaid**: tit-for-tat works while a peer
+One thing it does not do. **Seeding is unpaid**: tit-for-tat works while a peer
 still wants something, and a node that has finished gets nothing back, so a swarm
-of pure leeches transfers nothing and no code here prevents one. And **there is
-no peer discovery** — `--peer` takes addresses because there is nowhere to look
-one up. The log is a better place to put that than a DHT, and it is a decision
-worth making deliberately.
+of pure leeches transfers nothing and no code here prevents one.
+
+### Finding peers without a name anybody owns
+
+Discovery is two problems, and conflating them is what makes DNS feel
+load-bearing:
+
+> **identity** — is the thing I reached the thing I meant to reach?
+>
+> **location** — what address is it at today?
+
+If a hostname *identifies* a peer, whoever controls the name controls the
+network. So here a peer's identity is an ed25519 public key and its address is a
+**hint signed by that key** — the same move as `evaluator` being a path and
+`evaluator_sha256` being the identity. Then any source of hints is acceptable
+because none is trusted: DNS, gossip, a QR code and a pasted string are all
+exactly as safe as each other.
+
+Which is why **encrypted DNS does not answer this question.** DoH and DoT hide
+*which name you asked for*; they do not stop a registrar taking the name, and
+they replace one hardcoded anchor with two. For a censorship-resistant network
+they arguably make it worse — the resolvers people use are a handful of
+providers, so encrypting to them concentrates the observation that plaintext DNS
+at least spread across every resolver on the path. The rule that falls out:
+**DNS may carry signed records; it may never be the thing that decides.**
+
+```sh
+proofwork blob serve --listen 0.0.0.0:9797
+proofwork blob fetch <digest> --peer HOST:PORT   # once
+proofwork blob peers                              # then they arrive by asking
+```
+
+Records follow Ethereum's ENR shape — signed, with a monotonic `seq`, so a peer
+that moves supersedes itself and a replayed record is merely out of date. Told
+one address once, a node accumulates the rest: verified end to end with three
+nodes where C is told only about A, A does not have the blob, and C reaches B
+anyway.
+
+That last part exposed a design bug worth keeping: hanging up on a peer asking
+for a digest you do not hold is the correct *transfer* decision and it breaks
+discovery completely, because **the node that does not have your blob is often
+the best node to ask who does.**
+
+No peer discovery is anchor-free — Bitcoin ships DNS seeds *and* fallback IPs,
+Tor ships directory authorities, IPFS ships bootstrap multiaddrs. The goal is to
+make the anchor a key rather than an address, replaceable without a code change,
+and serving data that verifies itself. See [discovery.md](docs/discovery.md) for
+the full survey, including DHTs, mDNS, onion services and what NAT traversal
+still costs.
 
 **At rest, the log is sealed line by line** with ChaCha20-Poly1305. Per line, not
 per file, because the log is append-only and encrypting it as a unit would make
@@ -528,7 +573,7 @@ src/                 Rust implementation (primary)
   sealed.rs          sealed submissions, openable without the submitter
   incentive/         the node-operator mechanism, and the harness that evaluates it
   store/             at-rest encryption, the data directory, content-addressed blobs, the size cap, the mirror
-  swarm/             peer-to-peer blob transfer: pieces, rarest-first, choking, endgame
+  swarm/             peer-to-peer blob transfer and discovery: pieces, rarest-first, choking, signed peer records
 reference/python/    Python reference implementation (183 tests)
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
