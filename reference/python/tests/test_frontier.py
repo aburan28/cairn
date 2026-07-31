@@ -1,5 +1,6 @@
 """Progressive bounties: the mechanism that makes publishing safe."""
 import hashlib
+from datetime import datetime, timezone
 
 import pytest
 
@@ -10,6 +11,14 @@ from proofwork.node import Node, RuleViolation
 from proofwork.records import Claim, Commitment, Objective, commitment_hash
 
 TS = "2026-07-28T00:00:00+00:00"
+#: Seconds since the Unix epoch for :data:`TS`, and the length of one epoch.
+BASE = 1_785_196_800
+EPOCH = 600
+
+
+def stamp(offset: int) -> str:
+    return datetime.fromtimestamp(BASE + offset, timezone.utc).isoformat(timespec="seconds")
+
 
 EVALUATOR = '''
 def score(artifact):
@@ -117,10 +126,27 @@ def env(tmp_path):
 
 
 def improve(node, objective, who, score, nonce, cites=()):
+    """Commit, reveal a strictly later epoch, then close the batch.
+
+    Three epochs because the rules need three: a reveal must beat its
+    commitment's epoch, and a batch pays only once its epoch is over. Stepping
+    off the ledger length keeps successive improvements in successive epochs,
+    which also means each one sees the previous frontier -- exactly the
+    sequencing a chain of improvements has in practice.
+    """
     artifact = {"score": score}
+    step = len(node.ledger) * 4 * EPOCH
     digest = commitment_hash(objective.id, who, artifact, nonce)
-    node.commit(Commitment(objective.id, who, digest, TS), ts=TS)
-    return node.reveal(Claim(objective.id, who, artifact, nonce, TS, tuple(cites)), ts=TS)
+    node.commit(Commitment(objective.id, who, digest, stamp(step)), ts=stamp(step))
+    claim = Claim(objective.id, who, artifact, nonce, TS, tuple(cites))
+    outcome = node.reveal(claim, ts=stamp(step + EPOCH))
+    if not outcome.is_pending:
+        return outcome
+    settled = node.settle_at(stamp(step + 2 * EPOCH))
+    for candidate in settled:
+        if candidate.claim_id == outcome.claim_id:
+            return candidate
+    return outcome
 
 
 def test_first_improvement_advances_the_frontier(env):

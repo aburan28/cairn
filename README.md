@@ -54,12 +54,44 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 747 tests, no network required
+cargo test                    # 876 tests, no network required
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
+./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
 proofwork incentives          # evaluate the node-operator game
 ```
+
+### Start a p2p node
+
+The easiest local launch is:
+
+```sh
+make p2p
+```
+
+On first run this creates `.local/node.identity.json`, `.local/root.key`, and
+`.local/checkpoint.json`. The first two contain private key material; keep
+`.local/` out of version control. The node listens on `127.0.0.1:9000` by
+default, accepts inbound peers, periodically dials configured bootstrap files,
+and re-derives received records locally.
+
+To connect to a peer, provide a bootstrap file containing its address and
+McEliece public key:
+
+```json
+{"addr":"127.0.0.1:9001","public":"<peer public-key hex>"}
+```
+
+Then launch with:
+
+```sh
+make p2p LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS='--bootstrap peer.json'
+```
+
+Use separate `LOCAL_DIR`, `LOG`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT`
+paths for each node. The root checkpoint key is ML-DSA-65 and is separate from
+the transport identity.
 
 Rust 1.85+ (verified in CI, not asserted). No network access needed at runtime.
 
@@ -439,6 +471,9 @@ examples/            worked objectives with real artifacts
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
+- [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
+- [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
+- [AGENTS.md](AGENTS.md) — instructions agents read: contributing here, and contributing *to* the network
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
 - [conformance/README.md](conformance/README.md) — the cross-implementation contract
 

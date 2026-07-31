@@ -20,16 +20,20 @@
 
 pub mod attribution;
 pub mod canonical;
+pub mod checkpoint;
 pub mod crypto;
 pub mod frontier;
 pub mod gossip;
 pub mod incentive;
 pub mod ledger;
 pub mod node;
+pub mod p2p;
 pub mod partition;
 pub mod records;
+pub mod schema;
 pub mod sealed;
 pub mod store;
+pub mod time;
 pub mod verifiers;
 
 pub use attribution::{flow, FlowParams};
@@ -41,6 +45,7 @@ pub use ledger::{Entry, Ledger, LedgerError};
 pub use node::{Node, Outcome, RuleViolation};
 pub use partition::{assign, assignment_for, beacon, Assignment};
 pub use records::{commitment_hash, Claim, Commitment, Objective, RecordError};
+pub use schema::{validate_claim, validate_objective, SchemaError};
 pub use verifiers::{Status, Verdict, VerifierRegistry};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -140,11 +140,20 @@ class PinMismatch(Exception):
 
 
 SANDBOXING = """
-This reference implementation executes pinned verifier code in-process. That is
-adequate for a single-operator Stage 0 deployment where the operator authors or
-reviews every objective, and it is NOT adequate for a permissionless network: a
-malicious objective author would be running arbitrary code on every contributor
-that touches the objective. Before opening objective authorship, verifier
-execution must move into a sandbox (container, gVisor/Firecracker, or WASM) with
-no network and a wall-clock cap. Tracked as a launch blocker, not a nice-to-have.
+This reference implementation executes pinned verifier code IN-PROCESS, with no
+jail, no network restriction, and no wall-clock cap. A malicious objective
+author gets the interpreter running this module: its memory, its keys, its
+filesystem, its network.
+
+This is a deliberate and stated parity gap with the Rust implementation, which
+spawns the same code inside an OS jail (bubblewrap on Linux, seatbelt on macOS)
+and documents exactly what that does and does not bound. The gap is not closed
+here because closing it would mean reimplementing that jail in a second
+language, and the value of this package is that it is small enough to read
+end to end and check the *encoding and settlement rules* against -- not that it
+is a hardened node.
+
+So: run this package only on objectives you wrote or have read. To verify
+objectives from strangers, use the Rust node. Tracked as a launch blocker for
+this package, not a nice-to-have.
 """

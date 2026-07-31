@@ -114,7 +114,7 @@ fn every_section_this_file_covers_is_present_and_populated() {
     // let every loop below iterate zero times and report success.
     let v = vectors();
     let records = section(&v, "records");
-    assert_eq!(list_of(records, "objectives").len(), 5);
+    assert_eq!(list_of(records, "objectives").len(), 6);
     assert_eq!(list_of(records, "claims").len(), 2);
     assert_eq!(list_of(records, "commitments").len(), 1);
     assert_eq!(list_of(records, "commitment_hash_cases").len(), 5);

@@ -14,3 +14,10 @@ venv/
 # Logs produced by demos
 *.jsonl
 !conformance/*.json
+
+# macOS AppleDouble sidecars; this volume creates one per file
+._*
+.DS_Store
+
+# Local node state: transport identity, ML-DSA root key, checkpoints, and log.
+.local/

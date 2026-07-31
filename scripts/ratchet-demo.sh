@@ -14,13 +14,25 @@ PW="${PROOFWORK_BIN:-./target/release/proofwork}"
 pw() { "$PW" --log "$LOG" --root . "$@"; }
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 
-# `reveal` prints the full claim id on its first line, so capture it from the
-# command that produced it rather than re-deriving it from the log.
-reveal_capture() {
+# A reveal must land in a strictly later epoch than its commitment, and a batch
+# pays only once its epoch is over. One-second epochs let the same rules play
+# out in a script that finishes; they change no canonical bytes.
+export PROOFWORK_EPOCH_SECONDS=1
+tick() { sleep 1.1; }
+
+# Commit, wait an epoch, reveal, wait another, settle. `reveal` prints the full
+# claim id on its first line, so capture it from the command that produced it
+# rather than re-deriving it from the log.
+step() {
+  local who=$1 artifact=$2 nonce=$3; shift 3
+  pw commit "$OID" --submitter "$who" --artifact "$artifact" --nonce "$nonce" >/dev/null
+  tick
   local out
-  out=$(pw reveal "$@")
+  out=$(pw reveal "$OID" --submitter "$who" --artifact "$artifact" --nonce "$nonce" "$@")
   echo "$out"
   echo "$out" | awk '/^claim /{print $2}' > /tmp/pw-last-claim
+  tick
+  pw settle
 }
 last_claim() { cat /tmp/pw-last-claim; }
 
@@ -28,22 +40,18 @@ rule "fund a progressive objective: cap sets in F_3^4, baseline 9, target 20"
 OID=$(pw post examples/capset_progressive/objective.json | head -1 | awk '{print $2}')
 
 rule "alice finds a 12-point cap set"
-pw commit "$OID" --submitter alice --artifact examples/capset_progressive/artifact-12.json --nonce a1 >/dev/null
-reveal_capture "$OID" --submitter alice --artifact examples/capset_progressive/artifact-12.json --nonce a1
+step alice examples/capset_progressive/artifact-12.json a1
 PREV=$(last_claim)
 
 rule "eve resubmits alice's result verbatim -- verifies, earns nothing"
-pw commit "$OID" --submitter eve --artifact examples/capset_progressive/artifact-12.json --nonce e1 >/dev/null
-pw reveal "$OID" --submitter eve --artifact examples/capset_progressive/artifact-12.json --nonce e1 --cites "$PREV"
+step eve examples/capset_progressive/artifact-12.json e1 --cites "$PREV"
 
 rule "bob improves to 16, citing alice"
-pw commit "$OID" --submitter bob --artifact examples/capset_progressive/artifact-16.json --nonce b1 >/dev/null
-reveal_capture "$OID" --submitter bob --artifact examples/capset_progressive/artifact-16.json --nonce b1 --cites "$PREV"
+step bob examples/capset_progressive/artifact-16.json b1 --cites "$PREV"
 PREV=$(last_claim)
 
 rule "carol reaches the target of 20, citing bob"
-pw commit "$OID" --submitter carol --artifact examples/capset_progressive/artifact-20.json --nonce c1 >/dev/null
-pw reveal "$OID" --submitter carol --artifact examples/capset_progressive/artifact-20.json --nonce c1 --cites "$PREV"
+step carol examples/capset_progressive/artifact-20.json c1 --cites "$PREV"
 
 rule "audit: pool never overspent, frontier never moved backwards"
 pw audit

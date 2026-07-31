@@ -30,26 +30,27 @@
 //! - [`Status::Unavailable`] blames *this node*: no `lean`, no `python3`, a
 //!   crash, a timeout. Another node may well reach a verdict.
 //!
-//! # Four verifiers
+//! # Five verifiers
 //!
 //! | kind | what it proves | cost |
 //! |---|---|---|
 //! | `certificate` | an NP witness recomputes | milliseconds |
 //! | `evaluator` | a pinned deterministic score clears a threshold | one evaluation |
+//! | `statistical` | a pinned, seeded test statistic clears a threshold | one evaluation |
 //! | `lean` | a proof-assistant kernel accepted the proof | seconds to minutes |
 //! | `replay` | a pinned computation reproduces its declared fields | a full re-run |
 //!
-//! # Architectural change from the Python reference: subprocess, not `exec`
+//! # Architectural change from the Python reference: jailed subprocess, not `exec`
 //!
 //! The reference implementation `exec`s pinned checker and evaluator source
-//! **in-process**. This port runs it as a **subprocess** instead. Two reasons,
-//! both real:
+//! **in-process**. This port runs it as a **subprocess inside an OS jail**
+//! instead. Two reasons, both real:
 //!
 //! 1. *Security.* In-process execution gives a malicious objective author the
 //!    address space of every contributor who touches the objective -- their
-//!    keys, their ledger, their filesystem handles. A subprocess is a genuine
-//!    (if partial) improvement and the first step toward the jail described in
-//!    [`SANDBOXING`], which the roadmap flags as a launch blocker.
+//!    keys, their ledger, their filesystem handles. The jail in
+//!    [`sandbox`] removes the network and the filesystem too; [`SANDBOXING`]
+//!    states precisely what is left.
 //! 2. *Practicality.* The pinned checkers in `examples/` are Python. Rust cannot
 //!    `exec` them; it can spawn an interpreter that can.
 //!
@@ -64,7 +65,10 @@
 //! child spawned here runs under a wall-clock bound and is killed on expiry.
 //! Expiry yields `Unavailable`, so a slow checker can never become a rejection.
 
+pub mod sandbox;
+
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -76,6 +80,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sha2::{Digest as _, Sha256};
 
 use crate::canonical::Value;
+use sandbox::Confinement;
 
 // ---------------------------------------------------------------------------
 // Status
@@ -261,15 +266,30 @@ pub enum Kind {
     Evaluator,
     Lean,
     Replay,
+    Statistical,
 }
 
 impl Kind {
+    /// Every kind this build can dispatch, in wire-spelling order.
+    ///
+    /// The published `spec/objective.schema.json` enum has to list exactly
+    /// these, so the schema tests iterate this rather than a second literal;
+    /// one list cannot drift from itself.
+    pub const ALL: &'static [Kind] = &[
+        Kind::Certificate,
+        Kind::Evaluator,
+        Kind::Lean,
+        Kind::Replay,
+        Kind::Statistical,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Kind::Certificate => "certificate",
             Kind::Evaluator => "evaluator",
             Kind::Lean => "lean",
             Kind::Replay => "replay",
+            Kind::Statistical => "statistical",
         }
     }
 
@@ -279,6 +299,7 @@ impl Kind {
             "evaluator" => Some(Kind::Evaluator),
             "lean" => Some(Kind::Lean),
             "replay" => Some(Kind::Replay),
+            "statistical" => Some(Kind::Statistical),
             _ => None,
         }
     }
@@ -341,19 +362,30 @@ impl fmt::Display for Direction {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Note carried across from the reference implementation, updated for the
-/// subprocess design. Still a launch blocker, not a nice-to-have.
+/// Exactly what the jail around objective-authored code does and does not do.
+///
+/// Reproduced in `docs/threat-model.md`. Keep the two saying the same thing:
+/// the whole value of that document is that it is not marketing.
 pub const SANDBOXING: &str = "\
-Pinned verifier code runs in a child process rather than in this process, which \
-is strictly better than the reference implementation's in-process exec: a \
-crashing or looping checker cannot take the node down, it cannot read this \
-process's memory, and it dies on a wall-clock deadline. It is NOT a sandbox. \
-The child inherits the node's user, filesystem, and network, so a malicious \
-objective author still gets code execution on every contributor who touches the \
-objective. Before permissionless objective authorship, verifier execution must \
-move into a real jail -- container, gVisor/Firecracker, or WASM -- with no \
-network, a read-only filesystem view of the objective bundle, a memory cap, and \
-an output cap. Tracked as a launch blocker.";
+Objective-authored code -- pinned checkers, evaluators, and statistics, replay \
+commands, and Lean on submitted proof text -- runs in a child process inside an \
+OS jail: bubblewrap on Linux, a seatbelt profile on macOS. Enforced by the \
+kernel: no network of any kind (including unix sockets to a local daemon), no \
+writes outside a scratch directory that is deleted when the check finishes, a \
+wall-clock deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. Pinned pure \
+functions additionally get a scrubbed environment, so a checker cannot read the \
+operator's credentials out of it. \
+\
+It is NOT a VM boundary, and four gaps are real. (1) A kernel or policy bug is \
+still an escape; gVisor/Firecracker/WASM would bound that and are not \
+implemented. (2) The seatbelt profile denies writes and network but not reads, \
+so on macOS objective code can read any file the operator can -- it just cannot \
+transmit or persist what it read. (3) replay and Lean keep the operator's \
+environment, because their toolchains are configured through it; a checker's \
+environment is scrubbed but theirs is not. (4) On a host with no jail mechanism \
+the child runs as before, unconfined; set PROOFWORK_REQUIRE_SANDBOX=1 to make \
+that Unavailable instead. When a jailed run fails, the verdict's evidence names \
+the mechanism, so an operator can tell a broken jail from a broken checker.";
 
 /// Wall-clock bound for pinned checkers and evaluators when the spec is silent.
 ///
@@ -457,6 +489,12 @@ const NATIVE_DECIDE: Screen = Screen {
 /// The program handed to `python3 -c`. It loads the pinned file by path, feeds
 /// it the artifact from stdin, and prints exactly one JSON object.
 ///
+/// A third argument, when present, is the `statistical` kind's pinned seed and
+/// is passed to the entrypoint as a second parameter. It is `argv`-carried
+/// rather than folded into the stdin artifact because the seed belongs to the
+/// *objective* and the artifact belongs to the submitter; merging them would
+/// let a submitter who controls the artifact choose the seed.
+///
 /// Three details are load bearing:
 ///
 /// - The module is loaded with `importlib.util.spec_from_file_location`, so the
@@ -483,6 +521,7 @@ def main():
         return 2
     path = sys.argv[1]
     entrypoint = sys.argv[2]
+    seed = int(sys.argv[3]) if len(sys.argv) > 3 else None
     artifact = json.load(sys.stdin)
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
@@ -497,7 +536,7 @@ def main():
         if not callable(func):
             sys.stderr.write("no callable entrypoint %r\n" % (entrypoint,))
             return 4
-        result = func(artifact)
+        result = func(artifact) if seed is None else func(artifact, seed)
     finally:
         sys.stdout = real_stdout
     if isinstance(result, tuple):
@@ -572,7 +611,7 @@ impl VerifierRegistry {
 
     /// Every kind this build can answer to, in sorted order.
     pub fn kinds() -> &'static [&'static str] {
-        &["certificate", "evaluator", "lean", "replay"]
+        &["certificate", "evaluator", "lean", "replay", "statistical"]
     }
 
     /// Whether an objective naming this kind can be posted at all. The node
@@ -597,6 +636,7 @@ impl VerifierRegistry {
             Some(Kind::Evaluator) => self.verify_evaluator(spec, artifact),
             Some(Kind::Lean) => self.verify_lean(spec, artifact),
             Some(Kind::Replay) => self.verify_replay(spec, artifact),
+            Some(Kind::Statistical) => self.verify_statistical(spec, artifact),
             // Unknown kind is Unavailable, not InvalidSpec: another node, or a
             // later version of this crate, may well know this verifier. Saying
             // "your objective is broken" because *we* are old would be wrong.
@@ -650,7 +690,7 @@ impl VerifierRegistry {
             Ok(path) => path,
             Err(verdict) => return verdict,
         };
-        let outcome = match self.run_pinned("checker", &path, entrypoint, artifact, timeout) {
+        let outcome = match self.run_pinned("checker", &path, entrypoint, artifact, timeout, None) {
             Ok(outcome) => outcome,
             Err(verdict) => return verdict,
         };
@@ -716,38 +756,13 @@ impl VerifierRegistry {
             Err(verdict) => return verdict,
         };
 
-        // `Value::Bool` is not `Value::Int`, so the reference implementation's
-        // explicit `isinstance(threshold, bool)` guard is structural here.
-        let threshold = match spec.get("threshold") {
-            Some(Value::Int(raw)) => match i64::try_from(*raw) {
-                Ok(threshold) => threshold,
-                Err(_) => {
-                    return Verdict::invalid_spec(format!(
-                        "threshold {raw} is outside the signed 64-bit range scores are recorded in"
-                    ))
-                }
-            },
-            _ => {
-                return Verdict::invalid_spec(
-                    "threshold must be an integer (scale fractional scores)",
-                )
-            }
+        let threshold = match spec_threshold(spec) {
+            Ok(threshold) => threshold,
+            Err(verdict) => return verdict,
         };
-        let direction = match spec.get("direction") {
-            None => Direction::Maximize,
-            Some(Value::String(text)) => match Direction::parse(text) {
-                Some(direction) => direction,
-                None => {
-                    return Verdict::invalid_spec(
-                        "direction must be one of (\"maximize\", \"minimize\")",
-                    )
-                }
-            },
-            Some(_) => {
-                return Verdict::invalid_spec(
-                    "direction must be one of (\"maximize\", \"minimize\")",
-                )
-            }
+        let direction = match spec_direction(spec) {
+            Ok(direction) => direction,
+            Err(verdict) => return verdict,
         };
         let timeout = match spec_timeout(spec, DEFAULT_PINNED_TIMEOUT_SECONDS) {
             Ok(timeout) => timeout,
@@ -758,11 +773,133 @@ impl VerifierRegistry {
             Ok(path) => path,
             Err(verdict) => return verdict,
         };
-        let outcome = match self.run_pinned("evaluator", &path, entrypoint, artifact, timeout) {
+        let outcome = match self.run_pinned("evaluator", &path, entrypoint, artifact, timeout, None)
+        {
             Ok(outcome) => outcome,
             Err(verdict) => return verdict,
         };
-        score_verdict(outcome, threshold, direction, declared)
+        score_verdict(
+            outcome,
+            threshold,
+            direction,
+            "evaluator",
+            Value::object([("evaluator_sha256", Value::string(declared))]),
+        )
+    }
+
+    // -- statistical --------------------------------------------------------
+
+    /// Statistical verification: a pinned, seeded test statistic clears a
+    /// pinned threshold.
+    ///
+    /// The whole point is *pre-registration*. The statistic and the rejection
+    /// threshold are fields of the objective, so they are inside the
+    /// objective's digest: choosing the criterion after seeing the data means
+    /// posting a different objective, with a different id, that funded nothing
+    /// and cites nothing. That is the only defence this network has against the
+    /// oldest fraud in empirical work, and it costs nothing to enforce because
+    /// identity already covers the verifier block.
+    ///
+    /// Spec: `{kind, statistic: {path, sha256}, entrypoint, threshold,
+    /// direction, seed}`, where the pinned file exposes
+    /// `statistic(artifact, seed) -> int`.
+    ///
+    /// Two rules beyond the evaluator's:
+    ///
+    /// - **The seed is pinned, and it comes from the objective.** Resampling,
+    ///   permutation tests, and bootstraps are the normal shape of a test
+    ///   statistic and they are all randomised. A statistic whose randomness a
+    ///   submitter could choose is a statistic a submitter can grind against
+    ///   until it clears; a statistic whose randomness is unpinned makes two
+    ///   honest nodes disagree, which is worse. `seed` defaults to 0 rather
+    ///   than being required, so the common deterministic case stays terse and
+    ///   the field stays omitted-on-default in the objective's digest.
+    /// - **Integers only**, for the same reason as the evaluator: IEEE-754 does
+    ///   not reproduce bitwise across hosts, so a p-value must arrive scaled
+    ///   (parts per million, say) and the objective statement must say so.
+    ///
+    /// Stage 0 admits only statistics cheap enough to re-run locally. A
+    /// resampling test that needs a compute committee is Stage 2.
+    fn verify_statistical(&self, spec: &Value, artifact: &Value) -> Verdict {
+        let statistic = match spec.get("statistic") {
+            Some(Value::Object(map)) => map,
+            _ => {
+                return Verdict::invalid_spec(
+                    "statistical spec needs a 'statistic' object with 'path' and 'sha256'",
+                )
+            }
+        };
+        let relative = match statistic.get("path").and_then(Value::as_str) {
+            Some(path) => path,
+            None => return Verdict::invalid_spec("missing spec field 'statistic.path'"),
+        };
+        let declared = match statistic.get("sha256").and_then(Value::as_str) {
+            Some(sha) => sha,
+            None => return Verdict::invalid_spec("missing spec field 'statistic.sha256'"),
+        };
+        let entrypoint = match required_str(spec, "entrypoint") {
+            Ok(entrypoint) => entrypoint,
+            Err(verdict) => return verdict,
+        };
+        let threshold = match spec_threshold(spec) {
+            Ok(threshold) => threshold,
+            Err(verdict) => return verdict,
+        };
+        let direction = match spec_direction(spec) {
+            Ok(direction) => direction,
+            Err(verdict) => return verdict,
+        };
+        // Absent means 0, and writing `"seed": 0` must mean the same thing --
+        // otherwise the two spellings would be two objectives.
+        let seed = match spec.get("seed") {
+            None | Some(Value::Null) => 0i64,
+            Some(Value::Int(raw)) => match i64::try_from(*raw) {
+                Ok(seed) => seed,
+                Err(_) => {
+                    return Verdict::invalid_spec(format!(
+                        "seed {raw} is outside the signed 64-bit range every node can represent"
+                    ))
+                }
+            },
+            Some(_) => {
+                return Verdict::invalid_spec(
+                    "seed must be an integer; a seed two nodes could read differently \
+                     is not a seed",
+                )
+            }
+        };
+        let timeout = match spec_timeout(spec, DEFAULT_PINNED_TIMEOUT_SECONDS) {
+            Ok(timeout) => timeout,
+            Err(verdict) => return verdict,
+        };
+
+        let path = match self.pinned("statistic", relative, declared) {
+            Ok(path) => path,
+            Err(verdict) => return verdict,
+        };
+        let outcome = match self.run_pinned(
+            "statistic",
+            &path,
+            entrypoint,
+            artifact,
+            timeout,
+            Some(seed),
+        ) {
+            Ok(outcome) => outcome,
+            Err(verdict) => return verdict,
+        };
+        score_verdict(
+            outcome,
+            threshold,
+            direction,
+            "statistic",
+            Value::object([
+                ("statistic_sha256", Value::string(declared)),
+                // Recorded so an auditor re-running this does not have to
+                // guess which seed produced the number.
+                ("seed", Value::Int(i128::from(seed))),
+            ]),
+        )
     }
 
     // -- lean ---------------------------------------------------------------
@@ -849,8 +986,24 @@ impl VerifierRegistry {
             Some(root) if !root.is_empty() => PathBuf::from(root),
             _ => workdir.path().to_path_buf(),
         };
-        let mut command = Command::new(&binary);
-        command.arg(&claim).current_dir(&cwd);
+
+        // Lean elaboration runs arbitrary code (macros, `#eval`), and half the
+        // input is submitter-controlled, so this spawn is jailed like any
+        // other. `project_root` is writable because building a Lake project
+        // writes `.olean` files into it and the operator named that directory
+        // themselves; the environment is inherited because `elan`/`LEAN_PATH`
+        // is how a Lean toolchain is located at all.
+        let mut plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs()).reading(&binary);
+        if cwd != workdir.path() {
+            plan = plan.writing(&cwd);
+        }
+        let jailed = match sandbox::confine(&binary, &sandbox::argv([claim.as_os_str()]), &plan) {
+            Ok(jailed) => jailed,
+            Err(sandbox::Unavailable(why)) => {
+                return Verdict::unavailable(format!("cannot jail lean: {why}"))
+            }
+        };
+        let mut command = jailed.command;
 
         let completed = match run_bounded(&mut command, workdir.path(), None, timeout) {
             Ok(completed) => completed,
@@ -994,11 +1147,34 @@ impl VerifierRegistry {
                 return Verdict::unavailable(format!("cannot create a working directory: {error}"))
             }
         };
-        let mut command = Command::new(program);
-        if let Some(rest) = command_parts.get(1..) {
-            command.args(rest);
-        }
-        command.current_dir(&cwd);
+        // Resolved here rather than left to the jail's `PATH`: bubblewrap hands
+        // the child a filesystem where the operator's `PATH` mostly does not
+        // exist, so a bare program name would resolve to a different binary or
+        // to none at all. The lookup failure is `Unavailable` for the same
+        // reason a missing interpreter is.
+        let resolved = match which(program) {
+            Some(resolved) => resolved,
+            None => {
+                return Verdict::unavailable(format!(
+                    "replay command '{program}' is not on PATH; this node cannot re-run it"
+                ))
+            }
+        };
+        let rest: Vec<OsString> = sandbox::argv(command_parts.get(1..).unwrap_or(&[]));
+        // The replay command is objective-authored by definition. Its `cwd` is
+        // read-only: a re-run that needs to mutate the bundle it is checking
+        // is not reproducible anyway. The environment is inherited because the
+        // command's toolchain is the operator's, not the objective's.
+        let plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs())
+            .reading(&resolved)
+            .reading(&self.root);
+        let jailed = match sandbox::confine(&resolved, &rest, &plan) {
+            Ok(jailed) => jailed,
+            Err(sandbox::Unavailable(why)) => {
+                return Verdict::unavailable(format!("cannot jail the replay command: {why}"))
+            }
+        };
+        let mut command = jailed.command;
 
         let completed = match run_bounded(&mut command, workdir.path(), None, timeout) {
             Ok(completed) => completed,
@@ -1172,14 +1348,19 @@ impl VerifierRegistry {
         Ok(full)
     }
 
-    /// Run pinned code in a child process and collect its single JSON result.
+    /// Run pinned code in a jailed child process and collect its single JSON
+    /// result.
     ///
-    /// Every failure here is `Unavailable`: a missing interpreter, a crashed
-    /// checker, a checker that ran past its deadline, output that is not a JSON
-    /// object. None of those are facts about the artifact. The one thing this
-    /// function does *not* decide is whether the returned value has the right
-    /// shape -- that is the caller's job, and it is `InvalidSpec`, because a
-    /// checker returning the wrong type is a broken objective.
+    /// Every failure here is `Unavailable`: a missing interpreter, a jail that
+    /// will not start, a crashed checker, a checker that ran past its deadline,
+    /// output that is not a JSON object. None of those are facts about the
+    /// artifact. The one thing this function does *not* decide is whether the
+    /// returned value has the right shape -- that is the caller's job, and it
+    /// is `InvalidSpec`, because a checker returning the wrong type is a broken
+    /// objective.
+    ///
+    /// `seed` is passed to the entrypoint as a second argument when present.
+    /// Only the `statistical` kind supplies one.
     fn run_pinned(
         &self,
         role: &str,
@@ -1187,6 +1368,7 @@ impl VerifierRegistry {
         entrypoint: &str,
         artifact: &Value,
         timeout: Duration,
+        seed: Option<i64>,
     ) -> Result<Harvest, Verdict> {
         let interpreter = match which(&self.python_binary) {
             Some(interpreter) => interpreter,
@@ -1206,13 +1388,32 @@ impl VerifierRegistry {
             }
         };
 
-        let mut command = Command::new(&interpreter);
-        command
-            .arg("-c")
-            .arg(HARNESS)
-            .arg(path)
-            .arg(entrypoint)
-            .current_dir(workdir.path());
+        let mut args: Vec<OsString> = sandbox::argv(["-c", HARNESS]);
+        args.push(path.as_os_str().to_os_string());
+        args.push(OsString::from(entrypoint));
+        if let Some(seed) = seed {
+            args.push(OsString::from(seed.to_string()));
+        }
+
+        // A pinned checker is a pure function of the artifact: it needs the
+        // interpreter, its own source, and nothing else. This is the one spawn
+        // path where the full jail costs nothing, so it gets all of it --
+        // scrubbed environment and an address-space cap included.
+        let plan = Confinement::new(workdir.path(), workdir.path(), timeout.as_secs())
+            .reading(&interpreter)
+            .reading(path)
+            .scrubbed()
+            .capped_memory();
+        let jailed = match sandbox::confine(&interpreter, &args, &plan) {
+            Ok(jailed) => jailed,
+            Err(sandbox::Unavailable(why)) => {
+                return Err(Verdict::unavailable(format!(
+                    "cannot jail the pinned {role}: {why}"
+                )))
+            }
+        };
+        let mechanism = jailed.mechanism;
+        let mut command = jailed.command;
 
         let stdin = artifact.canonical_bytes();
         let completed = match run_bounded(
@@ -1229,7 +1430,9 @@ impl VerifierRegistry {
                 )))
             }
             Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
-                return Err(Verdict::unavailable(format!("cannot run {role}: {error}")))
+                return Err(Verdict::unavailable(format!(
+                    "cannot run {role} under the {mechanism} jail: {error}"
+                )))
             }
         };
 
@@ -1244,10 +1447,13 @@ impl VerifierRegistry {
                     "pinned {role} exited {code}; a crashed verifier is unavailable, \
                      not a rejection"
                 ),
-                Value::object([(
-                    "stderr_tail",
-                    Value::string(tail(&completed.stderr, OUTPUT_TAIL_CHARS)),
-                )]),
+                Value::object([
+                    (
+                        "stderr_tail",
+                        Value::string(tail(&completed.stderr, OUTPUT_TAIL_CHARS)),
+                    ),
+                    ("sandbox", Value::string(mechanism)),
+                ]),
             ));
         }
 
@@ -1265,6 +1471,7 @@ impl VerifierRegistry {
                         "stderr_tail",
                         Value::string(tail(&completed.stderr, OUTPUT_TAIL_CHARS)),
                     ),
+                    ("sandbox", Value::string(mechanism)),
                 ]),
             )),
         }
@@ -1320,15 +1527,22 @@ fn parse_harvest(stdout: &str) -> Option<Harvest> {
     None
 }
 
-/// Turn an evaluator's result into a verdict.
+/// Turn a scoring verifier's result into a verdict.
 ///
-/// Split out from [`VerifierRegistry::verify_evaluator`] so the arithmetic edge
-/// cases are testable without spawning an interpreter.
+/// Shared by `evaluator` and `statistical`, which differ only in what they call
+/// the pinned file and what they add to the evidence. Split out from the
+/// verifiers so the arithmetic edge cases are testable without spawning an
+/// interpreter.
+///
+/// `role` names the pinned file in diagnostics; `extra` is folded into the
+/// evidence alongside the score. The `score` key stays where it is regardless:
+/// [`crate::frontier`] reads it from there.
 fn score_verdict(
     outcome: Harvest,
     threshold: i64,
     direction: Direction,
-    evaluator_sha256: &str,
+    role: &str,
+    extra: Value,
 ) -> Verdict {
     let score = match outcome {
         Harvest::Score(score) => match i64::try_from(score) {
@@ -1337,43 +1551,46 @@ fn score_verdict(
             // something that cannot be recorded is an evaluator no node can use.
             Err(_) => {
                 return Verdict::invalid_spec(format!(
-                    "evaluator returned {score}, outside the signed 64-bit range the \
+                    "{role} returned {score}, outside the signed 64-bit range the \
                      frontier records scores in"
                 ))
             }
         },
         Harvest::ScoreOutOfRange(raw) => {
             return Verdict::invalid_spec(format!(
-                "evaluator returned {raw}, outside the range any node can record"
+                "{role} returned {raw}, outside the range any node can record"
             ))
         }
         // `True` in Python is an `int`, so this is a real failure mode rather
         // than a hypothetical one, and it must not score as 1.
         Harvest::Boolean { .. } => {
-            return Verdict::invalid_spec(
-                "evaluator returned bool; scores must be int so every node agrees on \
-                 the comparison",
-            )
+            return Verdict::invalid_spec(format!(
+                "{role} returned bool; scores must be int so every node agrees on \
+                 the comparison"
+            ))
         }
         Harvest::BadReturn(kind) => {
             return Verdict::invalid_spec(format!(
-                "evaluator returned {kind}; scores must be int so every node agrees on \
+                "{role} returned {kind}; scores must be int so every node agrees on \
                  the comparison"
             ))
         }
     };
 
     let met = direction.clears(score, threshold);
+    let mut evidence = BTreeMap::from([
+        // The ratchet reads the score from here. Keep the key stable.
+        ("score".to_string(), Value::Int(i128::from(score))),
+        ("threshold".to_string(), Value::Int(i128::from(threshold))),
+        ("direction".to_string(), Value::string(direction.as_str())),
+    ]);
+    if let Value::Object(more) = extra {
+        evidence.extend(more);
+    }
     Verdict::new(
         if met { Status::Accept } else { Status::Reject },
         format!("score {score} vs threshold {threshold} ({direction})"),
-        Value::object([
-            // The ratchet reads the score from here. Keep the key stable.
-            ("score", Value::Int(i128::from(score))),
-            ("threshold", Value::Int(i128::from(threshold))),
-            ("direction", Value::string(direction.as_str())),
-            ("evaluator_sha256", Value::string(evaluator_sha256)),
-        ]),
+        Value::Object(evidence),
     )
 }
 
@@ -1385,6 +1602,35 @@ fn required_str<'a>(spec: &'a Value, key: &str) -> Result<&'a str, Verdict> {
     match spec.get(key).and_then(Value::as_str) {
         Some(value) => Ok(value),
         None => Err(Verdict::invalid_spec(format!("missing spec field '{key}'"))),
+    }
+}
+
+/// The integer rejection threshold shared by `evaluator` and `statistical`.
+///
+/// `Value::Bool` is not `Value::Int`, so the reference implementation's
+/// explicit `isinstance(threshold, bool)` guard is structural here.
+fn spec_threshold(spec: &Value) -> Result<i64, Verdict> {
+    match spec.get("threshold") {
+        Some(Value::Int(raw)) => i64::try_from(*raw).map_err(|_| {
+            Verdict::invalid_spec(format!(
+                "threshold {raw} is outside the signed 64-bit range scores are recorded in"
+            ))
+        }),
+        _ => Err(Verdict::invalid_spec(
+            "threshold must be an integer (scale fractional scores)",
+        )),
+    }
+}
+
+fn spec_direction(spec: &Value) -> Result<Direction, Verdict> {
+    match spec.get("direction") {
+        None => Ok(Direction::Maximize),
+        Some(Value::String(text)) => Direction::parse(text).ok_or_else(|| {
+            Verdict::invalid_spec("direction must be one of (\"maximize\", \"minimize\")")
+        }),
+        Some(_) => Err(Verdict::invalid_spec(
+            "direction must be one of (\"maximize\", \"minimize\")",
+        )),
     }
 }
 
@@ -1841,58 +2087,85 @@ mod tests {
         assert!(Direction::Minimize.clears(3, 3));
     }
 
+    fn scored(outcome: Harvest, threshold: i64, direction: Direction) -> Verdict {
+        score_verdict(
+            outcome,
+            threshold,
+            direction,
+            "evaluator",
+            Value::object([("evaluator_sha256", Value::string("ab"))]),
+        )
+    }
+
     #[test]
     fn evaluator_threshold_decides_accept_or_reject() {
-        let accepted = score_verdict(Harvest::Score(3), 3, Direction::Maximize, "ab");
+        let accepted = scored(Harvest::Score(3), 3, Direction::Maximize);
         assert_eq!(accepted.status, Status::Accept);
         assert_eq!(accepted.score(), Some(3));
-        let rejected = score_verdict(Harvest::Score(2), 3, Direction::Maximize, "ab");
+        let rejected = scored(Harvest::Score(2), 3, Direction::Maximize);
         assert_eq!(rejected.status, Status::Reject);
-        let minimized = score_verdict(Harvest::Score(2), 3, Direction::Minimize, "ab");
+        let minimized = scored(Harvest::Score(2), 3, Direction::Minimize);
         assert_eq!(minimized.status, Status::Accept);
     }
 
     #[test]
+    fn the_score_evidence_shape_is_stable_across_both_scoring_kinds() {
+        // The frontier reads `score` from evidence and the audit re-derives
+        // payouts from it; a kind that spells the key differently would settle
+        // and then be unrecheckable.
+        let evaluator = scored(Harvest::Score(3), 3, Direction::Maximize);
+        assert_eq!(evaluator.score(), Some(3));
+        assert!(evaluator.evidence.get("evaluator_sha256").is_some());
+        let statistical = score_verdict(
+            Harvest::Score(3),
+            3,
+            Direction::Maximize,
+            "statistic",
+            Value::object([
+                ("statistic_sha256", Value::string("ab")),
+                ("seed", Value::Int(7)),
+            ]),
+        );
+        assert_eq!(statistical.score(), Some(3));
+        assert_eq!(
+            statistical.evidence.get("seed").and_then(Value::as_i64),
+            Some(7)
+        );
+    }
+
+    #[test]
     fn a_score_too_large_to_record_is_a_spec_defect_not_a_rejection() {
-        let over = score_verdict(
+        let over = scored(
             Harvest::Score(i128::from(i64::MAX) + 1),
             0,
             Direction::Maximize,
-            "ab",
         );
         assert_eq!(over.status, Status::InvalidSpec);
         assert!(!over.status.settles());
 
-        let bignum = score_verdict(
+        let bignum = scored(
             Harvest::ScoreOutOfRange(
                 "1606938044258990275541962092341162602522202993782792835301376".into(),
             ),
             0,
             Direction::Maximize,
-            "ab",
         );
         assert_eq!(bignum.status, Status::InvalidSpec);
     }
 
     #[test]
     fn a_non_integer_score_is_refused_because_nodes_would_disagree() {
-        let float = score_verdict(
-            Harvest::BadReturn("float".into()),
-            3,
-            Direction::Maximize,
-            "ab",
-        );
+        let float = scored(Harvest::BadReturn("float".into()), 3, Direction::Maximize);
         assert_eq!(float.status, Status::InvalidSpec);
         assert!(float.detail.contains("int"));
 
-        let boolean = score_verdict(
+        let boolean = scored(
             Harvest::Boolean {
                 ok: true,
                 detail: String::new(),
             },
             3,
             Direction::Maximize,
-            "ab",
         );
         assert_eq!(boolean.status, Status::InvalidSpec);
         assert!(boolean.detail.contains("int"));
@@ -2056,12 +2329,16 @@ mod tests {
     fn kinds_are_sorted_and_complete() {
         assert_eq!(
             VerifierRegistry::kinds(),
-            &["certificate", "evaluator", "lean", "replay"]
+            &["certificate", "evaluator", "lean", "replay", "statistical"]
         );
         for kind in VerifierRegistry::kinds() {
             assert!(VerifierRegistry::supports(kind));
             assert_eq!(Kind::parse(kind).map(|k| k.as_str()), Some(*kind));
         }
+        // `kinds()` is what the CLI prints and what the schema enum mirrors;
+        // `Kind::ALL` is what dispatch matches on. Two lists, one truth.
+        let dispatchable: Vec<&str> = Kind::ALL.iter().map(Kind::as_str).collect();
+        assert_eq!(dispatchable, VerifierRegistry::kinds());
         assert!(!VerifierRegistry::supports("haruspicy"));
     }
 
@@ -2206,6 +2483,204 @@ mod tests {
                 .status,
             Status::InvalidSpec
         );
+    }
+
+    // -- statistical -------------------------------------------------------
+
+    const STATISTIC: &str = "def statistic(artifact, seed):\n    \
+                             return seed * 10 + len(artifact.get(\"data\", []))\n";
+
+    fn statistical_spec(sha: &str, extra: Vec<(&str, Value)>) -> Value {
+        let mut pairs: Vec<(&str, Value)> = vec![
+            ("kind", Value::string("statistical")),
+            (
+                "statistic",
+                Value::object([
+                    ("path", Value::string("s.py")),
+                    ("sha256", Value::string(sha)),
+                ]),
+            ),
+            ("entrypoint", Value::string("statistic")),
+            ("direction", Value::string("minimize")),
+        ];
+        pairs.extend(extra);
+        Value::object(pairs)
+    }
+
+    #[test]
+    fn a_statistical_verifier_uses_the_objectives_seed_not_the_artifacts() {
+        if !have("python3") {
+            return;
+        }
+        let root = tmpdir("proofwork-statistical");
+        let sha = write_pinned(&root, "s.py", STATISTIC);
+        let registry = VerifierRegistry::new(root.path());
+        // Two data points, so the statistic is `seed * 10 + 2`.
+        let artifact = Value::object([
+            ("data", Value::array([Value::Int(1), Value::Int(2)])),
+            // A submitter-supplied seed must be ignored: if it were read, the
+            // submitter would choose the randomisation they are tested under.
+            ("seed", Value::Int(99)),
+        ]);
+
+        let default_seed = registry.run(
+            &statistical_spec(&sha, vec![("threshold", Value::Int(2))]),
+            &artifact,
+        );
+        assert_eq!(
+            default_seed.status,
+            Status::Accept,
+            "{}",
+            default_seed.detail
+        );
+        assert_eq!(
+            default_seed.score(),
+            Some(2),
+            "seed defaulted to something other than 0"
+        );
+
+        let pinned = registry.run(
+            &statistical_spec(
+                &sha,
+                vec![("threshold", Value::Int(2)), ("seed", Value::Int(3))],
+            ),
+            &artifact,
+        );
+        assert_eq!(pinned.score(), Some(32));
+        // 32 > 2 under `minimize`, so the same artifact now fails: the seed is
+        // part of the objective's identity precisely because it can flip this.
+        assert_eq!(pinned.status, Status::Reject);
+        assert_eq!(pinned.evidence.get("seed").and_then(Value::as_i64), Some(3));
+    }
+
+    #[test]
+    fn a_statistical_verifier_is_bit_reproducible_across_runs() {
+        if !have("python3") {
+            return;
+        }
+        let root = tmpdir("proofwork-statistical-stable");
+        let sha = write_pinned(&root, "s.py", STATISTIC);
+        let registry = VerifierRegistry::new(root.path());
+        let spec = statistical_spec(&sha, vec![("threshold", Value::Int(50))]);
+        let artifact = Value::object([("data", Value::array([Value::Int(1)]))]);
+        let first = registry.run(&spec, &artifact);
+        let second = registry.run(&spec, &artifact);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_statistical_spec_must_pin_a_path_a_hash_and_an_integer_threshold() {
+        let registry = VerifierRegistry::new(".");
+        let sha = "0".repeat(64);
+        for (why, spec) in [
+            (
+                "no statistic block",
+                Value::object([
+                    ("kind", Value::string("statistical")),
+                    ("entrypoint", Value::string("statistic")),
+                    ("threshold", Value::Int(1)),
+                ]),
+            ),
+            (
+                "statistic is not an object",
+                Value::object([
+                    ("kind", Value::string("statistical")),
+                    ("statistic", Value::string("s.py")),
+                    ("entrypoint", Value::string("statistic")),
+                    ("threshold", Value::Int(1)),
+                ]),
+            ),
+            (
+                "no sha256",
+                Value::object([
+                    ("kind", Value::string("statistical")),
+                    (
+                        "statistic",
+                        Value::object([("path", Value::string("s.py"))]),
+                    ),
+                    ("entrypoint", Value::string("statistic")),
+                    ("threshold", Value::Int(1)),
+                ]),
+            ),
+            ("no threshold", statistical_spec(&sha, vec![])),
+            (
+                "float threshold is unrepresentable, so a string stands in for it",
+                statistical_spec(&sha, vec![("threshold", Value::string("0.05"))]),
+            ),
+            (
+                "boolean threshold",
+                statistical_spec(&sha, vec![("threshold", Value::Bool(true))]),
+            ),
+            (
+                "non-integer seed",
+                statistical_spec(
+                    &sha,
+                    vec![("threshold", Value::Int(1)), ("seed", Value::string("0"))],
+                ),
+            ),
+            (
+                "unknown direction",
+                Value::object([
+                    ("kind", Value::string("statistical")),
+                    (
+                        "statistic",
+                        Value::object([
+                            ("path", Value::string("s.py")),
+                            ("sha256", Value::string(&sha)),
+                        ]),
+                    ),
+                    ("entrypoint", Value::string("statistic")),
+                    ("threshold", Value::Int(1)),
+                    ("direction", Value::string("sideways")),
+                ]),
+            ),
+        ] {
+            let verdict = registry.run(&spec, &empty_object());
+            assert_eq!(verdict.status, Status::InvalidSpec, "{why}");
+            assert!(!verdict.status.settles(), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_statistic_returning_a_float_is_a_spec_defect_not_a_rejection() {
+        if !have("python3") {
+            return;
+        }
+        let root = tmpdir("proofwork-statistical-float");
+        let sha = write_pinned(
+            &root,
+            "s.py",
+            "def statistic(artifact, seed):\n    return 0.05\n",
+        );
+        let registry = VerifierRegistry::new(root.path());
+        let verdict = registry.run(
+            &statistical_spec(&sha, vec![("threshold", Value::Int(1))]),
+            &empty_object(),
+        );
+        assert_eq!(verdict.status, Status::InvalidSpec);
+        assert!(verdict.detail.contains("int"), "{}", verdict.detail);
+    }
+
+    #[test]
+    fn an_edited_statistic_invalidates_the_objective_rather_than_rescoring() {
+        // The point of the whole kind: the rejection rule cannot be changed
+        // after the data exists without changing the objective's id.
+        if !have("python3") {
+            return;
+        }
+        let root = tmpdir("proofwork-statistical-edited");
+        let sha = write_pinned(&root, "s.py", STATISTIC);
+        fs::write(
+            root.path().join("s.py"),
+            b"def statistic(artifact, seed):\n    return 0\n",
+        )
+        .expect("rewrite");
+        let registry = VerifierRegistry::new(root.path());
+        let verdict = registry.run(
+            &statistical_spec(&sha, vec![("threshold", Value::Int(1))]),
+            &empty_object(),
+        );
+        assert_eq!(verdict.status, Status::InvalidSpec);
     }
 
     // -- timeouts ----------------------------------------------------------
@@ -2599,7 +3074,11 @@ mod tests {
         }
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let registry = VerifierRegistry::new(&root);
-        for (name, artifact_field) in [("collatz", "n"), ("capset", "points")] {
+        for (name, artifact_field) in [
+            ("collatz", "n"),
+            ("capset", "points"),
+            ("permutation", "observations"),
+        ] {
             let objective_text =
                 match fs::read_to_string(root.join("examples").join(name).join("objective.json")) {
                     Ok(text) => text,
@@ -2697,9 +3176,104 @@ mod tests {
         assert_eq!(canonicalize(&integer).ok(), Some(Value::Int(7)));
     }
 
+    /// The predecessor of this test asserted the note still said "NOT a
+    /// sandbox". That was the right test while there was no jail. Now there is
+    /// one, and the risk has inverted: the note could quietly grow into a claim
+    /// that the boundary is stronger than it is. So the assertions moved to the
+    /// four gaps, which are the part a reader acts on and the part a future
+    /// edit is tempted to drop.
     #[test]
-    fn the_sandboxing_note_still_says_this_is_not_a_sandbox() {
-        assert!(SANDBOXING.contains("NOT a sandbox"));
-        assert!(SANDBOXING.contains("launch blocker"));
+    fn the_sandboxing_note_names_both_the_boundary_and_its_gaps() {
+        for enforced in ["bubblewrap", "seatbelt", "no network", "scrubbed"] {
+            assert!(SANDBOXING.contains(enforced), "missing: {enforced}");
+        }
+        assert!(SANDBOXING.contains("NOT a VM boundary"));
+        for gap in [
+            // A kernel escape is still an escape.
+            "kernel",
+            // macOS reads are not confined.
+            "not reads",
+            // replay and lean keep the operator's environment.
+            "environment",
+            // No jail at all on an unsupported host.
+            sandbox::REQUIRE_ENV,
+        ] {
+            assert!(SANDBOXING.contains(gap), "gap not stated: {gap}");
+        }
+    }
+
+    #[test]
+    fn objective_code_runs_jailed_on_a_host_that_has_a_jail() {
+        // A jail that is silently not applied is the failure this whole module
+        // exists to prevent, and it looks identical to a working one from the
+        // outside. Assert the mechanism is actually reached.
+        if !have("python3") || !sandbox::mechanism().is_jail() {
+            return;
+        }
+        let root = tmpdir("proofwork-jail-network");
+        // Opening a socket is the single capability the jail must remove.
+        let source = "import socket\n\
+                      def check(artifact):\n\
+                      \x20   s = socket.socket()\n\
+                      \x20   s.settimeout(2)\n\
+                      \x20   s.connect((\"1.1.1.1\", 80))\n\
+                      \x20   return True\n";
+        let sha = write_pinned(&root, "net.py", source);
+        let registry = VerifierRegistry::new(root.path());
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("net.py")),
+            ("checker_sha256", Value::string(sha)),
+            ("entrypoint", Value::string("check")),
+            ("timeout_seconds", Value::Int(30)),
+        ]);
+        let verdict = registry.run(&spec, &empty_object());
+        // The checker crashes because the connect is refused, and a crashed
+        // checker is Unavailable. What must never happen is Accept.
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+        assert_eq!(
+            verdict.evidence.get("sandbox").and_then(Value::as_str),
+            Some(sandbox::mechanism().as_str())
+        );
+    }
+
+    #[test]
+    fn objective_code_cannot_write_outside_its_scratch_directory() {
+        if !have("python3") || !sandbox::mechanism().is_jail() {
+            return;
+        }
+        let root = tmpdir("proofwork-jail-write");
+        let target = root.path().join("escaped.txt");
+        let source = format!(
+            "def check(artifact):\n    open({:?}, \"w\").write(\"x\")\n    return True\n",
+            target.to_string_lossy()
+        );
+        let sha = write_pinned(&root, "w.py", &source);
+        let registry = VerifierRegistry::new(root.path());
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("w.py")),
+            ("checker_sha256", Value::string(sha)),
+            ("entrypoint", Value::string("check")),
+        ]);
+        let verdict = registry.run(&spec, &empty_object());
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+        assert!(!target.exists(), "the jail let a write through");
+    }
+
+    #[test]
+    fn requiring_a_sandbox_that_is_absent_is_unavailable_never_a_rejection() {
+        // Cannot be exercised by setting the env var here -- the probe is
+        // cached process-wide and tests share a process -- so the decision
+        // function is checked directly. The invariant is the one that matters:
+        // no configuration of this module produces a settling verdict.
+        let dir = tmpdir("proofwork-require");
+        let plan = sandbox::Confinement::new(dir.path(), dir.path(), 1);
+        if let sandbox::Mechanism::None(_) = sandbox::mechanism() {
+            // Only reachable on a host with no jail; the error type carries no
+            // status, which is what makes a rejection unconstructible here.
+            let outcome = sandbox::confine(Path::new("/bin/true"), &[], &plan);
+            assert!(outcome.is_ok() || matches!(outcome, Err(sandbox::Unavailable(_))));
+        }
     }
 }

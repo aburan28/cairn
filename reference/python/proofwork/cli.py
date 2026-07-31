@@ -3,6 +3,7 @@
     proofwork post      examples/cap_set/objective.json
     proofwork commit    <objective-id> --submitter alice --artifact a.json --nonce n1
     proofwork reveal    <objective-id> --submitter alice --artifact a.json --nonce n1
+    proofwork settle
     proofwork audit
     proofwork attribute
     proofwork log
@@ -21,6 +22,7 @@ from .canonical import short
 from .ledger import Ledger
 from .node import Node, RuleViolation
 from .records import Claim, Commitment, Objective, commitment_hash
+from .schema import SchemaError, validate_claim, validate_objective
 
 DEFAULT_LOG = os.environ.get("PROOFWORK_LOG", "proofwork.jsonl")
 
@@ -37,6 +39,15 @@ def _read_json(path: str) -> dict[str, Any]:
 def cmd_post(args: argparse.Namespace) -> int:
     node = _node(args)
     data = _read_json(args.objective)
+    # The published schema runs *before* the constructor. ``from_dict`` is
+    # permissive by necessity -- it has to read back records written by older
+    # versions -- so it is the wrong place to enforce the contract third
+    # parties implement against.
+    try:
+        validate_objective(data)
+    except SchemaError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
     objective = Objective.from_dict(data)
     try:
         oid = node.post_objective(objective)
@@ -75,14 +86,51 @@ def cmd_reveal(args: argparse.Namespace) -> int:
         cites=tuple(args.cites or ()),
     )
     try:
+        validate_claim(claim.to_dict())
+    except SchemaError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+    try:
         outcome = node.reveal(claim)
     except RuleViolation as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
-    print(f"claim {short(outcome.claim_id)}")
+    # The FULL claim id, not the display-shortened form: citing this claim is
+    # the next thing anyone does with it, and a truncated id cannot be passed
+    # to ``--cites``.
+    print(f"claim {outcome.claim_id}")
     print(f"  verdict  {outcome.verdict.status.value}: {outcome.verdict.detail}")
-    print(f"  settled  {outcome.settled}  reward {outcome.reward}  ({outcome.note})")
+    if outcome.is_pending:
+        print(
+            f"  pending  settles when epoch {outcome.pending_epoch} closes  "
+            "(`proofwork settle`)"
+        )
+    else:
+        print(f"  settled  {outcome.settled}  reward {outcome.reward}  ({outcome.note})")
     return 0 if outcome.verdict.status.settles else 3
+
+
+def cmd_settle(args: argparse.Namespace) -> int:
+    """Close every reveal epoch that is over and pay out its batch.
+
+    Exists because settlement is deferred: a claim accepted in epoch N is paid
+    when N closes, in beacon order rather than arrival order. Commit and reveal
+    both drain due batches on the way in, so this is only needed when nothing
+    else is happening -- a demo, a cron job, a quiet objective being wound down.
+    """
+    node = _node(args)
+    try:
+        settled = node.settle_at(ts())
+    except RuleViolation as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+    if not settled:
+        print("no batch was due")
+        return 0
+    for outcome in settled:
+        print(f"claim {outcome.claim_id}")
+        print(f"  settled  {outcome.settled}  reward {outcome.reward}  ({outcome.note})")
+    return 0
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
@@ -130,6 +178,8 @@ def cmd_log(args: argparse.Namespace) -> int:
             summary = f"{entry.payload['submitter']} <- {entry.payload['reward']}"
         elif entry.kind == "commitment":
             summary = f"by {entry.payload['submitter']}"
+        elif entry.kind == "batch":
+            summary = f"epoch {entry.payload['epoch']}: {len(entry.payload['claims'])} claim(s)"
         print(f"{entry.seq:>4}  {entry.kind:<11} {short(entry.hash)}  {summary}")
     return 0
 
@@ -164,6 +214,9 @@ def build_parser() -> argparse.ArgumentParser:
     reveal.add_argument("--nonce", required=True)
     reveal.add_argument("--cites", nargs="*", default=[])
     reveal.set_defaults(func=cmd_reveal)
+
+    settle = sub.add_parser("settle", help="pay out every reveal epoch that has closed")
+    settle.set_defaults(func=cmd_settle)
 
     audit = sub.add_parser("audit", help="re-derive the entire log independently")
     audit.add_argument("--no-rerun", action="store_true", help="check hashes only")

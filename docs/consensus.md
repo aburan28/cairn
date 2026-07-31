@@ -110,14 +110,19 @@ down to a single step the base layer can adjudicate cheaply — the run manifest
 already pins command, seed, and environment, which is exactly what makes a trace
 bisectable.
 
-**Epoch-batched commit–reveal.** Commits in epoch N, reveals in epoch N+1, order
-within the epoch fixed by the beacon rather than arrival time. Kills in-flight
-front-running and removes the sequencer's ability to reorder for profit.
+**Epoch-batched commit–reveal.** *Built* — commits in epoch N, reveals in
+epoch N+1, order within the epoch fixed by the beacon rather than arrival time.
+That kills in-flight front-running and removes the sequencer's ability to
+reorder *within* a batch for profit. It does not remove the sequencer's ability
+to choose the beacon, which is the next item and is now the load-bearing one.
 
 **A real randomness beacon.** `partition.py` currently derives its beacon from
 ledger heads and admits in its own docstring that a sequencer free to choose
-that value could grind it. A VDF or threshold signature is required before the
-sequencer is untrusted.
+that value could grind it. That was a work-assignment problem when it was
+written. It is a settlement problem now: the same beacon orders a settlement
+batch, so grinding the anchor picks who gets paid first. A VDF or threshold
+signature is required before the sequencer is untrusted, and epoch batching
+moved this from "should" to "must".
 
 ## The verifier's dilemma, and why it is mild here
 
@@ -161,5 +166,5 @@ all, and every objective that drifts out of those shapes drags one back in.
 | Fastest finality needed? | Seconds. Frontier advances are minutes apart. |
 | Build a new consensus protocol? | No. |
 | Run an L1? | No — rollup on an established chain. |
-| Where is the real protocol work? | Verification committees, epoch-batched reveal, randomness beacon. |
+| Where is the real protocol work? | Verification committees and a randomness beacon. Epoch-batched reveal is built, and it is what made the beacon urgent. |
 | What keeps this tractable? | Verification costing one evaluation. |

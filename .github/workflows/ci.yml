@@ -22,6 +22,10 @@ jobs:
       - run: cargo build --release
       - run: ./scripts/demo.sh
       - run: ./scripts/ratchet-demo.sh
+      # Runs the MCP server as a real process. The unit tests call handle_line
+      # directly and structurally cannot catch a stray write to stdout, which is
+      # the failure that breaks every MCP client and looks like their bug.
+      - run: ./scripts/mcp-smoke.sh
 
   reference-python:
     # The Python reference is what conformance/vectors.json is generated from.
@@ -51,6 +55,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
+
+  tla:
+    # A rule that is implemented but not modeled is incomplete work. Tests
+    # exercise the paths someone thought of; TLC exercises the interleavings
+    # nobody did, and "anyone can re-derive every settled result from the log
+    # alone" is a property no unit test can state.
+    #
+    # scripts/tla.sh returns 3 when it could not check anything at all. That
+    # status is not tolerated here: on a runner we control, "I could not check"
+    # is a broken job. Locally it is a skip; the script never turns it into a
+    # pass.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # ~8 MB. The key is dated rather than fixed: a fixed key silently pins the
+      # first jar ever cached, which is a stale toolchain nobody chose.
+      - uses: actions/cache@v4
+        with:
+          path: .local/tla2tools.jar
+          key: tla2tools-2026-07
+      - run: ./scripts/tla.sh
 
   interop:
     # The strongest check in the repo. "Anyone can independently re-derive every

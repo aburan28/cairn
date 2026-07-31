@@ -50,12 +50,30 @@ use proofwork::canonical::Value;
 use proofwork::frontier::{Direction, Ratchet, RatchetError};
 use proofwork::ledger::Ledger;
 use proofwork::node::{Node, Outcome, RuleViolation};
+use proofwork::partition::epoch_seconds;
 use proofwork::records::{commitment_hash, Claim, Commitment, Objective};
+use proofwork::time::format_iso8601_utc;
 use proofwork::verifiers::{Status, VerifierRegistry};
 
 /// Frozen timestamp. Nothing in the rules depends on wall-clock time, and a
 /// fixed stamp keeps record ids reproducible across runs.
 const TS: &str = "2026-07-28T00:00:00+00:00";
+
+/// [`TS`] as seconds since the Unix epoch, and the origin every [`stamp`] is
+/// measured from.
+const BASE: i64 = 1_785_196_800;
+
+/// One epoch, as an offset. Read from the crate rather than restated here: a
+/// `PROOFWORK_EPOCH_SECONDS` override that this file did not follow would put
+/// commit and reveal back in the same epoch and fail every submission.
+fn epoch() -> i64 {
+    epoch_seconds() as i64
+}
+
+/// [`TS`] plus `offset` seconds.
+fn stamp(offset: i64) -> String {
+    format_iso8601_utc(BASE + offset)
+}
 
 /// A Lean binary name guaranteed not to exist, so `lean` verification is
 /// deterministically `Unavailable` without touching (or depending on) whatever
@@ -236,7 +254,22 @@ fn proof(text: &str) -> Value {
     Value::object([("proof", Value::string(text))])
 }
 
-/// Commit, then reveal, the way an honest submitter does.
+/// Commit, reveal, then close the batch -- what an honest submitter and an
+/// honest operator do between them.
+///
+/// Three epochs, and they do not collapse into one. A reveal must land in a
+/// strictly later epoch than its own commitment, or the sequencer -- who sees
+/// reveals first -- could open a commitment of its own in the same breath; and
+/// a batch settles only once its epoch is over, because settlement order is a
+/// function of the whole set of claims in the epoch and that set is not known
+/// until then. The step is taken off the ledger length so successive
+/// submissions occupy successive epochs: an epoch whose batch has already been
+/// paid refuses further reveals, which is the rule rather than an artifact of
+/// this helper.
+///
+/// Returns the claim's *final* outcome, so a caller can still ask "what did
+/// this submission earn" in one line. A verdict that never reaches the batch --
+/// unavailable, rejected -- is returned as it stands.
 fn submit(
     node: &mut Node,
     objective: &Objective,
@@ -245,10 +278,39 @@ fn submit(
     nonce: &str,
     cites: Vec<String>,
 ) -> Result<Outcome, RuleViolation> {
-    let hash = commitment_hash(&objective.id(), submitter, &artifact, nonce);
-    node.commit(&Commitment::new(objective.id(), submitter, hash, TS), TS)
+    let step = node.ledger().len() as i64 * 4 * epoch();
+    commit_at(node, objective, submitter, &artifact, nonce, &stamp(step));
+    let outcome = reveal_at(
+        node,
+        objective,
+        submitter,
+        artifact,
+        nonce,
+        cites,
+        &stamp(step + epoch()),
+    )?;
+    if !outcome.is_pending() {
+        return Ok(outcome);
+    }
+    let settled = node.settle_at(&stamp(step + 2 * epoch()))?;
+    Ok(settled
+        .into_iter()
+        .find(|candidate| candidate.claim_id == outcome.claim_id)
+        .unwrap_or(outcome))
+}
+
+/// Commit at a chosen instant, for the tests that need the two halves apart.
+fn commit_at(
+    node: &mut Node,
+    objective: &Objective,
+    submitter: &str,
+    artifact: &Value,
+    nonce: &str,
+    ts: &str,
+) {
+    let hash = commitment_hash(&objective.id(), submitter, artifact, nonce);
+    node.commit(&Commitment::new(objective.id(), submitter, hash, ts), ts)
         .expect("commit");
-    reveal_only(node, objective, submitter, artifact, nonce, cites)
 }
 
 /// Reveal without committing first -- what an artifact thief does.
@@ -260,9 +322,25 @@ fn reveal_only(
     nonce: &str,
     cites: Vec<String>,
 ) -> Result<Outcome, RuleViolation> {
+    reveal_at(node, objective, submitter, artifact, nonce, cites, TS)
+}
+
+/// Reveal at a chosen instant. `created_at` on the claim stays [`TS`]: the
+/// commitment binds the artifact and the nonce, not when the claim record says
+/// it was written, and holding it fixed keeps claim ids reproducible.
+#[allow(clippy::too_many_arguments)]
+fn reveal_at(
+    node: &mut Node,
+    objective: &Objective,
+    submitter: &str,
+    artifact: Value,
+    nonce: &str,
+    cites: Vec<String>,
+    ts: &str,
+) -> Result<Outcome, RuleViolation> {
     let claim = Claim::new(objective.id(), submitter, artifact, nonce, TS, cites)
         .expect("structurally valid claim");
-    node.reveal(&claim, TS)
+    node.reveal(&claim, ts)
 }
 
 fn settlements_for(node: &Node, objective_id: &str) -> Vec<Value> {
@@ -401,24 +479,49 @@ fn a_duplicate_artifact_verifies_but_mints_nothing() {
     let (_dir, mut node, objective) = certificate_env("duplicate", CHECKER);
     let artifact = n(42);
     for (who, nonce) in [("alice", "a"), ("bob", "b")] {
-        let hash = commitment_hash(&objective.id(), who, &artifact, nonce);
-        node.commit(&Commitment::new(objective.id(), who, hash, TS), TS)
-            .expect("commit");
+        commit_at(&mut node, &objective, who, &artifact, nonce, &stamp(0));
     }
 
-    let first = reveal_only(
+    // Alice reveals into epoch 1 and its batch pays her when epoch 2 opens.
+    // Bob reveals into epoch 2 -- a later epoch, deliberately, so that "who was
+    // first" is settled by the batches rather than by the beacon ordering
+    // inside one of them, which is what a same-epoch race would test instead.
+    let first = reveal_at(
         &mut node,
         &objective,
         "alice",
         artifact.clone(),
         "a",
         vec![],
+        &stamp(epoch()),
     )
     .expect("reveal");
+    assert!(first.is_pending(), "{}", first.note);
+    let first = node
+        .settle_at(&stamp(2 * epoch()))
+        .expect("close the batch")
+        .into_iter()
+        .find(|candidate| candidate.claim_id == first.claim_id)
+        .expect("alice's claim is in the batch");
     assert!(first.settled);
     assert_eq!(first.reward, 1000);
 
-    let second = reveal_only(&mut node, &objective, "bob", artifact, "b", vec![]).expect("reveal");
+    let second = reveal_at(
+        &mut node,
+        &objective,
+        "bob",
+        artifact,
+        "b",
+        vec![],
+        &stamp(2 * epoch()),
+    )
+    .expect("reveal");
+    let second = node
+        .settle_at(&stamp(3 * epoch()))
+        .expect("close the batch")
+        .into_iter()
+        .find(|candidate| candidate.claim_id == second.claim_id)
+        .expect("bob's claim is in the batch");
     assert_eq!(
         second.verdict.status,
         Status::Accept,
