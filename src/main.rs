@@ -416,6 +416,9 @@ enum Command {
     /// whole input from flags and is safe to run anywhere.
     Incentives {
         params: Box<NodeParams>,
+        /// Also report how far each parameter can move before the mechanism
+        /// breaks. Opt-in because it is hundreds of full solver runs.
+        robustness: bool,
     },
     /// Create an at-rest key.
     Keygen {
@@ -754,9 +757,11 @@ fn parse_audit(cursor: &mut Cursor) -> Result<Command, CliError> {
 /// throwing that away at the first threshold comparison.
 fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut params = NodeParams::reference();
+    let mut robustness = false;
 
     while let Some(token) = cursor.take() {
         match token.as_str() {
+            "--robustness" => robustness = true,
             "--nodes" => params.nodes = parse_u32(&cursor.value("--nodes")?, "--nodes")?,
             "--settled" => {
                 params.settled_value = parse_u64(&cursor.value("--settled")?, "--settled")?
@@ -818,6 +823,7 @@ fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
     params.validate().map_err(CliError::Params)?;
     Ok(Command::Incentives {
         params: Box::new(params),
+        robustness,
     })
 }
 
@@ -1062,11 +1068,15 @@ fn print_help(out: &mut dyn Write) {
     say(out, "      compute citation-flow payouts");
     say(
         out,
-        "  incentives [--nodes N] [--settled N] [--canary-rate N/D] ...",
+        "  incentives [--nodes N] [--settled N] [--canary-rate N/D] [--robustness] ...",
     );
     say(
         out,
-        "      evaluate the node-operator game at a parameter set",
+        "      evaluate the node-operator game at a parameter set; --robustness",
+    );
+    say(
+        out,
+        "      also reports how far each parameter can move before it breaks",
     );
     say(out, "  log");
     say(out, "      print the log");
@@ -1311,10 +1321,41 @@ fn cmd_attribute(
 /// and the answer is bad news", which a script has to be able to tell from "the
 /// tool could not run". A failing report is still printed in full -- the useful
 /// part is *which* line failed.
-fn cmd_incentives(out: &mut dyn Write, params: &NodeParams) -> Result<i32, CliError> {
+fn cmd_incentives(
+    out: &mut dyn Write,
+    params: &NodeParams,
+    robustness: bool,
+) -> Result<i32, CliError> {
     let report = IncentiveReport::of(params).map_err(|error| CliError::Usage(error.to_string()))?;
     for line in report.to_string().lines() {
         say(out, line);
+    }
+    if robustness {
+        say(out, "");
+        say(
+            out,
+            "robustness -- how far each parameter moves before honesty stops holding",
+        );
+        let margins = proofwork::incentive::robustness::margins(params)
+            .map_err(|error| CliError::Usage(error.to_string()))?;
+        for margin in &margins {
+            say(out, format!("  {margin}"));
+        }
+        // The line that changes what somebody does next. A verdict says the
+        // mechanism works; this says which measurement it is betting on.
+        match margins.iter().find(|m| m.factor.is_some()) {
+            Some(binding) => say(
+                out,
+                format!(
+                    "  binding constraint    {} -- measure this one first",
+                    binding.parameter
+                ),
+            ),
+            None => say(
+                out,
+                "  no parameter breaks within the ladder, or the point already fails",
+            ),
+        }
     }
     Ok(if report.passes() { 0 } else { 1 })
 }
@@ -2156,7 +2197,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         ),
         Command::Audit { rerun } => cmd_audit(out, options, *rerun),
         Command::Attribute { params } => cmd_attribute(out, options, params),
-        Command::Incentives { params } => cmd_incentives(out, params),
+        Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
         Command::Store { action } => cmd_store(out, options, *action),
         Command::Blob { action } => cmd_blob(out, options, action),
@@ -2405,7 +2446,18 @@ mod tests {
         assert_eq!(
             parsed.command,
             Command::Incentives {
-                params: Box::new(NodeParams::reference())
+                params: Box::new(NodeParams::reference()),
+                robustness: false,
+            }
+        );
+        // Opt-in, because a margin table is hundreds of full solver runs.
+        assert_eq!(
+            parse(argv(&["incentives", "--robustness"]))
+                .expect("parses")
+                .command,
+            Command::Incentives {
+                params: Box::new(NodeParams::reference()),
+                robustness: true,
             }
         );
     }
@@ -2418,7 +2470,7 @@ mod tests {
         let parsed =
             parse(argv(&["incentives", "--canary-rate", "0", "--nodes", "40"])).expect("parses");
         match parsed.command {
-            Command::Incentives { params } => {
+            Command::Incentives { params, .. } => {
                 assert_eq!(params.canary_rate, Rat::ZERO);
                 assert_eq!(params.nodes, 40);
                 assert_eq!(params.stake, NodeParams::reference().stake);

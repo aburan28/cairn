@@ -238,6 +238,40 @@ a shared client default or one popular piece of software that skips the check
 gets there in a single step. Thin the bond as well and it becomes a slope: one
 lazy operator is enough. Two different failures wanting two different fixes.
 
+## The verdict is a point; the useful claim is a region
+
+Everything above answers a question about *one* parameter set. That verdict is
+worth less than it looks, and the reason is uncomfortable: `passes` at the
+reference parameters is equally consistent with "the mechanism is sound" and
+"the reference parameters were chosen -- consciously or not -- to be a point
+where it passes." Nothing in the verdict distinguishes those.
+
+`proofwork incentives --robustness` distinguishes them. For each parameter it
+walks outward on a geometric ladder and reports the first rung at which the
+report stops passing, in *both* directions -- because `fraud_rate` breaks the
+mechanism by getting smaller, and a one-directional search would call it safe.
+
+The result contradicts where this document spends its attention:
+
+```
+  stake: 4000000 survives 1.25x, breaks lowering to 3200000
+  sealed_value: 2000000 survives 1.25x, breaks raising to 2500000
+  slash_rate: 10000 survives 1.25x, breaks lowering to 8000
+  detection_rate: 50000 survives 1.25x, breaks lowering to 40000
+  ...
+  verify_cost: 200 survives 16.00x, breaks raising to 3200
+  canary_rate: 1000 survives 16.00x, breaks lowering to 62
+  binding constraint    stake -- measure this one first
+```
+
+**The four tightest constraints are all custody.** Verification -- the sub-game
+this document argues about at length, and the one with the interesting
+structural result -- survives a sixteenfold error in the cost of a check.
+Custody does not survive a quarter. The interesting argument is not the fragile
+one, and no passing verdict would have said so.
+
+See [proving-it.md](proving-it.md) for what that does and does not establish.
+
 ## Where this is wrong
 
 Every number is a parameter somebody has to measure, and the output is a
@@ -267,6 +301,13 @@ More specifically:
   "up to `n − t` members may fail" — not probabilistic. A probabilistic model
   needs an availability assumption the harness does not have and would not be
   able to justify.
+- **The three sub-games are solved independently, and one operator plays all
+  three with one bond.** `stake` is slashable in verification, in availability
+  and in custody, so a deviation that risks the bond in one game changes what
+  the others cost -- an operator already facing a custody slash has less left to
+  lose by rubber-stamping. Separability is assumed rather than proved, and
+  unlike every other caveat here it is assumed in the direction that *flatters*
+  the mechanism. It is also structural: no choice of parameters fixes it.
 - **No saturation proof.** Bounded parameters keep every payoff far inside
   `i128`, but that is a *tested* property rather than a proved one, which is why
   every service finding carries an `exact` flag and a report says so when the

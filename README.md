@@ -59,6 +59,7 @@ cargo test                    # 812 tests, loopback only
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
 proofwork incentives          # evaluate the node-operator game
+proofwork incentives --robustness   # ...and how far each parameter can move before it breaks
 ```
 
 Rust 1.85+ (verified in CI, not asserted). No outbound network access needed at
@@ -261,6 +262,16 @@ rational payoffs (no floats, so "is this an equilibrium" is decidable), the full
 ladder from individual rationality up to k-resilience and sybil-proofness, and
 better-reply dynamics for where a population *lands* rather than where it could
 rest.
+
+And the verdict is a point, which is the weakest form of the claim. `--robustness`
+walks each parameter outward until the report stops passing, in both directions —
+`fraud_rate` breaks the mechanism by getting *smaller*, so a one-directional
+search would call it safe. The result contradicts where the prose spends its
+attention: **the four tightest constraints are all custody.** Verification, the
+sub-game with the interesting structural argument, survives a sixteenfold error
+in the cost of a check; custody does not survive a quarter. No passing verdict
+would have said so. See [proving-it.md](docs/proving-it.md) for what that does
+and does not establish.
 
 ```
 $ proofwork incentives --canary-rate 0
@@ -536,6 +547,7 @@ examples/            worked objectives with real artifacts
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
+- [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
