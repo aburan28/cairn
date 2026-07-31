@@ -82,6 +82,25 @@ correspond to real dependency.
 judgement, disputable, and labeled as subjective rather than dressed up as
 verification.
 
+## Paying the nodes
+
+The three flows above pay submitters. They do not pay the operators who re-run
+the verifiers, hold the log, or custody the shares that open a sealed
+submission, and the temptation there is a per-epoch subsidy -- which is the
+grinding attack wearing a different hat, since it is issuance against claimed
+effort with nothing gating supply.
+
+So node rewards are a **protocol fee on settlement**, taken from flow 1. Supply
+stays bounded by what someone was willing to pay to know, and the security
+budget scales with the value being secured.
+
+The honest cost of that choice: at launch, nothing has settled, so the fee pool
+is zero and the network can support no operators. `proofwork incentives
+--settled 0` prints exactly that. The bootstrap problem is stated rather than
+assumed away, and [node-incentives.md](node-incentives.md) has the rest --
+including the result that the size of the pool decides *how many* nodes there
+are and has no effect whatever on whether they do the work.
+
 ## Negative results
 
 "I searched this region and found nothing" is genuinely valuable, genuinely
