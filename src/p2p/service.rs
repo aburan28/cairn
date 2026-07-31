@@ -1,16 +1,18 @@
 //! High-level bootstrap and session orchestration.
 
+use super::code::{CodeLimits, CodeReport};
 use super::discovery::{AddressBook, Endpoint};
 use super::handshake::{PeerId, PeerIdentity};
 use super::pop::{PopLimits, PopReport};
 use super::session::{self, SessionError};
 use super::sync::{Peer, SyncError};
-use super::transport::{self, TransportError};
+use super::transport::{self, Connection, TransportError};
 use crate::gossip::{Candidate, Population};
 use crate::node::Node;
 use crate::records::{Claim, Commitment, Objective};
 use crate::time::timestamp;
 use rand_core::OsRng;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -131,17 +133,28 @@ impl Service {
         self.book.sample(fanout, &mut OsRng)
     }
 
-    /// Dial one endpoint and reconcile records, then populations.
+    /// Dial one endpoint and reconcile records, then verifier code, then
+    /// populations.
     ///
-    /// Two rounds on one connection, in that order and with that dependency:
-    /// candidates are scored against objectives, so a node that has not yet
-    /// heard of an objective cannot usefully score candidates for it. Records
-    /// first means the objective is in hand before the candidates arrive.
+    /// Three rounds on one connection, in that order, and each boundary carries
+    /// a dependency:
     ///
-    /// A population failure is reported but does not undo the record round,
-    /// which has already been applied. Gossiped candidates are a search
-    /// optimisation; a peer that mishandles them must not cost this node the
-    /// records it just imported.
+    /// - **records before code.** The set of blobs to ask for is derived from the
+    ///   objectives in hand, so fetching first would ask for last round's pins.
+    /// - **code before the records are applied.** A claim verified while its
+    ///   objective's checker is still missing gets `Unavailable` — correct, but
+    ///   sticky: the claim is in the log with a non-settling verdict and nothing
+    ///   re-runs it until some later round. Landing the code first means the
+    ///   first verdict this node ever records for the claim is the real one.
+    /// - **code before populations.** Candidates are scored by running the
+    ///   pinned evaluator, so a node without the code re-scores nothing and
+    ///   drops every candidate it was offered.
+    ///
+    /// Failures are contained rather than cascading. A code or population failure
+    /// is reported but does not undo the record round, which has already been
+    /// applied; a code failure does skip the population round, because the two
+    /// share a connection whose message sequence is no longer where the peer
+    /// thinks it is.
     ///
     /// `rescore` is handed the node rather than closing over it, because it is
     /// called only after the record round has landed and must see the
@@ -157,10 +170,8 @@ impl Service {
     where
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
-        let mut peer = records_from_node(node);
         let mut connection = transport::connect(&endpoint.peer, endpoint.addr, &self.identity)?;
-        session::reconcile(&mut connection, &mut peer, decode_record)?;
-        apply_records(node, &peer);
+        exchange_records_and_code(&mut connection, node)?;
         let settled: &Node = node;
         session::reconcile_population(&mut connection, population, limits, |candidate| {
             rescore(settled, candidate)
@@ -168,7 +179,8 @@ impl Service {
         .map_err(Into::into)
     }
 
-    /// Accept one inbound stream and reconcile records, then populations.
+    /// Accept one inbound stream and reconcile records, then verifier code, then
+    /// populations.
     pub fn accept_node_and_population<F>(
         &self,
         listener: &TcpListener,
@@ -183,9 +195,7 @@ impl Service {
         let (stream, _) = listener.accept().map_err(TransportError::from)?;
         let mut connection = transport::accept(stream, &self.identity)?;
         let remote = connection.remote();
-        let mut peer = records_from_node(node);
-        session::reconcile(&mut connection, &mut peer, decode_record)?;
-        apply_records(node, &peer);
+        exchange_records_and_code(&mut connection, node)?;
         let settled: &Node = node;
         let report =
             session::reconcile_population(&mut connection, population, limits, |candidate| {
@@ -196,10 +206,14 @@ impl Service {
 
     /// Synchronize a live node and replay newly admitted inputs into its own
     /// rules engine. Derived verdicts and settlements are never imported.
+    ///
+    /// Verifier code travels in the same session, before the records are
+    /// applied — a node that imported the inputs and not the checker would hold
+    /// the log and still be unable to re-derive it, which is the whole gap this
+    /// exists to close.
     pub fn dial_node_once(&self, endpoint: &Endpoint, node: &mut Node) -> Result<(), ServiceError> {
-        let mut peer = records_from_node(node);
-        self.dial_once(endpoint, &mut peer, decode_record)?;
-        apply_records(node, &peer);
+        let mut connection = transport::connect(&endpoint.peer, endpoint.addr, &self.identity)?;
+        exchange_records_and_code(&mut connection, node)?;
         Ok(())
     }
 
@@ -208,11 +222,60 @@ impl Service {
         listener: &TcpListener,
         node: &mut Node,
     ) -> Result<PeerId, ServiceError> {
-        let mut peer = records_from_node(node);
-        let remote = self.accept_once(listener, &mut peer, decode_record)?;
-        apply_records(node, &peer);
+        let (stream, _) = listener.accept().map_err(TransportError::from)?;
+        let mut connection = transport::accept(stream, &self.identity)?;
+        let remote = connection.remote();
+        exchange_records_and_code(&mut connection, node)?;
         Ok(remote)
     }
+}
+
+/// Records, then verifier code, then apply — the ordering every node path
+/// shares, in one place so the three callers cannot drift apart on it.
+///
+/// The record round lands in a staging [`Peer`] rather than in the log, which is
+/// what makes the code round possible at all: the want set is computed from the
+/// staged objectives, so this round's arrivals are covered, and the code is on
+/// disk before any claim against them is verified.
+fn exchange_records_and_code(
+    connection: &mut Connection,
+    node: &mut Node,
+) -> Result<CodeReport, ServiceError> {
+    let mut peer = records_from_node(node);
+    session::reconcile(connection, &mut peer, decode_record)?;
+    let needs = needed_code(node, &peer);
+    let store = node.registry().blobs().clone();
+    let code = session::reconcile_code(connection, &store, &needs, CodeLimits::default());
+    // Applied whatever the code round did. The records are already reconciled
+    // and refusing to apply them because a blob did not arrive would throw away
+    // work this node accepted; a claim whose checker is still missing simply
+    // records `Unavailable`, which is the truth and leaves the objective open.
+    apply_records(node, &peer);
+    code.map_err(Into::into)
+}
+
+/// The content addresses this node will need once `peer`'s objectives are
+/// applied.
+///
+/// Both halves matter. The log's own unmet pins are included because a blob may
+/// have been unavailable for many rounds and this peer may be the first that
+/// holds it; the staged objectives are included because otherwise the first
+/// round that learns an objective could not fetch its checker, and every claim
+/// in that same round would be verified without it.
+fn needed_code(node: &Node, peer: &Peer) -> BTreeSet<String> {
+    let mut needs = node.missing_code();
+    for id in peer.ids() {
+        let Some(record) = peer.get(&id) else {
+            continue;
+        };
+        if record.kind != "objective" {
+            continue;
+        }
+        if let Ok(objective) = Objective::from_value(&record.payload) {
+            needs.extend(node.registry().missing_code(&objective.verifier));
+        }
+    }
+    needs
 }
 
 fn records_from_node(node: &Node) -> Peer {

@@ -21,3 +21,9 @@ venv/
 
 # Local node state: transport identity, ML-DSA root key, checkpoints, and log.
 .local/
+
+# The content-addressed cache of pinned verifier code. Every blob in it is
+# recoverable from the pin in the objective that names it, so it is a cache and
+# never a source: committing one would put a second copy of a checker in the
+# repository, under a different path, that nothing checks against the first.
+.proofwork/

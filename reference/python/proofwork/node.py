@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from . import verifiers
+from . import blobs, verifiers
 from .frontier import FrontierEntry, Ratchet
 from .ledger import Ledger
 from .partition import epoch_of, epoch_seconds, settlement_rank
@@ -117,7 +117,57 @@ class Node:
                     "one pool, not two"
                 )
         self.ledger.append("objective", objective.to_dict(), ts or now())
+        # How pinned code becomes available to anyone who does not share this
+        # filesystem: the funder has the checker on disk, and this copies it into
+        # the content-addressed store under the same root, where its name is the
+        # pin the objective already declares.
+        #
+        # After the append and deliberately without raising. This same method
+        # admits objectives replayed from another node's log, where there is no
+        # bundle to publish from; a failure to cache code that was never provided
+        # is not a reason to refuse the record.
+        verifiers.publish_code(self.root, objective.verifier)
         return objective.id
+
+    # -- pinned verifier code ---------------------------------------------
+    def pinned_code(self) -> set[str]:
+        """Every content address the log's objectives pin.
+
+        The reachable set: a blob outside it is pinned by no objective this node
+        knows of. Computed from the log rather than remembered, so it cannot
+        drift and an objective learned a moment ago is protected with no
+        bookkeeping step.
+        """
+        return {
+            sha
+            for objective in self.objectives().values()
+            for _role, _path, sha in verifiers.pinned_code(objective.verifier)
+            if blobs.is_address(sha)
+        }
+
+    def missing_code(self) -> set[str]:
+        """Content addresses this node needs and does not have.
+
+        Why a verdict came back UNAVAILABLE, and what a peer would have to serve
+        to make the log re-derivable here.
+        """
+        out: set[str] = set()
+        for objective in self.objectives().values():
+            out.update(verifiers.missing_code(self.root, objective.verifier))
+        return out
+
+    def publish_local_code(self) -> int:
+        """Copy every pinned file the bundle has into the store, for every
+        objective in the log. Returns how many addresses are now servable.
+
+        Idempotent. A log written before verifier code was content-addressed has
+        objectives whose checkers were never published, and this is what fixes
+        that without reposting anything.
+        """
+        published: set[str] = set()
+        for objective in self.objectives().values():
+            published.update(verifiers.publish_code(self.root, objective.verifier))
+        return len(published)
 
     def objectives(self) -> dict[str, Objective]:
         return {
