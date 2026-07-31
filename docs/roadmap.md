@@ -55,6 +55,23 @@ downstream is unbacked.
 - [ ] Rate limiting and submission bonds against spam.
 - [ ] Sensitive-objective classes and an embargo path, **before** anything is
       published. This cannot be retrofitted.
+- [ ] **Agent as funder** — bind `funder` to a submitter identity, prepay escrow
+      from a settled balance, and size the posting bond against the verification
+      the objective will cost. This is the whole of agent-to-agent payment: a
+      trade expressed as an objective reuses escrow, settlement, audit and
+      citation flow, and needs no transfer primitive. See
+      [agent-market.md](agent-market.md).
+- [ ] **Reserved citation share**, and a discretionary split weighted by settled
+      reward. Citation flow divides δ evenly, which is safe only while citable
+      claims are scarce; agent funding makes them free to manufacture, and five
+      citations recover four fifths of what the ratchet promised the frontier
+      holder. A change to how settled money splits, so it lands *before* the
+      first agent-funded objective, not after — and it moves the conformance
+      vectors and the Python reference with it.
+- [ ] Surface the **decomposition floor** at post time. A sub-objective the
+      network verifies for more than it settles is subsidized by everything else;
+      the break-even is a function of the objective's verifier tier and is
+      computable before anything is funded.
 
 ## Stage 2 — permissionless verification
 
@@ -79,6 +96,13 @@ downstream is unbacked.
 - [ ] Bonded share custody, with the committee sized against the largest sealed
       bounty rather than fixed.
 - [ ] Claim assets typed by verification tier, non-fungible across tiers.
+- [ ] The **agent market sub-game** in `src/incentive/`, and only build the market
+      if it survives: candidates circulate through gossip because nothing prices
+      them, so pricing them may starve the population the island model runs on.
+      That is a payoff question, and the answer decides whether the rest of
+      [agent-market.md](agent-market.md) is worth building.
+- [ ] Offers on the gossip transport, trades in the log — and purchased goods
+      cited at submission, enforced the way the frontier citation already is.
 - [ ] A real randomness beacon (VDF or threshold signature) replacing the
       ledger-head derivation in `partition.py`, which a sequencer can grind.
 - [ ] Forced inclusion via a base layer. Censorship is the primary threat --
