@@ -32,7 +32,11 @@ for solved.
 | **spurious citations** — cite everything to farm attribution | δ decays with depth, bounding the payoff. Validators slashing bad edges is designed, not built | partial |
 | **self-dealing** — fund a bounty you have already solved | statement commitment must predate any witness; funder ≠ solver for protocol pools. Not enforced here (no identity layer) | not handled |
 | **sybil on judgement stake** | operator attestation, concentration caps. Mitigation, never prevention | out of scope at Stage 0 |
-| **rubber-stamp verification** — attest without checking (verifier's dilemma) | canaries, bonded challenge windows, interactive fraud proofs. Only arises when verification is expensive, i.e. Stage 2+ | out of scope at Stage 0 |
+| **rubber-stamp verification** — attest without checking (verifier's dilemma) | canaries against a bonded stake. Conditional slashing provably cannot work: with no canaries, universal rubber-stamping is a Nash equilibrium at *any* penalty, because nobody is caught when nobody looks. Mechanism designed, parameters solved and tested in `src/incentive/`; not wired into settlement | designed, not built |
+| **blind rejection** — reject everything without checking, collecting canary catches for free | valid canaries, plus the fact that the denied submitter is strictly motivated to dispute. False rejections police themselves; false acceptances do not | designed, not built |
+| **sybil on node rewards** — present one machine as forty | pools split by stake, never per node: stake is conserved when divided, headcount is not. An even split is sybil-attracting by construction | designed, not built |
+| **committee collusion** — `t` share-holders open a sealed submission early and front-run it | bonded custody: unprofitable when `V ≤ t·d·S'`. Note the residual — a sub-threshold cartel is behaviourally identical to honest members, so it assembles at zero cost and the honest profile is only ever a *weak* equilibrium | designed, not built |
+| **committee censorship** — `n − t + 1` share-holders withhold, so the reveal never opens and a rival wins | attributable non-publication is slashable, and the threshold must sit in a window where neither this nor early opening pays. The window is empty for a committee too small for the value it seals | designed, not built |
 | **result withholding** — find something extraordinary and walk away | escrow makes it cost the bounty. Nothing makes it impossible | unsolvable |
 | **post-hoc statistics** — choose the success criterion after seeing data | test statistic and threshold registered with the objective. V3 not implemented | design only |
 
@@ -67,3 +71,20 @@ bad faith. What the operator *cannot* do is lie about a settled result: the log
 is hash-linked and `proofwork audit` re-derives every verdict from the artifacts
 themselves. That is the specific, narrow guarantee this stage makes, and
 overstating it would be the first dishonest thing in the project.
+
+
+## Node operators
+
+Five rows above are new and share a caveat worth stating once rather than five
+times: they are **mechanism, not code**. `src/incentive/` contains the payoff
+model, the solvers, and the parameters that make each attack unprofitable, all
+tested; nothing in it runs at settlement time. A row marked *designed, not
+built* means the attack has a worked answer and an unbuilt implementation --
+which is better than an unanswered attack and considerably worse than a defended
+one.
+
+What the analysis adds beyond "here is a mitigation" is the size of the
+parameters. A bond in the millions, a committee that grows with the largest
+sealed bounty, and a canary pipeline indistinguishable from real submissions are
+requirements that are cheap to discover now and very expensive to discover after
+a network has operators. See [node-incentives.md](node-incentives.md).

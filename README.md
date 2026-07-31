@@ -54,10 +54,11 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 526 tests, no network required
+cargo test                    # 677 tests, no network required
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
+proofwork incentives          # evaluate the node-operator game
 ```
 
 Rust 1.85+ (verified in CI, not asserted). No network access needed at runtime.
@@ -178,6 +179,68 @@ a bug — it's the island model preserving search diversity. **Gossip is
 untrusted**: a peer asserting `score = 10^12` would evict every real candidate, so
 `ingest()` re-scores locally and drops what doesn't reproduce.
 
+## Why anyone runs a node
+
+Everything above pays *submitters*. Nothing in it pays the machines that re-run
+the verifiers, hold the log, or custody the shares that open a sealed
+submission — all public goods, all of which the dominant strategy is to leave to
+somebody else.
+
+The hard one is verification, and it is hard structurally rather than
+quantitatively. Punish a node for accepting work that somebody *else* later
+proves invalid, and
+
+> **"everybody rubber-stamps" is a Nash equilibrium at any penalty** — if nobody
+> checks, nobody is caught, so no penalty ever fires.
+
+Raising the slash does not touch it. The mechanism has to manufacture its own
+ground truth: **canaries**, artifacts whose verdict the protocol already knows,
+mixed indistinguishably into each node's sample. Then the punishment is
+unconditional and the equilibrium moves.
+
+Availability and custody need no such trick, and the reason is the whole design
+in one line: **the protocol already holds the right answer.** A Merkle challenge
+is checked against a published root; a share that never appears names its
+holder. Verification is the only service with no oracle.
+
+`src/incentive/` is the mechanism and a harness that evaluates it — exact
+rational payoffs (no floats, so "is this an equilibrium" is decidable), the full
+ladder from individual rationality up to k-resilience and sybil-proofness, and
+better-reply dynamics for where a population *lands* rather than where it could
+rest.
+
+```
+$ proofwork incentives --canary-rate 0
+
+verification -- honest action: verify
+  honest profile                 strict Nash  ok
+  pure equilibria                          2
+  rival (strict) equilibria                1  FAIL
+  smallest defection               100 nodes  FAIL
+  free (zero-gain) drift                none  ok
+  tipping point                    100 nodes  FAIL
+  binding constraint        canary_rate must exceed 1/1425 (currently 0)
+```
+
+Three results worth stating plainly, each pinned by a test:
+
+- **The reward pool decides how many nodes there are; it has no effect on
+  whether they do the work.** A rubber-stamper collects the same share, so the
+  pool cancels out of every honest-versus-lazy comparison. Paying operators more
+  is never an answer to "nobody is checking".
+- **Node rewards are a fee on settlement, not a mint** — the same demand-gating
+  rule as everything else here, which means security spend is proportional to
+  settled value and *zero at launch*. Stated, not solved.
+- **The committee has to grow with the value it seals.** Raising the threshold
+  makes early opening harder and censorship-by-withholding easier, so safety is
+  a window; a shape safe for a small bounty is corruptible for a large one, with
+  no code change in between.
+
+Also stated rather than papered over: a committee member standing ready to
+collude is behaviourally identical to an honest one, so the custody equilibrium
+is **weak at every parameter set** and no bond makes it strict. What the bond
+buys is that reaching the threshold does not pay.
+
 ## Censorship resistance
 
 Assume censorship. But separate four properties that get bundled under "encrypt
@@ -252,6 +315,7 @@ src/                 Rust implementation (primary)
   verifiers/         certificate, evaluator, lean, replay
   crypto/            Shamir, sealed envelopes, pseudonymous identity
   sealed.rs          sealed submissions, openable without the submitter
+  incentive/         the node-operator mechanism, and the harness that evaluates it
 reference/python/    Python reference implementation (183 tests)
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
@@ -266,6 +330,7 @@ examples/            worked objectives with real artifacts
 - [coordination.md](docs/coordination.md) — the hoarding trap, the ratchet, CRDT gossip
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
+- [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
 - [conformance/README.md](conformance/README.md) — the cross-implementation contract
@@ -284,6 +349,10 @@ examples/            worked objectives with real artifacts
 - **Not able to price a shared technique.** Citation flow tracks artifacts,
   because artifacts are checkable. If you tell me "try annealing on the third
   coordinate" and I win, nothing pays you.
+- **Not running the node mechanism.** `src/incentive/` is a mechanism and its
+  evaluation, not a code path. No canary is generated, no bond is posted, no
+  Merkle challenge is issued. It exists now because the parameters it demands
+  are expensive to discover after launch.
 
 ## Prior art
 
