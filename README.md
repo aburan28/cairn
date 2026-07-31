@@ -54,7 +54,7 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 747 tests, no network required
+cargo test                    # 770 tests, no network required
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
@@ -305,6 +305,42 @@ proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
 proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
 ```
 
+### A copy of the log, and nothing else
+
+That claim had a hole in it. An objective pins its checker by digest — the digest
+is part of the objective's id — but the digest was only ever used to *check* a
+file the operator already had, at a relative path under a locally chosen root. So
+two nodes with different roots disagreed, one Accepting and one returning
+Unavailable, and re-deriving a settled result quietly needed a copy of the
+verifier tree as well.
+
+`cache/blobs/` closes it by making the digest a **name** rather than only a check:
+
+```sh
+proofwork blob put examples/capset/evaluators/cap_set.py
+proofwork blob ls          # held, needed by the log, and absent
+```
+
+An objective now verifies on any node holding the bytes, whatever its directory
+layout — `tests/storage.rs` settles a real capset bounty against an *empty*
+verifier root. Reads re-hash and refuse bytes that do not match the name they were
+filed under, so the filename **is** the integrity record. And a corrupt or missing
+blob is `Unavailable`, never `Reject`: a damaged cache is a fact about that disk,
+and letting it refute honest work would be the missing-Lean-toolchain mistake in a
+new place. No id changed, no conformance vector moved.
+
+The quota had to learn one thing. A blob is reclaimable by construction — it is
+named by its content — right up until an objective in the log pins it, at which
+point evicting it makes this node answer Unavailable for work it is paid to check.
+That is not a third storage class but a pin set moving blobs across the existing
+line, so the rule stays one sentence: **a blob is reclaimable exactly when nothing
+needs it.** Every posted objective counts, settled or not, because `audit --rerun`
+re-verifies settled claims — a node that dropped an evaluator when its objective
+closed would keep the ability to earn and lose the ability to prove.
+
+Nothing fetches a blob yet. This is where one lives once a node has it; `sync`
+carries them, and the wire protocol that would go and get one does not exist.
+
 **At rest, the log is sealed line by line** with ChaCha20-Poly1305. Per line, not
 per file, because the log is append-only and encrypting it as a unit would make
 every append an `O(n)` rewrite. The AEAD's associated data binds each line's
@@ -419,7 +455,7 @@ src/                 Rust implementation (primary)
   crypto/            Shamir, sealed envelopes, pseudonymous identity
   sealed.rs          sealed submissions, openable without the submitter
   incentive/         the node-operator mechanism, and the harness that evaluates it
-  store/             at-rest encryption, the data directory, the size cap, the mirror
+  store/             at-rest encryption, the data directory, content-addressed blobs, the size cap, the mirror
 reference/python/    Python reference implementation (183 tests)
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes

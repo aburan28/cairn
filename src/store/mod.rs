@@ -7,6 +7,7 @@
 //! ```text
 //! <data-dir>/
 //!   log/proofwork.jsonl    the hash-linked log        PINNED       never evicted
+//!   cache/blobs/           content-addressed bytes    either       see below
 //!   cache/                 re-fetchable content       RECLAIMABLE  evicted under pressure
 //!   tmp/                   scratch                    RECLAIMABLE  always safe to drop
 //! ```
@@ -19,6 +20,19 @@
 //! cheerfully eat the log, because the log *is* the oldest thing. So the log is
 //! never a candidate: when the cap cannot be met without it, the store
 //! **refuses** and says which pinned bytes are in the way.
+//!
+//! [`blobs`] is what makes that two-way split not quite enough. A blob is
+//! content-addressed, so losing one is a re-download rather than a lost record
+//! -- reclaimable by construction. But a blob that is this node's only copy of
+//! an evaluator some posted objective pins is the difference between a node that
+//! can verify and one that answers `Unavailable` for work it is paid to check,
+//! which under availability sampling is a slash.
+//!
+//! The fix is deliberately *not* a third class. [`Store::with_pinned_blobs`]
+//! moves individual blobs across the existing line, so the rule stays sayable in
+//! one sentence: **a blob is reclaimable exactly when nothing needs it.** A
+//! caller that never sets a pin set gets the old behaviour, which is the right
+//! default for a store that is not backing a node.
 //!
 //! That refusal is correct and its consequence is worth stating bluntly: **a cap
 //! smaller than your log stops your node; it does not prune your log.** A tool
@@ -42,12 +56,16 @@
 //! rather than silent.
 
 pub mod atrest;
+pub mod blobs;
 pub mod mirror;
 pub mod quota;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use blobs::BLOB_DIR;
 
 /// Environment variable naming the data directory.
 pub const DATA_ENV: &str = "PROOFWORK_DATA";
@@ -79,6 +97,14 @@ pub enum StoreError {
     BadSize(String),
     /// The store's root is a file, or otherwise unusable as a directory.
     NotADirectory(PathBuf),
+    /// A blob was asked for by a name that is not a SHA-256 digest.
+    NotADigest(String),
+    /// A stored blob does not hash to the name it is filed under.
+    ///
+    /// A fact about this disk, never about the objective that asked for the
+    /// bytes -- which is why callers turn it into `Unavailable` rather than a
+    /// verdict that settles.
+    CorruptBlob { digest: String, actual: String },
 }
 
 impl fmt::Display for StoreError {
@@ -101,6 +127,16 @@ impl fmt::Display for StoreError {
             StoreError::NotADirectory(path) => {
                 write!(f, "{} is not a directory", path.display())
             }
+            StoreError::NotADigest(name) => write!(
+                f,
+                "{name:?} is not a sha256 digest; expected 64 lowercase hex \
+                 characters, optionally prefixed with \"sha256:\""
+            ),
+            StoreError::CorruptBlob { digest, actual } => write!(
+                f,
+                "blob {digest} hashes to {actual}: the stored bytes are not the \
+                 bytes that name promises. Delete it and fetch it again"
+            ),
         }
     }
 }
@@ -138,6 +174,10 @@ pub enum Class {
 pub struct Store {
     root: PathBuf,
     limit: Option<u64>,
+    /// Blobs something still needs, as canonical `sha256:` digests. Empty means
+    /// "nothing is claiming any of them", which is the correct assumption for a
+    /// store nobody has told about a log.
+    pinned_blobs: BTreeSet<String>,
 }
 
 impl Store {
@@ -146,6 +186,7 @@ impl Store {
         Store {
             root: root.into(),
             limit: None,
+            pinned_blobs: BTreeSet::new(),
         }
     }
 
@@ -168,6 +209,39 @@ impl Store {
         self
     }
 
+    /// Declare the blobs that must survive a reclaim.
+    ///
+    /// A blob is [`Class::Reclaimable`] by default, because content addressing
+    /// makes losing one a re-download rather than a lost record. That stops
+    /// being true the moment a posted objective pins it: evicting the only local
+    /// copy of an evaluator turns this node into one that answers `Unavailable`
+    /// for work it is paid to check, and in a network that pays for availability
+    /// that is a slash rather than an inconvenience.
+    ///
+    /// Digests are accepted in either spelling and stored canonically, so a
+    /// caller passing an objective's bare-hex `evaluator_sha256` and one passing
+    /// a prefixed id pin the same blob. Anything that is not a digest is
+    /// ignored: this is a hint about what matters, and a malformed verifier spec
+    /// should fail at verification with a verdict, not here with an error about
+    /// disk.
+    ///
+    /// [`crate::node::Node::pinned_blobs`] is where a node's set comes from.
+    pub fn with_pinned_blobs(
+        mut self,
+        digests: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Store {
+        self.pinned_blobs = digests
+            .into_iter()
+            .filter_map(|digest| blobs::canonical_digest(digest.as_ref()).ok())
+            .collect();
+        self
+    }
+
+    /// The blobs this store has been told are still needed.
+    pub fn pinned_blobs(&self) -> &BTreeSet<String> {
+        &self.pinned_blobs
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -183,6 +257,11 @@ impl Store {
 
     pub fn cache_dir(&self) -> PathBuf {
         self.root.join(CACHE_DIR)
+    }
+
+    /// Where content-addressed blobs live: `<data-dir>/cache/blobs`.
+    pub fn blob_dir(&self) -> PathBuf {
+        self.cache_dir().join(BLOB_DIR)
     }
 
     pub fn tmp_dir(&self) -> PathBuf {
@@ -219,6 +298,7 @@ impl Store {
             self.root.clone(),
             self.root.join(LOG_DIR),
             self.cache_dir(),
+            self.blob_dir(),
             self.tmp_dir(),
         ] {
             create_private_dir(&dir)?;
@@ -239,10 +319,33 @@ impl Store {
         };
         match relative.components().next() {
             Some(std::path::Component::Normal(first)) if first == CACHE_DIR || first == TMP_DIR => {
-                Class::Reclaimable
+                match self.blob_digest_of(path) {
+                    Some(digest) if self.pinned_blobs.contains(&digest) => Class::Pinned,
+                    _ => Class::Reclaimable,
+                }
             }
             _ => Class::Pinned,
         }
+    }
+
+    /// The digest a path under [`Store::blob_dir`] is filed as, if it is one.
+    ///
+    /// Reconstructed from the layout rather than from the file's contents:
+    /// classification runs over every file in the store on every `usage` call,
+    /// and re-hashing the disk to answer "may I delete this" would make the
+    /// quota cost proportional to the bytes it is trying to bound. A blob whose
+    /// contents no longer match its name is a corruption
+    /// ([`StoreError::CorruptBlob`]) and is caught where the bytes are used, not
+    /// here.
+    fn blob_digest_of(&self, path: &Path) -> Option<String> {
+        let relative = path.strip_prefix(self.blob_dir()).ok()?;
+        let mut parts = relative.components();
+        let shard = parts.next()?.as_os_str().to_str()?;
+        let rest = parts.next()?.as_os_str().to_str()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        blobs::canonical_digest(&format!("{shard}{rest}")).ok()
     }
 }
 

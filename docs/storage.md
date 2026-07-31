@@ -122,6 +122,7 @@ able to destroy your only copy — and you are told, loudly, to remove it yourse
 ```
 <data-dir>/
   log/proofwork.jsonl    PINNED       never evicted
+  cache/blobs/           either       content-addressed; pinned when the log needs it
   cache/                 RECLAIMABLE  evicted under pressure
   tmp/                   RECLAIMABLE  always safe to drop
 ```
@@ -131,6 +132,40 @@ it, the log is still a bare `proofwork.jsonl` in the working directory, and
 `--log` / `$PROOFWORK_LOG` still override everything. Quietly relocating an
 existing operator's log on upgrade would be the worst possible way to introduce
 this.
+
+## Blobs: the bytes an objective pins by hash
+
+An objective commits to its checker by digest, and that digest is part of the
+objective's id. But the digest was only ever used to *check* a file the operator
+already happened to have, at a relative path under `--root`. So two nodes whose
+roots differed disagreed — one Accepts, the other returns Unavailable — and
+"anyone can re-derive every settled result from nothing but a copy of the log"
+quietly needed a copy of the verifier tree as well.
+
+`cache/blobs/` closes that. The digest is now a *name*:
+
+```sh
+proofwork blob put examples/capset/evaluators/cap_set.py
+proofwork blob ls          # held, needed, and absent
+proofwork blob verify      # re-hash everything
+```
+
+**The name is the hash**, and everything follows from it. Reads re-hash and refuse
+bytes that do not match the name they were filed under, so integrity needs no
+second record to keep in sync. Writes are idempotent and leave mtime alone —
+which matters here more than it looks, because mtime is what eviction orders by.
+Two stores holding the same blob hold the same bytes, which is what makes `sync` a
+backup rather than a snapshot of one machine's opinion.
+
+Resolution asks the blob store first and falls back to the path, so a node with no
+blobs behaves exactly as it did before. A blob that is present but *corrupt* is
+`Unavailable`, never `Reject` and never `INVALID_SPEC`: a damaged local cache is a
+fact about that disk, and letting it refute honest work would be the same mistake
+as letting a missing Lean toolchain refute a proof.
+
+Nothing here fetches a blob. This is where one lives once a node has it; the wire
+protocol that would go and get it does not exist. See
+[knowledge-store.md](knowledge-store.md).
 
 ## The size cap
 
@@ -166,6 +201,30 @@ not cost you your cache on the way to failing.
 Anything under a directory this module does not recognise is classified pinned.
 A file it has never heard of is one whose loss it cannot reason about, so it does
 not get to delete it.
+
+### Blobs the log needs are pinned too
+
+A blob is reclaimable by construction — it is named by its content, so losing one
+is a re-download and never a lost record. That stops being true the moment an
+objective in the log pins it: evicting the only local copy of an evaluator turns
+this node into one that answers `Unavailable` for work it is paid to check, which
+under availability sampling is a slash rather than an inconvenience.
+
+Deliberately **not** a third class. The pin set moves individual blobs across the
+existing line, so the rule stays sayable in one sentence:
+
+> **A blob is reclaimable exactly when nothing needs it.**
+
+`store status` and `store gc` compute the set from the log, and a cap that cannot
+be met without one of those blobs gets the same refusal the log gets. **Every
+posted objective counts, settled or not** — `audit --rerun` re-verifies settled
+claims, so a node that dropped an evaluator when its objective closed would keep
+the ability to earn and lose the ability to prove. The cost is that the set only
+grows.
+
+A log that cannot be read is not treated as "nothing is pinned". That answer would
+let `gc` delete an evaluator on the strength of having been unable to check
+whether anything wanted it, so it is a refusal instead.
 
 ### Eviction order, and what it costs
 

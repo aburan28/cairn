@@ -370,6 +370,107 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_blob_is_not_an_eviction_candidate() {
+        // A blob is reclaimable exactly when nothing needs it. The one an open
+        // objective pins is the difference between a node that can verify and
+        // one that answers Unavailable for work it is paid to check, so it moves
+        // across the existing line rather than getting a class of its own.
+        use crate::store::blobs::BlobStore;
+
+        let dir = scratch("pinned-blob");
+        let store = Store::new(dir.join("data"));
+        store.prepare().expect("prepares");
+        fs::write(store.log_path(), vec![b'l'; 10]).expect("write log");
+
+        let blobs = BlobStore::under(&store);
+        let needed = blobs.put(&[b'n'; 100]).expect("puts");
+        let spare = blobs.put(&[b's'; 100]).expect("puts");
+
+        // Unpinned, both blobs are fair game and the cap is met by deleting.
+        let loose = store.clone().with_limit(Some(120));
+        assert_eq!(
+            loose.classify(&blobs.path_of(&needed).expect("a digest")),
+            Class::Reclaimable
+        );
+        assert_eq!(usage(&loose).expect("measures").pinned, 10, "just the log");
+
+        // Pinned, the same blob is counted as pinned and survives.
+        let tight = store
+            .clone()
+            .with_limit(Some(120))
+            .with_pinned_blobs([needed.as_str()]);
+        assert_eq!(
+            tight.classify(&blobs.path_of(&needed).expect("a digest")),
+            Class::Pinned
+        );
+        assert_eq!(
+            tight.classify(&blobs.path_of(&spare).expect("a digest")),
+            Class::Reclaimable
+        );
+        assert_eq!(usage(&tight).expect("measures").pinned, 110);
+
+        let eviction = reclaim(&tight, 0).expect("reclaims");
+        assert!(blobs.has(&needed), "the pinned blob survived");
+        assert!(!blobs.has(&spare), "the spare paid for the cap");
+        assert_eq!(eviction.freed, 100);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cap_below_the_blobs_an_objective_needs_is_refused_rather_than_met() {
+        // The same refusal the log gets, for the same reason: a store that
+        // cannot hold what its objectives depend on is a store that has to stop,
+        // not one that should quietly delete the thing and carry on verifying
+        // nothing.
+        use crate::store::blobs::BlobStore;
+
+        let dir = scratch("pinned-refuse");
+        let store = Store::new(dir.join("data"));
+        store.prepare().expect("prepares");
+        fs::write(store.log_path(), vec![b'l'; 10]).expect("write log");
+        let blobs = BlobStore::under(&store);
+        let needed = blobs.put(&[b'n'; 500]).expect("puts");
+
+        let store = store
+            .with_limit(Some(100))
+            .with_pinned_blobs([needed.as_str()]);
+        match reclaim(&store, 0).expect_err("cannot fit") {
+            StoreError::QuotaExceeded { pinned, limit } => {
+                assert_eq!(pinned, 510, "the log and the blob it cannot do without");
+                assert_eq!(limit, 100);
+            }
+            other => panic!("expected QuotaExceeded, got {other:?}"),
+        }
+        assert!(blobs.has(&needed), "nothing deleted on the way to refusing");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pin_set_naming_blobs_the_store_does_not_have_changes_nothing() {
+        // Pin sets come from the log, and a log may well name an evaluator this
+        // node has never fetched. That is a gap in the inventory, reported by
+        // `blob ls`, and it is not the quota's business.
+        use crate::store::blobs::BlobStore;
+
+        let dir = scratch("pinned-absent");
+        let store = Store::new(dir.join("data"));
+        store.prepare().expect("prepares");
+        fs::write(store.log_path(), vec![b'l'; 10]).expect("write log");
+        let blobs = BlobStore::under(&store);
+        let held = blobs.put(&[b'h'; 100]).expect("puts");
+        let never_fetched = crate::canonical::digest_bytes(b"an evaluator we do not have");
+
+        let store = store
+            .with_limit(Some(50))
+            .with_pinned_blobs([never_fetched.as_str(), "not-a-digest-at-all"]);
+        assert_eq!(usage(&store).expect("measures").pinned, 10);
+        let eviction = reclaim(&store, 0).expect("reclaims");
+        assert_eq!(eviction.freed, 100);
+        assert!(!blobs.has(&held));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn describe_says_whether_a_limit_is_set() {
         let usage = Usage {
             pinned: 1 << 20,

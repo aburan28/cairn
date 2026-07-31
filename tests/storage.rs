@@ -13,8 +13,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use proofwork::canonical::Value;
 use proofwork::ledger::{Codec, Ledger, LedgerError};
+use proofwork::node::{Node, Outcome};
+use proofwork::records::{commitment_hash, Claim, Commitment, Objective};
 use proofwork::store::atrest::{AtRestError, Cipher};
+use proofwork::store::blobs::BlobStore;
 use proofwork::store::{format_size, mirror, parse_size, quota, Store, StoreError};
+use proofwork::verifiers::VerifierRegistry;
+
+const TS: &str = "2026-01-01T00:00:00+00:00";
+
+/// Commit and reveal in one step, which is all these tests need of the rules
+/// engine -- they are about where the bytes came from, not about the protocol.
+fn submit(node: &mut Node, objective_id: &str, who: &str, artifact: Value, nonce: &str) -> Outcome {
+    let hash = commitment_hash(objective_id, who, &artifact, nonce);
+    node.commit(&Commitment::new(objective_id, who, hash.as_str(), TS), TS)
+        .expect("commits");
+    let claim =
+        Claim::new(objective_id, who, artifact, nonce, TS, Vec::new()).expect("valid claim");
+    node.reveal(&claim, TS).expect("reveals")
+}
 
 fn scratch(tag: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -394,5 +411,175 @@ fn mirroring_a_store_that_was_never_encrypted_says_so() {
     // Copied anyway: it is the operator's call, and refusing would push them
     // towards `cp -r`, which has no opinion at all.
     assert!(destination.join("log/proofwork.jsonl").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Content-addressed blobs
+// ---------------------------------------------------------------------------
+
+/// A checker with no dependencies, so this test needs nothing but `python3`.
+const CHECKER: &str = "def check(artifact):\n    return artifact.get(\"n\") == 42\n";
+
+fn have_python() -> bool {
+    std::process::Command::new("python3")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn an_objective_verifies_from_the_blob_store_with_no_verifier_tree_at_all() {
+    // The claim the blob store exists to make true. Before it, "anyone can
+    // re-derive every settled result from nothing but a copy of the log" needed
+    // a copy of the verifier tree as well: pinned code was addressed by a path
+    // under a root each operator chose for themselves, and a node whose root
+    // differed answered Unavailable for work another node settled.
+    //
+    // Here the root is an empty directory. The checker exists only as bytes
+    // filed under their own digest -- which is the digest the objective already
+    // committed to, so nothing about the objective changes.
+    if !have_python() {
+        return;
+    }
+    let dir = scratch("blob-verify");
+    let store = Store::new(dir.join("data"));
+    store.prepare().expect("prepares");
+
+    let blobs = BlobStore::under(&store);
+    let digest = blobs.put(CHECKER.as_bytes()).expect("puts");
+    let declared = digest.strip_prefix("sha256:").expect("prefixed");
+
+    let objective = Objective::new(
+        "G",
+        "exhibit the answer",
+        Value::object([
+            ("kind", Value::string("certificate")),
+            // Names a file that does not exist on this machine or any other.
+            ("checker", Value::string("checkers/answer.py")),
+            ("checker_sha256", Value::string(declared)),
+            ("entrypoint", Value::string("check")),
+        ]),
+        1_000,
+        "treasury",
+        "2026-01-01T00:00:00+00:00",
+        None,
+        None,
+    )
+    .expect("valid objective");
+
+    let empty_root = dir.join("no-verifier-tree");
+    fs::create_dir_all(&empty_root).expect("mkdir");
+
+    let ledger = Ledger::open(store.log_path()).expect("opens");
+    let registry = VerifierRegistry::new(&empty_root).with_blobs(blobs.clone());
+    let mut node = Node::with_registry(ledger, registry);
+
+    let id = node.post_objective(&objective, TS).expect("posts");
+    let artifact = Value::object([("n", Value::Int(42))]);
+    let outcome = submit(&mut node, &id, "alice", artifact, "nonce");
+    assert_eq!(outcome.verdict.status.as_str(), "accept");
+    assert!(outcome.settled);
+    assert_eq!(outcome.reward, 1_000);
+
+    // And the same node without the blob store cannot do it -- which is the
+    // control, and also the exact situation every operator was in before.
+    let ledger = Ledger::open(dir.join("second.jsonl")).expect("opens");
+    let mut blind = Node::with_registry(ledger, VerifierRegistry::new(&empty_root));
+    let id = blind.post_objective(&objective, TS).expect("posts");
+    let outcome = submit(
+        &mut blind,
+        &id,
+        "alice",
+        Value::object([("n", Value::Int(42))]),
+        "nonce",
+    );
+    assert_eq!(
+        outcome.verdict.status.as_str(),
+        "unavailable",
+        "missing bytes are an infrastructure fact, never a rejection"
+    );
+    assert!(!outcome.settled, "and nothing settles on one");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_cap_never_evicts_the_evaluator_an_objective_in_the_log_depends_on() {
+    // `store gc` deleting a pinned checker would leave a node answering
+    // Unavailable for work it is paid to verify, which under availability
+    // sampling is a slash. Same shape as the log: refuse rather than delete.
+    let dir = scratch("blob-gc");
+    let store = Store::new(dir.join("data"));
+    store.prepare().expect("prepares");
+
+    let blobs = BlobStore::under(&store);
+    let needed = blobs.put(CHECKER.as_bytes()).expect("puts");
+    let spare = blobs.put(&[b'x'; 4096]).expect("puts");
+
+    let objective = Objective::new(
+        "G",
+        "exhibit the answer",
+        Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("c.py")),
+            (
+                "checker_sha256",
+                Value::string(needed.strip_prefix("sha256:").expect("prefixed")),
+            ),
+            ("entrypoint", Value::string("check")),
+        ]),
+        1_000,
+        "treasury",
+        "2026-01-01T00:00:00+00:00",
+        None,
+        None,
+    )
+    .expect("valid objective");
+
+    let ledger = Ledger::open(store.log_path()).expect("opens");
+    let mut node = Node::with_registry(ledger, VerifierRegistry::new(dir.join("root")));
+    node.post_objective(&objective, TS).expect("posts");
+
+    // The pin set comes from the log, exactly as the CLI computes it.
+    let pinned = node.pinned_blobs();
+    assert_eq!(pinned.len(), 1);
+    let store = store.with_limit(Some(2_048)).with_pinned_blobs(pinned);
+
+    let eviction = quota::reclaim(&store, 0).expect("reclaims");
+    assert!(
+        blobs.has(&needed),
+        "the checker an objective in this log depends on"
+    );
+    assert!(!blobs.has(&spare), "the unreferenced blob paid for the cap");
+    assert_eq!(eviction.removed.len(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_mirror_carries_blobs_so_a_restored_node_can_still_verify() {
+    // A backup that dropped the blobs would restore a node that audits its own
+    // log and cannot re-run a single verifier against it.
+    let dir = scratch("blob-mirror");
+    let store = Store::new(dir.join("data"));
+    store.prepare().expect("prepares");
+    fs::write(store.log_path(), "pwenc1:00:11\n").expect("write");
+    let digest = BlobStore::under(&store)
+        .put(CHECKER.as_bytes())
+        .expect("puts");
+
+    let destination = dir.join("backup");
+    mirror::mirror(&store, &destination, mirror::Options::default()).expect("mirrors");
+
+    let restored = BlobStore::under(&Store::new(&destination));
+    assert!(restored.has(&digest));
+    assert_eq!(
+        restored.get(&digest).expect("gets"),
+        Some(CHECKER.as_bytes().to_vec()),
+        "content-addressed, so a mirror is a copy rather than one machine's idea of it"
+    );
+    assert!(restored.verify().expect("verifies").is_empty());
     let _ = fs::remove_dir_all(&dir);
 }

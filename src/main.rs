@@ -70,7 +70,9 @@ use proofwork::ledger::{Codec, Ledger, LedgerError};
 use proofwork::node::Node;
 use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordError};
 use proofwork::store::atrest::{AtRestError, Cipher};
+use proofwork::store::blobs::BlobStore;
 use proofwork::store::{mirror, quota, Store, StoreError};
+use proofwork::verifiers::VerifierRegistry;
 
 /// Where the log lives when `--log` and `$PROOFWORK_LOG` are both silent.
 const DEFAULT_LOG: &str = "proofwork.jsonl";
@@ -105,10 +107,27 @@ const DETAIL_WIDTH: usize = 40;
 // ---------------------------------------------------------------------------
 
 /// Open the log and wrap it in a node rooted at `--root`.
+///
+/// The registry is given the store's blob directory, so pinned checkers resolve
+/// by content first and by path second. A store with no blobs in it resolves
+/// exactly as it did before this existed.
 fn open_node(options: &Options) -> Result<Node, CliError> {
     let codec = resolve_codec(options)?;
     let ledger = Ledger::open_with(options.log.as_str(), codec).map_err(CliError::Ledger)?;
-    Ok(Node::new(ledger, options.root.as_str()))
+    let registry =
+        VerifierRegistry::new(options.root.as_str()).with_blobs(BlobStore::under(&options.store()));
+    Ok(Node::with_registry(ledger, registry))
+}
+
+/// The store, told which blobs the log still needs.
+///
+/// Computing the pin set means reading the log, which is why this is fallible
+/// where [`Options::store`] is not. A log that cannot be read must not degrade
+/// to "nothing is pinned": that answer lets `gc` delete an evaluator on the
+/// strength of having been unable to check whether anything wanted it.
+fn store_with_pins(options: &Options) -> Result<Store, CliError> {
+    let node = open_node(options)?;
+    Ok(options.store().with_pinned_blobs(node.pinned_blobs()))
 }
 
 /// Read-only view of the node's log, for `log` and `attribute`.
@@ -404,6 +423,10 @@ enum Command {
     Store {
         action: StoreAction,
     },
+    /// Inspect or add to the content-addressed blob store.
+    Blob {
+        action: BlobAction,
+    },
     /// Copy the store to a directory of the operator's choosing.
     Sync {
         destination: String,
@@ -421,6 +444,16 @@ enum StoreAction {
     Gc,
     /// Convert a plaintext log to a sealed one, in place.
     Encrypt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BlobAction {
+    /// File a local file's bytes under their digest.
+    Put { path: String },
+    /// List what is held, and which of it the log still needs.
+    List,
+    /// Re-hash everything and report what does not match its name.
+    Verify,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -573,6 +606,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "incentives" => parse_incentives(&mut cursor)?,
         "keygen" => parse_keygen(&mut cursor)?,
         "store" => parse_store(&mut cursor)?,
+        "blob" => parse_blob(&mut cursor)?,
         "sync" => parse_sync(&mut cursor)?,
         "log" => {
             expect_end(&mut cursor, "log")?;
@@ -819,6 +853,26 @@ fn parse_store(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Store { action })
 }
 
+fn parse_blob(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = match cursor.take().as_deref() {
+        Some("ls") | Some("list") | None => BlobAction::List,
+        Some("verify") => BlobAction::Verify,
+        Some("put") => {
+            let path = cursor
+                .take()
+                .ok_or_else(|| CliError::Usage(String::from("blob put: needs a file to store")))?;
+            BlobAction::Put { path }
+        }
+        Some(other) => {
+            return Err(CliError::Usage(format!(
+                "blob: unknown action {other:?}; try put, ls, or verify"
+            )))
+        }
+    };
+    expect_end(cursor, "blob")?;
+    Ok(Command::Blob { action })
+}
+
 fn parse_sync(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut destination: Option<String> = None;
     let mut options = mirror::Options::default();
@@ -966,6 +1020,11 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      report local usage, reclaim space, or seal an existing log",
+    );
+    say(out, "  blob [ls|put FILE|verify]");
+    say(
+        out,
+        "      the content-addressed store pinned checkers resolve from",
     );
     say(out, "  sync <dir> [--prune] [--dry-run]");
     say(
@@ -1303,8 +1362,101 @@ fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32,
     Ok(0)
 }
 
-fn cmd_store(out: &mut dyn Write, options: &Options, action: StoreAction) -> Result<i32, CliError> {
+fn cmd_blob(out: &mut dyn Write, options: &Options, action: &BlobAction) -> Result<i32, CliError> {
     let store = options.store();
+    let blobs = BlobStore::under(&store);
+    match action {
+        BlobAction::Put { path } => {
+            blobs.prepare().map_err(CliError::Store)?;
+            let digest = blobs.put_file(Path::new(path)).map_err(CliError::Store)?;
+            say(out, format!("blob {digest}"));
+            say(out, format!("  {} -> {}", path, blobs.root().display()));
+            Ok(0)
+        }
+        BlobAction::List => {
+            let held = blobs.list().map_err(CliError::Store)?;
+            // Which blobs the log needs is the number that matters, since it is
+            // the difference between "gc may take this" and "gc must not" -- and
+            // between a node that can verify and one that cannot. Computed even
+            // when nothing is held, because "you have none of the three you need"
+            // is the single most useful thing this command can say, and an early
+            // return on an empty inventory is exactly how it would go unsaid.
+            let needed = store_with_pins(options)
+                .map(|store| store.pinned_blobs().clone())
+                .unwrap_or_default();
+            if held.is_empty() && needed.is_empty() {
+                say(out, "no blobs held, and the log needs none");
+                return Ok(0);
+            }
+            for (digest, bytes) in &held {
+                say(
+                    out,
+                    format!(
+                        "{}  {:>10}  {}",
+                        short(digest),
+                        proofwork::store::format_size(*bytes),
+                        if needed.contains(digest) {
+                            "pinned -- an objective in the log needs it"
+                        } else {
+                            "reclaimable"
+                        }
+                    ),
+                );
+            }
+            let missing: Vec<&String> = needed.iter().filter(|digest| !blobs.has(digest)).collect();
+            for digest in &missing {
+                say(
+                    out,
+                    format!(
+                        "{}  {:>10}  MISSING -- verification will report Unavailable",
+                        short(digest),
+                        "-"
+                    ),
+                );
+            }
+            if !missing.is_empty() {
+                say(
+                    out,
+                    format!(
+                        "{} of {} blobs the log needs are absent; \
+                         `proofwork blob put <file>` files one by its digest",
+                        missing.len(),
+                        needed.len()
+                    ),
+                );
+            }
+            Ok(if missing.is_empty() { 0 } else { 1 })
+        }
+        BlobAction::Verify => {
+            let corrupt = blobs.verify().map_err(CliError::Store)?;
+            if corrupt.is_empty() {
+                let held = blobs.list().map_err(CliError::Store)?;
+                say(
+                    out,
+                    format!("{} blobs, every one hashes to its name", held.len()),
+                );
+                return Ok(0);
+            }
+            for digest in &corrupt {
+                say(out, format!("corrupt {digest}"));
+            }
+            say(
+                out,
+                "these bytes are not the bytes their names promise; delete them and fetch again",
+            );
+            Ok(1)
+        }
+    }
+}
+
+fn cmd_store(out: &mut dyn Write, options: &Options, action: StoreAction) -> Result<i32, CliError> {
+    // Pin-aware, so a blob some posted objective needs is not an eviction
+    // candidate. Falls back to the unpinned store only for `encrypt`, which
+    // deletes nothing.
+    let store = match action {
+        StoreAction::Encrypt => options.store(),
+        StoreAction::Status | StoreAction::Gc => store_with_pins(options)?,
+    };
     match action {
         StoreAction::Status => {
             let usage = quota::usage(&store).map_err(CliError::Store)?;
@@ -1879,6 +2031,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Incentives { params } => cmd_incentives(out, params),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
         Command::Store { action } => cmd_store(out, options, *action),
+        Command::Blob { action } => cmd_blob(out, options, action),
         Command::Sync {
             destination,
             options: mirror_options,
@@ -1951,6 +2104,44 @@ mod tests {
     fn inline_values_are_accepted() {
         let parsed = parse(argv(&["--log=/tmp/y.jsonl", "log"])).expect("this parses");
         assert_eq!(parsed.options.log, "/tmp/y.jsonl");
+    }
+
+    #[test]
+    fn blob_actions_parse_and_default_to_listing() {
+        for spelling in [vec!["blob"], vec!["blob", "ls"], vec!["blob", "list"]] {
+            assert_eq!(
+                parse(argv(&spelling)).expect("parses").command,
+                Command::Blob {
+                    action: BlobAction::List
+                }
+            );
+        }
+        assert_eq!(
+            parse(argv(&["blob", "verify"])).expect("parses").command,
+            Command::Blob {
+                action: BlobAction::Verify
+            }
+        );
+        assert_eq!(
+            parse(argv(&["blob", "put", "checker.py"]))
+                .expect("parses")
+                .command,
+            Command::Blob {
+                action: BlobAction::Put {
+                    path: "checker.py".to_string()
+                }
+            }
+        );
+        // `put` without a file is a usage error rather than a silent no-op: the
+        // command's whole purpose is the argument.
+        assert!(matches!(
+            parse(argv(&["blob", "put"])),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(argv(&["blob", "fetch"])),
+            Err(CliError::Usage(_))
+        ));
     }
 
     #[test]

@@ -76,6 +76,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sha2::{Digest as _, Sha256};
 
 use crate::canonical::Value;
+use crate::store::blobs::BlobStore;
 
 // ---------------------------------------------------------------------------
 // Status
@@ -531,11 +532,16 @@ sys.exit(main())
 ///
 /// `root` is the objective bundle root. Pinned checker and evaluator paths are
 /// resolved against it and may not escape it; see [`VerifierRegistry::pinned`].
+///
+/// `blobs`, if set, is consulted *first* and by content
+/// ([`VerifierRegistry::with_blobs`]). A registry without one behaves exactly as
+/// this type always has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifierRegistry {
     root: PathBuf,
     lean_binary: String,
     python_binary: String,
+    blobs: Option<BlobStore>,
 }
 
 impl Default for VerifierRegistry {
@@ -550,7 +556,29 @@ impl VerifierRegistry {
             root: root.into(),
             lean_binary: "lean".to_string(),
             python_binary: "python3".to_string(),
+            blobs: None,
         }
+    }
+
+    /// Resolve pinned code by content before falling back to the filesystem.
+    ///
+    /// An objective already commits to its checker by digest, so the digest is
+    /// the name and the relative path is only ever a hint about where a human
+    /// keeps a copy. A registry with a blob store looks up the digest first,
+    /// which makes an objective portable: it verifies on any node holding the
+    /// bytes, regardless of that node's directory layout.
+    ///
+    /// This changes no id, no verdict that was previously reachable, and no
+    /// conformance vector. A node with no blob store, or with one that does not
+    /// hold the digest, resolves exactly as before.
+    pub fn with_blobs(mut self, blobs: BlobStore) -> VerifierRegistry {
+        self.blobs = Some(blobs);
+        self
+    }
+
+    /// The blob store backing this registry, if any.
+    pub fn blobs(&self) -> Option<&BlobStore> {
+        self.blobs.as_ref()
     }
 
     pub fn root(&self) -> &Path {
@@ -573,6 +601,32 @@ impl VerifierRegistry {
     /// Every kind this build can answer to, in sorted order.
     pub fn kinds() -> &'static [&'static str] {
         &["certificate", "evaluator", "lean", "replay"]
+    }
+
+    /// The content digests a verifier spec pins, if any.
+    ///
+    /// The spec format is this module's business -- it is the only place that
+    /// knows `certificate` pins `checker_sha256` and `evaluator` pins
+    /// `evaluator_sha256` -- so the question "which blobs does this objective
+    /// need" is answered here rather than by a caller pattern-matching on field
+    /// names it would have to keep in sync.
+    ///
+    /// `lean` and `replay` pin nothing by hash: the former's trusted input is
+    /// the objective's own statement, and the latter pins a command, a seed and
+    /// an environment rather than a file. An empty result is therefore a normal
+    /// answer and not a sign of a malformed spec.
+    ///
+    /// Malformed specs yield whatever digests are legible and no error. A
+    /// verifier block missing its digest fails at verification with a verdict,
+    /// which is where a caller can do something about it; failing here would
+    /// turn "what should I keep on disk" into a question that can refuse to be
+    /// answered.
+    pub fn pinned_digests(spec: &Value) -> Vec<String> {
+        ["checker_sha256", "evaluator_sha256"]
+            .iter()
+            .filter_map(|field| spec.get(field).and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
     }
 
     /// Whether an objective naming this kind can be posted at all. The node
@@ -650,7 +704,7 @@ impl VerifierRegistry {
             Ok(path) => path,
             Err(verdict) => return verdict,
         };
-        let outcome = match self.run_pinned("checker", &path, entrypoint, artifact, timeout) {
+        let outcome = match self.run_pinned("checker", path.path(), entrypoint, artifact, timeout) {
             Ok(outcome) => outcome,
             Err(verdict) => return verdict,
         };
@@ -758,7 +812,8 @@ impl VerifierRegistry {
             Ok(path) => path,
             Err(verdict) => return verdict,
         };
-        let outcome = match self.run_pinned("evaluator", &path, entrypoint, artifact, timeout) {
+        let outcome = match self.run_pinned("evaluator", path.path(), entrypoint, artifact, timeout)
+        {
             Ok(outcome) => outcome,
             Err(verdict) => return verdict,
         };
@@ -1122,12 +1177,44 @@ impl VerifierRegistry {
     /// root like `"."` never prefixes a normalized relative join, so the naive
     /// check rejects every legitimate objective -- an actual bug the reference
     /// implementation carries a comment about.
+    /// Locate the pinned code an objective declares, by content then by path.
+    ///
+    /// The digest is the identity and the relative path is a hint, so the blob
+    /// store is asked first. Two failure modes are kept apart on purpose, and it
+    /// is the same distinction the whole verification ladder rests on:
+    ///
+    /// - **The bytes are not here** -- no blob, no file -- is `Unavailable`. An
+    ///   infrastructure fact about this node. The objective is fine and another
+    ///   node may well settle it.
+    /// - **The bytes at the declared path are the wrong bytes** is
+    ///   `INVALID_SPEC`. A fact about the objective, reported the same way it
+    ///   always was.
+    ///
+    /// A blob that is present but corrupt is the first kind, not the second: the
+    /// name promised one thing and the disk holds another, which says nothing
+    /// whatever about the objective that asked for it.
     fn pinned(
         &self,
         role: &str,
         relative: &str,
         declared_sha256: &str,
-    ) -> Result<PathBuf, Verdict> {
+    ) -> Result<PinnedCode, Verdict> {
+        if let Some(blobs) = &self.blobs {
+            match blobs.get(declared_sha256) {
+                // Present, and it hashes to its own name, which is the declared
+                // digest -- so there is nothing left to check.
+                Ok(Some(bytes)) => return PinnedCode::materialize(role, &bytes),
+                // Not held locally: fall through to the path, which is what a
+                // node that has never seen a blob store does anyway.
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(Verdict::unavailable(format!(
+                        "cannot load {role} from the blob store: {error}"
+                    )))
+                }
+            }
+        }
+
         let root = match absolutize(&self.root) {
             Ok(root) => root,
             Err(error) => {
@@ -1169,7 +1256,7 @@ impl VerifierRegistry {
                 "pinned code {relative} has sha256 {actual}, objective declares {declared_sha256}"
             )));
         }
-        Ok(full)
+        Ok(PinnedCode::at(full))
     }
 
     /// Run pinned code in a child process and collect its single JSON result.
@@ -1586,6 +1673,60 @@ fn is_executable_file(path: &Path) -> bool {
 // ---------------------------------------------------------------------------
 // Subprocess execution with a wall-clock bound
 // ---------------------------------------------------------------------------
+
+/// Pinned code, located and ready to run.
+///
+/// Two provenances, one type. Code found at the objective's declared path is
+/// used where it lies; code resolved from the blob store is written into a
+/// scratch directory this value owns, and removed when it drops.
+///
+/// The copy is not incidental. A blob is filed under its digest, which is 62 hex
+/// characters and no extension, and Python's
+/// `importlib.util.spec_from_file_location` picks a loader from the suffix -- so
+/// a blob handed to it directly loads as nothing at all. Materializing it as
+/// `pinned.py` is the smaller fix than teaching the harness about loaders, and
+/// the harness is shared with the reference implementation, where a divergence
+/// would be a real one.
+///
+/// It buys a second thing worth having: the pinned code never learns where the
+/// blob store is, so a checker that goes looking cannot read or scribble on
+/// blobs belonging to other objectives.
+#[derive(Debug)]
+struct PinnedCode {
+    path: PathBuf,
+    /// Dropped -- and deleted -- when the verification that owns this finishes.
+    /// Present only for code that came from a blob.
+    _scratch: Option<TempDir>,
+}
+
+impl PinnedCode {
+    /// Code already on disk at a path of its own.
+    fn at(path: PathBuf) -> PinnedCode {
+        PinnedCode {
+            path,
+            _scratch: None,
+        }
+    }
+
+    /// Write `bytes` somewhere runnable.
+    fn materialize(role: &str, bytes: &[u8]) -> Result<PinnedCode, Verdict> {
+        let scratch = TempDir::new("proofwork-pinned-blob").map_err(|error| {
+            Verdict::unavailable(format!("cannot place the pinned {role}: {error}"))
+        })?;
+        let path = scratch.path().join("pinned.py");
+        fs::write(&path, bytes).map_err(|error| {
+            Verdict::unavailable(format!("cannot place the pinned {role}: {error}"))
+        })?;
+        Ok(PinnedCode {
+            path,
+            _scratch: Some(scratch),
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
 /// A scratch directory removed on drop, including on an early return.
 ///
@@ -2456,6 +2597,145 @@ mod tests {
                 .status,
             Status::Reject
         );
+    }
+
+    // -- blob resolution ---------------------------------------------------
+
+    #[test]
+    fn a_checker_held_only_as_a_blob_still_verifies() {
+        // The point of the whole blob store: the objective names its checker by
+        // digest, so a node that has the *bytes* can verify it without having
+        // the file the author happened to write it to. `root` here is an empty
+        // directory -- there is no `c.py` anywhere.
+        if !have("python3") {
+            return;
+        }
+        let root = tmpdir("proofwork-blob-verify");
+        let blobs = BlobStore::new(root.path().join("blobs"));
+        blobs.prepare().expect("prepares");
+        let digest = blobs.put(CHECKER.as_bytes()).expect("puts");
+        let bare = digest.strip_prefix("sha256:").expect("prefixed");
+
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            // A path that does not exist and never did.
+            ("checker", Value::string("nowhere/c.py")),
+            ("checker_sha256", Value::string(bare)),
+            ("entrypoint", Value::string("check")),
+        ]);
+        let artifact = Value::object([("n", Value::Int(42))]);
+
+        let without = VerifierRegistry::new(root.path());
+        assert_eq!(
+            without.run(&spec, &artifact).status,
+            Status::Unavailable,
+            "no blob store and no file: an infrastructure fact, never a rejection"
+        );
+
+        let with = VerifierRegistry::new(root.path()).with_blobs(blobs);
+        assert_eq!(with.run(&spec, &artifact).status, Status::Accept);
+        assert_eq!(
+            with.run(&spec, &Value::object([("n", Value::Int(41))]))
+                .status,
+            Status::Reject,
+            "resolving by content changes where the bytes came from, not the verdict"
+        );
+    }
+
+    #[test]
+    fn the_path_still_works_when_the_blob_store_does_not_have_it() {
+        // Backward compatibility, stated as a test. A store that has never seen
+        // this digest must fall through to the old behaviour rather than
+        // shadowing it.
+        if !have("python3") {
+            return;
+        }
+        let root = tmpdir("proofwork-blob-fallback");
+        let sha = write_pinned(&root, "c.py", CHECKER);
+        let blobs = BlobStore::new(root.path().join("blobs"));
+        blobs.prepare().expect("prepares");
+        blobs.put(b"something else entirely").expect("puts");
+
+        let registry = VerifierRegistry::new(root.path()).with_blobs(blobs);
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("c.py")),
+            ("checker_sha256", Value::string(sha)),
+            ("entrypoint", Value::string("check")),
+        ]);
+        assert_eq!(
+            registry
+                .run(&spec, &Value::object([("n", Value::Int(42))]))
+                .status,
+            Status::Accept
+        );
+    }
+
+    #[test]
+    fn a_corrupt_blob_is_unavailable_and_never_a_verdict_about_the_artifact() {
+        // The distinction the whole ladder rests on. Bytes on this disk that do
+        // not match the name they are filed under say something about this disk.
+        // Reporting `Reject` would let a node with a damaged cache refute honest
+        // work, and reporting `INVALID_SPEC` would blame an objective that is
+        // perfectly well formed.
+        let root = tmpdir("proofwork-blob-corrupt");
+        let blobs = BlobStore::new(root.path().join("blobs"));
+        blobs.prepare().expect("prepares");
+        let digest = blobs.put(CHECKER.as_bytes()).expect("puts");
+        fs::write(
+            blobs.path_of(&digest).expect("a digest"),
+            b"def check(artifact):\n    return True\n",
+        )
+        .expect("tamper");
+
+        let registry = VerifierRegistry::new(root.path()).with_blobs(blobs);
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("c.py")),
+            (
+                "checker_sha256",
+                Value::string(digest.strip_prefix("sha256:").expect("prefixed")),
+            ),
+            ("entrypoint", Value::string("check")),
+        ]);
+        let verdict = registry.run(&spec, &Value::object([("n", Value::Int(42))]));
+        assert_eq!(verdict.status, Status::Unavailable);
+        assert!(!verdict.status.settles());
+    }
+
+    #[test]
+    fn pinned_digests_names_what_a_spec_needs_on_disk() {
+        assert_eq!(
+            VerifierRegistry::pinned_digests(&Value::object([
+                ("kind", Value::string("evaluator")),
+                ("evaluator_sha256", Value::string("ab")),
+            ])),
+            vec!["ab".to_string()]
+        );
+        assert_eq!(
+            VerifierRegistry::pinned_digests(&Value::object([
+                ("kind", Value::string("certificate")),
+                ("checker_sha256", Value::string("cd")),
+            ])),
+            vec!["cd".to_string()]
+        );
+        // `lean` trusts the objective's own statement and `replay` pins a
+        // command rather than a file, so neither needs anything kept on disk.
+        // An empty answer is a real answer here, not a parse failure.
+        for kind in ["lean", "replay"] {
+            assert!(VerifierRegistry::pinned_digests(&Value::object([(
+                "kind",
+                Value::string(kind)
+            )]))
+            .is_empty());
+        }
+        // A malformed spec yields what is legible and no error: this question is
+        // "what should I keep", and it must always have an answer.
+        assert!(VerifierRegistry::pinned_digests(&Value::object([(
+            "evaluator_sha256",
+            Value::Int(7)
+        )]))
+        .is_empty());
     }
 
     #[test]

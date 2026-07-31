@@ -396,6 +396,31 @@ impl Node {
         self.decode_objectives().0
     }
 
+    /// Every content digest the objectives in this log pin, in sorted order.
+    ///
+    /// This is the set a node must keep on disk to stay able to do its job, and
+    /// it is what [`crate::store::Store::with_pinned_blobs`] takes.
+    ///
+    /// **Every posted objective counts, settled or not.** The tempting narrower
+    /// rule -- pin what an *open* objective needs -- is wrong, and wrong in the
+    /// direction that matters: `audit --rerun` re-verifies settled claims, which
+    /// is the re-derivation this project's central claim is made of. A node that
+    /// drops an evaluator the moment its objective settles has kept the ability
+    /// to earn and lost the ability to prove, which is exactly backwards.
+    ///
+    /// The cost of that choice is honest and worth stating: the set only grows,
+    /// so a node's floor grows with the number of objectives it has ever seen.
+    /// The alternative is a store that cannot re-derive its own history.
+    pub fn pinned_blobs(&self) -> BTreeSet<String> {
+        let mut digests = BTreeSet::new();
+        for objective in self.objectives().values() {
+            for digest in VerifierRegistry::pinned_digests(&objective.verifier) {
+                digests.insert(digest);
+            }
+        }
+        digests
+    }
+
     /// The first settlement recorded for an objective, as its raw payload.
     ///
     /// "First" rather than "latest" because for a non-ratchet objective there is
@@ -1184,6 +1209,34 @@ mod tests {
             Some(ratchet_block(0, 100, 1_000_000)),
         )
         .expect("valid objective")
+    }
+
+    #[test]
+    fn pinned_blobs_names_what_the_log_still_needs_on_disk() {
+        let dir = TempDir::new("pinned-blobs");
+        let mut node = node(&dir);
+        assert!(
+            node.pinned_blobs().is_empty(),
+            "an empty log needs nothing kept"
+        );
+
+        // A `lean` objective pins no code by hash, so posting one adds nothing.
+        node.post_objective(&lean_objective(10), TS).expect("posts");
+        assert!(node.pinned_blobs().is_empty());
+
+        node.post_objective(&ratchet_objective(), TS)
+            .expect("posts");
+        assert_eq!(
+            node.pinned_blobs().into_iter().collect::<Vec<_>>(),
+            vec!["00".repeat(32)],
+            "the evaluator the objective pins"
+        );
+
+        // Settling does not release it. `audit --rerun` re-verifies settled
+        // claims, so a node that dropped the evaluator when the objective closed
+        // would keep the ability to earn and lose the ability to prove.
+        let settled = node.pinned_blobs();
+        assert!(settled.contains(&"00".repeat(32)));
     }
 
     fn proof(text: &str) -> Value {
