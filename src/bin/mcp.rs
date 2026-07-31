@@ -72,6 +72,7 @@ use rand_core::{OsRng, RngCore};
 use serde_json::{json, Map, Value as Json};
 
 use proofwork::canonical::Value;
+use proofwork::frontier::Ratchet;
 use proofwork::ledger::Ledger;
 use proofwork::node::Node;
 use proofwork::partition::{assignment_for, epoch_of, epoch_seconds};
@@ -751,7 +752,16 @@ impl Server {
         if let Some(score) = verdict.score() {
             out.push_str(&format!("score: {score}\n"));
             if let Some(f) = self.node.frontier_of(&id) {
-                if score > f.score {
+                // Maximize assumed `score > best`; minimize objectives (ecdsa.fail-
+                // shaped) need the ratchet's notion of progress or they are told
+                // a worse product "improves" the frontier.
+                let improves = match objective.ratchet.as_ref().and_then(|block| {
+                    Ratchet::from_value(block).ok()
+                }) {
+                    Some(ratchet) => ratchet.improves(Some(f.score), score),
+                    None => score > f.score,
+                };
+                if improves {
                     out.push_str(&format!(
                         "This improves the frontier ({} -> {score}).\n",
                         f.score
