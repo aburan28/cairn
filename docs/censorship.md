@@ -260,3 +260,14 @@ retrofitted onto objectives already funded.
 | t colluding committee members | early decryption | rotation, diversity, high threshold | mitigated, not prevented |
 | anyone | forge a sealed artifact | the commitment binds the plaintext | handled |
 | legal process | force takedown | decentralized inclusion | unsolved at Stage 0 |
+
+
+## A note on the local disk
+
+Everything above concerns what observers of the *network* can see. What a node
+keeps on its own disk is a separate question with a separate answer: the local
+store is encrypted at rest, and that is a property of the operator's copy rather
+than of the protocol. It changes no hash, no Merkle root and no audit result, and
+it deliberately does not extend to artifacts the network publishes -- those must
+stay readable or the project's one guarantee evaporates. See
+[storage.md](storage.md).

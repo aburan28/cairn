@@ -128,6 +128,17 @@ impl Secret32 {
         Secret32(bytes)
     }
 
+    /// Take ownership of key bytes the caller already has.
+    ///
+    /// Public because [`crate::store::atrest`] holds a key that came off disk
+    /// rather than out of this module, and it should get the same zeroing and
+    /// the same redacted `Debug` as every other secret here. Taking the array
+    /// by value rather than by reference is the point: there is one owner, and
+    /// the caller's copy is moved rather than left lying around.
+    pub fn new(bytes: [u8; KEY_LEN]) -> Secret32 {
+        Secret32(bytes)
+    }
+
     /// Borrow the raw bytes. Named `expose` so that every call site reads as an
     /// admission rather than an accessor.
     pub fn expose(&self) -> &[u8; KEY_LEN] {

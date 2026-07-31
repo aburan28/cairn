@@ -32,6 +32,7 @@ pub mod partition;
 pub mod records;
 pub mod schema;
 pub mod sealed;
+pub mod store;
 pub mod time;
 pub mod verifiers;
 

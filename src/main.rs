@@ -60,7 +60,7 @@ use std::env;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use proofwork::attribution::{payouts_over, FlowError, FlowParams};
@@ -68,10 +68,12 @@ use proofwork::canonical::{short, CanonicalError, Value};
 use proofwork::checkpoint::SignedCheckpoint;
 use proofwork::incentive::design::Report as IncentiveReport;
 use proofwork::incentive::{NodeParams, ParamError, Rat};
-use proofwork::ledger::{Ledger, LedgerError};
+use proofwork::ledger::{Codec, Ledger, LedgerError};
 use proofwork::node::Node;
 use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordError};
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
+use proofwork::store::atrest::{AtRestError, Cipher};
+use proofwork::store::{mirror, quota, Store, StoreError};
 use proofwork::time::timestamp;
 
 /// Where the log lives when `--log` and `$PROOFWORK_LOG` are both silent.
@@ -108,7 +110,8 @@ const DETAIL_WIDTH: usize = 40;
 
 /// Open the log and wrap it in a node rooted at `--root`.
 fn open_node(options: &Options) -> Result<Node, CliError> {
-    let ledger = Ledger::open(options.log.as_str()).map_err(CliError::Ledger)?;
+    let codec = resolve_codec(options)?;
+    let ledger = Ledger::open_with(options.log.as_str(), codec).map_err(CliError::Ledger)?;
     Ok(Node::new(ledger, options.root.as_str()))
 }
 
@@ -241,6 +244,10 @@ enum CliError {
     Entropy(String),
     /// A set of incentive parameters that is not a network.
     Params(ParamError),
+    /// The local store could not be read, sized, or copied.
+    Store(StoreError),
+    /// The at-rest key could not be created, found, or used.
+    AtRest(AtRestError),
     /// An argument is not valid UTF-8. `std::env::args` would panic on this.
     NotUnicode(usize),
 }
@@ -250,6 +257,8 @@ impl fmt::Display for CliError {
         match self {
             CliError::Usage(message) => f.write_str(message),
             CliError::Params(error) => write!(f, "{error}"),
+            CliError::Store(error) => write!(f, "{error}"),
+            CliError::AtRest(error) => write!(f, "{error}"),
             CliError::Refused(message) => f.write_str(message),
             CliError::Io { context, source } => write!(f, "{context}: {source}"),
             CliError::Json { path, source } => write!(f, "{path}: {source}"),
@@ -316,14 +325,83 @@ impl CliError {
 struct Options {
     log: String,
     root: String,
+    /// The data directory, when one was chosen. `None` keeps the pre-existing
+    /// behaviour exactly: a bare `proofwork.jsonl` wherever you are standing.
+    data: Option<String>,
+    /// Explicit key file, overriding `$PROOFWORK_KEY` and the default.
+    key_file: Option<String>,
+    /// File holding the passphrase for a wrapped key.
+    passphrase_file: Option<String>,
+    /// Size cap on the data directory, in bytes.
+    max_size: Option<u64>,
 }
 
 impl Options {
     fn from_env() -> Options {
+        let data = env::var(proofwork::store::DATA_ENV)
+            .ok()
+            .filter(|value| !value.is_empty());
+        // `--log` and `$PROOFWORK_LOG` still win, and the default when neither
+        // is set still depends on whether a data directory was chosen. An
+        // operator upgrading into this release must find their log exactly
+        // where they left it.
+        let log = env::var("PROOFWORK_LOG").ok().filter(|v| !v.is_empty());
         Options {
-            log: env::var("PROOFWORK_LOG").unwrap_or_else(|_| DEFAULT_LOG.to_string()),
+            log: match (log, &data) {
+                (Some(explicit), _) => explicit,
+                (None, Some(data)) => Store::new(data).log_path().display().to_string(),
+                (None, None) => DEFAULT_LOG.to_string(),
+            },
             root: String::from("."),
+            data,
+            key_file: None,
+            passphrase_file: None,
+            max_size: None,
         }
+    }
+
+    /// The store this invocation is working in.
+    ///
+    /// Falls back to the log file's own directory when no data directory was
+    /// chosen, so `store status` and `sync` mean something even for an operator
+    /// who never adopted the layout.
+    fn store(&self) -> Store {
+        let root = match &self.data {
+            Some(data) => PathBuf::from(data),
+            None => PathBuf::from(&self.log)
+                .parent()
+                .map(Path::to_path_buf)
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| PathBuf::from(".")),
+        };
+        Store::new(root).with_limit(self.max_size)
+    }
+
+    /// Where the at-rest key lives.
+    fn key_path(&self) -> PathBuf {
+        match &self.key_file {
+            Some(path) => PathBuf::from(path),
+            None => self.store().default_key_path(),
+        }
+    }
+
+    /// The passphrase, if one was supplied.
+    ///
+    /// From a file or `$PROOFWORK_PASSPHRASE`, never from a prompt. Reading a
+    /// passphrase without echoing it needs terminal control this crate has no
+    /// dependency for, and echoing one into a shell's scrollback and history is
+    /// worse than not offering the option.
+    fn passphrase(&self) -> Result<Option<String>, CliError> {
+        if let Some(path) = &self.passphrase_file {
+            let text = fs::read_to_string(path).map_err(|source| CliError::Io {
+                context: format!("reading {path}"),
+                source,
+            })?;
+            return Ok(Some(text.trim_end_matches(['\n', '\r']).to_string()));
+        }
+        Ok(env::var("PROOFWORK_PASSPHRASE")
+            .ok()
+            .filter(|value| !value.is_empty()))
     }
 }
 
@@ -370,8 +448,31 @@ enum Command {
     Incentives {
         params: Box<NodeParams>,
     },
+    /// Create an at-rest key.
+    Keygen {
+        wrap: bool,
+    },
+    /// Report or reclaim local storage.
+    Store {
+        action: StoreAction,
+    },
+    /// Copy the store to a directory of the operator's choosing.
+    Sync {
+        destination: String,
+        options: mirror::Options,
+    },
     Log,
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreAction {
+    /// How much is used, split into what can and cannot be evicted.
+    Status,
+    /// Evict reclaimable content until the cap is met.
+    Gc,
+    /// Convert a plaintext log to a sealed one, in place.
+    Encrypt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,6 +577,29 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         } else if token == "--root" {
             cursor.take();
             options.root = cursor.value("--root")?;
+        } else if token == "--data-dir" {
+            cursor.take();
+            let data = cursor.value("--data-dir")?;
+            // Only redirect the log if nothing more specific already did.
+            if env::var("PROOFWORK_LOG")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_none()
+                && options.log == DEFAULT_LOG
+            {
+                options.log = Store::new(&data).log_path().display().to_string();
+            }
+            options.data = Some(data);
+        } else if token == "--key-file" {
+            cursor.take();
+            options.key_file = Some(cursor.value("--key-file")?);
+        } else if token == "--passphrase-file" {
+            cursor.take();
+            options.passphrase_file = Some(cursor.value("--passphrase-file")?);
+        } else if token == "--max-size" {
+            cursor.take();
+            let text = cursor.value("--max-size")?;
+            options.max_size = Some(proofwork::store::parse_size(&text).map_err(CliError::Store)?);
         } else if token == "-h" || token == "--help" {
             cursor.take();
             return Ok(Invocation {
@@ -504,6 +628,9 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "verify" => parse_verify(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
+        "keygen" => parse_keygen(&mut cursor)?,
+        "store" => parse_store(&mut cursor)?,
+        "sync" => parse_sync(&mut cursor)?,
         "log" => {
             expect_end(&mut cursor, "log")?;
             Command::Log
@@ -759,6 +886,58 @@ fn parse_rate(text: &str, flag: &str) -> Result<Rat, CliError> {
     Rat::rate(num, den).ok_or_else(bad)
 }
 
+fn parse_keygen(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut wrap = false;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--passphrase" => wrap = true,
+            other => return Err(CliError::Usage(format!("keygen: unknown option {other:?}"))),
+        }
+    }
+    Ok(Command::Keygen { wrap })
+}
+
+fn parse_store(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = match cursor.take().as_deref() {
+        Some("status") | None => StoreAction::Status,
+        Some("gc") => StoreAction::Gc,
+        Some("encrypt") => StoreAction::Encrypt,
+        Some(other) => {
+            return Err(CliError::Usage(format!(
+                "store: unknown action {other:?}; try status, gc, or encrypt"
+            )))
+        }
+    };
+    expect_end(cursor, "store")?;
+    Ok(Command::Store { action })
+}
+
+fn parse_sync(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut destination: Option<String> = None;
+    let mut options = mirror::Options::default();
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--prune" => options.prune = true,
+            "--dry-run" => options.dry_run = true,
+            other if is_flag(other) => {
+                return Err(CliError::Usage(format!("sync: unknown option {other:?}")))
+            }
+            other => {
+                if destination.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "sync: unexpected argument {other:?}"
+                    )));
+                }
+                destination = Some(other.to_string());
+            }
+        }
+    }
+    Ok(Command::Sync {
+        destination: require(destination, "sync", "a destination directory")?,
+        options,
+    })
+}
+
 fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
     // Seeded from `FlowParams::default()` so the defaults live in one place --
     // the module that has to honour them -- rather than being restated here.
@@ -881,6 +1060,21 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  log");
     say(out, "      print the log");
+    say(out, "  keygen [--passphrase]");
+    say(
+        out,
+        "      create the at-rest key that seals the local store",
+    );
+    say(out, "  store [status|gc|encrypt]");
+    say(
+        out,
+        "      report local usage, reclaim space, or seal an existing log",
+    );
+    say(out, "  sync <dir> [--prune] [--dry-run]");
+    say(
+        out,
+        "      copy the store to a directory of your choosing, still encrypted",
+    );
     say(out, "  help");
     say(out, "      this message");
     say(out, "");
@@ -892,6 +1086,22 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "  --root PATH   root for pinned verifier code (default: .)",
+    );
+    say(
+        out,
+        "  --data-dir PATH        where node data lives (default: $PROOFWORK_DATA)",
+    );
+    say(
+        out,
+        "  --key-file PATH        at-rest key (default: $PROOFWORK_KEY, else ~/.proofwork/key)",
+    );
+    say(
+        out,
+        "  --passphrase-file PATH passphrase for a wrapped key (else $PROOFWORK_PASSPHRASE)",
+    );
+    say(
+        out,
+        "  --max-size SIZE        cap on the data directory, e.g. 20GB or 20GiB",
     );
     say(out, "");
     say(out, "exit codes:");
@@ -1259,6 +1469,321 @@ fn cmd_incentives(out: &mut dyn Write, params: &NodeParams) -> Result<i32, CliEr
     Ok(if report.passes() { 0 } else { 1 })
 }
 
+// ---------------------------------------------------------------------------
+// The local store
+// ---------------------------------------------------------------------------
+
+/// Decide how to read and write this invocation's log.
+///
+/// The ledger deliberately refuses to guess ([`Ledger::open_with`]); this is
+/// where the guessing is allowed to happen, because it is a user-experience
+/// decision rather than an integrity one. The rule:
+///
+/// * a log whose first line is sealed needs the key, and says so if it is
+///   missing rather than reporting the file as corrupt;
+/// * a log that is already plaintext stays plaintext, even if a key exists --
+///   converting somebody's log as a side effect of an unrelated command would
+///   be indefensible, and `store encrypt` is the command that does it on
+///   purpose;
+/// * a log that does not exist yet is created sealed **if a key is there**, so
+///   `keygen` followed by ordinary use encrypts without further ceremony.
+fn resolve_codec(options: &Options) -> Result<Codec, CliError> {
+    let sealed_on_disk = first_line_is_sealed(&options.log)?;
+    let key_path = options.key_path();
+    let exists = key_path.exists();
+
+    match (sealed_on_disk, exists) {
+        (Some(true), false) => Err(CliError::AtRest(AtRestError::NoKeyFile { path: key_path })),
+        (Some(true), true) | (None, true) => {
+            let passphrase = options.passphrase()?;
+            let cipher = Cipher::read_key_file(&key_path, passphrase.as_deref())
+                .map_err(CliError::AtRest)?;
+            Ok(Codec::Sealed(Box::new(cipher)))
+        }
+        // Plaintext log, or no log and no key: unchanged behaviour.
+        (Some(false), _) | (None, false) => Ok(Codec::Plain),
+    }
+}
+
+/// `Some(true)` sealed, `Some(false)` plaintext, `None` for an absent or empty log.
+fn first_line_is_sealed(path: &str) -> Result<Option<bool>, CliError> {
+    if !Path::new(path).exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path).map_err(|source| CliError::Io {
+        context: format!("reading {path}"),
+        source,
+    })?;
+    Ok(text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(proofwork::store::atrest::is_sealed_line))
+}
+
+fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32, CliError> {
+    let path = options.key_path();
+    let passphrase = options.passphrase()?;
+    if wrap && passphrase.is_none() {
+        return Err(CliError::Usage(String::from(
+            "keygen --passphrase needs a passphrase: set $PROOFWORK_PASSPHRASE or \
+             pass --passphrase-file PATH. There is no prompt, because reading one \
+             without echoing it needs terminal control this binary does not link",
+        )));
+    }
+    let cipher = Cipher::generate(&mut rand_core::OsRng);
+    cipher
+        .write_key_file(
+            &path,
+            if wrap { passphrase.as_deref() } else { None },
+            &mut rand_core::OsRng,
+        )
+        .map_err(CliError::AtRest)?;
+
+    say(out, format!("key written to {}", path.display()));
+    if wrap {
+        say(out, "  wrapped with a passphrase (argon2id)");
+    }
+    if !proofwork::store::atrest::private_permissions_supported() {
+        say(
+            out,
+            "  warning: this platform cannot restrict the key to its owner",
+        );
+    }
+    // The one thing an operator has to be told, once, loudly.
+    let store = options.store();
+    if path.starts_with(store.root()) {
+        say(out, "");
+        say(
+            out,
+            "  WARNING: this key is INSIDE the data directory. Anything that copies",
+        );
+        say(
+            out,
+            "  that directory copies the key with it, which is not encryption at all.",
+        );
+        say(
+            out,
+            "  `proofwork sync` refuses to copy it; other tools will not.",
+        );
+    }
+    say(out, "");
+    say(
+        out,
+        "Back this file up somewhere the data is not. Lose it and the log is",
+    );
+    say(
+        out,
+        "unreadable -- there is no recovery path and that is the design.",
+    );
+    Ok(0)
+}
+
+fn cmd_store(out: &mut dyn Write, options: &Options, action: StoreAction) -> Result<i32, CliError> {
+    let store = options.store();
+    match action {
+        StoreAction::Status => {
+            let usage = quota::usage(&store).map_err(CliError::Store)?;
+            say(out, format!("store   {}", store.root().display()));
+            say(out, format!("log     {}", options.log));
+            say(
+                out,
+                format!(
+                    "sealed  {}",
+                    match first_line_is_sealed(&options.log)? {
+                        Some(true) => "yes",
+                        Some(false) => "no -- run `proofwork store encrypt`",
+                        None => "n/a (log is empty)",
+                    }
+                ),
+            );
+            let key = options.key_path();
+            say(
+                out,
+                format!(
+                    "key     {} ({})",
+                    key.display(),
+                    if key.exists() { "present" } else { "absent" }
+                ),
+            );
+            say(
+                out,
+                format!("usage   {}", quota::describe(&usage, store.limit())),
+            );
+            if let Some(limit) = store.limit() {
+                if usage.over(limit) {
+                    say(out, "        OVER LIMIT -- run `proofwork store gc`");
+                    return Ok(1);
+                }
+            }
+            Ok(0)
+        }
+        StoreAction::Gc => {
+            if store.limit().is_none() {
+                return Err(CliError::Usage(String::from(
+                    "store gc needs a limit: pass --max-size, for example --max-size 20GB",
+                )));
+            }
+            let eviction = quota::reclaim(&store, 0).map_err(CliError::Store)?;
+            if eviction.is_empty() {
+                say(out, "nothing to reclaim");
+            } else {
+                for (path, bytes) in &eviction.removed {
+                    say(
+                        out,
+                        format!(
+                            "evicted {} ({})",
+                            path.display(),
+                            proofwork::store::format_size(*bytes)
+                        ),
+                    );
+                }
+                say(
+                    out,
+                    format!(
+                        "freed {} -- {}",
+                        proofwork::store::format_size(eviction.freed),
+                        quota::describe(&eviction.after, store.limit())
+                    ),
+                );
+                say(
+                    out,
+                    "note: evicted content can no longer answer an availability challenge.",
+                );
+            }
+            Ok(0)
+        }
+        StoreAction::Encrypt => cmd_encrypt(out, options),
+    }
+}
+
+/// Convert a plaintext log to a sealed one.
+///
+/// Written to a new file, verified by reading it back, and only then swapped in.
+/// The plaintext original is renamed aside rather than deleted: this command
+/// must not be able to destroy somebody's only copy, so the last step is left to
+/// the operator and is stated loudly rather than done quietly.
+fn cmd_encrypt(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
+    match first_line_is_sealed(&options.log)? {
+        Some(true) => {
+            say(out, "already sealed; nothing to do");
+            return Ok(0);
+        }
+        None => {
+            say(out, "log is empty or absent; nothing to convert");
+            say(out, "new entries will be sealed if a key is present");
+            return Ok(0);
+        }
+        Some(false) => {}
+    }
+    let key_path = options.key_path();
+    if !key_path.exists() {
+        return Err(CliError::AtRest(AtRestError::NoKeyFile { path: key_path }));
+    }
+    let passphrase = options.passphrase()?;
+    let cipher =
+        Cipher::read_key_file(&key_path, passphrase.as_deref()).map_err(CliError::AtRest)?;
+
+    let plain = Ledger::open(&options.log).map_err(CliError::Ledger)?;
+    let problems = plain.verify_chain();
+    if !problems.is_empty() {
+        // Converting a broken log would bake the breakage into ciphertext and
+        // make it far harder to diagnose afterwards.
+        for problem in &problems {
+            say(out, format!("  {problem}"));
+        }
+        return Err(CliError::Refused(String::from(
+            "the log does not verify; fix it before sealing it",
+        )));
+    }
+
+    let sealed_path = format!("{}.sealing", options.log);
+    let _ = fs::remove_file(&sealed_path);
+    {
+        let mut sealed = Ledger::open_with(
+            &sealed_path,
+            Codec::Sealed(Box::new(
+                Cipher::read_key_file(&key_path, passphrase.as_deref())
+                    .map_err(CliError::AtRest)?,
+            )),
+        )
+        .map_err(CliError::Ledger)?;
+        for entry in plain.entries() {
+            sealed
+                .append(&entry.kind, entry.payload.clone(), &entry.ts)
+                .map_err(CliError::Ledger)?;
+        }
+    }
+
+    // Read it back before anything is moved. An encryption step that cannot be
+    // reversed is one that has to be proved right before it is trusted.
+    let check = Ledger::open_with(&sealed_path, Codec::Sealed(Box::new(cipher)))
+        .map_err(CliError::Ledger)?;
+    if check.entries() != plain.entries() || check.root() != plain.root() {
+        let _ = fs::remove_file(&sealed_path);
+        return Err(CliError::Refused(String::from(
+            "the sealed copy does not re-derive the original; nothing was changed",
+        )));
+    }
+
+    let backup = format!("{}.plaintext.bak", options.log);
+    fs::rename(&options.log, &backup).map_err(|source| CliError::Io {
+        context: format!("moving {} aside", options.log),
+        source,
+    })?;
+    fs::rename(&sealed_path, &options.log).map_err(|source| CliError::Io {
+        context: format!("installing {}", options.log),
+        source,
+    })?;
+
+    say(
+        out,
+        format!(
+            "sealed {} entries; root unchanged at {}",
+            check.len(),
+            check.root().unwrap_or_default()
+        ),
+    );
+    say(out, "");
+    say(
+        out,
+        format!("The PLAINTEXT original is still on disk at {backup}"),
+    );
+    say(
+        out,
+        "Delete it yourself once you have confirmed the sealed log reads back.",
+    );
+    say(
+        out,
+        "It is left in place because this command must not be able to",
+    );
+    say(out, "destroy your only copy.");
+    Ok(0)
+}
+
+fn cmd_sync(
+    out: &mut dyn Write,
+    options: &Options,
+    destination: &str,
+    mirror_options: mirror::Options,
+) -> Result<i32, CliError> {
+    let store = options.store();
+    let report =
+        mirror::mirror(&store, Path::new(destination), mirror_options).map_err(CliError::Store)?;
+    if mirror_options.dry_run {
+        say(out, "dry run -- nothing was written");
+    }
+    for path in &report.copied {
+        say(out, format!("copied {}", path.display()));
+    }
+    for path in &report.pruned {
+        say(out, format!("pruned {}", path.display()));
+    }
+    for line in report.summary().lines() {
+        say(out, line);
+    }
+    Ok(0)
+}
+
 fn cmd_log(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
     let node = open_node(options)?;
     for entry in ledger_of(&node).entries() {
@@ -1575,6 +2100,12 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         ),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Incentives { params } => cmd_incentives(out, params),
+        Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
+        Command::Store { action } => cmd_store(out, options, *action),
+        Command::Sync {
+            destination,
+            options: mirror_options,
+        } => cmd_sync(out, options, destination, *mirror_options),
         Command::Log => cmd_log(out, options),
     }
 }

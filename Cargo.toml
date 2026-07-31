@@ -30,6 +30,14 @@ zeroize = "1"
 classic-mceliece-rust = { version = "3.1.0", default-features = false, features = ["mceliece348864", "zeroize", "alloc"] }
 ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
 
+# At-rest encryption of the local store. Argon2id is used only to wrap the key
+# file with a passphrase -- the data itself is sealed with the ChaCha20-Poly1305
+# already pulled in above. A memory-hard KDF is not optional for that job: a key
+# file that leaves the machine (which is the entire point of `proofwork sync`)
+# is an offline-attackable target, and PBKDF2 at any iteration count is the
+# wrong shape of defence against a GPU.
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
+
 [dev-dependencies]
 rand = "0.8"
 

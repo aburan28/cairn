@@ -31,6 +31,13 @@ behaviour ships and is tested, not that TLC has checked it.
       silent unconfined run. [verification.md](verification.md#sandboxing) and
       the threat-model row name the four remaining gaps; VM-class isolation is
       Stage 2.
+- [x] **Local store: encryption at rest, a chosen data directory, and a size
+      cap** (`src/store/`). The log is sealed line-wise so appends stay appends,
+      the key defaults to outside the data directory, `sync` mirrors ciphertext
+      without ever carrying the key, and the cap refuses rather than pruning a
+      hash-linked log. See [storage.md](storage.md).
+- [ ] Key rotation: re-key an existing store without a manual decrypt and
+      re-seal. Cheap to add, and not yet needed by anyone.
 - [x] Signed checkpoints: publish `(merkle_root, height, signature)` with a
       separate FIPS 204 ML-DSA-65 root key so a reader can pin what the operator
       claimed at a point in time and detect a rewrite. The daemon writes one
