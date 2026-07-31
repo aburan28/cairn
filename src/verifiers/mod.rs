@@ -576,8 +576,8 @@ enum PinFailure {
     /// The declared path leaves the bundle root. A broken objective, and
     /// deliberately not rescuable from the store.
     Escape,
-    /// A bundle file exists and hashes to something else, with no correct copy
-    /// in the store either.
+    /// A bundle file exists and hashes to something else. Not rescuable from
+    /// the store: a cached blob must not shadow an edited bundle file.
     Mismatch { actual: String },
     /// Neither the bundle nor the store has a copy. The only fetchable case.
     Absent { detail: String },
@@ -1412,13 +1412,12 @@ impl VerifierRegistry {
                 PinFailure::Escape => Verdict::invalid_spec(format!(
                     "pinned path escapes the objective root: {relative}"
                 )),
-                // The wording of the mismatch is unchanged from before the blob
-                // store existed, because it is the diagnostic an operator who
-                // edited a checker in place needs to see; the tail says why the
-                // fallback did not rescue it.
+                // Wording unchanged from before the blob store: an operator who
+                // edited a checker in place needs this diagnostic, and a cached
+                // blob must not rescue (or rephrase) the mismatch.
                 PinFailure::Mismatch { actual } => Verdict::invalid_spec(format!(
                     "pinned code {relative} has sha256 {actual}, objective declares \
-                     {declared_sha256}; no blob matching the pin is available locally"
+                     {declared_sha256}"
                 )),
                 PinFailure::Absent { detail } => {
                     Verdict::unavailable(format!("cannot load {role}: {detail}"))
@@ -1456,43 +1455,35 @@ impl VerifierRegistry {
         // The bundle is the origin. Consulted first so that an operator who
         // edits a checker in place is told their edit no longer matches the pin,
         // rather than having a cached blob silently stand in for the file they
-        // are looking at.
-        let bundle = match fs::read(&full) {
+        // are looking at. Mismatch returns immediately; the store is only for
+        // peers that have no bundle file at all.
+        match fs::read(&full) {
             Ok(source) => {
                 let actual = blobs::address(&source);
                 if actual == declared {
                     return Ok(full);
                 }
-                PinFailure::Mismatch { actual }
+                return Err(PinFailure::Mismatch { actual });
             }
-            Err(error) => PinFailure::Absent {
-                detail: format!("{error} ({})", full.display()),
-            },
-        };
-
-        // The content-addressed fallback, and the reason this module exists: a
-        // peer that learned the objective over the wire has no bundle at all,
-        // and the blob it fetched is byte-identical by construction because its
-        // filename is the pin.
-        match self.blobs.read(declared) {
-            Ok(_) => absolutize(&self.blobs.path_of(declared).map_err(|error| {
-                PinFailure::Absent {
-                    detail: error.to_string(),
+            Err(error) => {
+                // The content-addressed fallback, and the reason this module
+                // exists: a peer that learned the objective over the wire has no
+                // bundle at all, and the blob it fetched is byte-identical by
+                // construction because its filename is the pin.
+                match self.blobs.read(declared) {
+                    Ok(_) => absolutize(&self.blobs.path_of(declared).map_err(|error| {
+                        PinFailure::Absent {
+                            detail: error.to_string(),
+                        }
+                    })?)
+                    .map_err(|error| PinFailure::Absent {
+                        detail: format!("cannot resolve the blob store path: {error}"),
+                    }),
+                    Err(store) => Err(PinFailure::Absent {
+                        detail: format!("{error} ({}); {store}", full.display()),
+                    }),
                 }
-            })?)
-            .map_err(|error| PinFailure::Absent {
-                detail: format!("cannot resolve the blob store path: {error}"),
-            }),
-            Err(store) => match bundle {
-                // A mismatched bundle file outranks a missing blob in the
-                // report: the objective is demonstrably broken here, and
-                // "fetch the code" is not the remedy.
-                mismatch @ PinFailure::Mismatch { .. } => Err(mismatch),
-                PinFailure::Absent { detail } => Err(PinFailure::Absent {
-                    detail: format!("{detail}; {store}"),
-                }),
-                other => Err(other),
-            },
+            }
         }
     }
 

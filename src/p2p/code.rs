@@ -283,7 +283,9 @@ pub fn want_message(needs: &BTreeSet<String>, limits: CodeLimits) -> CodeMessage
 /// tracking, and the asker learns the same thing from the blob not arriving.
 pub fn serve(store: &BlobStore, addresses: &[String], limits: CodeLimits) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
-    let mut budget = limits.max_blob_bytes.saturating_mul(limits.max_blobs_per_message);
+    let mut budget = limits
+        .max_blob_bytes
+        .saturating_mul(limits.max_blobs_per_message);
     for address in addresses {
         if out.len() >= limits.max_blobs_per_message {
             break;
@@ -562,7 +564,13 @@ mod tests {
         let mine = store("nobody-holds-mine");
         let theirs = store("nobody-holds-theirs");
         let needs = set(&[&blobs::address(CHECKER)]);
-        let (report, _) = reconcile(&mine, &needs, &theirs, &BTreeSet::new(), CodeLimits::default());
+        let (report, _) = reconcile(
+            &mine,
+            &needs,
+            &theirs,
+            &BTreeSet::new(),
+            CodeLimits::default(),
+        );
         assert_eq!(report.accepted, 0);
         assert_eq!(report.refused, 0);
         assert_eq!(report.outstanding, 1);

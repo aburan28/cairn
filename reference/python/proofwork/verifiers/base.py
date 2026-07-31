@@ -180,34 +180,27 @@ def resolve_pinned(root: str, path: str, expected_sha256: str) -> str:
     if full != root_abs and not full.startswith(root_abs + os.sep):
         raise PinMismatch(f"pinned path escapes the objective root: {path}")
 
-    bundle_error: Exception | None = None
     try:
         with open(full, "rb") as handle:
             source = handle.read()
-    except OSError as exc:
-        bundle_error = exc
+    except OSError as bundle_error:
+        store = blobs.BlobStore.under(root_abs)
+        try:
+            store.read(expected_sha256)
+            return store.path_of(expected_sha256)
+        except blobs.BlobError as store_error:
+            raise FileNotFoundError(f"{bundle_error}; {store_error}") from None
     else:
+        # Mismatch is raised here, before the store is consulted: a cached blob
+        # must not silently stand in for an edited bundle file (see module
+        # comment above). The store is only for peers that have no bundle file.
         actual = hashlib.sha256(source).hexdigest()
-        if actual == expected_sha256:
-            return full
-        bundle_error = PinMismatch(
-            f"pinned code {path} has sha256 {actual}, "
-            f"objective declares {expected_sha256}"
-        )
-
-    store = blobs.BlobStore.under(root_abs)
-    try:
-        store.read(expected_sha256)
-        return store.path_of(expected_sha256)
-    except blobs.BlobError as store_error:
-        # A mismatched bundle file outranks a missing blob in the report: the
-        # objective is demonstrably broken here, and "fetch the code" is not the
-        # remedy.
-        if isinstance(bundle_error, PinMismatch):
+        if actual != expected_sha256:
             raise PinMismatch(
-                f"{bundle_error}; no blob matching the pin is available locally"
-            ) from None
-        raise FileNotFoundError(f"{bundle_error}; {store_error}") from None
+                f"pinned code {path} has sha256 {actual}, "
+                f"objective declares {expected_sha256}"
+            )
+        return full
 
 
 def missing_code(root: str, spec: dict[str, Any]) -> list[str]:

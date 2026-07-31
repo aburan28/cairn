@@ -1863,7 +1863,10 @@ fn cmd_blob(out: &mut dyn Write, options: &Options, action: BlobAction) -> Resul
     match action {
         BlobAction::List => {
             let held = store.addresses();
-            say(out, format!("{} blob(s) in {}", held.len(), store.dir().display()));
+            say(
+                out,
+                format!("{} blob(s) in {}", held.len(), store.dir().display()),
+            );
             let pinned = node.pinned_code();
             for address in held {
                 // Whether anything in *this* log still wants it, which is what
@@ -1879,12 +1882,18 @@ fn cmd_blob(out: &mut dyn Write, options: &Options, action: BlobAction) -> Resul
         BlobAction::Need => {
             let needs = node.missing_code();
             if needs.is_empty() {
-                say(out, "every pinned verifier in this log is available locally");
+                say(
+                    out,
+                    "every pinned verifier in this log is available locally",
+                );
             } else {
                 say(
                     out,
-                    format!("{} pin(s) unavailable; verdicts against them will be \
-                             'unavailable' until a peer serves them", needs.len()),
+                    format!(
+                        "{} pin(s) unavailable; verdicts against them will be \
+                             'unavailable' until a peer serves them",
+                        needs.len()
+                    ),
                 );
                 for address in &needs {
                     say(out, format!("  {}", short_address(address)));
@@ -1895,7 +1904,10 @@ fn cmd_blob(out: &mut dyn Write, options: &Options, action: BlobAction) -> Resul
             let published = node.publish_local_code();
             say(
                 out,
-                format!("{published} pinned blob(s) servable from {}", store.dir().display()),
+                format!(
+                    "{published} pinned blob(s) servable from {}",
+                    store.dir().display()
+                ),
             );
         }
         BlobAction::Collect => {

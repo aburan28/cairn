@@ -93,7 +93,10 @@ pub fn address(bytes: &[u8]) -> String {
 /// that declared the uppercase form would be unverifiable on a node that had
 /// stored the lowercase one.
 pub fn is_address(text: &str) -> bool {
-    text.len() == 64 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Why a blob operation failed.
@@ -569,7 +572,9 @@ mod tests {
 
         let other = address(b"different");
         assert!(!store.publish_file(&bundle, &other).expect("publish"));
-        assert!(!store.publish_file(&dir.join("nope.py"), &a).expect("absent"));
+        assert!(!store
+            .publish_file(&dir.join("nope.py"), &a)
+            .expect("absent"));
         assert!(matches!(
             store.publish_file(&bundle, "not-an-address"),
             Err(BlobError::NotAnAddress { .. })
