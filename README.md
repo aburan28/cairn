@@ -376,6 +376,7 @@ examples/            worked objectives with real artifacts
 
 ## Docs
 
+- [diagrams.md](docs/diagrams.md) — architecture and detailed design, drawn from the code
 - [architecture.md](docs/architecture.md) — the full design and which work shapes fit
 - [verification.md](docs/verification.md) — the verification ladder; authoring verifiers
 - [economics.md](docs/economics.md) — what mints, why demand-gating, citation flow
