@@ -29,7 +29,20 @@ Remaining before Stage 0 is usable by anyone but its author:
       can pin what the operator claimed at a point in time and detect a rewrite.
 - [ ] `proofwork verify --from <checkpoint>` for readers who only have a log
       fragment.
-- [ ] Objective schemas in `spec/` wired into `post` as a hard validation gate.
+- [ ] Objective schemas in `spec/` wired into `post` as a hard validation gate —
+      on **admission only**. A schema that can reject a record already in the log
+      rewrites history on a version bump. Plus `validate_spec` on the verifier
+      registry, so a verifier block missing `evaluator_sha256` is refused at post
+      time instead of becoming a funded bounty nobody can win. See
+      [knowledge-store.md](knowledge-store.md).
+- [ ] **A content-addressed blob store.** Pinned verifier code lives outside the
+      log, referenced by a relative path against a local `--root`, so "anyone can
+      re-derive every result from nothing but a copy of the log" currently needs
+      a copy of the verifier tree too. `evaluator_sha256` is already a content
+      address; what is missing is a `blob` record kind, `cache/blobs/<sha256>`,
+      and resolution by hash before path. Changes no id and no conformance vector.
+- [ ] A pin set in the quota, so `store gc` cannot evict the evaluator of an
+      objective the node must still be able to verify.
 - [ ] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [ ] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while

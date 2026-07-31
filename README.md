@@ -431,6 +431,7 @@ examples/            worked objectives with real artifacts
 - [diagrams.md](docs/diagrams.md) — architecture and detailed design, drawn from the code
 - [architecture.md](docs/architecture.md) — the full design and which work shapes fit
 - [verification.md](docs/verification.md) — the verification ladder; authoring verifiers
+- [knowledge-store.md](docs/knowledge-store.md) — how a challenge is submitted, where every byte of it is stored, and how the format extends
 - [economics.md](docs/economics.md) — what mints, why demand-gating, citation flow
 - [coordination.md](docs/coordination.md) — the hoarding trap, the ratchet, CRDT gossip
 - [agent-market.md](docs/agent-market.md) — agent-to-agent rewards: what a peer-to-peer mechanism would be, and what it breaks
