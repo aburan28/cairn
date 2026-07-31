@@ -1,0 +1,22 @@
+{
+  "created_at": "2026-07-31T00:00:00+00:00",
+  "funder": "ecdsa-fail-mvp",
+  "goal": "GOAL-ecdsa-fail-circuit-cost",
+  "ratchet": {
+    "baseline": 100000,
+    "direction": "minimize",
+    "min_improvement": 1000,
+    "reward": 1000000,
+    "target": 10000
+  },
+  "reward": 1000000,
+  "statement": "ecdsa.fail-shaped MVP: lower the qubit × Toffoli product for a declared point-addition cost claim. Submit {\"qubits\": <int>, \"toffoli\": <int>} (optional \"score\" must equal the product). Score is qubits*toffoli; lower is better. Baseline 100000, target 10000. This pinned evaluator checks metric shape and the product identity only — it does NOT re-simulate a reversible secp256k1 point-add circuit. Real ecdsa.fail settlement still requires ecdsafail run/submit against the launch harness. See examples/ecdsa-fail/GAP.md.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/ecdsa-fail/evaluators/circuit_cost.py",
+    "evaluator_sha256": "2f8096d4f9dd25165295684e3a6570418c0cd51fd883fdcb850b313af7ac0850",
+    "kind": "evaluator",
+    "threshold": 100000
+  }
+}
