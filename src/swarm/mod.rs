@@ -83,6 +83,7 @@
 //! [`tcp`] is where the clock, the sockets and the threads live, and it is the
 //! only part of this module that can fail for reasons that are nobody's fault.
 
+pub mod dht;
 pub mod discovery;
 pub mod piece;
 pub mod tcp;
@@ -94,6 +95,7 @@ use std::fmt;
 use piece::{Bitfield, Manifest, PieceError};
 use wire::Message;
 
+pub use dht::{Contact, Lookup, NodeId, ProviderStore, RoutingTable};
 pub use discovery::{AddressBook, PeerRecord};
 pub use piece::{Layout, Manifest as PieceManifest, DEFAULT_PIECE_LEN};
 pub use tcp::{fetch, serve, Listener, TransferError};
@@ -439,7 +441,15 @@ impl Swarm {
             // handled by the driver that owns the address book. A swarm holding
             // one would be a per-blob copy of node-wide state, which is how two
             // views of the same peers start disagreeing.
-            Message::WantPeers | Message::Peers(_) => Vec::new(),
+            // Peer exchange and DHT routing are about the *node*, not this
+            // blob, so the driver that owns the routing table handles them. A
+            // swarm holding one would be a per-blob copy of node-wide state,
+            // which is how two views of the same network start disagreeing.
+            Message::WantPeers
+            | Message::Peers(_)
+            | Message::FindNode { .. }
+            | Message::Nodes { .. }
+            | Message::Announce { .. } => Vec::new(),
         }
     }
 

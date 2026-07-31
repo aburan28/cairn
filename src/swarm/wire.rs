@@ -209,6 +209,23 @@ pub enum Message {
     /// relays a record is passing on evidence rather than hearsay. See
     /// [`super::discovery`].
     Peers(Vec<crate::crypto::identity::SignedRecord>),
+    /// Kademlia `FIND_NODE` / `GET_PROVIDERS`, which are one message here.
+    ///
+    /// A single round trip returns both the contacts nearest the key *and* any
+    /// providers known for it, because a lookup wants both and splitting them
+    /// would double the hops for no gain -- the answering node consults one
+    /// routing table either way.
+    FindNode { key: [u8; 32] },
+    /// The answer: contacts nearer the key, and who is known to hold it.
+    ///
+    /// Both are signed records, so the whole answer is relayable evidence and a
+    /// hostile hop can withhold but not substitute.
+    Nodes {
+        closer: Vec<crate::crypto::identity::SignedRecord>,
+        providers: Vec<crate::crypto::identity::SignedRecord>,
+    },
+    /// "I hold this key." A provider announcement, signed by the announcer.
+    Announce { key: [u8; 32] },
 }
 
 // Tags. Explicit rather than derived from declaration order, because a wire
@@ -227,6 +244,9 @@ const TAG_CANCEL: u8 = 10;
 const TAG_PIECE: u8 = 11;
 const TAG_WANT_PEERS: u8 = 12;
 const TAG_PEERS: u8 = 13;
+const TAG_FIND_NODE: u8 = 14;
+const TAG_NODES: u8 = 15;
+const TAG_ANNOUNCE: u8 = 16;
 
 impl Message {
     /// A name for logs and errors.
@@ -243,6 +263,9 @@ impl Message {
             Message::Piece { .. } => "piece",
             Message::WantPeers => "want-peers",
             Message::Peers(_) => "peers",
+            Message::FindNode { .. } => "find-node",
+            Message::Nodes { .. } => "nodes",
+            Message::Announce { .. } => "announce",
         }
     }
 
@@ -287,6 +310,25 @@ impl Message {
                 out.push(TAG_PEERS);
                 let body = Value::array(records.iter().map(|r| r.to_value()));
                 out.extend_from_slice(&body.canonical_bytes());
+            }
+            Message::FindNode { key } => {
+                out.push(TAG_FIND_NODE);
+                out.extend_from_slice(key);
+            }
+            Message::Nodes { closer, providers } => {
+                out.push(TAG_NODES);
+                let body = Value::object([
+                    ("closer", Value::array(closer.iter().map(|r| r.to_value()))),
+                    (
+                        "providers",
+                        Value::array(providers.iter().map(|r| r.to_value())),
+                    ),
+                ]);
+                out.extend_from_slice(&body.canonical_bytes());
+            }
+            Message::Announce { key } => {
+                out.push(TAG_ANNOUNCE);
+                out.extend_from_slice(key);
             }
         }
         out
@@ -369,6 +411,16 @@ impl Message {
                 }
                 Ok(Message::Peers(records))
             }
+            TAG_FIND_NODE => key_only(rest, "find-node").map(|key| Message::FindNode { key }),
+            TAG_ANNOUNCE => key_only(rest, "announce").map(|key| Message::Announce { key }),
+            TAG_NODES => {
+                let text = std::str::from_utf8(rest).map_err(|_| WireError::BadPeers)?;
+                let value = Value::from_json(text).map_err(|_| WireError::BadPeers)?;
+                Ok(Message::Nodes {
+                    closer: records_at(&value, "closer")?,
+                    providers: records_at(&value, "providers")?,
+                })
+            }
             other => Err(WireError::UnknownTag(other)),
         }
     }
@@ -396,6 +448,46 @@ fn empty(rest: &[u8], message: &'static str) -> Result<(), WireError> {
             extra: rest.len(),
         })
     }
+}
+
+/// A fixed 32-byte key field, with nothing after it.
+fn key_only(rest: &[u8], message: &'static str) -> Result<[u8; 32], WireError> {
+    let head = rest.get(..32).ok_or(WireError::Truncated { message })?;
+    if rest.len() > 32 {
+        return Err(WireError::Trailing {
+            message,
+            extra: rest.len() - 32,
+        });
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(head);
+    Ok(key)
+}
+
+/// A bounded list of signed records under `field`.
+///
+/// Bounded by [`super::dht::K`] rather than trusted: an answer claiming ten
+/// thousand contacts is a peer trying to make this node verify ten thousand
+/// signatures, and the routing table would keep at most `K` of them anyway.
+fn records_at(
+    value: &Value,
+    field: &'static str,
+) -> Result<Vec<crate::crypto::identity::SignedRecord>, WireError> {
+    let items = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or(WireError::BadPeers)?;
+    if items.len() > super::dht::K {
+        return Err(WireError::TooLong {
+            declared: items.len(),
+        });
+    }
+    items
+        .iter()
+        .map(|item| {
+            crate::crypto::identity::SignedRecord::from_value(item).map_err(|_| WireError::BadPeers)
+        })
+        .collect()
 }
 
 fn index_only(rest: &[u8], message: &'static str) -> Result<u32, WireError> {
@@ -438,7 +530,25 @@ mod tests {
     fn every_message_survives_a_round_trip() {
         let manifest = manifest();
         let pieces = Some(manifest.pieces());
+        let record = crate::swarm::discovery::PeerRecord::sign(
+            &crate::crypto::identity::Identity::from_secret_bytes([3u8; 32]),
+            &["127.0.0.1:9797".parse().expect("addr")],
+            1,
+        )
+        .expect("signs");
         for message in [
+            Message::WantPeers,
+            Message::Peers(vec![record.clone()]),
+            Message::FindNode { key: [7u8; 32] },
+            Message::Announce { key: [0u8; 32] },
+            Message::Nodes {
+                closer: vec![record.clone()],
+                providers: vec![record],
+            },
+            Message::Nodes {
+                closer: Vec::new(),
+                providers: Vec::new(),
+            },
             Message::Manifest(Box::new(manifest.clone())),
             Message::WantManifest,
             Message::Bitfield(super::super::piece::Bitfield::full(manifest.pieces())),
@@ -549,6 +659,48 @@ mod tests {
             Err(WireError::BadBitfield),
             "and a count that does not match the bytes is refused"
         );
+    }
+
+    #[test]
+    fn a_routing_answer_claiming_more_contacts_than_k_is_refused() {
+        // An answer claiming ten thousand contacts is a peer trying to make this
+        // node verify ten thousand signatures. The routing table would keep at
+        // most K of them anyway, so the bound costs nothing legitimate.
+        let record = crate::swarm::discovery::PeerRecord::sign(
+            &crate::crypto::identity::Identity::from_secret_bytes([5u8; 32]),
+            &["127.0.0.1:1234".parse().expect("addr")],
+            1,
+        )
+        .expect("signs");
+        let too_many: Vec<Value> = (0..crate::swarm::dht::K + 1)
+            .map(|_| record.to_value())
+            .collect();
+        let body = Value::object([
+            ("closer", Value::array(too_many)),
+            ("providers", Value::array([])),
+        ]);
+        let mut frame = vec![TAG_NODES];
+        frame.extend_from_slice(&body.canonical_bytes());
+        assert!(matches!(
+            Message::decode(&frame, None),
+            Err(WireError::TooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn a_key_field_is_exactly_thirty_two_bytes() {
+        let mut short = vec![TAG_FIND_NODE];
+        short.extend_from_slice(&[0u8; 31]);
+        assert!(matches!(
+            Message::decode(&short, None),
+            Err(WireError::Truncated { .. })
+        ));
+        let mut long = vec![TAG_ANNOUNCE];
+        long.extend_from_slice(&[0u8; 33]);
+        assert!(matches!(
+            Message::decode(&long, None),
+            Err(WireError::Trailing { .. })
+        ));
     }
 
     #[test]

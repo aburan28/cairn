@@ -97,11 +97,38 @@ split that makes it work: *identity* is permanent and belongs in the log;
 *location* is ephemeral and does not, because the log is append-only and an IP is
 not. *Not built; the natural next step.*
 
-**Kademlia DHT with provider records.** The standard answer to "who has content
-X", and a good one — `blob fetch` wants exactly a provider lookup. Costs a lot of
-machinery, needs its own bootstrap, and is vulnerable to eclipse and sybil
-attacks that S/Kademlia mitigates rather than solves. Worth it at a scale this
-network is nowhere near, and the log does the same job with no new bootstrap.
+**Kademlia DHT with provider records.** *Built — `src/swarm/dht.rs`.* The
+standard answer to "who has content X", and the right one: `blob fetch` wants
+exactly a provider lookup, and without one it dials every peer it knows and asks
+each. That is flooding — fine at ten peers, hopeless at ten thousand, and worse
+exactly as the network becomes worth using.
+
+I argued against this earlier on the grounds that the log does the same job with
+no new bootstrap. That was wrong, and the error is worth naming because it is the
+same conflation this document opens with. The log can carry **peer identity**,
+which is permanent. It cannot carry **provider records**, which expire and are
+revoked by silence — an append-only structure has no way to say *no longer true*
+and would advertise a dead node forever. They are different problems and they
+want different structures:
+
+| | churn | belongs in |
+|---|---|---|
+| peer identity | permanent | the log |
+| who holds digest `D` right now | constant | the DHT |
+
+The bootstrap objection also dissolves: the DHT bootstraps from the address book,
+which is already there.
+
+And the security objection is much weaker here than where DHTs earned their
+reputation, because of work already done. **Every DHT answer is a hint; the
+digest decides.** A provider record that lies costs one wasted dial, checked
+against a digest the log fixed before the lookup started — where BitTorrent's DHT
+can hand you a poisoned answer you cannot check. So eclipse costs *liveness*, not
+correctness, and peer exchange remains as a fallback that does not route through
+the DHT at all. Node IDs are hashes of ed25519 public keys, so claiming an ID
+costs a keypair and a signature — S/Kademlia's crypto-ID mitigation, obtained for
+free from the identity layer. Binding IDs to stake rather than keys is the
+stronger version and is not built.
 
 **Local multicast (mDNS-style).** Genuinely zero-configuration on a LAN: no DNS,
 no hardcoded address, no anchor at all. Limited to a broadcast domain, and often
@@ -168,6 +195,28 @@ who does.** Refusing to talk to it forfeits exactly the hop that makes bootstrap
 a once-ever problem. So a digest this store does not hold now gets no bytes and
 peer exchange anyway, bounded by a message budget so it cannot be used as a free
 socket.
+
+## What iterates, and what does not yet
+
+Precision matters here, because "we have a DHT" can mean several things.
+
+**Built and tested**: the XOR metric, the k-bucket routing table with the
+oldest-live-wins policy, the provider store with expiry, and `Lookup` — the
+iterative α-parallel lookup as a pure state machine, with convergence and
+termination asserted against a synthetic 200-node network built from real routing
+tables.
+
+**Wired**: nodes answer `FIND_NODE` with their nearest contacts and any providers
+they know, learn from being asked (XOR symmetry means the table fills itself),
+and a fetch issues a single-hop provider query on every connection it opens. A
+node without the blob answers routing too — see the design note above.
+
+**Not wired**: the multi-hop driver. `Lookup` is ready and nothing yet feeds it
+across connections, so lookups are one hop rather than `O(log n)`. That is
+already better than flooding for the common case — a peer you reach knows a
+provider — and it is not the asymptotic claim. Also unbuilt: bucket refresh,
+provider republication, and announcing to the `k` nodes nearest a key rather than
+to whoever you happen to be talking to.
 
 ## Where this is wrong
 

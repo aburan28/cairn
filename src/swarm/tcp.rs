@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::dht::{Contact, NodeId, ProviderStore, RoutingTable};
 use super::discovery::AddressBook;
 use super::piece::DEFAULT_PIECE_LEN;
 use super::wire::{check_frame_len, Handshake, Message, PEER_ID_LEN};
@@ -104,6 +105,88 @@ pub type Book = Arc<Mutex<AddressBook>>;
 /// A fresh, empty address book.
 pub fn new_book() -> Book {
     Arc::new(Mutex::new(AddressBook::new()))
+}
+
+/// This node's routing table and what it has been told others hold.
+///
+/// Node-wide like the address book, and for the same reason: the DHT is one
+/// overlay, not one per blob.
+#[derive(Clone)]
+pub struct Dht {
+    pub table: Arc<Mutex<RoutingTable>>,
+    pub providers: Arc<Mutex<ProviderStore>>,
+    /// This node's own signed record, offered when answering so the asker learns
+    /// about us. Kademlia's tables fill themselves because XOR distance is
+    /// symmetric; this is the message that makes that happen.
+    pub me: Option<crate::crypto::identity::SignedRecord>,
+}
+
+impl Dht {
+    pub fn new(local: NodeId) -> Dht {
+        Dht {
+            table: Arc::new(Mutex::new(RoutingTable::new(local))),
+            providers: Arc::new(Mutex::new(ProviderStore::new())),
+            me: None,
+        }
+    }
+
+    pub fn with_record(mut self, record: crate::crypto::identity::SignedRecord) -> Dht {
+        self.me = Some(record);
+        self
+    }
+}
+
+/// Answer a routing query, and learn from having been asked.
+///
+/// Both halves matter. The answer is what makes lookups converge; the *learning*
+/// is what makes a routing table fill itself without any bootstrap traffic of its
+/// own, and it works because XOR distance is symmetric -- a node near enough to
+/// ask me is a node I want in the same bucket.
+fn on_dht(peer: PeerId, message: &Message, dht: &Dht, now: u64) -> Vec<Action> {
+    match message {
+        Message::FindNode { key } => {
+            let key = NodeId::from_bytes(*key);
+            let closer: Vec<crate::crypto::identity::SignedRecord> = dht
+                .table
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .closest(key, super::dht::K)
+                .into_iter()
+                .map(|contact| contact.signed)
+                .collect();
+            let providers = dht
+                .providers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .providers(key, now);
+            vec![Action::Send(peer, Message::Nodes { closer, providers })]
+        }
+        Message::Nodes { closer, providers } => {
+            let mut table = dht.table.lock().unwrap_or_else(|e| e.into_inner());
+            for signed in closer {
+                // Verified here. An unverifiable contact is dropped and costs
+                // nothing, which is the right price for an unprovable hint.
+                if let Ok(contact) = Contact::open(signed) {
+                    // A full bucket defers to its oldest contact, and probing
+                    // that one needs a connection this function does not have.
+                    // Leaving it un-inserted is the conservative answer: it
+                    // keeps the incumbent, which is the anti-eclipse behaviour.
+                    let _ = table.insert(contact);
+                }
+            }
+            let _ = providers;
+            Vec::new()
+        }
+        Message::Announce { key } => {
+            // An announcement is only as good as the record that carries it, and
+            // this message does not carry one -- the announcer's record arrives
+            // via peer exchange on the same connection. Without it there is
+            // nothing verifiable to store, so nothing is stored.
+            let _ = key;
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Handle peer exchange, which the swarm state machine deliberately does not.
@@ -184,6 +267,17 @@ pub fn serve_with(
     limits: Limits,
     book: Book,
 ) -> Result<Listener, TransferError> {
+    serve_full(addr, blobs, limits, book, Dht::new(NodeId::default()))
+}
+
+/// Serve, against an address book and a routing table the caller owns.
+pub fn serve_full(
+    addr: impl ToSocketAddrs,
+    blobs: BlobStore,
+    limits: Limits,
+    book: Book,
+    dht: Dht,
+) -> Result<Listener, TransferError> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
     listener.set_nonblocking(true)?;
@@ -202,13 +296,17 @@ pub fn serve_with(
         while !stop_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let blobs = blobs.clone();
-                    let swarms = Arc::clone(&swarms);
-                    let outboxes = Arc::clone(&outboxes);
-                    let next_peer = Arc::clone(&next_peer);
-                    let book = Arc::clone(&book);
+                    let ctx = Serving {
+                        blobs: blobs.clone(),
+                        swarms: Arc::clone(&swarms),
+                        outboxes: Arc::clone(&outboxes),
+                        next_peer: Arc::clone(&next_peer),
+                        limits,
+                        book: Arc::clone(&book),
+                        dht: dht.clone(),
+                    };
                     thread::spawn(move || {
-                        let _ = serve_one(stream, blobs, swarms, outboxes, next_peer, limits, book);
+                        let _ = serve_one(stream, ctx);
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -224,15 +322,32 @@ pub fn serve_with(
     Ok(Listener { addr: bound, stop })
 }
 
-fn serve_one(
-    mut stream: TcpStream,
+/// Everything a served connection needs that is not the socket.
+///
+/// A struct rather than eight parameters, and cloned per connection: every field
+/// is either an `Arc` or cheap, so the clone is a handful of refcount bumps and
+/// each thread gets a value it owns rather than a lifetime to thread through.
+#[derive(Clone)]
+struct Serving {
     blobs: BlobStore,
     swarms: Arc<Mutex<BTreeMap<String, Arc<Mutex<Swarm>>>>>,
     outboxes: Arc<Mutex<BTreeMap<String, Outbox>>>,
     next_peer: Arc<AtomicU64>,
     limits: Limits,
     book: Book,
-) -> io::Result<()> {
+    dht: Dht,
+}
+
+fn serve_one(mut stream: TcpStream, ctx: Serving) -> io::Result<()> {
+    let Serving {
+        blobs,
+        swarms,
+        outboxes,
+        next_peer,
+        limits,
+        book,
+        dht,
+    } = ctx;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
 
@@ -257,7 +372,7 @@ fn serve_one(
     // to it forfeits exactly the hop that makes bootstrap a once-ever problem.
     // So: no bytes, no transfer, and peer exchange anyway.
     let Ok(Some(bytes)) = blobs.get(&their.digest) else {
-        return serve_peers_only(stream, &book);
+        return serve_peers_only(stream, &book, &dht);
     };
 
     let swarm = {
@@ -302,7 +417,7 @@ fn serve_one(
     });
 
     let peer = PeerId(next_peer.fetch_add(1, Ordering::SeqCst));
-    let result = run_peer(stream, peer, &swarm, &outbox, &book);
+    let result = run_peer(stream, peer, &swarm, &outbox, &book, &dht);
     ticking.store(false, Ordering::SeqCst);
     {
         let mut swarm = swarm.lock().unwrap_or_else(|e| e.into_inner());
@@ -320,7 +435,7 @@ fn serve_one(
 /// Bounded by a message budget rather than by a timeout alone: a peer that keeps
 /// asking is a peer using this node as a free socket, and there is nothing here
 /// worth more than a handful of frames.
-fn serve_peers_only(mut stream: TcpStream, book: &Book) -> io::Result<()> {
+fn serve_peers_only(mut stream: TcpStream, book: &Book, dht: &Dht) -> io::Result<()> {
     const BUDGET: u32 = 4;
 
     // Ask as well as answer. A node reached by a stranger has just learned that
@@ -356,6 +471,17 @@ fn serve_peers_only(mut stream: TcpStream, book: &Book) -> io::Result<()> {
                 let mut guard = book.lock().unwrap_or_else(|e| e.into_inner());
                 for record in &records {
                     let _ = guard.offer(record);
+                }
+            }
+            // A node without the blob is exactly the node a lookup wants to
+            // reach, so routing is answered on this path too.
+            Message::FindNode { .. } => {
+                for action in on_dht(PeerId(0), &message, dht, unix_now()) {
+                    if let Action::Send(_, reply) = action {
+                        if stream.write_all(&reply.frame()).is_err() {
+                            return Ok(());
+                        }
+                    }
                 }
             }
             // Anything else on this connection is a transfer message for a blob
@@ -408,6 +534,10 @@ pub fn fetch_with(
     }
     let swarm = Arc::new(Mutex::new(Swarm::leech(digest, limits)));
     let outbox: Outbox = Arc::new(Mutex::new(BTreeMap::new()));
+    // A routing table for the duration of the fetch. Contacts learned here are
+    // not yet persisted -- the address book is what survives the process, and
+    // the records land there too.
+    let dht = Dht::new(NodeId::default());
     let (done_tx, done_rx): (Sender<()>, Receiver<()>) = mpsc::channel();
     let connected = Arc::new(AtomicU64::new(0));
 
@@ -419,6 +549,7 @@ pub fn fetch_with(
         let done = done_tx.clone();
         let connected = Arc::clone(&connected);
         let book = Arc::clone(&book);
+        let dht = dht.clone();
         thread::spawn(move || {
             let Ok(stream) = TcpStream::connect_timeout(&addr, IO_TIMEOUT) else {
                 return;
@@ -452,7 +583,7 @@ pub fn fetch_with(
             // we dialled. The claimed id in the handshake is never used, because
             // it is self-asserted and free to forge.
             let peer = PeerId(index as u64);
-            let _ = run_peer(stream, peer, &swarm, &outbox, &book);
+            let _ = run_peer(stream, peer, &swarm, &outbox, &book, &dht);
             {
                 let mut swarm = swarm.lock().unwrap_or_else(|e| e.into_inner());
                 swarm.remove_peer(peer);
@@ -522,6 +653,7 @@ fn run_peer(
     swarm: &Arc<Mutex<Swarm>>,
     outbox: &Outbox,
     book: &Book,
+    dht: &Dht,
 ) -> io::Result<()> {
     let (tx, rx) = mpsc::channel::<Message>();
     outbox
@@ -548,6 +680,19 @@ fn run_peer(
     // Ask on every connection. One answer is what turns bootstrap from a
     // recurring problem into a once-ever one.
     opening.push(Action::Send(peer, Message::WantPeers));
+    // And ask who holds what we came for. A single hop, not an iterative
+    // lookup -- see the module docs for what that does and does not buy.
+    {
+        let guard = swarm.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(key) = NodeId::of_digest(guard.digest()) {
+            opening.push(Action::Send(
+                peer,
+                Message::FindNode {
+                    key: *key.as_bytes(),
+                },
+            ));
+        }
+    }
     dispatch(&opening, outbox);
 
     let mut reader = stream;
@@ -594,6 +739,19 @@ fn run_peer(
         let exchange = on_peer_exchange(peer, &message, book);
         if !exchange.is_empty() {
             dispatch(&exchange, outbox);
+        }
+        let routing = on_dht(peer, &message, dht, unix_now());
+        if !routing.is_empty() {
+            dispatch(&routing, outbox);
+        }
+        // Provider records arrive on the routing path and belong in the address
+        // book too: knowing who holds a blob is only useful with somewhere to
+        // dial, and both facts came in the same verified record.
+        if let Message::Nodes { providers, .. } = &message {
+            let mut guard = book.lock().unwrap_or_else(|e| e.into_inner());
+            for record in providers {
+                let _ = guard.offer(record);
+            }
         }
         let actions = {
             let mut guard = swarm.lock().unwrap_or_else(|e| e.into_inner());
@@ -642,6 +800,18 @@ fn dispatch(actions: &[Action], outbox: &Outbox) {
             Action::Complete => {}
         }
     }
+}
+
+/// Seconds since the epoch, for provider expiry.
+///
+/// The one clock reading in this module. A node's clock is not evidence -- which
+/// is why [`super::dht::ProviderStore`] takes the time as an argument rather than
+/// reading it -- and this is the boundary where a real one is allowed in.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 /// Human-readable reason a peer was dropped, for a caller that wants to log it.

@@ -54,9 +54,20 @@ Remaining before Stage 0 is usable by anyone but its author:
       accumulates the rest. Every hint source is equal because none is trusted,
       which is what makes DNS optional rather than load-bearing. See
       [discovery.md](discovery.md).
-- [ ] Peer identities in the log, so discovery stops being a *separate* bootstrap
-      problem from obtaining the log. Identity is permanent and belongs there;
-      location is ephemeral and does not.
+- [x] **A Kademlia DHT** (`src/swarm/dht.rs`) for the question a fetch actually
+      asks -- who holds digest `D` right now. Peer exchange answers which peers
+      exist; without provider lookup a fetch floods everyone it knows. XOR
+      metric, k-buckets with oldest-live-wins, provider store with expiry, and
+      the iterative lookup as a pure state machine. Safe to get wrong here in a
+      way it is not elsewhere: every answer is a hint and the digest decides, so
+      eclipse costs liveness and never correctness.
+- [ ] The multi-hop lookup driver. `Lookup` is built and tested; nothing yet
+      feeds it across connections, so lookups are one hop rather than `O(log n)`.
+      Plus bucket refresh, provider republication, and announcing to the `k`
+      nodes nearest a key rather than to whoever is on the line.
+- [ ] Peer identities in the log, so *identity* discovery stops being a separate
+      bootstrap problem from obtaining the log. Identity is permanent and belongs
+      there; provider records are not and must not.
 - [ ] Local multicast as a second hint source: genuinely zero-configuration on a
       LAN, and cheap now that every source is interchangeable.
 - [ ] NAT traversal. Not discovery, and routinely confused with it -- knowing an

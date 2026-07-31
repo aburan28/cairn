@@ -54,7 +54,7 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 832 tests, loopback only
+cargo test                    # 849 tests, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
@@ -454,9 +454,58 @@ the best node to ask who does.**
 No peer discovery is anchor-free — Bitcoin ships DNS seeds *and* fallback IPs,
 Tor ships directory authorities, IPFS ships bootstrap multiaddrs. The goal is to
 make the anchor a key rather than an address, replaceable without a code change,
-and serving data that verifies itself. See [discovery.md](docs/discovery.md) for
-the full survey, including DHTs, mDNS, onion services and what NAT traversal
-still costs.
+and serving data that verifies itself.
+
+### Kademlia, for the question a fetch actually asks
+
+Peer exchange answers *which peers exist*. It does not answer **who holds digest
+`D` right now**, and without that a fetch dials everyone it knows and asks each —
+flooding, fine at ten peers and hopeless at ten thousand. `src/swarm/dht.rs` is
+the XOR metric, the k-bucket routing table, the provider store, and the iterative
+lookup.
+
+The two are different problems because the data has different churn, and that
+decides where each belongs:
+
+| | churn | belongs in |
+|---|---|---|
+| peer identity | permanent | the log |
+| who holds digest `D` | constant, revoked by silence | the DHT |
+
+An append-only log cannot say *no longer true*, so it would advertise a dead
+provider forever. That is why the DHT is not redundant with the log, and why
+provider records must expire.
+
+DHTs earned a bad security reputation honestly — BitTorrent's can hand you a
+poisoned answer you cannot check. That failure mode does not exist here, because
+of work already done:
+
+> **Every DHT answer is a hint. The digest decides.**
+
+A lying provider record costs one wasted dial, checked against a digest the log
+fixed before the lookup started. Eclipse costs *liveness*, never correctness, and
+peer exchange stays as a fallback that does not route through the DHT at all.
+Node IDs are hashes of ed25519 public keys, so claiming one costs a keypair and a
+signature — S/Kademlia's crypto-ID mitigation, free from the identity layer.
+
+The k-bucket policy is worth reading twice, because it is backwards from every
+cache written by reflex: when a bucket is full the **oldest still-live** contact
+wins and the newcomer is discarded. That is the anti-eclipse mechanism — an
+attacker flooding fresh identities cannot displace nodes that have been reachable
+for hours, because longevity is the one thing flooding cannot manufacture. So
+`insert` does not evict; it returns the contact to *probe* and lets the caller
+decide after actually trying it, which is what keeps the policy testable without
+a network.
+
+Built and tested: metric, routing table, provider store with expiry, and the
+α-parallel iterative `Lookup` — convergence and termination asserted against a
+synthetic 200-node network. Wired: nodes answer `FIND_NODE`, learn from being
+asked (XOR symmetry fills the table for free), and a fetch issues a single-hop
+provider query per connection. **Not wired: the multi-hop driver** — lookups are
+one hop, not yet `O(log n)`.
+
+See [discovery.md](docs/discovery.md) for the full survey, including mDNS, onion
+services, beacon-derived rendezvous, and what NAT traversal still costs.
 
 **At rest, the log is sealed line by line** with ChaCha20-Poly1305. Per line, not
 per file, because the log is append-only and encrypting it as a unit would make
@@ -573,7 +622,7 @@ src/                 Rust implementation (primary)
   sealed.rs          sealed submissions, openable without the submitter
   incentive/         the node-operator mechanism, and the harness that evaluates it
   store/             at-rest encryption, the data directory, content-addressed blobs, the size cap, the mirror
-  swarm/             peer-to-peer blob transfer and discovery: pieces, rarest-first, choking, signed peer records
+  swarm/             peer-to-peer transfer and discovery: pieces, rarest-first, choking, signed peer records, Kademlia
 reference/python/    Python reference implementation (183 tests)
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
