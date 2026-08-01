@@ -60,6 +60,7 @@ cargo test                    # 876 tests, no network required
 ./scripts/interop.sh          # each implementation audits the other's log
 ./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
 proofwork incentives          # evaluate the node-operator game
+proofwork incentives --robustness   # ...and how far each parameter can move before it breaks
 ```
 
 ### Start a p2p node
@@ -470,6 +471,7 @@ examples/            worked objectives with real artifacts
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
+- [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
