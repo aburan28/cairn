@@ -52,8 +52,8 @@ behaviour ships and is tested, not that TLC has checked it.
       `spec/*.json` rather than reimplementing them, so the two cannot drift.
 - [x] **Piece-level blob transfer** (`src/swarm/`), in the BitTorrent shape:
       pieces, a manifest of piece hashes, bitfields, rarest-first, bounded
-      pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver
-      behind `blob serve` and `blob fetch`. It reads and writes the same
+      pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver.
+      Library-only: no CLI subcommand drives it yet. It reads and writes the same
       `src/blobs.rs` store `p2p::code` uses, and overlaps it: `p2p` already moves
       pinned code whole, which is adequate while `blobs::MAX_BLOB_BYTES` is 1 MiB
       — four pieces. The piece machinery is sized for the artifacts that cap does

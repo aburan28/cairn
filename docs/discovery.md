@@ -1,8 +1,8 @@
 # Peer discovery without a name anybody owns
 
-`blob fetch --peer host:port` was honest about a network with nowhere to look an
-address up. This is the design that replaces it, and it starts by splitting the
-question in two — because the split is most of the answer.
+A fetch that takes `--peer host:port` is honest about a network with nowhere to
+look an address up. This is the design that replaces it, and it starts by
+splitting the question in two — because the split is most of the answer.
 
 ## Discovery is two problems
 
@@ -98,9 +98,8 @@ split that makes it work: *identity* is permanent and belongs in the log;
 not. *Not built; the natural next step.*
 
 **Kademlia DHT with provider records.** *Built — `src/swarm/dht.rs`.* The
-standard answer to "who has content X", and the right one: `blob fetch` wants
-exactly a provider lookup, and without one it dials every peer it knows and asks
-each. That is flooding — fine at ten peers, hopeless at ten thousand, and worse
+standard answer to "who has content X", and the right one: a fetch wants exactly
+a provider lookup, and without one it dials every peer it knows and asks each. That is flooding — fine at ten peers, hopeless at ten thousand, and worse
 exactly as the network becomes worth using.
 
 I argued against this earlier on the grounds that the log does the same job with
@@ -158,31 +157,26 @@ Unaddressed here, and the reason a node behind a home router cannot yet seed.
 
 ## What is built
 
-`src/swarm/discovery.rs` and peer exchange over the connection `swarm::tcp`
-already opens.
+`src/swarm/discovery.rs`, plus peer exchange over the connection `swarm::tcp`
+already opens. **Library-only in this tree.** No CLI subcommand drives it: the
+`blob` verbs belong to `src/blobs.rs` and are `ls | need | publish | gc`, and
+wiring a serve/fetch pair in would mean deciding first whether `src/swarm/` folds
+into `src/p2p/` — see [roadmap.md](roadmap.md).
 
-```sh
-proofwork blob serve --listen 0.0.0.0:9797   # announces itself, learns from callers
-proofwork blob fetch <digest> --peer HOST:PORT
-proofwork blob peers                          # who this node knows how to reach
-```
-
-Told one address, once, a node accumulates the rest by asking. Three nodes,
-verified end to end:
+Told one address, once, a node accumulates the rest by asking. Three nodes over
+loopback, driven directly against `swarm::tcp`:
 
 ```
 B holds the blob, serving on :9801
 A holds nothing, was told about B once, serving on :9802
 C knows nobody, and is told about A only
 
-$ proofwork --data-dir c blob fetch sha256:05ad14fa… --peer 127.0.0.1:9802
-blob sha256:05ad14fa
-  1.8 KiB -> c/cache/blobs
+C fetches sha256:05ad14fa… via 127.0.0.1:9802
+  1.8 KiB transferred
 
-$ proofwork --data-dir c blob peers
-da256588ed83a46b  seq 1785515728  127.0.0.1:9801     <- learned from A
-ddc5711bca6b4099  seq 1785515729  127.0.0.1:9802
-2 peers known
+C's address book afterwards:
+  da256588ed83a46b  seq 1785515728  127.0.0.1:9801     <- learned from A
+  ddc5711bca6b4099  seq 1785515729  127.0.0.1:9802
 ```
 
 C was never told B existed, and A could not serve the blob itself.

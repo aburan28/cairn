@@ -1537,6 +1537,8 @@ fn cmd_incentives(
         for margin in &margins {
             say(out, format!("  {margin}"));
         }
+        // The line that changes what somebody does next. A verdict says the
+        // mechanism works; this says which measurement it is betting on.
         match margins.iter().find(|m| m.factor.is_some()) {
             Some(binding) => say(
                 out,
@@ -2474,6 +2476,16 @@ mod tests {
             Command::Incentives {
                 params: Box::new(NodeParams::reference()),
                 robustness: false,
+            }
+        );
+        // Opt-in, because a margin table is hundreds of full solver runs.
+        assert_eq!(
+            parse(argv(&["incentives", "--robustness"]))
+                .expect("parses")
+                .command,
+            Command::Incentives {
+                params: Box::new(NodeParams::reference()),
+                robustness: true,
             }
         );
     }

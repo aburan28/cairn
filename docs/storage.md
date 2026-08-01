@@ -122,7 +122,6 @@ able to destroy your only copy — and you are told, loudly, to remove it yourse
 ```
 <data-dir>/
   log/proofwork.jsonl    PINNED       never evicted
-  cache/blobs/           either       content-addressed; pinned when the log needs it
   cache/                 RECLAIMABLE  evicted under pressure
   tmp/                   RECLAIMABLE  always safe to drop
 ```
@@ -136,48 +135,41 @@ this.
 ## Blobs: the bytes an objective pins by hash
 
 An objective commits to its checker by digest, and that digest is part of the
-objective's id. But the digest was only ever used to *check* a file the operator
-already happened to have, at a relative path under `--root`. So two nodes whose
-roots differed disagreed — one Accepts, the other returns Unavailable — and
-"anyone can re-derive every settled result from nothing but a copy of the log"
-quietly needed a copy of the verifier tree as well.
+objective's id. The digest used to be a *check* on a file the operator already
+happened to have, at a relative path under `--root`. So two nodes whose roots
+differed disagreed — one Accepts, the other returns Unavailable — and "anyone
+can re-derive every settled result from nothing but a copy of the log" quietly
+needed a copy of the verifier tree as well.
 
-`cache/blobs/` closes that. The digest is now a *name*:
+[`src/blobs.rs`](../src/blobs.rs) closes that: the digest is a *name*, blobs live
+in `.proofwork/blobs`, and `blob ls | need | publish | gc` is the operator's view
+of what the log pins and what is missing. **The name is the hash**, so reads
+re-hash and refuse bytes that do not match the name they were filed under, and
+integrity needs no second record to keep in sync.
 
-```sh
-proofwork blob put examples/capset/evaluators/cap_set.py
-proofwork blob ls          # held, needed, and absent
-proofwork blob verify      # re-hash everything
-```
-
-**The name is the hash**, and everything follows from it. Reads re-hash and refuse
-bytes that do not match the name they were filed under, so integrity needs no
-second record to keep in sync. Writes are idempotent and leave mtime alone —
-which matters here more than it looks, because mtime is what eviction orders by.
-Two stores holding the same blob hold the same bytes, which is what makes `sync` a
-backup rather than a snapshot of one machine's opinion.
-
-Resolution asks the blob store first and falls back to the path, so a node with no
-blobs behaves exactly as it did before. A blob that is present but *corrupt* is
-`Unavailable`, never `Reject` and never `INVALID_SPEC`: a damaged local cache is a
-fact about that disk, and letting it refute honest work would be the same mistake
-as letting a missing Lean toolchain refute a proof.
+A blob that is present but *corrupt* is `Unavailable`, never `Reject` and never
+`INVALID_SPEC`: a damaged local cache is a fact about that disk, and letting it
+refute honest work would be the same mistake as letting a missing Lean toolchain
+refute a proof.
 
 ### Moving one between peers
 
-```sh
-proofwork blob serve --listen 0.0.0.0:9797
-proofwork blob fetch <digest> --peer host:port
-```
+There are two paths, against the same store, and they overlap:
 
-`src/swarm/` transfers blobs in the BitTorrent shape — pieces, manifests,
-bitfields, rarest-first, choking, endgame. The digest an objective already
-commits to *is* the swarm id, so there is no tracker and nothing to sign: a
-manifest arrives from a stranger and is checked against a digest the log fixed
+- `p2p::code` moves a pinned blob **whole** over the existing McEliece session.
+  This is what the daemon uses, and at `blobs::MAX_BLOB_BYTES` — 1 MiB — it is
+  adequate.
+- [`src/swarm/`](../src/swarm/) moves one in the BitTorrent shape: pieces, a
+  manifest of piece hashes, bitfields, rarest-first, choking, endgame. It is
+  library-only — no CLI subcommand drives it yet — and sized for artifacts the
+  1 MiB cap does not currently allow. Groundwork, not a current need.
+
+What both get for free is the part BitTorrent cannot do: the digest an objective
+already commits to *is* the swarm id, so there is no tracker and nothing to sign.
+A manifest arrives from a stranger and is checked against a digest the log fixed
 before the transfer started.
 
-`--peer` takes an address directly. [discovery.md](discovery.md) is how a node
-finds one it was not given.
+[discovery.md](discovery.md) is how a node finds a peer it was not given.
 
 ## The size cap
 
