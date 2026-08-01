@@ -13,6 +13,7 @@ what deliberately is not built yet.
 from __future__ import annotations
 
 from .attribution import FlowParams, flow, ledger_payouts
+from .blobs import BlobStore
 from .canonical import canonical_bytes, digest, merkle_root
 from .frontier import FrontierEntry, Ratchet
 from .gossip import Candidate, Population, ingest
@@ -20,6 +21,7 @@ from .partition import Assignment, assign, assignment_for, beacon, epoch_of
 from .ledger import Entry, Ledger, LedgerError
 from .node import Node, Outcome, RuleViolation, now
 from .records import Claim, Commitment, Objective, RecordError, commitment_hash
+from .schema import SchemaError, validate_claim, validate_objective
 from .verifiers import Status, Verdict
 
 __version__ = "0.1.0"
@@ -41,6 +43,7 @@ __all__ = [
     "Ratchet",
     "RecordError",
     "RuleViolation",
+    "SchemaError",
     "Status",
     "Verdict",
     "assign",
@@ -55,4 +58,6 @@ __all__ = [
     "ledger_payouts",
     "merkle_root",
     "now",
+    "validate_claim",
+    "validate_objective",
 ]

@@ -198,6 +198,18 @@ pub enum LedgerError {
         location: String,
         source: CanonicalError,
     },
+    /// An append was attempted on a read-only prefix view.
+    ///
+    /// A prefix shares the backing path with the log it was cut from, so an
+    /// append would splice a new entry onto a truncated chain and write it into
+    /// the middle of the real file. Refusing is not a nicety; it is the only
+    /// thing standing between "verify a checkpoint" and "corrupt the log you
+    /// were verifying".
+    ///
+    /// Named for what it guards rather than for "sealed", which in this module
+    /// means encrypted at rest -- an unrelated property a prefix view may or may
+    /// not also have.
+    ReadOnlyPrefix { height: usize },
     /// A stored line could not be decrypted, or was encrypted when no key was
     /// supplied.
     ///
@@ -219,6 +231,10 @@ impl fmt::Display for LedgerError {
             LedgerError::Io { context, source } => write!(f, "{context}: {source}"),
             LedgerError::Malformed { location, reason } => write!(f, "{location}: {reason}"),
             LedgerError::Canonical { location, source } => write!(f, "{location}: {source}"),
+            LedgerError::ReadOnlyPrefix { height } => write!(
+                f,
+                "this is a read-only view of the first {height} entries; it cannot be appended to"
+            ),
             LedgerError::Sealed { location, source } => write!(f, "{location}: {source}"),
         }
     }
@@ -230,7 +246,7 @@ impl std::error::Error for LedgerError {
             LedgerError::Io { source, .. } => Some(source),
             LedgerError::Canonical { source, .. } => Some(source),
             LedgerError::Sealed { source, .. } => Some(source),
-            LedgerError::Malformed { .. } => None,
+            LedgerError::Malformed { .. } | LedgerError::ReadOnlyPrefix { .. } => None,
         }
     }
 }
@@ -253,6 +269,8 @@ fn io_error(context: impl Into<String>, source: std::io::Error) -> LedgerError {
 pub struct Ledger {
     path: PathBuf,
     entries: Vec<Entry>,
+    /// Set on a prefix view. See [`LedgerError::ReadOnlyPrefix`].
+    read_only_prefix: bool,
     codec: Codec,
 }
 
@@ -349,12 +367,48 @@ impl Ledger {
         let mut ledger = Ledger {
             path: path.into(),
             entries: Vec::new(),
+            read_only_prefix: false,
             codec,
         };
         if ledger.path.exists() {
             ledger.load()?;
         }
         Ok(ledger)
+    }
+
+    /// A read-only view of the first `height` entries.
+    ///
+    /// What `verify --from` needs: a checkpoint pins `(height, head, root)`, and
+    /// a reader whose log has grown past that height must recompute both over
+    /// the *prefix* the operator actually signed. Truncating the file to do that
+    /// would be absurd, and recomputing by hand in the caller would put a second
+    /// Merkle implementation in the tree.
+    ///
+    /// `None` when the log is shorter than `height`: a log that does not reach
+    /// the checkpoint cannot confirm it, and returning a short view would let
+    /// the caller compare a root over the wrong number of leaves.
+    ///
+    /// The view carries [`Codec::Plain`] whatever the log it was cut from
+    /// carries, and that is not a loss of fidelity: a codec is only consulted
+    /// when a line is read from or written to the file, and a prefix view does
+    /// neither -- its entries are already decoded, and appending to it is
+    /// [`LedgerError::ReadOnlyPrefix`]. Copying the codec would mean cloning a
+    /// [`Cipher`], and that type declines to be cloned on purpose.
+    pub fn prefix(&self, height: usize) -> Option<Ledger> {
+        if height > self.entries.len() {
+            return None;
+        }
+        Some(Ledger {
+            path: self.path.clone(),
+            entries: self.entries[..height].to_vec(),
+            read_only_prefix: true,
+            codec: Codec::Plain,
+        })
+    }
+
+    /// Whether this is a read-only prefix view rather than the log itself.
+    pub fn is_read_only_prefix(&self) -> bool {
+        self.read_only_prefix
     }
 
     /// Whether this handle seals what it writes.
@@ -417,6 +471,11 @@ impl Ledger {
     /// integrity one. A *torn* tail -- a partially written line -- is caught on
     /// the next [`open`](Ledger::open) as malformed JSON.
     pub fn append(&mut self, kind: &str, payload: Value, ts: &str) -> Result<&Entry, LedgerError> {
+        if self.read_only_prefix {
+            return Err(LedgerError::ReadOnlyPrefix {
+                height: self.entries.len(),
+            });
+        }
         let prev = self.entries.last().map(|entry| entry.hash.clone());
         // `seq` is the count of everything already in the log. The conversion
         // cannot fail on any platform this runs on, but it is checked rather
@@ -1046,6 +1105,7 @@ mod tests {
         let ledger = Ledger {
             path: PathBuf::from("unused"),
             entries: vec![Entry { hash, ..entry }],
+            read_only_prefix: false,
             codec: Codec::Plain,
         };
         let problems = ledger.verify_chain();

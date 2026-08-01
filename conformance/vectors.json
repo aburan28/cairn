@@ -4094,6 +4094,28 @@
             "kind": "certificate"
           }
         }
+      },
+      {
+        "id": "sha256:1e4dec0bc0e6c1b67dc6a3d9e6484dce54881b99be4a0f63c9df55aa42aaf690",
+        "record": {
+          "created_at": "2026-07-28T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-x",
+          "reward": 500,
+          "statement": "beat the null",
+          "type": "objective",
+          "verifier": {
+            "direction": "minimize",
+            "entrypoint": "statistic",
+            "kind": "statistical",
+            "seed": 7,
+            "statistic": {
+              "path": "s.py",
+              "sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+            },
+            "threshold": 50000
+          }
+        }
       }
     ]
   }

@@ -54,16 +54,47 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 849 tests, loopback only
+cargo test                    # 933 tests, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
+./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
 proofwork incentives          # evaluate the node-operator game
 proofwork incentives --robustness   # ...and how far each parameter can move before it breaks
 ```
 
-Rust 1.85+ (verified in CI, not asserted). No outbound network access needed at
-runtime; the peer-to-peer tests use loopback.
+### Start a p2p node
+
+The easiest local launch is:
+
+```sh
+make p2p
+```
+
+On first run this creates `.local/node.identity.json`, `.local/root.key`, and
+`.local/checkpoint.json`. The first two contain private key material; keep
+`.local/` out of version control. The node listens on `127.0.0.1:9000` by
+default, accepts inbound peers, periodically dials configured bootstrap files,
+and re-derives received records locally.
+
+To connect to a peer, provide a bootstrap file containing its address and
+McEliece public key:
+
+```json
+{"addr":"127.0.0.1:9001","public":"<peer public-key hex>"}
+```
+
+Then launch with:
+
+```sh
+make p2p LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS='--bootstrap peer.json'
+```
+
+Use separate `LOCAL_DIR`, `LOG`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT`
+paths for each node. The root checkpoint key is ML-DSA-65 and is separate from
+the transport identity.
+
+Rust 1.85+ (verified in CI, not asserted). No network access needed at runtime.
 
 ## How it works
 
@@ -317,234 +348,54 @@ proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
 proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
 ```
 
-### A copy of the log, and nothing else
+### `src/swarm/`: piece-level transfer and a DHT, alongside `p2p`
 
-That claim had a hole in it. An objective pins its checker by digest — the digest
-is part of the objective's id — but the digest was only ever used to *check* a
-file the operator already had, at a relative path under a locally chosen root. So
-two nodes with different roots disagreed, one Accepting and one returning
-Unavailable, and re-deriving a settled result quietly needed a copy of the
-verifier tree as well.
+Two things here that `src/p2p/` does not have, and one honest overlap.
 
-`cache/blobs/` closes it by making the digest a **name** rather than only a check:
+**A Kademlia DHT** (`src/swarm/dht.rs`) for the question a fetch actually asks:
+*who holds digest `D` right now*. `p2p::discovery` answers which peers exist;
+without a provider lookup, finding a blob means asking everyone. XOR metric,
+k-buckets, provider records with expiry, and the α-parallel iterative lookup as a
+pure state machine — convergence and termination asserted against a synthetic
+200-node network built from real routing tables.
 
-```sh
-proofwork blob put examples/capset/evaluators/cap_set.py
-proofwork blob ls          # held, needed by the log, and absent
-```
+The k-bucket policy is the part worth reading twice, because it is backwards from
+every cache written by reflex: when a bucket is full the **oldest still-live**
+contact wins and the newcomer is discarded. Longevity is the one thing an
+attacker flooding fresh identities cannot manufacture. So `insert` does not
+evict — it returns the contact to *probe* and lets the caller decide after
+actually trying it, which keeps the policy testable without a network.
 
-An objective now verifies on any node holding the bytes, whatever its directory
-layout — `tests/storage.rs` settles a real capset bounty against an *empty*
-verifier root. Reads re-hash and refuse bytes that do not match the name they were
-filed under, so the filename **is** the integrity record. And a corrupt or missing
-blob is `Unavailable`, never `Reject`: a damaged cache is a fact about that disk,
-and letting it refute honest work would be the missing-Lean-toolchain mistake in a
-new place. No id changed, no conformance vector moved.
-
-The quota had to learn one thing. A blob is reclaimable by construction — it is
-named by its content — right up until an objective in the log pins it, at which
-point evicting it makes this node answer Unavailable for work it is paid to check.
-That is not a third storage class but a pin set moving blobs across the existing
-line, so the rule stays one sentence: **a blob is reclaimable exactly when nothing
-needs it.** Every posted objective counts, settled or not, because `audit --rerun`
-re-verifies settled claims — a node that dropped an evaluator when its objective
-closed would keep the ability to earn and lose the ability to prove.
-
-### Getting one: peer-to-peer, in the torrent shape
-
-`sync` copies a whole store between two directories one operator controls.
-Between strangers there was nothing, so a node could name its gap and not close
-it. `src/swarm/` closes it, and the shape is BitTorrent's because the problem is
-BitTorrent's: many peers, none trusted, each holding part of a file everybody
-wants, and no server worth paying for.
-
-```sh
-proofwork blob serve --listen 0.0.0.0:9797
-proofwork blob fetch <digest> --peer host:port [--peer ...]
-```
-
-Pieces, a manifest of piece hashes, bitfields, rarest-first selection, bounded
-pipelining, tit-for-tat choking with a rotating optimistic slot, endgame
-duplication with cancels.
-
-**The joint BitTorrent gets wrong is the one this network doesn't have.** A
-`.torrent` must be obtained out of band and *believed* — the infohash is the root
-of trust and nothing in the protocol establishes it, which is why trackers,
-signed feeds and magnet links all exist and all pass the problem somewhere else.
-Here the objective already commits to `evaluator_sha256` as part of its
-content-addressed id, so
-
-> **the ledger is the tracker**, and it did the job before this module existed.
-
-A manifest is fetched from a stranger and checked against a digest the log fixed
-before the transfer started. A peer offering a manifest for other content is
-dropped on arrival rather than after a download.
-
-Be precise about what piece hashes buy, because it is *not* trust — anyone can
-compute a manifest for any bytes:
-
-> **The whole-blob digest is the ground truth. Piece hashes buy blame.**
-
-A peer that sends a bad piece has provably misbehaved on *that piece*, so it is
-dropped and its bytes discarded while the rest of the transfer continues. Without
-them one bad peer costs the whole download and leaves no evidence about who —
-and attributable failure is exactly the currency the availability mechanism runs
-on.
-
-Rarest-first deserves the same second look. It reads as a throughput trick and is
-really a **durability** rule: it stops a swarm converging on a state where one
-piece lives on a single node whose departure strands everybody. That is the
-last-copy problem `src/incentive/` pays to prevent, avoided for free by choosing
-what to ask for.
-
-`Swarm` is a pure state machine — no clock, no randomness, no sockets — so
-rarest-first, endgame and choking are tested by asserting on exact output rather
-than by running a network and hoping. BitTorrent picks its optimistic unchoke at
-random; this rotates it by round number, which buys the same eventual-turn
-property and keeps a transfer reproducible from its message history.
-`swarm::tcp` holds the threads and timeouts, and is the only part that can fail
-for reasons that are nobody's fault — the same rule as `Unavailable` never
-settling. **A peer that cannot be reached has not misbehaved.**
-
-One thing it does not do. **Seeding is unpaid**: tit-for-tat works while a peer
-still wants something, and a node that has finished gets nothing back, so a swarm
-of pure leeches transfers nothing and no code here prevents one.
-
-### Finding peers without a name anybody owns
-
-Discovery is two problems, and conflating them is what makes DNS feel
-load-bearing:
-
-> **identity** — is the thing I reached the thing I meant to reach?
->
-> **location** — what address is it at today?
-
-If a hostname *identifies* a peer, whoever controls the name controls the
-network. So here a peer's identity is an ed25519 public key and its address is a
-**hint signed by that key** — the same move as `evaluator` being a path and
-`evaluator_sha256` being the identity. Then any source of hints is acceptable
-because none is trusted: DNS, gossip, a QR code and a pasted string are all
-exactly as safe as each other.
-
-Which is why **encrypted DNS does not answer this question.** DoH and DoT hide
-*which name you asked for*; they do not stop a registrar taking the name, and
-they replace one hardcoded anchor with two. For a censorship-resistant network
-they arguably make it worse — the resolvers people use are a handful of
-providers, so encrypting to them concentrates the observation that plaintext DNS
-at least spread across every resolver on the path. The rule that falls out:
-**DNS may carry signed records; it may never be the thing that decides.**
-
-```sh
-proofwork blob serve --listen 0.0.0.0:9797
-proofwork blob fetch <digest> --peer HOST:PORT   # once
-proofwork blob peers                              # then they arrive by asking
-```
-
-Records follow Ethereum's ENR shape — signed, with a monotonic `seq`, so a peer
-that moves supersedes itself and a replayed record is merely out of date. Told
-one address once, a node accumulates the rest: verified end to end with three
-nodes where C is told only about A, A does not have the blob, and C reaches B
-anyway.
-
-That last part exposed a design bug worth keeping: hanging up on a peer asking
-for a digest you do not hold is the correct *transfer* decision and it breaks
-discovery completely, because **the node that does not have your blob is often
-the best node to ask who does.**
-
-No peer discovery is anchor-free — Bitcoin ships DNS seeds *and* fallback IPs,
-Tor ships directory authorities, IPFS ships bootstrap multiaddrs. The goal is to
-make the anchor a key rather than an address, replaceable without a code change,
-and serving data that verifies itself.
-
-### Kademlia, for the question a fetch actually asks
-
-Peer exchange answers *which peers exist*. It does not answer **who holds digest
-`D` right now**, and without that a fetch dials everyone it knows and asks each —
-flooding, fine at ten peers and hopeless at ten thousand. `src/swarm/dht.rs` is
-the XOR metric, the k-bucket routing table, the provider store, and the iterative
-lookup.
-
-The two are different problems because the data has different churn, and that
-decides where each belongs:
-
-| | churn | belongs in |
-|---|---|---|
-| peer identity | permanent | the log |
-| who holds digest `D` | constant, revoked by silence | the DHT |
-
-An append-only log cannot say *no longer true*, so it would advertise a dead
-provider forever. That is why the DHT is not redundant with the log, and why
-provider records must expire.
-
-DHTs earned a bad security reputation honestly — BitTorrent's can hand you a
-poisoned answer you cannot check. That failure mode does not exist here, because
-of work already done:
+DHTs earned a bad security reputation honestly, and it does not transfer here:
 
 > **Every DHT answer is a hint. The digest decides.**
 
 A lying provider record costs one wasted dial, checked against a digest the log
-fixed before the lookup started. Eclipse costs *liveness*, never correctness, and
-peer exchange stays as a fallback that does not route through the DHT at all.
+fixed before the lookup started. Eclipse costs *liveness*, never correctness.
 Node IDs are hashes of ed25519 public keys, so claiming one costs a keypair and a
 signature — S/Kademlia's crypto-ID mitigation, free from the identity layer.
 
-The k-bucket policy is worth reading twice, because it is backwards from every
-cache written by reflex: when a bucket is full the **oldest still-live** contact
-wins and the newcomer is discarded. That is the anti-eclipse mechanism — an
-attacker flooding fresh identities cannot displace nodes that have been reachable
-for hours, because longevity is the one thing flooding cannot manufacture. So
-`insert` does not evict; it returns the contact to *probe* and lets the caller
-decide after actually trying it, which is what keeps the policy testable without
-a network.
+**Piece-level transfer** (`piece.rs`, `wire.rs`) — manifests of piece hashes,
+bitfields, rarest-first, bounded pipelining, tit-for-tat choking, endgame with
+cancels. Piece hashes buy not trust (anyone can compute a manifest) but **blame**:
+a bad piece is localised to one peer instead of costing the whole download. And
+rarest-first is really a *durability* rule rather than a throughput trick — it
+prevents the last-copy state the availability mechanism pays to avoid.
 
-Built and tested: metric, routing table, provider store with expiry, and the
-α-parallel iterative `Lookup` — convergence and termination asserted against a
-synthetic 200-node network. Wired: nodes answer `FIND_NODE`, learn from being
-asked (XOR symmetry fills the table for free), and a fetch issues a single-hop
-provider query per connection. **Not wired: the multi-hop driver** — lookups are
-one hop, not yet `O(log n)`.
+**The honest overlap.** `swarm::tcp` and `swarm::discovery` are a second
+transport and a second address book beside `p2p::transport` and
+`p2p::discovery`, built before those landed and not wired into the CLI. They
+resolve blobs through `crate::blobs`, so there is exactly one blob store — but
+two networking stacks is one more than a repo should carry. The DHT is the piece
+worth keeping; the transport underneath it should be `p2p`'s. See
+[discovery.md](docs/discovery.md) for the design and the survey, including why
+encrypted DNS answers a different question than the one people ask it.
 
-See [discovery.md](docs/discovery.md) for the full survey, including mDNS, onion
-services, beacon-derived rendezvous, and what NAT traversal still costs.
+One caveat that argues against the whole module: `blobs::MAX_BLOB_BYTES` caps a
+blob at 1 MiB, which is four pieces. At that size rarest-first and choking buy
+nothing, and `p2p::code`'s whole-blob transfer is the right call. The swarm
+machinery is sized for a constraint this design does not currently have.
 
-**At rest, the log is sealed line by line** with ChaCha20-Poly1305. Per line, not
-per file, because the log is append-only and encrypting it as a unit would make
-every append an `O(n)` rewrite. The AEAD's associated data binds each line's
-position, so a reordered or spliced log fails to decrypt at the exact line rather
-than merely failing the chain later.
-
-This does not contradict public verifiability, and the distinction is *whose
-copy*: artifacts the network publishes stay readable — encrypt those and you are
-back to trusting an operator — while a node's own disk is its own business. An
-encrypting node serves exactly what a non-encrypting one serves, and
-
-> **encryption changes no hash, no `prev` link, no Merkle root, and no audit
-> result.** The chain covers plaintext; sealing is storage.
-
-**The key defaults to outside the data directory** (`~/.proofwork/key`), because
-a key beside its ciphertext looks fine right up until the folder is synced
-somewhere else — and then it was never encryption. `sync` refuses to copy a key
-it finds inside a store, detecting them by content rather than filename, and
-withholds the plaintext backup `store encrypt` leaves behind. Optional argon2id
-passphrase wrapping, with the cost parameters stored in the file so raising the
-defaults later does not orphan existing keys.
-
-**The size cap never evicts the log.** A cap on a store holding the only copy of
-a hash-linked log is an instruction to destroy evidence, and "delete the oldest
-thing" would eat the log first. Eviction touches re-fetchable content only; when
-that is not enough the answer is a refusal, *before* anything is deleted:
-
-```
-error: store limit of 100 B cannot hold 1.8 KiB of data that must not be deleted
-(the log and anything beside it). Raise the limit or move the store; proofwork
-will not prune a hash-linked log to fit
-```
-
-A cap smaller than your log stops your node. It does not prune your log.
-
-And the cost of eviction is not disk — it is that evicted content can no longer
-answer an availability challenge, which in a network that pays for availability
-is a slash. `store gc` names every path it dropped for exactly that reason.
 
 ## Censorship resistance
 
@@ -621,8 +472,8 @@ src/                 Rust implementation (primary)
   crypto/            Shamir, sealed envelopes, pseudonymous identity
   sealed.rs          sealed submissions, openable without the submitter
   incentive/         the node-operator mechanism, and the harness that evaluates it
-  store/             at-rest encryption, the data directory, content-addressed blobs, the size cap, the mirror
-  swarm/             peer-to-peer transfer and discovery: pieces, rarest-first, choking, signed peer records, Kademlia
+  store/             at-rest encryption, the data directory, the size cap, the mirror
+  swarm/             piece-level transfer and a Kademlia DHT, alongside p2p/
 reference/python/    Python reference implementation (183 tests)
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
@@ -634,7 +485,6 @@ examples/            worked objectives with real artifacts
 - [diagrams.md](docs/diagrams.md) — architecture and detailed design, drawn from the code
 - [architecture.md](docs/architecture.md) — the full design and which work shapes fit
 - [verification.md](docs/verification.md) — the verification ladder; authoring verifiers
-- [knowledge-store.md](docs/knowledge-store.md) — how a challenge is submitted, where every byte of it is stored, how it moves between peers, and how the format extends
 - [economics.md](docs/economics.md) — what mints, why demand-gating, citation flow
 - [coordination.md](docs/coordination.md) — the hoarding trap, the ratchet, CRDT gossip
 - [agent-market.md](docs/agent-market.md) — agent-to-agent rewards: what a peer-to-peer mechanism would be, and what it breaks
@@ -644,6 +494,9 @@ examples/            worked objectives with real artifacts
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
+- [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
+- [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
+- [AGENTS.md](AGENTS.md) — instructions agents read: contributing here, and contributing *to* the network
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
 - [conformance/README.md](conformance/README.md) — the cross-implementation contract
 

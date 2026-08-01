@@ -1,0 +1,13 @@
+{
+  "created_at": "2026-07-29T00:00:00+00:00",
+  "funder": "ecdlp-cost-challenge",
+  "goal": "GOAL-ecdlp-first-blood",
+  "reward": 25600000,
+  "statement": "Recover the discrete logarithm k for the 112-bit generic prime-field ECDLP instance pinned in the checker: find k with k*G == Q, 1 <= k < n. Submit {\"k\": <integer>}. Any method is admissible -- this is the representation track, not the generic-group arena, so the curve is public and the solver holds it. k was discarded at generation and is unknown to the funder.",
+  "verifier": {
+    "checker": "examples/first-blood/checkers/instance_112.py",
+    "checker_sha256": "591ea52389a2782b5bab7ae588efe4ee78475850764a9216d29187b7bfd36257",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

@@ -174,10 +174,10 @@ proofwork blob fetch <digest> --peer host:port
 bitfields, rarest-first, choking, endgame. The digest an objective already
 commits to *is* the swarm id, so there is no tracker and nothing to sign: a
 manifest arrives from a stranger and is checked against a digest the log fixed
-before the transfer started. See [knowledge-store.md](knowledge-store.md).
+before the transfer started.
 
-There is no peer discovery. `--peer` takes addresses because there is nowhere to
-look one up yet.
+`--peer` takes an address directly. [discovery.md](discovery.md) is how a node
+finds one it was not given.
 
 ## The size cap
 

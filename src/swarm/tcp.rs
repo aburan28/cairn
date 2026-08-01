@@ -45,7 +45,7 @@ use super::discovery::AddressBook;
 use super::piece::DEFAULT_PIECE_LEN;
 use super::wire::{check_frame_len, Handshake, Message, PEER_ID_LEN};
 use super::{Action, Dropped, Limits, PeerId, Swarm};
-use crate::store::blobs::BlobStore;
+use crate::blobs::{self, BlobStore};
 
 /// How long a socket may be silent before it is considered gone.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -371,7 +371,15 @@ fn serve_one(mut stream: TcpStream, ctx: Serving) -> io::Result<()> {
     // have your blob is often the best node to ask who does.** Refusing to talk
     // to it forfeits exactly the hop that makes bootstrap a once-ever problem.
     // So: no bytes, no transfer, and peer exchange anyway.
-    let Ok(Some(bytes)) = blobs.get(&their.digest) else {
+    // `crate::blobs` addresses are bare lowercase hex; this protocol carries the
+    // `sha256:` spelling the records use. One strip at the boundary rather than
+    // two spellings loose in the module.
+    let wanted = their
+        .digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&their.digest)
+        .to_string();
+    let Ok(bytes) = blobs.read(&wanted) else {
         return serve_peers_only(stream, &book, &dht);
     };
 
@@ -605,7 +613,7 @@ pub fn fetch_with(
                 if let Some(bytes) = guard.finish() {
                     drop(guard);
                     blobs
-                        .put(&bytes)
+                        .put(&blobs::address(&bytes), &bytes)
                         .map_err(|error| TransferError::Io(io::Error::other(error.to_string())))?;
                     return Ok(bytes);
                 }
@@ -632,7 +640,7 @@ pub fn fetch_with(
                 if let Some(bytes) = guard.finish() {
                     drop(guard);
                     blobs
-                        .put(&bytes)
+                        .put(&blobs::address(&bytes), &bytes)
                         .map_err(|error| TransferError::Io(io::Error::other(error.to_string())))?;
                     return Ok(bytes);
                 }
@@ -822,8 +830,8 @@ pub fn describe(dropped: &Dropped) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blobs::{self, BlobStore};
     use crate::canonical::digest_bytes;
-    use crate::store::blobs::BlobStore;
     use std::fs;
     use std::path::PathBuf;
 
@@ -844,9 +852,26 @@ mod tests {
     }
 
     fn store(dir: &std::path::Path, name: &str) -> BlobStore {
-        let blobs = BlobStore::new(dir.join(name));
-        blobs.prepare().expect("prepares");
-        blobs
+        BlobStore::at(dir.join(name))
+    }
+
+    // `crate::blobs` addresses are bare hex; this protocol speaks the `sha256:`
+    // spelling the records use. Three shims rather than the prefix scattered
+    // through every assertion.
+    fn put(store: &BlobStore, bytes: &[u8]) -> String {
+        let address = blobs::address(bytes);
+        store.put(&address, bytes).expect("puts");
+        format!("sha256:{address}")
+    }
+
+    fn holds(store: &BlobStore, digest: &str) -> bool {
+        store.holds(digest.strip_prefix("sha256:").unwrap_or(digest))
+    }
+
+    fn read(store: &BlobStore, digest: &str) -> Option<Vec<u8>> {
+        store
+            .read(digest.strip_prefix("sha256:").unwrap_or(digest))
+            .ok()
     }
 
     fn evaluator(size: usize) -> Vec<u8> {
@@ -864,8 +889,8 @@ mod tests {
         let leecher = store(&dir, "leech");
 
         let data = evaluator(80_000);
-        let digest = seeder.put(&data).expect("puts");
-        assert!(!leecher.has(&digest), "the leech starts with nothing");
+        let digest = put(&seeder, &data);
+        assert!(!holds(&leecher, &digest), "the leech starts with nothing");
 
         let listener = serve("127.0.0.1:0", seeder, Limits::default()).expect("serves");
         let got = fetch(
@@ -878,12 +903,11 @@ mod tests {
         .expect("transfers");
 
         assert_eq!(got, data);
-        assert!(leecher.has(&digest), "and it landed in the store");
-        assert_eq!(leecher.get(&digest).expect("gets"), Some(data));
-        assert!(
-            leecher.verify().expect("verifies").is_empty(),
-            "filed under a name its bytes actually hash to"
-        );
+        assert!(holds(&leecher, &digest), "and it landed in the store");
+        assert_eq!(read(&leecher, &digest), Some(data));
+        // Main's store hashes on read and refuses a mismatch, so a successful
+        // read *is* the integrity check.
+        assert!(holds(&leecher, &digest));
         listener.shutdown();
         let _ = fs::remove_dir_all(&dir);
     }
@@ -898,7 +922,7 @@ mod tests {
         let mut listeners = Vec::new();
         for index in 0..3 {
             let seeder = store(&dir, &format!("seed{index}"));
-            seeder.put(&data).expect("puts");
+            put(&seeder, &data);
             let listener = serve("127.0.0.1:0", seeder, Limits::default()).expect("serves");
             addrs.push(listener.addr());
             listeners.push(listener);
@@ -924,7 +948,7 @@ mod tests {
         let dir = scratch("mixed");
         let data = evaluator(50_000);
         let seeder = store(&dir, "seed");
-        let digest = seeder.put(&data).expect("puts");
+        let digest = put(&seeder, &data);
         let listener = serve("127.0.0.1:0", seeder, Limits::default()).expect("serves");
 
         // A port nothing is listening on, first in the list.
@@ -946,7 +970,7 @@ mod tests {
     fn asking_a_node_for_a_blob_it_does_not_have_fails_without_hanging() {
         let dir = scratch("absent");
         let seeder = store(&dir, "seed");
-        seeder.put(b"something else").expect("puts");
+        put(&seeder, b"something else");
         let listener = serve("127.0.0.1:0", seeder, Limits::default()).expect("serves");
 
         let leecher = store(&dir, "leech");
@@ -985,7 +1009,7 @@ mod tests {
 
         // B holds the blob and serves it.
         let b_store = store(&dir, "b");
-        b_store.put(&only_b).expect("puts");
+        put(&b_store, &only_b);
         let b = serve("127.0.0.1:0", b_store, Limits::default()).expect("serves");
 
         // A holds nothing, but knows where B is -- and will say so when asked.

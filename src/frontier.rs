@@ -311,6 +311,21 @@ pub struct Ratchet {
     /// Smallest score movement that counts. Raising it blocks epsilon-farming
     /// at the cost of also blocking genuine small gains -- a real tradeoff, not
     /// a free win.
+    ///
+    /// **This is an economic parameter, not a spam filter, and it is currently
+    /// the only defence against citation-flow dilution.** Telescoping makes
+    /// chopping free in *direct* reward, but citation flow decays per hop, so
+    /// an improver who chops starves whoever they built on — for nothing,
+    /// since they already hold the result. `min_improvement` is what bounds
+    /// the number of hops they can insert: an improver moving a span `S` can
+    /// cut it into at most `S / min_improvement` steps.
+    ///
+    /// Set it deliberately. The shipped cap-set example ran at `1` over a span
+    /// of `11` — eleven slices, the maximally exploitable setting — and is now
+    /// `3`. See `tests/citation_flow.rs` for the measured cost of getting this
+    /// wrong, and "Slicing, and why telescoping is not enough" in
+    /// `docs/threat-model.md` for the structural fix that would retire this
+    /// parameter as a defence.
     pub min_improvement: u64,
 }
 

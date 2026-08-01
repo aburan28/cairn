@@ -238,4 +238,4 @@ to whoever you happen to be talking to.
   here.
 - **A peer record proves identity, not honesty.** It says the key holder claims
   this address. Whether that node serves what it advertises is the bitfield
-  problem in [knowledge-store.md](knowledge-store.md), and it is unattributed.
+  problem in [threat-model.md](threat-model.md), and it is unattributed.

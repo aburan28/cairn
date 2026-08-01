@@ -92,6 +92,12 @@ reproduce. This is affordable for exactly the reason the whole network works:
 checking costs one evaluation, which the node was going to spend on that
 candidate anyway.
 
+The merge law now has a transport under it: `src/p2p/pop.rs` carries
+populations between peers as a message family of its own, kept separate from
+record sync down to the AEAD context. Re-scoring happens on every arrival, and
+only for candidates this node actually asked for. See
+[p2p.md](p2p.md#population-anti-entropy).
+
 ### Work split: `partition.py`
 
 No dispatcher, because assignment does not need agreement. Two nodes searching
@@ -137,15 +143,49 @@ Commit–reveal stops an observer stealing a *revealed* artifact. It does not st
 a subtler attack: I watch your submission land, tweak it marginally, and submit
 a hair better before yours settles.
 
-Two defences, neither implemented yet:
+Two defences, both implemented:
 
-1. **Epoch-batched reveal.** Commits in epoch N, reveals in epoch N+1, order
-   within the epoch fixed by the beacon rather than by arrival. Nobody sees a
-   competitor's artifact while they can still act on it, and the sequencer
-   cannot reorder for profit.
+1. **Epoch-batched reveal.** A commitment lands in the epoch its `created_at`
+   falls in, and a reveal is refused unless its own epoch is strictly later
+   (`RuleViolation::RevealBeforeEpoch`). So an artifact only becomes visible in
+   an epoch where the window to commit against it has already closed. Epoch
+   membership comes from the record's own timestamp, which is in the log and
+   auditable, rather than from the receiving node's clock — otherwise two nodes
+   replaying the same records would disagree about which reveals were legal.
 2. **Minimum improvement.** `Ratchet.min_improvement` makes an epsilon-better
-   resubmission earn nothing. Already implemented, and a real tradeoff: raising
-   it also blocks genuine small gains.
+   resubmission earn nothing. A real tradeoff: raising it also blocks genuine
+   small gains.
+
+### Settlement order inside a batch
+
+Accepted claims do not pay on arrival. They are marked pending and settle when
+their reveal epoch closes, in the order
+
+```
+H(beacon(reveal_epoch, anchor) ‖ commitment_hash)
+```
+
+so a sequencer cannot pay itself first by choosing where in the file a claim
+lands. `audit` recomputes the order and names any batch that deviates, which is
+what makes it a rule rather than a convention.
+
+**Why the commitment hash and not the claim id.** The anchor is public by the
+time anyone reveals, so any part of the ordering key a submitter can still
+choose is a part they can try until it sorts first. A claim's id covers its
+`created_at` and its `cites`, and the commitment binds neither — a submitter
+could restamp or add a citation and re-roll their own rank for free. The
+commitment hash was fixed an epoch earlier, before the anchor existed.
+
+What this does *not* fix: the anchor is a ledger head, and a sequencer free to
+choose ledger heads can grind it. That was already true for work assignment; it
+now moves money as well. It is the same row in
+[threat-model.md](threat-model.md) and the same answer — a VDF or threshold
+signature, which is Stage 2.
+
+`PROOFWORK_EPOCH_SECONDS` overrides the 600-second epoch for local demos. It
+changes no record bytes: epochs are derived from timestamps, never stored, so
+two nodes configured differently disagree about which reveals are legal but not
+about what any record *is*. Production leaves it alone.
 
 ## What this does not solve
 
@@ -157,3 +197,11 @@ are not. This is the judgement problem from
 and it is the part of scientific collaboration this design captures worst.
 Discussion, intuition, and negative results shared in passing — the things that
 make a research group more than the sum of its members — remain unpriced.
+
+## Known gap: telescoping does not cover citation flow
+
+Everything above is about the *direct* reward, where telescoping holds exactly.
+Citation flow decays per hop, so chopping an improvement is free in direct
+reward and strictly profitable in flow — it starves whoever you built on. See
+**Slicing, and why telescoping is not enough** in [threat-model.md](threat-model.md),
+and `tests/citation_flow.rs`, which pins the numbers.

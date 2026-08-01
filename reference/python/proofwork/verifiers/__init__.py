@@ -10,10 +10,14 @@ from .base import (  # noqa: F401
     get,
     kinds,
     load_pinned,
+    missing_code,
+    pinned_code,
+    publish_code,
     register,
+    resolve_pinned,
     run,
 )
-from . import certificate, evaluator, lean, replay  # noqa: F401,E402
+from . import certificate, evaluator, lean, replay, statistical  # noqa: F401,E402
 
 __all__ = [
     "SANDBOXING",
@@ -24,7 +28,11 @@ __all__ = [
     "get",
     "kinds",
     "load_pinned",
+    "missing_code",
+    "pinned_code",
+    "publish_code",
     "register",
+    "resolve_pinned",
     "run",
     "set_root",
 ]
@@ -32,7 +40,7 @@ __all__ = [
 
 def set_root(root: str) -> None:
     """Point the code-loading verifiers at an objective bundle root."""
-    for kind in ("certificate", "evaluator", "replay"):
+    for kind in ("certificate", "evaluator", "replay", "statistical"):
         verifier = get(kind)
         if verifier is not None:
             verifier.root = root  # type: ignore[attr-defined]

@@ -193,6 +193,64 @@ pub fn epoch_of(timestamp_seconds: u64, epoch_seconds: u64) -> u64 {
     timestamp_seconds.checked_div(epoch_seconds).unwrap_or(0)
 }
 
+/// Overrides [`EPOCH_SECONDS`] for a local demo. Never set this in production.
+pub const EPOCH_SECONDS_ENV: &str = "PROOFWORK_EPOCH_SECONDS";
+
+/// The epoch length in force for this process.
+///
+/// [`EPOCH_SECONDS`] is ten minutes, which makes the commit-in-N/reveal-in-N+1
+/// rule impossible to demonstrate in a shell script that has to finish. The
+/// override exists for exactly that and for nothing else.
+///
+/// Two nodes with different settings disagree about which epoch a record is in
+/// and therefore about which reveals were legal — so this is a *policy*
+/// parameter, not a format one. It changes no canonical bytes: nothing derived
+/// from it enters a record, and every id in the log is identical whatever it is
+/// set to. A malformed or zero value falls back to the default rather than
+/// producing an epoch length of nothing.
+pub fn epoch_seconds() -> u64 {
+    match std::env::var(EPOCH_SECONDS_ENV) {
+        Ok(text) => match text.trim().parse::<u64>() {
+            Ok(seconds) if seconds > 0 => seconds,
+            _ => EPOCH_SECONDS,
+        },
+        Err(_) => EPOCH_SECONDS,
+    }
+}
+
+/// The order acceptable reveals settle in, inside one reveal epoch.
+///
+/// `H(beacon(epoch, anchor) ‖ key)`, ascending. Append order is the sequencer's
+/// to choose, and on a progressive objective the order two improvements settle
+/// in decides which of them is paid for the whole span and which is paid for
+/// the remainder — so leaving settlement order to the sequencer is leaving them
+/// a lever on other people's money. Sorting by a value derived from a beacon
+/// fixed *before the epoch opened* takes the lever away: the operator can still
+/// choose the anchor, but must do so before knowing who will reveal.
+///
+/// # `key` must be fixed before the anchor is public
+///
+/// The anchor is the log head at the start of the reveal epoch, so by reveal
+/// time every submitter can compute it. Any part of `key` a submitter can still
+/// choose at that point is a part they can grind until their rank comes out
+/// first, and the rule buys nothing against them.
+///
+/// Callers therefore pass the **commitment hash**, not the claim id. A claim id
+/// covers `created_at` and `cites`, neither of which the commitment binds and
+/// neither of which anything checks against the reveal — a submitter could try
+/// timestamps until one sorted first. The commitment hash covers exactly the
+/// fields the commitment froze an epoch earlier, when the anchor did not exist
+/// yet. See [`crate::node::Node::settle_due`] for the residual gap.
+///
+/// Returned as hex so the ordering is a plain lexicographic string compare that
+/// any implementation reproduces, and so an auditor can print it.
+pub fn settlement_rank(epoch: u64, anchor: &str, key: &str) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{}{key}", beacon(epoch, anchor)).as_bytes())
+    )
+}
+
 /// One node's claim on one objective for one epoch.
 ///
 /// Immutable by construction in the reference implementation (a frozen
@@ -662,5 +720,23 @@ mod tests {
         assert_eq!(epoch_of(u64::MAX, EPOCH_SECONDS), u64::MAX / EPOCH_SECONDS);
         // A zero-length epoch is nonsense, but not a crash.
         assert_eq!(epoch_of(12_345, 0), 0);
+    }
+
+    #[test]
+    fn settlement_rank_depends_on_every_input() {
+        let base = settlement_rank(7, "anchor", "claim:a");
+        assert_ne!(base, settlement_rank(8, "anchor", "claim:a"));
+        assert_ne!(base, settlement_rank(7, "other", "claim:a"));
+        assert_ne!(base, settlement_rank(7, "anchor", "claim:b"));
+        assert_eq!(base.len(), 64);
+    }
+
+    #[test]
+    fn settlement_rank_is_the_hash_of_the_beacon_and_the_id() {
+        let expected = format!(
+            "{:x}",
+            Sha256::digest(format!("{}{}", beacon(3, "head"), "claim:x").as_bytes())
+        );
+        assert_eq!(settlement_rank(3, "head", "claim:x"), expected);
     }
 }

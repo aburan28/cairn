@@ -23,7 +23,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["certificate", "evaluator", "lean", "replay"]
+          "enum": ["certificate", "evaluator", "lean", "replay", "statistical"]
         }
       },
       "$comment": "Per-kind fields are validated by the verifier itself, which returns INVALID_SPEC rather than a settling verdict when the spec is malformed."

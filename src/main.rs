@@ -5,7 +5,9 @@
 //!   post      examples/collatz/objective.json
 //!   commit    <objective-id> --submitter alice --artifact a.json --nonce n1
 //!   reveal    <objective-id> --submitter alice --artifact a.json --nonce n1
+//!   settle
 //!   audit
+//!   verify    --from checkpoint.json [--root-key HEX|FILE] [--audit]
 //!   attribute
 //!   log
 //! ```
@@ -42,7 +44,7 @@
 //! | code | meaning |
 //! |------|---------|
 //! | 0    | success |
-//! | 1    | `audit` found problems |
+//! | 1    | `audit` found problems, or `verify` found a checkpoint mismatch |
 //! | 2    | the network refused the submission, or the input was bad |
 //! | 3    | `reveal` produced a verdict that settles nothing |
 //!
@@ -58,24 +60,21 @@ use std::env;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write};
-use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use proofwork::attribution::{payouts_over, FlowError, FlowParams};
 use proofwork::canonical::{short, CanonicalError, Value};
-use proofwork::crypto::identity::Identity;
+use proofwork::checkpoint::SignedCheckpoint;
 use proofwork::incentive::design::Report as IncentiveReport;
 use proofwork::incentive::{NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError};
 use proofwork::node::Node;
 use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordError};
+use proofwork::schema::{validate_claim, validate_objective, SchemaError};
 use proofwork::store::atrest::{AtRestError, Cipher};
-use proofwork::store::blobs::BlobStore;
 use proofwork::store::{mirror, quota, Store, StoreError};
-use proofwork::swarm::{self, AddressBook};
-use proofwork::verifiers::VerifierRegistry;
+use proofwork::time::timestamp;
 
 /// Where the log lives when `--log` and `$PROOFWORK_LOG` are both silent.
 const DEFAULT_LOG: &str = "proofwork.jsonl";
@@ -110,27 +109,10 @@ const DETAIL_WIDTH: usize = 40;
 // ---------------------------------------------------------------------------
 
 /// Open the log and wrap it in a node rooted at `--root`.
-///
-/// The registry is given the store's blob directory, so pinned checkers resolve
-/// by content first and by path second. A store with no blobs in it resolves
-/// exactly as it did before this existed.
 fn open_node(options: &Options) -> Result<Node, CliError> {
     let codec = resolve_codec(options)?;
     let ledger = Ledger::open_with(options.log.as_str(), codec).map_err(CliError::Ledger)?;
-    let registry =
-        VerifierRegistry::new(options.root.as_str()).with_blobs(BlobStore::under(&options.store()));
-    Ok(Node::with_registry(ledger, registry))
-}
-
-/// The store, told which blobs the log still needs.
-///
-/// Computing the pin set means reading the log, which is why this is fallible
-/// where [`Options::store`] is not. A log that cannot be read must not degrade
-/// to "nothing is pinned": that answer lets `gc` delete an evaluator on the
-/// strength of having been unable to check whether anything wanted it.
-fn store_with_pins(options: &Options) -> Result<Store, CliError> {
-    let node = open_node(options)?;
-    Ok(options.store().with_pinned_blobs(node.pinned_blobs()))
+    Ok(Node::new(ledger, options.root.as_str()))
 }
 
 /// Read-only view of the node's log, for `log` and `attribute`.
@@ -160,9 +142,28 @@ fn reveal_claim(node: &mut Node, claim: &Claim, ts: &str) -> Result<RevealReport
         detail: outcome.verdict.detail.clone(),
         settles: outcome.verdict.settles(),
         settled: outcome.settled,
+        pending_epoch: outcome.pending_epoch,
         reward: outcome.reward,
         note: outcome.note.clone(),
     })
+}
+
+/// Drain every settlement batch whose epoch has closed.
+fn settle_now(node: &mut Node, ts: &str) -> Result<Vec<(String, bool, u64, String)>, CliError> {
+    let outcomes = node
+        .settle_at(ts)
+        .map_err(|violation| CliError::Refused(violation.to_string()))?;
+    Ok(outcomes
+        .into_iter()
+        .map(|outcome| {
+            (
+                outcome.claim_id,
+                outcome.settled,
+                outcome.reward,
+                outcome.note,
+            )
+        })
+        .collect())
 }
 
 fn audit_log(node: &Node, rerun: bool) -> Vec<String> {
@@ -184,6 +185,9 @@ struct RevealReport {
     settles: bool,
     /// Value actually moved.
     settled: bool,
+    /// Accepted, but its reveal epoch has not closed, so nothing has been paid
+    /// yet and `settled == false` does not mean "earned nothing".
+    pending_epoch: Option<u64>,
     reward: u64,
     note: String,
 }
@@ -212,7 +216,16 @@ enum CliError {
         path: String,
         source: CanonicalError,
     },
+    /// A checkpoint file could not be read as one. Carries the message rather
+    /// than the error, so this type stays independent of `checkpoint`.
+    Checkpoint(String),
     Record(RecordError),
+    /// The body does not match the published schema in `spec/`.
+    ///
+    /// Separate from [`CliError::Record`] because it fires earlier and says
+    /// something different: the record is not the shape third parties implement
+    /// against, so it is refused before any constructor gets to interpret it.
+    Schema(SchemaError),
     Ledger(LedgerError),
     Flow(FlowError),
     /// A payload already in the log cannot be read back. Distinct from
@@ -249,7 +262,9 @@ impl fmt::Display for CliError {
             CliError::Refused(message) => f.write_str(message),
             CliError::Io { context, source } => write!(f, "{context}: {source}"),
             CliError::Json { path, source } => write!(f, "{path}: {source}"),
+            CliError::Checkpoint(message) => f.write_str(message),
             CliError::Record(source) => write!(f, "{source}"),
+            CliError::Schema(source) => write!(f, "{source}"),
             CliError::Ledger(source) => write!(f, "{source}"),
             CliError::Flow(source) => write!(f, "{source}"),
             CliError::LogPayload { seq, reason } => write!(f, "log entry {seq}: {reason}"),
@@ -268,6 +283,7 @@ impl std::error::Error for CliError {
             CliError::Io { source, .. } => Some(source),
             CliError::Json { source, .. } => Some(source),
             CliError::Record(source) => Some(source),
+            CliError::Schema(source) => Some(source),
             CliError::Ledger(source) => Some(source),
             CliError::Flow(source) => Some(source),
             _ => None,
@@ -282,7 +298,11 @@ impl CliError {
     fn report(&self) -> String {
         match self {
             CliError::Usage(message) => format!("usage: {message}\ntry `proofwork help`"),
+            // A schema violation *is* a refusal: the network declined to record
+            // the body, and a script watching for `refused:` needs to see it as
+            // one rather than as a local file-handling error.
             CliError::Refused(message) => format!("refused: {message}"),
+            CliError::Schema(source) => format!("refused: {source}"),
             other => format!("error: {other}"),
         }
     }
@@ -404,11 +424,24 @@ enum Command {
         nonce: String,
         cites: Vec<String>,
     },
+    Settle,
     Audit {
+        rerun: bool,
+    },
+    Verify {
+        checkpoint: String,
+        /// Hex, or a path to a file holding hex. `None` trusts the key inside
+        /// the checkpoint, which authenticates nothing -- see [`cmd_verify`].
+        root_key: Option<String>,
+        /// Also re-derive the rules over the signed prefix.
+        audit: bool,
         rerun: bool,
     },
     Attribute {
         params: FlowParams,
+    },
+    Blob {
+        action: BlobAction,
     },
     /// Evaluate the node-operator incentives at a parameter set.
     ///
@@ -429,10 +462,6 @@ enum Command {
     Store {
         action: StoreAction,
     },
-    /// Inspect or add to the content-addressed blob store.
-    Blob {
-        action: BlobAction,
-    },
     /// Copy the store to a directory of the operator's choosing.
     Sync {
         destination: String,
@@ -440,6 +469,26 @@ enum Command {
     },
     Log,
     Help,
+}
+
+/// What `proofwork blob` was asked to do.
+///
+/// Collection is a command rather than something a sync round does on its way
+/// past, and that is deliberate: a node cannot distinguish a blob nobody wants
+/// from a blob pinned by an objective it has not synced yet, so a timer-driven
+/// collector would delete exactly the code its peers are about to ask it for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobAction {
+    /// Every content address held.
+    List,
+    /// Pins the log names that this node cannot obtain — why a verdict came
+    /// back `unavailable`.
+    Need,
+    /// Copy every pinned file the bundle has into the store, so peers can fetch
+    /// it. Idempotent, and what a log written before blobs existed needs.
+    Publish,
+    /// Drop blobs no objective in the log pins.
+    Collect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,26 +499,6 @@ enum StoreAction {
     Gc,
     /// Convert a plaintext log to a sealed one, in place.
     Encrypt,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum BlobAction {
-    /// File a local file's bytes under their digest.
-    Put { path: String },
-    /// List what is held, and which of it the log still needs.
-    List,
-    /// Re-hash everything and report what does not match its name.
-    Verify,
-    /// Show the address book: who this node knows how to reach.
-    Peers,
-    /// Serve the store's blobs to peers until interrupted.
-    Serve { listen: String },
-    /// Pull a blob from peers into the store.
-    Fetch {
-        digest: String,
-        peers: Vec<String>,
-        seconds: u64,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,12 +646,17 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "post" => parse_post(&mut cursor)?,
         "commit" => parse_commit(&mut cursor)?,
         "reveal" => parse_reveal(&mut cursor)?,
+        "settle" => {
+            expect_end(&mut cursor, "settle")?;
+            Command::Settle
+        }
         "audit" => parse_audit(&mut cursor)?,
+        "verify" => parse_verify(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
+        "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
         "keygen" => parse_keygen(&mut cursor)?,
         "store" => parse_store(&mut cursor)?,
-        "blob" => parse_blob(&mut cursor)?,
         "sync" => parse_sync(&mut cursor)?,
         "log" => {
             expect_end(&mut cursor, "log")?;
@@ -744,6 +778,42 @@ fn parse_audit(cursor: &mut Cursor) -> Result<Command, CliError> {
         }
     }
     Ok(Command::Audit { rerun })
+}
+
+fn parse_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut checkpoint: Option<String> = None;
+    let mut root_key: Option<String> = None;
+    let mut audit = false;
+    // Mirrors `audit`: re-running the verifiers is the default, and
+    // `--no-rerun` is the way to ask for the cheap structural check.
+    let mut rerun = true;
+
+    while let Some(token) = cursor.take() {
+        if token == "--from" {
+            checkpoint = Some(cursor.value("--from")?);
+        } else if token == "--root-key" {
+            root_key = Some(cursor.value("--root-key")?);
+        } else if token == "--audit" {
+            audit = true;
+        } else if token == "--no-rerun" {
+            rerun = false;
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!("verify: unknown option {token:?}")));
+        } else if checkpoint.is_some() {
+            return Err(CliError::Usage(format!(
+                "verify: unexpected argument {token:?}"
+            )));
+        } else {
+            checkpoint = Some(token);
+        }
+    }
+
+    Ok(Command::Verify {
+        checkpoint: require(checkpoint, "verify", "--from <checkpoint.json>")?,
+        root_key,
+        audit,
+        rerun,
+    })
 }
 
 /// `incentives [--nodes N] [--settled N] [--stake N] [--fee N/D] ...`
@@ -872,71 +942,6 @@ fn parse_store(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Store { action })
 }
 
-fn parse_blob(cursor: &mut Cursor) -> Result<Command, CliError> {
-    let action = match cursor.take().as_deref() {
-        Some("ls") | Some("list") | None => BlobAction::List,
-        Some("verify") => BlobAction::Verify,
-        Some("peers") => BlobAction::Peers,
-        Some("put") => {
-            let path = cursor
-                .take()
-                .ok_or_else(|| CliError::Usage(String::from("blob put: needs a file to store")))?;
-            BlobAction::Put { path }
-        }
-        Some("serve") => {
-            let mut listen = String::from("0.0.0.0:9797");
-            while let Some(token) = cursor.take() {
-                if token == "--listen" {
-                    listen = cursor.value("--listen")?;
-                } else {
-                    return Err(CliError::Usage(format!(
-                        "blob serve: unknown option {token:?}"
-                    )));
-                }
-            }
-            return Ok(Command::Blob {
-                action: BlobAction::Serve { listen },
-            });
-        }
-        Some("fetch") => {
-            let digest = cursor.take().ok_or_else(|| {
-                CliError::Usage(String::from("blob fetch: needs a digest to fetch"))
-            })?;
-            let mut peers: Vec<String> = Vec::new();
-            let mut seconds = 120;
-            while let Some(token) = cursor.take() {
-                if token == "--peer" {
-                    peers.push(cursor.value("--peer")?);
-                } else if token == "--timeout" {
-                    seconds = cursor
-                        .value("--timeout")?
-                        .parse()
-                        .map_err(|_| CliError::Usage(String::from("--timeout wants seconds")))?;
-                } else {
-                    return Err(CliError::Usage(format!(
-                        "blob fetch: unknown option {token:?}"
-                    )));
-                }
-            }
-
-            return Ok(Command::Blob {
-                action: BlobAction::Fetch {
-                    digest,
-                    peers,
-                    seconds,
-                },
-            });
-        }
-        Some(other) => {
-            return Err(CliError::Usage(format!(
-                "blob: unknown action {other:?}; try put, ls, peers, verify, serve, or fetch"
-            )))
-        }
-    };
-    expect_end(cursor, "blob")?;
-    Ok(Command::Blob { action })
-}
-
 fn parse_sync(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut destination: Option<String> = None;
     let mut options = mirror::Options::default();
@@ -1004,6 +1009,27 @@ fn require(value: Option<String>, command: &str, what: &str) -> Result<String, C
     value.ok_or_else(|| CliError::Usage(format!("{command}: {what} is required")))
 }
 
+fn parse_blob(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = match cursor.take() {
+        // Bare `blob` lists, because "what do I have" is the question an
+        // operator diagnosing an `unavailable` verdict asks first.
+        None => BlobAction::List,
+        Some(word) => match word.as_str() {
+            "ls" | "list" => BlobAction::List,
+            "need" => BlobAction::Need,
+            "publish" => BlobAction::Publish,
+            "gc" => BlobAction::Collect,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "blob: unknown action {other:?}; expected ls, need, publish, or gc"
+                )))
+            }
+        },
+    };
+    expect_end(cursor, "blob")?;
+    Ok(Command::Blob { action })
+}
+
 /// Negative numbers are rejected by the type, not by a range check: `-1` does
 /// not parse as `u64` and never reaches [`FlowParams`].
 fn parse_u64(text: &str, flag: &str) -> Result<u64, CliError> {
@@ -1056,26 +1082,37 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "      reveal a committed artifact, verify it, settle if accepted",
+        "      reveal a committed artifact and verify it (settles when the epoch closes)",
     );
+    say(out, "  settle");
+    say(out, "      pay out every reveal epoch that has closed");
     say(out, "  audit [--no-rerun]");
     say(out, "      re-derive the entire log independently");
+    say(
+        out,
+        "  verify --from CHECKPOINT [--root-key HEX|FILE] [--audit] [--no-rerun]",
+    );
+    say(
+        out,
+        "      check a signed checkpoint against this log's prefix",
+    );
     say(
         out,
         "  attribute [--delta-num N] [--delta-den N] [--max-depth N]",
     );
     say(out, "      compute citation-flow payouts");
+    say(out, "  blob [ls|need|publish|gc]");
     say(
         out,
-        "  incentives [--nodes N] [--settled N] [--canary-rate N/D] [--robustness] ...",
+        "      inspect the content-addressed store of pinned verifier code",
     );
     say(
         out,
-        "      evaluate the node-operator game at a parameter set; --robustness",
+        "  incentives [--nodes N] [--settled N] [--canary-rate N/D] ...",
     );
     say(
         out,
-        "      also reports how far each parameter can move before it breaks",
+        "      evaluate the node-operator game at a parameter set",
     );
     say(out, "  log");
     say(out, "      print the log");
@@ -1089,18 +1126,6 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      report local usage, reclaim space, or seal an existing log",
     );
-    say(out, "  blob [ls|put FILE|verify]");
-    say(
-        out,
-        "      the content-addressed store pinned checkers resolve from",
-    );
-    say(out, "  blob serve [--listen ADDR]");
-    say(out, "      seed this store's blobs to peers");
-    say(
-        out,
-        "  blob fetch <digest> --peer HOST:PORT [--peer ...] [--timeout SECS]",
-    );
-    say(out, "      pull a blob from peers, verified piece by piece");
     say(out, "  sync <dir> [--prune] [--dry-run]");
     say(
         out,
@@ -1137,7 +1162,10 @@ fn print_help(out: &mut dyn Write) {
     say(out, "");
     say(out, "exit codes:");
     say(out, "  0  success");
-    say(out, "  1  audit found problems, or incentives do not hold");
+    say(
+        out,
+        "  1  audit found problems, a checkpoint did not match, or incentives do not hold",
+    );
     say(out, "  2  refused, or bad input");
     say(out, "  3  reveal produced a verdict that settles nothing");
 }
@@ -1165,6 +1193,12 @@ fn read_json(path: &str) -> Result<Value, CliError> {
 fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
     let mut node = open_node(options)?;
     let data = read_json(path)?;
+    // The published schema runs *before* the constructor. `Objective::from_value`
+    // is permissive by necessity -- it has to read back records written by older
+    // versions of this code -- so it is the wrong place to enforce the contract
+    // third parties implement against. Gating here means nothing enters the log
+    // that `spec/objective.schema.json` would reject.
+    validate_objective(&data).map_err(CliError::Schema)?;
     let objective = Objective::from_value(&data).map_err(CliError::Record)?;
     let id = post_objective(&mut node, &objective, &timestamp())?;
 
@@ -1233,6 +1267,7 @@ fn cmd_reveal(
         cites.to_vec(),
     )
     .map_err(CliError::Record)?;
+    validate_claim(&claim.to_value()).map_err(CliError::Schema)?;
 
     let report = reveal_claim(&mut node, &claim, &stamp)?;
     // Print the FULL claim id, not the display-shortened form. Citing this claim
@@ -1245,18 +1280,48 @@ fn cmd_reveal(
         out,
         format!("  verdict  {}: {}", report.status, report.detail),
     );
-    say(
-        out,
-        format!(
-            "  settled  {}  reward {}  ({})",
-            report.settled, report.reward, report.note
+    match report.pending_epoch {
+        Some(epoch) => say(
+            out,
+            format!("  pending  settles when epoch {epoch} closes  (`proofwork settle`)"),
         ),
-    );
+        None => say(
+            out,
+            format!(
+                "  settled  {}  reward {}  ({})",
+                report.settled, report.reward, report.note
+            ),
+        ),
+    }
 
     // See the module docs: a rejection is a real answer and exits 0. Only a
     // verdict that settles nothing -- `unavailable`, `invalid_spec` -- exits 3,
     // because in that case nothing was learned and the objective is still open.
     Ok(if report.settles { 0 } else { 3 })
+}
+
+/// Close every reveal epoch that is over and pay out its batch.
+///
+/// Exists because settlement is deferred: a claim accepted in epoch N is paid
+/// when N closes, in an order derived from a beacon rather than from arrival.
+/// Every other command drains due batches on its way in, so this is only needed
+/// when nothing else is happening -- which is exactly the case a demo, a cron
+/// job, or an operator winding a quiet objective down finds itself in.
+fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
+    let mut node = open_node(options)?;
+    let settled = settle_now(&mut node, &timestamp())?;
+    if settled.is_empty() {
+        say(out, "no batch was due");
+        return Ok(0);
+    }
+    for (claim_id, moved, reward, note) in &settled {
+        say(out, format!("claim {claim_id}"));
+        say(
+            out,
+            format!("  settled  {moved}  reward {reward}  ({note})"),
+        );
+    }
+    Ok(0)
 }
 
 fn cmd_audit(out: &mut dyn Write, options: &Options, rerun: bool) -> Result<i32, CliError> {
@@ -1295,6 +1360,138 @@ fn cmd_audit(out: &mut dyn Write, options: &Options, rerun: bool) -> Result<i32,
         "log verified: chain intact, every settled claim re-verified",
     );
     Ok(0)
+}
+
+/// Check a signed checkpoint against the local log.
+///
+/// The question this answers is the one a hash chain cannot answer alone: *is
+/// my copy of the log a prefix-consistent view of what the operator published?*
+/// A truncated log is internally consistent -- every link checks out -- so
+/// rollback is invisible without an external anchor, and this is the anchor.
+///
+/// Three exit codes, and the split between them is deliberate. A signature that
+/// does not verify and a root that does not match are the *same* answer to the
+/// reader: the log in front of them is not the one that was signed. Both are 1.
+/// A missing file or an unparsable checkpoint is 2, because nothing was
+/// checked either way and reporting "mismatch" would be a false accusation.
+fn cmd_verify(
+    out: &mut dyn Write,
+    options: &Options,
+    checkpoint_path: &str,
+    root_key: Option<&str>,
+    audit: bool,
+    rerun: bool,
+) -> Result<i32, CliError> {
+    let signed = SignedCheckpoint::from_value(&read_json(checkpoint_path)?)
+        .map_err(|source| CliError::Checkpoint(source.to_string()))?;
+
+    // Without an out-of-band key this verifies only that the file is
+    // self-consistent: an operator rewriting history signs the rewrite with a
+    // fresh key and the check passes. Said plainly rather than left to the
+    // reader to work out, because a verification that proves nothing is worse
+    // than none -- it is the one that gets quoted.
+    let expected = match root_key {
+        Some(source) => read_root_key(source)?,
+        None => signed.public_key.clone(),
+    };
+
+    let node = open_node(options)?;
+    let ledger = ledger_of(&node);
+    if let Err(error) = signed.verify_prefix(ledger, &expected) {
+        say(out, format!("checkpoint FAILED: {error}"));
+        return Ok(1);
+    }
+
+    say(
+        out,
+        format!(
+            "checkpoint ok: height {}  head {}  issued {}",
+            signed.checkpoint.height,
+            short(signed.checkpoint.head.as_deref().unwrap_or("-")),
+            signed.checkpoint.issued_at
+        ),
+    );
+    if root_key.is_none() {
+        say(
+            out,
+            "  warning: no --root-key given, so this checks the file against itself; \
+             pin the operator's published key to make it mean anything",
+        );
+    }
+    let local = ledger.len();
+    let height = signed.checkpoint.height;
+    if local as u64 > height {
+        say(
+            out,
+            format!("  local log continues past the checkpoint ({local} entries)"),
+        );
+    }
+
+    if !audit {
+        return Ok(0);
+    }
+
+    // Audit the signed prefix, not the whole log: entries appended after the
+    // checkpoint have not been vouched for by anyone, and folding their
+    // problems into this result would make a valid checkpoint look broken.
+    let height = usize::try_from(height)
+        .map_err(|_| CliError::Overflow(String::from("checkpoint height")))?;
+    let prefix = match ledger.prefix(height) {
+        Some(prefix) => prefix,
+        // Unreachable: `verify_prefix` already refused a short log above. An
+        // error rather than an unwrap all the same -- this is the money path.
+        None => {
+            return Err(CliError::Checkpoint(format!(
+                "log is shorter than {height}"
+            )))
+        }
+    };
+    let problems = Node::new(prefix, options.root.as_str()).audit(rerun);
+    if !problems.is_empty() {
+        say(out, "");
+        say(
+            out,
+            format!("{} problem(s) inside the signed prefix:", problems.len()),
+        );
+        for problem in &problems {
+            say(out, format!("  ! {problem}"));
+        }
+        return Ok(1);
+    }
+    say(out, "  signed prefix re-derives cleanly");
+    Ok(0)
+}
+
+/// A root key given as hex on the command line, or as a file holding hex.
+///
+/// Both spellings, because a 1952-byte ML-DSA-65 key is 3904 hex characters and
+/// no one is pasting that into a shell. Which one was meant is decided by
+/// whether the argument names an existing file, not by a flag: a path and a
+/// hex blob are not confusable.
+fn read_root_key(source: &str) -> Result<Vec<u8>, CliError> {
+    let text = if Path::new(source).is_file() {
+        fs::read_to_string(source).map_err(|error| CliError::Io {
+            context: format!("reading {source}"),
+            source: error,
+        })?
+    } else {
+        source.to_string()
+    };
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if text.len() % 2 != 0 {
+        return Err(CliError::Usage(String::from(
+            "--root-key: hex has an odd number of digits",
+        )));
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    let digits: Vec<char> = text.chars().collect();
+    for pair in digits.chunks(2) {
+        let hex: String = pair.iter().collect();
+        let byte = u8::from_str_radix(&hex, 16)
+            .map_err(|_| CliError::Usage(format!("--root-key: {hex:?} is not hex")))?;
+        bytes.push(byte);
+    }
+    Ok(bytes)
 }
 
 fn cmd_attribute(
@@ -1340,8 +1537,6 @@ fn cmd_incentives(
         for margin in &margins {
             say(out, format!("  {margin}"));
         }
-        // The line that changes what somebody does next. A verdict says the
-        // mechanism works; this says which measurement it is betting on.
         match margins.iter().find(|m| m.factor.is_some()) {
             Some(binding) => say(
                 out,
@@ -1468,330 +1663,8 @@ fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32,
     Ok(0)
 }
 
-/// This node's network identity, created on first use.
-///
-/// Deliberately **not** the at-rest key. That one protects a disk and never
-/// leaves it; this one is published in every peer record and *is* the node's
-/// name on the network. One key doing both jobs would mean rotating a storage
-/// key renames the node, and leaking a network identity exposes the disk.
-fn node_identity(options: &Options) -> Result<Identity, CliError> {
-    let path = options.store().root().join("node.key");
-    if let Ok(bytes) = fs::read(&path) {
-        if bytes.len() == 32 {
-            let mut secret = [0u8; 32];
-            secret.copy_from_slice(&bytes);
-            return Ok(Identity::from_secret_bytes(secret));
-        }
-    }
-    let identity = Identity::generate(&mut rand_core::OsRng);
-    let secret = identity.to_secret_bytes();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| CliError::Io {
-            context: format!("creating {}", parent.display()),
-            source,
-        })?;
-    }
-    fs::write(&path, secret.as_slice()).map_err(|source| CliError::Io {
-        context: format!("writing {}", path.display()),
-        source,
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
-    Ok(identity)
-}
-
-/// A record version derived from the wall clock.
-///
-/// `seq` only has to increase, and seconds-since-epoch does that across
-/// restarts without any state to keep. A clock that goes backwards costs this
-/// node an announcement until it catches up, which is the cheapest possible
-/// failure and is why no attempt is made to do better.
-fn now_seq() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(1)
-}
-
-fn peers_path(options: &Options) -> PathBuf {
-    options.store().root().join("peers.json")
-}
-
-/// Load the address book, keeping whatever verifies.
-///
-/// A missing or corrupt file is an empty book rather than an error: this is a
-/// cache of hints, and refusing to start because a cache is stale would be the
-/// wrong failure by a wide margin.
-fn load_peers(options: &Options) -> AddressBook {
-    match fs::read_to_string(peers_path(options))
-        .ok()
-        .and_then(|text| Value::from_json(&text).ok())
-    {
-        Some(value) => AddressBook::from_value(&value).0,
-        None => AddressBook::new(),
-    }
-}
-
-fn save_peers(options: &Options, book: &AddressBook) -> Result<(), CliError> {
-    let path = peers_path(options);
-    fs::write(&path, book.to_value().canonical_bytes()).map_err(|source| CliError::Io {
-        context: format!("writing {}", path.display()),
-        source,
-    })
-}
-
-fn cmd_blob(out: &mut dyn Write, options: &Options, action: &BlobAction) -> Result<i32, CliError> {
-    let store = options.store();
-    let blobs = BlobStore::under(&store);
-    match action {
-        BlobAction::Put { path } => {
-            blobs.prepare().map_err(CliError::Store)?;
-            let digest = blobs.put_file(Path::new(path)).map_err(CliError::Store)?;
-            say(out, format!("blob {digest}"));
-            say(out, format!("  {} -> {}", path, blobs.root().display()));
-            Ok(0)
-        }
-        BlobAction::List => {
-            let held = blobs.list().map_err(CliError::Store)?;
-            // Which blobs the log needs is the number that matters, since it is
-            // the difference between "gc may take this" and "gc must not" -- and
-            // between a node that can verify and one that cannot. Computed even
-            // when nothing is held, because "you have none of the three you need"
-            // is the single most useful thing this command can say, and an early
-            // return on an empty inventory is exactly how it would go unsaid.
-            let needed = store_with_pins(options)
-                .map(|store| store.pinned_blobs().clone())
-                .unwrap_or_default();
-            if held.is_empty() && needed.is_empty() {
-                say(out, "no blobs held, and the log needs none");
-                return Ok(0);
-            }
-            for (digest, bytes) in &held {
-                say(
-                    out,
-                    format!(
-                        "{}  {:>10}  {}",
-                        short(digest),
-                        proofwork::store::format_size(*bytes),
-                        if needed.contains(digest) {
-                            "pinned -- an objective in the log needs it"
-                        } else {
-                            "reclaimable"
-                        }
-                    ),
-                );
-            }
-            let missing: Vec<&String> = needed.iter().filter(|digest| !blobs.has(digest)).collect();
-            for digest in &missing {
-                say(
-                    out,
-                    format!(
-                        "{}  {:>10}  MISSING -- verification will report Unavailable",
-                        short(digest),
-                        "-"
-                    ),
-                );
-            }
-            if !missing.is_empty() {
-                say(
-                    out,
-                    format!(
-                        "{} of {} blobs the log needs are absent; \
-                         `blob put <file>` files one from disk, \
-                         `blob fetch <digest> --peer HOST:PORT` pulls one from a peer",
-                        missing.len(),
-                        needed.len()
-                    ),
-                );
-            }
-            Ok(if missing.is_empty() { 0 } else { 1 })
-        }
-        BlobAction::Serve { listen } => {
-            blobs.prepare().map_err(CliError::Store)?;
-            let held = blobs.list().map_err(CliError::Store)?;
-            let identity = node_identity(options)?;
-            let mut known = load_peers(options);
-            let book = swarm::tcp::new_book();
-            {
-                let mut guard = book.lock().unwrap_or_else(|e| e.into_inner());
-                for entry in known.entries() {
-                    let _ = guard.offer(&entry.signed);
-                }
-            }
-            let listener = swarm::tcp::serve_with(
-                listen.as_str(),
-                blobs,
-                swarm::Limits::default(),
-                std::sync::Arc::clone(&book),
-            )
-            .map_err(|error| CliError::Refused(format!("cannot serve on {listen}: {error}")))?;
-
-            // Announce where we actually bound, which is not always where we
-            // were asked to -- port 0 is the common case.
-            if let Ok(record) = swarm::PeerRecord::sign(&identity, &[listener.addr()], now_seq()) {
-                let _ = book
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .offer(&record);
-                let _ = known.offer(&record);
-                let _ = save_peers(options, &known);
-            }
-
-            say(out, format!("node {}", &identity.public().to_hex()[..16]));
-            say(
-                out,
-                format!("serving {} blobs on {}", held.len(), listener.addr()),
-            );
-            say(
-                out,
-                format!(
-                    "  {} peers known; every connection asks for more",
-                    known.len()
-                ),
-            );
-            say(
-                out,
-                "  a digest this store does not hold gets no bytes and peer exchange anyway",
-            );
-            say(out, "  ctrl-c to stop");
-            // Nothing to wait on but the accept loop, which owns its own thread.
-            // Parking rather than spinning: this process exists to be a server.
-            loop {
-                std::thread::park();
-            }
-        }
-        BlobAction::Fetch {
-            digest,
-            peers,
-            seconds,
-        } => {
-            blobs.prepare().map_err(CliError::Store)?;
-            let mut addrs = Vec::new();
-            for peer in peers {
-                let resolved: Vec<std::net::SocketAddr> = peer
-                    .to_socket_addrs()
-                    .map_err(|error| CliError::Usage(format!("{peer}: {error}")))?
-                    .collect();
-                if resolved.is_empty() {
-                    return Err(CliError::Usage(format!("{peer} resolves to no address")));
-                }
-                addrs.extend(resolved);
-            }
-            if blobs.has(digest) {
-                say(out, format!("blob {} already held", short(digest)));
-                return Ok(0);
-            }
-
-            let known = load_peers(options);
-            let book = swarm::tcp::new_book();
-            {
-                let mut guard = book.lock().unwrap_or_else(|e| e.into_inner());
-                for entry in known.entries() {
-                    let _ = guard.offer(&entry.signed);
-                }
-            }
-            if addrs.is_empty() && known.is_empty() {
-                return Err(CliError::Usage(String::from(
-                    "blob fetch: no peers known and none given. Pass --peer HOST:PORT \
-                     once; after that they arrive by asking, and `blob peers` lists them",
-                )));
-            }
-
-            let outcome = swarm::tcp::fetch_with(
-                digest,
-                &addrs,
-                &blobs,
-                swarm::Limits::default(),
-                std::time::Duration::from_secs(*seconds),
-                std::sync::Arc::clone(&book),
-            );
-            // Save what was learned even when the transfer failed. A fetch that
-            // found no blob but three peers has still made the next one likelier
-            // to work, and throwing that away on the error path would hide the
-            // one thing that improved.
-            {
-                let guard = book.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = save_peers(options, &guard);
-            }
-            let bytes = outcome.map_err(|error| CliError::Refused(error.to_string()))?;
-            say(out, format!("blob {}", short(digest)));
-            say(
-                out,
-                format!(
-                    "  {} -> {}",
-                    proofwork::store::format_size(bytes.len() as u64),
-                    blobs.root().display()
-                ),
-            );
-            Ok(0)
-        }
-        BlobAction::Peers => {
-            let book = load_peers(options);
-            if book.is_empty() {
-                say(out, "no peers known");
-                say(
-                    out,
-                    "  every source of addresses is equal here, because records are signed:",
-                );
-                say(
-                    out,
-                    "  `blob fetch <digest> --peer HOST:PORT` once, and the rest arrives by asking",
-                );
-                return Ok(0);
-            }
-            for entry in book.entries() {
-                say(
-                    out,
-                    format!(
-                        "{}  seq {}  {}",
-                        &entry.record.peer[..16.min(entry.record.peer.len())],
-                        entry.record.seq,
-                        entry
-                            .record
-                            .addrs
-                            .iter()
-                            .map(|a| a.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                );
-            }
-            say(out, format!("{} peers known", book.len()));
-            Ok(0)
-        }
-        BlobAction::Verify => {
-            let corrupt = blobs.verify().map_err(CliError::Store)?;
-            if corrupt.is_empty() {
-                let held = blobs.list().map_err(CliError::Store)?;
-                say(
-                    out,
-                    format!("{} blobs, every one hashes to its name", held.len()),
-                );
-                return Ok(0);
-            }
-            for digest in &corrupt {
-                say(out, format!("corrupt {digest}"));
-            }
-            say(
-                out,
-                "these bytes are not the bytes their names promise; delete them and fetch again",
-            );
-            Ok(1)
-        }
-    }
-}
-
 fn cmd_store(out: &mut dyn Write, options: &Options, action: StoreAction) -> Result<i32, CliError> {
-    // Pin-aware, so a blob some posted objective needs is not an eviction
-    // candidate. Falls back to the unpinned store only for `encrypt`, which
-    // deletes nothing.
-    let store = match action {
-        StoreAction::Encrypt => options.store(),
-        StoreAction::Status | StoreAction::Gc => store_with_pins(options)?,
-    };
+    let store = options.store();
     match action {
         StoreAction::Status => {
             let usage = quota::usage(&store).map_err(CliError::Store)?;
@@ -2013,6 +1886,83 @@ fn cmd_log(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
     Ok(0)
 }
 
+/// Inspect and maintain the content-addressed store of pinned verifier code.
+///
+/// Exit code 0 throughout, including for `need` with unmet pins. Missing code is
+/// `Unavailable` — this node cannot check something — and reporting it as a
+/// failure would make a script treat "I have not fetched the checker yet" as "the
+/// log is wrong". `audit` is where a log that does not re-derive is an error.
+fn cmd_blob(out: &mut dyn Write, options: &Options, action: BlobAction) -> Result<i32, CliError> {
+    let node = open_node(options)?;
+    let store = node.registry().blobs();
+    match action {
+        BlobAction::List => {
+            let held = store.addresses();
+            say(
+                out,
+                format!("{} blob(s) in {}", held.len(), store.dir().display()),
+            );
+            let pinned = node.pinned_code();
+            for address in held {
+                // Whether anything in *this* log still wants it, which is what
+                // `gc` would act on.
+                let mark = if pinned.contains(&address) {
+                    "pinned"
+                } else {
+                    "unreferenced"
+                };
+                say(out, format!("  {} {mark}", short_address(&address)));
+            }
+        }
+        BlobAction::Need => {
+            let needs = node.missing_code();
+            if needs.is_empty() {
+                say(
+                    out,
+                    "every pinned verifier in this log is available locally",
+                );
+            } else {
+                say(
+                    out,
+                    format!(
+                        "{} pin(s) unavailable; verdicts against them will be \
+                             'unavailable' until a peer serves them",
+                        needs.len()
+                    ),
+                );
+                for address in &needs {
+                    say(out, format!("  {}", short_address(address)));
+                }
+            }
+        }
+        BlobAction::Publish => {
+            let published = node.publish_local_code();
+            say(
+                out,
+                format!(
+                    "{published} pinned blob(s) servable from {}",
+                    store.dir().display()
+                ),
+            );
+        }
+        BlobAction::Collect => {
+            let dropped = store.retain(&node.pinned_code());
+            say(out, format!("dropped {dropped} unreferenced blob(s)"));
+        }
+    }
+    Ok(0)
+}
+
+/// A content address abbreviated the way [`short`] abbreviates a record hash, so
+/// the two read alike in a terminal. Full addresses are 64 characters and the
+/// prefix identifies a blob among the handful a node holds.
+fn short_address(address: &str) -> String {
+    match address.get(..12) {
+        Some(head) => format!("{head}…"),
+        None => address.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reading the log
 // ---------------------------------------------------------------------------
@@ -2090,6 +2040,18 @@ fn summarize(kind: &str, payload: &Value) -> String {
                 .map(|units| units.to_string())
                 .unwrap_or_else(|| String::from("?"));
             format!("{} <- {reward}", text("submitter"))
+        }
+        "batch" => {
+            let epoch = payload
+                .get("epoch")
+                .and_then(Value::as_i128)
+                .map(|epoch| epoch.to_string())
+                .unwrap_or_else(|| String::from("?"));
+            let claims = match payload.get("claims") {
+                Some(Value::Array(items)) => items.len(),
+                _ => 0,
+            };
+            format!("epoch {epoch}: {claims} claim(s)")
         }
         _ => String::new(),
     }
@@ -2205,84 +2167,6 @@ fn percent(units: u64, total: u128) -> f64 {
 // ---------------------------------------------------------------------------
 // Timestamps
 // ---------------------------------------------------------------------------
-
-/// Now, as `2026-07-28T17:12:33+00:00`.
-///
-/// The reference implementation's `node.now()` --
-/// `datetime.now(timezone.utc).isoformat(timespec="seconds")` -- spelled with
-/// nothing but `std`, because this crate has no date library and will not grow
-/// one for a single format string.
-///
-/// This value is **advisory**. Ordering in this system comes from the hash
-/// chain, never from the clock: an operator who lies about the time produces a
-/// log whose entries are still in exactly the order they were appended, which is
-/// why a wrong clock is a cosmetic problem here rather than a consensus one.
-fn timestamp() -> String {
-    let seconds = match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
-        // A clock set before 1970. Absurd, and still not a reason to panic.
-        Err(before) => i64::try_from(before.duration().as_secs())
-            .map(|seconds| -seconds)
-            .unwrap_or(i64::MIN),
-    };
-    format_iso8601_utc(seconds)
-}
-
-/// Seconds since the Unix epoch, rendered as a UTC ISO-8601 instant.
-///
-/// Clamped to years 1..=9999 first. Every arithmetic step below is then bounded
-/// by construction, which matters because this crate builds release with
-/// `overflow-checks = true`: an unclamped input would abort rather than wrap.
-fn format_iso8601_utc(unix_seconds: i64) -> String {
-    // 0001-01-01T00:00:00Z.
-    const MIN_SECONDS: i64 = -62_135_596_800;
-    // 9999-12-31T23:59:59Z.
-    const MAX_SECONDS: i64 = 253_402_300_799;
-    const SECONDS_PER_DAY: i64 = 86_400;
-
-    let unix_seconds = unix_seconds.clamp(MIN_SECONDS, MAX_SECONDS);
-    // Euclidean, not truncating: a negative instant must floor to the day that
-    // contains it, otherwise every pre-1970 time lands one day late.
-    let days = unix_seconds.div_euclid(SECONDS_PER_DAY);
-    let second_of_day = unix_seconds.rem_euclid(SECONDS_PER_DAY);
-
-    let (year, month, day) = civil_from_days(days);
-    let hour = second_of_day / 3_600;
-    let minute = (second_of_day % 3_600) / 60;
-    let second = second_of_day % 60;
-
-    // `+00:00`, not `Z`: that is what Python's `isoformat` emits for a
-    // timezone-aware UTC datetime, and these strings land in records whose
-    // digests must match across implementations.
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}+00:00")
-}
-
-/// Days since the Unix epoch to a proleptic Gregorian `(year, month, day)`.
-///
-/// Howard Hinnant's `civil_from_days`, with Euclidean division in place of his
-/// sign correction. The algorithm shifts the year to start in March so that the
-/// leap day lands at the end of it, which is what removes every special case for
-/// February.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    // Re-base to 0000-03-01. Bounded by the clamp in the caller.
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097); // [0, 146096]
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153; // [0, 11], March = 0
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = if month_prime < 10 {
-        month_prime + 3
-    } else {
-        month_prime - 9
-    };
-    let year = if month <= 2 { year + 1 } else { year };
-    (year, month, day)
-}
-
 // ---------------------------------------------------------------------------
 // Nonces
 // ---------------------------------------------------------------------------
@@ -2361,12 +2245,26 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             nonce,
             cites,
         ),
+        Command::Settle => cmd_settle(out, options),
         Command::Audit { rerun } => cmd_audit(out, options, *rerun),
+        Command::Verify {
+            checkpoint,
+            root_key,
+            audit,
+            rerun,
+        } => cmd_verify(
+            out,
+            options,
+            checkpoint,
+            root_key.as_deref(),
+            *audit,
+            *rerun,
+        ),
         Command::Attribute { params } => cmd_attribute(out, options, params),
+        Command::Blob { action } => cmd_blob(out, options, *action),
         Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
         Command::Store { action } => cmd_store(out, options, *action),
-        Command::Blob { action } => cmd_blob(out, options, action),
         Command::Sync {
             destination,
             options: mirror_options,
@@ -2439,44 +2337,6 @@ mod tests {
     fn inline_values_are_accepted() {
         let parsed = parse(argv(&["--log=/tmp/y.jsonl", "log"])).expect("this parses");
         assert_eq!(parsed.options.log, "/tmp/y.jsonl");
-    }
-
-    #[test]
-    fn blob_actions_parse_and_default_to_listing() {
-        for spelling in [vec!["blob"], vec!["blob", "ls"], vec!["blob", "list"]] {
-            assert_eq!(
-                parse(argv(&spelling)).expect("parses").command,
-                Command::Blob {
-                    action: BlobAction::List
-                }
-            );
-        }
-        assert_eq!(
-            parse(argv(&["blob", "verify"])).expect("parses").command,
-            Command::Blob {
-                action: BlobAction::Verify
-            }
-        );
-        assert_eq!(
-            parse(argv(&["blob", "put", "checker.py"]))
-                .expect("parses")
-                .command,
-            Command::Blob {
-                action: BlobAction::Put {
-                    path: "checker.py".to_string()
-                }
-            }
-        );
-        // `put` without a file is a usage error rather than a silent no-op: the
-        // command's whole purpose is the argument.
-        assert!(matches!(
-            parse(argv(&["blob", "put"])),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(
-            parse(argv(&["blob", "fetch"])),
-            Err(CliError::Usage(_))
-        ));
     }
 
     #[test]
@@ -2616,16 +2476,6 @@ mod tests {
                 robustness: false,
             }
         );
-        // Opt-in, because a margin table is hundreds of full solver runs.
-        assert_eq!(
-            parse(argv(&["incentives", "--robustness"]))
-                .expect("parses")
-                .command,
-            Command::Incentives {
-                params: Box::new(NodeParams::reference()),
-                robustness: true,
-            }
-        );
     }
 
     #[test]
@@ -2707,7 +2557,11 @@ mod tests {
             CliError::Usage(_)
         ));
         assert!(matches!(
-            parse(argv(&["settle"])).expect_err("no such command"),
+            parse(argv(&["conjure"])).expect_err("no such command"),
+            CliError::Usage(_)
+        ));
+        assert!(matches!(
+            parse(argv(&["settle", "extra"])).expect_err("settle takes no arguments"),
             CliError::Usage(_)
         ));
         assert!(matches!(
@@ -2890,63 +2744,6 @@ mod tests {
             summarize("verdict", &verdict),
             format!("reject: {}", "x".repeat(DETAIL_WIDTH))
         );
-    }
-
-    // -- timestamps --------------------------------------------------------
-
-    #[test]
-    fn instants_render_the_way_python_isoformat_does() {
-        // `datetime.fromtimestamp(x, timezone.utc).isoformat(timespec="seconds")`
-        assert_eq!(format_iso8601_utc(0), "1970-01-01T00:00:00+00:00");
-        assert_eq!(format_iso8601_utc(1), "1970-01-01T00:00:01+00:00");
-        assert_eq!(
-            format_iso8601_utc(1_774_699_200),
-            "2026-03-28T12:00:00+00:00"
-        );
-        assert_eq!(
-            format_iso8601_utc(1_785_196_800),
-            "2026-07-28T00:00:00+00:00"
-        );
-    }
-
-    #[test]
-    fn leap_days_and_century_rules_are_respected() {
-        // 2000 is a leap year (divisible by 400), so 29 February exists.
-        assert_eq!(format_iso8601_utc(951_782_400), "2000-02-29T00:00:00+00:00");
-        // 1900 was not (divisible by 100 but not 400): these two days are
-        // adjacent, with no 29 February between them.
-        assert_eq!(
-            format_iso8601_utc(-2_203_977_600),
-            "1900-02-28T00:00:00+00:00"
-        );
-        assert_eq!(
-            format_iso8601_utc(-2_203_977_600 + 86_400),
-            "1900-03-01T00:00:00+00:00"
-        );
-    }
-
-    #[test]
-    fn instants_before_the_epoch_floor_to_the_right_day() {
-        // Truncating division would put this on 1970-01-01, a day late: the
-        // reason `div_euclid` is used rather than `/`.
-        assert_eq!(format_iso8601_utc(-1), "1969-12-31T23:59:59+00:00");
-        assert_eq!(format_iso8601_utc(-86_400), "1969-12-31T00:00:00+00:00");
-    }
-
-    #[test]
-    fn absurd_instants_clamp_instead_of_overflowing() {
-        // Release builds enable overflow checks, so an unclamped i64::MIN here
-        // would abort rather than wrap.
-        assert_eq!(format_iso8601_utc(i64::MIN), "0001-01-01T00:00:00+00:00");
-        assert_eq!(format_iso8601_utc(i64::MAX), "9999-12-31T23:59:59+00:00");
-    }
-
-    #[test]
-    fn the_clock_produces_a_well_formed_instant() {
-        let stamp = timestamp();
-        assert_eq!(stamp.chars().count(), "1970-01-01T00:00:00+00:00".len());
-        assert!(stamp.ends_with("+00:00"), "got {stamp:?}");
-        assert!(stamp.contains('T'), "got {stamp:?}");
     }
 
     // -- nonces ------------------------------------------------------------
