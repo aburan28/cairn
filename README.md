@@ -642,6 +642,7 @@ examples/            worked objectives with real artifacts
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
+- [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
