@@ -1,0 +1,195 @@
+# What a proof would be, and what it would not be
+
+"Can we prove the system works game-theoretically" is two questions wearing one
+coat, and separating them is most of the answer.
+
+## The two claims
+
+> **A.** Honest behaviour is what a self-interested operator chooses.
+>
+> **B.** The network produces research somebody wanted.
+
+Game theory speaks to A. It has nothing whatever to say about B — no equilibrium
+argument establishes that anyone will fund an objective, that the objectives will
+be good ones, or that the artifacts settled will be worth what was paid. B is
+Stage 1's question, *will strangers point compute at these objectives*, and it is
+answered by running the thing, not by solving it.
+
+**Conflating them is the characteristic failure of this genre.** A mechanism
+whose incentives are provably sound and whose output nobody wants is a
+well-designed machine for producing nothing, and the proof is not evidence
+against that reading. `src/incentive/` proves things about A. This document is
+about exactly how much.
+
+## The chain, and where each link stands
+
+| link | claim | status |
+|---|---|---|
+| 1 | the rules are what the code says | **proved**, as strongly as anything here: two independent implementations agree on every id and Merkle root, bound by `conformance/vectors.json` |
+| 2 | an accepted artifact satisfies its verifier | **proved by construction** for `certificate` and `evaluator` — acceptance *is* recomputation |
+| 3 | the verifier is a faithful encoding of the statement | **never provable.** This is V4, the judgement tier, and [verification.md](verification.md) says so |
+| 4 | honest play is an equilibrium of the node game | **conditionally proved** — `src/incentive/`, and the conditional is the rest of this document |
+| 5 | a population actually lands there | **conditionally**, via better-reply dynamics and `tipping_point` |
+| 6 | the results are worth what was paid | **not a proof question** |
+
+Link 3 is worth pausing on, because it bounds everything above it. The strongest
+statement available is *soundness relative to a pinned checker*. If the checker
+is a bad encoding of the question, the network settles confidently on the wrong
+thing, and no amount of mechanism design detects it. That is why "authoring a
+verifier is the scarce skill" is a claim about security and not about
+convenience.
+
+## What "conditionally" is hiding
+
+A proof here is a proof of a **conditional**, and it has three antecedents. Game
+theory discharges none of them.
+
+### 1. The model matches the code
+
+This is the largest hole and it is not subtle: **`src/incentive/` is not a code
+path.** No canary is generated, no bond is posted, no Merkle challenge is issued.
+The mechanism is written *beside* the implementation, not derived from it.
+
+So the honest reading of a passing report is: *if the network implemented this
+mechanism, honest play would be an equilibrium of the model of it.* Both
+conditionals are load-bearing. Closing this is worth more than any refinement of
+the game theory, because a perfect equilibrium proof about a mechanism nobody
+runs is a proof about a document.
+
+### 2. The parameters match the world
+
+Every number is a measurement nobody has taken. `verify_cost` is a guess,
+`fraud_rate` is a fact about people who have not shown up, and `canary_leak` is
+an engineering property of a pipeline that does not exist.
+
+This is what [robustness.rs](../src/incentive/robustness.rs) is for, and it is
+the one antecedent that can be *partially* discharged without new empirical work
+— by showing the verdict does not depend on getting the numbers right. See
+below.
+
+### 3. The agents match the model
+
+Operators are modelled as maximising money over one epoch. No reputation, no
+repeated play, no legal exposure, and none of the people who would run a node
+because they want the thing to exist.
+
+The docs say this biases towards pessimism, and that is right in most places —
+reputation and repeat play both add honesty the model does not count. **It is not
+uniformly right**, and two places where it fails the other way are worth naming:
+
+- **Sybil resistance is proved only against the channel that was modelled.**
+  Stake-weighted rewards are invariant to splitting because stake is conserved
+  when divided. That argument covers the *pool*. It does not cover any other
+  per-identity benefit — sampling assignments, connection slots, gossip
+  influence — and each of those is a channel the model does not have.
+- **The three sub-games are solved independently, and one operator plays all
+  three with one bond.** `stake` is slashable in verification, in availability
+  and in custody, so a deviation that risks the bond in one game changes what the
+  others cost. An operator already facing a custody slash has less left to lose
+  by rubber-stamping. Separability is assumed, not proved, and it is assumed in
+  the direction that flatters the mechanism.
+
+The second of those is the sharpest known gap in the analysis and it is
+structural rather than parametric: no choice of numbers fixes it. Closing it
+means a combined game whose action space is the product of the three, which is
+tractable in the symmetric representation and is not written.
+
+## What can be done, in order of how much it buys
+
+**1. Enlarge the claim from a point to a region.** *(built —
+`incentive::robustness`)*
+
+A verdict at one parameter set is nearly worthless on its own, and the reason is
+uncomfortable: `passes` at the reference parameters is equally consistent with
+"the mechanism is sound" and "the reference parameters were chosen, consciously
+or not, to be a point where it passes." The verdict cannot tell those apart.
+
+The margin table can. For each parameter it walks outward on a geometric ladder
+and reports the first rung at which `Report::passes` stops holding — in both
+directions, because `fraud_rate` breaks the mechanism by getting *smaller* and a
+one-directional search would call it safe.
+
+```sh
+proofwork incentives --robustness
+```
+
+Two design notes, since they are the difference between a useful number and a
+misleading one. The search is a **ladder, not a bisection**: bisection is only
+correct on a monotone predicate, monotonicity holds for none of these
+parameters provably, and an exact boundary would claim a precision the inputs do
+not have. And an invalid parameter set counts as *out of range* rather than as a
+break — otherwise `canary_rate` reports as the most fragile knob in the model,
+because pushing it far enough makes canaries plus fraud exceed the whole sample.
+
+**2. Make the model and the code the same object.** *(not built — the big one)*
+
+Discharges antecedent 1. Concretely: the canary generator, the bond, the
+availability challenge, wired into settlement, with the payoff functions in
+`mechanism` derived from the same constants the runtime uses rather than typed in
+beside them.
+
+**3. Measure the parameters.** *(Stage 1, empirical)*
+
+Discharges antecedent 2 properly rather than partially. The margin table's
+binding constraint is exactly the priority list for this: it names which
+measurement changes the answer.
+
+**4. Weaken the agent model.** *(not built)*
+
+The standard move is BAR — Byzantine, Altruistic, Rational — where some fraction
+of players are not maximising anything and some are actively hostile. Rational-only
+analysis is silent about an attacker who spends money to break the network rather
+than to profit from it, which is precisely the attacker a research network
+pointed at valuable problems should expect.
+
+## What the margin table says about this design
+
+```
+$ proofwork incentives --robustness            # ~2.5 minutes at 100 nodes
+
+robustness -- how far each parameter moves before honesty stops holding
+  stake: 4000000 survives 1.25x, breaks lowering to 3200000
+  sealed_value: 2000000 survives 1.25x, breaks raising to 2500000
+  slash_rate: 10000 survives 1.25x, breaks lowering to 8000
+  detection_rate: 50000 survives 1.25x, breaks lowering to 40000
+  operating_cost: 2000 survives 2.00x, breaks raising to 4000
+  settled_value: 10000000 survives 2.00x, breaks lowering to 5000000
+  ...
+  verify_cost: 200 survives 16.00x, breaks raising to 3200
+  canary_rate: 1000 survives 16.00x, breaks lowering to 62
+  canary_leak: 5000 survives 32.00x, breaks raising to 100000
+  catch_bounty: 50000 survives every rung of the ladder
+  fraud_rate: 100 survives every rung of the ladder
+  binding constraint    stake -- measure this one first
+```
+
+The four tightest constraints are all **custody** parameters — `stake`,
+`sealed_value`, `slash_rate`, `detection_rate` — and all of them break at the
+first rung of the ladder, a 25% error.
+
+That is a result, and it is not the one the documentation emphasises. The prose
+in [node-incentives.md](node-incentives.md) spends most of its length on the
+verifier's dilemma and canaries, which is where the *interesting* argument lives.
+The margin table says the interesting argument is not the fragile one:
+verification survives a sixteenfold error in `verify_cost`, while custody does
+not survive a quarter. If one number in this design is worth measuring before
+anything is built, it is the value of the largest sealed submission, and the
+committee has to be sized against it.
+
+That is the whole case for this kind of analysis. The finding is not visible from
+a passing verdict, and it contradicts where the attention had been going.
+
+## The honest summary
+
+You cannot prove the system works.
+
+What you can do is make the claim precise enough to be wrong: *given* that the
+implementation matches the model, *given* parameters in this region, and *given*
+agents who maximise money over one epoch, honest play is a strict equilibrium in
+two of three sub-games and a weak one in the third — where no bond makes it
+strict, because a sub-threshold cartel is behaviourally identical to honest
+members.
+
+Each of those three "given"s is a place the argument can fail, and only the
+second has been narrowed. Saying which is which is the useful output. A green
+tick would not be.
