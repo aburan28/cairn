@@ -54,7 +54,7 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 876 tests, no network required
+cargo test                    # 933 tests, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
@@ -294,6 +294,16 @@ ladder from individual rationality up to k-resilience and sybil-proofness, and
 better-reply dynamics for where a population *lands* rather than where it could
 rest.
 
+And the verdict is a point, which is the weakest form of the claim. `--robustness`
+walks each parameter outward until the report stops passing, in both directions —
+`fraud_rate` breaks the mechanism by getting *smaller*, so a one-directional
+search would call it safe. The result contradicts where the prose spends its
+attention: **the four tightest constraints are all custody.** Verification, the
+sub-game with the interesting structural argument, survives a sixteenfold error
+in the cost of a check; custody does not survive a quarter. No passing verdict
+would have said so. See [proving-it.md](docs/proving-it.md) for what that does
+and does not establish.
+
 ```
 $ proofwork incentives --canary-rate 0
 
@@ -338,44 +348,77 @@ proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
 proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
 ```
 
-**At rest, the log is sealed line by line** with ChaCha20-Poly1305. Per line, not
-per file, because the log is append-only and encrypting it as a unit would make
-every append an `O(n)` rewrite. The AEAD's associated data binds each line's
-position, so a reordered or spliced log fails to decrypt at the exact line rather
-than merely failing the chain later.
+### `src/swarm/`: piece-level transfer and a DHT, alongside `p2p`
 
-This does not contradict public verifiability, and the distinction is *whose
-copy*: artifacts the network publishes stay readable — encrypt those and you are
-back to trusting an operator — while a node's own disk is its own business. An
-encrypting node serves exactly what a non-encrypting one serves, and
+Two things here that `src/p2p/` does not have, and one honest overlap.
 
-> **encryption changes no hash, no `prev` link, no Merkle root, and no audit
-> result.** The chain covers plaintext; sealing is storage.
+**A Kademlia DHT** (`src/swarm/dht.rs`) for the question a fetch actually asks:
+*who holds digest `D` right now*. `p2p::discovery` answers which peers exist;
+without a provider lookup, finding a blob means asking everyone. XOR metric,
+k-buckets, provider records with expiry, and the α-parallel iterative lookup as a
+pure state machine — convergence and termination asserted against a synthetic
+200-node network built from real routing tables.
 
-**The key defaults to outside the data directory** (`~/.proofwork/key`), because
-a key beside its ciphertext looks fine right up until the folder is synced
-somewhere else — and then it was never encryption. `sync` refuses to copy a key
-it finds inside a store, detecting them by content rather than filename, and
-withholds the plaintext backup `store encrypt` leaves behind. Optional argon2id
-passphrase wrapping, with the cost parameters stored in the file so raising the
-defaults later does not orphan existing keys.
+The k-bucket policy is the part worth reading twice, because it is backwards from
+every cache written by reflex: when a bucket is full the **oldest still-live**
+contact wins and the newcomer is discarded. Longevity is the one thing an
+attacker flooding fresh identities cannot manufacture. So `insert` does not
+evict — it returns the contact to *probe* and lets the caller decide after
+actually trying it, which keeps the policy testable without a network.
 
-**The size cap never evicts the log.** A cap on a store holding the only copy of
-a hash-linked log is an instruction to destroy evidence, and "delete the oldest
-thing" would eat the log first. Eviction touches re-fetchable content only; when
-that is not enough the answer is a refusal, *before* anything is deleted:
+DHTs earned a bad security reputation honestly, and it does not transfer here:
 
-```
-error: store limit of 100 B cannot hold 1.8 KiB of data that must not be deleted
-(the log and anything beside it). Raise the limit or move the store; proofwork
-will not prune a hash-linked log to fit
-```
+> **Every DHT answer is a hint. The digest decides.**
 
-A cap smaller than your log stops your node. It does not prune your log.
+A lying provider record costs one wasted dial, checked against a digest the log
+fixed before the lookup started. Eclipse costs *liveness*, never correctness.
+Node IDs are hashes of ed25519 public keys, so claiming one costs a keypair and a
+signature — S/Kademlia's crypto-ID mitigation, free from the identity layer.
 
-And the cost of eviction is not disk — it is that evicted content can no longer
-answer an availability challenge, which in a network that pays for availability
-is a slash. `store gc` names every path it dropped for exactly that reason.
+**Piece-level transfer** (`piece.rs`, `wire.rs`) — manifests of piece hashes,
+bitfields, rarest-first, bounded pipelining, tit-for-tat choking, endgame with
+cancels. Piece hashes buy not trust (anyone can compute a manifest) but **blame**:
+a bad piece is localised to one peer instead of costing the whole download. And
+rarest-first is really a *durability* rule rather than a throughput trick — it
+prevents the last-copy state the availability mechanism pays to avoid.
+
+**The overlap, and what was done about it.** The DHT is no longer duplicated:
+the metric, the k-buckets, the iterative lookup and the provider store live in
+`src/dht.rs`, generic over a contact type, and `swarm::dht` and `p2p::dht` are
+both instantiations of it. `p2p::dht` is the one the daemon runs: a session
+asks which of the blobs this node wants the peer holds, and `Service::peers_for`
+then asks a peer that said yes instead of asking three at random.
+
+Asks, not announces, and that is the interesting constraint. `p2p::code` already
+refuses to offer an inventory of held blobs, because that list is a list of the
+objectives a node is working on. Building a DHT by publishing it would spend
+exactly the privacy `code` declined to spend, so holdership is pulled: a node
+answers only for addresses the peer named, and the set it names is the
+`code_want` already sent on that connection. The round adds routing knowledge at
+no additional disclosure.
+
+Two details that are specific rather than incidental. A `PeerId` is already
+`sha256(McEliece public key)`, so it *is* the Kademlia id — identity is
+self-certifying through the handshake, with no signature needed. And a contact
+deliberately does not carry the key, because that key is 261,120 bytes and a
+full routing table holding one per contact would cost about 1.3 GB; the key
+comes from the address book at dial time, which is why a `p2p` routing answer is
+a hint checked by dialling rather than a proof.
+
+What remains duplicated is `swarm::tcp` and `swarm::discovery`: a second
+transport and a second address book beside `p2p::transport` and
+`p2p::discovery`, built before those landed and not wired into the CLI. They
+resolve blobs through `crate::blobs`, so there is exactly one blob store — but
+two transports is one more than a repo should carry, and `swarm::discovery`'s
+signed peer records are exactly the peer-list exchange `p2p` is missing. See
+[discovery.md](docs/discovery.md) for the design and the survey, including why
+encrypted DNS answers a different question than the one people ask it.
+
+One caveat that argues against the whole module: `blobs::MAX_BLOB_BYTES` caps a
+blob at 1 MiB, which is four pieces. At that size rarest-first and choking buy
+nothing, and `p2p::code`'s whole-blob transfer is the right call. The swarm
+machinery is sized for a constraint this design does not currently have.
+
 
 ## Censorship resistance
 
@@ -453,6 +496,7 @@ src/                 Rust implementation (primary)
   sealed.rs          sealed submissions, openable without the submitter
   incentive/         the node-operator mechanism, and the harness that evaluates it
   store/             at-rest encryption, the data directory, the size cap, the mirror
+  swarm/             piece-level transfer and a Kademlia DHT, alongside p2p/
 reference/python/    Python reference implementation (183 tests)
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
@@ -472,6 +516,7 @@ examples/            worked objectives with real artifacts
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
+- [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake

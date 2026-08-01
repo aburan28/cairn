@@ -79,14 +79,12 @@ once per validator. "Cross-verifier agreement" multiplies by the number of
 verifiers *by construction*. "Occasional expensive audits" is an admission that
 `V` has a heavy tail.
 
-The same arithmetic already binds this repo elsewhere. Node rewards are a fee on
-settlement, so a settled artifact must pay for its own re-verification: at the
-reference parameters in [node-incentives.md](node-incentives.md) — a 5% fee, half
-of it to verification, 100 nodes at a verification cost of 200 — the break-even is
-`100 × 200 / (1/40) = 800,000` units of settled value per artifact under full
-redundancy. The conclusion transfers: **redundant verification is affordable for a
-market that settles a few valuable things and unaffordable for a chain that
-validates every block.**
+This is the same arithmetic as the decomposition floor in
+[knowledge-store.md](knowledge-store.md), where the reference parameters put the
+break-even at 800,000 units of settled value per artifact under full redundancy.
+The conclusion transfers: **redundant verification is affordable for a market
+that settles a few valuable things and unaffordable for a chain that validates
+every block.**
 
 The fix is sampling — but sampled verification is exactly what makes consensus
 probabilistic about *validity*, not just about ordering, and that is a different

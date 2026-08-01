@@ -434,3 +434,139 @@ fn the_receiver_reaches_the_same_state_whatever_order_records_arrive_in() {
     assert_eq!(forward.audit(true), Vec::<String>::new());
     assert_eq!(backward.audit(true), Vec::<String>::new());
 }
+
+#[test]
+fn a_dialling_node_learns_who_holds_a_blob_and_asks_that_peer_next() {
+    // The gap this closes: `p2p::code` is need-driven fetch with no way to
+    // choose *whom* to need it from, so a node asks whoever the random dial
+    // sample turned up. Here alice learns, from the session itself, that bob
+    // holds the capset checker.
+    //
+    // Note what alice has to do to learn it: *ask*. There is no inventory
+    // message -- `code` refuses one on privacy grounds and this round does not
+    // reintroduce it -- so alice only hears about blobs she named, and the
+    // answer is attributed to the session's peer id rather than to anything in
+    // the message body. See `p2p::dht`.
+    let objective = capset_objective();
+
+    let bob_identity = Arc::new(PeerIdentity::generate());
+    let bob_public = bob_identity.to_public();
+    let bob_service = Service::new(bob_identity);
+    let listener = bob_service
+        .listen("127.0.0.1:0".parse().expect("loopback"))
+        .expect("listen");
+    let bob_addr = listener.local_addr().expect("bound address");
+    let endpoint = Endpoint::new(bob_addr, bob_public.clone());
+
+    let bob_objective = objective.clone();
+    let bob_thread = thread::spawn(move || {
+        let mut bob = node("bob-dht");
+        bob.post_objective(&bob_objective, TS).expect("post");
+        // Bob is the funder, so he is the one node that certainly has the
+        // checker on disk. Publishing moves it into the content-addressed store,
+        // which is what makes him a *provider* rather than merely an owner.
+        let published = bob.publish_local_code();
+        assert!(published > 0, "bob published nothing to serve");
+        bob_service
+            .accept_node_once(&listener, &mut bob)
+            .expect("bob's round");
+        bob.registry().blobs().addresses()
+    });
+
+    // Alice must want the blob before she can learn who has it, so she posts
+    // the same objective: that is what puts the checker in her want set. She
+    // then both fetches it and records bob as a holder, because the DHT round
+    // reuses the set the code round asked for rather than what is still missing
+    // afterwards -- see `Service::exchange_dht_round`.
+    //
+    // Her verifier root is an empty scratch directory, not the repository. With
+    // the repository as root she resolves the checker by path and needs nothing,
+    // which is the shipped-tree case and not the one this is about.
+    // Removed and recreated, not just created: the blob alice fetches lands in
+    // a store under this root, and a leftover from the previous run would mean
+    // she needs nothing and the test passes once and never again.
+    let empty_root = repo_root().join("target").join("p2p-tests").join("no-root");
+    let _ = std::fs::remove_dir_all(&empty_root);
+    std::fs::create_dir_all(&empty_root).expect("empty root");
+    let mut alice = Node::new(
+        Ledger::open(scratch("alice-dht")).expect("open ledger"),
+        empty_root,
+    );
+    alice.post_objective(&objective, TS).expect("post");
+    assert!(
+        !alice.missing_code().is_empty(),
+        "alice already holds the checker, so the ask would be empty"
+    );
+    let alice_service = Service::new(Arc::new(PeerIdentity::generate()));
+    alice_service
+        .dial_node_once(&endpoint, &mut alice)
+        .expect("alice's round");
+
+    let bob_holds = bob_thread.join().expect("bob's thread");
+    assert!(
+        !bob_holds.is_empty(),
+        "bob holds no blobs to tell alice about"
+    );
+
+    // Alice heard the announcement, and attributed it to the peer she was
+    // actually talking to.
+    let now = proofwork::time::unix_seconds();
+    let (holders, _) =
+        alice_service.with_directory(|directory| directory.lookup_providers(&bob_holds[0], now));
+    assert_eq!(
+        holders.len(),
+        1,
+        "alice recorded no provider for bob's blob"
+    );
+    assert_eq!(
+        holders[0].peer_id(),
+        bob_public.id(),
+        "the provider record names a peer alice never spoke to"
+    );
+    assert_eq!(holders[0].addr, bob_addr);
+}
+
+#[test]
+fn a_needed_blob_puts_its_known_holder_ahead_of_the_random_sample() {
+    // The behaviour change, not just the bookkeeping: with something specific
+    // missing, the peer that announced holding it is dialled first.
+    let bob = Arc::new(PeerIdentity::generate()).to_public();
+    let carol = Arc::new(PeerIdentity::generate()).to_public();
+    let bob_addr = "127.0.0.1:9101".parse().expect("loopback");
+    let carol_addr = "127.0.0.1:9102".parse().expect("loopback");
+
+    let mut service = Service::new(Arc::new(PeerIdentity::generate()));
+    service.add_bootstrap(Endpoint::new(bob_addr, bob.clone()));
+    service.add_bootstrap(Endpoint::new(carol_addr, carol));
+
+    let wanted = "ab".repeat(32);
+    // Announced against the same clock `peers_for` reads. Announcing at zero
+    // instead looks like it works and does not: the record expires 1800 seconds
+    // after the epoch, `candidates` falls through to the nearest-peer list, and
+    // which peer that is depends on two randomly generated ids.
+    let now = proofwork::time::unix_seconds();
+    let mut needs = std::collections::BTreeSet::new();
+    needs.insert(wanted.clone());
+    service.with_directory(|directory| {
+        directory.record_tell(
+            bob.id(),
+            bob_addr,
+            &needs,
+            std::slice::from_ref(&wanted),
+            now,
+        );
+    });
+
+    let chosen = service.peers_for(&needs, 1);
+    assert_eq!(chosen.len(), 1);
+    assert_eq!(
+        chosen[0].peer.id(),
+        bob.id(),
+        "the node known to hold it was not asked first"
+    );
+
+    // And with nothing missing it is the plain random sample again, so the DHT
+    // costs nothing in the steady state.
+    let sampled = service.peers_for(&std::collections::BTreeSet::new(), 2);
+    assert_eq!(sampled.len(), 2);
+}

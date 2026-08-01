@@ -1,16 +1,19 @@
 //! Message driver for one encrypted connection.
 //!
-//! Three families run over the same session and never share a frame. Records use
+//! Four families run over the same session and never share a frame. Records use
 //! [`RECORD_CONTEXT`], populations use [`super::pop::CONTEXT`], verifier code
-//! uses [`super::code::CONTEXT`], and the AEAD binds the context into the tag —
-//! so a frame sealed for one family cannot be opened as another even by a peer
-//! that wants to. See [`super::pop`] and [`super::code`] for why that separation
-//! is a security boundary rather than housekeeping.
+//! uses [`super::code::CONTEXT`], provider lookup uses
+//! [`super::dht::CONTEXT`], and the AEAD binds the context into the tag — so a
+//! frame sealed for one family cannot be opened as another even by a peer that
+//! wants to. See [`super::pop`] and [`super::code`] for why that separation is a
+//! security boundary rather than housekeeping.
 //!
-//! The order on one connection is records, then code, then populations, and it is
-//! not arbitrary — see [`reconcile_code`].
+//! The order on one connection is records, then code, then the DHT, then
+//! populations, and it is not arbitrary — see [`reconcile_code`] for the first
+//! boundary and [`exchange_dht`] for the third.
 
 use super::code::{self, CodeError, CodeLimits, CodeMessage, CodeReport};
+use super::dht::{DhtError, DhtMessage, Directory, MAX_ASK_ADDRESSES};
 use super::pop::{self, PopError, PopLimits, PopMessage, PopReport};
 use super::sync::{Message, Peer, SyncError};
 use super::transport::{Connection, TransportError};
@@ -28,6 +31,7 @@ pub enum SessionError {
     Sync(SyncError),
     Pop(PopError),
     Code(CodeError),
+    Dht(DhtError),
     Protocol(String),
 }
 
@@ -38,6 +42,7 @@ impl fmt::Display for SessionError {
             SessionError::Sync(e) => write!(f, "sync: {e}"),
             SessionError::Pop(e) => write!(f, "population: {e}"),
             SessionError::Code(e) => write!(f, "verifier code: {e}"),
+            SessionError::Dht(e) => write!(f, "dht: {e}"),
             SessionError::Protocol(e) => write!(f, "protocol: {e}"),
         }
     }
@@ -61,6 +66,11 @@ impl From<PopError> for SessionError {
 impl From<CodeError> for SessionError {
     fn from(e: CodeError) -> Self {
         Self::Code(e)
+    }
+}
+impl From<DhtError> for SessionError {
+    fn from(e: DhtError) -> Self {
+        Self::Dht(e)
     }
 }
 
@@ -242,6 +252,73 @@ pub fn reconcile_code(
     let mut report = code::admit(store, needs, incoming);
     report.served = served_count;
     Ok(report)
+}
+
+/// Ask a peer which of the blobs this node needs it holds, and answer the same
+/// question in return.
+///
+/// Four messages, mirroring [`reconcile_code`]: ask, ask, tell, tell. The shape
+/// is deliberate and it is not an announcement round — see [`super::dht`]. A
+/// node discloses holdership only for addresses the peer explicitly named, and
+/// in a session it has already named them, because the identical set went out as
+/// a `code_want` moments earlier. So this round adds routing knowledge at no
+/// additional disclosure, which is what lets it coexist with [`super::code`]'s
+/// refusal to offer an inventory.
+///
+/// # Why the answer is not believed about anybody else
+///
+/// The peer's identity comes from `connection.remote()`, which the handshake
+/// derived from a key the peer had to hold to key the channel up. A `Tell` has
+/// no sender field, so there is nothing to forge and no way to claim holdership
+/// on a third party's behalf.
+///
+/// # `dialable` is not the socket's peer address
+///
+/// It is the address this node would use to *reach* the peer, which for an
+/// inbound connection is not the source port the kernel reports — that is an
+/// ephemeral port belonging to a socket about to close. A caller with no
+/// dialable address passes `None`, and the answer is read and dropped rather
+/// than stored: a provider record nobody can act on is worse than none, because
+/// it occupies a slot a usable one could have had.
+///
+/// Runs even when `needs` is empty, because the peer's own ask still deserves an
+/// answer — a node that stopped talking the moment it wanted nothing would be
+/// useless to every peer that wants something from it.
+///
+/// Returns how many provider records were stored.
+pub fn exchange_dht(
+    connection: &mut Connection,
+    directory: &mut Directory,
+    needs: &BTreeSet<String>,
+    held: &BTreeSet<String>,
+    dialable: Option<std::net::SocketAddr>,
+    now: u64,
+) -> Result<usize, SessionError> {
+    let asked: BTreeSet<String> = needs.iter().take(MAX_ASK_ADDRESSES).cloned().collect();
+    let mine = DhtMessage::Ask {
+        addresses: asked.iter().cloned().collect(),
+    };
+    connection.send(&mine.encode(), super::dht::CONTEXT)?;
+
+    let their_ask = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+        DhtMessage::Ask { addresses } => addresses,
+        _ => return Err(SessionError::Protocol("expected dht_ask".into())),
+    };
+    let answer = DhtMessage::Tell {
+        addresses: Directory::answer_ask(&their_ask, held),
+    };
+    connection.send(&answer.encode(), super::dht::CONTEXT)?;
+
+    let their_tell = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+        DhtMessage::Tell { addresses } => addresses,
+        _ => return Err(SessionError::Protocol("expected dht_tell".into())),
+    };
+
+    let remote = connection.remote();
+    let Some(addr) = dialable else {
+        return Ok(0);
+    };
+    Ok(directory.record_tell(remote, addr, &asked, &their_tell, now))
 }
 
 fn send_pop(connection: &mut Connection, message: PopMessage) -> Result<(), SessionError> {
