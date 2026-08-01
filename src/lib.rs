@@ -23,6 +23,7 @@ pub mod blobs;
 pub mod canonical;
 pub mod checkpoint;
 pub mod crypto;
+pub mod dht;
 pub mod frontier;
 pub mod gossip;
 pub mod incentive;

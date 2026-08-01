@@ -1,8 +1,8 @@
-//! Kademlia: finding *who has a blob* in `O(log n)` instead of by asking everyone.
+//! Kademlia over signed peer records: `swarm`'s instantiation of [`crate::dht`].
 //!
-//! [`super::discovery`] answers "which peers exist". This answers the question
-//! `blob fetch` actually has -- **who holds digest `D` right now** -- and the two
-//! are different problems that want different structures:
+//! [`super::discovery`] answers "which peers exist". This answers the question a
+//! fetch actually has -- **who holds digest `D` right now** -- and the two are
+//! different problems that want different structures:
 //!
 //! | | churn | shape | where it belongs |
 //! |---|---|---|---|
@@ -11,10 +11,27 @@
 //!
 //! Without this, a fetch dials every peer in the address book and asks each one.
 //! That is flooding: fine at ten peers, hopeless at ten thousand, and it gets
-//! worse exactly as the network gets more useful. Kademlia turns it into
-//! `O(log n)` hops by making *distance* something you can compute.
+//! worse exactly as the network gets more useful.
 //!
-//! # Why this is safe here in a way it usually is not
+//! # What is here, and what moved
+//!
+//! The algorithm is not here. The XOR metric, the `k`-bucket policy, the
+//! iterative lookup and the provider store live in [`crate::dht`], because
+//! [`crate::p2p::dht`] needs the same ones and two copies of a subtle algorithm
+//! become two different algorithms. What is here is the part that is genuinely
+//! this stack's: **what a contact is**, and **what makes a provider record
+//! believable**.
+//!
+//! # A contact carries its own proof
+//!
+//! A [`Contact`] is a signed peer record. The signature travels with it so a
+//! routing answer can be *relayed*: a DHT whose contacts were bare addresses
+//! would make every hop hearsay, and the asker would have to trust the whole path
+//! rather than none of it. At 32 bytes of key and 64 of signature that is cheap
+//! here -- [`crate::p2p::dht`] cannot afford the same trick and the contrast is
+//! documented there.
+//!
+//! # Why this is safe in a way DHTs usually are not
 //!
 //! DHTs have a bad security reputation, and it is deserved in the systems that
 //! made it. BitTorrent's DHT can hand you a poisoned answer and you have no way
@@ -36,190 +53,25 @@
 //!   observation: a sybil that wins the routing table still cannot produce bytes
 //!   that hash correctly.
 //!
-//! That is the argument for building it: the content addressing and the signed
-//! records make a DHT *safe to get wrong*, which is not true of most places one
-//! is deployed.
-//!
 //! # Node IDs are public keys, which is S/Kademlia's fix for free
 //!
-//! A [`NodeId`] is the SHA-256 of an ed25519 public key, and every contact
-//! carries the signed record that proves it. So a node cannot claim an ID it does
-//! not hold the key for, and the "generate IDs until one lands next to the key I
-//! want to eclipse" attack costs a keypair *and a signature* per attempt rather
-//! than a counter increment. S/Kademlia proposes crypto puzzles for exactly this;
-//! here the identity layer already provided it.
+//! A node id is the SHA-256 of an ed25519 public key, and every contact carries
+//! the signed record that proves it. So a node cannot claim an ID it does not
+//! hold the key for, and the "generate IDs until one lands next to the key I want
+//! to eclipse" attack costs a keypair *and a signature* per attempt rather than a
+//! counter increment. S/Kademlia proposes crypto puzzles for exactly this; here
+//! the identity layer already provided it.
 //!
 //! Binding IDs to something genuinely scarce -- the bond in
 //! [`crate::incentive`] -- is the stronger version and is not built. Keys are
 //! cheap; stake is not.
-//!
-//! # The k-bucket policy is the anti-eclipse mechanism, not the routing
-//!
-//! Kademlia's routing table keeps `K` contacts per distance band, and the rule
-//! that matters is what happens when a bucket is **full**: the *oldest still-live*
-//! contact wins and the newcomer is discarded. That is backwards from every cache
-//! anyone writes by reflex, and it is the whole defence -- an attacker flooding
-//! fresh identities cannot displace nodes that have been reachable for hours,
-//! because longevity is the one thing flooding cannot manufacture.
-//!
-//! [`RoutingTable::insert`] therefore does not silently evict. It returns
-//! [`Insertion::Pending`] naming the contact to probe, and the caller decides
-//! after actually trying it. Keeping that decision out of the data structure is
-//! what makes the policy testable without a network.
-//!
-//! # Determinism
-//!
-//! No clock and no randomness, like [`super::Swarm`]. A [`Lookup`] is a pure
-//! state machine -- responses in, next queries out -- so convergence, termination
-//! and the `alpha` parallelism are asserted on exact output rather than observed
-//! on a live network and hoped about. Real Kademlia randomises bucket refresh
-//! targets; that belongs in the driver with the clock.
-
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-
-use sha2::{Digest as _, Sha256};
 
 use super::discovery::{DiscoveryError, PeerRecord};
 use crate::crypto::identity::SignedRecord;
 
-/// Contacts kept per distance band. Kademlia's `k`.
-///
-/// Twenty is the paper's number and the one every deployment kept, for a reason
-/// worth stating: it is chosen so that with high probability at least one contact
-/// per bucket is still alive after an hour of churn. It is a redundancy
-/// parameter, not a performance one.
-pub const K: usize = 20;
-
-/// Lookups in flight at once. Kademlia's `alpha`.
-///
-/// Three, again from the paper. Above one it hides a slow peer; too far above it
-/// and a lookup floods more of the network than it saves.
-pub const ALPHA: usize = 3;
-
-/// Bits in a node id, and therefore the number of buckets.
-pub const ID_BITS: usize = 256;
-
-/// Provider records one node will hold for one key.
-pub const MAX_PROVIDERS: usize = 20;
-
-/// Keys one node will hold provider records for.
-pub const MAX_KEYS: usize = 4096;
-
-/// A point in the 256-bit keyspace: a node, or a blob.
-///
-/// One type for both on purpose. Kademlia's trick is that content and nodes share
-/// a metric space, so "who is near this blob" is the same computation as "who is
-/// near this node" and one routing table serves both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct NodeId([u8; 32]);
-
-impl NodeId {
-    /// The id of a node holding this public key.
-    pub fn of_key(public_key: &[u8; 32]) -> NodeId {
-        let mut hasher = Sha256::new();
-        hasher.update(public_key);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&hasher.finalize());
-        NodeId(out)
-    }
-
-    /// The keyspace point of a blob, from its `sha256:` digest.
-    ///
-    /// The digest *is* the key -- no second hash. Hashing it again would put the
-    /// blob at a point nobody could compute without this crate, and the whole
-    /// value of content addressing is that anybody can.
-    pub fn of_digest(digest: &str) -> Option<NodeId> {
-        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
-        if hex.len() != 64 {
-            return None;
-        }
-        let mut out = [0u8; 32];
-        for (index, slot) in out.iter_mut().enumerate() {
-            *slot = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
-        }
-        Some(NodeId(out))
-    }
-
-    /// A raw keyspace point, as it travels on the wire.
-    pub fn from_bytes(bytes: [u8; 32]) -> NodeId {
-        NodeId(bytes)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    pub fn to_hex(self) -> String {
-        self.0.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    /// XOR distance.
-    ///
-    /// The metric the whole design rests on, and its properties are why: it is
-    /// symmetric (`d(a,b) == d(b,a)`, so a node learns about the peers that
-    /// query it and the table fills itself), and unidirectional (for any point
-    /// and any distance there is exactly one node at it, so lookups from
-    /// different starts converge on the same path and caching works).
-    pub fn distance(self, other: NodeId) -> Distance {
-        let mut out = [0u8; 32];
-        for (index, slot) in out.iter_mut().enumerate() {
-            *slot = self.0[index] ^ other.0[index];
-        }
-        Distance(out)
-    }
-
-    /// Which bucket `other` falls in, or `None` for oneself.
-    ///
-    /// The index of the highest differing bit, so bucket `i` holds nodes sharing
-    /// exactly `255 - i` leading bits. Distant nodes share a bucket and near ones
-    /// are finely divided, which is what makes the table `O(log n)` in size while
-    /// still resolving the neighbourhood a lookup terminates in.
-    pub fn bucket(self, other: NodeId) -> Option<usize> {
-        let distance = self.distance(other);
-        let leading = distance.leading_zeros();
-        if leading == ID_BITS {
-            return None;
-        }
-        Some(ID_BITS - 1 - leading)
-    }
-}
-
-impl fmt::Display for NodeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", &self.to_hex()[..16])
-    }
-}
-
-/// An XOR distance, ordered as a big-endian 256-bit number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Distance([u8; 32]);
-
-impl Distance {
-    pub fn leading_zeros(&self) -> usize {
-        let mut count = 0;
-        for byte in self.0 {
-            if byte == 0 {
-                count += 8;
-            } else {
-                count += byte.leading_zeros() as usize;
-                break;
-            }
-        }
-        count
-    }
-
-    pub fn is_zero(&self) -> bool {
-        self.0.iter().all(|b| *b == 0)
-    }
-}
+pub use crate::dht::{Distance, Insertion, NodeId, ALPHA, ID_BITS, K, MAX_KEYS, MAX_PROVIDERS};
 
 /// A peer in the routing table: where it is, and the proof it said so.
-///
-/// The signed record travels with the contact so a routing answer can be
-/// *relayed*. A DHT whose contacts were bare addresses would make every hop
-/// hearsay, and the asker would have to trust the whole path rather than none of
-/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Contact {
     pub id: NodeId,
@@ -229,6 +81,9 @@ pub struct Contact {
 
 impl Contact {
     /// Verify a signed record and turn it into a contact.
+    ///
+    /// The only constructor, which is what makes "every contact in the table was
+    /// proved once" a property of the type rather than of the call sites.
     pub fn open(signed: &SignedRecord) -> Result<Contact, DiscoveryError> {
         let record = PeerRecord::open(signed)?;
         Ok(Contact {
@@ -239,155 +94,64 @@ impl Contact {
     }
 }
 
-/// What happened when a contact was offered to the table.
+impl crate::dht::Contact for Contact {
+    fn id(&self) -> NodeId {
+        self.id
+    }
+
+    /// The record's own sequence number, so a peer that moved supersedes itself
+    /// and a replayed old record never displaces a newer one.
+    fn seq(&self) -> u64 {
+        self.record.seq
+    }
+}
+
+/// A verified claim that some peer holds a blob.
+///
+/// A newtype rather than a bare [`SignedRecord`] for one reason: a `SignedRecord`
+/// can be decoded without being checked, and [`crate::dht::ProviderStore`] does
+/// not verify on insert. Making [`ProviderRecord::open`] the only way to obtain
+/// one moves "a store never holds a claim it could not prove" from a check that
+/// could be forgotten to an invariant that cannot be.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Insertion {
-    /// New, and there was room.
-    Added,
-    /// Already known; moved to the most-recently-seen end.
-    Refreshed,
-    /// The bucket is full. **Probe this contact.** If it answers, discard the
-    /// newcomer; if it does not, call [`RoutingTable::replace`].
-    ///
-    /// Returned rather than decided internally because the decision needs a
-    /// network round trip, and a data structure that performed one could not be
-    /// tested without a network.
-    Pending { probe: Box<Contact> },
-    /// The contact is this node.
-    Ignored,
+pub struct ProviderRecord {
+    id: NodeId,
+    signed: SignedRecord,
 }
 
-/// `K` contacts per distance band, oldest-live-wins.
-#[derive(Debug, Clone)]
-pub struct RoutingTable {
-    local: NodeId,
-    /// Least-recently-seen first, so the head is the eviction candidate and the
-    /// tail is the freshest -- which is the order Kademlia's policy reads in.
-    buckets: Vec<Vec<Contact>>,
-}
-
-impl RoutingTable {
-    pub fn new(local: NodeId) -> RoutingTable {
-        RoutingTable {
-            local,
-            buckets: vec![Vec::new(); ID_BITS],
-        }
+impl ProviderRecord {
+    pub fn open(signed: &SignedRecord) -> Result<ProviderRecord, DiscoveryError> {
+        PeerRecord::open(signed)?;
+        Ok(ProviderRecord {
+            id: NodeId::of_key(&signed.public_key),
+            signed: signed.clone(),
+        })
     }
 
-    pub fn local(&self) -> NodeId {
-        self.local
-    }
-
-    pub fn len(&self) -> usize {
-        self.buckets.iter().map(Vec::len).sum()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Offer a contact.
-    pub fn insert(&mut self, contact: Contact) -> Insertion {
-        let Some(index) = self.local.bucket(contact.id) else {
-            return Insertion::Ignored;
-        };
-        let bucket = &mut self.buckets[index];
-        if let Some(position) = bucket.iter().position(|held| held.id == contact.id) {
-            // Seen again: move to the fresh end, and take the newer record. A
-            // peer that moved is the same peer.
-            let mut existing = bucket.remove(position);
-            if contact.record.seq >= existing.record.seq {
-                existing = contact;
-            }
-            bucket.push(existing);
-            return Insertion::Refreshed;
-        }
-        if bucket.len() < K {
-            bucket.push(contact);
-            return Insertion::Added;
-        }
-        // Full. The oldest contact gets right of first refusal, which is the
-        // anti-eclipse rule: longevity is the one thing an attacker flooding
-        // fresh identities cannot manufacture.
-        Insertion::Pending {
-            probe: Box::new(bucket[0].clone()),
-        }
-    }
-
-    /// Evict a contact that failed its probe, and admit `contact` in its place.
-    ///
-    /// Returns whether the eviction happened. A `dead` that is no longer in the
-    /// table means somebody else already handled it, which is not an error.
-    pub fn replace(&mut self, dead: &NodeId, contact: Contact) -> bool {
-        let Some(index) = self.local.bucket(*dead) else {
-            return false;
-        };
-        let bucket = &mut self.buckets[index];
-        let Some(position) = bucket.iter().position(|held| held.id == *dead) else {
-            return false;
-        };
-        bucket.remove(position);
-        bucket.push(contact);
-        true
-    }
-
-    /// Drop a contact known to be gone.
-    pub fn remove(&mut self, id: &NodeId) -> bool {
-        let Some(index) = self.local.bucket(*id) else {
-            return false;
-        };
-        let bucket = &mut self.buckets[index];
-        match bucket.iter().position(|held| held.id == *id) {
-            Some(position) => {
-                bucket.remove(position);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// The `count` contacts nearest `target`, nearest first.
-    ///
-    /// The one query the routing table exists to answer: it is what a node
-    /// returns for `FIND_NODE`, and what seeds a [`Lookup`].
-    pub fn closest(&self, target: NodeId, count: usize) -> Vec<Contact> {
-        let mut all: Vec<(Distance, &Contact)> = self
-            .buckets
-            .iter()
-            .flatten()
-            .map(|contact| (contact.id.distance(target), contact))
-            .collect();
-        // Distance first; id breaks ties so the answer is total and reproducible
-        // rather than dependent on bucket iteration order.
-        all.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
-        all.into_iter()
-            .take(count)
-            .map(|(_, contact)| contact.clone())
-            .collect()
-    }
-
-    pub fn contacts(&self) -> impl Iterator<Item = &Contact> {
-        self.buckets.iter().flatten()
+    pub fn signed(&self) -> &SignedRecord {
+        &self.signed
     }
 }
+
+impl crate::dht::Provider for ProviderRecord {
+    fn provider(&self) -> NodeId {
+        self.id
+    }
+}
+
+/// `K` contacts per distance band, oldest-live-wins. See [`crate::dht`].
+pub type RoutingTable = crate::dht::RoutingTable<Contact>;
 
 /// One iterative lookup, as a pure state machine.
 ///
-/// Kademlia's convergence argument in code: repeatedly query the `alpha` closest
-/// unqueried nodes, keep the `k` closest seen, and stop when a round produces
-/// nothing nearer. Each hop at least halves the distance in expectation, so the
-/// whole thing terminates in `O(log n)` rounds.
+/// A thin wrapper rather than a type alias so the provider type stays
+/// [`SignedRecord`] at the boundary: callers on this side of the crate speak
+/// signed records, and the verified [`ProviderRecord`] is an internal detail of
+/// how the store keeps its invariant.
 #[derive(Debug, Clone)]
 pub struct Lookup {
-    target: NodeId,
-    /// Everything heard of, keyed by distance so the closest is always first.
-    shortlist: BTreeMap<Distance, Contact>,
-    queried: BTreeSet<NodeId>,
-    in_flight: BTreeSet<NodeId>,
-    /// Provider records collected on the way, for a `GET_PROVIDERS` lookup.
+    inner: crate::dht::Lookup<Contact, ProviderRecord>,
     providers: Vec<SignedRecord>,
-    alpha: usize,
-    k: usize,
 }
 
 impl Lookup {
@@ -396,102 +160,54 @@ impl Lookup {
     }
 
     pub fn with(target: NodeId, seeds: Vec<Contact>, alpha: usize, k: usize) -> Lookup {
-        let mut lookup = Lookup {
-            target,
-            shortlist: BTreeMap::new(),
-            queried: BTreeSet::new(),
-            in_flight: BTreeSet::new(),
+        Lookup {
+            inner: crate::dht::Lookup::with(target, seeds, alpha, k),
             providers: Vec::new(),
-            alpha: alpha.max(1),
-            k: k.max(1),
-        };
-        for seed in seeds {
-            lookup.consider(seed);
         }
-        lookup
     }
 
     pub fn target(&self) -> NodeId {
-        self.target
+        self.inner.target()
     }
 
-    fn consider(&mut self, contact: Contact) {
-        let distance = contact.id.distance(self.target);
-        self.shortlist.entry(distance).or_insert(contact);
-    }
-
-    /// The next contacts to query: up to `alpha` unqueried nodes among the `k`
-    /// closest known.
-    ///
-    /// Restricting to the `k` closest is what keeps a lookup from wandering: a
-    /// malicious peer returning a thousand distant contacts cannot make this node
-    /// query them, because they never enter the frontier.
     pub fn next_queries(&mut self) -> Vec<Contact> {
-        let frontier: Vec<Contact> = self
-            .shortlist
-            .values()
-            .take(self.k)
-            .filter(|contact| {
-                !self.queried.contains(&contact.id) && !self.in_flight.contains(&contact.id)
-            })
-            .take(self.alpha.saturating_sub(self.in_flight.len()))
-            .cloned()
-            .collect();
-        for contact in &frontier {
-            self.in_flight.insert(contact.id);
-        }
-        frontier
+        self.inner.next_queries()
     }
 
     /// Fold in an answer.
+    ///
+    /// Unverifiable provider records are **dropped, not refused**, and the
+    /// distinction matters: a hop that mixes one forged record into nine good
+    /// ones should cost the forgery and not the lookup.
     pub fn on_response(
         &mut self,
         from: NodeId,
         closer: Vec<Contact>,
         providers: Vec<SignedRecord>,
     ) {
-        self.in_flight.remove(&from);
-        self.queried.insert(from);
-        for contact in closer {
-            self.consider(contact);
-        }
-        for record in providers {
-            if !self
-                .providers
-                .iter()
-                .any(|held| held.public_key == record.public_key)
-            {
-                self.providers.push(record);
-            }
+        let opened: Vec<ProviderRecord> = providers
+            .iter()
+            .filter_map(|signed| ProviderRecord::open(signed).ok())
+            .collect();
+        let before = self.inner.providers().len();
+        self.inner.on_response(from, closer, opened);
+        for record in &self.inner.providers()[before..] {
+            self.providers.push(record.signed.clone());
         }
     }
 
-    /// A peer that did not answer.
-    ///
-    /// Marked queried, not forgotten: retrying a silent node is how a lookup
-    /// stops terminating.
     pub fn on_timeout(&mut self, from: NodeId) {
-        self.in_flight.remove(&from);
-        self.queried.insert(from);
+        self.inner.on_timeout(from);
     }
 
-    /// True when nothing is outstanding and the `k` closest have all been asked.
     pub fn is_done(&self) -> bool {
-        if !self.in_flight.is_empty() {
-            return false;
-        }
-        self.shortlist
-            .values()
-            .take(self.k)
-            .all(|contact| self.queried.contains(&contact.id))
+        self.inner.is_done()
     }
 
-    /// The `k` closest contacts found.
     pub fn closest(&self) -> Vec<Contact> {
-        self.shortlist.values().take(self.k).cloned().collect()
+        self.inner.closest()
     }
 
-    /// Provider records collected, in the order first heard.
     pub fn providers(&self) -> &[SignedRecord] {
         &self.providers
     }
@@ -499,16 +215,14 @@ impl Lookup {
 
 /// Who claims to hold what, with an expiry.
 ///
-/// Expiry is the reason this cannot live in the log. A provider that goes away
-/// stops republishing and its record lapses; an append-only structure has no way
-/// to express "no longer true", and would advertise a dead node forever.
-///
-/// Time is supplied by the caller rather than read here, so the store stays as
-/// testable as everything else in this module -- and because a node's clock is
-/// not evidence, which is the same rule `replay` enforces on verification.
+/// Wraps [`crate::dht::ProviderStore`] to keep the verifying boundary: `announce`
+/// takes a raw [`SignedRecord`] and returns an error rather than a `false` when
+/// it cannot be proved, because "I refused this" and "I had no room" are
+/// different answers and a caller that conflates them cannot tell a hostile peer
+/// from a full table.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderStore {
-    keys: BTreeMap<NodeId, Vec<(SignedRecord, u64)>>,
+    inner: crate::dht::ProviderStore<ProviderRecord>,
 }
 
 impl ProviderStore {
@@ -517,79 +231,36 @@ impl ProviderStore {
     }
 
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.inner.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.inner.is_empty()
     }
 
     /// Record that the signer of `record` holds `key`, until `expires_at`.
-    ///
-    /// Verified here, so a store never holds a claim it could not prove. Returns
-    /// whether anything was stored.
     pub fn announce(
         &mut self,
         key: NodeId,
         record: &SignedRecord,
         expires_at: u64,
     ) -> Result<bool, DiscoveryError> {
-        PeerRecord::open(record)?;
-        if self.keys.len() >= MAX_KEYS && !self.keys.contains_key(&key) {
-            return Ok(false);
-        }
-        let entries = self.keys.entry(key).or_default();
-        if let Some(existing) = entries
-            .iter_mut()
-            .find(|(held, _)| held.public_key == record.public_key)
-        {
-            existing.0 = record.clone();
-            existing.1 = existing.1.max(expires_at);
-            return Ok(true);
-        }
-        if entries.len() >= MAX_PROVIDERS {
-            // Drop the soonest to expire, which is the one least likely to still
-            // be there -- never "whatever arrived last", which a flooder picks.
-            if let Some(position) = entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, (_, at))| *at)
-                .map(|(index, _)| index)
-            {
-                if entries[position].1 >= expires_at {
-                    return Ok(false);
-                }
-                entries.remove(position);
-            }
-        }
-        entries.push((record.clone(), expires_at));
-        Ok(true)
+        let opened = ProviderRecord::open(record)?;
+        Ok(self.inner.announce(key, &opened, expires_at))
     }
 
     /// Who holds `key`, as of `now`.
     pub fn providers(&self, key: NodeId, now: u64) -> Vec<SignedRecord> {
-        self.keys
-            .get(&key)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|(_, at)| *at > now)
-                    .map(|(record, _)| record.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.inner
+            .providers(key, now)
+            .into_iter()
+            .map(|record| record.signed)
+            .collect()
     }
 
     /// Drop everything that has lapsed. Returns how many records went.
     pub fn expire(&mut self, now: u64) -> usize {
-        let mut dropped = 0;
-        for entries in self.keys.values_mut() {
-            let before = entries.len();
-            entries.retain(|(_, at)| *at > now);
-            dropped += before - entries.len();
-        }
-        self.keys.retain(|_, entries| !entries.is_empty());
-        dropped
+        self.inner.expire(now)
     }
 }
 
@@ -597,6 +268,7 @@ impl ProviderStore {
 mod tests {
     use super::*;
     use crate::crypto::identity::Identity;
+    use std::collections::BTreeMap;
     use std::net::SocketAddr;
 
     fn identity(n: u64) -> Identity {
@@ -630,18 +302,18 @@ mod tests {
 
     #[test]
     fn the_bucket_index_is_the_highest_differing_bit() {
-        let zero = NodeId([0u8; 32]);
+        let zero = NodeId::from_bytes([0u8; 32]);
         // Flipping the top bit is the most distant band.
         let mut top = [0u8; 32];
         top[0] = 0x80;
-        assert_eq!(zero.bucket(NodeId(top)), Some(255));
+        assert_eq!(zero.bucket(NodeId::from_bytes(top)), Some(255));
         // Flipping the bottom bit is the nearest.
         let mut bottom = [0u8; 32];
         bottom[31] = 0x01;
-        assert_eq!(zero.bucket(NodeId(bottom)), Some(0));
+        assert_eq!(zero.bucket(NodeId::from_bytes(bottom)), Some(0));
         let mut mid = [0u8; 32];
         mid[0] = 0x01;
-        assert_eq!(zero.bucket(NodeId(mid)), Some(248));
+        assert_eq!(zero.bucket(NodeId::from_bytes(mid)), Some(248));
     }
 
     #[test]
@@ -667,7 +339,7 @@ mod tests {
         // reflex: an attacker flooding fresh identities cannot displace nodes
         // that have been reachable for hours, because longevity is the one thing
         // flooding cannot manufacture.
-        let local = NodeId([0u8; 32]);
+        let local = NodeId::from_bytes([0u8; 32]);
         let mut table = RoutingTable::new(local);
 
         // Fill one bucket. Contacts whose ids share a top bit land together.
@@ -706,7 +378,7 @@ mod tests {
 
     #[test]
     fn seeing_a_contact_again_refreshes_it_and_takes_the_newer_record() {
-        let local = NodeId([1u8; 32]);
+        let local = NodeId::from_bytes([1u8; 32]);
         let mut table = RoutingTable::new(local);
         let first = contact(5);
         assert_eq!(table.insert(first.clone()), Insertion::Added);
@@ -735,7 +407,7 @@ mod tests {
 
     #[test]
     fn closest_is_ordered_by_distance_and_is_reproducible() {
-        let local = NodeId([0u8; 32]);
+        let local = NodeId::from_bytes([0u8; 32]);
         let mut table = RoutingTable::new(local);
         for n in 0..60 {
             table.insert(contact(n));

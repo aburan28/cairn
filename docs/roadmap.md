@@ -78,10 +78,27 @@ behaviour ships and is tested, not that TLC has checked it.
       feeds it across connections, so lookups are one hop rather than `O(log n)`.
       Plus bucket refresh, provider republication, and announcing to the `k`
       nodes nearest a key rather than to whoever is on the line.
-- [ ] Fold `src/swarm/` into `src/p2p/` rather than running two networking
-      stacks. They were written independently against the same blob store; the
-      DHT and the signed records are what `p2p::discovery` lacks, and the
-      McEliece transport is what `swarm::tcp` lacks.
+- [x] **One Kademlia, not two** (`src/dht.rs`). The metric, the k-buckets, the
+      iterative lookup and the provider store are generic over a contact type;
+      `swarm::dht` and `p2p::dht` are instantiations. Written twice they would
+      have drifted, and the one part of a DHT that is genuinely subtle is the
+      part that must not.
+- [x] **Provider lookup in the daemon** (`src/p2p/dht.rs`). `p2p::code` is
+      need-driven fetch with no way to choose whom to ask, so the want set went
+      to whatever the random dial sample turned up. Now a session announces what
+      the node holds, and `Service::peers_for` asks a peer that said it has the
+      blob. A `PeerId` is already `sha256(public key)`, so it is the Kademlia id
+      unchanged -- and a contact deliberately does not carry the key, because a
+      McEliece public key is 261,120 bytes and a full table would cost 1.3 GB.
+      Holdership is pulled, not advertised: `p2p::code` refuses an inventory
+      message on privacy grounds and this does not reintroduce one -- a `Tell`
+      answers only what the peer asked, and the asked set is the `code_want`
+      already sent on that connection. Answers are attributed to the session,
+      never to the message body, which is what makes an unsigned record safe.
+- [ ] Fold the rest of `src/swarm/` into `src/p2p/`. The DHT is shared now; the
+      signed peer records and the piece machinery are not. `swarm::discovery` is
+      exactly the peer-list exchange `p2p` is missing, against a different
+      identity scheme, and the McEliece transport is what `swarm::tcp` lacks.
 - [ ] Peer identities in the log, so *identity* discovery stops being a separate
       bootstrap problem from obtaining the log. Identity is permanent and belongs
       there; provider records are not and must not.

@@ -382,12 +382,35 @@ a bad piece is localised to one peer instead of costing the whole download. And
 rarest-first is really a *durability* rule rather than a throughput trick — it
 prevents the last-copy state the availability mechanism pays to avoid.
 
-**The honest overlap.** `swarm::tcp` and `swarm::discovery` are a second
+**The overlap, and what was done about it.** The DHT is no longer duplicated:
+the metric, the k-buckets, the iterative lookup and the provider store live in
+`src/dht.rs`, generic over a contact type, and `swarm::dht` and `p2p::dht` are
+both instantiations of it. `p2p::dht` is the one the daemon runs: a session
+asks which of the blobs this node wants the peer holds, and `Service::peers_for`
+then asks a peer that said yes instead of asking three at random.
+
+Asks, not announces, and that is the interesting constraint. `p2p::code` already
+refuses to offer an inventory of held blobs, because that list is a list of the
+objectives a node is working on. Building a DHT by publishing it would spend
+exactly the privacy `code` declined to spend, so holdership is pulled: a node
+answers only for addresses the peer named, and the set it names is the
+`code_want` already sent on that connection. The round adds routing knowledge at
+no additional disclosure.
+
+Two details that are specific rather than incidental. A `PeerId` is already
+`sha256(McEliece public key)`, so it *is* the Kademlia id — identity is
+self-certifying through the handshake, with no signature needed. And a contact
+deliberately does not carry the key, because that key is 261,120 bytes and a
+full routing table holding one per contact would cost about 1.3 GB; the key
+comes from the address book at dial time, which is why a `p2p` routing answer is
+a hint checked by dialling rather than a proof.
+
+What remains duplicated is `swarm::tcp` and `swarm::discovery`: a second
 transport and a second address book beside `p2p::transport` and
 `p2p::discovery`, built before those landed and not wired into the CLI. They
 resolve blobs through `crate::blobs`, so there is exactly one blob store — but
-two networking stacks is one more than a repo should carry. The DHT is the piece
-worth keeping; the transport underneath it should be `p2p`'s. See
+two transports is one more than a repo should carry, and `swarm::discovery`'s
+signed peer records are exactly the peer-list exchange `p2p` is missing. See
 [discovery.md](docs/discovery.md) for the design and the survey, including why
 encrypted DNS answers a different question than the one people ask it.
 
