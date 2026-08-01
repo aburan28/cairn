@@ -50,6 +50,69 @@ behaviour ships and is tested, not that TLC has checked it.
 - [x] Objective schemas in `spec/` wired into `post` as a hard validation gate.
       The schema documents are the validator: both implementations interpret
       `spec/*.json` rather than reimplementing them, so the two cannot drift.
+- [x] **Piece-level blob transfer** (`src/swarm/`), in the BitTorrent shape:
+      pieces, a manifest of piece hashes, bitfields, rarest-first, bounded
+      pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver.
+      Library-only: no CLI subcommand drives it yet. It reads and writes the same
+      `src/blobs.rs` store `p2p::code` uses, and overlaps it: `p2p` already moves
+      pinned code whole, which is adequate while `blobs::MAX_BLOB_BYTES` is 1 MiB
+      — four pieces. The piece machinery is sized for the artifacts that cap does
+      not yet allow, so it is groundwork rather than a current need. The
+      objective's digest *is* the swarm id, so the ledger does the tracker's job
+      and there is nothing to sign.
+- [x] **Signed peer records** (`src/swarm/discovery.rs`) in the ENR shape --
+      identity is an ed25519 key, location is a hint signed by it, `seq`
+      supersedes -- plus peer exchange, so one address given once accumulates the
+      rest. This is the answer to "learning new peers is bootstrap-file only" in
+      the gossip entry above, and it is not yet wired into `p2p`'s address book.
+      Every hint source is equal because none is trusted, which is what makes DNS
+      optional rather than load-bearing. See [discovery.md](discovery.md).
+- [x] **A Kademlia DHT** (`src/swarm/dht.rs`) for the question a fetch actually
+      asks -- who holds digest `D` right now. Peer exchange answers which peers
+      exist; without provider lookup a fetch floods everyone it knows. XOR
+      metric, k-buckets with oldest-live-wins, provider store with expiry, and
+      the iterative lookup as a pure state machine. Safe to get wrong here in a
+      way it is not elsewhere: every answer is a hint and the digest decides, so
+      eclipse costs liveness and never correctness.
+- [ ] The multi-hop lookup driver. `Lookup` is built and tested; nothing yet
+      feeds it across connections, so lookups are one hop rather than `O(log n)`.
+      Plus bucket refresh, provider republication, and announcing to the `k`
+      nodes nearest a key rather than to whoever is on the line.
+- [x] **One Kademlia, not two** (`src/dht.rs`). The metric, the k-buckets, the
+      iterative lookup and the provider store are generic over a contact type;
+      `swarm::dht` and `p2p::dht` are instantiations. Written twice they would
+      have drifted, and the one part of a DHT that is genuinely subtle is the
+      part that must not.
+- [x] **Provider lookup in the daemon** (`src/p2p/dht.rs`). `p2p::code` is
+      need-driven fetch with no way to choose whom to ask, so the want set went
+      to whatever the random dial sample turned up. Now a session announces what
+      the node holds, and `Service::peers_for` asks a peer that said it has the
+      blob. A `PeerId` is already `sha256(public key)`, so it is the Kademlia id
+      unchanged -- and a contact deliberately does not carry the key, because a
+      McEliece public key is 261,120 bytes and a full table would cost 1.3 GB.
+      Holdership is pulled, not advertised: `p2p::code` refuses an inventory
+      message on privacy grounds and this does not reintroduce one -- a `Tell`
+      answers only what the peer asked, and the asked set is the `code_want`
+      already sent on that connection. Answers are attributed to the session,
+      never to the message body, which is what makes an unsigned record safe.
+- [ ] Fold the rest of `src/swarm/` into `src/p2p/`. The DHT is shared now; the
+      signed peer records and the piece machinery are not. `swarm::discovery` is
+      exactly the peer-list exchange `p2p` is missing, against a different
+      identity scheme, and the McEliece transport is what `swarm::tcp` lacks.
+- [ ] Peer identities in the log, so *identity* discovery stops being a separate
+      bootstrap problem from obtaining the log. Identity is permanent and belongs
+      there; provider records are not and must not.
+- [ ] Local multicast as a second hint source: genuinely zero-configuration on a
+      LAN, and cheap now that every source is interchangeable.
+- [ ] NAT traversal. Not discovery, and routinely confused with it -- knowing an
+      address does not mean you can reach it. Until then a node behind a home
+      router can fetch and cannot seed, which makes the network more centralised
+      than the protocol suggests.
+- [ ] A `blob` record kind announcing who holds what, which is the useful half —
+      that a blob exists is already implied by the objective.
+- [ ] Pay for seeding. Tit-for-tat covers the download phase and nothing covers
+      a node that has finished; a swarm of pure leeches transfers nothing. This
+      is the availability service in [node-incentives.md](node-incentives.md).
 - [x] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [x] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while

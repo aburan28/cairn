@@ -132,6 +132,45 @@ it, the log is still a bare `proofwork.jsonl` in the working directory, and
 existing operator's log on upgrade would be the worst possible way to introduce
 this.
 
+## Blobs: the bytes an objective pins by hash
+
+An objective commits to its checker by digest, and that digest is part of the
+objective's id. The digest used to be a *check* on a file the operator already
+happened to have, at a relative path under `--root`. So two nodes whose roots
+differed disagreed — one Accepts, the other returns Unavailable — and "anyone
+can re-derive every settled result from nothing but a copy of the log" quietly
+needed a copy of the verifier tree as well.
+
+[`src/blobs.rs`](../src/blobs.rs) closes that: the digest is a *name*, blobs live
+in `.proofwork/blobs`, and `blob ls | need | publish | gc` is the operator's view
+of what the log pins and what is missing. **The name is the hash**, so reads
+re-hash and refuse bytes that do not match the name they were filed under, and
+integrity needs no second record to keep in sync.
+
+A blob that is present but *corrupt* is `Unavailable`, never `Reject` and never
+`INVALID_SPEC`: a damaged local cache is a fact about that disk, and letting it
+refute honest work would be the same mistake as letting a missing Lean toolchain
+refute a proof.
+
+### Moving one between peers
+
+There are two paths, against the same store, and they overlap:
+
+- `p2p::code` moves a pinned blob **whole** over the existing McEliece session.
+  This is what the daemon uses, and at `blobs::MAX_BLOB_BYTES` — 1 MiB — it is
+  adequate.
+- [`src/swarm/`](../src/swarm/) moves one in the BitTorrent shape: pieces, a
+  manifest of piece hashes, bitfields, rarest-first, choking, endgame. It is
+  library-only — no CLI subcommand drives it yet — and sized for artifacts the
+  1 MiB cap does not currently allow. Groundwork, not a current need.
+
+What both get for free is the part BitTorrent cannot do: the digest an objective
+already commits to *is* the swarm id, so there is no tracker and nothing to sign.
+A manifest arrives from a stranger and is checked against a digest the log fixed
+before the transfer started.
+
+[discovery.md](discovery.md) is how a node finds a peer it was not given.
+
 ## The size cap
 
 ```sh
@@ -166,6 +205,30 @@ not cost you your cache on the way to failing.
 Anything under a directory this module does not recognise is classified pinned.
 A file it has never heard of is one whose loss it cannot reason about, so it does
 not get to delete it.
+
+### Blobs the log needs are pinned too
+
+A blob is reclaimable by construction — it is named by its content, so losing one
+is a re-download and never a lost record. That stops being true the moment an
+objective in the log pins it: evicting the only local copy of an evaluator turns
+this node into one that answers `Unavailable` for work it is paid to check, which
+under availability sampling is a slash rather than an inconvenience.
+
+Deliberately **not** a third class. The pin set moves individual blobs across the
+existing line, so the rule stays sayable in one sentence:
+
+> **A blob is reclaimable exactly when nothing needs it.**
+
+`store status` and `store gc` compute the set from the log, and a cap that cannot
+be met without one of those blobs gets the same refusal the log gets. **Every
+posted objective counts, settled or not** — `audit --rerun` re-verifies settled
+claims, so a node that dropped an evaluator when its objective closed would keep
+the ability to earn and lose the ability to prove. The cost is that the set only
+grows.
+
+A log that cannot be read is not treated as "nothing is pinned". That answer would
+let `gc` delete an evaluator on the strength of having been unable to check
+whether anything wanted it, so it is a refusal instead.
 
 ### Eviction order, and what it costs
 

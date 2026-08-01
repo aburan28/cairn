@@ -1,6 +1,7 @@
 //! High-level bootstrap and session orchestration.
 
 use super::code::{CodeLimits, CodeReport};
+use super::dht::{Directory, PeerContact};
 use super::discovery::{AddressBook, Endpoint};
 use super::handshake::{PeerId, PeerIdentity};
 use super::pop::{PopLimits, PopReport};
@@ -16,6 +17,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 /// Endpoints dialled per tick when the caller does not choose.
 ///
@@ -52,17 +54,26 @@ impl From<SessionError> for ServiceError {
     }
 }
 
-/// Owns the local identity and the non-consensus address book.
+/// Owns the local identity, the non-consensus address book, and the DHT view.
 pub struct Service {
     identity: Arc<PeerIdentity>,
     book: AddressBook,
+    /// Who holds which blob, and whom to route through to find out.
+    ///
+    /// Behind a `Mutex` because every dial and accept path takes `&self` — a
+    /// session is a read of the service and a write of what it learned, and
+    /// threading `&mut self` through would make two concurrent sessions
+    /// impossible for a reason that has nothing to do with correctness.
+    directory: Mutex<Directory>,
 }
 
 impl Service {
     pub fn new(identity: Arc<PeerIdentity>) -> Service {
+        let local = identity.id();
         Service {
             identity,
             book: AddressBook::new(),
+            directory: Mutex::new(Directory::new(local)),
         }
     }
 
@@ -76,8 +87,83 @@ impl Service {
 
     pub fn add_bootstrap(&mut self, endpoint: Endpoint) {
         if endpoint.peer.id() != self.identity.id() {
+            // Into the routing table as well as the book. A bootstrap peer is
+            // the only thing a fresh node can route through, and leaving it out
+            // would mean the DHT stayed empty until somebody else volunteered.
+            self.note_contact(endpoint.peer.id(), endpoint.addr);
             self.book.insert(endpoint);
         }
+    }
+
+    /// The DHT view. Held behind a lock; callers take it briefly.
+    pub fn with_directory<T>(&self, f: impl FnOnce(&mut Directory) -> T) -> T {
+        let mut guard = self.directory.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+
+    /// Note that a peer is reachable at an address.
+    ///
+    /// `seq` is the routing table's tiebreak between two records for one peer,
+    /// and this stack has no signed record to take one from. Zero is honest
+    /// about that: every contact is equally fresh, so "seen again" keeps what is
+    /// already held rather than pretending the newest arrival is the truest.
+    /// Wiring [`super::discovery`]'s signed records through would give it a real
+    /// value; see `docs/discovery.md`.
+    pub fn note_contact(&self, peer: PeerId, addr: SocketAddr) {
+        if peer == self.identity.id() {
+            return;
+        }
+        self.with_directory(|directory| {
+            directory.saw(PeerContact::new(peer, addr, 0));
+        });
+    }
+
+    /// The endpoints worth dialling when specific blobs are missing.
+    ///
+    /// Known holders first, then peers near the key, then whatever the random
+    /// sample turns up — and the fallback is not a formality: it is what runs
+    /// when nothing has been announced yet, which is every node's first tick.
+    ///
+    /// **A DHT candidate that is not in the address book is skipped**, and that
+    /// is the cost of a contact not carrying its key. A 261 KiB McEliece public
+    /// key cannot live in a routing table (see [`super::dht`]), so this stack can
+    /// learn *that* a peer holds a blob before it can learn how to talk to it.
+    /// Until peer records carry keys, the DHT reorders the peers a node already
+    /// knows rather than introducing new ones.
+    pub fn peers_for(&self, needs: &BTreeSet<String>, fanout: usize) -> Vec<Endpoint> {
+        if needs.is_empty() {
+            return self.sample_peers(fanout);
+        }
+        let now = crate::time::unix_seconds();
+        let mut chosen: Vec<Endpoint> = Vec::new();
+        let mut seen: BTreeSet<PeerId> = BTreeSet::new();
+        for address in needs {
+            for candidate in self.with_directory(|d| d.candidates(address, now)) {
+                let Some(endpoint) = self
+                    .book
+                    .endpoints()
+                    .find(|held| held.addr == candidate)
+                    .cloned()
+                else {
+                    continue;
+                };
+                if seen.insert(endpoint.peer.id()) {
+                    chosen.push(endpoint);
+                }
+                if chosen.len() >= fanout {
+                    return chosen;
+                }
+            }
+        }
+        for endpoint in self.sample_peers(fanout) {
+            if seen.insert(endpoint.peer.id()) {
+                chosen.push(endpoint);
+            }
+            if chosen.len() >= fanout {
+                break;
+            }
+        }
+        chosen
     }
 
     /// Bind a listener. The caller may run `accept_once` in a loop and apply
@@ -133,10 +219,10 @@ impl Service {
         self.book.sample(fanout, &mut OsRng)
     }
 
-    /// Dial one endpoint and reconcile records, then verifier code, then
-    /// populations.
+    /// Dial one endpoint and reconcile records, then verifier code, then the
+    /// DHT, then populations.
     ///
-    /// Three rounds on one connection, in that order, and each boundary carries
+    /// Four rounds on one connection, in that order, and each boundary carries
     /// a dependency:
     ///
     /// - **records before code.** The set of blobs to ask for is derived from the
@@ -150,11 +236,17 @@ impl Service {
     ///   pinned evaluator, so a node without the code re-scores nothing and
     ///   drops every candidate it was offered.
     ///
-    /// Failures are contained rather than cascading. A code or population failure
-    /// is reported but does not undo the record round, which has already been
-    /// applied; a code failure does skip the population round, because the two
-    /// share a connection whose message sequence is no longer where the peer
-    /// thinks it is.
+    /// - **the DHT round after the code round, on the code round's want set.**
+    ///   It asks who holds the blobs this node asked for, so it must run once
+    ///   that set exists — and it must use *that* set rather than what is still
+    ///   missing afterwards, or a peer that supplied everything would teach this
+    ///   node nothing about who holds what.
+    ///
+    /// Failures are contained rather than cascading. A code, DHT or population
+    /// failure is reported but does not undo the record round, which has already
+    /// been applied; any of them does skip what follows it, because they share a
+    /// connection whose message sequence is no longer where the peer thinks it
+    /// is.
     ///
     /// `rescore` is handed the node rather than closing over it, because it is
     /// called only after the record round has landed and must see the
@@ -171,7 +263,8 @@ impl Service {
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
         let mut connection = transport::connect(&endpoint.peer, endpoint.addr, &self.identity)?;
-        exchange_records_and_code(&mut connection, node)?;
+        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        self.exchange_dht_round(&mut connection, node, &wanted, Some(endpoint.addr))?;
         let settled: &Node = node;
         session::reconcile_population(&mut connection, population, limits, |candidate| {
             rescore(settled, candidate)
@@ -195,7 +288,8 @@ impl Service {
         let (stream, _) = listener.accept().map_err(TransportError::from)?;
         let mut connection = transport::accept(stream, &self.identity)?;
         let remote = connection.remote();
-        exchange_records_and_code(&mut connection, node)?;
+        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
         let settled: &Node = node;
         let report =
             session::reconcile_population(&mut connection, population, limits, |candidate| {
@@ -213,7 +307,8 @@ impl Service {
     /// exists to close.
     pub fn dial_node_once(&self, endpoint: &Endpoint, node: &mut Node) -> Result<(), ServiceError> {
         let mut connection = transport::connect(&endpoint.peer, endpoint.addr, &self.identity)?;
-        exchange_records_and_code(&mut connection, node)?;
+        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        self.exchange_dht_round(&mut connection, node, &wanted, Some(endpoint.addr))?;
         Ok(())
     }
 
@@ -225,8 +320,46 @@ impl Service {
         let (stream, _) = listener.accept().map_err(TransportError::from)?;
         let mut connection = transport::accept(stream, &self.identity)?;
         let remote = connection.remote();
-        exchange_records_and_code(&mut connection, node)?;
+        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
         Ok(remote)
+    }
+
+    /// An address this node could use to *reach* `peer`, if it knows one.
+    ///
+    /// Only the address book can answer this. An inbound connection's source
+    /// port is not it — see [`session::exchange_dht`].
+    fn dialable(&self, peer: &PeerId) -> Option<SocketAddr> {
+        self.book.for_peer(peer).first().map(|held| held.addr)
+    }
+
+    /// Ask the peer which of this node's pins it holds, and answer the same
+    /// question.
+    ///
+    /// `wanted` is the set the code round already asked for, threaded through
+    /// rather than recomputed, and the choice is load-bearing in both
+    /// directions. Recomputing would ask about what is *still* missing after the
+    /// fetch — which excludes everything the peer just supplied, so a successful
+    /// code round would teach this node nothing about who holds what. And
+    /// reusing the code round's set is exactly what keeps the disclosure at
+    /// zero: it is the identical list, already sent as a `code_want` on this
+    /// connection.
+    fn exchange_dht_round(
+        &self,
+        connection: &mut Connection,
+        node: &Node,
+        wanted: &BTreeSet<String>,
+        dialable: Option<SocketAddr>,
+    ) -> Result<(), ServiceError> {
+        let held: BTreeSet<String> = node.registry().blobs().addresses().into_iter().collect();
+        let now = crate::time::unix_seconds();
+        if let Some(addr) = dialable {
+            self.note_contact(connection.remote(), addr);
+        }
+        self.with_directory(|directory| {
+            session::exchange_dht(connection, directory, wanted, &held, dialable, now)
+        })?;
+        Ok(())
     }
 }
 
@@ -240,7 +373,7 @@ impl Service {
 fn exchange_records_and_code(
     connection: &mut Connection,
     node: &mut Node,
-) -> Result<CodeReport, ServiceError> {
+) -> Result<(CodeReport, BTreeSet<String>), ServiceError> {
     let mut peer = records_from_node(node);
     session::reconcile(connection, &mut peer, decode_record)?;
     let needs = needed_code(node, &peer);
@@ -251,7 +384,7 @@ fn exchange_records_and_code(
     // work this node accepted; a claim whose checker is still missing simply
     // records `Unavailable`, which is the truth and leaves the objective open.
     apply_records(node, &peer);
-    code.map_err(Into::into)
+    code.map(|report| (report, needs)).map_err(Into::into)
 }
 
 /// The content addresses this node will need once `peer`'s objectives are

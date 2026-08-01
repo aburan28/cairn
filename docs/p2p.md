@@ -242,6 +242,88 @@ and with enough entries eclipses a node outright. Uniform sampling is a
 in the book" — and see **Still open** below for the fact that nothing yet adds
 anyone to the book but the operator.
 
+## Provider lookup
+
+Built: `p2p::dht`, a Kademlia instance over `crate::dht`, exchanged once per
+session and consulted by `Service::peers_for`.
+
+Sampling answers *who do I talk to this tick* uniformly, which is the right
+answer when a node has nothing particular to want. It is the wrong answer when
+it does. `p2p::code` is need-driven fetch — a node asks for the checkers its own
+log pins — but with no way to choose whom to ask, the want set goes to whoever
+the sample turned up, and a blob held by one node in ten thousand is found by
+luck. This closes that: a key is a blob's content address, a value is *this peer
+holds it*, and the routing is Kademlia's.
+
+**A peer id is already a node id.** `PeerId` is `sha256(McEliece public key)`,
+which is exactly what a Kademlia id is supposed to be, so there is no second
+hash. Two things follow. Identity is self-certifying without a signature —
+completing a session *is* the proof, because the responder decapsulates with the
+secret key or the channel never keys up. And grinding ids to surround a key
+costs a McEliece keypair each, which is far from free. That second one is a real
+cost and **not a defence**: it is a constant factor against an attacker willing
+to spend, and constant factors do not scale into security.
+
+**A contact cannot carry its key, and that is a design constraint rather than a
+preference.** A McEliece public key is 261,120 bytes. A full routing table is
+`K × 256` contacts, so inlining one per contact would cost about 1.3 GB for the
+part of the system that is supposed to be cheap. A `PeerContact` is therefore an
+id, an address and a sequence number — 58 bytes — and the key is resolved from
+the address book at dial time.
+
+The consequence is worth stating rather than discovering later: **a routing
+answer from this stack is not self-proving.** It is a claim that a peer with that
+id lives at that address, checked only when somebody dials it and the handshake
+either derives the expected id or does not. Wrong answers cost a dial; they
+cannot cost correctness. `swarm::dht` makes the opposite trade, inlining a signed
+ed25519 record because at 32 bytes it can.
+
+### Asked, not announced
+
+There is no inventory message, and refusing one is not incidental — `p2p::code`
+already refuses one, on the grounds that a list of the blobs a node holds is a
+list of the objectives it is working on, which is a free traffic-analysis
+signal. Building a DHT by publishing that list would buy routing with exactly
+the privacy `code` declined to spend.
+
+So holdership is **pulled**. `Ask` carries content addresses the asker wants;
+`Tell` says which of *those* the responder holds, and `Directory::record_tell`
+discards anything outside the asked set rather than trusting a peer not to
+volunteer. The set asked is the set the code round already sent as a
+`code_want`, threaded through rather than recomputed, so the round adds routing
+knowledge at **no additional disclosure**.
+
+Threading it rather than recomputing matters in the other direction too: the
+still-missing set after a fetch excludes everything the peer just supplied, so a
+successful code round would teach the node nothing about who holds what.
+
+### First-hand claims are stored; relayed ones are used and dropped
+
+This is the rule that replaces signatures.
+
+A `Tell` is attributed to **the session's peer id**, never to an id in the
+message — there is no such field to forge. A `Providers` response, which belongs
+to the multi-hop lookup, is hearsay: a peer relaying "C holds D" cannot prove it
+and the receiver cannot check it. Those records are used as lookup results and
+**never entered into the local provider store**, so a lie dies with the lookup
+that heard it.
+
+Without the second half an unsigned DHT is an amplifier: claim a victim holds a
+popular blob, let it propagate, and the network dials the victim. The cost of
+closing it this way is that provider knowledge spreads one hop rather than
+arbitrarily far — which costs nothing today, because the multi-hop driver that
+would carry it further is not built. It is the reason to prefer signed records if
+the network outgrows this.
+
+### What this does not do yet
+
+`peers_for` reorders the peers a node **already knows**; it cannot introduce new
+ones, because a DHT candidate with no address-book entry has no key to dial with.
+So provider lookup improves *whom you ask among your peers* and does not yet
+improve *who your peers are*. The lookup itself is also one hop: `dht::Lookup` is
+built and tested as a pure state machine, and nothing feeds it across
+connections, so `O(log n)` routing is designed and not running.
+
 ## Implemented baseline
 
 `p2p::discovery::AddressBook` stores non-consensus `PeerId` to socket-address
@@ -289,10 +371,12 @@ does.
 
 ## Still open
 
-- **Peer discovery.** Sampling chooses *among* the peers the address book
-  already holds; nothing adds to it but `--bootstrap` files the operator wrote.
-  The design calls for a signed, size-capped peer-list exchange, and that is not
-  built. Until it is, the peer set is an operator configuration decision, which
+- **Peer discovery.** Sampling and provider lookup both choose *among* the peers
+  the address book already holds; nothing adds to it but `--bootstrap` files the
+  operator wrote. The design calls for a signed, size-capped peer-list exchange;
+  `swarm::discovery` implements exactly that against a different identity scheme
+  and is not wired in here, which is the "fold the two stacks together" item in
+  [roadmap.md](roadmap.md). Until it is, the peer set is an operator configuration decision, which
   is a real limit and also the only thing currently standing between this node
   and an eclipse: uniform sampling over a book an attacker can fill is uniform
   sampling over the attacker. Structured overlays with identities that cost

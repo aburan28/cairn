@@ -31,6 +31,22 @@ pub fn timestamp() -> String {
     format_iso8601_utc(seconds)
 }
 
+/// Seconds since the Unix epoch.
+///
+/// Same advisory status as [`timestamp`], and one caller with a real need for
+/// the number rather than the string: [`crate::dht::ProviderStore`] expires
+/// records against it. Expiry is the one place in this crate where a clock
+/// changes behaviour, and it is safe there for the reason the DHT is safe
+/// generally -- being wrong costs a stale hint, never a wrong verdict.
+pub fn unix_seconds() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_secs(),
+        // A clock set before 1970. Every provider record then looks expired,
+        // which degrades to "no DHT" rather than to a wrong answer.
+        Err(_) => 0,
+    }
+}
+
 /// Seconds since the Unix epoch, rendered as a UTC ISO-8601 instant.
 ///
 /// Clamped to years 1..=9999 first. Every arithmetic step below is then bounded

@@ -353,11 +353,22 @@ fn main() {
     });
 
     loop {
-        // A sample rather than the whole book: dialling every peer every tick
-        // is quadratic in the network, and the tail of a fixed iteration order
-        // is always the last to hear anything. See `AddressBook::sample` for
-        // what random sampling does not defend against.
-        for endpoint in service.sample_peers(fanout) {
+        // Peers with a reason to be useful first, then a random sample.
+        //
+        // Dialling every peer every tick is quadratic in the network, and the
+        // tail of a fixed iteration order is always the last to hear anything.
+        // The DHT narrows it further when something specific is missing: a node
+        // whose log pins a checker it does not hold dials a peer that said it
+        // has that blob, rather than three at random. With nothing missing this
+        // is exactly the old random sample, so the DHT costs nothing in the
+        // steady state. See `Service::peers_for` for what it cannot do yet.
+        let needs = {
+            let guard = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.node.missing_code()
+        };
+        for endpoint in service.peers_for(&needs, fanout) {
             let mut guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
