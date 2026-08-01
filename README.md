@@ -469,6 +469,7 @@ examples/            worked objectives with real artifacts
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
+- [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
