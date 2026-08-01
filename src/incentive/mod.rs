@@ -80,6 +80,7 @@ pub mod dynamics;
 pub mod exact;
 pub mod game;
 pub mod mechanism;
+pub mod robustness;
 
 use std::fmt;
 
