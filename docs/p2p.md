@@ -242,6 +242,33 @@ and with enough entries eclipses a node outright. Uniform sampling is a
 in the book" — and see **Still open** below for the fact that nothing yet adds
 anyone to the book but the operator.
 
+## What is encrypted, and what is not
+
+Every frame on a `p2p` connection — records, verifier code, DHT, populations —
+is sealed with an AEAD keyed by the Classic McEliece handshake, with the
+family's context string bound into the tag. Adding a round means adding a
+context, not adding a socket write, and `p2p::dht` was added that way.
+
+That claim is checked rather than asserted. `tests/wire_encryption.rs` puts a
+recording relay between two real nodes, runs a session that carries an
+objective, a blob and a DHT ask/tell, and asserts none of the content appears in
+the captured bytes. It also asserts the initiator's peer id *is* visible, which
+is the positive control: without it the test would pass on an empty capture.
+
+**What an observer still learns.** Who talks to whom, how much, and when. The
+handshake prefix is necessarily cleartext, because a responder must know which
+peer to expect before a key exists. Unlinkability is a transport-layer problem —
+onion routing, or rendezvous under a derived key — and is not solved here.
+
+**`swarm::tcp` is not encrypted.** No handshake, no AEAD, no peer
+authentication. It is behind the off-by-default `insecure-swarm-tcp` feature so
+it cannot reach a binary by accident, and only the socket-facing part is gated:
+`swarm::piece`, `swarm::wire`, `swarm::dht` and `swarm::discovery` are pure and
+always compiled. The reason it never grew a handshake is the identity mismatch
+this document keeps returning to — `swarm` records carry an ed25519 key, the
+encrypted transport needs a 261,120-byte McEliece key — so closing it is the
+fold-the-stacks work, not a missing call.
+
 ## Provider lookup
 
 Built: `p2p::dht`, a Kademlia instance over `crate::dht`, exchanged once per

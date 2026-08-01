@@ -1,6 +1,26 @@
 //! Peer-to-peer blob transfer, in the BitTorrent shape.
 //!
-//! [`crate::store::blobs`] made a blob's digest its *name*, which fixed where a
+//! # This module's transport is not encrypted
+//!
+//! `swarm::tcp` speaks a plaintext framing over a bare `TcpStream`: no handshake, no
+//! AEAD, no peer authentication. It is behind the off-by-default
+//! `insecure-swarm-tcp` feature so it cannot be built into anything by accident,
+//! and [`crate::p2p::transport`] — Classic McEliece to an AEAD channel — is the
+//! transport everything the daemon runs goes through.
+//!
+//! The gap is not an oversight so much as an unfinished merge. The two stacks
+//! were written independently; `swarm`'s peer records carry an ed25519 identity,
+//! and the encrypted transport needs the responder's McEliece public key, which
+//! is 261,120 bytes and has no place in a gossiped record. Closing it properly
+//! means folding this module onto `p2p`'s identity, which `docs/roadmap.md`
+//! tracks.
+//!
+//! Everything else here is a pure state machine with no socket: [`piece`],
+//! [`wire`], [`dht`] and [`discovery`] are always compiled, and
+//! [`crate::p2p::dht`] already uses the shared Kademlia in [`crate::dht`] over
+//! the encrypted transport.
+//!
+//! [`crate::blobs`] made a blob's digest its *name*, which fixed where a
 //! blob lives once a node has one and left the harder question open: how does a
 //! node that needs an evaluator get it from a node that has it? `sync` copies a
 //! whole store between two directories one operator controls. Between strangers
@@ -80,12 +100,15 @@
 //! rules -- rarest-first, endgame, choking -- be tested by asserting on exact
 //! output rather than by running a network and hoping.
 //!
-//! [`tcp`] is where the clock, the sockets and the threads live, and it is the
+//! `swarm::tcp` is where the clock, the sockets and the threads live, and it is the
 //! only part of this module that can fail for reasons that are nobody's fault.
 
 pub mod dht;
 pub mod discovery;
 pub mod piece;
+/// The TCP driver, gated because it is **not encrypted**. See the
+/// `insecure-swarm-tcp` feature in `Cargo.toml`.
+#[cfg(feature = "insecure-swarm-tcp")]
 pub mod tcp;
 pub mod wire;
 
@@ -98,6 +121,7 @@ use wire::Message;
 pub use dht::{Contact, Lookup, NodeId, ProviderStore, RoutingTable};
 pub use discovery::{AddressBook, PeerRecord};
 pub use piece::{Layout, Manifest as PieceManifest, DEFAULT_PIECE_LEN};
+#[cfg(feature = "insecure-swarm-tcp")]
 pub use tcp::{fetch, serve, Listener, TransferError};
 pub use wire::{Handshake, WireError};
 
@@ -119,7 +143,7 @@ impl fmt::Display for PeerId {
 /// Why a peer was dropped.
 ///
 /// Every variant is something the peer *did*, not something that went wrong.
-/// Transport failures are [`tcp`]'s business and never reach here, for the same
+/// Transport failures are `swarm::tcp`'s business and never reach here, for the same
 /// reason a verifier that cannot run returns `Unavailable` rather than `Reject`:
 /// an infrastructure fact is not evidence about anybody.
 #[derive(Debug, Clone, PartialEq, Eq)]

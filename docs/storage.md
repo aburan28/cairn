@@ -147,6 +147,16 @@ of what the log pins and what is missing. **The name is the hash**, so reads
 re-hash and refuse bytes that do not match the name they were filed under, and
 integrity needs no second record to keep in sync.
 
+**At-rest encryption covers the log, and only the log.** The blob store is not
+sealed, and neither is the `--population` file the daemon writes. Neither holds
+a secret exactly: a pinned checker is named in the log and fetchable from any
+peer, and gossiped candidates were shared with peers on purpose. What is
+readable is the *set* rather than the contents — blob filenames are content
+addresses, so anyone with the disk learns which objectives this node works on,
+which is the same signal `p2p::code` declines to publish on the wire. The
+asymmetry is worth naming rather than assuming it was considered;
+[threat-model.md](threat-model.md) carries it as not handled.
+
 A blob that is present but *corrupt* is `Unavailable`, never `Reject` and never
 `INVALID_SPEC`: a damaged local cache is a fact about that disk, and letting it
 refute honest work would be the same mistake as letting a missing Lean toolchain
