@@ -147,10 +147,79 @@ args = ["--log", "/abs/path/to/proofwork.jsonl", "--root", "/abs/path/to/repo"]
 }
 ```
 
+Claude Code will also write the project stanza for you, which avoids a
+hand-edited JSON file drifting from the flags:
+
+```sh
+claude mcp add proofwork --scope project -- \
+  /abs/path/to/target/release/proofwork-mcp \
+  --log /abs/path/to/proofwork.jsonl --root /abs/path/to/repo
+```
+
 Config schemas for these tools move between releases. If a stanza is rejected,
 check the tool's current docs rather than assuming the server is at fault — the
 server itself is standard stdio MCP and is exercised directly in
 `cargo test --bin proofwork-mcp`.
+
+### Check the wiring before blaming the agent
+
+The server is a subprocess speaking JSON-RPC on stdio, so a misconfigured client
+and a broken server look identical from inside a chat window. Ask the server
+directly:
+
+```sh
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  | ./target/release/proofwork-mcp --log /tmp/pw.jsonl --root .
+```
+
+Seven tool names come back: `score_candidate`, `list_objectives`,
+`get_objective`, `frontier_status`, `submit_claim`, `work_assignment`, `audit`.
+If that works and the client still shows nothing, the problem is the client's
+config, not this binary.
+
+### Running more than one client at once
+
+**Do not point two clients at the same `--log`.** Each launches its own server
+process, each holds its own `Ledger`, and [`Ledger`](../src/ledger.rs) is not
+`Clone` for exactly this reason: two handles compute `prev` from their own view
+of the tail, so concurrent appends produce two entries claiming the same
+predecessor and the same `seq`. There is **no file lock**, so nothing stops it
+happening at write time.
+
+It is at least loud afterwards. `proofwork audit` names both symptoms and exits
+non-zero, so a scheduled audit catches a fork even though the write did not:
+
+```
+2 problem(s):
+  ! entry 1: seq is 0
+  ! entry 1: prev is None, expected 'sha256:840c2118…'
+```
+
+Two arrangements work:
+
+**One log per agent, reconciled by the daemon.** This is the designed answer and
+it is better than sharing anyway — different model families are real search
+diversity, and [`gossip.rs`](../src/gossip.rs) preserves it deliberately.
+
+```sh
+# each client gets its own --log
+claude-code  → proofwork-mcp --log ~/pw/claude.jsonl  --root /abs/repo
+codex        → proofwork-mcp --log ~/pw/codex.jsonl   --root /abs/repo
+opencode     → proofwork-mcp --log ~/pw/opencode.jsonl --root /abs/repo
+
+# and a daemon per log reconciles them
+proofwork-p2p --log ~/pw/claude.jsonl --root /abs/repo \
+  --identity … --root-key … --checkpoint … --listen 127.0.0.1:9101 \
+  --bootstrap peers.json
+```
+
+Records converge by anti-entropy and each node re-derives its own verdicts, so
+nothing is imported that was not re-checked. What does *not* converge is
+settlement order — that is keyed to each node's own head at the epoch boundary,
+and `docs/p2p.md` says what is still open there.
+
+**Or run one client at a time** against a shared log. Simplest, and adequate for
+a single operator experimenting.
 
 ## Driving it without an agent
 
@@ -168,7 +237,8 @@ bug.
 
 ## What a session looks like
 
-Two agents on one objective, no coordination between them:
+Two agents on one objective, no coordination between them — on **two logs**
+reconciled by the daemon, not one log shared (see above):
 
 ```
 claude-code  submit 12 points        reward 300000   frontier advanced
@@ -187,8 +257,13 @@ heterogeneous fleet needs no scheduler.
 
 ## Known limits
 
-- **One writer per log.** The server opens the ledger once and holds it. Two
-  servers over one file will fork it — the same constraint `Ledger` documents.
+- **One writer per log, unenforced at write time.** The server opens the ledger
+  once and holds it. Two servers over one file will fork it and no lock stops
+  them; `audit` does catch it afterwards and exits non-zero. See *Running more
+  than one client at once* for the two arrangements that work.
+- **Candidate gossip is opt-in.** A daemon started without `--population`
+  reconciles records but not the candidate population, so agents on separate
+  logs will not see each other's unsettled work — only what has settled.
 - **No identity layer.** `submitter` is a self-declared string. Nothing stops an
   agent claiming to be someone else; that is Stage 1 work, not a gap in the
   server.

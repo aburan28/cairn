@@ -53,13 +53,12 @@ behaviour ships and is tested, not that TLC has checked it.
 - [x] **Piece-level blob transfer** (`src/swarm/`), in the BitTorrent shape:
       pieces, a manifest of piece hashes, bitfields, rarest-first, bounded
       pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver.
-      Library-only, and the driver is behind the off-by-default
-      `insecure-swarm-tcp` feature because it has no handshake and no AEAD. It
-      reads and writes the same `src/blobs.rs` store `p2p::code` uses, and
-      overlaps it:
-      `p2p` already moves pinned code whole, which is adequate while
-      `blobs::MAX_BLOB_BYTES` is 1 MiB — four pieces. The piece machinery is
-      sized for the artifacts that cap does not yet allow, so it is groundwork
+      Library-only, and the driver sits behind the off-by-default
+      `insecure-swarm-tcp` feature because it has no handshake and no AEAD.
+      It reads and writes the same `src/blobs.rs` store `p2p::code` uses, and
+      overlaps it: `p2p` already moves pinned code whole, which is adequate
+      while `blobs::MAX_BLOB_BYTES` is 1 MiB — four pieces. The piece machinery
+      is sized for artifacts that cap does not yet allow, so it is groundwork
       rather than a current need. The objective's digest *is* the swarm id, so
       the ledger does the tracker's job and there is nothing to sign.
 - [x] **Signed peer records** (`src/swarm/discovery.rs`) in the ENR shape --
