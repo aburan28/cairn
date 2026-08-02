@@ -11,6 +11,24 @@ license = "Apache-2.0"
 repository = "https://github.com/aburan28/proofwork"
 readme = "README.md"
 
+[features]
+default = []
+
+# The `swarm` TCP driver, which is **not encrypted**.
+#
+# `swarm::tcp` speaks a plaintext framing over a bare `TcpStream`: no handshake,
+# no AEAD, no peer authentication. `p2p::transport` is the encrypted transport
+# and everything the daemon runs goes through it. The two stacks were written
+# independently and `swarm` never grew the handshake, because its peer records
+# carry an ed25519 identity while the encrypted transport needs a McEliece key
+# the records have no room for -- see `docs/p2p.md`.
+#
+# Off by default so the gap cannot be shipped by accident. The state machines it
+# drives -- `swarm::piece`, `swarm::wire`, `swarm::dht`, `swarm::discovery` --
+# are pure and always available; only the socket-facing part is gated. CI builds
+# and tests with `--all-features`, so gating it does not stop it being checked.
+insecure-swarm-tcp = []
+
 [dependencies]
 # Parsing untrusted JSON only. Canonical *output* is written by this crate's own
 # encoder -- see src/canonical.rs for why the two are deliberately separate.

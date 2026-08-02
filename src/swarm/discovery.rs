@@ -90,7 +90,7 @@
 //! # What is here and what is not
 //!
 //! Here: signed peer records, an address book that verifies and supersedes them,
-//! and peer exchange over the connection [`super::tcp`] already opens.
+//! and peer exchange over the connection `swarm::tcp` already opens.
 //!
 //! Not here: a Kademlia DHT, local multicast, and log-borne identity records.
 //! Each is a source of hints, all three are interchangeable under the identity

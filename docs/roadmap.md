@@ -53,13 +53,14 @@ behaviour ships and is tested, not that TLC has checked it.
 - [x] **Piece-level blob transfer** (`src/swarm/`), in the BitTorrent shape:
       pieces, a manifest of piece hashes, bitfields, rarest-first, bounded
       pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver.
-      Library-only: no CLI subcommand drives it yet. It reads and writes the same
-      `src/blobs.rs` store `p2p::code` uses, and overlaps it: `p2p` already moves
-      pinned code whole, which is adequate while `blobs::MAX_BLOB_BYTES` is 1 MiB
-      — four pieces. The piece machinery is sized for the artifacts that cap does
-      not yet allow, so it is groundwork rather than a current need. The
-      objective's digest *is* the swarm id, so the ledger does the tracker's job
-      and there is nothing to sign.
+      Library-only, and the driver sits behind the off-by-default
+      `insecure-swarm-tcp` feature because it has no handshake and no AEAD.
+      It reads and writes the same `src/blobs.rs` store `p2p::code` uses, and
+      overlaps it: `p2p` already moves pinned code whole, which is adequate
+      while `blobs::MAX_BLOB_BYTES` is 1 MiB — four pieces. The piece machinery
+      is sized for artifacts that cap does not yet allow, so it is groundwork
+      rather than a current need. The objective's digest *is* the swarm id, so
+      the ledger does the tracker's job and there is nothing to sign.
 - [x] **Signed peer records** (`src/swarm/discovery.rs`) in the ENR shape --
       identity is an ed25519 key, location is a hint signed by it, `seq`
       supersedes -- plus peer exchange, so one address given once accumulates the
@@ -85,9 +86,9 @@ behaviour ships and is tested, not that TLC has checked it.
       part that must not.
 - [x] **Provider lookup in the daemon** (`src/p2p/dht.rs`). `p2p::code` is
       need-driven fetch with no way to choose whom to ask, so the want set went
-      to whatever the random dial sample turned up. Now a session announces what
-      the node holds, and `Service::peers_for` asks a peer that said it has the
-      blob. A `PeerId` is already `sha256(public key)`, so it is the Kademlia id
+      to whatever the random dial sample turned up. Now a session asks which of
+      those the peer holds, and `Service::peers_for` dials one that said yes. A
+      `PeerId` is already `sha256(public key)`, so it is the Kademlia id
       unchanged -- and a contact deliberately does not carry the key, because a
       McEliece public key is 261,120 bytes and a full table would cost 1.3 GB.
       Holdership is pulled, not advertised: `p2p::code` refuses an inventory
@@ -95,6 +96,17 @@ behaviour ships and is tested, not that TLC has checked it.
       answers only what the peer asked, and the asked set is the `code_want`
       already sent on that connection. Answers are attributed to the session,
       never to the message body, which is what makes an unsigned record safe.
+- [ ] Encrypt `swarm`'s transport, which today means folding it onto `p2p`'s
+      identity. `swarm::tcp` has no handshake and no AEAD; it is behind the
+      off-by-default `insecure-swarm-tcp` feature so it cannot ship by accident,
+      which contains the risk without removing it.
+- [ ] Extend at-rest encryption past the log, or decide on the record that it
+      should not go further. `store::atrest` seals the log and nothing else: the
+      blob store's filenames are content addresses, so the disk discloses which
+      objectives a node works on, and the `--population` file is plain JSON.
+      Neither is a secret -- the checkers are fetchable and the candidates were
+      gossiped -- but the log beside them is sealed, and the asymmetry should be
+      a decision rather than an accident.
 - [ ] Fold the rest of `src/swarm/` into `src/p2p/`. The DHT is shared now; the
       signed peer records and the piece machinery are not. `swarm::discovery` is
       exactly the peer-list exchange `p2p` is missing, against a different
