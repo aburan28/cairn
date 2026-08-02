@@ -100,6 +100,16 @@ behaviour ships and is tested, not that TLC has checked it.
       identity. `swarm::tcp` has no handshake and no AEAD; it is behind the
       off-by-default `insecure-swarm-tcp` feature so it cannot ship by accident,
       which contains the risk without removing it.
+- [ ] **Partition-scoped settlement**, so one objective can settle once per
+      slice of a search instead of closing on first blood. Every approach to
+      paying for negative results needs it and none works without it; it is the
+      smallest real increment towards scalable computation. See
+      [search-work.md](search-work.md).
+- [ ] Succinct exhaustion proofs, so "this slice is empty" is cheap to check.
+      Sampling provably cannot do this -- it catches a skipped fraction and
+      misses a hidden hit at probability `k/N` -- so the proof must constrain
+      every step, which prices it at `overhead × V_min` and argues for a
+      proof-friendly predicate rather than secp256k1 ECDLP.
 - [ ] Extend at-rest encryption past the log, or decide on the record that it
       should not go further. `store::atrest` seals the log and nothing else: the
       blob store's filenames are content addresses, so the disk discloses which
