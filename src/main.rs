@@ -1305,6 +1305,37 @@ fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, C
             objective.verifier_kind().unwrap_or("?")
         ),
     );
+
+    // A pin this node cannot resolve is not an error: content addressing is
+    // what lets a node post an objective whose checker a peer will serve, and
+    // record sync admits objectives from nodes that never had the bundle. So
+    // this cannot refuse.
+    //
+    // Saying nothing is the wrong answer too. The id covers the pin, so a
+    // typo'd hash does not fail -- it mints a *different* objective, one whose
+    // every claim returns InvalidSpec forever and whose reward is stranded.
+    // The funder finds out when strangers have already burned compute on a
+    // bounty that could never settle. The distinction the operator needs is
+    // between "a peer will serve this" and "I mistyped it", and only they can
+    // draw it, so name the addresses and let them.
+    let missing = node.registry().missing_code(&objective.verifier);
+    if !missing.is_empty() {
+        say(
+            out,
+            format!(
+                "  warning: {} pinned file(s) do not resolve on this node yet:",
+                missing.len()
+            ),
+        );
+        for address in &missing {
+            say(out, format!("    {address}"));
+        }
+        say(
+            out,
+            "  Expected if a peer will serve them. If not, the pin is wrong -- and because \
+             the id covers it, this is now a different objective that can never settle.",
+        );
+    }
     Ok(0)
 }
 
@@ -2646,6 +2677,102 @@ mod tests {
             .iter()
             .map(|(who, units)| ((*who).to_string(), *units))
             .collect()
+    }
+
+    /// A scratch bundle: an objective whose pinned checker really is on disk,
+    /// plus `Options` pointing at both. The pin is computed from the bytes
+    /// written, so the fixture cannot drift out of agreement with itself.
+    fn bundle_with_objective() -> (std::path::PathBuf, Options, Value) {
+        use proofwork::canonical::digest_bytes;
+        let dir = std::env::temp_dir().join(format!(
+            "proofwork-cli-test-{}",
+            digest_bytes(&std::time::Instant::now().elapsed().as_nanos().to_le_bytes())
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let source = b"def check(artifact):\n    return artifact.get('n') == 42\n";
+        std::fs::write(dir.join("c.py"), source).expect("write checker");
+        let pin = digest_bytes(source)
+            .strip_prefix("sha256:")
+            .expect("prefixed")
+            .to_string();
+        let objective = Value::object([
+            ("goal", Value::string("GOAL-x")),
+            ("statement", Value::string("find it")),
+            (
+                "verifier",
+                Value::object([
+                    ("kind", Value::string("certificate")),
+                    ("checker", Value::string("c.py")),
+                    ("checker_sha256", Value::string(pin)),
+                    ("entrypoint", Value::string("check")),
+                ]),
+            ),
+            ("reward", Value::Int(1000)),
+            ("funder", Value::string("treasury")),
+            ("created_at", Value::string("2026-07-28T00:00:00+00:00")),
+        ]);
+        let options = Options {
+            log: dir.join("log.jsonl").display().to_string(),
+            root: dir.display().to_string(),
+            data: None,
+            key_file: None,
+            passphrase_file: None,
+            max_size: None,
+        };
+        (dir, options, objective)
+    }
+
+    fn post_to_string(options: &Options, objective: &Value, dir: &std::path::Path) -> String {
+        let path = dir.join("objective.json");
+        std::fs::write(&path, objective.canonical_string()).expect("write objective");
+        let mut out: Vec<u8> = Vec::new();
+        cmd_post(&mut out, options, &path.display().to_string()).expect("post succeeds");
+        String::from_utf8(out).expect("utf-8")
+    }
+
+    #[test]
+    fn post_warns_when_a_pin_does_not_resolve_but_still_accepts_it() {
+        // A wrong pin cannot be refused: posting an objective whose checker a
+        // peer will serve is how content-addressed distribution works, and
+        // record sync admits objectives from nodes that never had the bundle.
+        // But silence is worse than either -- the id covers the pin, so a typo
+        // does not fail, it mints a *different* objective whose every claim is
+        // InvalidSpec forever. The operator is the only one who can tell the
+        // two apart, so they have to be told.
+        let (dir, options, objective) = bundle_with_objective();
+
+        // Resolvable: no warning, or the noise makes the real one invisible.
+        let clean = post_to_string(&options, &objective, &dir);
+        assert!(clean.contains("objective sha256:"), "{clean}");
+        assert!(
+            !clean.contains("warning"),
+            "a resolvable pin warned: {clean}"
+        );
+
+        // Same objective, one hex digit changed.
+        let mut broken = objective.clone();
+        if let Value::Object(map) = &mut broken {
+            if let Some(Value::Object(verifier)) = map.get_mut("verifier") {
+                verifier.insert("checker_sha256".to_string(), Value::string("00".repeat(32)));
+            }
+        }
+        let warned = post_to_string(&options, &broken, &dir);
+        assert!(
+            warned.contains("warning"),
+            "a dead pin did not warn: {warned}"
+        );
+        assert!(warned.contains("can never settle"), "{warned}");
+        // And it is a *different* objective, which is the whole hazard.
+        let id_of = |text: &str| {
+            text.lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .expect("id on the first line")
+                .to_string()
+        };
+        assert_ne!(id_of(&clean), id_of(&warned));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // -- argument parsing --------------------------------------------------

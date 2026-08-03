@@ -143,14 +143,17 @@ needed at runtime.
 An **objective** is a funded question that comes with a runnable verifier, pinned
 by hash:
 
+This is [`examples/capset/objective.json`](examples/capset/objective.json)
+verbatim — every value real, so it posts as it stands:
+
 ```json
 {
   "goal": "GOAL-capset-lower-bounds",
-  "statement": "Exhibit a cap set in F_3^4 of size at least 20.",
+  "statement": "Exhibit a cap set in F_3^4 of size at least 20 (no three distinct points collinear). Score is the set size; the maximum is known to be 20.",
   "verifier": {
     "kind": "evaluator",
     "evaluator": "examples/capset/evaluators/cap_set.py",
-    "evaluator_sha256": "05ad14fa...",
+    "evaluator_sha256": "05ad14fa10bd3055a8f3b1962a6a909832887676558035e40e44c4bd0aa271c4",
     "entrypoint": "score",
     "threshold": 20,
     "direction": "maximize"
@@ -160,6 +163,15 @@ by hash:
   "created_at": "2026-07-28T00:00:00+00:00"
 }
 ```
+
+The hash is the real one, and abbreviating it would not be a tidier example —
+it would be a broken one. A wrong pin does not fail: the id covers the
+verifier, so it mints a *different* objective, one whose every claim returns
+`InvalidSpec` forever and whose reward is stranded. `post` warns when a pin
+does not resolve locally but cannot refuse, because posting an objective whose
+checker a peer will serve is exactly how content-addressed distribution works.
+Key order does not matter here — the record is canonicalized before hashing —
+but the bytes of every *value* do.
 
 An objective's id **is** the hash of that whole record, verifier included. There
 is no operation that changes the rules of a funded bounty — editing the evaluator

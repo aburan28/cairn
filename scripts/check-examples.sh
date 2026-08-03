@@ -88,5 +88,40 @@ done < <(find examples -name 'objective*.json' | sort)
 
 [ "$CHECKED" -gt 0 ] || fail "found no examples/**/objective*.json to check"
 
-printf '\n\033[32mEXAMPLES OK: %d objectives posted, %d pins verified.\033[0m\n' \
+# --------------------------------------------------------------------------
+# The objective in README.md is the first code anybody reads, and a reader
+# copies it. It carries a real 64-hex pin for the same reason the examples do:
+# `post` refuses an objective whose pin does not match the file, so an
+# abbreviated digest there is a broken example rather than a tidy one. This
+# extracts the block and posts it, and requires the id to equal the shipped
+# objective's -- which catches a truncated hash, a drifted statement, and a
+# stale reward in one assertion.
+# --------------------------------------------------------------------------
+rule "the objective snippet in README.md"
+
+python3 - > "$TMP/readme-objective.json" <<'PY'
+import json, re, sys
+
+text = open("README.md").read()
+blocks = [b for b in re.findall(r"```json\n(.*?)```", text, re.S) if "GOAL-capset" in b]
+if len(blocks) != 1:
+    sys.exit(f"expected exactly one capset objective block in README.md, found {len(blocks)}")
+# Must parse as printed: a reader copies these bytes, not a repaired version.
+json.loads(blocks[0])
+sys.stdout.write(blocks[0].rstrip())
+PY
+
+README_LOG=$(mktemp -u "$TMP/readme-XXXXXX.jsonl")
+README_ID=$("$RUST" --log "$README_LOG" --root . post "$TMP/readme-objective.json" 2>&1 | head -1 | awk '{print $2}') \
+  || fail "the README objective snippet does not post; a reader copying it gets an error"
+REAL_LOG=$(mktemp -u "$TMP/real-XXXXXX.jsonl")
+REAL_ID=$("$RUST" --log "$REAL_LOG" --root . post examples/capset/objective.json | head -1 | awk '{print $2}')
+
+[ -n "$README_ID" ] \
+  || fail "the README objective snippet does not post; a reader copying it gets an error"
+[ "$README_ID" = "$REAL_ID" ] \
+  || fail "README snippet posts as $README_ID but examples/capset/objective.json is $REAL_ID"
+echo "  posts cleanly, and is byte-equivalent to examples/capset/objective.json"
+
+printf '\n\033[32mEXAMPLES OK: %d objectives posted, %d pins verified, README snippet matches.\033[0m\n' \
   "$CHECKED" "$PINS"
