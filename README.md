@@ -54,7 +54,8 @@ build, not a limitation to route around.
 
 ```sh
 cargo build --release
-cargo test                    # 933 tests, loopback only
+cargo install --path .        # puts `proofwork` and the other binaries on PATH
+cargo test                    # the full suite, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
@@ -62,6 +63,12 @@ cargo test                    # 933 tests, loopback only
 proofwork incentives          # evaluate the node-operator game
 proofwork incentives --robustness   # ...and how far each parameter can move before it breaks
 ```
+
+On Linux, install [bubblewrap](https://github.com/containers/bubblewrap)
+(`apt install bubblewrap`) so objective-authored verifier code runs inside an
+OS jail, and set `PROOFWORK_REQUIRE_SANDBOX=1` on any node that verifies
+objectives it did not write — without a jail mechanism the code runs
+unconfined, and that variable turns "unconfined" into `Unavailable` instead.
 
 ### Start a p2p node
 
@@ -108,7 +115,7 @@ by hash:
   "verifier": {
     "kind": "evaluator",
     "evaluator": "examples/capset/evaluators/cap_set.py",
-    "evaluator_sha256": "8f14e4...",
+    "evaluator_sha256": "05ad14fa...",
     "entrypoint": "score",
     "threshold": 20,
     "direction": "maximize"
@@ -142,10 +149,13 @@ proofwork attribute
 | `lean` | a proof assistant kernel accepts the proof | seconds | kernel soundness |
 | `replay` | re-runs a pinned computation, compares declared fields | full re-run | bit-reproducibility |
 
-Pinned verifier code runs as a **subprocess** with its hash checked first — a
-step toward the sandboxing the roadmap flags as a launch blocker. The `lean`
-verifier rejects `sorry`, `admit`, new `axiom`s, and `native_decide` before Lean
-ever runs, because each produces a file the kernel accepts while proving nothing.
+Pinned verifier code runs as a **subprocess inside an OS jail** — bubblewrap on
+Linux, a seatbelt profile on macOS — with its hash checked first: no network,
+writes confined to a scratch directory, a wall-clock deadline. Not a VM
+boundary; `docs/verification.md#sandboxing` names the gaps that remain. The
+`lean` verifier rejects `sorry`, `admit`, new `axiom`s, and `native_decide`
+before Lean ever runs, because each produces a file the kernel accepts while
+proving nothing.
 
 ### Rules the code enforces
 
@@ -507,7 +517,7 @@ src/                 Rust implementation (primary)
   incentive/         the node-operator mechanism, and the harness that evaluates it
   store/             at-rest encryption, the data directory, the size cap, the mirror
   swarm/             piece-level transfer and a Kademlia DHT, alongside p2p/
-reference/python/    Python reference implementation (183 tests)
+reference/python/    Python reference implementation
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
 examples/            worked objectives with real artifacts
@@ -526,9 +536,9 @@ examples/            worked objectives with real artifacts
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
-- [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
+- [launch-review.md](docs/launch-review.md) — the pre-launch pass: what was fixed, and the gaps that remain, in priority order
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
 - [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
 - [AGENTS.md](AGENTS.md) — instructions agents read: contributing here, and contributing *to* the network
@@ -539,9 +549,12 @@ examples/            worked objectives with real artifacts
 
 - **Not a blockchain.** One sequencer, no consensus, no token. Deliberate: the
   valuable property is "anyone can check", not "no one is in charge".
-- **Not sandboxed.** Pinned verifier code runs as a subprocess, which is better
-  than in-process `exec` and is still not a jail. A launch blocker before
-  objective authorship opens.
+- **Sandboxed, not virtualized.** Pinned verifier code runs in an OS jail
+  (bubblewrap / seatbelt): no network, confined writes, a deadline. A kernel
+  bug is still an escape, macOS does not confine reads, and a host with no
+  jail mechanism runs unconfined unless `PROOFWORK_REQUIRE_SANDBOX=1` is set.
+  VM-class isolation is Stage 2; see the threat model before opening
+  objective authorship to strangers.
 - **Not able to verify judgement.** Whether a direction is promising, whether a
   result is novel against the literature — no mechanism settles these.
 - **Not able to pay fairly for effort that produced nothing**, which is most of

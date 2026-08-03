@@ -200,7 +200,14 @@ Four gaps are real and none of them are hypothetical:
    scrubbed; theirs is not.
 4. **A host with neither mechanism runs the child unconfined.** Set
    `PROOFWORK_REQUIRE_SANDBOX=1` to make that `UNAVAILABLE` instead of a silent
-   downgrade. Any node running third-party objectives should set it.
+   downgrade. Any node running third-party objectives should set it. The
+   switch fails closed: any value other than an explicit `0`/`false`/`no`/`off`
+   counts as on, so a typo cannot silently mean "unjailed".
+
+One thing that is *not* a gap, because it is checked: directories a spec can
+name — replay's `cwd`, lean's `project_root` — resolve against the objective
+root and are refused when they escape it. A record cannot choose which host
+paths are bound into its own jail.
 
 **The Python reference does not jail at all.** It `exec`s pinned code in-process
 by design — it is the readable specification of the *rules*, not a hardened

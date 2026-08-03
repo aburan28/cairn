@@ -158,47 +158,24 @@ impl Value {
     /// This is the only place untrusted JSON enters the system, which is why
     /// float rejection lives here: past this point the type system carries the
     /// guarantee and no further checking is needed.
+    ///
+    /// Hand-rolled for the same reason the encoder is. Routing this through a
+    /// JSON library gives that library's private conventions consensus weight:
+    /// `serde_json` with `arbitrary_precision` decodes an object whose first
+    /// key is its internal number token (`$serde_json::private::Number`) as a
+    /// *number*, so the same bytes parsed here and by the Python reference
+    /// produced two different values — and therefore two different digests.
+    /// A decoder spelled out in this file cannot drift under a dependency
+    /// update, and every rule below is the same rule `json.loads` applies.
     pub fn from_json(text: &str) -> Result<Value, CanonicalError> {
-        let parsed: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| CanonicalError::Malformed(e.to_string()))?;
-        Value::from_serde(&parsed, "$")
-    }
-
-    fn from_serde(value: &serde_json::Value, path: &str) -> Result<Value, CanonicalError> {
-        match value {
-            serde_json::Value::Null => Ok(Value::Null),
-            serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
-            serde_json::Value::String(s) => Ok(Value::String(s.clone())),
-            serde_json::Value::Number(n) => {
-                // With `arbitrary_precision` the number is kept as text, so an
-                // integer too large for i128 is distinguishable from a float
-                // rather than silently becoming one.
-                let raw = n.to_string();
-                if raw.contains('.') || raw.contains('e') || raw.contains('E') {
-                    return Err(CanonicalError::Float(path.to_string()));
-                }
-                raw.parse::<i128>()
-                    .map(Value::Int)
-                    .map_err(|_| CanonicalError::IntegerOutOfRange(path.to_string()))
-            }
-            serde_json::Value::Array(items) => {
-                let mut out = Vec::with_capacity(items.len());
-                for (i, item) in items.iter().enumerate() {
-                    out.push(Value::from_serde(item, &format!("{path}[{i}]"))?);
-                }
-                Ok(Value::Array(out))
-            }
-            serde_json::Value::Object(map) => {
-                let mut out = BTreeMap::new();
-                for (key, item) in map {
-                    out.insert(
-                        key.clone(),
-                        Value::from_serde(item, &format!("{path}.{key}"))?,
-                    );
-                }
-                Ok(Value::Object(out))
-            }
+        let mut parser = Parser { text, pos: 0 };
+        parser.skip_whitespace();
+        let value = parser.parse_value(0, "$")?;
+        parser.skip_whitespace();
+        if parser.pos != text.len() {
+            return Err(parser.malformed("trailing characters after the value"));
         }
+        Ok(value)
     }
 
     /// The one canonical byte encoding of this value.
@@ -254,6 +231,274 @@ impl Value {
     }
 }
 
+/// Recursion ceiling for [`Value::from_json`]. Matches the limit the previous
+/// serde_json-based decoder enforced, so nothing that parsed before is refused
+/// now, and a deliberately deep document cannot overflow the stack.
+const MAX_DEPTH: usize = 128;
+
+/// The decoder behind [`Value::from_json`]. Strict JSON (RFC 8259), no
+/// extensions: no `NaN`/`Infinity`, no comments, no trailing commas, no raw
+/// control characters inside strings. Duplicate object keys keep the last
+/// value, which is what both `json.loads` and the previous decoder did.
+struct Parser<'a> {
+    text: &'a str,
+    pos: usize,
+}
+
+impl Parser<'_> {
+    fn peek(&self) -> Option<u8> {
+        self.text.as_bytes().get(self.pos).copied()
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.pos += 1;
+        }
+    }
+
+    fn malformed(&self, why: &str) -> CanonicalError {
+        CanonicalError::Malformed(format!("{why} at byte {}", self.pos))
+    }
+
+    fn expect(&mut self, byte: u8) -> Result<(), CanonicalError> {
+        if self.peek() == Some(byte) {
+            self.pos += 1;
+            Ok(())
+        } else {
+            Err(self.malformed(&format!("expected {:?}", byte as char)))
+        }
+    }
+
+    fn parse_value(&mut self, depth: usize, path: &str) -> Result<Value, CanonicalError> {
+        if depth > MAX_DEPTH {
+            return Err(CanonicalError::Malformed(
+                "recursion limit exceeded".to_string(),
+            ));
+        }
+        match self.peek() {
+            Some(b'n') => self.literal("null", Value::Null),
+            Some(b't') => self.literal("true", Value::Bool(true)),
+            Some(b'f') => self.literal("false", Value::Bool(false)),
+            Some(b'"') => self.parse_string().map(Value::String),
+            Some(b'[') => self.parse_array(depth, path),
+            Some(b'{') => self.parse_object(depth, path),
+            Some(b'-' | b'0'..=b'9') => self.parse_number(path),
+            Some(_) => Err(self.malformed("unexpected character")),
+            None => Err(self.malformed("unexpected end of input")),
+        }
+    }
+
+    fn literal(&mut self, word: &str, value: Value) -> Result<Value, CanonicalError> {
+        if self.text[self.pos..].starts_with(word) {
+            self.pos += word.len();
+            Ok(value)
+        } else {
+            Err(self.malformed("invalid literal"))
+        }
+    }
+
+    fn parse_array(&mut self, depth: usize, path: &str) -> Result<Value, CanonicalError> {
+        self.expect(b'[')?;
+        self.skip_whitespace();
+        let mut out = Vec::new();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            return Ok(Value::Array(out));
+        }
+        loop {
+            let item = self.parse_value(depth + 1, &format!("{path}[{}]", out.len()))?;
+            out.push(item);
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => {
+                    self.pos += 1;
+                    self.skip_whitespace();
+                }
+                Some(b']') => {
+                    self.pos += 1;
+                    return Ok(Value::Array(out));
+                }
+                _ => return Err(self.malformed("expected ',' or ']'")),
+            }
+        }
+    }
+
+    fn parse_object(&mut self, depth: usize, path: &str) -> Result<Value, CanonicalError> {
+        self.expect(b'{')?;
+        self.skip_whitespace();
+        let mut out = BTreeMap::new();
+        if self.peek() == Some(b'}') {
+            self.pos += 1;
+            return Ok(Value::Object(out));
+        }
+        loop {
+            if self.peek() != Some(b'"') {
+                return Err(self.malformed("expected a string key"));
+            }
+            let key = self.parse_string()?;
+            self.skip_whitespace();
+            self.expect(b':')?;
+            self.skip_whitespace();
+            let value = self.parse_value(depth + 1, &format!("{path}.{key}"))?;
+            out.insert(key, value);
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => {
+                    self.pos += 1;
+                    self.skip_whitespace();
+                }
+                Some(b'}') => {
+                    self.pos += 1;
+                    return Ok(Value::Object(out));
+                }
+                _ => return Err(self.malformed("expected ',' or '}'")),
+            }
+        }
+    }
+
+    fn parse_number(&mut self, path: &str) -> Result<Value, CanonicalError> {
+        let start = self.pos;
+        if self.peek() == Some(b'-') {
+            self.pos += 1;
+        }
+        // `0`, or a nonzero digit followed by more. A longer run starting with
+        // zero is not JSON.
+        match self.peek() {
+            Some(b'0') => {
+                self.pos += 1;
+                if matches!(self.peek(), Some(b'0'..=b'9')) {
+                    return Err(self.malformed("leading zero"));
+                }
+            }
+            Some(b'1'..=b'9') => {
+                while matches!(self.peek(), Some(b'0'..=b'9')) {
+                    self.pos += 1;
+                }
+            }
+            _ => return Err(self.malformed("expected a digit")),
+        }
+        let mut float = false;
+        if self.peek() == Some(b'.') {
+            float = true;
+            self.pos += 1;
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(self.malformed("expected a digit after '.'"));
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            float = true;
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(self.malformed("expected a digit in the exponent"));
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+        }
+        // The whole grammar is consumed before the float refusal so that
+        // `1.5x` is malformed JSON rather than "a float", same as before.
+        if float {
+            return Err(CanonicalError::Float(path.to_string()));
+        }
+        self.text[start..self.pos]
+            .parse::<i128>()
+            .map(Value::Int)
+            .map_err(|_| CanonicalError::IntegerOutOfRange(path.to_string()))
+    }
+
+    fn parse_string(&mut self) -> Result<String, CanonicalError> {
+        self.expect(b'"')?;
+        let mut out = String::new();
+        loop {
+            let Some(byte) = self.peek() else {
+                return Err(self.malformed("unterminated string"));
+            };
+            match byte {
+                b'"' => {
+                    self.pos += 1;
+                    return Ok(out);
+                }
+                b'\\' => {
+                    self.pos += 1;
+                    let Some(escape) = self.peek() else {
+                        return Err(self.malformed("unterminated escape"));
+                    };
+                    self.pos += 1;
+                    match escape {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{08}'),
+                        b'f' => out.push('\u{0c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => out.push(self.parse_unicode_escape()?),
+                        _ => return Err(self.malformed("unknown escape")),
+                    }
+                }
+                0x00..=0x1F => {
+                    return Err(self.malformed("raw control character in string"));
+                }
+                b if b < 0x80 => {
+                    out.push(b as char);
+                    self.pos += 1;
+                }
+                _ => {
+                    // Multi-byte UTF-8. The input is a `&str`, so the sequence
+                    // is already valid; copy the whole character through.
+                    let ch = self.text[self.pos..].chars().next().expect("valid utf-8");
+                    out.push(ch);
+                    self.pos += ch.len_utf8();
+                }
+            }
+        }
+    }
+
+    /// `\uXXXX`, with a surrogate pair combined into one character. A lone
+    /// surrogate is refused: it is not a character, and `String` cannot hold
+    /// it anyway.
+    fn parse_unicode_escape(&mut self) -> Result<char, CanonicalError> {
+        let high = self.hex4()?;
+        if (0xDC00..=0xDFFF).contains(&high) {
+            return Err(self.malformed("lone trailing surrogate"));
+        }
+        if (0xD800..=0xDBFF).contains(&high) {
+            if self.peek() != Some(b'\\') {
+                return Err(self.malformed("lone leading surrogate"));
+            }
+            self.pos += 1;
+            if self.peek() != Some(b'u') {
+                return Err(self.malformed("lone leading surrogate"));
+            }
+            self.pos += 1;
+            let low = self.hex4()?;
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return Err(self.malformed("lone leading surrogate"));
+            }
+            let code = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+            return char::from_u32(code).ok_or_else(|| self.malformed("invalid escape"));
+        }
+        char::from_u32(high).ok_or_else(|| self.malformed("invalid escape"))
+    }
+
+    fn hex4(&mut self) -> Result<u32, CanonicalError> {
+        let slice = self
+            .text
+            .get(self.pos..self.pos + 4)
+            .filter(|s| s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| self.malformed("expected four hex digits"))?;
+        self.pos += 4;
+        Ok(u32::from_str_radix(slice, 16).expect("checked hex"))
+    }
+}
+
 /// Escape exactly as the reference implementation does.
 ///
 /// Every deviation here is a consensus fault, so the rules are spelled out
@@ -288,9 +533,15 @@ pub fn digest_bytes(data: &[u8]) -> String {
 }
 
 /// Display form, e.g. `sha256:ab12cd34`. Never use for equality.
+///
+/// By characters, not bytes: identifiers reach here from records other people
+/// wrote, and byte-slicing an attacker-chosen string panics mid-character.
 pub fn short(identifier: &str) -> String {
     match identifier.strip_prefix(DIGEST_PREFIX) {
-        Some(rest) => format!("{DIGEST_PREFIX}{}", &rest[..rest.len().min(8)]),
+        Some(rest) => {
+            let head: String = rest.chars().take(8).collect();
+            format!("{DIGEST_PREFIX}{head}")
+        }
         None => identifier.chars().take(8).collect(),
     }
 }
@@ -328,4 +579,155 @@ macro_rules! obj {
         $( map.insert(String::from($key), $value); )*
         $crate::canonical::Value::Object(map)
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_library_private_number_token_stays_an_object() {
+        // Regression. `serde_json` with `arbitrary_precision` decodes an object
+        // whose first key is its internal number token as a *number*, so this
+        // input used to parse as `{"x":42}` here while the Python reference —
+        // and the encoder in this very file — saw an object. Same bytes, two
+        // digests: a consensus split one crafted record away.
+        let text = r#"{"x":{"$serde_json::private::Number":"42"}}"#;
+        let value = Value::from_json(text).expect("valid JSON object");
+        let inner = value.get("x").expect("x is present");
+        assert!(
+            inner.as_object().is_some(),
+            "the object literal must stay an object, got {inner:?}"
+        );
+        assert_eq!(
+            inner
+                .get("$serde_json::private::Number")
+                .and_then(Value::as_str),
+            Some("42")
+        );
+        // And the digest round-trips through the canonical encoding.
+        let reparsed = Value::from_json(&value.canonical_string()).expect("round trip");
+        assert_eq!(reparsed, value);
+
+        // The float-shaped variant used to fail the whole parse as a float.
+        let float_shaped = r#"{"$serde_json::private::Number":"1.5"}"#;
+        assert!(Value::from_json(float_shaped).is_ok());
+    }
+
+    #[test]
+    fn scalars_parse_and_floats_are_refused_with_a_path() {
+        assert_eq!(Value::from_json("null"), Ok(Value::Null));
+        assert_eq!(Value::from_json("true"), Ok(Value::Bool(true)));
+        assert_eq!(Value::from_json("false"), Ok(Value::Bool(false)));
+        assert_eq!(Value::from_json("42"), Ok(Value::Int(42)));
+        assert_eq!(Value::from_json("-0"), Ok(Value::Int(0)));
+        assert_eq!(Value::from_json(" 7 "), Ok(Value::Int(7)));
+        assert_eq!(
+            Value::from_json(&i128::MAX.to_string()),
+            Ok(Value::Int(i128::MAX))
+        );
+        assert_eq!(
+            Value::from_json(&i128::MIN.to_string()),
+            Ok(Value::Int(i128::MIN))
+        );
+
+        assert_eq!(
+            Value::from_json("{\"a\":[1,2.5]}"),
+            Err(CanonicalError::Float("$.a[1]".to_string()))
+        );
+        assert_eq!(
+            Value::from_json("1e3"),
+            Err(CanonicalError::Float("$".to_string()))
+        );
+        assert_eq!(
+            Value::from_json("170141183460469231731687303715884105728"),
+            Err(CanonicalError::IntegerOutOfRange("$".to_string()))
+        );
+    }
+
+    #[test]
+    fn malformed_json_is_refused_not_repaired() {
+        for bad in [
+            "",
+            "  ",
+            "{",
+            "[1,]",
+            "{\"a\":1,}",
+            "{\"a\"}",
+            "{a:1}",
+            "01",
+            "-",
+            "1.",
+            ".5",
+            "+1",
+            "nul",
+            "truex",
+            "1 2",
+            "NaN",
+            "Infinity",
+            "'single'",
+            "\"unterminated",
+            "\"bad escape \\q\"",
+            "\"raw tab \t\"",
+            "\"lone surrogate \\ud800\"",
+            "\"backwards pair \\udc00\\ud800\"",
+        ] {
+            let parsed = Value::from_json(bad);
+            assert!(
+                matches!(parsed, Err(CanonicalError::Malformed(_))),
+                "{bad:?} parsed to {parsed:?}"
+            );
+        }
+        // A float followed by garbage is refused as a float: the number
+        // grammar completes before the trailing junk is reached. Either error
+        // is a refusal; this pins which one so a change is a decision.
+        assert!(matches!(
+            Value::from_json("1.5.2"),
+            Err(CanonicalError::Float(_))
+        ));
+    }
+
+    #[test]
+    fn strings_unescape_the_way_the_encoder_escapes() {
+        let value =
+            Value::from_json(r#""\" \\ \/ \b \f \n \r \t \u00e9 \ud83d\ude00 é""#).expect("valid");
+        assert_eq!(
+            value.as_str(),
+            Some("\" \\ / \u{08} \u{0c} \n \r \t é 😀 é")
+        );
+        // Everything the encoder writes must read back as itself.
+        let original = Value::string("control \u{01} tab\tnewline\nquote\"backslash\\ é 😀");
+        let reparsed = Value::from_json(&original.canonical_string()).expect("round trip");
+        assert_eq!(reparsed, original);
+    }
+
+    #[test]
+    fn duplicate_keys_keep_the_last_value() {
+        // What `json.loads` does, and what the previous decoder did.
+        let value = Value::from_json(r#"{"a":1,"a":2}"#).expect("valid");
+        assert_eq!(value.get("a"), Some(&Value::Int(2)));
+    }
+
+    #[test]
+    fn deep_nesting_is_bounded_not_a_stack_overflow() {
+        let deep_ok = format!("{}1{}", "[".repeat(100), "]".repeat(100));
+        assert!(Value::from_json(&deep_ok).is_ok());
+        let too_deep = format!("{}1{}", "[".repeat(500), "]".repeat(500));
+        assert!(matches!(
+            Value::from_json(&too_deep),
+            Err(CanonicalError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn short_never_panics_on_attacker_chosen_identifiers() {
+        // Regression: the digest arm sliced bytes, so a multi-byte character
+        // straddling index 8 panicked — reachable from any record id another
+        // peer chose.
+        assert_eq!(short("sha256:1234567é9"), "sha256:1234567é");
+        assert_eq!(short("sha256:abcdef012345"), "sha256:abcdef01");
+        assert_eq!(short("sha256:ab"), "sha256:ab");
+        assert_eq!(short("é234567890"), "é2345678");
+        assert_eq!(short("plain"), "plain");
+    }
 }

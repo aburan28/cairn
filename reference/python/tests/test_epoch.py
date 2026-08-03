@@ -267,6 +267,29 @@ def test_a_timestamp_that_names_no_instant_does_not_parse(text):
     assert unix_seconds(text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Every spelling below is one `datetime.fromisoformat` accepts and the
+        # Rust parser refuses. Both implementations walk the whole log deciding
+        # which entries move the settlement anchor, so one timestamp parsed
+        # here and refused there is a different anchor, a different beacon
+        # order, and different payouts for the same log. The list mirrors the
+        # Rust test `impossible_and_ambiguous_instants_are_refused`.
+        "2026-07-28T00:00:00+0000",
+        "2026-07-28T00:00:00+00",
+        " 2026-07-28T00:00:00Z",
+        "2026-07-28T00:00:00Z ",
+        "2026-07-28_00:00:00+00:00",
+        "2026-07-28T00:00:00,5+00:00",
+        # And the one direction Rust used to be more permissive: leap seconds.
+        "2026-07-28T00:00:60+00:00",
+    ],
+)
+def test_spellings_the_rust_parser_refuses_are_refused_here_too(text):
+    assert unix_seconds(text) is None
+
+
 def test_rust_and_python_agree_on_the_epoch_of_a_timestamp():
     # Both implementations derive epochs from the same instants, so a
     # disagreement here is a disagreement about which reveals were legal.

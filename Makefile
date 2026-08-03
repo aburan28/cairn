@@ -100,4 +100,4 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy interop mcp-smoke tla
+check: test fmt clippy demo ratchet interop mcp-smoke tla

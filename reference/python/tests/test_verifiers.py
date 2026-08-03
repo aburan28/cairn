@@ -208,6 +208,38 @@ def test_replay_failure_is_unavailable_not_a_rejection(tmp_path):
     assert verifiers.run(spec, {"results": {"count": 1}}).status is Status.UNAVAILABLE
 
 
+@pytest.mark.parametrize("escape", ["/", "/etc", "..", "../..", "a/../../.."])
+def test_replay_cwd_cannot_escape_the_objective_root(escape):
+    # Regression, mirrored in the Rust suite. ``cwd`` is objective-authored;
+    # unconfined it pointed the command at any host directory the record
+    # named, with declared fields as the exfiltration channel.
+    spec = {
+        "kind": "replay",
+        "command": ["true"],
+        "reproducible_fields": ["n"],
+        "cwd": escape,
+    }
+    verdict = verifiers.run(spec, {"results": {}})
+    assert verdict.status is Status.INVALID_SPEC, escape
+    assert "escapes" in verdict.detail
+
+
+@pytest.mark.parametrize("escape", ["/", "/etc", "..", "../.."])
+def test_lean_project_root_cannot_escape_the_objective_root(escape):
+    # Regression, mirrored in the Rust suite, where ``project_root`` is bound
+    # into the verifier jail *writable* -- "/" turned the jail into a
+    # pass-through. Screened before the toolchain lookup, so this refusal is
+    # testable without Lean installed.
+    spec = {
+        "kind": "lean",
+        "statement": "theorem t : True",
+        "project_root": escape,
+    }
+    verdict = verifiers.run(spec, {"proof": ":= trivial"})
+    assert verdict.status is Status.INVALID_SPEC, escape
+    assert "escapes" in verdict.detail
+
+
 # -- dispatch --------------------------------------------------------------
 
 

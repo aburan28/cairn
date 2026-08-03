@@ -127,6 +127,16 @@ class Objective:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Objective":
+        # An absent key and an explicit null both mean "unset". Everything
+        # else must be a string: the previous `or DEFAULT` treated every falsy
+        # value -- `""`, `0`, `False` -- as unset, so a record the Rust
+        # implementation refuses decoded here as a public objective. Same
+        # bytes, two verdicts on validity, is a consensus split.
+        confidentiality = data.get("confidentiality")
+        if confidentiality is None:
+            confidentiality = DEFAULT_CONFIDENTIALITY
+        elif not isinstance(confidentiality, str):
+            raise RecordError("confidentiality must be a string naming a confidentiality class")
         return cls(
             goal=data["goal"],
             statement=data["statement"],
@@ -136,9 +146,7 @@ class Objective:
             created_at=data["created_at"],
             deadline=data.get("deadline"),
             ratchet=data.get("ratchet"),
-            # `or` rather than a default argument: a record carrying an
-            # explicit null means "unset", same as an absent key.
-            confidentiality=data.get("confidentiality") or DEFAULT_CONFIDENTIALITY,
+            confidentiality=confidentiality,
         )
 
 
@@ -224,11 +232,21 @@ class Claim:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Claim":
+        # Missing `cites` reads as empty; anything present must be an array of
+        # strings, matching the Rust decoder. `tuple(...)` alone iterated
+        # whatever it was handed, so `"cites": "abc"` decoded as three
+        # one-letter citations here while the Rust side refused the record --
+        # and those phantom edges would have carried citation flow.
+        cites = data.get("cites", ())
+        if isinstance(cites, str) or not isinstance(cites, (list, tuple)):
+            raise RecordError("cites must be an array of claim ids")
+        if any(not isinstance(cited, str) for cited in cites):
+            raise RecordError("cites must be an array of claim ids")
         return cls(
             objective_id=data["objective_id"],
             submitter=data["submitter"],
             artifact=data["artifact"],
             nonce=data["nonce"],
             created_at=data["created_at"],
-            cites=tuple(data.get("cites", ())),
+            cites=tuple(cites),
         )

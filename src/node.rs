@@ -854,7 +854,12 @@ impl Node {
     /// back-dated append after the fact could otherwise change what this
     /// function returns for an epoch that already settled -- [`Node::audit`]
     /// compares the two and reports a divergence.
-    fn anchor_of_epoch(&self, epoch: u64) -> String {
+    ///
+    /// Public because work assignment must key on the same stable anchor:
+    /// deriving a partition from the *live* head instead means every append
+    /// reshuffles every node's slice mid-epoch, and "anyone can recompute a
+    /// peer's region" stops being true.
+    pub fn anchor_of_epoch(&self, epoch: u64) -> String {
         let mut anchor = String::new();
         for entry in self.ledger.entries() {
             match crate::time::parse_rfc3339(&entry.ts) {

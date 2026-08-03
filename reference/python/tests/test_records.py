@@ -4,6 +4,7 @@ import pytest
 from proofwork.canonical import MAX_UNITS
 from proofwork.frontier import Ratchet, RatchetError
 from proofwork.records import (
+    Claim,
     CONFIDENTIALITY_CLASSES,
     DEFAULT_CONFIDENTIALITY,
     Objective,
@@ -91,6 +92,47 @@ def test_absent_or_null_decodes_as_public_with_an_unchanged_id(value):
     decoded = Objective.from_dict(body)
     assert decoded.confidentiality == "public"
     assert decoded.id == objective().id
+
+
+@pytest.mark.parametrize("value", ["", 0, False, [], {}])
+def test_falsy_confidentiality_is_refused_not_defaulted(value):
+    # Regression: `data.get("confidentiality") or DEFAULT` treated every falsy
+    # value as unset, so a record the Rust decoder refuses -- `""` is an
+    # unknown class there, `0` the wrong type -- decoded here as a public
+    # objective. Same bytes, two verdicts on validity, is a consensus split.
+    body = objective().to_dict()
+    body["confidentiality"] = value
+    with pytest.raises(RecordError):
+        Objective.from_dict(body)
+
+
+@pytest.mark.parametrize("value", ["abc", None, 7, {"a": 1}, ["ok", 3]])
+def test_cites_must_be_an_array_of_strings(value):
+    # Regression: `tuple(data.get("cites", ()))` iterated whatever it was
+    # handed, so `"cites": "abc"` decoded as three one-letter citations the
+    # Rust side refuses -- phantom edges that would have carried citation flow.
+    body = Claim(
+        objective_id="sha256:" + "a" * 64,
+        submitter="alice",
+        artifact={"n": 1},
+        nonce="s3cret",
+        created_at=TS,
+    ).to_dict()
+    body["cites"] = value
+    with pytest.raises(RecordError, match="array of claim ids"):
+        Claim.from_dict(body)
+
+
+def test_absent_cites_decodes_as_empty():
+    body = Claim(
+        objective_id="sha256:" + "a" * 64,
+        submitter="alice",
+        artifact={"n": 1},
+        nonce="s3cret",
+        created_at=TS,
+    ).to_dict()
+    del body["cites"]
+    assert Claim.from_dict(body).cites == ()
 
 
 @pytest.mark.parametrize("cls", ["public", "embargoed"])

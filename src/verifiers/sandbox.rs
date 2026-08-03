@@ -158,13 +158,11 @@ pub fn confine(
     plan: &Confinement<'_>,
 ) -> Result<Jailed, Unavailable> {
     let mechanism = mechanism();
-    let required = std::env::var(REQUIRE_ENV)
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let required = require_sandbox(std::env::var(REQUIRE_ENV).ok().as_deref());
 
     match mechanism {
         Mechanism::None(why) if required => Err(Unavailable(format!(
-            "{REQUIRE_ENV}=1 and no sandbox mechanism is usable here ({why}); \
+            "{REQUIRE_ENV} is set and no sandbox mechanism is usable here ({why}); \
              refusing to run objective-authored code unjailed"
         ))),
         Mechanism::None(_) => Ok(Jailed {
@@ -176,6 +174,23 @@ pub fn confine(
             mechanism: "bwrap",
         }),
         Mechanism::Seatbelt(sandbox_exec) => seatbelt(sandbox_exec, program, args, plan),
+    }
+}
+
+/// Whether [`REQUIRE_ENV`] asks for a mandatory jail.
+///
+/// Fails closed. This is a security kill-switch, so `=true`, `=yes`, or a typo
+/// must not silently mean "off" -- the failure mode of a misread value is
+/// objective-authored code running unjailed with nothing printed anywhere.
+/// Only unset, empty, and the explicit off spellings leave the requirement
+/// off; every other value turns it on.
+fn require_sandbox(value: Option<&str>) -> bool {
+    match value {
+        None => false,
+        Some(text) => {
+            let normalized = text.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        }
     }
 }
 
@@ -511,6 +526,27 @@ mod tests {
     #[test]
     fn profile_paths_with_quotes_cannot_break_out_of_the_sexp() {
         assert_eq!(escape(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn the_require_switch_fails_closed_on_unrecognised_values() {
+        // Regression: only the literal "1" used to count, so `=true` -- the
+        // spelling half of everyone reaches for first -- silently meant "run
+        // objective code unjailed".
+        for on in ["1", "true", "TRUE", "yes", "on", " 1 ", "banana"] {
+            assert!(require_sandbox(Some(on)), "{on:?} must require the jail");
+        }
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+            Some("OFF"),
+        ] {
+            assert!(!require_sandbox(off), "{off:?} must not require the jail");
+        }
     }
 
     #[test]

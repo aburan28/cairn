@@ -27,7 +27,17 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 
 LOG=$(mktemp -u /tmp/pw-mcp-XXXXXX.jsonl)
 OUT=$(mktemp -u /tmp/pw-mcp-out-XXXXXX.jsonl)
-trap 'rm -f "$LOG" "$OUT" "${LOG%.jsonl}.pending.json"' EXIT
+ERR=$(mktemp -u /tmp/pw-mcp-err-XXXXXX.log)
+trap 'rm -f "$LOG" "$OUT" "$ERR" "${LOG%.jsonl}.pending.json"' EXIT
+
+# stderr is the only channel for "cannot save pending commitments" -- a server
+# silently losing every nonce must fail this script, not pass it.
+check_stderr() {
+  if grep -q "cannot save\|cannot serialize\|cannot read pending\|is corrupt" "$ERR" 2>/dev/null; then
+    cat "$ERR" >&2
+    fail "the server reported a pending-store failure on stderr"
+  fi
+}
 
 rule "post an objective with the CLI"
 OID=$("$RUST" --log "$LOG" --root . post examples/capset_progressive/objective.json \
@@ -42,7 +52,8 @@ ARTIFACT=$(python3 -c 'import json;print(json.dumps(json.load(open("examples/cap
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
   printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"score_candidate","arguments":{"objective_id":"%s","artifact":%s}}}\n' \
     "$OID" "$ARTIFACT"
-} | "$MCP" --log "$LOG" --root . > "$OUT" 2>/dev/null
+} | "$MCP" --log "$LOG" --root . > "$OUT" 2>"$ERR"
+check_stderr
 
 python3 - "$OUT" <<'PY'
 import json, sys
@@ -135,10 +146,12 @@ echo "  posted hostile objective $HOID"
   printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"submit_claim","arguments":{"objective_id":"%s","submitter":"agent","artifact":{"n":27},"cites":["%s"]}}}\n' "$HOID" "$PLANTED"
   printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"work_assignment","arguments":{"objective_id":"%s","node_id":"agent-a","partitions":4,"epoch":7}}}\n' "$HOID"
   printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"work_assignment","arguments":{"objective_id":"%s","node_id":"agent-b","partitions":4,"epoch":7}}}\n' "$HOID"
-} | "$MCP" --log "$HOSTILE_LOG" --root . > "$OUT" 2>/dev/null
+  printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"work_assignment","arguments":{"objective_id":"%s","node_id":"agent-a"}}}\n' "$HOID"
+} | "$MCP" --log "$HOSTILE_LOG" --root . > "$OUT" 2>"$ERR"
+check_stderr
 
 python3 - "$OUT" "$PLANTED" <<'PY'
-import json, sys
+import json, sys, time
 planted = sys.argv[2]
 msgs = {}
 for line in open(sys.argv[1]).read().splitlines():
@@ -163,6 +176,18 @@ a, b = msgs[3]["content"][0]["text"], msgs[4]["content"][0]["text"]
 for who, t in (("agent-a", a), ("agent-b", b)):
     assert who in t and "partition" in t, t
 print("  work_assignment answered for two nodes, no coordinator involved")
+
+# An unpinned work_assignment must use the protocol epoch, not a private one.
+# (This ran before PROOFWORK_EPOCH_SECONDS=1 is exported below, so the length
+# here is the 600s default and a boundary race is vanishingly unlikely.)
+unpinned = msgs[5]["content"][0]["text"]
+reported = int(unpinned.split("for epoch ")[1].split()[0])
+expected = int(time.time()) // 600
+assert abs(reported - expected) <= 1, (
+    f"work_assignment reported epoch {reported}, the protocol epoch is {expected}: "
+    "the tool is using a private epoch length again"
+)
+print("  unpinned work_assignment agrees with the protocol epoch")
 PY
 
 ENTRIES=$(grep -c . "$HOSTILE_LOG")
@@ -182,10 +207,14 @@ echo "  ledger still holds 1 entry: the refusal cost nothing"
 export PROOFWORK_EPOCH_SECONDS=1
 rule "submit_claim commits, then reveals an epoch later"
 
-call_submit() {
-  printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_claim","arguments":{"objective_id":"%s","submitter":"agent","artifact":%s}}}\n' \
-    "$OID" "$ARTIFACT" | "$MCP" --log "$LOG" --root . 2>/dev/null \
+call_tool() {
+  printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}\n' \
+    "$1" "$2" | "$MCP" --log "$LOG" --root . 2>>"$ERR" \
     | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["result"]["content"][0]["text"])'
+}
+
+call_submit() {
+  call_tool submit_claim "$(printf '{"objective_id":"%s","submitter":"agent","artifact":%s}' "$OID" "$ARTIFACT")"
 }
 
 FIRST=$(call_submit)
@@ -193,6 +222,12 @@ echo "$FIRST" | sed 's/^/  /'
 echo "$FIRST" | grep -q "Committed in epoch" || fail "first submit_claim did not commit"
 grep -q '"kind": *"commitment"' "$LOG" || fail "no commitment reached the log"
 grep -q '"kind": *"claim"' "$LOG" && fail "the artifact was revealed in the same epoch as its commitment"
+
+# The open commitment must be discoverable after a restart -- an agent whose
+# session was compacted has no other way to learn it owes a reveal.
+PENDING=$(call_tool pending_reveals '{"submitter":"agent"}')
+echo "$PENDING" | grep -q "$OID" || fail "pending_reveals does not list the open commitment"
+echo "  pending_reveals lists the open commitment across a server restart"
 
 # Same epoch, same artifact: the server must recognise its own outstanding
 # commitment rather than making a second one the agent can never open.
@@ -209,12 +244,18 @@ echo "$SECOND" | grep -q "verdict: accept" || fail "the revealed claim did not v
 echo "$SECOND" | grep -q "beacon order" || fail "the agent was not told why payment is deferred"
 echo "  the nonce survived a restart of the server and opened the commitment"
 
-rule "the epoch closes and the batch settles"
+rule "the epoch closes and the batch settles -- over MCP alone"
 sleep 1.1
-"$RUST" --log "$LOG" --root . settle | sed 's/^/  /'
-grep -q '"kind": *"batch"' "$LOG" || fail "no batch record was written"
+# No CLI settle here, deliberately: an agent that reveals and then polls
+# frontier_status must get paid without the operator running anything. The
+# server drains due epochs on any read.
+STATUS=$(call_tool frontier_status "$(printf '{"objective_id":"%s"}' "$OID")")
+echo "$STATUS" | sed 's/^/  /'
+grep -q '"kind": *"batch"' "$LOG" || fail "polling frontier_status did not settle the closed epoch"
+echo "$STATUS" | grep -q "frontier: score 12" || fail "the settled claim did not move the frontier"
 "$RUST" --log "$LOG" --root . audit | grep -q "log verified" \
   || fail "the log the MCP server produced does not audit"
-echo "  audit re-derived the batch's beacon order"
+check_stderr
+echo "  a read tool settled the closed epoch; audit re-derived the batch's beacon order"
 
 printf '\n\033[32mMCP SMOKE OK\033[0m\n'

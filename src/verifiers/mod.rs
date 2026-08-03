@@ -373,7 +373,10 @@ kernel: no network of any kind (including unix sockets to a local daemon), no \
 writes outside a scratch directory that is deleted when the check finishes, a \
 wall-clock deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. Pinned pure \
 functions additionally get a scrubbed environment, so a checker cannot read the \
-operator's credentials out of it. \
+operator's credentials out of it. Directories a spec can name (replay's cwd, \
+lean's project_root) resolve against the objective root and are refused when \
+they escape it, so a record cannot choose which host paths are bound into its \
+own jail. \
 \
 It is NOT a VM boundary, and four gaps are real. (1) A kernel or policy bug is \
 still an escape; gVisor/Firecracker/WASM would bound that and are not \
@@ -1053,6 +1056,28 @@ impl VerifierRegistry {
             }
         }
 
+        // `project_root` comes from the objective record -- attacker-authored,
+        // like every other spec field -- and it is handed to the jail as a
+        // *writable* bind. Unconfined, `"/"` turns the sandbox into a
+        // pass-through of the whole filesystem, so it resolves against the
+        // bundle root and must stay inside it, exactly as pinned code paths
+        // must. Screened before the toolchain lookup: a malformed spec is
+        // malformed whether or not this node has Lean, and the reference
+        // implementation refuses it in the same place. Writes inside the
+        // bundle are bounded: every pinned file is hash-checked on each run,
+        // so a build that scribbles on a checker is caught when it resolves.
+        let project_cwd = match spec.get("project_root").and_then(Value::as_str) {
+            Some(root) if !root.is_empty() => match contained_dir(&self.root, root) {
+                Some(cwd) => Some(cwd),
+                None => {
+                    return Verdict::invalid_spec(format!(
+                        "project_root escapes the objective root: {root}"
+                    ))
+                }
+            },
+            _ => None,
+        };
+
         let binary = match which(&self.lean_binary) {
             Some(binary) => binary,
             // No toolchain is an infrastructure fact about this node. It says
@@ -1083,17 +1108,13 @@ impl VerifierRegistry {
             return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
         }
 
-        let cwd = match spec.get("project_root").and_then(Value::as_str) {
-            Some(root) if !root.is_empty() => PathBuf::from(root),
-            _ => workdir.path().to_path_buf(),
-        };
+        let cwd = project_cwd.unwrap_or_else(|| workdir.path().to_path_buf());
 
         // Lean elaboration runs arbitrary code (macros, `#eval`), and half the
         // input is submitter-controlled, so this spawn is jailed like any
         // other. `project_root` is writable because building a Lake project
-        // writes `.olean` files into it and the operator named that directory
-        // themselves; the environment is inherited because `elan`/`LEAN_PATH`
-        // is how a Lean toolchain is located at all.
+        // writes `.olean` files into it; the environment is inherited because
+        // `elan`/`LEAN_PATH` is how a Lean toolchain is located at all.
         let mut plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs()).reading(&binary);
         if cwd != workdir.path() {
             plan = plan.writing(&cwd);
@@ -1236,11 +1257,20 @@ impl VerifierRegistry {
             Err(verdict) => return verdict,
         };
 
-        // Lexical join, as in the reference implementation: an absolute `cwd`
-        // replaces the root, and no containment check is applied. The command
-        // itself is arbitrary anyway -- see SANDBOXING for what that costs.
+        // `cwd` comes from the objective record, and the jail ro-binds it.
+        // Unconfined it reads any host directory the record names -- and any
+        // declared field the command prints lands in public verdict evidence,
+        // which is exfiltration with no network needed. So it resolves against
+        // the bundle root and must stay inside it, the same containment pinned
+        // code paths get. The reference implementation applies the identical
+        // check.
         let relative = spec.get("cwd").and_then(Value::as_str).unwrap_or(".");
-        let cwd = normalize(&self.root.join(relative));
+        let cwd = match contained_dir(&self.root, relative) {
+            Some(cwd) => cwd,
+            None => {
+                return Verdict::invalid_spec(format!("cwd escapes the objective root: {relative}"))
+            }
+        };
 
         let workdir = match TempDir::new("proofwork-replay") {
             Ok(workdir) => workdir,
@@ -1990,6 +2020,26 @@ fn absolutize(path: &Path) -> io::Result<PathBuf> {
         Ok(normalize(path))
     } else {
         Ok(normalize(&std::env::current_dir()?.join(path)))
+    }
+}
+
+/// Resolve an objective-authored directory against the bundle root, refusing
+/// escapes -- the same containment [`VerifierRegistry::resolve_pinned`]
+/// applies to pinned code, for the same reason.
+///
+/// A spec field must never choose a host path: these directories are handed to
+/// the jail as bind mounts (`project_root` writable, replay's `cwd` readable),
+/// so an unconfined one turns the sandbox into a pass-through of whatever the
+/// record names -- `"/"` included. `Path::join` replaces the root when the
+/// field is absolute, and the `starts_with` below is component-wise, so both
+/// the absolute and the `../` spellings land in `None`.
+fn contained_dir(root: &Path, relative: &str) -> Option<PathBuf> {
+    let root = absolutize(root).ok()?;
+    let full = absolutize(&root.join(relative)).ok()?;
+    if full.starts_with(&root) {
+        Some(full)
+    } else {
+        None
     }
 }
 
@@ -3009,6 +3059,62 @@ mod tests {
         for spec in cases {
             let verdict = registry.run(&spec, &Value::object([("results", empty_object())]));
             assert_eq!(verdict.status, Status::InvalidSpec, "spec: {spec:?}");
+        }
+    }
+
+    #[test]
+    fn replay_cwd_cannot_escape_the_objective_root() {
+        // Regression. `cwd` is objective-authored and is ro-bound into the
+        // jail; before the containment check an objective could name any host
+        // directory -- `/home/<op>/.ssh` included -- and have its own command
+        // read it, with declared fields as the exfiltration channel.
+        let root = tmpdir("proofwork-replay-escape");
+        let registry = VerifierRegistry::new(root.path());
+        for escape in ["/", "/etc", "..", "../..", "a/../../.."] {
+            let spec = Value::object([
+                ("kind", Value::string("replay")),
+                ("command", Value::array([Value::string("true")])),
+                ("reproducible_fields", Value::array([Value::string("n")])),
+                ("cwd", Value::string(escape)),
+            ]);
+            let verdict = registry.run(&spec, &Value::object([("results", empty_object())]));
+            assert_eq!(verdict.status, Status::InvalidSpec, "cwd {escape:?}");
+            assert!(verdict.detail.contains("escapes"), "{}", verdict.detail);
+        }
+        // Staying inside the root is not refused by the containment check.
+        let spec = Value::object([
+            ("kind", Value::string("replay")),
+            ("command", Value::array([Value::string("true")])),
+            ("reproducible_fields", Value::array([Value::string("n")])),
+            ("cwd", Value::string(".")),
+        ]);
+        let verdict = registry.run(&spec, &Value::object([("results", empty_object())]));
+        assert_ne!(verdict.status, Status::InvalidSpec, "{}", verdict.detail);
+    }
+
+    #[test]
+    fn lean_project_root_cannot_escape_the_objective_root() {
+        // Regression. `project_root` is objective-authored and is bound into
+        // the jail *writable*; "/" used to turn the sandbox into a
+        // pass-through of the operator's whole filesystem. Screened before
+        // the toolchain lookup, so the refusal is testable without Lean.
+        let root = tmpdir("proofwork-lean-escape");
+        let registry = VerifierRegistry::new(root.path());
+        for escape in ["/", "/etc", "..", "../.."] {
+            let spec = Value::object([
+                ("kind", Value::string("lean")),
+                ("statement", Value::string("theorem t : True")),
+                ("project_root", Value::string(escape)),
+            ]);
+            let artifact = Value::object([("proof", Value::string(":= trivial"))]);
+            let verdict = registry.run(&spec, &artifact);
+            assert_eq!(
+                verdict.status,
+                Status::InvalidSpec,
+                "project_root {escape:?}: {}",
+                verdict.detail
+            );
+            assert!(verdict.detail.contains("escapes"), "{}", verdict.detail);
         }
     }
 
