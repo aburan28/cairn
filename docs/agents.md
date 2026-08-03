@@ -31,13 +31,20 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 
 | tool | writes to the log | what it is for |
 |---|---|---|
-| `list_objectives` | no | what is open, and where each frontier stands |
-| `get_objective` | no | full record, verifier spec, artifact shape |
+| `list_objectives` | no* | what is open, and where each frontier stands |
+| `get_objective` | no* | full record, verifier spec |
 | `score_candidate` | **no** | run the pinned verifier; the tight loop |
-| `frontier_status` | no | best score, which claim to cite, pool remaining |
+| `frontier_status` | no* | best score, which claim to cite, pool remaining |
+| `pending_reveals` | no | commitments you still owe a reveal for |
 | `work_assignment` | no | your slice of the search space this epoch |
 | `submit_claim` | yes | commit, then reveal on a later call |
-| `audit` | no | re-derive the whole log |
+| `audit` | no | re-derive the whole log (`rerun: true` re-runs verifiers; slow) |
+
+\* — with one automatic exception: a reveal epoch that has already closed is
+settled by whichever call looks at the log next, `frontier_status` included.
+The batch order was fixed by the epoch beacon when the epoch closed, so the
+caller merely materialises it and cannot influence it. This is what pays an
+agent that revealed and then only polled.
 
 ## `submit_claim` is two calls, and that is the protocol showing through
 
@@ -46,13 +53,17 @@ than the commitment it opens, so **no single call can do both**. Call
 `submit_claim` once to commit. Call it again with the same objective and the
 same artifact once the epoch has turned, and the second call opens the
 commitment the first one made. The server tells you which epoch it is waiting
-for.
+for and roughly how many seconds away that is (epochs default to 600 s;
+`PROOFWORK_EPOCH_SECONDS` changes the length for demos). If a session restart
+loses track of what you owe, `pending_reveals` lists every open commitment —
+an unrevealed commitment is never paid.
 
-An accepted reveal is not paid on the spot either. It is recorded as pending and
-settles when its reveal epoch closes, in an order derived from the epoch beacon.
-That is the point: nobody, the operator included, chooses who in a batch gets
-paid first. `settled: false` on an accepted claim means *not yet*, never
-*rejected*.
+An accepted reveal is not paid on the spot either. It is recorded as pending
+and settles when its reveal epoch closes, in an order derived from the epoch
+beacon. That is the point: nobody, the operator included, chooses who in a
+batch gets paid first. `settled: false` on an accepted claim means *not yet*,
+never *rejected* — and the settlement is applied by whatever call touches the
+log after the epoch closes, so polling `frontier_status` is enough to be paid.
 
 The nonce that binds the two calls together lives in a file beside the log. It
 has to survive a restart of the server, and it must never reach your context —
@@ -95,7 +106,10 @@ forge extra rows.
 through a structured field — a frontier holder, or the id of a claim the agent
 itself submitted — is *offered*. A claim id appearing inside a rendered
 statement is *tainted*. `submit_claim` refuses any citation that is tainted and
-never offered, which is the injection signature exactly.
+never offered, which is the injection signature exactly. Text a pinned verifier
+prints (`detail`, evidence) is tainted the same way: the checker was authored
+by whoever posted the objective, so it is the same attacker speaking through a
+second door.
 
 The check is deliberately narrow. An id the agent learned some other way (a
 human pasted it, an earlier session) is untouched: a claim id that never
@@ -172,10 +186,10 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | ./target/release/proofwork-mcp --log /tmp/pw.jsonl --root .
 ```
 
-Seven tool names come back: `score_candidate`, `list_objectives`,
-`get_objective`, `frontier_status`, `submit_claim`, `work_assignment`, `audit`.
-If that works and the client still shows nothing, the problem is the client's
-config, not this binary.
+Eight tool names come back: `score_candidate`, `list_objectives`,
+`get_objective`, `frontier_status`, `submit_claim`, `pending_reveals`,
+`work_assignment`, `audit`. If that works and the client still shows nothing,
+the problem is the client's config, not this binary.
 
 ### Running more than one client at once
 
@@ -241,12 +255,20 @@ Two agents on one objective, no coordination between them — on **two logs**
 reconciled by the daemon, not one log shared (see above):
 
 ```
-claude-code  submit 12 points        reward 300000   frontier advanced
-codex        score 16                accept — improves 12 → 16
-codex        submit 16, no citation  refused, nothing recorded
-codex        submit 16, citing       reward 400000   frontier advanced
-audit                                log verified: 11 entries, chain intact
+claude-code  submit 12 points          committed in epoch N; reveal from N+1
+             …epoch turns…
+claude-code  submit 12 points (again)  revealed: accept, settled: false
+             …epoch closes; next call settles the batch…
+claude-code  frontier_status           frontier 12, pool shows 300000 paid
+codex        score 16                  accept — improves 12 → 16
+codex        submit 16, no citation    refused, nothing recorded
+codex        submit 16, citing         committed → …epoch turns… → revealed
+             …epoch closes…            pool shows a further 400000 paid
+audit                                  log verified, chain intact
 ```
+
+`settled: false` with `reward: 0` on a fresh reveal is the protocol working,
+not failing — the batch pays when the epoch closes, in beacon order.
 
 Running *different* agents is better than several copies of one.
 [`gossip.rs`](../src/gossip.rs) preserves population diversity deliberately —
