@@ -1,0 +1,21 @@
+# Weekly, not daily: this project pins its lockfile (`--locked` in CI) and a
+# dependency bump is a reviewed change like any other, so batching them beats
+# a trickle of single-crate PRs.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # The Python reference implementation. It deliberately has no runtime
+  # dependencies, so this mostly watches the dev tooling (pytest).
+  - package-ecosystem: pip
+    directory: /reference/python
+    schedule:
+      interval: weekly

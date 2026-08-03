@@ -1,0 +1,38 @@
+name: release
+
+# Tag builds only. `--locked` because a release built from an unlocked
+# dependency resolution is a release nobody can reproduce.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # All four binaries ship together: a node operator needs the CLI, the
+      # MCP server, the p2p daemon, and the serve daemon to be the same
+      # commit, and separate tarballs invite mixing versions.
+      - name: package
+        run: |
+          tar -C "target/${{ matrix.target }}/release" -czf \
+            "proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" \
+            proofwork proofwork-mcp proofwork-p2p proofwork-serve
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz

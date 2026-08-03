@@ -15,21 +15,28 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all-targets
+      # `--locked` on everything that compiles the workspace: Cargo.lock is
+      # checked in, and a CI run that quietly rewrites it is testing a
+      # dependency set nobody committed.
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
       # `--all-features` too, because `insecure-swarm-tcp` is off by default and
       # gated code that nothing builds is gated code that rots.
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-targets --all-features
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets --all-features
       # The demos are part of the contract: if the documented walkthrough stops
       # working, the README is lying.
-      - run: cargo build --release
+      - run: cargo build --release --locked
       - run: ./scripts/demo.sh
       - run: ./scripts/ratchet-demo.sh
       # Runs the MCP server as a real process. The unit tests call handle_line
       # directly and structurally cannot catch a stray write to stdout, which is
       # the failure that breaks every MCP client and looks like their bug.
       - run: ./scripts/mcp-smoke.sh
+      # Drives proofwork-serve over a real socket. The only test in the repo
+      # where the client shares nothing with the node but an address, which is
+      # the arrangement every outside contributor is in.
+      - run: ./scripts/serve-smoke.sh
 
   reference-python:
     # The Python reference is what conformance/vectors.json is generated from.
@@ -50,15 +57,16 @@ jobs:
             || (echo "::error::conformance/vectors.json is stale; re-run scripts/gen_conformance.py" && exit 1)
 
   msrv:
-    # The crate claims rust-version 1.85. An unchecked MSRV is a claim, not a
-    # fact, and downstream users are the ones who find out. 1.75 was the original
-    # claim and was measurably false: transitive deps need edition2024.
+    # The crate claims rust-version 1.89 (`File::try_lock` stabilized there).
+    # An unchecked MSRV is a claim, not a fact, and downstream users are the
+    # ones who find out. 1.75 was the original claim and was measurably false:
+    # transitive deps need edition2024.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets --all-features
+      - run: cargo check --locked --all-targets --all-features
 
   tla:
     # A rule that is implemented but not modeled is incomplete work. Tests
@@ -101,5 +109,33 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e "./reference/python[dev]"
-      - run: cargo build --release
+      - run: cargo build --release --locked
       - run: ./scripts/interop.sh
+
+  audit:
+    # Known-vulnerable dependencies fail the build. Deliberately not advisory:
+    # a warning nobody is forced to read is a warning nobody reads, and this
+    # project ships code that executes attacker-authored verifiers -- the
+    # dependency tree is part of the sandbox boundary. `continue-on-error` is
+    # spelled out so the intent survives someone "fixing" a red build.
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  examples:
+    # Every example objective must pass schema validation and match its pinned
+    # verifier hashes -- not only the ones the demo scripts happen to post.
+    # Without this, an example nobody demos can rot into one the CLI rejects,
+    # and a stale sha256 pin turns an open bounty into an unsatisfiable one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - run: ./scripts/check-examples.sh

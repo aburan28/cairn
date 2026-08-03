@@ -70,6 +70,22 @@ OS jail, and set `PROOFWORK_REQUIRE_SANDBOX=1` on any node that verifies
 objectives it did not write — without a jail mechanism the code runs
 unconfined, and that variable turns "unconfined" into `Unavailable` instead.
 
+### Publish your log so others can check it
+
+```sh
+proofwork-serve --log proofwork.jsonl --root . --listen 0.0.0.0:8080
+```
+
+`GET /log` returns the log byte for byte; `GET /objectives` and
+`GET /frontier/{id}` are conveniences over it. A contributor fetches it and
+re-derives everything themselves with `proofwork verify --from`, which is the
+whole point — they need not trust the server that served it.
+
+Add `--queue ./queue` to accept `POST /submit`. Submissions are *queued*, never
+appended: the operator admits them with `proofwork drain --queue ./queue`,
+which re-checks every rule against the whole log. See
+[serving.md](docs/serving.md).
+
 ### Start a p2p node
 
 The easiest local launch is:
@@ -101,7 +117,8 @@ Use separate `LOCAL_DIR`, `LOG`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT`
 paths for each node. The root checkpoint key is ML-DSA-65 and is separate from
 the transport identity.
 
-Rust 1.85+ (verified in CI, not asserted). No network access needed at runtime.
+Rust 1.89+ (verified in CI, and asserted by `rust-version`). No network access
+needed at runtime.
 
 ## How it works
 
@@ -537,6 +554,7 @@ examples/            worked objectives with real artifacts
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
+- [serving.md](docs/serving.md) — publishing a log over HTTP, and why submissions queue instead of appending
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [launch-review.md](docs/launch-review.md) — the pre-launch pass: what was fixed, and the gaps that remain, in priority order
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
