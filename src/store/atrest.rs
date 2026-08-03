@@ -526,7 +526,7 @@ fn nibble(value: u8) -> char {
 fn hex_decode(text: &str) -> Option<Vec<u8>> {
     // `% 2` rather than `is_multiple_of`, which stabilised after this crate's
     // pinned 1.85 toolchain.
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     let bytes = text.as_bytes();

@@ -72,6 +72,7 @@ use proofwork::ledger::{Codec, Ledger, LedgerError};
 use proofwork::node::Node;
 use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordError};
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
+use proofwork::serve::Spool;
 use proofwork::store::atrest::{AtRestError, Cipher};
 use proofwork::store::{mirror, quota, Store, StoreError};
 use proofwork::time::timestamp;
@@ -108,10 +109,25 @@ const DETAIL_WIDTH: usize = 40;
 // is why [`timestamp`] lives here.
 // ---------------------------------------------------------------------------
 
-/// Open the log and wrap it in a node rooted at `--root`.
+/// Open the log for reading and wrap it in a node rooted at `--root`.
+///
+/// No lock: reading a log another process is appending to is safe, because an
+/// append never rewrites a line that is already there.
 fn open_node(options: &Options) -> Result<Node, CliError> {
     let codec = resolve_codec(options)?;
     let ledger = Ledger::open_with(options.log.as_str(), codec).map_err(CliError::Ledger)?;
+    Ok(Node::new(ledger, options.root.as_str()))
+}
+
+/// Open the log for writing, taking the single-writer lock.
+///
+/// Every command that appends goes through here. Two writers over one log
+/// each compute `prev` from their own view of the tail and fork it; `audit`
+/// notices afterwards, which is too late for the entries already written.
+fn open_node_for_writing(options: &Options) -> Result<Node, CliError> {
+    let codec = resolve_codec(options)?;
+    let ledger =
+        Ledger::open_exclusive_with(options.log.as_str(), codec).map_err(CliError::Ledger)?;
     Ok(Node::new(ledger, options.root.as_str()))
 }
 
@@ -425,6 +441,17 @@ enum Command {
         cites: Vec<String>,
     },
     Settle,
+    /// Admit records queued by `proofwork-serve` into the log.
+    ///
+    /// Separate from the server on purpose: the server is a transport and this
+    /// is the rules engine. A queued record has been parsed and schema-checked
+    /// and *nothing else* -- every admission rule is re-derived here, against
+    /// the whole log, by the same code path the CLI uses.
+    Drain {
+        queue: String,
+        /// Report what would be admitted without appending anything.
+        dry_run: bool,
+    },
     Audit {
         rerun: bool,
     },
@@ -650,6 +677,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             expect_end(&mut cursor, "settle")?;
             Command::Settle
         }
+        "drain" => parse_drain(&mut cursor)?,
         "audit" => parse_audit(&mut cursor)?,
         "verify" => parse_verify(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
@@ -778,6 +806,28 @@ fn parse_audit(cursor: &mut Cursor) -> Result<Command, CliError> {
         }
     }
     Ok(Command::Audit { rerun })
+}
+
+fn parse_drain(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut queue: Option<String> = None;
+    let mut dry_run = false;
+    while let Some(token) = cursor.take() {
+        if token == "--queue" {
+            queue = Some(cursor.value("--queue")?);
+        } else if token == "--dry-run" {
+            dry_run = true;
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!("drain: unknown option {token:?}")));
+        } else if queue.is_none() {
+            queue = Some(token);
+        } else {
+            return Err(CliError::Usage(format!("drain: unexpected {token:?}")));
+        }
+    }
+    Ok(Command::Drain {
+        queue: require(queue, "drain", "a queue directory")?,
+        dry_run,
+    })
 }
 
 fn parse_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -1086,6 +1136,11 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  settle");
     say(out, "      pay out every reveal epoch that has closed");
+    say(out, "  drain --queue DIR [--dry-run]");
+    say(
+        out,
+        "      admit records queued by proofwork-serve, re-checking every rule",
+    );
     say(out, "  audit [--no-rerun]");
     say(out, "      re-derive the entire log independently");
     say(
@@ -1191,7 +1246,7 @@ fn read_json(path: &str) -> Result<Value, CliError> {
 }
 
 fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
-    let mut node = open_node(options)?;
+    let mut node = open_node_for_writing(options)?;
     let data = read_json(path)?;
     // The published schema runs *before* the constructor. `Objective::from_value`
     // is permissive by necessity -- it has to read back records written by older
@@ -1224,7 +1279,7 @@ fn cmd_commit(
     artifact_path: &str,
     nonce: Option<&str>,
 ) -> Result<i32, CliError> {
-    let mut node = open_node(options)?;
+    let mut node = open_node_for_writing(options)?;
     let artifact = read_json(artifact_path)?;
     let nonce = match nonce {
         Some(nonce) => nonce.to_string(),
@@ -1255,7 +1310,7 @@ fn cmd_reveal(
     nonce: &str,
     cites: &[String],
 ) -> Result<i32, CliError> {
-    let mut node = open_node(options)?;
+    let mut node = open_node_for_writing(options)?;
     let artifact = read_json(artifact_path)?;
     let stamp = timestamp();
     let claim = Claim::new(
@@ -1308,7 +1363,7 @@ fn cmd_reveal(
 /// when nothing else is happening -- which is exactly the case a demo, a cron
 /// job, or an operator winding a quiet objective down finds itself in.
 fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
-    let mut node = open_node(options)?;
+    let mut node = open_node_for_writing(options)?;
     let settled = settle_now(&mut node, &timestamp())?;
     if settled.is_empty() {
         say(out, "no batch was due");
@@ -1321,6 +1376,123 @@ fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
             format!("  settled  {moved}  reward {reward}  ({note})"),
         );
     }
+    Ok(0)
+}
+
+/// Admit records queued by `proofwork-serve`, oldest first.
+///
+/// The queue holds *proposals*. Every rule is re-derived here against the
+/// whole log, by the same `Node::commit` / `Node::reveal` the CLI uses, so a
+/// record that arrived over the network is admitted on exactly the terms one
+/// typed by the operator would be. The server deliberately decides nothing.
+///
+/// A refused record is dropped from the queue rather than retried forever:
+/// almost every refusal is permanent (a stale epoch, a citation that is not
+/// an accepted claim, a duplicate artifact), and a queue that retries a
+/// permanent failure is a queue that never empties. The refusal is printed, so
+/// an operator watching the output sees why.
+fn cmd_drain(
+    out: &mut dyn Write,
+    options: &Options,
+    queue: &str,
+    dry_run: bool,
+) -> Result<i32, CliError> {
+    let spool = Spool::at(queue);
+    let pending = spool.pending();
+    if pending.is_empty() {
+        say(out, format!("nothing queued in {queue}"));
+        return Ok(0);
+    }
+
+    // Opened for writing even on a dry run: holding the lock is what makes the
+    // report honest, since admission depends on a log nobody else is moving.
+    let mut node = open_node_for_writing(options)?;
+    let ts = timestamp();
+    let (mut admitted, mut refused) = (0usize, 0usize);
+
+    for (path, kind, record) in pending {
+        let outcome = match kind.as_str() {
+            "commitment" => Commitment::from_value(&record)
+                .map_err(|e| e.to_string())
+                .and_then(|commitment| {
+                    if dry_run {
+                        return Ok(String::from("would admit commitment"));
+                    }
+                    node.commit(&commitment, &ts)
+                        .map(|id| format!("commitment {}", short(&id)))
+                        .map_err(|violation| violation.to_string())
+                }),
+            "claim" => Claim::from_value(&record)
+                .map_err(|e| e.to_string())
+                .and_then(|claim| {
+                    validate_claim(&claim.to_value()).map_err(|e| e.to_string())?;
+                    if dry_run {
+                        return Ok(String::from("would admit claim"));
+                    }
+                    node.reveal(&claim, &ts)
+                        .map(|outcome| {
+                            format!(
+                                "claim {}  {}  reward {}",
+                                short(&outcome.claim_id),
+                                outcome.verdict.status.as_str(),
+                                outcome.reward
+                            )
+                        })
+                        .map_err(|violation| violation.to_string())
+                }),
+            other => Err(format!("unknown record kind {other:?}")),
+        };
+
+        match outcome {
+            Ok(note) => {
+                admitted += 1;
+                say(out, format!("  {note}"));
+                if !dry_run {
+                    spool.take(&path).map_err(|e| CliError::Io {
+                        context: format!("removing {}", path.display()),
+                        source: e,
+                    })?;
+                }
+            }
+            Err(why) => {
+                refused += 1;
+                say(out, format!("  refused: {why}"));
+                if !dry_run {
+                    spool.take(&path).map_err(|e| CliError::Io {
+                        context: format!("removing {}", path.display()),
+                        source: e,
+                    })?;
+                }
+            }
+        }
+    }
+
+    // Settlement is deferred, so a drain that admitted a reveal into a closed
+    // epoch should pay it rather than wait for the next command.
+    if !dry_run {
+        for (claim_id, moved, reward, note) in settle_now(&mut node, &ts)? {
+            say(
+                out,
+                format!(
+                    "  settled {}  {moved}  reward {reward}  ({note})",
+                    short(&claim_id)
+                ),
+            );
+        }
+    }
+
+    say(
+        out,
+        format!(
+            "{} admitted, {refused} refused{}",
+            admitted,
+            if dry_run {
+                " (dry run, nothing written)"
+            } else {
+                ""
+            }
+        ),
+    );
     Ok(0)
 }
 
@@ -1478,7 +1650,7 @@ fn read_root_key(source: &str) -> Result<Vec<u8>, CliError> {
         source.to_string()
     };
     let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err(CliError::Usage(String::from(
             "--root-key: hex has an odd number of digits",
         )));
@@ -2248,6 +2420,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             cites,
         ),
         Command::Settle => cmd_settle(out, options),
+        Command::Drain { queue, dry_run } => cmd_drain(out, options, queue, *dry_run),
         Command::Audit { rerun } => cmd_audit(out, options, *rerun),
         Command::Verify {
             checkpoint,

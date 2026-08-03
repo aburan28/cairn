@@ -311,7 +311,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 fn hex_decode(text: &str) -> Result<Vec<u8>, CheckpointError> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err(CheckpointError::Invalid("odd-length hex".into()));
     }
     (0..text.len())

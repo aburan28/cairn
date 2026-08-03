@@ -591,7 +591,7 @@ fn hex_decode(text: &str) -> Result<Vec<u8>, ShamirError> {
     }
 
     let bytes = text.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(ShamirError::InvalidField {
             field: "data",
             expected: SHAPE,

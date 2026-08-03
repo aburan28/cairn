@@ -29,7 +29,7 @@ fn usage() -> ! {
 }
 
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err("hex has odd length".into());
     }
     let mut out = Vec::with_capacity(text.len() / 2);
@@ -280,8 +280,10 @@ fn main() {
         eprintln!("listen: {e}");
         std::process::exit(2)
     });
+    // Exclusive: the daemon appends every record it imports from a peer, so
+    // it is a writer and must not share a log with another one.
     let node = Node::new(
-        Ledger::open(log).unwrap_or_else(|e| {
+        Ledger::open_exclusive(log).unwrap_or_else(|e| {
             eprintln!("ledger: {e}");
             std::process::exit(2)
         }),
