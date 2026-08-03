@@ -1353,6 +1353,30 @@ impl Node {
             }
         }
 
+        // Every batch fault at once usually means the auditor and the writer
+        // disagree about how long an epoch is, not that anybody was paid out
+        // of turn. Epochs are derived from timestamps and never stored, so a
+        // log written under `PROOFWORK_EPOCH_SECONDS=1` audits as thoroughly
+        // broken under the default 600 -- both implementations agree, and both
+        // are right. Worth one line, because the alarming version of this
+        // message is the first thing a new contributor sees if the operator
+        // published a log built by a demo script.
+        let batches = self.ledger.entries_of_kind(BATCH).len();
+        let faulted: BTreeSet<&str> = problems
+            .iter()
+            .filter(|problem| problem.starts_with("batch for epoch "))
+            .filter_map(|problem| problem.split_whitespace().nth(3))
+            .collect();
+        if batches > 0 && faulted.len() == batches {
+            problems.push(format!(
+                "note: every batch in this log looks wrong, which is more often a mismatched \
+                 epoch length than a dishonest operator. Epochs are derived from record \
+                 timestamps and never stored, so a log written with a different \
+                 PROOFWORK_EPOCH_SECONDS (this audit used {}) cannot be re-derived without it.",
+                epoch_seconds()
+            ));
+        }
+
         problems
     }
 
@@ -2498,6 +2522,70 @@ mod tests {
             !problems.iter().any(|p| p.contains("anchor")),
             "a back-dated append moved a settled batch's anchor: {problems:?}"
         );
+    }
+
+    #[test]
+    fn an_audit_where_every_batch_faults_suggests_the_epoch_length() {
+        // Found while building the published log: a log written under
+        // PROOFWORK_EPOCH_SECONDS=1 audits as thoroughly broken under the
+        // default 600, in both implementations, and both are right -- epochs
+        // are derived, never stored. Without the hint a contributor's first
+        // `proofwork audit` on a demo-built log says the operator paid people
+        // out of turn, which is the worst possible false accusation for this
+        // project to make.
+        let dir = TempDir::new("audit-epoch-hint");
+        let mut node = node(&dir);
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        node.post_objective(&objective, TS).expect("post");
+        submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+        assert!(
+            node.audit(false).is_empty(),
+            "clean at the epoch it was built with"
+        );
+
+        // Re-derive the same log against a different epoch length.
+        let hinted = {
+            let _guard = EpochGuard::set("7");
+            node.audit(false)
+        };
+        assert!(
+            hinted.iter().any(|p| p.contains("mismatched epoch length")),
+            "no hint among {hinted:?}"
+        );
+
+        // And the hint must not fire when only *some* batches are wrong --
+        // that really is a claim about the operator.
+        assert!(
+            !node
+                .audit(false)
+                .iter()
+                .any(|p| p.contains("mismatched epoch length")),
+            "the hint fired on a clean log"
+        );
+    }
+
+    /// Sets `PROOFWORK_EPOCH_SECONDS` for as long as it lives.
+    ///
+    /// Tests share a process, so the variable has to go back; a leaked value
+    /// would silently re-epoch every test that ran afterwards.
+    struct EpochGuard;
+
+    impl EpochGuard {
+        fn set(value: &str) -> EpochGuard {
+            // SAFETY: single-threaded test, and the guard restores it on drop.
+            unsafe { std::env::set_var(crate::partition::EPOCH_SECONDS_ENV, value) };
+            EpochGuard
+        }
+    }
+
+    impl Drop for EpochGuard {
+        fn drop(&mut self) {
+            // SAFETY: as above.
+            unsafe { std::env::remove_var(crate::partition::EPOCH_SECONDS_ENV) };
+        }
     }
 
     // -- the improvement path -----------------------------------------------

@@ -473,16 +473,29 @@ class Node:
             out.append((epoch_of(seconds, epoch_seconds()), claim))
         return out
 
-    def _anchor_of_epoch(self, epoch: int) -> str:
+    def _anchor_of_epoch(self, epoch: int, positions: int | None = None) -> str:
         """The log head as of the start of ``epoch``.
 
         Derived from the log rather than from a clock, so an auditor reaches the
         same value. It is also recorded in the batch entry, because a back-dated
         append could otherwise change what this returns for an epoch that has
         already settled -- ``audit`` compares the two.
+
+        ``positions`` bounds the scan to the first N entries, which is what
+        makes a settled batch re-derivable forever. Records arrive over sync
+        stamped with their own ``created_at`` and land at the *tail*, so a peer
+        can append a record dated into an epoch that already settled. Scanning
+        the whole log would then produce a different anchor than the batch
+        used, and ``audit`` would report an honest node's correct batch as
+        wrong -- permanently, and at a peer's choosing. Bounding by log
+        *position* rather than by timestamp is the point: a position is not
+        something a record's author can claim.
         """
         anchor = ""
-        for entry in self.ledger:
+        entries = list(self.ledger)
+        if positions is not None:
+            entries = entries[:positions]
+        for entry in entries:
             seconds = unix_seconds(entry.ts)
             if seconds is None or seconds < 0:
                 continue
@@ -783,7 +796,11 @@ class Node:
             seen.add(epoch)
 
             recorded_anchor = entry.payload.get("anchor", "")
-            derived_anchor = self._anchor_of_epoch(epoch)
+            # Derived over the log as it stood *when this batch was written*.
+            # Anything appended afterwards could not have influenced it,
+            # whatever timestamp it carries -- and a peer can append a
+            # back-dated record at will.
+            derived_anchor = self._anchor_of_epoch(epoch, positions=entry.seq)
             if recorded_anchor != derived_anchor:
                 problems.append(
                     f"batch for epoch {epoch}: anchor {recorded_anchor[:12]} is not "
@@ -817,4 +834,27 @@ class Node:
                     f"batch for epoch {epoch}: settled {len(recorded)} claim(s) in "
                     "an order the beacon does not produce"
                 )
+
+        # Every batch faulting at once usually means the auditor and the writer
+        # disagree about how long an epoch is, not that anybody was paid out of
+        # turn. Epochs are derived from timestamps and never stored, so a log
+        # written under PROOFWORK_EPOCH_SECONDS=1 audits as thoroughly broken
+        # under the default 600 -- both implementations agree, and both are
+        # right. Worth one line, because the alarming version of this message
+        # is the first thing a new contributor sees if the operator published
+        # a log a demo script built.
+        batches = len(self.ledger.entries(BATCH))
+        faulted = {
+            problem.split()[3]
+            for problem in problems
+            if problem.startswith("batch for epoch ")
+        }
+        if batches and len(faulted) == batches:
+            problems.append(
+                "note: every batch in this log looks wrong, which is more often a "
+                "mismatched epoch length than a dishonest operator. Epochs are derived "
+                "from record timestamps and never stored, so a log written with a "
+                f"different PROOFWORK_EPOCH_SECONDS (this audit used {epoch_seconds()}) "
+                "cannot be re-derived without it."
+            )
         return problems
