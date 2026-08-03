@@ -11,16 +11,20 @@ RELEASE_DIR ?= target/release
 CLI := $(RELEASE_DIR)/proofwork
 MCP := $(RELEASE_DIR)/proofwork-mcp
 P2P := $(RELEASE_DIR)/proofwork-p2p
+SERVE := $(RELEASE_DIR)/proofwork-serve
 IDENTITY ?= $(abspath $(LOCAL_DIR)/node.identity.json)
 ROOT_KEY ?= $(abspath $(LOCAL_DIR)/root.key)
 CHECKPOINT ?= $(abspath $(LOCAL_DIR)/checkpoint.json)
 LISTEN ?= 127.0.0.1:9000
 BOOTSTRAP_ARGS ?=
+SERVE_LISTEN ?= 127.0.0.1:8080
+SERVE_ARGS ?=
 P2P_ARGS ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp p2p demo ratchet interop mcp-smoke test test-rust \
+.PHONY: help build debug cli mcp p2p serve demo ratchet interop mcp-smoke serve-smoke \
+	test test-rust \
 	test-python fmt clippy tla check
 
 help:
@@ -28,6 +32,7 @@ help:
 	  'proofwork local commands:' \
 	  '  make mcp                 Build and run the local MCP server (stdio).' \
 	  '  make p2p                 Build and run a local p2p node.' \
+	  '  make serve               Publish this log over HTTP (read-only).' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
@@ -75,6 +80,14 @@ interop: build
 mcp-smoke: build
 	RUST_BIN="$(abspath $(CLI))" MCP_BIN="$(abspath $(MCP))" ./scripts/mcp-smoke.sh
 
+serve-smoke: build
+	RUST_BIN="$(abspath $(CLI))" SERVE_BIN="$(abspath $(SERVE))" ./scripts/serve-smoke.sh
+
+# Publish this node's log over HTTP. Read-only unless QUEUE is set, because
+# publishing is safe for anyone and accepting is a decision.
+serve: build
+	$(SERVE) --log "$(LOG)" --root "$(ROOT)" --listen "$(SERVE_LISTEN)" $(SERVE_ARGS)
+
 test-rust:
 	$(CARGO) test --all-targets
 
@@ -100,4 +113,4 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy demo ratchet interop mcp-smoke tla
+check: test fmt clippy demo ratchet interop mcp-smoke serve-smoke tla

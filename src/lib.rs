@@ -34,6 +34,7 @@ pub mod partition;
 pub mod records;
 pub mod schema;
 pub mod sealed;
+pub mod serve;
 pub mod store;
 pub mod swarm;
 pub mod time;
