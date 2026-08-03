@@ -24,25 +24,121 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+_DIGITS = frozenset("0123456789")
+
+
+def _is_leap(year: int) -> bool:
+    return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
+
+
+def _days_in_month(year: int, month: int) -> int:
+    if month in (1, 3, 5, 7, 8, 10, 12):
+        return 31
+    if month in (4, 6, 9, 11):
+        return 30
+    return 29 if _is_leap(year) else 28
+
+
+def _days_from_civil(year: int, month: int, day: int) -> int:
+    """Days since the Unix epoch for a proleptic Gregorian date.
+
+    Howard Hinnant's ``days_from_civil``, the same algorithm the Rust
+    implementation runs, so the two agree by construction rather than by test.
+    """
+    year = year - 1 if month <= 2 else year
+    era = year // 400
+    year_of_era = year - era * 400
+    month_prime = month - 3 if month > 2 else month + 9
+    day_of_year = (153 * month_prime + 2) // 5 + day - 1
+    day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
+    return era * 146_097 + day_of_era - 719_468
+
+
 def unix_seconds(ts: str) -> int | None:
     """An RFC-3339 instant as seconds since the Unix epoch, or ``None``.
 
-    ``datetime.fromisoformat`` accepts a naive timestamp, which names no
-    instant, and before 3.11 it rejects a trailing ``Z``. Both are handled here
-    rather than at four call sites, and a naive value is refused rather than
-    assumed to be UTC: guessing a timezone means guessing an epoch, and the
-    epoch decides which reveals were legal.
+    A field-by-field port of the Rust implementation's ``parse_rfc3339``,
+    **not** ``datetime.fromisoformat``. ``fromisoformat`` accepts spellings the
+    Rust side refuses (``+0000``, a ``,5`` fraction, surrounding whitespace),
+    and both implementations walk the whole log deciding which entries move
+    the settlement anchor -- a timestamp one side parses and the other refuses
+    is a different anchor, a different beacon order, and different payouts for
+    the same log. The grammar therefore has exactly one definition, written
+    twice, and the tests pin the accept/refuse boundary in both languages.
+
+    Strict on purpose: separator ``T``/``t``/space, an optional ``.digits``
+    fraction (truncated), an offset of ``Z``/``z`` or ``+HH:MM``/``-HH:MM``,
+    nothing before or after, and no leap second. A naive value is refused
+    rather than assumed UTC: guessing a timezone means guessing an epoch, and
+    the epoch decides which reveals were legal.
     """
-    text = ts.strip()
-    if text.endswith(("Z", "z")):
-        text = text[:-1] + "+00:00"
-    try:
-        moment = datetime.fromisoformat(text)
-    except ValueError:
+    text = ts
+    n = len(text)
+    if n < 19:
         return None
-    if moment.tzinfo is None:
+
+    def digits(start: int, length: int) -> int | None:
+        chunk = text[start : start + length]
+        if len(chunk) != length or any(c not in _DIGITS for c in chunk):
+            return None
+        return int(chunk)
+
+    year = digits(0, 4)
+    month = digits(5, 2)
+    day = digits(8, 2)
+    hour = digits(11, 2)
+    minute = digits(14, 2)
+    second = digits(17, 2)
+    if None in (year, month, day, hour, minute, second):
         return None
-    return int(moment.timestamp())
+    if text[4] != "-" or text[7] != "-" or text[10] not in "Tt " or text[13] != ":":
+        return None
+    if text[16] != ":":
+        return None
+
+    i = 19
+    # Fractional seconds are parsed and discarded: truncating toward the epoch
+    # start keeps an instant inside the epoch it was actually in.
+    if i < n and text[i] == ".":
+        i += 1
+        start = i
+        while i < n and text[i] in _DIGITS:
+            i += 1
+        if i == start:
+            return None
+
+    if i < n and text[i] in "Zz":
+        offset_minutes = 0
+        i += 1
+    elif i < n and text[i] in "+-":
+        sign = -1 if text[i] == "-" else 1
+        offset_hour = digits(i + 1, 2)
+        if offset_hour is None or i + 3 >= n or text[i + 3] != ":":
+            return None
+        offset_minute = digits(i + 4, 2)
+        if offset_minute is None:
+            return None
+        i += 6
+        if offset_hour > 23 or offset_minute > 59:
+            return None
+        offset_minutes = sign * (offset_hour * 60 + offset_minute)
+    else:
+        # A naive timestamp names no instant.
+        return None
+    if i != n:
+        return None
+
+    if not (1 <= year <= 9999) or not (1 <= month <= 12) or day < 1:
+        return None
+    if day > _days_in_month(year, month):
+        return None
+    # ``second == 60`` (a leap second) is refused on both sides -- see the
+    # matching comment in the Rust ``parse_rfc3339``.
+    if hour > 23 or minute > 59 or second > 59:
+        return None
+
+    days = _days_from_civil(year, month, day)
+    return days * 86_400 + hour * 3_600 + minute * 60 + second - offset_minutes * 60
 
 
 def epoch_of_timestamp(record: str, ts: str) -> int:
