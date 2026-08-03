@@ -65,7 +65,7 @@ use std::process;
 
 use proofwork::attribution::{payouts_over, FlowError, FlowParams};
 use proofwork::canonical::{short, CanonicalError, Value};
-use proofwork::checkpoint::SignedCheckpoint;
+use proofwork::checkpoint::{RootKey, SignedCheckpoint};
 use proofwork::incentive::design::Report as IncentiveReport;
 use proofwork::incentive::{NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError};
@@ -441,6 +441,17 @@ enum Command {
         cites: Vec<String>,
     },
     Settle,
+    /// Sign the log's current state so a reader can pin what this operator
+    /// claimed at a point in time.
+    ///
+    /// The counterpart to `verify --from`: without a way to *write* a
+    /// checkpoint from the CLI, only the p2p daemon could publish one, and an
+    /// operator not running p2p had nothing for a contributor to check
+    /// against.
+    Checkpoint {
+        root_key: String,
+        out: Option<String>,
+    },
     /// Admit records queued by `proofwork-serve` into the log.
     ///
     /// Separate from the server on purpose: the server is a transport and this
@@ -677,6 +688,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             expect_end(&mut cursor, "settle")?;
             Command::Settle
         }
+        "checkpoint" => parse_checkpoint(&mut cursor)?,
         "drain" => parse_drain(&mut cursor)?,
         "audit" => parse_audit(&mut cursor)?,
         "verify" => parse_verify(&mut cursor)?,
@@ -806,6 +818,26 @@ fn parse_audit(cursor: &mut Cursor) -> Result<Command, CliError> {
         }
     }
     Ok(Command::Audit { rerun })
+}
+
+fn parse_checkpoint(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut root_key: Option<String> = None;
+    let mut out: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        if token == "--root-key" {
+            root_key = Some(cursor.value("--root-key")?);
+        } else if token == "--out" {
+            out = Some(cursor.value("--out")?);
+        } else {
+            return Err(CliError::Usage(format!(
+                "checkpoint: unknown option {token:?}"
+            )));
+        }
+    }
+    Ok(Command::Checkpoint {
+        root_key: require(root_key, "checkpoint", "--root-key FILE")?,
+        out,
+    })
 }
 
 fn parse_drain(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -1136,6 +1168,11 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  settle");
     say(out, "      pay out every reveal epoch that has closed");
+    say(out, "  checkpoint --root-key FILE [--out FILE]");
+    say(
+        out,
+        "      sign the log's current height, head, and Merkle root",
+    );
     say(out, "  drain --queue DIR [--dry-run]");
     say(
         out,
@@ -1377,6 +1414,116 @@ fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
         );
     }
     Ok(0)
+}
+
+/// Sign the log's current state.
+///
+/// The counterpart to `verify --from`. A checkpoint pins `(height, head,
+/// merkle_root)` under an ML-DSA-65 signature, so a reader who has the
+/// operator's public key can tell a log that grew from a log that was
+/// *rewritten* -- the property a bare hash chain cannot give them, because an
+/// operator who rewrites history rewrites the chain with it.
+///
+/// The key file is the one `proofwork-p2p` creates: `{"public": hex, "secret":
+/// hex}`. Read-only on the log, because signing observes and changes nothing.
+fn cmd_checkpoint(
+    out: &mut dyn Write,
+    options: &Options,
+    root_key: &str,
+    destination: Option<&str>,
+) -> Result<i32, CliError> {
+    let key = read_root_key_file(root_key)?;
+    let node = open_node(options)?;
+    let ledger = ledger_of(&node);
+    if ledger.is_empty() {
+        return Err(CliError::Usage(String::from(
+            "the log is empty; there is nothing to check-point",
+        )));
+    }
+    let signed = key.sign_ledger(ledger, timestamp());
+    let text = signed.to_value().canonical_string();
+
+    match destination {
+        Some(path) => {
+            fs::write(path, format!("{text}\n")).map_err(|error| CliError::Io {
+                context: format!("writing {path}"),
+                source: error,
+            })?;
+            say(out, format!("wrote {path}"));
+        }
+        None => say(out, &text),
+    }
+    say(
+        out,
+        format!(
+            "  height {}  root {}",
+            ledger.len(),
+            ledger.root().as_deref().map(short).unwrap_or_default()
+        ),
+    );
+    say(
+        out,
+        format!("  public key {}", short(&hex_encode(&key.public_key()))),
+    );
+    say(
+        out,
+        "  Readers verify with `proofwork verify --from <file> --root-key <hex|file>`.",
+    );
+    say(
+        out,
+        "  Publish the public key somewhere they already trust: a key served",
+    );
+    say(
+        out,
+        "  alongside what it authenticates authenticates nothing.",
+    );
+    Ok(0)
+}
+
+/// Load the ML-DSA-65 root key from the file `proofwork-p2p` writes.
+fn read_root_key_file(path: &str) -> Result<RootKey, CliError> {
+    let value = read_json(path)?;
+    let secret = value
+        .get("secret")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::Usage(format!("{path}: no \"secret\" field")))?;
+    let bytes = decode_hex(secret)
+        .map_err(|why| CliError::Usage(format!("{path}: secret is not hex ({why})")))?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| CliError::Usage(format!("{path}: secret must be 32 bytes")))?;
+    let key = RootKey::from_secret_bytes(bytes);
+    // A file whose halves disagree is a file somebody edited; signing with it
+    // would produce checkpoints nobody can verify against the published key.
+    if let Some(public) = value.get("public").and_then(Value::as_str) {
+        let declared = decode_hex(public)
+            .map_err(|why| CliError::Usage(format!("{path}: public is not hex ({why})")))?;
+        if declared != key.public_key() {
+            return Err(CliError::Usage(format!(
+                "{path}: the public key does not match the secret"
+            )));
+        }
+    }
+    Ok(key)
+}
+
+fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if !text.len().is_multiple_of(2) {
+        return Err(String::from("odd number of digits"));
+    }
+    let digits: Vec<char> = text.chars().collect();
+    digits
+        .chunks(2)
+        .map(|pair| {
+            let hex: String = pair.iter().collect();
+            u8::from_str_radix(&hex, 16).map_err(|_| format!("{hex:?} is not hex"))
+        })
+        .collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Admit records queued by `proofwork-serve`, oldest first.
@@ -2420,6 +2567,10 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             cites,
         ),
         Command::Settle => cmd_settle(out, options),
+        Command::Checkpoint {
+            root_key,
+            out: path,
+        } => cmd_checkpoint(out, options, root_key, path.as_deref()),
         Command::Drain { queue, dry_run } => cmd_drain(out, options, queue, *dry_run),
         Command::Audit { rerun } => cmd_audit(out, options, *rerun),
         Command::Verify {
