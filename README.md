@@ -580,7 +580,10 @@ examples/            worked objectives with real artifacts
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
 - [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
 - [AGENTS.md](AGENTS.md) — instructions agents read: contributing here, and contributing *to* the network
+- [CONTRIBUTING.md](CONTRIBUTING.md) — the two different things "contributing" means here, and the gate for each
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
+- [formal-model.md](docs/formal-model.md) — which rules TLC actually checks, and which are only tested
+- [design-stage0-completion.md](docs/design-stage0-completion.md) — what "Stage 0 is done" was defined to mean
 - [conformance/README.md](conformance/README.md) — the cross-implementation contract
 
 ## What this is not
