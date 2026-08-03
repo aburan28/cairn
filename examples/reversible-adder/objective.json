@@ -1,0 +1,42 @@
+{
+  "artifact_schema": {
+    "properties": {
+      "gates": {
+        "description": "Gate list applied in order. Each gate is [name, ...wires] with wires indexed from 0, little-endian within each register: [\"X\", a] flips a; [\"CNOT\", a, b] flips b if a; [\"CCX\", a, b, c] flips c if a and b; [\"SWAP\", a, b] exchanges them. Operands must be distinct and below `qubits`. Only CCX counts toward the Toffoli total.",
+        "items": {
+          "type": "array"
+        },
+        "type": "array"
+      },
+      "qubits": {
+        "description": "Declared circuit width. Wires 0..3 are register A, 4..7 are register B, 8 and above are ancillas that must be returned to zero. Reserving a wire costs it whether or not the circuit uses it.",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "qubits",
+      "gates"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-03T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-reversible-adder-cost",
+  "ratchet": {
+    "baseline": 100,
+    "direction": "minimize",
+    "min_improvement": 2,
+    "reward": 1000000,
+    "target": 24
+  },
+  "reward": 1000000,
+  "statement": "Build the cheapest reversible 4-bit adder. Submit a circuit as {\"qubits\": <width>, \"gates\": [[name, ...wires], ...]}. Wires 0-3 hold register A (little-endian), wires 4-7 hold register B, and wires 8 and above are ancillas. The circuit must map |A>|B>|0...0> to |A>|(A+B) mod 16>|0...0> for all 256 input pairs: A is preserved, B receives the truncated sum, and every ancilla returns to zero. Score is width x Toffoli count (CCX gates only); lower is better. The pinned evaluator simulates your circuit on every input pair and derives the score from the gates themselves, so declared metrics count for nothing. Baseline 100 is above the textbook Cuccaro ripple-carry adder (9 qubits, 8 Toffolis, score 72); target 24.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/reversible-adder/evaluators/adder_cost.py",
+    "evaluator_sha256": "8deafacc33a463e1f0067495aeb056f486b9347046d4591506dd566bfa90e97c",
+    "kind": "evaluator",
+    "threshold": 100
+  }
+}

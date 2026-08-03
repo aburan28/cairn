@@ -12,6 +12,7 @@ top-level README.
 
 | example | verifier | reward | status | needs | worked artifact |
 |---|---|---|---|---|---|
+| [`reversible-adder`](reversible-adder/) | evaluator (minimize) + ratchet | 1000000 | **worked, and open** | python3 | `artifact-cuccaro.json`, `artifact-truncated.json` |
 | [`collatz`](collatz/) | certificate | 100000 | worked | python3 | `artifact.json` |
 | [`capset`](capset/) | evaluator | 250000 | worked | python3 | `artifact.json` |
 | [`capset_progressive`](capset_progressive/) | evaluator + ratchet | 1100000 | worked | python3 | `artifact-12/16/20.json` |
@@ -23,6 +24,12 @@ top-level README.
 
 - **worked** — a passing artifact is committed, so the whole loop
   (`post → commit → reveal → audit`) can be exercised end to end. Start here.
+- **`reversible-adder` is the one to read if you are judging the design.** It
+  is the only example whose score is *derived by simulating the artifact*
+  rather than read off a field the submitter filled in, which is what makes an
+  objective safe to fund. Compare it against `ecdsa-fail`, which has the same
+  shape and accepts declared numbers — one is a bounty, the other is a demo,
+  and the difference is the whole thesis.
 - **open bounty** — no known solution ships. Submitting requires actually
   solving the problem; scoring a candidate is still free.
 - Without a Lean toolchain the `lean` objective verifies as `unavailable` on

@@ -1,5 +1,13 @@
 # Gap analysis: proofwork today vs ecdsa.fail needs
 
+> **The verifier in this directory is a demo, not a bounty.** It accepts
+> declared `{qubits, toffoli}` and checks only that the product is arithmetic,
+> so anyone can type two small integers and clear it. For the same shape with a
+> verifier that *derives* the score by simulating the submitted circuit — which
+> is what makes an objective safe to fund — see
+> [`../reversible-adder/`](../reversible-adder/). Read the two side by side:
+> the difference is the entire thesis of this project.
+
 Honest inventory for the MVP in this directory. **Implemented** means the
 harness loop runs end-to-end on a local proofwork log. **Design-only** means
 documented mapping without claiming settlement equivalence to ecdsa.fail.
