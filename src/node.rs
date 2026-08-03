@@ -860,8 +860,26 @@ impl Node {
     /// reshuffles every node's slice mid-epoch, and "anyone can recompute a
     /// peer's region" stops being true.
     pub fn anchor_of_epoch(&self, epoch: u64) -> String {
+        self.anchor_of_epoch_within(epoch, self.ledger.len())
+    }
+
+    /// [`Node::anchor_of_epoch`] over the first `positions` entries only.
+    ///
+    /// The bound is what makes a settled batch re-derivable forever. Records
+    /// arrive over `p2p::sync` stamped with their own `created_at` and land at
+    /// the *tail*, so a peer can append a record dated into an epoch that
+    /// already settled. Scanning the whole log would then produce a different
+    /// anchor than the one the batch actually used, and [`Node::audit`] would
+    /// report an honest node's correct batch as wrong — permanently, and at a
+    /// peer's choosing.
+    ///
+    /// Bounding by log *position* rather than by timestamp is the point: a
+    /// position is not something a record's author can claim. Everything the
+    /// batch could have seen precedes it in the file; everything appended
+    /// afterwards could not have influenced it, whatever date it carries.
+    fn anchor_of_epoch_within(&self, epoch: u64, positions: usize) -> String {
         let mut anchor = String::new();
-        for entry in self.ledger.entries() {
+        for entry in self.ledger.entries().iter().take(positions) {
             match crate::time::parse_rfc3339(&entry.ts) {
                 Some(seconds) if seconds >= 0 => {
                     if epoch_of(seconds as u64, epoch_seconds()) < epoch {
@@ -1367,7 +1385,14 @@ impl Node {
             }
 
             let recorded_anchor = payload_str(&entry.payload, "anchor").unwrap_or("");
-            let derived_anchor = self.anchor_of_epoch(epoch);
+            // Derived over the log as it stood *when this batch was written*,
+            // not as it stands now. Anything appended after the batch record
+            // could not have influenced it, whatever timestamp it carries --
+            // and a peer can append a back-dated record at will, so scanning
+            // the whole log would let one turn an honest batch into a
+            // permanent audit failure.
+            let position = usize::try_from(entry.seq).unwrap_or(usize::MAX);
+            let derived_anchor = self.anchor_of_epoch_within(epoch, position);
             if recorded_anchor != derived_anchor {
                 problems.push(format!(
                     "batch for epoch {epoch}: anchor {} is not the log head at the \
@@ -2434,6 +2459,44 @@ mod tests {
             ranks,
             BTreeSet::from([baseline]),
             "a submitter moved their own rank by restamping"
+        );
+    }
+
+    #[test]
+    fn a_back_dated_append_cannot_invalidate_a_batch_that_already_settled() {
+        // Records arrive over p2p::sync stamped with their own created_at and
+        // land at the tail, so a peer can append one dated into an epoch that
+        // has already been paid. Deriving the anchor over the whole log would
+        // then disagree with what the batch actually used, and audit would
+        // call an honest node's correct batch wrong -- forever, at a peer's
+        // choosing. The bound is the batch record's own log position.
+        let dir = TempDir::new("audit-backdate");
+        let mut node = node(&dir);
+        // A replay objective, so the claim really is accepted and a batch
+        // really is written -- an Unavailable verdict settles nothing and
+        // would leave nothing to invalidate.
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        node.post_objective(&objective, TS).expect("post");
+        submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+        assert!(
+            !node.ledger().entries_of_kind(BATCH).is_empty(),
+            "the fixture must actually settle a batch"
+        );
+        assert!(node.audit(false).is_empty(), "clean before the back-date");
+
+        // A peer's record, dated into the epoch that already settled, landing
+        // at the tail the way sync appends it.
+        node.ledger_mut()
+            .append("note", Value::object([("from", Value::string("peer"))]), TS)
+            .expect("append");
+
+        let problems = node.audit(false);
+        assert!(
+            !problems.iter().any(|p| p.contains("anchor")),
+            "a back-dated append moved a settled batch's anchor: {problems:?}"
         );
     }
 

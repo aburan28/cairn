@@ -431,6 +431,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Characters of subprocess output retained as evidence.
 const OUTPUT_TAIL_CHARS: usize = 2000;
 
+/// Ceiling on what one verification may write to stdout and stderr together.
+///
+/// Only [`OUTPUT_TAIL_CHARS`] of it is ever kept, so this is not a limit on
+/// anything useful -- it is the bound that stops an objective's checker from
+/// filling the operator's disk (and then the node's memory, when the capture
+/// is read back) by printing for its whole CPU budget. 8 MiB is far more than
+/// any real checker emits and far less than a `df` moves.
+const MAX_CAPTURED_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Wall-clock ceiling for a caller that answers a human or an agent while it
+/// waits. See [`VerifierRegistry::interactive`].
+pub const INTERACTIVE_TIMEOUT_SECONDS: u64 = 120;
+
 /// A screen applied to submitted Lean proof text before Lean ever runs.
 #[derive(Debug, Clone, Copy)]
 struct Screen {
@@ -663,6 +676,9 @@ pub struct VerifierRegistry {
     blobs: BlobStore,
     lean_binary: String,
     python_binary: String,
+    /// Ceiling applied to every spec-declared timeout, when set. See
+    /// [`VerifierRegistry::interactive`].
+    timeout_ceiling: Option<Duration>,
 }
 
 impl Default for VerifierRegistry {
@@ -679,6 +695,32 @@ impl VerifierRegistry {
             root,
             lean_binary: "lean".to_string(),
             python_binary: "python3".to_string(),
+            timeout_ceiling: None,
+        }
+    }
+
+    /// Cap every verification at [`INTERACTIVE_TIMEOUT_SECONDS`].
+    ///
+    /// For a caller that answers a human or an agent while it waits. An
+    /// objective may declare a timeout of up to a day, which is a reasonable
+    /// bound for a batch audit and a liveness attack on a single-threaded
+    /// server: one hostile objective would make `proofwork-mcp` stop answering
+    /// `ping` and look dead to its client.
+    ///
+    /// Deliberately not the default. Settlement and `audit` must honour the
+    /// objective's own bound, or a slow-but-honest verifier would settle
+    /// differently depending on who ran it -- which is the one thing no part
+    /// of this crate may do.
+    pub fn interactive(mut self) -> VerifierRegistry {
+        self.timeout_ceiling = Some(Duration::from_secs(INTERACTIVE_TIMEOUT_SECONDS));
+        self
+    }
+
+    /// Apply the interactive ceiling, when one is set.
+    fn bounded(&self, timeout: Duration) -> Duration {
+        match self.timeout_ceiling {
+            Some(ceiling) => timeout.min(ceiling),
+            None => timeout,
         }
     }
 
@@ -786,7 +828,7 @@ impl VerifierRegistry {
             None => return Verdict::invalid_spec("missing spec fields: [entrypoint]"),
         };
         let timeout = match spec_timeout(spec, DEFAULT_PINNED_TIMEOUT_SECONDS) {
-            Ok(timeout) => timeout,
+            Ok(timeout) => self.bounded(timeout),
             Err(verdict) => return verdict,
         };
 
@@ -869,7 +911,7 @@ impl VerifierRegistry {
             Err(verdict) => return verdict,
         };
         let timeout = match spec_timeout(spec, DEFAULT_PINNED_TIMEOUT_SECONDS) {
-            Ok(timeout) => timeout,
+            Ok(timeout) => self.bounded(timeout),
             Err(verdict) => return verdict,
         };
 
@@ -973,7 +1015,7 @@ impl VerifierRegistry {
             }
         };
         let timeout = match spec_timeout(spec, DEFAULT_PINNED_TIMEOUT_SECONDS) {
-            Ok(timeout) => timeout,
+            Ok(timeout) => self.bounded(timeout),
             Err(verdict) => return verdict,
         };
 
@@ -1090,7 +1132,7 @@ impl VerifierRegistry {
             }
         };
         let timeout = match spec_timeout(spec, DEFAULT_LEAN_TIMEOUT_SECONDS) {
-            Ok(timeout) => timeout,
+            Ok(timeout) => self.bounded(timeout),
             Err(verdict) => return verdict,
         };
 
@@ -1253,7 +1295,7 @@ impl VerifierRegistry {
         }
 
         let timeout = match spec_timeout(spec, DEFAULT_REPLAY_TIMEOUT_SECONDS) {
-            Ok(timeout) => timeout,
+            Ok(timeout) => self.bounded(timeout),
             Err(verdict) => return verdict,
         };
 
@@ -2212,26 +2254,53 @@ fn run_bounded(
     command.stdout(Stdio::from(out_file));
     command.stderr(Stdio::from(err_file));
 
+    // Its own process group, so the deadline can take out whatever the child
+    // spawned rather than only the child. Under bubblewrap `--unshare-pid`
+    // already does this; seatbelt and the no-jail fallback have no pid
+    // namespace, so without it a checker that forks and exits leaves its
+    // children running past the timeout with nothing watching them.
+    #[cfg(unix)]
+    let command = {
+        use std::os::unix::process::CommandExt;
+        // Safety: `setpgid(0, 0)` between fork and exec is async-signal-safe.
+        // It touches no allocator and no lock, which is the whole constraint
+        // on a pre_exec closure.
+        unsafe { command.pre_exec(crate::verifiers::setpgid_self) }
+    };
+
     let mut child = command.spawn().map_err(RunFailure::Spawn)?;
     let started = Instant::now();
+    let mut over_cap = false;
     let code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code(),
             Ok(None) => {
                 if started.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    reap(&mut child);
                     return Err(RunFailure::TimedOut);
+                }
+                // A checker that prints for its whole CPU budget fills the
+                // operator's disk. Checked while it runs rather than after,
+                // because "after" is too late for the bytes already written.
+                if captured_bytes(&out_path, &err_path) > MAX_CAPTURED_BYTES {
+                    over_cap = true;
+                    reap(&mut child);
+                    break None;
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                reap(&mut child);
                 return Err(RunFailure::Io(error));
             }
         }
     };
+    if over_cap {
+        return Err(RunFailure::Io(io::Error::other(format!(
+            "verifier wrote more than {MAX_CAPTURED_BYTES} bytes of output and was stopped; \
+             that is a fact about this node's limits, not about the artifact"
+        ))));
+    }
 
     Ok(Completed {
         code,
@@ -2240,14 +2309,82 @@ fn run_bounded(
     })
 }
 
+/// Kill a child and everything it started, then reap it.
+///
+/// The process group first: `Child::kill` signals one pid, and a checker that
+/// forked has already escaped that. Killing the group is best-effort — the
+/// child may have changed its own group, and on a platform without process
+/// groups there is nothing to kill — so the direct kill still follows.
+fn reap(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    kill_process_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn setpgid_self() -> io::Result<()> {
+    // SAFETY: `setpgid` is a plain syscall wrapper with no preconditions
+    // beyond valid arguments; `(0, 0)` means "this process, its own group".
+    if unsafe { libc_setpgid(0, 0) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    if let Ok(pid) = i32::try_from(pid) {
+        // SAFETY: `kill` with a negative pid signals the process group; an
+        // invalid group is reported in the return value, which is ignored
+        // because this is best-effort cleanup.
+        unsafe {
+            libc_kill(-pid, 9);
+        }
+    }
+}
+
+// This crate has no `libc` dependency and will not grow one for two calls.
+// Both are stable syscall entry points in the platform's C library, which is
+// already linked into every Rust binary on these targets.
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "setpgid"]
+    fn libc_setpgid(pid: i32, pgid: i32) -> i32;
+    #[link_name = "kill"]
+    fn libc_kill(pid: i32, sig: i32) -> i32;
+}
+
+/// Bytes captured so far across both streams.
+fn captured_bytes(out_path: &Path, err_path: &Path) -> u64 {
+    let size = |path: &Path| fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    size(out_path).saturating_add(size(err_path))
+}
+
 /// Read captured output, tolerating both a missing file and invalid UTF-8.
 /// Neither is worth failing a verification over; the reference implementation
 /// decodes with the same tolerance.
+///
+/// Reads at most [`MAX_CAPTURED_BYTES`]: the caller only ever keeps a short
+/// tail, and loading a multi-gigabyte capture into a `String` to throw nearly
+/// all of it away is how a disk-filling checker becomes an OOM as well.
 fn read_lossy(path: &Path) -> String {
-    match fs::read(path) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(_) => String::new(),
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return String::new(),
+    };
+    use std::io::Read as _;
+    let mut buffer = Vec::new();
+    if file
+        .by_ref()
+        .take(MAX_CAPTURED_BYTES)
+        .read_to_end(&mut buffer)
+        .is_err()
+    {
+        return String::new();
     }
+    String::from_utf8_lossy(&buffer).into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -3375,6 +3512,75 @@ mod tests {
         assert_eq!(verdict.status, Status::Unavailable);
         assert!(!verdict.status.settles());
         assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn an_interactive_registry_clamps_a_hostile_timeout() {
+        // An objective may declare up to MAX_TIMEOUT_SECONDS -- a day -- which
+        // is fine for a batch audit and a liveness attack on the
+        // single-threaded MCP server, where it would stop answering even
+        // `ping`. The clamp is opt-in: settlement must honour the objective's
+        // own bound, or a slow verifier would settle differently depending on
+        // who ran it.
+        let root = tmpdir("proofwork-clamp");
+        // Settlement and audit honour whatever the objective declared, up to
+        // the format's own day-long maximum.
+        let batch = VerifierRegistry::new(root.path());
+        let day = Duration::from_secs(MAX_TIMEOUT_SECONDS);
+        assert_eq!(batch.bounded(day), day);
+
+        // An interactive caller does not.
+        let interactive = VerifierRegistry::new(root.path()).interactive();
+        assert_eq!(
+            interactive.bounded(day).as_secs(),
+            INTERACTIVE_TIMEOUT_SECONDS
+        );
+        // A timeout already under the ceiling is left alone, so the clamp
+        // never *extends* what an objective asked for.
+        assert_eq!(interactive.bounded(Duration::from_secs(5)).as_secs(), 5);
+    }
+
+    #[test]
+    fn a_checker_that_floods_its_output_is_stopped_and_reported_unavailable() {
+        // Only OUTPUT_TAIL_CHARS of the capture is ever kept, so an unbounded
+        // one buys nothing and costs the operator's disk -- and then the
+        // node's memory when the capture is read back.
+        if !have("python3") {
+            return;
+        }
+        let root = tmpdir("proofwork-flood");
+        // Writes well past the cap, as fast as it can.
+        let source = "import sys\n\n\ndef check(artifact):\n    \
+                      block = 'x' * 65536\n    \
+                      while True:\n        sys.stdout.write(block)\n";
+        let sha = write_pinned(&root, "flood.py", source);
+        let registry = VerifierRegistry::new(root.path());
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("flood.py")),
+            ("checker_sha256", Value::string(sha)),
+            ("entrypoint", Value::string("check")),
+            ("timeout_seconds", Value::Int(60)),
+        ]);
+        let started = Instant::now();
+        let verdict = registry.run(&spec, &empty_object());
+        // A node that could not complete the check says nothing about the
+        // artifact -- this is infrastructure, so Unavailable and never Reject.
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+        assert!(!verdict.status.settles());
+        // Stopped on the cap, well before the 60s deadline.
+        assert!(
+            started.elapsed() < Duration::from_secs(45),
+            "the cap did not stop it: {:?}",
+            started.elapsed()
+        );
+        // And nothing enormous was left behind in the scratch directory.
+        assert!(
+            !root.path().join("stdout").exists()
+                || fs::metadata(root.path().join("stdout"))
+                    .map(|m| m.len() <= MAX_CAPTURED_BYTES * 2)
+                    .unwrap_or(true)
+        );
     }
 
     // -- shipped examples --------------------------------------------------
