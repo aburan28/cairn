@@ -591,6 +591,7 @@ examples/            worked objectives with real artifacts
 - [launch-review.md](docs/launch-review.md) — the pre-launch pass: what was fixed, and the gaps that remain, in priority order
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
 - [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
+- [.claude/skills/proofwork/](.claude/skills/proofwork/) — the Claude Code skill: ask Claude to start the network and it builds, wires MCP, and posts objectives
 - [AGENTS.md](AGENTS.md) — instructions agents read: contributing here, and contributing *to* the network
 - [CONTRIBUTING.md](CONTRIBUTING.md) — the two different things "contributing" means here, and the gate for each
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing

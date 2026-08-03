@@ -8,6 +8,12 @@ than three** — the per-agent work is a config stanza, not code.
 cargo build --release --bin proofwork-mcp
 ```
 
+**Claude Code users: there is a skill for this.** `.claude/skills/proofwork/`
+ships with the repository, so a clone already has it — ask Claude to start the
+network and it will build, write `.mcp.json` with absolute paths, and post
+starter objectives via `scripts/setup.sh`. The rest of this document is the
+same material for people wiring it by hand or using another client.
+
 ## The point is `score_candidate`, not `submit_claim`
 
 This network's founding constraint is that verification is cheap by
