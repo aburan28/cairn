@@ -324,6 +324,24 @@ pub struct Objective {
     /// existing objective. The conformance vectors that predate it still pass
     /// unchanged, which is the check that this is true rather than intended.
     pub confidentiality: Confidentiality,
+    /// What shape of artifact the verifier expects, for a submitter who has
+    /// only the record.
+    ///
+    /// Documentation, **not** a rule. Nothing validates an artifact against it
+    /// and nothing may start: the pinned verifier is the only thing that
+    /// decides what passes, and a second gate here would be a second answer to
+    /// that question -- one the two implementations could disagree about, on a
+    /// field the funder writes.
+    ///
+    /// It exists because without it an agent has no honest source for the
+    /// artifact's shape. The verifier spec names a checker file and a hash,
+    /// not a schema; the *statement* is attacker-authored prose. An agent that
+    /// had to guess would guess from the statement, which is precisely the
+    /// input the rest of this design refuses to trust.
+    ///
+    /// Omitted when absent, like every other optional field, so adding it
+    /// moved no ids.
+    pub artifact_schema: Option<Value>,
 }
 
 impl Objective {
@@ -352,9 +370,23 @@ impl Objective {
             deadline,
             ratchet,
             confidentiality: Confidentiality::Public,
+            artifact_schema: None,
         };
         objective.validate()?;
         Ok(objective)
+    }
+
+    /// Attach an artifact-shape hint, re-validating.
+    ///
+    /// A builder step for the same reason [`with_confidentiality`] is one:
+    /// every existing caller keeps the default, and the ones that want this
+    /// say so by name.
+    ///
+    /// [`with_confidentiality`]: Objective::with_confidentiality
+    pub fn with_artifact_schema(mut self, schema: Value) -> Result<Objective, RecordError> {
+        self.artifact_schema = Some(schema);
+        self.validate()?;
+        Ok(self)
     }
 
     /// Set the confidentiality class, re-validating.
@@ -390,6 +422,18 @@ impl Objective {
                 return Err(RecordError::InvalidField {
                     record: "objective",
                     field: "ratchet",
+                    expected: "an object",
+                });
+            }
+        }
+        // Shape only. What the hint *says* is never checked -- the pinned
+        // verifier decides what passes, and validating an artifact against
+        // this would be a second answer to that question.
+        if let Some(schema) = &self.artifact_schema {
+            if schema.as_object().is_none() {
+                return Err(RecordError::InvalidField {
+                    record: "objective",
+                    field: "artifact_schema",
                     expected: "an object",
                 });
             }
@@ -449,6 +493,10 @@ impl Objective {
                 Value::string(self.confidentiality.as_str()),
             );
         }
+        // Omitted when absent, for the reason every optional field here is.
+        if let Some(schema) = &self.artifact_schema {
+            body.insert("artifact_schema".to_string(), schema.clone());
+        }
         Value::Object(body)
     }
 
@@ -492,6 +540,12 @@ impl Objective {
             }
         };
 
+        // Absent and null both mean "no hint", exactly as for `ratchet`.
+        let artifact_schema = match value.get("artifact_schema") {
+            None | Some(Value::Null) => None,
+            Some(other) => Some(other.clone()),
+        };
+
         let objective = Objective {
             goal: required_string(value, RECORD, "goal")?,
             statement: required_string(value, RECORD, "statement")?,
@@ -502,6 +556,7 @@ impl Objective {
             deadline: optional_string(value, RECORD, "deadline")?,
             ratchet,
             confidentiality,
+            artifact_schema,
         };
         objective.validate()?;
         Ok(objective)
@@ -800,6 +855,7 @@ mod tests {
             deadline: None,
             ratchet: None,
             confidentiality: Confidentiality::Public,
+            artifact_schema: None,
         }
     }
 
@@ -983,6 +1039,72 @@ mod tests {
         let decoded = Objective::from_value(&original.to_value()).unwrap();
         assert_eq!(decoded, original);
         assert_eq!(decoded.id(), original.id());
+    }
+
+    // -- artifact shape -----------------------------------------------------
+
+    #[test]
+    fn an_objective_without_an_artifact_schema_keeps_the_id_it_had_before_the_field_existed() {
+        // Same argument as the confidentiality default, and the same
+        // consequence if it ever fails: every objective in every deployed log
+        // reissued, every claim against a live bounty orphaned. The
+        // conformance vectors are the stronger check -- they were generated
+        // before this field existed and still pass byte for byte.
+        let plain = objective();
+        assert!(plain.artifact_schema.is_none());
+        assert!(
+            plain.to_value().get("artifact_schema").is_none(),
+            "an absent hint must not appear in the canonical form"
+        );
+
+        // Absent and explicitly-null decode the same, and neither is the
+        // record a *present* hint produces.
+        let mut nulled = match plain.to_value() {
+            Value::Object(map) => map,
+            _ => unreachable!(),
+        };
+        nulled.insert("artifact_schema".to_string(), Value::Null);
+        let decoded = Objective::from_value(&Value::Object(nulled)).expect("decodes");
+        assert_eq!(decoded.id(), plain.id());
+        assert!(decoded.artifact_schema.is_none());
+    }
+
+    #[test]
+    fn a_declared_artifact_shape_is_part_of_the_objective() {
+        // It is a hint about what passes, so it belongs to the funded question
+        // the way the verifier does: a funder cannot swap the documented shape
+        // out from under work already submitted, because that is a different
+        // objective.
+        let plain = objective();
+        let hinted = plain
+            .clone()
+            .with_artifact_schema(Value::object([("type", Value::string("object"))]))
+            .expect("valid hint");
+        assert_ne!(plain.id(), hinted.id());
+        assert_eq!(
+            hinted.to_value().get("artifact_schema").unwrap(),
+            &Value::object([("type", Value::string("object"))])
+        );
+        let decoded = Objective::from_value(&hinted.to_value()).expect("round trips");
+        assert_eq!(decoded, hinted);
+        assert_eq!(decoded.id(), hinted.id());
+    }
+
+    #[test]
+    fn an_artifact_schema_must_be_an_object_but_is_never_interpreted() {
+        // Shape is checked so the field cannot be a bare string that one
+        // implementation iterates and the other refuses. What it *says* is
+        // never checked: the pinned verifier decides what passes, and a second
+        // gate here would be a second answer to that question.
+        let refused = objective().with_artifact_schema(Value::string("an object, honest"));
+        assert!(refused.is_err(), "a non-object hint must be refused");
+
+        // Nonsense that is shaped correctly is accepted, because validating it
+        // is not this layer's business.
+        let accepted = objective()
+            .with_artifact_schema(Value::object([("wat", Value::Int(-1))]))
+            .expect("shape is all that is checked");
+        assert!(accepted.artifact_schema.is_some());
     }
 
     // -- confidentiality ----------------------------------------------------

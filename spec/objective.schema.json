@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aburan28/proofwork/spec/objective.schema.json",
+  "$id": "https://github.com/aburan28/distributed-researcher/spec/objective.schema.json",
   "title": "Objective",
   "description": "A funded, checkable question. The record's SHA-256 over its canonical serialization IS its id, so the verifier block is part of the objective's identity: editing an evaluator forks the objective rather than rescoring work already done against it.",
   "type": "object",
@@ -46,6 +46,11 @@
       "enum": ["public", "embargoed", "sealed", null],
       "default": "public",
       "description": "When settled artifacts become public -- never whether. Omitted or null means 'public', and writing it explicitly produces byte-identical output, so this field did not reissue any pre-existing objective id. 'sealed' is declared so its cost is explicit but is refused at validation: paying for an artifact nobody may read requires a zero-knowledge proof that the pinned verifier accepts it, which is not implemented. Use 'embargoed' for delayed disclosure."
+    },
+    "artifact_schema": {
+      "type": ["object", "null"],
+      "description": "What shape of artifact the verifier expects, for a submitter who has only this record. Documentation, not a rule: nothing validates an artifact against it, because the pinned verifier is the only thing that decides what passes and a second gate would be a second answer to that question. It exists because an agent's only other source for the artifact's shape is the statement, which is attacker-authored prose. Part of the id like every other field; omitted when absent, so adding it reissued nothing.",
+      "$comment": "Deliberately unconstrained beyond 'an object'. Requiring JSON Schema here would make this crate's validator the arbiter of a field the funder writes, and a funder whose hint is a worked example rather than a schema is being more helpful, not less."
     }
   }
 }

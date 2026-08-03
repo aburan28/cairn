@@ -1,4 +1,20 @@
 {
+  "artifact_schema": {
+    "description": "An object naming the integer whose trajectory is long. The checker reads exactly one field.",
+    "example": {
+      "n": 27
+    },
+    "properties": {
+      "n": {
+        "description": "The candidate integer, in [1, 10^7).",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "n"
+    ],
+    "type": "object"
+  },
   "created_at": "2026-07-28T00:00:00+00:00",
   "funder": "treasury",
   "goal": "GOAL-collatz-extremes",

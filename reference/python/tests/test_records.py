@@ -135,6 +135,38 @@ def test_absent_cites_decodes_as_empty():
     assert Claim.from_dict(body).cites == ()
 
 
+def test_an_absent_artifact_schema_keeps_the_id_it_had_before_the_field_existed():
+    # Same argument as the confidentiality default: emitting it would reissue
+    # every objective in every deployed log. The conformance vectors are the
+    # stronger check -- they predate the field and still pass byte for byte.
+    plain = objective()
+    assert plain.artifact_schema is None
+    assert "artifact_schema" not in plain.to_dict()
+    # Absent and explicitly-null decode the same.
+    body = {**plain.to_dict(), "artifact_schema": None}
+    assert Objective.from_dict(body).id == plain.id
+
+
+def test_a_declared_artifact_shape_is_part_of_the_objective():
+    # It belongs to the funded question the way the verifier does: a funder
+    # cannot swap the documented shape out from under submitted work, because
+    # that is a different objective.
+    plain = objective()
+    hinted = objective(artifact_schema={"type": "object"})
+    assert plain.id != hinted.id
+    assert hinted.to_dict()["artifact_schema"] == {"type": "object"}
+    assert Objective.from_dict(hinted.to_dict()) == hinted
+
+
+@pytest.mark.parametrize("value", ["an object, honest", 7, ["a"]])
+def test_an_artifact_schema_must_be_an_object(value):
+    # Shape is checked so the field cannot be a bare string one implementation
+    # iterates and the other refuses. What it *says* is never checked: the
+    # pinned verifier decides what passes.
+    with pytest.raises(RecordError, match="artifact_schema"):
+        objective(artifact_schema=value)
+
+
 @pytest.mark.parametrize("cls", ["public", "embargoed"])
 def test_every_usable_class_round_trips(cls):
     original = objective(confidentiality=cls)

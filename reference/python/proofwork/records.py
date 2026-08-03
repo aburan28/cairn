@@ -67,6 +67,17 @@ class Objective:
     #: and ``ratchet`` when unset, so adding this field did not change the id of
     #: a single existing objective.
     confidentiality: str = DEFAULT_CONFIDENTIALITY
+    #: What shape of artifact the verifier expects, for a submitter who has
+    #: only the record.
+    #:
+    #: Documentation, **not** a rule. Nothing validates an artifact against it
+    #: and nothing may start: the pinned verifier is the only thing that
+    #: decides what passes, and a second gate here would be a second answer to
+    #: that question -- one the two implementations could disagree about, on a
+    #: field the funder writes. It exists because otherwise an agent's only
+    #: source for the artifact's shape is the attacker-authored statement.
+    #: Omitted when absent, so adding it moved no ids.
+    artifact_schema: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.statement.strip():
@@ -98,6 +109,9 @@ class Objective:
                 'confidentiality "sealed" requires zero-knowledge verification, '
                 'which is not implemented; use "embargoed" for delayed disclosure'
             )
+        # Shape only. What the hint *says* is never checked -- see the field.
+        if self.artifact_schema is not None and not isinstance(self.artifact_schema, dict):
+            raise RecordError("artifact_schema must be an object")
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -119,6 +133,9 @@ class Objective:
         # orphan every claim already posted against a live bounty.
         if self.confidentiality != DEFAULT_CONFIDENTIALITY:
             body["confidentiality"] = self.confidentiality
+        # Omitted when absent, for the reason every optional field here is.
+        if self.artifact_schema is not None:
+            body["artifact_schema"] = self.artifact_schema
         return body
 
     @property
@@ -147,6 +164,8 @@ class Objective:
             deadline=data.get("deadline"),
             ratchet=data.get("ratchet"),
             confidentiality=confidentiality,
+            # Absent and null both mean "no hint", exactly as for ``ratchet``.
+            artifact_schema=data.get("artifact_schema"),
         )
 
 
