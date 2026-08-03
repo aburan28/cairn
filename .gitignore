@@ -14,6 +14,10 @@ venv/
 # Logs produced by demos
 *.jsonl
 !conformance/*.json
+# ...except the published one. A project whose whole claim is "anyone can
+# re-derive every settled result from the log" has to ship a log. See
+# launch/README.md and scripts/make-launch-log.sh.
+!launch/proofwork.jsonl
 
 # macOS AppleDouble sidecars; this volume creates one per file
 ._*

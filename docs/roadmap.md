@@ -111,6 +111,13 @@ behaviour ships and is tested, not that TLC has checked it.
       signed peer records and the piece machinery are not. `swarm::discovery` is
       exactly the peer-list exchange `p2p` is missing, against a different
       identity scheme, and the McEliece transport is what `swarm::tcp` lacks.
+      Reviewed again in the launch pass and deliberately **not** attempted
+      then: the two identity schemes (ed25519 for `swarm` peer records, a
+      261,120-byte McEliece key for the encrypted transport) have to be
+      reconciled before the merge means anything, and a rushed version would
+      trade a contained duplication for an uncontained one. The containment
+      -- `insecure-swarm-tcp` off by default, so the unencrypted socket cannot
+      reach a binary by accident -- is what makes deferring it safe.
 - [ ] Peer identities in the log, so *identity* discovery stops being a separate
       bootstrap problem from obtaining the log. Identity is permanent and belongs
       there; provider records are not and must not.
@@ -135,6 +142,32 @@ behaviour ships and is tested, not that TLC has checked it.
       address book already knows; **learning** new peers is still bootstrap-file
       only, and uniform sampling is not Sybil resistance. See
       [p2p.md](p2p.md#still-open).
+
+### Added in the launch pass
+
+- [x] **A remote surface** (`src/serve.rs`, `proofwork-serve`). `GET /log`
+      returns the log byte for byte, with `/objectives`, `/objective/{id}`,
+      `/frontier/{id}`, `/checkpoint` and `/health` as conveniences over it.
+      This is what makes "anyone can re-derive every settled result from the
+      log" reachable by somebody who is not the operator, and it was the item
+      standing between Stage 0 and anyone outside using it. See
+      [serving.md](serving.md).
+- [x] **A submission queue** (`POST /submit`, `proofwork drain`). Records
+      arriving over the network are spooled, not appended: a Ledger has one
+      writer, and admission is decided against the whole log by the rules
+      engine rather than in a request handler. This is the honest version of
+      "Objective discovery API and a work queue" below, minus the identity
+      half.
+- [x] **One writer per log, enforced** (`Ledger::open_exclusive`). The type
+      always said it; an advisory lock now means a second *process* cannot
+      quietly fork the log either.
+- [x] **A published log** (`launch/`), with the signed checkpoint and the key,
+      built by `scripts/make-launch-log.sh`. `proofwork checkpoint` signs one
+      from the CLI, which previously only the p2p daemon could do.
+- [x] **Objective-declared artifact shape** (`artifact_schema`). Documentation
+      rather than a rule -- the pinned verifier stays the only authority -- so
+      an agent has a source for the shape that is not the attacker-authored
+      statement.
 
 ## Stage 1 — bounty market, real contributors
 

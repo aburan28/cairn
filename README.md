@@ -70,6 +70,24 @@ OS jail, and set `PROOFWORK_REQUIRE_SANDBOX=1` on any node that verifies
 objectives it did not write — without a jail mechanism the code runs
 unconfined, and that variable turns "unconfined" into `Unavailable` instead.
 
+### A log you can check right now
+
+`launch/` holds a real settled log, the checkpoint signing it, and the public
+key — so the claim above can be tested before you build anything of your own:
+
+```sh
+proofwork --log launch/proofwork.jsonl --root . audit
+proofwork --log launch/proofwork.jsonl --root . verify \
+    --from launch/checkpoint.json --root-key launch/root-key.pub --audit
+
+# and the check that matters: the Python reference re-deriving the same log
+PYTHONPATH=reference/python python3 -m proofwork.cli \
+    --log launch/proofwork.jsonl --root . audit
+```
+
+Both print the same Merkle root. See [launch/README.md](launch/README.md) for
+what is in it and the two caveats that come with a sample artifact.
+
 ### Publish your log so others can check it
 
 ```sh
@@ -155,6 +173,8 @@ proofwork commit <objective-id> --submitter bob --artifact solution.json --nonce
 proofwork reveal <objective-id> --submitter bob --artifact solution.json --nonce s3cret
 proofwork audit
 proofwork attribute
+proofwork checkpoint --root-key key.json --out checkpoint.json   # sign it
+proofwork drain --queue ./queue                                  # admit what arrived over HTTP
 ```
 
 ### Four verifiers, four trust assumptions
