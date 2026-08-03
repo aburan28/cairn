@@ -39,8 +39,12 @@ __all__ = [
 
 
 def set_root(root: str) -> None:
-    """Point the code-loading verifiers at an objective bundle root."""
-    for kind in ("certificate", "evaluator", "replay", "statistical"):
+    """Point the code-loading verifiers at an objective bundle root.
+
+    ``lean`` is here because ``project_root`` resolves against -- and is
+    contained inside -- the bundle root, the same rule pinned code paths obey.
+    """
+    for kind in ("certificate", "evaluator", "lean", "replay", "statistical"):
         verifier = get(kind)
         if verifier is not None:
             verifier.root = root  # type: ignore[attr-defined]

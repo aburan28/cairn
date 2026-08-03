@@ -56,8 +56,11 @@ NATIVE_DECIDE = (r"\bnative_decide\b", "uses `native_decide`: trusts the compile
 class LeanVerifier:
     kind = "lean"
 
-    def __init__(self, lean_binary: str = "lean"):
+    def __init__(self, lean_binary: str = "lean", root: str = "."):
         self.lean_binary = lean_binary
+        # Picked up by ``verifiers.set_root``, like the code-loading verifiers:
+        # ``project_root`` resolves against the bundle root, never the host.
+        self.root = root
 
     def _available(self) -> str | None:
         return shutil.which(self.lean_binary)
@@ -76,6 +79,27 @@ class LeanVerifier:
         for pattern, why in checks:
             if re.search(pattern, proof):
                 return Verdict(Status.REJECT, why, {"pattern": pattern})
+
+        # ``project_root`` comes from the objective record -- attacker-authored
+        # like every other spec field -- and the Rust implementation binds it
+        # into the verifier jail *writable* (a Lake build writes ``.olean``
+        # files). Unconfined, "/" turns that jail into a pass-through, so it
+        # resolves against the bundle root and must stay inside it, and both
+        # implementations refuse the same objectives in the same place --
+        # before the toolchain lookup, because a malformed spec is malformed
+        # whether or not this node has Lean. A non-string value falls back to
+        # the scratch directory, matching the Rust decoder.
+        project_root = spec.get("project_root")
+        run_cwd = None
+        if isinstance(project_root, str) and project_root:
+            root_abs = os.path.abspath(self.root)
+            resolved = os.path.abspath(os.path.join(root_abs, project_root))
+            if resolved != root_abs and not resolved.startswith(root_abs + os.sep):
+                return Verdict(
+                    Status.INVALID_SPEC,
+                    f"project_root escapes the objective root: {project_root}",
+                )
+            run_cwd = resolved
 
         binary = self._available()
         if binary is None:
@@ -101,7 +125,7 @@ class LeanVerifier:
                     capture_output=True,
                     text=True,
                     timeout=timeout,
-                    cwd=spec.get("project_root") or tmp,
+                    cwd=run_cwd or tmp,
                 )
             except subprocess.TimeoutExpired:
                 # A timeout is not a refutation. The proof may be fine and slow.

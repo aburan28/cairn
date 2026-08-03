@@ -25,6 +25,7 @@ settled by re-execution.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import Any
 
@@ -68,9 +69,20 @@ class ReplayVerifier:
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             return Verdict(Status.INVALID_SPEC, "timeout_seconds must be a positive int")
 
-        import os
-
-        cwd = os.path.normpath(os.path.join(self.root, spec.get("cwd", ".")))
+        # ``cwd`` comes from the objective record, so it must never choose a
+        # host directory: the Rust implementation binds it into the verifier
+        # jail, and any declared field the command prints lands in public
+        # verdict evidence -- exfiltration with no network needed. Same
+        # containment as pinned code paths, in both implementations, so the
+        # two agree on which objectives are malformed.
+        cwd_field = spec.get("cwd", ".")
+        root_abs = os.path.abspath(self.root)
+        cwd = os.path.abspath(os.path.join(root_abs, cwd_field))
+        if cwd != root_abs and not cwd.startswith(root_abs + os.sep):
+            return Verdict(
+                Status.INVALID_SPEC,
+                f"cwd escapes the objective root: {cwd_field}",
+            )
         try:
             proc = subprocess.run(
                 command, capture_output=True, text=True, timeout=timeout, cwd=cwd
