@@ -27,13 +27,11 @@ then ratchets baseline → mid → best with required frontier citations.
 ## Score a candidate (CLI)
 
 ```bash
-LOG=/tmp/pw-ecdsa.jsonl
-rm -f "$LOG"
+LOG=$(mktemp -u /tmp/pw-ecdsa-XXXXXX.jsonl)
 OID=$(./target/release/proofwork --log "$LOG" --root . post examples/ecdsa-fail/objective.json | awk '{print $2}')
-./target/release/proofwork --log "$LOG" --root .  # registry check via reveal path is settle-time;
-# free local check is MCP score_candidate, or run the demo / adapter score.
 ```
 
+The CLI has no free-scoring subcommand — its verifier runs at reveal time.
 Free local scoring without writing the log: use MCP (below) or the adapter:
 
 ```bash

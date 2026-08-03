@@ -14,8 +14,12 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 
+# `proofwork-py`, not `proofwork`: `pip install -e .` and `cargo install` would
+# otherwise race for the same name on PATH, and whoever installed second wins
+# silently -- the Python CLI has a subset of the Rust subcommands, so the
+# collision looks like a broken install rather than a name clash.
 [project.scripts]
-proofwork = "proofwork.cli:main"
+proofwork-py = "proofwork.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["proofwork*"]
