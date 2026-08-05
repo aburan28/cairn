@@ -77,3 +77,82 @@ fn oversized_integers_are_refused_rather_than_becoming_floats() {
     let too_big = "1".repeat(60);
     assert!(Value::from_json(&format!(r#"{{"x": {too_big}}}"#)).is_err());
 }
+
+/// Regenerate `conformance/signed-records.json`, which the Python reference
+/// reproduces field for field.
+///
+/// A signature is part of the record, so it is part of the id. Two
+/// implementations that disagreed about how a signed record digests would give
+/// every signed claim two ids, and citation would break at the first one --
+/// so this pins the canonical bytes, not just the signature.
+///
+/// `PROOFWORK_WRITE_VECTORS=1` rewrites the file.
+#[test]
+fn signed_record_vectors_match_the_committed_file() {
+    use proofwork::canonical::Value;
+    use proofwork::crypto::identity::Identity;
+    use proofwork::records::{Claim, Commitment};
+
+    let alice = Identity::from_secret_bytes([23u8; 32]);
+    let ts = "2026-07-28T00:00:00+00:00";
+    let claim = Claim::new(
+        "sha256:obj",
+        "placeholder",
+        Value::object([("n", Value::Int(42))]),
+        "s3cret",
+        ts,
+        vec![],
+    )
+    .expect("valid")
+    .signed_with(&alice);
+    let commitment =
+        Commitment::new("sha256:obj", "placeholder", "sha256:h", ts).signed_with(&alice);
+
+    // Both must verify here before they are offered as vectors at all.
+    claim.verify_signature().expect("claim self-verifies");
+    commitment
+        .verify_signature()
+        .expect("commitment self-verifies");
+
+    let produced = Value::object([
+        (
+            "claim",
+            Value::object([
+                (
+                    "canonical",
+                    Value::string(claim.to_value().canonical_string()),
+                ),
+                ("id", Value::string(claim.id())),
+                ("record", claim.to_value()),
+            ]),
+        ),
+        (
+            "commitment",
+            Value::object([
+                (
+                    "canonical",
+                    Value::string(commitment.to_value().canonical_string()),
+                ),
+                ("id", Value::string(commitment.id())),
+                ("record", commitment.to_value()),
+            ]),
+        ),
+    ])
+    .canonical_string();
+
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/conformance/signed-records.json"
+    );
+    if std::env::var("PROOFWORK_WRITE_VECTORS").is_ok() {
+        std::fs::write(path, format!("{produced}\n")).expect("write vectors");
+        return;
+    }
+    let committed =
+        std::fs::read_to_string(path).expect("conformance/signed-records.json is missing");
+    assert_eq!(
+        committed.trim(),
+        produced,
+        "signed record vectors moved -- signing or canonical encoding changed"
+    );
+}

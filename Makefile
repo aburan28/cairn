@@ -23,7 +23,7 @@ P2P_ARGS ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp p2p serve demo ratchet interop mcp-smoke serve-smoke \
+.PHONY: help build debug cli mcp p2p serve demo ratchet identity interop mcp-smoke serve-smoke \
 	test test-rust \
 	test-python fmt clippy tla check
 
@@ -67,6 +67,9 @@ p2p: build | $(LOCAL_DIR)
 
 cli: build | $(LOCAL_DIR)
 	"$(CLI)" --log "$(LOG)" --root "$(ROOT)" $(ARGS)
+
+identity: build
+	./scripts/identity-demo.sh
 
 demo: build
 	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/demo.sh
@@ -113,4 +116,4 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy demo ratchet interop mcp-smoke serve-smoke tla
+check: test fmt clippy demo ratchet identity interop mcp-smoke serve-smoke tla

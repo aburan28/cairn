@@ -1516,3 +1516,124 @@ fn the_shipped_progressive_example_runs_end_to_end() {
     );
     assert_clean(&node.audit(true));
 }
+
+// -- submitter identity ----------------------------------------------------
+
+/// A key-shaped submitter is unforgeable; a nickname is unchanged.
+///
+/// `submitter` was a free string, so a name was worth nothing and citation
+/// flow was paying whatever anyone typed. These are the four cases that
+/// matter, and the last two are the ones an attacker actually tries.
+#[test]
+fn a_key_shaped_submitter_cannot_be_worn_by_anyone_else() {
+    use proofwork::crypto::identity::Identity;
+    use proofwork::records::{signed_submitter, Commitment};
+
+    let alice = Identity::from_secret_bytes([7u8; 32]);
+    let mallory = Identity::from_secret_bytes([9u8; 32]);
+    let ts = "2026-07-28T00:00:00+00:00";
+
+    // The name *is* the key, so no registry is consulted to know that.
+    assert!(signed_submitter(&alice.submitter_id()).is_some());
+    assert!(signed_submitter("alice").is_none());
+
+    let unsigned = Commitment::new("sha256:obj", alice.submitter_id(), "sha256:h", ts);
+
+    // 1. Wearing alice's name with no signature at all.
+    assert!(
+        unsigned.verify_signature().is_err(),
+        "a key-shaped name was accepted unsigned"
+    );
+
+    // 2. Alice signing for herself.
+    let signed = unsigned.clone().signed_with(&alice);
+    signed.verify_signature().expect("alice's own signature");
+
+    // 3. Mallory signing a record that claims to be alice. The signature is
+    //    real -- it is just not hers, which is the whole attack.
+    let mut forged = signed.clone();
+    forged.signature = Some(mallory.sign_value(&forged.signing_payload()).to_hex());
+    assert!(
+        forged.verify_signature().is_err(),
+        "mallory signed as alice and it was accepted"
+    );
+
+    // 4. Stealing alice's signature and attaching it to a different record.
+    let mut moved = Commitment::new("sha256:other", alice.submitter_id(), "sha256:h", ts);
+    moved.signature = signed.signature.clone();
+    assert!(
+        moved.verify_signature().is_err(),
+        "a signature was replayed onto a different record"
+    );
+
+    // A nickname stays exactly as permissive as it was -- Stage 0 keeps
+    // working, which is what makes this deployable without a migration.
+    let nickname = Commitment::new("sha256:obj", "alice", "sha256:h", ts);
+    nickname
+        .verify_signature()
+        .expect("nicknames are unchanged");
+}
+
+/// The rules engine refuses a forged identity before writing anything.
+#[test]
+fn the_node_refuses_an_unsigned_key_shaped_submitter() {
+    use proofwork::crypto::identity::Identity;
+    use proofwork::records::Commitment;
+
+    let alice = Identity::from_secret_bytes([11u8; 32]);
+    let ts = TS;
+    let (_dir, mut node, objective) = certificate_env("identity-node", CHECKER);
+    let objective_id = objective.id();
+
+    let forged = Commitment::new(&objective_id, alice.submitter_id(), "sha256:h", ts);
+    let before = node.ledger().len();
+    let refused = node.commit(&forged, ts);
+    assert!(
+        refused.is_err(),
+        "an unsigned key-shaped submitter committed"
+    );
+    assert_eq!(
+        node.ledger().len(),
+        before,
+        "a refused commitment wrote to the log"
+    );
+    let message = refused.unwrap_err().to_string();
+    assert!(message.contains("must carry a signature"), "{message}");
+
+    // Signed by the key it names: admitted.
+    let honest =
+        Commitment::new(&objective_id, alice.submitter_id(), "sha256:h", ts).signed_with(&alice);
+    node.commit(&honest, ts)
+        .expect("a signed commitment is fine");
+}
+
+/// Signing changes the record's id, so a signature cannot be stripped from a
+/// claim somebody already cited.
+#[test]
+fn a_signature_is_covered_by_the_record_id() {
+    use proofwork::canonical::Value;
+    use proofwork::crypto::identity::Identity;
+    use proofwork::records::Claim;
+
+    let alice = Identity::from_secret_bytes([13u8; 32]);
+    let unsigned = Claim::new(
+        "sha256:obj",
+        alice.submitter_id(),
+        Value::object([("n", Value::Int(1))]),
+        "nonce",
+        "2026-07-28T00:00:00+00:00",
+        Vec::new(),
+    )
+    .expect("valid claim");
+    let signed = unsigned.clone().signed_with(&alice);
+
+    assert_ne!(
+        unsigned.id(),
+        signed.id(),
+        "stripping the signature left the id unchanged, so it could be removed \
+         from a claim other people already cited"
+    );
+    // And the signature covers the payload without itself, which is the only
+    // way it could be produced at all.
+    assert_eq!(unsigned.signing_payload(), signed.signing_payload());
+}

@@ -161,6 +161,14 @@ pub enum RuleViolation {
     /// placed in a settlement batch, and guessing one -- "treat it as now" --
     /// would hand a submitter a free choice of batch by writing garbage.
     MalformedTimestamp { record: &'static str, value: String },
+    /// A submitter that names an ed25519 public key did not prove it holds
+    /// that key.
+    ///
+    /// The rule that makes an identity worth having. `submitter` has always
+    /// been a free string, so a name was worth nothing and citation flow was
+    /// paying a string anyone could type; a key-shaped name now has to be
+    /// signed for. See [`crate::records::signed_submitter`].
+    UnsignedIdentity(crate::records::SignatureError),
     /// A reveal into an epoch whose settlement batch has already been paid.
     ///
     /// Refused rather than queued for the next batch. An epoch's batch is
@@ -252,6 +260,7 @@ impl fmt::Display for RuleViolation {
                 "{record} timestamp {value:?} is not an RFC-3339 instant, so the \
                  epoch it settles in cannot be derived"
             ),
+            RuleViolation::UnsignedIdentity(error) => write!(f, "{error}"),
             RuleViolation::EpochAlreadySettled { epoch } => write!(
                 f,
                 "epoch {epoch} has already settled; a reveal cannot join a batch \
@@ -267,6 +276,12 @@ impl fmt::Display for RuleViolation {
             ),
             RuleViolation::Ledger(source) => write!(f, "cannot record: {source}"),
         }
+    }
+}
+
+impl From<crate::records::SignatureError> for RuleViolation {
+    fn from(error: crate::records::SignatureError) -> RuleViolation {
+        RuleViolation::UnsignedIdentity(error)
     }
 }
 
@@ -563,6 +578,10 @@ impl Node {
     /// A **progressive** objective does not: it stays open until its pool is
     /// exhausted, because the whole point is that improvements keep arriving.
     pub fn commit(&mut self, commitment: &Commitment, ts: &str) -> Result<String, RuleViolation> {
+        // Before anything else, and before anything is written: a submitter
+        // that names a key must prove it holds that key. Cheap, and refusing
+        // early means a forged identity never reaches the log at all.
+        commitment.verify_signature()?;
         // Refused here rather than at reveal. The commitment's `created_at` is
         // what fixes the epoch a reveal must beat, so a commitment whose
         // timestamp cannot be read is a commitment that can never be opened --
@@ -644,6 +663,12 @@ impl Node {
     /// lost by waiting: the claim and its verdict are already in the log and
     /// already public.
     pub fn reveal(&mut self, claim: &Claim, ts: &str) -> Result<Outcome, RuleViolation> {
+        // As in `commit`: a key-shaped submitter must prove it holds the key,
+        // checked before any rule that could write. The commitment hash binds
+        // the submitter string, so a signed commitment can only be opened by a
+        // claim naming the same submitter -- and now that name is unforgeable
+        // rather than merely declared.
+        claim.verify_signature()?;
         let reveal_epoch = epoch_of_timestamp("reveal", ts)?;
         // Drain first. An epoch that closed while this node was idle must
         // settle *before* this claim's admission checks read the frontier, or

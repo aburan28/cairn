@@ -16,11 +16,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .canonical import MAX_UNITS, digest, digest_bytes
+from . import ed25519
+from .canonical import MAX_UNITS, canonical_bytes, digest, digest_bytes, short
 
 
 class RecordError(ValueError):
     """A record is structurally invalid."""
+
+
+class SignatureError(RecordError):
+    """A submitter that names a key did not prove it holds that key."""
 
 
 #: When an objective's settled artifacts become public -- never *whether*.
@@ -186,6 +191,65 @@ def commitment_hash(objective_id: str, submitter: str, artifact: dict, nonce: st
     )
 
 
+def signed_submitter(submitter: str) -> str | None:
+    """The public key a submitter name commits to, when it is one.
+
+    ``submitter`` has always been a free string, which means a name is worth
+    nothing: anyone can submit as ``alice``, and citation flow pays that name.
+    This is the rule that fixes it without a registry or a migration.
+
+    **A submitter that is 64 lowercase hex characters is an ed25519 public key,
+    and a record carrying one must be signed by it.** Anything else is an
+    unauthenticated nickname and is exactly as permissive as it always was, so
+    existing logs keep working unchanged.
+
+    No lookup is needed because the name *is* the key. Lowercase only: mixed
+    case would make ``AB..`` and ``ab..`` two names for one key, so one key
+    could hold two reputations and cite itself.
+    """
+    if len(submitter) != 64:
+        return None
+    if all(c in "0123456789abcdef" for c in submitter):
+        return submitter
+    return None
+
+
+def verify_record_signature(record: str, submitter: str, payload: dict, signature: str | None) -> None:
+    """Raise ``SignatureError`` unless this record satisfies the rule above.
+
+    Shared by both record kinds because the two must agree exactly -- a rule
+    enforced slightly differently on commitments and claims is a rule an
+    attacker gets to choose between.
+    """
+    key_hex = signed_submitter(submitter)
+    if key_hex is None:
+        # A nickname claims nothing, so nothing is checked. A signature
+        # attached to one is still refused rather than ignored, so it cannot
+        # look like authentication it is not.
+        if signature is not None:
+            raise SignatureError(
+                f"{record} carries a signature but submitter {submitter!r} is not a "
+                "public key, so nothing authenticates it"
+            )
+        return
+
+    if signature is None:
+        raise SignatureError(
+            f"{record} submitter {short(submitter)} is a public key, so the record "
+            "must carry a signature from it; sign it or submit under a name that "
+            "is not a key"
+        )
+    try:
+        key = bytes.fromhex(key_hex)
+        raw = bytes.fromhex(signature)
+    except ValueError:
+        raise SignatureError(f"{record} signature does not verify under submitter {short(submitter)}") from None
+    if not ed25519.verify(key, canonical_bytes(payload), raw):
+        raise SignatureError(
+            f"{record} signature does not verify under submitter {short(submitter)}"
+        )
+
+
 @dataclass(frozen=True)
 class Commitment:
     """Phase 1: bind to an artifact without revealing it."""
@@ -194,8 +258,20 @@ class Commitment:
     submitter: str
     hash: str
     created_at: str
+    #: Ed25519 signature over this record, hex, or None. Omitted from the
+    #: canonical form when absent, so adding it moved no ids. See
+    #: ``signed_submitter`` for when one is *required*.
+    signature: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def signing_payload(self) -> dict[str, Any]:
+        """The bytes a signature covers: this record without its signature.
+
+        Excluded rather than zeroed, because a signature over the field
+        holding it is not something anyone can produce. The record's id still
+        covers the signature, so a signed record and its unsigned twin are
+        different records -- which is what stops a signature being stripped
+        without changing the id anyone cited.
+        """
         return {
             "type": "commitment",
             "objective_id": self.objective_id,
@@ -203,6 +279,15 @@ class Commitment:
             "hash": self.hash,
             "created_at": self.created_at,
         }
+
+    def verify_signature(self) -> None:
+        verify_record_signature("commitment", self.submitter, self.signing_payload(), self.signature)
+
+    def to_dict(self) -> dict[str, Any]:
+        body = self.signing_payload()
+        if self.signature is not None:
+            body["signature"] = self.signature
+        return body
 
     @property
     def id(self) -> str:
@@ -219,6 +304,9 @@ class Claim:
     nonce: str
     created_at: str
     cites: tuple[str, ...] = field(default_factory=tuple)
+    #: Ed25519 signature over this record, hex, or None. See
+    #: ``signed_submitter``.
+    signature: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.artifact, dict):
@@ -226,7 +314,8 @@ class Claim:
         if len(set(self.cites)) != len(self.cites):
             raise RecordError("duplicate citation")
 
-    def to_dict(self) -> dict[str, Any]:
+    def signing_payload(self) -> dict[str, Any]:
+        """See ``Commitment.signing_payload``."""
         return {
             "type": "claim",
             "objective_id": self.objective_id,
@@ -236,6 +325,15 @@ class Claim:
             "created_at": self.created_at,
             "cites": list(self.cites),
         }
+
+    def verify_signature(self) -> None:
+        verify_record_signature("claim", self.submitter, self.signing_payload(), self.signature)
+
+    def to_dict(self) -> dict[str, Any]:
+        body = self.signing_payload()
+        if self.signature is not None:
+            body["signature"] = self.signature
+        return body
 
     @property
     def id(self) -> str:
@@ -268,4 +366,5 @@ class Claim:
             nonce=data["nonce"],
             created_at=data["created_at"],
             cites=tuple(cites),
+            signature=data.get("signature"),
         )

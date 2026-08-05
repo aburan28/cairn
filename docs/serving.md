@@ -84,7 +84,9 @@ empties.
 
 ## What this is not
 
-**Not authenticated.** `submitter` is still a self-declared string; see the
+**Partly authenticated.** A key-shaped `submitter` (64 lowercase hex) must
+carry a valid ed25519 signature, so a submission under one cannot be forged.
+A nickname submitter still cannot be authenticated at all; see the
 identity gap in [launch-review.md](launch-review.md). Anyone can submit as
 anyone, which matters because citation flow moves value. This is Stage 1 work
 and it is not done.

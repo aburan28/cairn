@@ -290,6 +290,10 @@ class Node:
     # -- commit / reveal --------------------------------------------------
     def commit(self, commitment: Commitment, ts: str | None = None) -> str:
         ts = ts or now()
+        # Before anything else, and before anything is written: a submitter
+        # that names a key must prove it holds that key. Refusing early means
+        # a forged identity never reaches the log at all.
+        commitment.verify_signature()
         # Refused here rather than at reveal. The commitment's ``created_at`` is
         # what fixes the epoch a reveal must beat, so a commitment whose
         # timestamp cannot be read can never be opened.
@@ -366,6 +370,9 @@ class Node:
         until the epoch is over. Paying the first arrival and re-ordering
         afterwards is impossible in an append-only log, so the payment waits.
         """
+        # As in ``commit``: a key-shaped submitter must prove it holds the key,
+        # checked before any rule that could write.
+        claim.verify_signature()
         ts = ts or now()
         reveal_epoch = epoch_of_timestamp("reveal", ts)
         # Drain first. An epoch that closed while this node was idle must settle

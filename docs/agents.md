@@ -292,9 +292,13 @@ heterogeneous fleet needs no scheduler.
 - **Candidate gossip is opt-in.** A daemon started without `--population`
   reconciles records but not the candidate population, so agents on separate
   logs will not see each other's unsettled work — only what has settled.
-- **No identity layer.** `submitter` is a self-declared string. Nothing stops an
-  agent claiming to be someone else; that is Stage 1 work, not a gap in the
-  server.
+- **Identity is opt-in.** A `submitter` that is 64 lowercase hex characters is
+  an ed25519 public key, and the network refuses a record naming one unless it
+  carries a signature from that key — so an identity you sign for cannot be
+  worn by anyone else. Anything else is a nickname, unauthenticated exactly as
+  before. Generate one with `proofwork identity --out alice.json` and submit
+  with `--identity alice.json`. The MCP server does not sign yet: use the CLI
+  when the name needs to be provably yours.
 - **Failed search still pays zero.** Threat-model #25 bites hardest here — an
   agent can burn a night of tokens and earn nothing. Progressive objectives
   soften it because partial progress pays; pass/fail objectives do not.

@@ -138,16 +138,22 @@ remains.
 
 ## What still remains, in priority order
 
-1. **`submitter` is an unauthenticated string, and nothing is escrowed.** Any
-   agent can submit as anyone, and citation flow moves value between those
-   names — so this is the one open item that is a *soundness* problem rather
-   than a missing feature. The HTTP surface makes it reachable by strangers,
-   which raises it rather than changing it. Cheapest real fix: an ed25519
-   signature over the commitment, keyed to the submitter; the crypto is
-   already in the tree. **Until then, every surface a contributor sees has to
-   say the rewards are notional**, which `examples/README.md`,
-   `examples/first-blood/README.md`, `launch/README.md` and `docs/serving.md`
-   now do.
+1. **Nothing is escrowed, and a nickname submitter is still unauthenticated.**
+   The forgery half of this is now closed: a `submitter` that is 64 lowercase
+   hex characters *is* an ed25519 public key, and both implementations refuse
+   a record naming one unless it carries a signature that verifies under it,
+   checked at `commit` and `reveal` before anything is written. The name is
+   the key, so there is no registry to consult and no migration to run —
+   existing nickname logs keep working untouched, which is also the remaining
+   hole: a nickname authenticates nothing, exactly as before, and nothing yet
+   lets an objective *require* key-shaped submitters. `scripts/identity-demo.sh`
+   drives the whole thing through the real binaries, including the theft
+   attempts.
+
+   What is untouched is escrow: rewards are numbers in a log that nothing
+   backs. **Every surface a contributor sees still has to say the rewards are
+   notional**, which `examples/README.md`, `examples/first-blood/README.md`,
+   `launch/README.md` and `docs/serving.md` do.
 2. **Settlement order does not converge across peers.** Two nodes reconcile
    records by anti-entropy and each re-derives its own verdicts, but each
    orders a batch against its own head at the epoch boundary, so two operators
@@ -192,11 +198,15 @@ blocked on plumbing. What it is blocked on is a choice, and it is item 1:
 
 - **Launch as a single operator** — you post objectives, run
   `proofwork-serve`, and contributors fetch the log, work, and submit through
-  the queue. This works end to end today. Unauthenticated `submitter` is
-  survivable because *you* drain the queue and can see what arrives, and the
-  rewards are notional anyway.
-- **Launch as an open network** — needs submitter signatures first, because
-  citation flow paying a name that anybody can claim is an open till.
+  the queue. This works end to end today.
+- **Launch as an open network** — now viable for contributors who use signed
+  identities (`proofwork identity --out alice.json`, then `--identity`), since
+  such a name cannot be forged or replayed. Two things still argue for caution:
+  a nickname submitter remains unauthenticated and no objective can yet demand
+  otherwise, and nothing is escrowed, so what is being competed for is
+  notional. The MCP server also does not sign yet — an agent that needs a
+  provable name submits through the CLI.
 
-The first is a real launch and the code supports it. The second is a Stage 1
-milestone that is closer than it was this morning but is not today.
+Neither is blocked on plumbing any more. The open-network case is blocked on
+deciding that notional rewards among partly-authenticated contributors is the
+launch you want, which is a judgement rather than a missing feature.

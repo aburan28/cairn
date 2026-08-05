@@ -66,6 +66,7 @@ use std::process;
 use proofwork::attribution::{payouts_over, FlowError, FlowParams};
 use proofwork::canonical::{short, CanonicalError, Value};
 use proofwork::checkpoint::{RootKey, SignedCheckpoint};
+use proofwork::crypto::identity::Identity;
 use proofwork::incentive::design::Report as IncentiveReport;
 use proofwork::incentive::{NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError};
@@ -432,6 +433,9 @@ enum Command {
         artifact: String,
         /// `None` means "generate one", matching `args.nonce or token_hex(16)`.
         nonce: Option<String>,
+        /// Identity file to sign with. When set, the signing key's public half
+        /// replaces `--submitter`: a signed record's submitter *is* its key.
+        identity: Option<String>,
     },
     Reveal {
         objective_id: String,
@@ -439,6 +443,8 @@ enum Command {
         artifact: String,
         nonce: String,
         cites: Vec<String>,
+        /// Identity file to sign with. See `Commit::identity`.
+        identity: Option<String>,
     },
     Settle,
     /// Sign the log's current state so a reader can pin what this operator
@@ -493,6 +499,11 @@ enum Command {
         robustness: bool,
     },
     /// Create an at-rest key.
+    /// Create a submitter identity: an ed25519 keypair whose public half is
+    /// the submitter name.
+    Identity {
+        out: String,
+    },
     Keygen {
         wrap: bool,
     },
@@ -695,6 +706,27 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "attribute" => parse_attribute(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
+        "identity" => {
+            let mut out: Option<String> = None;
+            while let Some(token) = cursor.take() {
+                if token == "--out" {
+                    out = Some(cursor.value("--out")?);
+                } else if is_flag(&token) {
+                    return Err(CliError::Usage(format!(
+                        "identity: unknown option {token:?}"
+                    )));
+                } else if out.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "identity: unexpected argument {token:?}"
+                    )));
+                } else {
+                    out = Some(token);
+                }
+            }
+            Command::Identity {
+                out: require(out, "identity", "--out <file>")?,
+            }
+        }
         "keygen" => parse_keygen(&mut cursor)?,
         "store" => parse_store(&mut cursor)?,
         "sync" => parse_sync(&mut cursor)?,
@@ -732,6 +764,7 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut submitter: Option<String> = None;
     let mut artifact: Option<String> = None;
     let mut nonce: Option<String> = None;
+    let mut identity: Option<String> = None;
 
     while let Some(token) = cursor.take() {
         if token == "--submitter" {
@@ -740,6 +773,8 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
             artifact = Some(cursor.value("--artifact")?);
         } else if token == "--nonce" {
             nonce = Some(cursor.value("--nonce")?);
+        } else if token == "--identity" {
+            identity = Some(cursor.value("--identity")?);
         } else if is_flag(&token) {
             return Err(CliError::Usage(format!("commit: unknown option {token:?}")));
         } else if objective_id.is_some() {
@@ -753,11 +788,23 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
 
     Ok(Command::Commit {
         objective_id: require(objective_id, "commit", "an objective id")?,
-        submitter: require(submitter, "commit", "--submitter")?,
+        // With `--identity` the key decides the submitter, so the flag is
+        // optional: requiring both invites them to disagree, and a record
+        // whose submitter contradicts its signature is refused anyway.
+        submitter: match (submitter, &identity) {
+            (Some(submitter), _) => submitter,
+            (None, Some(_)) => String::new(),
+            (None, None) => {
+                return Err(CliError::Usage(
+                    "commit: --submitter or --identity is required".into(),
+                ))
+            }
+        },
         artifact: require(artifact, "commit", "--artifact")?,
         // An explicitly empty `--nonce ""` generates one, exactly as Python's
         // `args.nonce or token_hex(16)` does. An empty nonce is not a nonce.
         nonce: nonce.filter(|value| !value.is_empty()),
+        identity,
     })
 }
 
@@ -766,6 +813,7 @@ fn parse_reveal(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut submitter: Option<String> = None;
     let mut artifact: Option<String> = None;
     let mut nonce: Option<String> = None;
+    let mut identity: Option<String> = None;
     let mut cites: Vec<String> = Vec::new();
 
     while let Some(token) = cursor.take() {
@@ -775,6 +823,8 @@ fn parse_reveal(cursor: &mut Cursor) -> Result<Command, CliError> {
             artifact = Some(cursor.value("--artifact")?);
         } else if token == "--nonce" {
             nonce = Some(cursor.value("--nonce")?);
+        } else if token == "--identity" {
+            identity = Some(cursor.value("--identity")?);
         } else if token == "--cites" {
             // `nargs="*"`: consume until the next flag or the end. Claim ids are
             // `sha256:` digests, so none of them can be mistaken for a flag.
@@ -798,13 +848,22 @@ fn parse_reveal(cursor: &mut Cursor) -> Result<Command, CliError> {
 
     Ok(Command::Reveal {
         objective_id: require(objective_id, "reveal", "an objective id")?,
-        submitter: require(submitter, "reveal", "--submitter")?,
+        submitter: match (submitter, &identity) {
+            (Some(submitter), _) => submitter,
+            (None, Some(_)) => String::new(),
+            (None, None) => {
+                return Err(CliError::Usage(
+                    "reveal: --submitter or --identity is required".into(),
+                ))
+            }
+        },
         artifact: require(artifact, "reveal", "--artifact")?,
         // Required, unlike on `commit`: revealing is opening a commitment, and
         // the nonce is part of what that commitment hashed. There is nothing to
         // generate.
         nonce: require(nonce, "reveal", "--nonce")?,
         cites,
+        identity,
     })
 }
 
@@ -1208,6 +1267,15 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  log");
     say(out, "      print the log");
+    say(out, "  identity --out <file>");
+    say(
+        out,
+        "      create a submitter identity; the public key IS the submitter name,",
+    );
+    say(
+        out,
+        "      so a name you sign for cannot be claimed by anyone else",
+    );
     say(out, "  keygen [--passphrase]");
     say(
         out,
@@ -1339,11 +1407,108 @@ fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, C
     Ok(0)
 }
 
+/// Read a submitter identity from disk, if one was asked for.
+///
+/// The file is `{"secret": "<64 hex>", "public": "<64 hex>"}` -- the same
+/// shape the p2p daemon writes for its transport key, so an operator has one
+/// format to learn rather than two. `public` is checked against the secret
+/// rather than trusted: a file whose halves disagree would sign records under
+/// a name its owner cannot prove, and finding that out at submission time is
+/// finding out too late.
+fn load_identity(path: Option<&str>) -> Result<Option<Identity>, CliError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let value = read_json(path)?;
+    let field = |name: &'static str| -> Result<String, CliError> {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                CliError::Usage(format!("{path}: identity file needs a {name:?} hex field"))
+            })
+    };
+    let secret = field("secret")?;
+    let bytes = decode_hex32(&secret)
+        .ok_or_else(|| CliError::Usage(format!("{path}: \"secret\" must be 32 bytes of hex")))?;
+    let identity = Identity::from_secret_bytes(bytes);
+    if let Ok(declared) = field("public") {
+        if declared != identity.submitter_id() {
+            return Err(CliError::Usage(format!(
+                "{path}: \"public\" does not match \"secret\" -- this file would sign \
+                 records under {}, not {declared}",
+                identity.submitter_id()
+            )));
+        }
+    }
+    Ok(Some(identity))
+}
+
+/// 32 bytes from a 64-character hex string.
+fn decode_hex32(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+fn cmd_identity(out: &mut dyn Write, path: &str) -> Result<i32, CliError> {
+    use rand_core::{OsRng, RngCore};
+    let mut secret = [0u8; 32];
+    OsRng.fill_bytes(&mut secret);
+    let identity = Identity::from_secret_bytes(secret);
+    let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    let body = Value::object([
+        ("secret", Value::string(hex(&secret))),
+        ("public", Value::string(identity.submitter_id())),
+    ]);
+    write_private_file(std::path::Path::new(path), &body.canonical_string())
+        .map_err(|error| CliError::Usage(format!("{path}: {error}")))?;
+
+    say(out, format!("identity written to {path}"));
+    say(out, format!("  submitter {}", identity.submitter_id()));
+    say(
+        out,
+        "  That id IS your public key, which is what makes it unforgeable: submit with",
+    );
+    say(
+        out,
+        "  --identity <file> and nobody else can claim it. Back the file up -- losing it",
+    );
+    say(out, "  loses the name, and there is no recovery.");
+    Ok(0)
+}
+
+/// Write a file only the owner can read, via a temporary so a crash cannot
+/// leave a half-written key behind.
+fn write_private_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
+}
+
 fn cmd_commit(
     out: &mut dyn Write,
     options: &Options,
     objective_id: &str,
-    submitter: &str,
+    who: Submitter<'_>,
     artifact_path: &str,
     nonce: Option<&str>,
 ) -> Result<i32, CliError> {
@@ -1353,12 +1518,21 @@ fn cmd_commit(
         Some(nonce) => nonce.to_string(),
         None => random_nonce()?,
     };
+    // The key decides the submitter when there is one. The commitment hash
+    // binds the submitter string, so it has to be settled *before* the hash is
+    // computed -- signing a hash that bound a different name would produce a
+    // commitment no claim could ever open.
+    let (submitter, identity) = who.resolve()?;
 
     // One clock reading for the record and the log entry alike, so a commitment
     // cannot appear to have been created after it was appended.
     let stamp = timestamp();
-    let hash = commitment_hash(objective_id, submitter, &artifact, &nonce);
-    let commitment = Commitment::new(objective_id, submitter, hash.as_str(), stamp.as_str());
+    let hash = commitment_hash(objective_id, &submitter, &artifact, &nonce);
+    let commitment = Commitment::new(objective_id, &submitter, hash.as_str(), stamp.as_str());
+    let commitment = match &identity {
+        Some(identity) => commitment.signed_with(identity),
+        None => commitment,
+    };
     post_commitment(&mut node, &commitment, &stamp)?;
 
     say(out, format!("committed {}", short(&hash)));
@@ -1369,27 +1543,55 @@ fn cmd_commit(
     Ok(0)
 }
 
+/// Who is submitting, and how they prove it.
+///
+/// Grouped because these three always travel together and always resolve the
+/// same way: an identity file, when given, *is* the submitter, so passing them
+/// separately invites a caller to let the name and the key disagree.
+struct Submitter<'a> {
+    declared: &'a str,
+    identity: Option<&'a str>,
+}
+
+impl Submitter<'_> {
+    /// Resolve to the name that will appear in the record, plus the key that
+    /// must sign it.
+    fn resolve(&self) -> Result<(String, Option<Identity>), CliError> {
+        let identity = load_identity(self.identity)?;
+        let name = match &identity {
+            Some(identity) => identity.submitter_id(),
+            None => self.declared.to_string(),
+        };
+        Ok((name, identity))
+    }
+}
+
 fn cmd_reveal(
     out: &mut dyn Write,
     options: &Options,
     objective_id: &str,
-    submitter: &str,
+    who: Submitter<'_>,
     artifact_path: &str,
     nonce: &str,
     cites: &[String],
 ) -> Result<i32, CliError> {
     let mut node = open_node_for_writing(options)?;
     let artifact = read_json(artifact_path)?;
+    let (submitter, identity) = who.resolve()?;
     let stamp = timestamp();
     let claim = Claim::new(
         objective_id,
-        submitter,
+        &submitter,
         artifact,
         nonce,
         stamp.as_str(),
         cites.to_vec(),
     )
     .map_err(CliError::Record)?;
+    let claim = match &identity {
+        Some(identity) => claim.signed_with(identity),
+        None => claim,
+    };
     validate_claim(&claim.to_value()).map_err(CliError::Schema)?;
 
     let report = reveal_claim(&mut node, &claim, &stamp)?;
@@ -2574,11 +2776,15 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             submitter,
             artifact,
             nonce,
+            identity,
         } => cmd_commit(
             out,
             options,
             objective_id,
-            submitter,
+            Submitter {
+                declared: submitter,
+                identity: identity.as_deref(),
+            },
             artifact,
             nonce.as_deref(),
         ),
@@ -2588,11 +2794,15 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             artifact,
             nonce,
             cites,
+            identity,
         } => cmd_reveal(
             out,
             options,
             objective_id,
-            submitter,
+            Submitter {
+                declared: submitter,
+                identity: identity.as_deref(),
+            },
             artifact,
             nonce,
             cites,
@@ -2620,6 +2830,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Blob { action } => cmd_blob(out, options, *action),
         Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),
+        Command::Identity { out: path } => cmd_identity(out, path),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
         Command::Store { action } => cmd_store(out, options, *action),
         Command::Sync {

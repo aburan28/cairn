@@ -603,6 +603,120 @@ pub fn commitment_hash(
     digest_bytes(&buf)
 }
 
+/// The public key a submitter name commits to, when it is one.
+///
+/// `submitter` has always been a free string, which means a name is worth
+/// exactly nothing: anyone can submit as `alice`, and under citation flow that
+/// name is being paid. This is the rule that fixes it without a registry, a
+/// new record kind, or a migration.
+///
+/// **A submitter that is 64 lowercase hex characters is an ed25519 public key,
+/// and a record carrying one must be signed by it.** Anything else is an
+/// unauthenticated nickname and stays exactly as permissive as it always was.
+///
+/// The binding needs no state to look up because the name *is* the key, which
+/// is what [`crate::crypto::identity::Identity::submitter_id`] has produced
+/// all along. Two consequences worth being explicit about:
+///
+/// * Existing logs keep working. `alice` is not hex, so nothing is required of
+///   it and no pre-existing record changes meaning. Stage 0 stays usable.
+/// * A signed identity cannot be stolen. Forging a claim as
+///   `8a88e3dd…` needs that key, and taking the name means taking the key.
+///
+/// What it does *not* do: stop anyone claiming an unsigned nickname, and stop
+/// someone registering a key nobody has heard of. It makes an identity
+/// unforgeable once used, which is what citation flow needs, rather than
+/// making it *attributable to a person*, which nothing at this layer can do.
+///
+/// Lowercase only, and exactly 64 characters. Accepting mixed case would make
+/// `AB…` and `ab…` two names for one key, so the same key could hold two
+/// reputations and cite itself.
+pub fn signed_submitter(submitter: &str) -> Option<&str> {
+    let is_key = submitter.len() == 64
+        && submitter
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    is_key.then_some(submitter)
+}
+
+/// Why a record's signature was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureError {
+    /// The submitter names a key, and the record carries no signature.
+    Missing {
+        record: &'static str,
+        submitter: String,
+    },
+    /// The submitter is not a usable key, or the signature is malformed or
+    /// wrong. One variant deliberately: an attacker learns nothing from which
+    /// of those it was, and a caller cannot act on the difference.
+    Invalid {
+        record: &'static str,
+        submitter: String,
+    },
+}
+
+impl fmt::Display for SignatureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SignatureError::Missing { record, submitter } => write!(
+                f,
+                "{record} submitter {} is a public key, so the record must carry a \
+                 signature from it; sign it or submit under a name that is not a key",
+                crate::canonical::short(submitter)
+            ),
+            SignatureError::Invalid { record, submitter } => write!(
+                f,
+                "{record} signature does not verify under submitter {}",
+                crate::canonical::short(submitter)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SignatureError {}
+
+/// The shared rule behind `Commitment::verify_signature` and `Claim`'s.
+///
+/// Kept in one place because the two must agree exactly: a rule enforced
+/// slightly differently on commitments and claims is a rule an attacker gets
+/// to choose between.
+fn verify_record_signature(
+    record: &'static str,
+    submitter: &str,
+    payload: &Value,
+    signature: Option<&str>,
+) -> Result<(), SignatureError> {
+    use crate::crypto::identity::{verify_value, Signature, VerifyingKeyBytes};
+
+    let Some(key_hex) = signed_submitter(submitter) else {
+        // A nickname. Nothing is claimed and nothing is checked -- but a
+        // signature attached to one is still refused below rather than
+        // ignored, so it cannot look like authentication it is not.
+        return match signature {
+            None => Ok(()),
+            Some(_) => Err(SignatureError::Invalid {
+                record,
+                submitter: submitter.to_string(),
+            }),
+        };
+    };
+
+    let Some(signature) = signature else {
+        return Err(SignatureError::Missing {
+            record,
+            submitter: submitter.to_string(),
+        });
+    };
+    let invalid = || SignatureError::Invalid {
+        record,
+        submitter: submitter.to_string(),
+    };
+    let key = VerifyingKeyBytes::from_hex(key_hex).map_err(|_| invalid())?;
+    let signature = Signature::from_hex(signature).map_err(|_| invalid())?;
+    verify_value(key.as_bytes(), payload, &signature).map_err(|_| invalid())
+}
+
 /// Phase 1: bind to an artifact without revealing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commitment {
@@ -612,6 +726,12 @@ pub struct Commitment {
     /// [`Claim`] reproduces it.
     pub hash: String,
     pub created_at: String,
+    /// Ed25519 signature over this record, hex, or `None`.
+    ///
+    /// Omitted from the canonical form when absent, so adding this field moved
+    /// no ids: every record written before it existed digests to exactly what
+    /// it always did. See [`signed_submitter`] for when one is *required*.
+    pub signature: Option<String>,
 }
 
 impl Commitment {
@@ -626,10 +746,26 @@ impl Commitment {
             submitter: submitter.into(),
             hash: hash.into(),
             created_at: created_at.into(),
+            signature: None,
         }
     }
 
     pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    /// The bytes a signature covers: this record without its own signature.
+    ///
+    /// Excluded rather than zeroed, because a signature over a field holding
+    /// that signature is not something anyone can produce. The record's `id`
+    /// still covers the signature, so a signed record and its unsigned twin
+    /// are different records -- which is what stops a signature being stripped
+    /// without changing the id anyone cited.
+    pub fn signing_payload(&self) -> Value {
         Value::object([
             ("type", Value::string(RecordKind::Commitment.as_str())),
             ("objective_id", Value::string(self.objective_id.clone())),
@@ -643,6 +779,29 @@ impl Commitment {
         self.to_value().digest()
     }
 
+    /// Sign this record with `identity`, returning the signed copy.
+    ///
+    /// The signature covers [`Commitment::signing_payload`], so the resulting
+    /// record's `id` covers the signature in turn.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Commitment {
+        self.submitter = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    /// Check the signature this record carries, if the rules demand one.
+    ///
+    /// See [`signed_submitter`] for when that is. Returns `Ok(())` for a
+    /// nickname-shaped submitter, which is Stage-0 behaviour unchanged.
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        verify_record_signature(
+            "commitment",
+            &self.submitter,
+            &self.signing_payload(),
+            self.signature.as_deref(),
+        )
+    }
+
     /// Decode a commitment from a log payload. The reference implementation
     /// reads these payloads as raw dicts; a typed decoder is the Rust-side
     /// equivalent and keeps the field names in one place.
@@ -654,6 +813,7 @@ impl Commitment {
             submitter: required_string(value, RECORD, "submitter")?,
             hash: required_string(value, RECORD, "hash")?,
             created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
         })
     }
 }
@@ -672,6 +832,10 @@ pub struct Claim {
     pub created_at: String,
     /// Claim ids this one builds on. A set, not a list: duplicates are refused.
     pub cites: Vec<String>,
+    /// Ed25519 signature over this record, hex, or `None`. Omitted from the
+    /// canonical form when absent, so adding it moved no ids. See
+    /// [`signed_submitter`].
+    pub signature: Option<String>,
 }
 
 impl Claim {
@@ -692,6 +856,7 @@ impl Claim {
             nonce: nonce.into(),
             created_at: created_at.into(),
             cites,
+            signature: None,
         };
         claim.validate()?;
         Ok(claim)
@@ -724,6 +889,17 @@ impl Claim {
     /// not an optional field, and omitting it when empty would give the same
     /// claim two different ids depending on how it was built.
     pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    /// The bytes a signature covers: this record without its own signature.
+    /// See [`Commitment::signing_payload`] for why it is excluded rather than
+    /// zeroed.
+    pub fn signing_payload(&self) -> Value {
         Value::object([
             ("type", Value::string(RecordKind::Claim.as_str())),
             ("objective_id", Value::string(self.objective_id.clone())),
@@ -745,6 +921,23 @@ impl Claim {
 
     pub fn id(&self) -> String {
         self.to_value().digest()
+    }
+
+    /// Sign this record with `identity`, returning the signed copy.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Claim {
+        self.submitter = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    /// Check the signature this record carries, if the rules demand one.
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        verify_record_signature(
+            "claim",
+            &self.submitter,
+            &self.signing_payload(),
+            self.signature.as_deref(),
+        )
     }
 
     /// Identity of the artifact alone -- used to detect duplicate submissions.
@@ -816,6 +1009,7 @@ impl Claim {
             nonce: required_string(value, RECORD, "nonce")?,
             created_at: required_string(value, RECORD, "created_at")?,
             cites,
+            signature: optional_string(value, RECORD, "signature")?,
         };
         claim.validate()?;
         Ok(claim)

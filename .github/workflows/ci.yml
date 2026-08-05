@@ -33,6 +33,7 @@ jobs:
       # directly and structurally cannot catch a stray write to stdout, which is
       # the failure that breaks every MCP client and looks like their bug.
       - run: ./scripts/mcp-smoke.sh
+      - run: ./scripts/identity-demo.sh
       # Drives proofwork-serve over a real socket. The only test in the repo
       # where the client shares nothing with the node but an address, which is
       # the arrangement every outside contributor is in.
