@@ -7,9 +7,12 @@ an exotic attack. This note records a design exploration — what was measured,
 which half of the attack a reward-weighted rule closes, and precisely why the
 other half survives.
 
-Nothing here is implemented. `scripts/citation-flow-harness.py` reproduces
-every number below in exact rational arithmetic, so the next attempt starts
-from ground rather than from prose.
+**The rule is now implemented** as `attribution::payouts_weighted`, with its
+properties proven in `tests/citation_flow.rs` and its numbers cross-checked
+against `scripts/citation-flow-harness.py`, which computes in exact rationals.
+It is **not yet the default**: switching the money path moves the conformance
+vectors and must happen in one piece across both implementations. What that
+costs is at the end of this note.
 
 ## The attack
 
@@ -119,22 +122,42 @@ this shape.
 is most of what a citation chain is — and it would penalise honest incremental
 work by different people, which is the behaviour the ratchet exists to reward.
 
-## Status: designed and validated, not implemented
+## Status: implemented in Rust, proven, not yet the default
 
-The rule meets both constraints below on measurement rather than argument, so
-what remains is implementation rather than design:
+`attribution::payouts_weighted` is the rule. Five tests pin what matters, and
+each of them is a property rather than a golden number:
 
-1. **Slicing-invariance** — exact for downstream citers, bounded and
-   converging for the slicer's own chain.
-2. **Exact conservation** — the harness asserts it at every step, in exact
-   rational arithmetic.
+- **conserves exactly** at every slicing, in integers, with largest-remainder
+  allocation resolved by sorted id so every node reproduces it;
+- **a downstream citer's contribution is bounded** — within 10% however finely
+  the middle is chopped, against unbounded loss today;
+- **the slicer's gain converges** — under 1% movement between 16 and 256
+  slices, where the current rule drives the upstream contributor's flow to
+  zero;
+- **identity-blind** — four slices by one submitter and four claims by four
+  submitters give the same distribution;
+- **a zero-reward ancestor cannot dilute** anyone, so a chain of claims that
+  moved nothing is not a way to thin the people who did.
 
-What has *not* been done, and is deliberately not a footnote: porting it to
-both implementations, regenerating the conformance vectors, and re-proving
-integer conservation with the odd-unit rule at every δ. This changes how
-settled money splits, so it must land before an objective anyone cares about
-is funded — and it must land in one piece, in both languages, or the two
-disagree about what everyone is owed.
+### The bug the tests caught, which is worth keeping
+
+The first implementation bounded ancestor discovery by `max_depth`, by analogy
+with the per-hop walk. That is wrong, and worse than what it replaced: at 256
+slices the upstream contributor falls *past the horizon* and is cut to zero
+outright. A cliff is sharper than a slope. `max_depth` belongs to per-hop
+decay, where it caps how far compounding runs; under a flat split, letting hop
+distance decide entitlement reintroduces exactly the attack being fixed.
+
+Ancestor discovery is therefore over the whole closure, `O(edges)` — the same
+order as the audit that re-derives the log anyway.
+
+### What switching the default still costs
+
+Porting `payouts_weighted` to `reference/python/proofwork/attribution.py`,
+flipping `payouts_over` and the `attribute` CLI to it, and regenerating the
+conformance vectors. It has to land in one piece in both languages, or the two
+implementations disagree about what everyone is owed — which is the one
+disagreement this project cannot survive.
 
 ## Where the next attempt should start
 

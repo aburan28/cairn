@@ -38,7 +38,7 @@
 //! `max_depth` bounds the walk as well; the path check is the belt to its
 //! braces.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::records::Claim;
@@ -318,6 +318,187 @@ pub fn payouts_over(
         }
     }
     Ok(totals)
+}
+
+/// Reward-weighted attribution: `delta` split among **all transitive
+/// ancestors**, weighted by each ancestor's own settled reward.
+///
+/// The replacement for [`payouts_over`]'s per-hop decay, implemented and
+/// proven here but **not yet the default** -- switching it moves settled money
+/// and therefore the conformance vectors, which has to happen in one piece
+/// across both implementations. See `docs/design/citation-flow-dilution.md`.
+///
+/// # Why weight by settled reward
+///
+/// On a ratchet a claim's settled reward *is* the progress it moved, and
+/// telescoping guarantees the slices of one improvement sum to the reward of
+/// the single claim they replaced. So the weights are slicing-invariant by
+/// construction, and no new input is needed -- the settlements the caller
+/// already passes carry the measure.
+///
+/// # What this fixes
+///
+/// Per-hop decay lets a submitter chop one improvement into many steps and
+/// drive an upstream contributor's citation flow to *zero* -- free in direct
+/// reward because the pool telescopes, and strictly profitable in flow. Under
+/// this rule a downstream citer pays the upstream contributor exactly the same
+/// however the middle was chopped, and the slicer's own premium converges
+/// instead of growing.
+///
+/// The rule is identity-blind: four slices by one submitter and four claims by
+/// four submitters produce identical numbers. That matters because minting an
+/// identity is one command, so anything keyed on *who* submitted would have a
+/// sybil version.
+pub fn payouts_weighted(
+    settlements: &[(String, u64)],
+    claims: &BTreeMap<String, Claim>,
+    params: &FlowParams,
+) -> Result<BTreeMap<String, u64>, FlowError> {
+    let weights: BTreeMap<&str, u64> = settlements
+        .iter()
+        .map(|(id, reward)| (id.as_str(), *reward))
+        .collect();
+    let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+
+    for (claim_id, reward) in settlements {
+        if *reward == 0 {
+            continue;
+        }
+        let Some(claim) = claims.get(claim_id) else {
+            continue;
+        };
+
+        // Ancestors carrying a non-zero weight. One that settled for nothing
+        // cannot take a share -- it moved no ground to be paid for -- and
+        // including it would let a chain of zero-reward claims dilute the
+        // people who did move something.
+        let ancestors = ancestors_of(claim_id, claims);
+        let weighted: Vec<(&str, u64)> = ancestors
+            .iter()
+            .filter_map(|id| weights.get(id).filter(|w| **w > 0).map(|w| (*id, *w)))
+            .collect();
+        let total_weight: u128 = weighted.iter().map(|(_, w)| u128::from(*w)).sum();
+
+        if weighted.is_empty() || total_weight == 0 {
+            add(&mut totals, &claim.submitter, *reward)?;
+            continue;
+        }
+
+        let upstream = upstream_of(*reward, params);
+        add(
+            &mut totals,
+            &claim.submitter,
+            reward.saturating_sub(upstream),
+        )?;
+        if upstream == 0 {
+            continue;
+        }
+
+        // Largest-remainder, resolved by sorted id. Any rule conserves; only
+        // one every node reproduces from the record keeps them in agreement,
+        // and `ancestors_of` returns sorted ids for exactly that reason.
+        let mut allocated: u64 = 0;
+        let mut shares: Vec<(&str, u64, u128)> = Vec::with_capacity(weighted.len());
+        for (id, weight) in &weighted {
+            let numerator = u128::from(upstream) * u128::from(*weight);
+            let floor = numerator / total_weight;
+            let remainder = numerator % total_weight;
+            let floor = u64::try_from(floor).unwrap_or(u64::MAX);
+            allocated = allocated.saturating_add(floor);
+            shares.push((id, floor, remainder));
+        }
+        // Hand the odd units to the largest remainders first, ties by id.
+        let mut order: Vec<usize> = (0..shares.len()).collect();
+        order.sort_by(|a, b| {
+            shares[*b]
+                .2
+                .cmp(&shares[*a].2)
+                .then_with(|| shares[*a].0.cmp(shares[*b].0))
+        });
+        let mut leftover = upstream.saturating_sub(allocated);
+        for index in order {
+            if leftover == 0 {
+                break;
+            }
+            shares[index].1 = shares[index].1.saturating_add(1);
+            leftover -= 1;
+        }
+
+        for (id, share, _) in shares {
+            if share == 0 {
+                continue;
+            }
+            let submitter = match claims.get(id) {
+                Some(ancestor) => ancestor.submitter.clone(),
+                None => continue,
+            };
+            add(&mut totals, &submitter, share)?;
+        }
+    }
+    Ok(totals)
+}
+
+/// Every transitive ancestor of `claim_id`, sorted, excluding itself.
+///
+/// **Deliberately not bounded by `max_depth`.** That bound belongs to the
+/// per-hop rule, where it caps how far decay compounds. Applying it here would
+/// make entitlement depend on hop distance again -- and worse than the decay
+/// it replaced, because a cliff is sharper than a slope: a submitter could
+/// push an upstream contributor past the horizon by slicing and cut them to
+/// *zero* rather than merely thinning them. A test pins this
+/// (`the_slicers_gain_converges_instead_of_growing`); it caught exactly this
+/// bug when the bound was applied.
+///
+/// The traversal is therefore over the whole ancestor closure, which is
+/// bounded by the log and costs `O(edges)` -- the same order as the audit that
+/// re-derives the log in the first place.
+///
+/// Cycle-safe by the visited set rather than by a path check: with a flat
+/// split there is no path, and an ancestor reached twice is still one
+/// ancestor.
+fn ancestors_of<'a>(claim_id: &str, claims: &'a BTreeMap<String, Claim>) -> Vec<&'a str> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut frontier: Vec<&str> = match claims.get(claim_id) {
+        Some(claim) => claim
+            .cites
+            .iter()
+            .filter_map(|id| claims.get_key_value(id).map(|(k, _)| k.as_str()))
+            .collect(),
+        None => return Vec::new(),
+    };
+    while !frontier.is_empty() {
+        let mut next: Vec<&str> = Vec::new();
+        for id in frontier {
+            if id == claim_id || !seen.insert(id) {
+                continue;
+            }
+            if let Some(claim) = claims.get(id) {
+                for cited in &claim.cites {
+                    if let Some((key, _)) = claims.get_key_value(cited) {
+                        if !seen.contains(key.as_str()) {
+                            next.push(key.as_str());
+                        }
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+    seen.into_iter().collect()
+}
+
+/// Add to a running total, refusing to wrap.
+fn add(totals: &mut BTreeMap<String, u64>, who: &str, units: u64) -> Result<(), FlowError> {
+    let total = totals.entry(who.to_string()).or_insert(0);
+    match total.checked_add(units) {
+        Some(sum) => {
+            *total = sum;
+            Ok(())
+        }
+        None => Err(FlowError::PayoutOverflow {
+            who: who.to_string(),
+        }),
+    }
 }
 
 /// Citations worth following: present in `claims`, not already an ancestor on
