@@ -23,7 +23,7 @@ P2P_ARGS ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp p2p serve demo ratchet identity interop mcp-smoke serve-smoke \
+.PHONY: help build debug cli mcp p2p serve demo ratchet identity interop differential mcp-smoke serve-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
@@ -77,6 +77,9 @@ demo: build
 ratchet: build
 	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/ratchet-demo.sh
 
+differential: build
+	./scripts/differential.sh
+
 interop: build
 	RUST_BIN="$(abspath $(CLI))" ./scripts/interop.sh
 
@@ -118,4 +121,4 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy demo ratchet identity interop mcp-smoke serve-smoke tla
+check: test fmt clippy demo ratchet identity interop differential mcp-smoke serve-smoke tla

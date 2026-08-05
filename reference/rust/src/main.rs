@@ -43,7 +43,7 @@ fn main() -> ExitCode {
                 .map(String::as_str),
         ),
         Some("audit") | Some("post") | Some("commit") | Some("reveal") | Some("settle")
-        | Some("log") => cli(&args),
+        | Some("log") | Some("decode") => cli(&args),
         Some("--help") | Some("help") | None => {
             eprintln!(
                 "proofwork-reference — an independent check on the primary implementation\n\n\
@@ -452,6 +452,25 @@ fn cli(args: &[String]) -> Result<(), String> {
                 );
             }
         }
+        // Decode a single record and say whether it is admissible, without a
+        // log and without writing anything. Useful on its own for checking a
+        // record before posting it, and it is the surface
+        // `scripts/differential.sh` drives to prove the two implementations
+        // classify every record the same way.
+        "decode" => {
+            let kind = positional.ok_or("decode needs a record kind")?;
+            let path = flag("--record").ok_or("decode needs --record <file>")?;
+            let value =
+                Value::from_json(&read(Some(&path), "a record")?).map_err(|e| e.to_string())?;
+            match decode_record(&kind, &value) {
+                Ok(id) => println!("ok {id}"),
+                Err(reason) => {
+                    println!("refused");
+                    eprintln!("  {reason}");
+                    return Err("record refused".into());
+                }
+            }
+        }
         "log" => {
             for entry in node.ledger.entries() {
                 println!("{:>4}  {:<12} {}", entry.seq, entry.kind, entry.hash);
@@ -492,4 +511,29 @@ fn random_nonce() -> String {
         .chars()
         .take(32)
         .collect()
+}
+
+/// Decode one record of `kind`, returning its id or why it is inadmissible.
+///
+/// Signatures are checked here too: a record naming a key it cannot prove is
+/// inadmissible, not merely unsigned.
+fn decode_record(kind: &str, value: &Value) -> Result<String, String> {
+    match kind {
+        "objective" => Objective::from_value(value)
+            .map(|record| record.id())
+            .map_err(|e| e.to_string()),
+        "commitment" => Commitment::from_value(value)
+            .and_then(|record| {
+                record.verify_signature()?;
+                Ok(record.id())
+            })
+            .map_err(|e| e.to_string()),
+        "claim" => Claim::from_value(value)
+            .and_then(|record| {
+                record.verify_signature()?;
+                Ok(record.id())
+            })
+            .map_err(|e| e.to_string()),
+        other => Err(format!("unknown record kind {other:?}")),
+    }
 }

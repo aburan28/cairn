@@ -36,8 +36,11 @@ The short version of the gate:
 make check     # test, fmt, clippy, the demos, interop, mcp-smoke, tla
 ```
 
-`./scripts/interop.sh` is the strongest check in the repository — each
-implementation audits a log the other produced. If you touched a record, a
+`./scripts/interop.sh` and `./scripts/differential.sh` are the strongest
+checks in the repository. The first has each implementation audit a log the
+other produced; the second has both classify every record in
+`conformance/adversarial.jsonl` — the boundary cases, where a disagreement
+about admissibility is a disagreement about what was settled. If you touched a record, a
 hash, or an encoding, you must change **both** implementations (`src/` and
 `reference/rust/`) and confirm that
 `proofwork-reference conformance conformance/vectors.json` still passes.

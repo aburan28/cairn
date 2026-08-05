@@ -75,8 +75,12 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `cargo test --manifest-path reference/rust/Cargo.toml` and
   `proofwork-reference conformance conformance/vectors.json`
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
-- `./scripts/interop.sh` — the strongest check in the repo: each implementation
-  audits a log the other produced
+- `./scripts/interop.sh` — each implementation audits a log the other produced
+- `./scripts/differential.sh` — both implementations classify every record in
+  `conformance/adversarial.jsonl` the same way. Interop proves they agree on
+  *valid* logs; this proves they agree on the boundary, which is where a split
+  actually lives: two nodes disagreeing about whether a record is admissible
+  disagree about what was settled, and neither ever errors
 - `./scripts/mcp-smoke.sh` if you touched `src/bin/mcp.rs`
 - `./scripts/demo.sh` and `./scripts/ratchet-demo.sh` if you touched the CLI or
   the rules; they are the only checks that exercise epoch boundaries against a

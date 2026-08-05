@@ -117,6 +117,7 @@ jobs:
       # kept: evidence from an implementation in another language.
       - run: ./reference/rust/target/release/proofwork-reference conformance conformance/vectors.json
       - run: ./scripts/interop.sh
+      - run: ./scripts/differential.sh
 
   audit:
     # Known-vulnerable dependencies fail the build. Deliberately not advisory:

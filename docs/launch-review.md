@@ -136,6 +136,24 @@ remains.
    paying people out of turn. `audit` now says so when every batch faults at
    once, and the published log uses the default epoch length.
 
+## The reference implementation is Rust
+
+`reference/python/` is gone; `reference/rust/` replaces it as an independent
+second implementation, sharing no code with the primary and not even a cargo
+workspace. It reproduces all 256 frozen conformance vectors and passes interop
+in both directions.
+
+Two Rust implementations share blind spots that Rust and Python did not — the
+reward-above-`u64` bound and the `"cites": "abc"` decode were both caught by
+Python's bignums and dynamic typing rather than by anyone testing for them.
+`scripts/differential.sh` closes that on purpose rather than by accident: a
+committed corpus of boundary records that both implementations must classify
+identically, covering integer bounds, type confusion, null-versus-absent,
+signature shapes and canonical-encoding edges. It is verified to fail when
+either implementation drifts. Testing the boundary deliberately is stronger
+than inheriting it from a language difference, and it survives whatever
+languages the two are written in.
+
 ## What still remains, in priority order
 
 0. **Citation-flow dilution.** The one open item that is a *soundness*

@@ -499,6 +499,11 @@ enum Command {
         robustness: bool,
     },
     /// Create an at-rest key.
+    /// Decode one record and report whether it is admissible, without a log.
+    Decode {
+        kind: String,
+        record: String,
+    },
     /// Create a submitter identity: an ed25519 keypair whose public half is
     /// the submitter name.
     Identity {
@@ -706,6 +711,27 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "attribute" => parse_attribute(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
+        "decode" => {
+            let mut kind: Option<String> = None;
+            let mut record: Option<String> = None;
+            while let Some(token) = cursor.take() {
+                if token == "--record" {
+                    record = Some(cursor.value("--record")?);
+                } else if is_flag(&token) {
+                    return Err(CliError::Usage(format!("decode: unknown option {token:?}")));
+                } else if kind.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "decode: unexpected argument {token:?}"
+                    )));
+                } else {
+                    kind = Some(token);
+                }
+            }
+            Command::Decode {
+                kind: require(kind, "decode", "a record kind")?,
+                record: require(record, "decode", "--record <file>")?,
+            }
+        }
         "identity" => {
             let mut out: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1267,6 +1293,11 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  log");
     say(out, "      print the log");
+    say(out, "  decode <objective|commitment|claim> --record <file>");
+    say(
+        out,
+        "      check one record without a log: is it admissible, and what is its id",
+    );
     say(out, "  identity --out <file>");
     say(
         out,
@@ -1455,6 +1486,46 @@ fn decode_hex32(text: &str) -> Option<[u8; 32]> {
         *slot = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
     }
     Some(out)
+}
+
+/// Decode one record and say whether it is admissible, touching no log.
+///
+/// Useful before posting something, and it is the surface
+/// `scripts/differential.sh` drives to prove this implementation and
+/// `reference/rust/` classify every record identically. Two implementations
+/// that disagree about which records are valid disagree about what was
+/// settled, so that agreement is checked rather than assumed.
+fn cmd_decode(out: &mut dyn Write, kind: &str, record_path: &str) -> Result<i32, CliError> {
+    let value = read_json(record_path)?;
+    let decoded = match kind {
+        "objective" => Objective::from_value(&value)
+            .map(|record| record.id())
+            .map_err(|error| error.to_string()),
+        "commitment" => Commitment::from_value(&value)
+            .map_err(|error| error.to_string())
+            .and_then(|record| {
+                record.verify_signature().map_err(|e| e.to_string())?;
+                Ok(record.id())
+            }),
+        "claim" => Claim::from_value(&value)
+            .map_err(|error| error.to_string())
+            .and_then(|record| {
+                record.verify_signature().map_err(|e| e.to_string())?;
+                Ok(record.id())
+            }),
+        other => return Err(CliError::Usage(format!("unknown record kind {other:?}"))),
+    };
+    match decoded {
+        Ok(id) => {
+            say(out, format!("ok {id}"));
+            Ok(0)
+        }
+        Err(reason) => {
+            say(out, "refused");
+            eprintln!("  {reason}");
+            Ok(1)
+        }
+    }
 }
 
 fn cmd_identity(out: &mut dyn Write, path: &str) -> Result<i32, CliError> {
@@ -2830,6 +2901,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Blob { action } => cmd_blob(out, options, *action),
         Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),
+        Command::Decode { kind, record } => cmd_decode(out, kind, record),
         Command::Identity { out: path } => cmd_identity(out, path),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
         Command::Store { action } => cmd_store(out, options, *action),
