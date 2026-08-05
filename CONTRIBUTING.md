@@ -38,10 +38,17 @@ make check     # test, fmt, clippy, the demos, interop, mcp-smoke, tla
 
 `./scripts/interop.sh` is the strongest check in the repository — each
 implementation audits a log the other produced. If you touched a record, a
-hash, or an encoding, you must also change **both** implementations,
-regenerate `conformance/vectors.json` with `scripts/gen_conformance.py`, and
-confirm every *pre-existing* vector is unchanged byte for byte. A diff in an
-old vector means you moved ids and orphaned live work.
+hash, or an encoding, you must change **both** implementations (`src/` and
+`reference/rust/`) and confirm that
+`proofwork-reference conformance conformance/vectors.json` still passes.
+
+Those vectors are **frozen**. They came from a Python reference implementation
+that no longer exists, and that provenance is their whole value: they are
+evidence from another language, with different integer semantics and a
+different type discipline. Nothing regenerates them, because regenerating them
+from either Rust implementation would quietly turn the contract into a
+description of one program's behaviour. A *diff* in an existing vector means
+you moved ids and orphaned live work.
 
 ### House style
 

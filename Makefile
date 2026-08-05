@@ -25,7 +25,7 @@ P2P_ARGS ?=
 
 .PHONY: help build debug cli mcp p2p serve demo ratchet identity interop mcp-smoke serve-smoke \
 	test test-rust \
-	test-python fmt clippy tla check
+	test-reference fmt clippy tla check
 
 help:
 	@printf '%s\n' \
@@ -91,13 +91,15 @@ serve-smoke: build
 serve: build
 	$(SERVE) --log "$(LOG)" --root "$(ROOT)" --listen "$(SERVE_LISTEN)" $(SERVE_ARGS)
 
+test-reference:
+	cargo test --manifest-path reference/rust/Cargo.toml
+	cargo build --release --locked --manifest-path reference/rust/Cargo.toml
+	./reference/rust/target/release/proofwork-reference conformance conformance/vectors.json
+
 test-rust:
 	$(CARGO) test --all-targets
 
-test-python:
-	cd reference/python && $(PYTHON) -m pytest -q
-
-test: test-rust test-python
+test: test-rust test-reference
 
 fmt:
 	$(CARGO) fmt --check

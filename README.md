@@ -7,8 +7,8 @@ payment is settled by a checker that anyone can re-run. No trust in the operator
 no trust in the contributor, no trust in the model that produced the answer.
 
 This repository contains **proofwork**, the protocol implementation: a Rust
-library and CLI, a Python reference implementation, and the conformance vectors
-that bind them to the same answers.
+library and CLI, a second and deliberately independent Rust implementation in
+`reference/`, and the conformance vectors that bind them to the same answers.
 
 Stage 0 — one operator, no token, no consensus. What it does provide is the
 property that actually matters: *anyone can independently re-derive every result
@@ -17,10 +17,10 @@ the network has settled*, from nothing but a copy of the log.
 ```
 $ ./scripts/interop.sh
 
-== Python audits the Rust log
+== the reference implementation audits the primary log
 log verified: chain intact, every settled claim re-verified
 
-== Rust audits the Python log
+== the primary implementation audits the reference log
 log verified: chain intact, every settled claim re-verified
 
 == Merkle roots agree across implementations
@@ -31,8 +31,15 @@ INTEROP OK: each implementation verifies the other.
 
 That is the claim made concrete. "Anyone can re-derive every result" is worth
 nothing if it means "anyone running my code"; two implementations written
-separately in different languages, agreeing on every id and every Merkle root, is
-what makes it real.
+separately, sharing no code and not even a cargo workspace, agreeing on every
+id and every Merkle root, is what makes it real.
+
+The second implementation earns its place by disagreeing. Building it caught
+two bugs the primary's own test suite could not see: work assignment reading
+four bytes of the HMAC where the format takes eight (two nodes would silently
+overlap regions), and the genesis `prev` written as `""` rather than `null`
+(every entry hash shifts, while the stored Merkle root still matches). Neither
+would ever have raised an error.
 
 ## The one idea
 
@@ -80,8 +87,8 @@ proofwork --log launch/proofwork.jsonl --root . audit
 proofwork --log launch/proofwork.jsonl --root . verify \
     --from launch/checkpoint.json --root-key launch/root-key.pub --audit
 
-# and the check that matters: the Python reference re-deriving the same log
-PYTHONPATH=reference/python python3 -m proofwork.cli \
+# and the check that matters: the independent implementation re-deriving it
+./reference/rust/target/release/proofwork-reference \
     --log launch/proofwork.jsonl --root . audit
 ```
 
@@ -573,7 +580,6 @@ src/                 Rust implementation (primary)
   incentive/         the node-operator mechanism, and the harness that evaluates it
   store/             at-rest encryption, the data directory, the size cap, the mirror
   swarm/             piece-level transfer and a Kademlia DHT, alongside p2p/
-reference/python/    Python reference implementation
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
 examples/            worked objectives with real artifacts

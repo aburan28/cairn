@@ -14,8 +14,3 @@ updates:
       interval: weekly
 
   # The Python reference implementation. It deliberately has no runtime
-  # dependencies, so this mostly watches the dev tooling (pytest).
-  - package-ecosystem: pip
-    directory: /reference/python
-    schedule:
-      interval: weekly

@@ -131,8 +131,10 @@ sleep 1.1
 "$RUST" --log "$LOG" --root . settle >/dev/null 2>&1 || true
 "$RUST" --log "$LOG" --root . audit | tail -2 | sed 's/^/  /'
 "$RUST" --log "$LOG" --root . audit | grep -q "log verified" || fail "the log does not audit"
-PYTHONPATH=reference/python python3 -m proofwork.cli --log "$LOG" --root . audit \
-  | grep -q "log verified" || fail "the Python reference does not verify this log"
-echo "  the Python reference verified the same signed log"
+REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+[ -x "$REF" ] || cargo build --release --locked --manifest-path reference/rust/Cargo.toml
+"$REF" --log "$LOG" --root . audit | grep -q "log verified" \
+  || fail "the reference implementation does not verify this log"
+echo "  the independent reference verified the same signed log"
 
 printf '\n\033[32mIDENTITY OK: a signed name cannot be worn by anyone else\033[0m\n'

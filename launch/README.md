@@ -31,11 +31,11 @@ re-derives the settlement order from the epoch beacon. The second checks the
 signature and recomputes the head and Merkle root over the signed prefix. The
 third recomputes the citation-flow payouts.
 
-And the check that actually matters — the Python reference implementation
+And the check that actually matters — the independent reference implementation implementation
 re-deriving the same log, having shared no code with the Rust one:
 
 ```sh
-PYTHONPATH=reference/python python3 -m proofwork.cli \
+./reference/rust/target/release/proofwork-reference \
     --log launch/proofwork.jsonl --root . audit
 ```
 

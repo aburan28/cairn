@@ -15,20 +15,45 @@ use std::process::ExitCode;
 use proofwork_reference::canonical::{merkle_root, Value};
 use proofwork_reference::frontier::Ratchet;
 use proofwork_reference::ledger::Ledger;
+use proofwork_reference::node::Node;
 use proofwork_reference::partition::{assign, beacon, settlement_rank};
 use proofwork_reference::records::{commitment_hash, Claim, Commitment, Objective};
+use proofwork_reference::time::timestamp;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
-        Some("conformance") => conformance(args.get(1).map(String::as_str)),
-        Some("audit") => audit(args.get(1).map(String::as_str)),
+    // The command may sit behind global flags (`--log`, `--root`), so dispatch
+    // on the first non-flag word rather than on argv[0].
+    let command = args
+        .iter()
+        .enumerate()
+        .find(|(index, arg)| {
+            !arg.starts_with("--")
+                && !matches!(
+                    args.get(index.wrapping_sub(1)).map(String::as_str),
+                    Some("--log") | Some("--root")
+                )
+        })
+        .map(|(_, arg)| arg.as_str());
+    let result = match command {
+        Some("conformance") => conformance(
+            args.iter()
+                .position(|a| a == "conformance")
+                .and_then(|at| args.get(at + 1))
+                .map(String::as_str),
+        ),
+        Some("audit") | Some("post") | Some("commit") | Some("reveal") | Some("settle")
+        | Some("log") => cli(&args),
         Some("--help") | Some("help") | None => {
             eprintln!(
                 "proofwork-reference — an independent check on the primary implementation\n\n\
                  USAGE\n    \
-                 proofwork-reference conformance <conformance/vectors.json>\n    \
-                 proofwork-reference audit <log.jsonl>\n"
+                 proofwork-reference conformance <vectors.json>\n    \
+                 proofwork-reference [--log P] [--root D] post <objective.json>\n    \
+                 proofwork-reference [--log P] [--root D] commit <id> --submitter S --artifact F [--nonce N]\n    \
+                 proofwork-reference [--log P] [--root D] reveal <id> --submitter S --artifact F --nonce N [--cites ID]\n    \
+                 proofwork-reference [--log P] [--root D] settle\n    \
+                 proofwork-reference [--log P] [--root D] audit\n"
             );
             return ExitCode::SUCCESS;
         }
@@ -290,73 +315,6 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
     }
 }
 
-fn audit(path: Option<&str>) -> Result<(), String> {
-    let path = path.ok_or("expected a path to a log")?;
-    let ledger = Ledger::open(path)?;
-    let mut problems = ledger.verify_chain();
-
-    // Every record must decode, re-encode to the same bytes, and -- when its
-    // submitter names a key -- carry a signature that verifies. A record whose
-    // canonical form changed on the way through is a record whose id moved.
-    let mut records = 0usize;
-    let mut signed = 0usize;
-    for entry in ledger.entries() {
-        let re_encoded = match entry.kind.as_str() {
-            "objective" => Objective::from_value(&entry.payload)
-                .map(|record| record.to_value())
-                .map_err(|e| e.to_string()),
-            "commitment" => Commitment::from_value(&entry.payload)
-                .and_then(|record| {
-                    record.verify_signature()?;
-                    if record.signature.is_some() {
-                        signed += 1;
-                    }
-                    Ok(record.to_value())
-                })
-                .map_err(|e| e.to_string()),
-            "claim" => Claim::from_value(&entry.payload)
-                .and_then(|record| {
-                    record.verify_signature()?;
-                    if record.signature.is_some() {
-                        signed += 1;
-                    }
-                    Ok(record.to_value())
-                })
-                .map_err(|e| e.to_string()),
-            // verdict, batch, frontier and friends are node-side bookkeeping
-            // rather than submitted records; the chain check above still
-            // covers them.
-            _ => continue,
-        };
-        records += 1;
-        match re_encoded {
-            Ok(value) if value == entry.payload => {}
-            Ok(_) => problems.push(format!(
-                "entry {}: {} does not re-encode to its own bytes",
-                entry.seq, entry.kind
-            )),
-            Err(error) => problems.push(format!("entry {}: {error}", entry.seq)),
-        }
-    }
-
-    println!(
-        "entries {}   records {records}   signed {signed}",
-        ledger.len()
-    );
-    if let Some(root) = ledger.merkle_root() {
-        println!("merkle  {root}");
-    }
-    if problems.is_empty() {
-        println!("\nlog verified: chain intact, every record re-derived independently");
-        Ok(())
-    } else {
-        for problem in &problems {
-            println!("  ! {problem}");
-        }
-        Err(format!("{} problem(s)", problems.len()))
-    }
-}
-
 // -- vector helpers ---------------------------------------------------------
 
 fn section<'a>(vectors: &'a Value, name: &str) -> Result<&'a [Value], String> {
@@ -375,4 +333,163 @@ fn str_of<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {
         .get(name)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("vector needs a string {name:?}"))
+}
+
+// -- the CLI ----------------------------------------------------------------
+//
+// The same surface `scripts/interop.sh` drives against the primary
+// implementation, so the two can each produce a log the other audits. That
+// round trip is the whole claim: "anyone can re-derive every settled result"
+// means nothing if it means "anyone running my code".
+
+fn cli(args: &[String]) -> Result<(), String> {
+    let mut log = String::from("proofwork.jsonl");
+    let mut root = String::from(".");
+    let mut rest: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--log" => {
+                log = args.get(i + 1).cloned().ok_or("--log needs a path")?;
+                i += 2;
+            }
+            "--root" => {
+                root = args.get(i + 1).cloned().ok_or("--root needs a path")?;
+                i += 2;
+            }
+            other => {
+                rest.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    let command = rest.first().cloned().unwrap_or_default();
+    let flag = |name: &str| -> Option<String> {
+        rest.iter()
+            .position(|a| a == name)
+            .and_then(|at| rest.get(at + 1).cloned())
+    };
+    let positional = rest.get(1).filter(|a| !a.starts_with("--")).cloned();
+
+    let mut node = Node::new(Ledger::open(&log)?, &root);
+    let ts = timestamp();
+
+    match command.as_str() {
+        "post" => {
+            let path = positional.ok_or("post needs an objective JSON file")?;
+            let value =
+                Value::from_json(&read(Some(&path), "an objective")?).map_err(|e| e.to_string())?;
+            let objective = Objective::from_value(&value).map_err(|e| e.to_string())?;
+            let id = node.post_objective(&objective, &ts)?;
+            // Field 2 is the id, and interop.sh reads it with awk.
+            println!("objective {id}");
+            println!(
+                "  reward {}  verifier {}",
+                objective.reward,
+                objective.verifier_kind().unwrap_or("?")
+            );
+        }
+        "commit" => {
+            let objective_id = positional.ok_or("commit needs an objective id")?;
+            let submitter = flag("--submitter").ok_or("commit needs --submitter")?;
+            let artifact = Value::from_json(&read(flag("--artifact").as_deref(), "an artifact")?)
+                .map_err(|e| e.to_string())?;
+            let nonce = flag("--nonce")
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(random_nonce);
+            let hash = commitment_hash(&objective_id, &submitter, &artifact, &nonce);
+            let commitment = Commitment {
+                objective_id,
+                submitter,
+                hash: hash.clone(),
+                created_at: ts.clone(),
+                signature: None,
+            };
+            node.commit(&commitment, &ts)?;
+            println!("committed {}", proofwork_reference::canonical::short(&hash));
+            println!("  nonce {nonce}   <- keep this; you need it to reveal");
+        }
+        "reveal" => {
+            let objective_id = positional.ok_or("reveal needs an objective id")?;
+            let submitter = flag("--submitter").ok_or("reveal needs --submitter")?;
+            let artifact = Value::from_json(&read(flag("--artifact").as_deref(), "an artifact")?)
+                .map_err(|e| e.to_string())?;
+            let nonce = flag("--nonce").ok_or("reveal needs --nonce")?;
+            let cites: Vec<String> = rest
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.as_str() == "--cites")
+                .filter_map(|(at, _)| rest.get(at + 1).cloned())
+                .collect();
+            let claim = Claim {
+                objective_id,
+                submitter,
+                artifact,
+                nonce,
+                created_at: ts.clone(),
+                cites,
+                signature: None,
+            };
+            claim.validate().map_err(|e| e.to_string())?;
+            let outcome = node.reveal(&claim, &ts)?;
+            println!("claim {}", outcome.claim_id);
+            println!(
+                "  verdict  {}: {}",
+                outcome.verdict.status.as_str(),
+                outcome.verdict.detail
+            );
+            println!("  {}", outcome.note);
+        }
+        "settle" => {
+            let outcomes = node.settle_at(&ts)?;
+            if outcomes.is_empty() {
+                println!("no batch was due");
+            }
+            for outcome in outcomes {
+                println!(
+                    "claim {}\n  settled  {}  reward {}  ({})",
+                    outcome.claim_id, outcome.settled, outcome.reward, outcome.note
+                );
+            }
+        }
+        "log" => {
+            for entry in node.ledger.entries() {
+                println!("{:>4}  {:<12} {}", entry.seq, entry.kind, entry.hash);
+            }
+        }
+        "audit" => {
+            // `rerun` on by default: re-running the pinned verifiers is the
+            // thing that makes an audit an audit rather than a checksum.
+            let problems = node.audit(!rest.iter().any(|a| a == "--no-rerun"));
+            println!("entries {}", node.ledger.len());
+            if let Some(root) = node.ledger.merkle_root() {
+                println!("merkle  {root}");
+            }
+            if problems.is_empty() {
+                println!("\nlog verified: chain intact, every settled claim re-verified");
+            } else {
+                for problem in &problems {
+                    println!("  ! {problem}");
+                }
+                return Err(format!("{} problem(s)", problems.len()));
+            }
+        }
+        other => return Err(format!("unknown command {other:?}")),
+    }
+    Ok(())
+}
+
+/// Not cryptographically chosen: this is a reference implementation and its
+/// nonces protect nothing anybody is paid for. The primary implementation uses
+/// the OS RNG.
+fn random_nonce() -> String {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    proofwork_reference::canonical::digest_bytes(&seed.to_le_bytes())
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(32)
+        .collect()
 }

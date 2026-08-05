@@ -13,17 +13,17 @@ Did this touch a record, a hash, or an encoding?
 
 - [ ] No — skip the rest of this section.
 - [ ] Yes, and **both** implementations changed together (Rust and
-      `reference/python/`).
-- [ ] Yes, and `conformance/vectors.json` was regenerated with
-      `scripts/gen_conformance.py`.
-- [ ] Yes, and every **pre-existing** vector is unchanged byte for byte.
-      *(A diff in an old vector means ids moved and live claims are orphaned.
-      Say so explicitly if that was the intent.)*
+      `reference/rust/`).
+- [ ] Yes, and `proofwork-reference conformance conformance/vectors.json`
+      still passes. Those vectors are **frozen** -- nothing regenerates them,
+      because their value is that they came from an implementation in another
+      language. A *diff* in an existing vector means ids moved and live claims
+      are orphaned; say so explicitly if that was the intent.
 
 ## Checks
 
 - [ ] `cargo test --all-targets`
-- [ ] `cd reference/python && pytest -q`
+- [ ] `cargo test --manifest-path reference/rust/Cargo.toml`
 - [ ] `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
 - [ ] `./scripts/interop.sh` — each implementation audits the other's log
 - [ ] `./scripts/mcp-smoke.sh` (if `src/bin/mcp.rs` changed)

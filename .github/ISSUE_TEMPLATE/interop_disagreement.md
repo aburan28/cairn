@@ -17,16 +17,16 @@ Do not worry about diagnosing it. The inputs and the two outputs are enough.
 paste it, or attach the `.jsonl`. Exact bytes matter more than a description
 of them; a reformatted paste can hide the bug.
 
-**What Rust says.**
+**What the primary implementation says.**
 
 ```
 $ proofwork --log … audit        # or the exact command you ran
 ```
 
-**What Python says.**
+**What the reference implementation says.**
 
 ```
-$ PYTHONPATH=reference/python python3 -m proofwork.cli --log … audit
+$ ./reference/rust/target/release/proofwork-reference --log … audit
 ```
 
 **Versions.** `proofwork --version`, the commit hash, and your OS.

@@ -169,7 +169,7 @@ deterministic owner.
 ## Where the next attempt should start
 
 Implement `payouts_over` against the transitive-ancestor set with reward
-weights, in `src/attribution.rs` and `reference/python/proofwork/attribution.py`
+weights, in `src/attribution.rs`
 together. The existing conservation machinery carries over unchanged — the odd
 unit still needs its deterministic owner, and the property tests that pin
 conservation across amounts and δs are the bar.

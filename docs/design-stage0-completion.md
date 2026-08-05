@@ -302,7 +302,7 @@ Overstating a model check is the same failure as overstating a mitigation.
 6. TLA+ modules and TLC configs, developed against the semantics above rather
    than against the code that happens to exist.
 7. Update `roadmap.md`, `threat-model.md`, `verification.md`, `p2p.md`,
-   `coordination.md`, `formal-model.md`; run `cargo test`, `pytest`,
+   `coordination.md`, `formal-model.md`; run `cargo test`,
    `interop.sh`, `tla.sh`.
 
 Items 1–5 and item 6 are independent enough to proceed in parallel; the design
