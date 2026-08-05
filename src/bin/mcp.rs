@@ -75,6 +75,7 @@ use rand_core::{OsRng, RngCore};
 use serde_json::{json, Map, Value as Json};
 
 use proofwork::canonical::{digest_bytes, Value};
+use proofwork::crypto::identity::Identity;
 use proofwork::frontier::Ratchet;
 use proofwork::ledger::Ledger;
 use proofwork::node::{Node, RuleViolation};
@@ -97,6 +98,7 @@ const NONCE_BYTES: usize = 32;
 fn main() {
     let mut log = PathBuf::from("proofwork.jsonl");
     let mut root = PathBuf::from(".");
+    let mut identity_path: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -108,12 +110,18 @@ fn main() {
                 Some(v) => root = PathBuf::from(v),
                 None => fail("--root needs a path"),
             },
+            "--identity" => match args.next() {
+                Some(v) => identity_path = Some(PathBuf::from(v)),
+                None => fail("--identity needs a path"),
+            },
             "--help" | "-h" => {
                 eprintln!(
                     "proofwork-mcp — MCP server over stdio\n\n\
                      USAGE\n    proofwork-mcp [--log <path>] [--root <dir>]\n\n\
-                     --log   append-only ledger (default proofwork.jsonl)\n\
-                     --root  bundle root that pinned verifier paths resolve against\n"
+                     --log       append-only ledger (default proofwork.jsonl)\n\
+                     --root      bundle root that pinned verifier paths resolve against\n\
+                     --identity  sign submissions with this key; its public half\n\
+                                 becomes the submitter, and nobody else can claim it\n"
                 );
                 return;
             }
@@ -132,13 +140,32 @@ fn main() {
     // objective declaring a day-long timeout would otherwise make it stop
     // answering anything -- including `ping` -- and look dead to its client.
     let registry = VerifierRegistry::new(&root).interactive();
-    let mut server = Server::new(Node::with_registry(ledger, registry));
+    // Loaded here rather than per-call: a key that cannot be read is a
+    // configuration error the operator must see at startup, not a refusal an
+    // agent discovers an epoch into a submission.
+    let identity = match identity_path.as_deref().map(load_identity) {
+        None => None,
+        Some(Ok(identity)) => Some(identity),
+        Some(Err(why)) => fail(&why),
+    };
+    let mut server = Server::new(Node::with_registry(ledger, registry), identity);
 
     eprintln!(
         "proofwork-mcp {SERVER_VERSION}: ledger {}, root {}",
         log.display(),
         root.display()
     );
+    match server.identity.as_ref() {
+        Some(identity) => eprintln!(
+            "signing submissions as {} -- this name is a public key, so it cannot be \
+             claimed by anyone else",
+            identity.submitter_id()
+        ),
+        None => eprintln!(
+            "not signing: submissions use whatever `submitter` the agent sends, which \
+             authenticates nothing. Pass --identity to make the name provably yours."
+        ),
+    }
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -161,6 +188,51 @@ fn main() {
             }
         }
     }
+}
+
+/// Read a submitter identity from disk. Same file shape as the CLI's
+/// `proofwork identity --out`.
+///
+/// `public` is checked against `secret` rather than trusted: a file whose
+/// halves disagree signs under a name its owner cannot prove, and an agent
+/// would discover that only when a reveal was refused an epoch later.
+fn load_identity(path: &std::path::Path) -> Result<Identity, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read identity {}: {error}", path.display()))?;
+    let value = Value::from_json(&text)
+        .map_err(|error| format!("{}: not usable JSON: {error}", path.display()))?;
+    let field = |name: &str| -> Result<String, String> {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("{}: identity needs a {name:?} hex field", path.display()))
+    };
+    let secret = field("secret")?;
+    if secret.len() != 64 {
+        return Err(format!(
+            "{}: \"secret\" must be 32 bytes of hex",
+            path.display()
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    for (i, slot) in bytes.iter_mut().enumerate() {
+        *slot = secret
+            .get(i * 2..i * 2 + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .ok_or_else(|| format!("{}: \"secret\" is not hex", path.display()))?;
+    }
+    let identity = Identity::from_secret_bytes(bytes);
+    if let Ok(declared) = field("public") {
+        if declared != identity.submitter_id() {
+            return Err(format!(
+                "{}: \"public\" does not match \"secret\"; this key signs as {}, not {declared}",
+                path.display(),
+                identity.submitter_id()
+            ));
+        }
+    }
+    Ok(identity)
 }
 
 fn fail(message: &str) -> ! {
@@ -343,16 +415,24 @@ struct Server {
     tainted: BTreeSet<String>,
     /// Commitments waiting for their reveal epoch. See [`PendingStore`].
     pending: PendingStore,
+    /// The key submissions are signed with, when the operator supplied one.
+    ///
+    /// When set, it *replaces* the agent's `submitter` argument rather than
+    /// being checked against it: the signed name is the key, and letting an
+    /// agent pass a name that disagreed with the signature would produce a
+    /// record the rules engine refuses for reasons the agent cannot see.
+    identity: Option<Identity>,
 }
 
 impl Server {
-    fn new(node: Node) -> Server {
+    fn new(node: Node, identity: Option<Identity>) -> Server {
         let pending = PendingStore::load(node.ledger().path());
         Server {
             node,
             offered: BTreeSet::new(),
             tainted: BTreeSet::new(),
             pending,
+            identity,
         }
     }
 
@@ -948,7 +1028,14 @@ impl Server {
 
     fn submit_claim(&mut self, args: &Json) -> Result<String, String> {
         let objective_id = string_arg(args, "objective_id")?;
-        let submitter = string_arg(args, "submitter")?;
+        // With a signing key the name is the key, so the agent's `submitter`
+        // is ignored rather than checked: a record whose name disagreed with
+        // its signature is refused by the rules engine for reasons the agent
+        // cannot see or fix.
+        let submitter = match &self.identity {
+            Some(identity) => identity.submitter_id(),
+            None => string_arg(args, "submitter")?,
+        };
         let artifact = value_arg(args, "artifact")?;
         self.objective(&objective_id)?;
 
@@ -1027,6 +1114,10 @@ impl Server {
                 cites.clone(),
             )
             .map_err(|e| format!("claim is malformed: {e}"))?;
+            let claim = match &self.identity {
+                Some(identity) => claim.signed_with(identity),
+                None => claim,
+            };
 
             // The same schema gate the CLI's `reveal` applies. The published
             // spec/*.json documents are the contract for what may enter the
@@ -1113,6 +1204,10 @@ impl Server {
         let nonce = fresh_nonce();
         let hash = commitment_hash(&objective_id, &submitter, &artifact, &nonce);
         let commitment = Commitment::new(&objective_id, &submitter, &hash, &ts);
+        let commitment = match &self.identity {
+            Some(identity) => commitment.signed_with(identity),
+            None => commitment,
+        };
         self.node
             .commit(&commitment, &ts)
             .map_err(|e| format!("commit refused: {e}"))?;
@@ -1380,7 +1475,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("proofwork-mcp-test-{}", fresh_nonce()));
         std::fs::create_dir_all(&dir).unwrap();
         let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
-        Server::new(Node::new(ledger, &dir))
+        Server::new(Node::new(ledger, &dir), None)
+    }
+
+    /// A server that signs, plus the identity it signs with.
+    fn signing_server() -> (Server, Identity) {
+        let dir = std::env::temp_dir().join(format!("proofwork-mcp-test-{}", fresh_nonce()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
+        let identity = Identity::from_secret_bytes([31u8; 32]);
+        (
+            Server::new(Node::new(ledger, &dir), Some(identity.clone())),
+            identity,
+        )
     }
 
     fn call(server: &mut Server, name: &str, args: Json) -> String {
@@ -2057,5 +2164,78 @@ mod tests {
         assert!(!flat.contains('\n'), "{flat}");
         assert_eq!(one_line("  padded  "), "padded");
         assert_eq!(one_line(&"x".repeat(200)).chars().count(), 100);
+    }
+    // -- signed submissions -------------------------------------------------
+
+    #[test]
+    fn a_signing_server_submits_under_its_key_and_ignores_the_agents_name() {
+        // The name is the key, so an agent-supplied `submitter` cannot
+        // override it. Letting it would build a record whose name disagreed
+        // with its signature -- refused by the rules engine for a reason the
+        // agent can neither see nor fix.
+        let (mut server, identity) = signing_server();
+        let objective = Objective::new(
+            "GOAL-x",
+            "find n",
+            Value::object([
+                ("kind", Value::string("certificate")),
+                ("checker", Value::string("c.py")),
+                ("checker_sha256", Value::string("ab".repeat(32))),
+                ("entrypoint", Value::string("check")),
+            ]),
+            1000,
+            "treasury",
+            "2026-07-28T00:00:00+00:00",
+            None,
+            None,
+        )
+        .expect("valid objective");
+        let objective_id = server
+            .node
+            .post_objective(&objective, "2026-07-28T00:00:00+00:00")
+            .expect("posted");
+
+        let out = call(
+            &mut server,
+            "submit_claim",
+            json!({
+                "objective_id": objective_id,
+                "submitter": "not-my-name",
+                "artifact": { "n": 1 }
+            }),
+        );
+        assert!(out.contains("Committed in epoch"), "{out}");
+
+        // The commitment in the log carries the key's name and a signature
+        // that verifies -- not the name the agent asked for.
+        let commitments = server.node.ledger().entries_of_kind("commitment");
+        let recorded = Commitment::from_value(&commitments[0].payload).expect("decodes");
+        assert_eq!(recorded.submitter, identity.submitter_id());
+        assert_ne!(recorded.submitter, "not-my-name");
+        recorded
+            .verify_signature()
+            .expect("the server's own signature verifies");
+        assert!(recorded.signature.is_some());
+    }
+
+    #[test]
+    fn an_unsigned_server_is_unchanged() {
+        // The compatibility half: without --identity nothing signs, and a
+        // nickname submitter behaves exactly as it always did.
+        let (mut s, objective_id, _) = server_with_injected_objective();
+        let out = call(
+            &mut s,
+            "submit_claim",
+            json!({
+                "objective_id": objective_id,
+                "submitter": "alice",
+                "artifact": { "n": 1 }
+            }),
+        );
+        assert!(out.contains("Committed in epoch"), "{out}");
+        let commitments = s.node.ledger().entries_of_kind("commitment");
+        let recorded = Commitment::from_value(&commitments[0].payload).expect("decodes");
+        assert_eq!(recorded.submitter, "alice");
+        assert!(recorded.signature.is_none());
     }
 }

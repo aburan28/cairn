@@ -37,8 +37,22 @@ stable across calls and sessions. Outstanding commitments are keyed on it, so
 revealing under a different name will not find the commitment you made, and
 that artifact is then stranded.
 
-It is self-declared and unauthenticated — nothing stops anyone claiming any
-name. That is a known Stage-0 gap, not a feature to rely on.
+A plain nickname is self-declared and unauthenticated — nothing stops anyone
+claiming it. **A submitter that is 64 lowercase hex characters is different:
+it is an ed25519 public key, and the network refuses any record naming one
+unless it carries a signature from that key.** Such a name cannot be worn by
+anyone else.
+
+To get one, the operator generates an identity and points the server at it:
+
+```sh
+proofwork identity --out alice.json
+proofwork-mcp --identity /abs/path/alice.json --log ... --root ...
+```
+
+The server then signs every submission and the key's name replaces the
+`submitter` argument. Back the file up: losing it loses the name, and there is
+no recovery.
 
 ## Building an artifact
 

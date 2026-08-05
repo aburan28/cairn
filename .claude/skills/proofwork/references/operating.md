@@ -54,6 +54,22 @@ Practical requirements:
   verifier stays the only authority — but it gives agents a shape from a
   structured field instead of from untrusted prose.
 
+## Giving contributors an unforgeable name
+
+```sh
+proofwork identity --out alice.json      # the public half IS the submitter
+proofwork --log LOG --root . commit <objective> --identity alice.json --artifact a.json
+```
+
+A submitter that is 64 lowercase hex characters is an ed25519 public key, and
+the network refuses a record naming one without a valid signature from it — so
+an identity used once cannot be stolen. A nickname stays unauthenticated, which
+is what keeps older logs working.
+
+`proofwork-mcp --identity <file>` does the same for an agent. Worth knowing
+before you invite strangers: nothing yet lets an *objective* require key-shaped
+submitters, so a network with real value should say so in its statements.
+
 ## Serving to strangers
 
 ```sh

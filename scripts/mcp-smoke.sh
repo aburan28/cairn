@@ -204,14 +204,28 @@ echo "  ledger still holds 1 entry: the refusal cost nothing"
 # -- so it has to survive in a sidecar file. Restarting the process between the
 # two calls is the only way to check that it does.
 # --------------------------------------------------------------------------
-# Four seconds rather than one. Two assertions below must land inside the
-# *same* epoch as the commit that precedes them, and each one is a fresh
-# process: a build's worth of page cache misses, or a loaded CI runner, and a
-# 1-second epoch turns underneath them. That failure looks exactly like the
-# bug the assertion is hunting -- "a repeat call made a second commitment" --
-# so a tight epoch here does not test the rule, it tests the runner. Four
-# seconds costs the script about six and removes the whole class.
+# Two assertions below must land inside the *same* epoch as the commit that
+# precedes them. Raising the epoch length does not make that safe, which is
+# the trap: what those assertions have is not the epoch length but whatever
+# is *left* of the epoch when the commit lands, and that is uniformly random.
+# A longer epoch only makes the failure rarer -- and it fails looking exactly
+# like the bug being hunted ("a repeat call made a second commitment"), so a
+# rare version of it is worse than a common one.
+#
+# wait_for_fresh_epoch removes the randomness rather than shrinking it:
+# commit just after a boundary and the assertions have a whole epoch, every
+# run, on any runner.
 export PROOFWORK_EPOCH_SECONDS=4
+
+wait_for_fresh_epoch() {
+  python3 -c '
+import sys, time
+length = int(sys.argv[1])
+# Sleep to just past the next boundary. The margin is for the process spawn
+# that follows -- landing exactly on the boundary would race it.
+time.sleep(length - (time.time() % length) + 0.15)
+' "$PROOFWORK_EPOCH_SECONDS"
+}
 rule "submit_claim commits, then reveals an epoch later"
 
 call_tool() {
@@ -224,6 +238,7 @@ call_submit() {
   call_tool submit_claim "$(printf '{"objective_id":"%s","submitter":"agent","artifact":%s}' "$OID" "$ARTIFACT")"
 }
 
+wait_for_fresh_epoch
 FIRST=$(call_submit)
 echo "$FIRST" | sed 's/^/  /'
 echo "$FIRST" | grep -q "Committed in epoch" || fail "first submit_claim did not commit"
