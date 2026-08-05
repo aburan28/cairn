@@ -138,6 +138,17 @@ remains.
 
 ## What still remains, in priority order
 
+0. **Citation-flow dilution.** The one open item that is a *soundness*
+   problem rather than a missing feature: slicing an improvement into many
+   steps is free in direct reward and strictly profitable in citation flow,
+   costing the upstream contributor 27% and inverting the payout result the
+   README uses to argue publishing pays. A reward-weighted rule was explored
+   and measured — it fully closes the downstream half and leaves an 8% leak
+   from the slicer's own claims. Not implemented, deliberately: it changes how
+   settled money splits and moves the conformance vectors, so a partial fix
+   shipped as a fix would be worse than the documented gap. See
+   [design/citation-flow-dilution.md](design/citation-flow-dilution.md).
+
 1. **Nothing is escrowed, and a nickname submitter is still unauthenticated.**
    The forgery half of this is now closed: a `submitter` that is 64 lowercase
    hex characters *is* an ed25519 public key, and both implementations refuse
