@@ -249,13 +249,20 @@ eve:   copies alice         reward 0        (does not improve)
 bob:   16, citing alice     reward 400000
 carol: 20, citing bob       reward 400000   (pool exhausted)
 
-after citation flow:  alice 425000 · bob 375000 · carol 300000
+after citation flow:  alice 442857 · bob 357143 · carol 300000
 ```
 
 Alice ends up with the **largest total from the smallest direct reward**, because
 two people built on her. Publishing immediately becomes the profitable move,
 copying earns zero, and an improvement **must cite the frontier it beat** —
 enforced at submission, so attribution needs no judgement.
+
+Flow is weighted by each cited claim's *settled reward* — which on a ratchet is
+the progress it moved — rather than decaying by citation depth. That is what
+stops an improver chopping one advance into many steps to dilute the person
+below them: a later contributor pays alice the same however bob packaged his
+work, and slicing converges to a small premium instead of draining her. See
+[the design note](docs/design/citation-flow-dilution.md).
 
 ### Three kinds of state, three consistency requirements
 
