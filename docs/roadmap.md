@@ -182,8 +182,16 @@ downstream is unbacked.
 - [ ] Agent proposer loop (propose → self-check against the pinned verifier →
       submit only what already passes locally). Free verification means the
       proposer can filter before it spends the network's time.
-- [ ] Objective discovery API and a work queue.
-- [ ] Rate limiting and submission bonds against spam.
+- [x] Objective discovery API and a work queue. `proofwork-serve` publishes
+      the log and the open objectives; `POST /submit` queues proposals that
+      `proofwork drain` admits through the same rules engine. See
+      [serving.md](serving.md).
+- [~] Rate limiting and submission bonds against spam. The queue is bounded
+      (`--max-queue`, 429 past it), body size, request time and concurrency are
+      capped, and the spool de-duplicates by content -- so disk exhaustion is
+      closed. Bonds are not built, so an attacker still costs the operator
+      drains, and nothing distinguishes many honest submitters from one
+      adversary.
 - [ ] Sensitive-objective classes and an embargo path, **before** anything is
       published. This cannot be retrofitted.
 - [ ] **Agent as funder** — bind `funder` to a submitter identity, prepay escrow

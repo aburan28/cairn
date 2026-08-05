@@ -43,6 +43,7 @@
 //! nothing it serves is secret and nothing it accepts is trusted.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -74,6 +75,20 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// back is better than holding it open with no thread to serve it.
 const MAX_CONCURRENT: u64 = 64;
 
+/// Queued submissions beyond which `POST /submit` is refused.
+///
+/// The spool de-duplicates by content, so a retry costs nothing -- but
+/// *distinct* records each write a file, and nothing stops a stranger sending
+/// endless valid-JSON records that differ by a byte. Unbounded, that fills the
+/// operator's disk, and a full disk stops the node writing its own log.
+///
+/// A cap converts disk exhaustion into "come back later", which is a fair
+/// answer to a queue the operator has not drained yet. It is not Sybil
+/// resistance and cannot be: distinguishing many honest submitters from one
+/// attacker needs an identity that costs something, which is Stage 1's
+/// submission bonds. This removes the cheapest version of the attack.
+pub const DEFAULT_MAX_QUEUED: usize = 4096;
+
 /// Where proposed records wait for the operator to drain them.
 ///
 /// One file per submission, named by the digest of its own bytes, so the same
@@ -81,11 +96,78 @@ const MAX_CONCURRENT: u64 = 64;
 /// itself with no index to keep consistent.
 pub struct Spool {
     dir: PathBuf,
+    max_queued: usize,
+}
+
+/// The spool is full. A distinct error because the caller answers it with a
+/// different status than a write failure: one is "try later", the other is
+/// "this node is broken".
+/// Why a submission could not be queued.
+#[derive(Debug)]
+pub enum OfferError {
+    /// The queue is at capacity. The caller answers 429: try later.
+    Full(QueueFull),
+    /// The spool could not be written. The caller answers 500: this node is
+    /// broken, and retrying will not help until the operator looks.
+    Io(io::Error),
+}
+
+impl fmt::Display for OfferError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OfferError::Full(full) => write!(f, "{full}"),
+            OfferError::Io(error) => write!(f, "cannot write to the queue: {error}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct QueueFull {
+    pub queued: usize,
+    pub limit: usize,
+}
+
+impl fmt::Display for QueueFull {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the submission queue holds {} of at most {} records and has not been \
+             drained; this is a proposal queue, so nothing was lost -- retry once the \
+             operator has run `proofwork drain`",
+            self.queued, self.limit
+        )
+    }
 }
 
 impl Spool {
     pub fn at(dir: impl Into<PathBuf>) -> Spool {
-        Spool { dir: dir.into() }
+        Spool {
+            dir: dir.into(),
+            max_queued: DEFAULT_MAX_QUEUED,
+        }
+    }
+
+    /// Change how many records may wait at once.
+    pub fn with_max_queued(mut self, max_queued: usize) -> Spool {
+        self.max_queued = max_queued;
+        self
+    }
+
+    /// How many records are waiting to be drained.
+    pub fn queued(&self) -> usize {
+        std::fs::read_dir(&self.dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .is_some_and(|extension| extension == "json")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     pub fn dir(&self) -> &Path {
@@ -97,19 +179,29 @@ impl Spool {
     /// Content-addressed and written write-then-rename, so a crashed or
     /// half-sent submission never leaves a torn file for the drain to trip
     /// over, and a retry is idempotent rather than a duplicate.
-    pub fn offer(&self, kind: &str, body: &Value) -> io::Result<String> {
-        std::fs::create_dir_all(&self.dir)?;
+    pub fn offer(&self, kind: &str, body: &Value) -> Result<String, OfferError> {
+        std::fs::create_dir_all(&self.dir).map_err(OfferError::Io)?;
         let record = Value::object([("kind", Value::string(kind)), ("record", body.clone())]);
         let bytes = record.canonical_bytes();
         let id = digest_bytes(&bytes);
         let name = id.replace("sha256:", "");
         let path = self.dir.join(format!("{name}.json"));
+        // Checked before the cap: a resend of something already queued costs
+        // no space, so refusing it would turn a full queue into a wall even
+        // for submitters whose work is already safely in it.
         if path.exists() {
             return Ok(id);
         }
+        let queued = self.queued();
+        if queued >= self.max_queued {
+            return Err(OfferError::Full(QueueFull {
+                queued,
+                limit: self.max_queued,
+            }));
+        }
         let tmp = self.dir.join(format!("{name}.json.tmp"));
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::rename(&tmp, &path)?;
+        std::fs::write(&tmp, &bytes).map_err(OfferError::Io)?;
+        std::fs::rename(&tmp, &path).map_err(OfferError::Io)?;
         Ok(id)
     }
 
@@ -174,6 +266,13 @@ impl Serving {
     /// answers 405 to every write.
     pub fn accepting_into(mut self, dir: impl Into<PathBuf>) -> Serving {
         self.spool = Some(Spool::at(dir));
+        self
+    }
+
+    /// Bound how many undrained submissions the queue will hold. See
+    /// [`DEFAULT_MAX_QUEUED`]. No effect on a read-only server.
+    pub fn with_max_queued(mut self, max_queued: usize) -> Serving {
+        self.spool = self.spool.map(|spool| spool.with_max_queued(max_queued));
         self
     }
 
@@ -661,7 +760,11 @@ fn submit(
                 ),
             ]),
         ),
-        Err(error) => json_error(
+        // 429, not 500: a full queue is a fact about how recently the
+        // operator drained, not a broken node, and the submitter should
+        // retry rather than assume their work is unwelcome.
+        Err(OfferError::Full(full)) => json_error(stream, 429, &full.to_string()),
+        Err(OfferError::Io(error)) => json_error(
             stream,
             500,
             &format!("cannot queue the submission: {error}"),
@@ -805,5 +908,41 @@ mod tests {
         assert_eq!(percent_decode("plain"), "plain");
         // A stray `%` is not an escape and must not eat the rest of the value.
         assert_eq!(percent_decode("100%"), "100%");
+    }
+    #[test]
+    fn a_full_queue_refuses_new_records_but_still_accepts_resends() {
+        // Unbounded, distinct records each write a file and a stranger fills
+        // the operator's disk -- which stops the node writing its own log.
+        // The cap turns that into "come back later".
+        let dir = std::env::temp_dir().join(format!("proofwork-spool-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let spool = Spool::at(&dir).with_max_queued(2);
+
+        let record =
+            |n: i128| Value::object([("type", Value::string("claim")), ("nonce", Value::Int(n))]);
+        let first = spool.offer("claim", &record(1)).expect("first fits");
+        spool.offer("claim", &record(2)).expect("second fits");
+        assert_eq!(spool.queued(), 2);
+
+        match spool.offer("claim", &record(3)) {
+            Err(OfferError::Full(full)) => {
+                assert_eq!(full.limit, 2);
+                // The message has to say the work was not lost, or a
+                // submitter reasonably concludes it was rejected.
+                let text = full.to_string();
+                assert!(text.contains("nothing was lost"), "{text}");
+                assert!(text.contains("drain"), "{text}");
+            }
+            other => panic!("a full queue accepted a new record: {other:?}"),
+        }
+
+        // A resend of something already queued must still succeed: it costs
+        // no space, and refusing it would wall off submitters whose work is
+        // already safely in the queue.
+        let again = spool.offer("claim", &record(1)).expect("resend is free");
+        assert_eq!(again, first);
+        assert_eq!(spool.queued(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

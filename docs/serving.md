@@ -84,6 +84,14 @@ empties.
 
 ## What this is not
 
+**Bounded.** The queue refuses submissions past `--max-queue` undrained
+records (4096 by default) and answers 429. The spool de-duplicates by content
+so a retry is free, but *distinct* records each cost a file, and unbounded that
+fills the operator's disk -- which stops the node writing its own log. A cap
+turns disk exhaustion into "come back later". It is not Sybil resistance and
+cannot be: telling many honest submitters from one attacker needs an identity
+that costs something, which is Stage 1's submission bonds.
+
 **Partly authenticated.** A key-shaped `submitter` (64 lowercase hex) must
 carry a valid ed25519 signature, so a submission under one cannot be forged.
 A nickname submitter still cannot be authenticated at all; see the

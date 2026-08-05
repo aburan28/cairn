@@ -28,6 +28,7 @@ fn usage() -> ! {
          --root        bundle root pinned verifier paths resolve against (default .)\n\
          --listen      address to bind (default 127.0.0.1:8080)\n\
          --queue       accept POST /submit into this spool directory; omit for read-only\n\
+         --max-queue   refuse submissions past this many undrained records\n\
          --checkpoint  signed checkpoint to publish at GET /checkpoint\n\n\
          Everything served is public by design. Submissions are queued, never\n\
          admitted: drain them into the log with `proofwork drain --queue <dir>`.\n"
@@ -41,6 +42,7 @@ fn main() {
     let mut listen = String::from("127.0.0.1:8080");
     let mut queue: Option<PathBuf> = None;
     let mut checkpoint: Option<PathBuf> = None;
+    let mut max_queue = proofwork::serve::DEFAULT_MAX_QUEUED;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -56,6 +58,19 @@ fn main() {
             "--root" => root = PathBuf::from(next("--root")),
             "--listen" => listen = next("--listen"),
             "--queue" => queue = Some(PathBuf::from(next("--queue"))),
+            "--max-queue" => {
+                let raw = next("--max-queue");
+                match raw.parse::<usize>() {
+                    Ok(value) if value > 0 => max_queue = value,
+                    // Refused rather than clamped: an operator who typed a
+                    // bound wants that bound, and silently substituting one
+                    // hides a full queue behind a number they never chose.
+                    _ => {
+                        eprintln!("proofwork-serve: --max-queue needs a positive integer");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--checkpoint" => checkpoint = Some(PathBuf::from(next("--checkpoint"))),
             "--help" | "-h" => usage(),
             other => {
@@ -67,7 +82,7 @@ fn main() {
 
     let mut serving = Serving::new(&log, &root);
     if let Some(dir) = queue {
-        serving = serving.accepting_into(dir);
+        serving = serving.accepting_into(dir).with_max_queued(max_queue);
     }
     if let Some(path) = checkpoint {
         serving = serving.with_checkpoint(path);
