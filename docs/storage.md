@@ -193,6 +193,59 @@ real store, then exports it and has the *independent* reference implementation
 audit the result and agree on the root. That is the strongest available statement
 that rotating a key changes every byte on disk and moves no record.
 
+### What encryption covers, and what it does not
+
+The log is sealed. Nothing else is, and that is a decision rather than a default.
+
+The threat is the narrow one stated at the top: a copy of the data directory
+reaching somewhere the operator did not intend. What sealing buys is that the
+copy is inert.
+
+| | sealed? | why |
+|---|---|---|
+| `log/` | **yes** | a stolen disk would otherwise yield the node's whole operating record in one readable file |
+| `.proofwork/blobs/` | no | every byte *and every name* is something this node hands to any peer that asks. `p2p::code` serves them on request; the name is the content address the objective itself declares |
+| the `--population` file | no | gossiped candidates were shared with peers on purpose |
+| `cache/`, `tmp/` | no | reclaimable by construction — a local copy of something fetchable, and scratch |
+
+**The residue, stated rather than waved away.** The set is not the contents. An
+adversary holding the disk learns *which objectives this node works on* without
+having to ask a peer and be observed doing it, and that difference in cost is
+real. [threat-model.md](threat-model.md) carries it as not handled.
+
+Closing it is possible and was rejected on the merits. Filing blobs under
+`HMAC(key, address)` instead of `address` would hide the set while keeping O(1)
+lookup — at the cost of the property that makes the store trustworthy in the
+first place: *the name is the hash*, so a read re-hashes and refuses bytes that
+do not match the name they were filed under, and integrity needs no second record
+to keep in sync. An encrypted name means an index, and an index is exactly that
+second record. Paying for it to hide a fact any peer will confirm on request is a
+bad trade.
+
+**The decision is checked, not just written down.** A decision that lives only in
+prose decays the first time somebody adds a file, so
+[`store::exposure`](../src/store/exposure.rs) classifies every file in a store as
+sealed, plaintext for a stated reason, a key that should not be there, or
+*unaccounted for*. `store status` reports the last two and **exits 1**:
+
+```
+at rest log sealed (1.7 KiB); 4.2 KiB plaintext by decision -- blobs, cache, tmp
+```
+
+```
+at rest log sealed (1.7 KiB); 0 B plaintext by decision -- blobs, cache, tmp; 88 B UNACCOUNTED FOR
+        KEY INSIDE THE STORE: /srv/pw/cache/notes.txt
+        unaccounted plaintext: /srv/pw/inference-receipts.json
+        Each is readable on any disk holding this directory.
+        A key here makes everything beside it readable too, which
+        is not encryption at all. Move it out of the store.
+```
+
+A future feature that writes plaintext state into a data directory trips this
+instead of slipping past, and whoever adds it has to either seal it or put it in
+the table above with a reason. Keys are found by **content, not filename** — the
+same rule `sync` applies, and for the same reason.
+
 ## A data directory of your choosing
 
 ```
@@ -223,15 +276,9 @@ of what the log pins and what is missing. **The name is the hash**, so reads
 re-hash and refuse bytes that do not match the name they were filed under, and
 integrity needs no second record to keep in sync.
 
-**At-rest encryption covers the log, and only the log.** The blob store is not
-sealed, and neither is the `--population` file the daemon writes. Neither holds
-a secret exactly: a pinned checker is named in the log and fetchable from any
-peer, and gossiped candidates were shared with peers on purpose. What is
-readable is the *set* rather than the contents — blob filenames are content
-addresses, so anyone with the disk learns which objectives this node works on,
-which is the same signal `p2p::code` declines to publish on the wire. The
-asymmetry is worth naming rather than assuming it was considered;
-[threat-model.md](threat-model.md) carries it as not handled.
+**At-rest encryption covers the log, and only the log — decided, not defaulted.**
+See [the boundary](#what-encryption-covers-and-what-it-does-not) below for the
+reasoning and for the check that keeps it honest.
 
 A blob that is present but *corrupt* is `Unavailable`, never `Reject` and never
 `INVALID_SPEC`: a damaged local cache is a fact about that disk, and letting it

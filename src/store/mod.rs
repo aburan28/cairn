@@ -42,6 +42,7 @@
 //! rather than silent.
 
 pub mod atrest;
+pub mod exposure;
 pub mod mirror;
 pub mod quota;
 

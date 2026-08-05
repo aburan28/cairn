@@ -107,13 +107,28 @@ behaviour ships and is tested, not that TLC has checked it.
       identity. `swarm::tcp` has no handshake and no AEAD; it is behind the
       off-by-default `insecure-swarm-tcp` feature so it cannot ship by accident,
       which contains the risk without removing it.
-- [ ] Extend at-rest encryption past the log, or decide on the record that it
-      should not go further. `store::atrest` seals the log and nothing else: the
-      blob store's filenames are content addresses, so the disk discloses which
-      objectives a node works on, and the `--population` file is plain JSON.
-      Neither is a secret -- the checkers are fetchable and the candidates were
-      gossiped -- but the log beside them is sealed, and the asymmetry should be
-      a decision rather than an accident.
+- [x] **Decided: at-rest encryption covers the log and stops there.** The
+      threat is a copy of the data directory reaching somewhere the operator did
+      not intend, and what sealing buys is that the copy is inert. The log is
+      sealed because a stolen disk would otherwise yield the node's whole
+      operating record in one readable file. The blob store is not, because
+      every byte *and every name* in it is something the node hands to any peer
+      that asks — a stolen disk yields nothing there the network does not give
+      away for free. Same for the `--population` file, and `cache/`/`tmp/` are
+      reclaimable by construction.
+      The residue is real and is stated rather than waved away: the *set* is not
+      the contents, so a disk discloses which objectives a node works on without
+      the adversary having to ask a peer and be observed doing it. Filing blobs
+      under `HMAC(key, address)` would close it and was rejected on the merits —
+      it costs the property that the name *is* the hash, which is what lets a
+      read re-hash and refuse mismatched bytes with no second index to keep in
+      sync.
+      The decision is enforced rather than merely written down:
+      [`store::exposure`](../src/store/exposure.rs) classifies every file in a
+      store as sealed, plaintext for a stated reason, a key that should not be
+      there, or **unaccounted for**, and `store status` reports the last two and
+      exits 1. A future feature that writes plaintext state into a data
+      directory trips it instead of slipping past.
 - [ ] Fold the rest of `src/swarm/` into `src/p2p/`. The DHT is shared now; the
       signed peer records and the piece machinery are not. `swarm::discovery` is
       exactly the peer-list exchange `p2p` is missing, against a different

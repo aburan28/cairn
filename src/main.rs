@@ -75,7 +75,7 @@ use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordEr
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
 use proofwork::serve::Spool;
 use proofwork::store::atrest::{AtRestError, Cipher};
-use proofwork::store::{mirror, quota, Store, StoreError};
+use proofwork::store::{exposure, mirror, quota, Store, StoreError};
 use proofwork::time::timestamp;
 
 /// Where the log lives when `--log` and `$PROOFWORK_LOG` are both silent.
@@ -2453,11 +2453,54 @@ fn cmd_store(
                 out,
                 format!("usage   {}", quota::describe(&usage, store.limit())),
             );
+            // What encryption covers, and what it does not. Reported here
+            // rather than left to a document, because the asymmetry -- a sealed
+            // log beside a plainly-named blob store -- is a decision the
+            // operator should be able to check against their own disk. See
+            // `store::exposure` for the decision itself.
+            let survey = exposure::survey(&store).map_err(CliError::Store)?;
+            say(out, format!("at rest {}", survey.describe()));
+            let mut findings = 0;
+            for (path, what) in &survey.findings {
+                findings += 1;
+                match what {
+                    exposure::Exposure::Key => say(
+                        out,
+                        format!("        KEY INSIDE THE STORE: {}", path.display()),
+                    ),
+                    _ => say(
+                        out,
+                        format!("        unaccounted plaintext: {}", path.display()),
+                    ),
+                }
+            }
+            if findings > 0 {
+                say(
+                    out,
+                    "        Each is readable on any disk holding this directory.",
+                );
+                if survey.holds_a_key() {
+                    say(
+                        out,
+                        "        A key here makes everything beside it readable too, which",
+                    );
+                    say(
+                        out,
+                        "        is not encryption at all. Move it out of the store.",
+                    );
+                }
+            }
             if let Some(limit) = store.limit() {
                 if usage.over(limit) {
                     say(out, "        OVER LIMIT -- run `proofwork store gc`");
                     return Ok(1);
                 }
+            }
+            // Exit 1 for a finding: a script that runs `store status` in a
+            // health check has to be able to notice one, and printing a warning
+            // that exits 0 is how a warning becomes invisible.
+            if findings > 0 {
+                return Ok(1);
             }
             Ok(0)
         }
@@ -3744,6 +3787,54 @@ mod tests {
             matches!(error, CliError::AtRest(AtRestError::NoKeyFile { .. })),
             "got {error:?}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn status_reports_the_encryption_boundary_and_exits_1_on_a_surprise() {
+        // The decision in `store::exposure` is only worth anything if an
+        // operator can check it against their own disk, and a warning that
+        // exits 0 is a warning a health check cannot notice.
+        let (dir, options) = sealed_store("boundary");
+        append_entry(&options, 1);
+        let store_options = Options {
+            data: Some(dir.join("data").display().to_string()),
+            ..options.clone()
+        };
+
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_store(&mut out, &store_options, &StoreAction::Status).expect("status"),
+            0
+        );
+        let clean = String::from_utf8(out).expect("utf-8");
+        assert!(clean.contains("at rest log sealed"), "{clean}");
+        assert!(!clean.contains("UNACCOUNTED"), "{clean}");
+
+        // A future feature writing plaintext state into the data directory.
+        std::fs::write(dir.join("data/inference-receipts.json"), b"{}").expect("writes");
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_store(&mut out, &store_options, &StoreAction::Status).expect("status"),
+            1,
+            "an unaccounted plaintext artifact did not change the exit code"
+        );
+        let flagged = String::from_utf8(out).expect("utf-8");
+        assert!(flagged.contains("UNACCOUNTED"), "{flagged}");
+        assert!(flagged.contains("inference-receipts.json"), "{flagged}");
+        // No key inside, so the key-specific advice stays quiet.
+        assert!(!flagged.contains("not encryption at all"), "{flagged}");
+
+        // A key dropped inside is the sharpest case and says so.
+        std::fs::copy(options.key_path(), dir.join("data/notes.txt")).expect("copies");
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_store(&mut out, &store_options, &StoreAction::Status).expect("status"),
+            1
+        );
+        let keyed = String::from_utf8(out).expect("utf-8");
+        assert!(keyed.contains("KEY INSIDE THE STORE"), "{keyed}");
+        assert!(keyed.contains("not encryption at all"), "{keyed}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
