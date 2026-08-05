@@ -69,6 +69,13 @@
 //! out as a `code_want` a moment earlier. The round adds routing knowledge at no
 //! additional disclosure.
 //!
+//! Two textbook Kademlia features fall out of this rule, and their absence is a
+//! decision rather than an omission: there is **no provider republication** and
+//! **no announcing to the `k` nodes nearest a key**, because both are announcing.
+//! Records stay fresh anyway — a node re-asks for what it still needs every
+//! round and each answer carries a new expiry, so a record lapses exactly when
+//! nobody is asking for that blob any more, which is when it should.
+//!
 //! # First-hand claims are stored; relayed ones are used and dropped
 //!
 //! This is the rule that replaces `swarm`'s signatures.
@@ -194,6 +201,15 @@ pub const KEY_HEX_LEN: usize = 261_120 * 2;
 /// that it is a peer nobody will vouch for, and a lookup that kept offering it
 /// would never terminate.
 pub const MAX_DEFERRALS: u32 = 3;
+
+/// Consecutive failed dials before a contact is dropped from the routing table.
+///
+/// Three, and the number is a judgement about which mistake is worse. Dropping
+/// a live peer on one bad dial makes a node forget the network every time its
+/// own link hiccups; keeping a dead one forever makes every lookup route
+/// through a corpse. Three failures with no success in between is a peer that
+/// is gone, and the count resets the instant one answers.
+pub const MAX_FAILURES: u32 = 3;
 
 /// Why a DHT message was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -746,6 +762,14 @@ pub struct Directory {
     /// leave that peer marked in-flight inside each lookup and none of them
     /// would ever reach [`Lookup::is_done`].
     outstanding: BTreeMap<NodeId, BTreeSet<String>>,
+    /// Consecutive failed dials per contact, cleared the moment one answers.
+    ///
+    /// The probe half of Kademlia's oldest-live-wins policy. See
+    /// [`Directory::on_unreachable`].
+    failures: BTreeMap<NodeId, u32>,
+    /// Newcomers waiting for a full bucket's oldest contact to be proved dead,
+    /// keyed by the contact they are waiting on.
+    pending: BTreeMap<NodeId, PeerContact>,
     /// How many rounds each contact has been passed over for want of a key.
     ///
     /// The bound that makes deferral safe. Without it a contact whose key never
@@ -767,6 +791,8 @@ impl Directory {
             providers: Providers::new(),
             lookups: BTreeMap::new(),
             deferrals: BTreeMap::new(),
+            failures: BTreeMap::new(),
+            pending: BTreeMap::new(),
             outstanding: BTreeMap::new(),
             key_wants: BTreeSet::new(),
         }
@@ -786,12 +812,31 @@ impl Directory {
 
     /// Note that a peer is reachable. Returns what the table decided.
     ///
-    /// [`Insertion::Pending`] is not handled here for the reason
-    /// [`crate::dht::RoutingTable::insert`] gives: deciding it needs a round
-    /// trip, and a data structure that performed one could not be tested without
-    /// a network. The driver probes and calls [`Directory::replace`].
+    /// [`Insertion::Pending`] means the bucket was full and the *oldest* contact
+    /// in it should be probed before the newcomer is admitted — Kademlia's
+    /// oldest-live-wins policy, which is what keeps an attacker flooding fresh
+    /// identities from displacing incumbents. The data structure will not
+    /// perform that probe (it has no network, and one that did could not be
+    /// tested without one), so the newcomer is parked here and admitted by
+    /// [`Directory::on_unreachable`] if the probe turns out to be dead.
+    ///
+    /// Seeing a peer also clears its failure count: a contact that answers is
+    /// alive whatever it did last time.
     pub fn saw(&mut self, contact: PeerContact) -> Insertion<PeerContact> {
-        self.routing.insert(contact)
+        self.failures.remove(&contact.id());
+        let newcomer = contact.clone();
+        let decision = self.routing.insert(contact);
+        if let Insertion::Pending { probe } = &decision {
+            // `probe` is the *oldest* contact in the full bucket -- the one to
+            // test -- and the newcomer waits on its death. One waiting newcomer
+            // per slot: a second arrival replaces the first rather than
+            // queueing, because the newest candidate is likeliest to still be
+            // reachable when the slot opens, and an unbounded queue per bucket
+            // is a memory footgun in the one place an attacker sets the arrival
+            // rate.
+            self.pending.insert(probe.id(), newcomer);
+        }
+        decision
     }
 
     /// Evict a contact that failed its probe, admitting the newcomer instead.
@@ -828,6 +873,9 @@ impl Directory {
         told: &[String],
         now: u64,
     ) -> usize {
+        // A first-hand `Tell` is a completed session, which is the strongest
+        // liveness evidence there is.
+        self.failures.remove(&NodeId::from_bytes(from));
         let holder = Holder::new(from, addr);
         let mut stored = 0;
         for address in told {
@@ -1046,6 +1094,10 @@ impl Directory {
     /// Contacts *are* entered into the routing table, because a wrong one costs
     /// only a dial: the handshake derives the id or the session does not key up.
     pub fn on_providers(&mut self, from: NodeId, answers: &[ProviderAnswer]) {
+        // It answered, so it is alive whatever it did last time. Clearing here
+        // rather than only in `saw` matters because a peer already in the table
+        // is not re-inserted on every round.
+        self.failures.remove(&from);
         let owed = self.outstanding.remove(&from).unwrap_or_default();
         for answer in answers {
             // An answer for something this node did not ask this peer is
@@ -1085,15 +1137,50 @@ impl Directory {
 
     /// A peer that could not be reached, or that failed mid-round.
     ///
-    /// Resolves it in every lookup that was waiting on it. Marked queried
-    /// rather than forgotten, for [`Lookup::on_timeout`]'s reason: retrying a
-    /// silent node is how a lookup stops terminating.
+    /// Two jobs. It resolves the peer in every lookup that was waiting on it —
+    /// marked queried rather than forgotten, for [`crate::dht::Lookup::on_timeout`]'s
+    /// reason: retrying a silent node is how a lookup stops terminating.
+    ///
+    /// And it is the **probe result** the routing table has been waiting for.
+    /// Kademlia's oldest-live-wins policy needs somebody to find out whether the
+    /// oldest contact in a full bucket is still alive; nothing here is going to
+    /// dial a peer purely to ask, so the failed dials the node was making anyway
+    /// are the probe. After [`MAX_FAILURES`] consecutive failures the contact is
+    /// dropped, and a newcomer parked by [`Directory::saw`] takes its slot.
+    ///
+    /// This is what the roadmap called bucket refresh, in the shape this stack
+    /// can actually pay for: no periodic random lookups, no extra traffic, and
+    /// a table that cleans itself from the dialling it already does. Without it
+    /// a bucket that filled once stayed full of dead peers for ever, and every
+    /// lookup routed through them.
     pub fn on_unreachable(&mut self, peer: NodeId) {
         for address in self.outstanding.remove(&peer).unwrap_or_default() {
             if let Some(lookup) = self.lookups.get_mut(&address) {
                 lookup.on_timeout(peer);
             }
         }
+        let failures = self.failures.entry(peer).or_insert(0);
+        *failures += 1;
+        if *failures < MAX_FAILURES {
+            return;
+        }
+        self.failures.remove(&peer);
+        match self.pending.remove(&peer) {
+            Some(newcomer) => {
+                self.routing.replace(&peer, newcomer);
+            }
+            None => {
+                self.routing.remove(&peer);
+            }
+        }
+    }
+
+    /// How many consecutive failures each known contact has.
+    ///
+    /// For reporting. A node whose table is mostly failing peers is a node on
+    /// the wrong side of a partition, and that is worth being able to see.
+    pub fn failing(&self) -> usize {
+        self.failures.len()
     }
 
     /// Take the finished lookups: the address sought and the holders found.
@@ -1769,6 +1856,101 @@ mod tests {
         let finished = directory.take_finished();
         assert_eq!(finished.len(), 1, "the lookup never terminated");
         assert!(finished[0].1.is_empty());
+    }
+
+    #[test]
+    fn a_contact_that_keeps_failing_is_dropped_and_its_slot_reused() {
+        // Kademlia's oldest-live-wins policy needs a probe, and nothing here is
+        // going to dial a peer purely to ask. The failed dials the node was
+        // making anyway are the probe -- which is bucket refresh in the shape
+        // this stack can pay for. Before it, a bucket that filled once stayed
+        // full of dead peers and every lookup routed through them.
+        let mut directory = Directory::new(peer(1));
+        directory.saw(PeerContact::new(peer(2), addr(9002), 0));
+        assert_eq!(directory.routing().len(), 1);
+
+        for _ in 0..MAX_FAILURES - 1 {
+            directory.on_unreachable(NodeId::from_bytes(peer(2)));
+            assert_eq!(
+                directory.routing().len(),
+                1,
+                "a contact was dropped before it had earned it"
+            );
+        }
+        directory.on_unreachable(NodeId::from_bytes(peer(2)));
+        assert_eq!(directory.routing().len(), 0, "a dead contact was kept");
+    }
+
+    #[test]
+    fn one_answer_wipes_out_a_history_of_failures() {
+        // A node whose own link hiccups must not forget the network. The count
+        // is *consecutive* failures, so any success resets it.
+        let mut directory = Directory::new(peer(1));
+        directory.saw(PeerContact::new(peer(2), addr(9002), 0));
+        for _ in 0..MAX_FAILURES - 1 {
+            directory.on_unreachable(NodeId::from_bytes(peer(2)));
+        }
+        assert_eq!(directory.failing(), 1);
+
+        directory.on_providers(NodeId::from_bytes(peer(2)), &[]);
+        assert_eq!(directory.failing(), 0, "an answer did not clear the count");
+
+        // And the clock really restarted: one more failure must not evict.
+        directory.on_unreachable(NodeId::from_bytes(peer(2)));
+        assert_eq!(directory.routing().len(), 1);
+    }
+
+    #[test]
+    fn a_full_bucket_admits_a_newcomer_only_once_the_oldest_is_proved_dead() {
+        // The policy that is backwards from every cache written by reflex, and
+        // deliberately so: longevity is the one thing an attacker flooding
+        // fresh identities cannot manufacture. The newcomer waits; it does not
+        // evict.
+        let mut directory = Directory::new(peer(0));
+        // Fill one bucket. Ids sharing a first byte with distinct remainders
+        // land in the same distance band from the local id.
+        let mut oldest = None;
+        for n in 0..K as u16 {
+            let mut raw = [0u8; 32];
+            raw[0] = 0x80;
+            raw[30] = (n >> 8) as u8;
+            raw[31] = n as u8;
+            let contact = PeerContact::new(raw, addr(9000 + n), 0);
+            if oldest.is_none() {
+                oldest = Some(contact.id);
+            }
+            directory.saw(contact);
+        }
+        let oldest = oldest.expect("a first contact");
+        assert_eq!(directory.routing().len(), K);
+
+        let mut raw = [0u8; 32];
+        raw[0] = 0x80;
+        raw[29] = 0xff;
+        let newcomer = PeerContact::new(raw, addr(9999), 0);
+        let decision = directory.saw(newcomer.clone());
+        assert!(
+            matches!(&decision, Insertion::Pending { probe } if probe.id == oldest),
+            "a full bucket did not park the newcomer behind its oldest contact"
+        );
+        assert!(
+            !directory.routing().contacts().any(|c| c.id == newcomer.id),
+            "the newcomer displaced an incumbent"
+        );
+
+        // The oldest turns out to be gone, and the slot goes to the waiting
+        // newcomer rather than staying empty.
+        for _ in 0..MAX_FAILURES {
+            directory.on_unreachable(oldest);
+        }
+        assert!(
+            !directory.routing().contacts().any(|c| c.id == oldest),
+            "the dead contact was kept"
+        );
+        assert!(
+            directory.routing().contacts().any(|c| c.id == newcomer.id),
+            "the slot was freed and the waiting newcomer never got it"
+        );
     }
 
     #[test]

@@ -99,8 +99,25 @@ behaviour ships and is tested, not that TLC has checked it.
       it: for each contact `next_hops` hands out, exactly one of `on_providers`
       or `on_unreachable` must follow. A contact left outstanding is a lookup
       that never terminates.
-      Still open: **bucket refresh**, **provider republication**, and announcing
-      to the `k` nodes nearest a key rather than to whoever is on the line.
+      **Bucket refresh**, in the shape this stack can pay for. Kademlia's
+      oldest-live-wins policy needs somebody to probe the oldest contact in a
+      full bucket, and nothing here will dial a peer purely to ask — so the
+      failed dials the node was already making are the probe. Three consecutive
+      failures with no answer in between drops a contact, any answer resets the
+      count, and a newcomer parked by `saw` takes the freed slot. Before this
+      nothing in `p2p` ever called `forget` or `replace`: a bucket that filled
+      once stayed full of dead peers and every lookup routed through them. No
+      periodic random lookups, because discovery already rides every lookup's
+      `closer` contacts.
+      **Provider republication and announcing to the `k` nearest are not
+      wanted here**, and that is a decision rather than an omission. Both
+      require *announcing*, and this stack is asked-not-announced on purpose:
+      a list of the blobs a node holds is a list of the objectives it is
+      working on, and publishing it to build a DHT would buy routing with
+      exactly the privacy `p2p::code` declined to spend. Records stay fresh
+      without it — a node re-asks for what it still needs every round, and each
+      answer re-announces with a new expiry, so a record lapses exactly when
+      nobody is asking for that blob any more.
 - [x] **One Kademlia, not two** (`src/dht.rs`). The metric, the k-buckets, the
       iterative lookup and the provider store are generic over a contact type;
       `swarm::dht` and `p2p::dht` are instantiations. Written twice they would
