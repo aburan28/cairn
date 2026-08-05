@@ -76,6 +76,9 @@ claim and you hand every submitter a free lottery ticket per restamp.
   `proofwork-reference conformance conformance/vectors.json`
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
 - `./scripts/interop.sh` — each implementation audits a log the other produced
+- `./scripts/fuzz-differential.sh` — the same agreement on *random* input,
+  which is the only way to find a disagreement nobody has already thought of.
+  A failure prints its seed; rerun with it to get the same case back
 - `./scripts/differential.sh` — both implementations classify every record in
   `conformance/adversarial.jsonl` the same way. Interop proves they agree on
   *valid* logs; this proves they agree on the boundary, which is where a split

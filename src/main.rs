@@ -499,6 +499,10 @@ enum Command {
         robustness: bool,
     },
     /// Create an at-rest key.
+    /// Canonicalize one JSON value and print its digest.
+    Canon {
+        input: String,
+    },
     /// Decode one record and report whether it is admissible, without a log.
     Decode {
         kind: String,
@@ -711,6 +715,23 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "attribute" => parse_attribute(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
+        "canon" => {
+            let mut input: Option<String> = None;
+            while let Some(token) = cursor.take() {
+                if token == "--input" {
+                    input = Some(cursor.value("--input")?);
+                } else if is_flag(&token) {
+                    return Err(CliError::Usage(format!("canon: unknown option {token:?}")));
+                } else if input.is_some() {
+                    return Err(CliError::Usage(format!("canon: unexpected argument {token:?}")));
+                } else {
+                    input = Some(token);
+                }
+            }
+            Command::Canon {
+                input: require(input, "canon", "--input <file>")?,
+            }
+        }
         "decode" => {
             let mut kind: Option<String> = None;
             let mut record: Option<String> = None;
@@ -1293,6 +1314,8 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  log");
     say(out, "      print the log");
+    say(out, "  canon --input <file>");
+    say(out, "      canonicalize one JSON value and print its digest");
     say(out, "  decode <objective|commitment|claim> --record <file>");
     say(
         out,
@@ -1486,6 +1509,26 @@ fn decode_hex32(text: &str) -> Option<[u8; 32]> {
         *slot = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
     }
     Some(out)
+}
+
+/// Canonicalize one JSON value and print its digest.
+///
+/// The format contract at its narrowest: same bytes in, same bytes and same
+/// digest out, in every implementation. `scripts/fuzz-differential.sh` drives
+/// this on random input, which is where an encoder disagreement surfaces
+/// before it ever reaches a record.
+fn cmd_canon(out: &mut dyn Write, input_path: &str) -> Result<i32, CliError> {
+    match read_json(input_path) {
+        Ok(value) => {
+            say(out, format!("ok {} {}", value.digest(), value.canonical_string()));
+            Ok(0)
+        }
+        Err(error) => {
+            say(out, "refused");
+            eprintln!("  {error}");
+            Ok(1)
+        }
+    }
 }
 
 /// Decode one record and say whether it is admissible, touching no log.
@@ -2901,6 +2944,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Blob { action } => cmd_blob(out, options, *action),
         Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),
+        Command::Canon { input } => cmd_canon(out, input),
         Command::Decode { kind, record } => cmd_decode(out, kind, record),
         Command::Identity { out: path } => cmd_identity(out, path),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),

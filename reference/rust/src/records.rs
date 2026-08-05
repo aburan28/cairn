@@ -462,3 +462,174 @@ impl Claim {
         Ok(claim)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verifier() -> Value {
+        Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("c.py")),
+            ("checker_sha256", Value::string("ab".repeat(32))),
+            ("entrypoint", Value::string("check")),
+        ])
+    }
+
+    fn objective() -> Objective {
+        Objective {
+            goal: "G".into(),
+            statement: "s".into(),
+            verifier: verifier(),
+            reward: 1000,
+            funder: "treasury".into(),
+            created_at: "2026-07-28T00:00:00+00:00".into(),
+            deadline: None,
+            ratchet: None,
+            confidentiality: DEFAULT_CONFIDENTIALITY.into(),
+            artifact_schema: None,
+            require_signed_submitter: false,
+        }
+    }
+
+    #[test]
+    fn optional_fields_are_omitted_when_unset() {
+        // The rule that lets a field be added without reissuing every id.
+        let value = objective().to_value();
+        for absent in [
+            "deadline",
+            "ratchet",
+            "confidentiality",
+            "artifact_schema",
+            "require_signed_submitter",
+        ] {
+            assert!(value.get(absent).is_none(), "{absent} was emitted");
+        }
+    }
+
+    #[test]
+    fn absent_and_null_and_falsy_are_not_interchangeable() {
+        let mut body = objective().to_value();
+        let base = Objective::from_value(&body).unwrap().id();
+
+        // Explicit null means unset, and must not move the id.
+        if let Value::Object(map) = &mut body {
+            map.insert("confidentiality".into(), Value::Null);
+        }
+        assert_eq!(Objective::from_value(&body).unwrap().id(), base);
+
+        // Falsy values of the wrong type are refused, never defaulted -- the
+        // divergence a falsy-means-unset decoder introduces.
+        for bad in [Value::string(""), Value::Int(0), Value::Bool(false)] {
+            let mut body = objective().to_value();
+            if let Value::Object(map) = &mut body {
+                map.insert("confidentiality".into(), bad.clone());
+            }
+            assert!(Objective::from_value(&body).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn the_reward_ceiling_is_the_format_bound_not_a_language_one() {
+        for (reward, ok) in [
+            (Value::Int(0), true),
+            (Value::Int(MAX_UNITS), true),
+            (Value::Int(MAX_UNITS + 1), false),
+            (Value::Int(-1), false),
+            (Value::Bool(true), false),
+            (Value::string("1000"), false),
+        ] {
+            let mut body = objective().to_value();
+            if let Value::Object(map) = &mut body {
+                map.insert("reward".into(), reward.clone());
+            }
+            assert_eq!(
+                Objective::from_value(&body).is_ok(),
+                ok,
+                "reward {reward:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn require_signed_submitter_is_not_coerced() {
+        // "yes" meaning true here and false elsewhere is two implementations
+        // disagreeing about which submissions are admissible.
+        for bad in [Value::string("yes"), Value::Int(1), Value::Array(vec![])] {
+            let mut body = objective().to_value();
+            if let Value::Object(map) = &mut body {
+                map.insert("require_signed_submitter".into(), bad.clone());
+            }
+            assert!(Objective::from_value(&body).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn a_key_shaped_submitter_is_recognised_by_shape_alone() {
+        assert!(signed_submitter(&"a".repeat(64)).is_some());
+        assert!(signed_submitter("alice").is_none());
+        // Uppercase is a nickname: two spellings of one key would be two
+        // reputations able to cite each other.
+        assert!(signed_submitter(&"A".repeat(64)).is_none());
+        assert!(signed_submitter(&"a".repeat(63)).is_none());
+        assert!(signed_submitter(&"g".repeat(64)).is_none());
+    }
+
+    #[test]
+    fn cites_must_be_an_array_of_strings() {
+        let base = Value::object([
+            ("type", Value::string("claim")),
+            ("objective_id", Value::string("sha256:x")),
+            ("submitter", Value::string("alice")),
+            ("artifact", Value::object([("n", Value::Int(1))])),
+            ("nonce", Value::string("s3cret")),
+            ("created_at", Value::string("2026-07-28T00:00:00+00:00")),
+        ]);
+        // Absent reads as empty.
+        assert!(Claim::from_value(&base).unwrap().cites.is_empty());
+        for bad in [
+            // A decoder that iterates a string produces phantom edges, each
+            // of which would draw citation flow.
+            Value::string("abc"),
+            Value::Null,
+            Value::Int(7),
+            Value::Array(vec![Value::Int(1)]),
+        ] {
+            let mut body = base.clone();
+            if let Value::Object(map) = &mut body {
+                map.insert("cites".into(), bad.clone());
+            }
+            assert!(Claim::from_value(&body).is_err(), "{bad:?} accepted");
+        }
+        // Duplicates draw twice the flow for one input.
+        let mut body = base.clone();
+        if let Value::Object(map) = &mut body {
+            map.insert(
+                "cites".into(),
+                Value::Array(vec![Value::string("x"), Value::string("x")]),
+            );
+        }
+        assert!(Claim::from_value(&body).is_err());
+    }
+
+    #[test]
+    fn a_signature_is_covered_by_the_id_but_not_by_itself() {
+        let claim = Claim {
+            objective_id: "sha256:obj".into(),
+            submitter: "alice".into(),
+            artifact: Value::object([("n", Value::Int(1))]),
+            nonce: "s3cret".into(),
+            created_at: "2026-07-28T00:00:00+00:00".into(),
+            cites: vec![],
+            signature: None,
+        };
+        let mut signed = claim.clone();
+        signed.signature = Some("ab".repeat(64));
+        // Different records, so a signature cannot be stripped from a claim
+        // somebody already cited...
+        assert_ne!(claim.id(), signed.id());
+        // ...while the bytes a signature covers are the same either way,
+        // which is the only way it could be produced.
+        assert_eq!(claim.signing_payload(), signed.signing_payload());
+    }
+}

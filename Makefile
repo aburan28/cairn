@@ -12,6 +12,7 @@ CLI := $(RELEASE_DIR)/proofwork
 MCP := $(RELEASE_DIR)/proofwork-mcp
 P2P := $(RELEASE_DIR)/proofwork-p2p
 SERVE := $(RELEASE_DIR)/proofwork-serve
+FUZZ_CASES ?= 2000
 IDENTITY ?= $(abspath $(LOCAL_DIR)/node.identity.json)
 ROOT_KEY ?= $(abspath $(LOCAL_DIR)/root.key)
 CHECKPOINT ?= $(abspath $(LOCAL_DIR)/checkpoint.json)
@@ -23,7 +24,7 @@ P2P_ARGS ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp p2p serve demo ratchet identity interop differential mcp-smoke serve-smoke \
+.PHONY: help build debug cli mcp p2p serve demo ratchet identity interop differential fuzz mcp-smoke serve-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
@@ -80,6 +81,9 @@ ratchet: build
 differential: build
 	./scripts/differential.sh
 
+fuzz: build
+	./scripts/fuzz-differential.sh $(FUZZ_CASES)
+
 interop: build
 	RUST_BIN="$(abspath $(CLI))" ./scripts/interop.sh
 
@@ -121,4 +125,4 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy demo ratchet identity interop differential mcp-smoke serve-smoke tla
+check: test fmt clippy demo ratchet identity interop differential fuzz mcp-smoke serve-smoke tla

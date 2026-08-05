@@ -497,3 +497,160 @@ impl Parser<'_> {
         Ok(u32::from_str_radix(slice, 16).expect("checked hex"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn del_and_slash_are_not_escaped() {
+        // The two an encoder is most likely to escape out of habit -- many
+        // JSON writers escape `/`, and several escape DEL as a control
+        // character. This format does neither, and a digest computed either
+        // way is a digest nobody else reproduces.
+        assert_eq!(Value::string("/").canonical_string(), "\"/\"");
+        assert_eq!(Value::string("\u{7f}").canonical_string(), "\"\u{7f}\"");
+    }
+
+    #[test]
+    fn control_characters_use_the_five_short_forms_then_u00xx() {
+        let cases = [
+            ("\u{08}", "\"\\b\""),
+            ("\t", "\"\\t\""),
+            ("\n", "\"\\n\""),
+            ("\u{0c}", "\"\\f\""),
+            ("\r", "\"\\r\""),
+            ("\u{00}", "\"\\u0000\""),
+            ("\u{01}", "\"\\u0001\""),
+            ("\u{1f}", "\"\\u001f\""),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(Value::string(raw).canonical_string(), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn non_ascii_stays_raw() {
+        // Escaping it would be valid JSON and the wrong bytes.
+        assert_eq!(Value::string("é😀").canonical_string(), "\"é😀\"");
+    }
+
+    #[test]
+    fn keys_sort_by_code_point() {
+        // Uppercase before lowercase, digits before both, and `_`/`~` where
+        // ASCII puts them -- not where a locale-aware collation would.
+        let value = Value::object([
+            ("~", Value::Int(1)),
+            ("a", Value::Int(2)),
+            ("Z", Value::Int(3)),
+            ("_", Value::Int(4)),
+            ("0", Value::Int(5)),
+            ("é", Value::Int(6)),
+        ]);
+        assert_eq!(
+            value.canonical_string(),
+            "{\"0\":5,\"Z\":3,\"_\":4,\"a\":2,\"~\":1,\"é\":6}"
+        );
+    }
+
+    #[test]
+    fn floats_are_refused_at_the_boundary() {
+        for text in ["1.5", "1e3", "1E3", "-0.0", "[1,2.5]", "{\"a\":1.0}"] {
+            assert!(Value::from_json(text).is_err(), "{text} parsed");
+        }
+    }
+
+    #[test]
+    fn integers_span_i128_and_refuse_beyond_it() {
+        assert_eq!(
+            Value::from_json(&i128::MAX.to_string()),
+            Ok(Value::Int(i128::MAX))
+        );
+        assert_eq!(
+            Value::from_json(&i128::MIN.to_string()),
+            Ok(Value::Int(i128::MIN))
+        );
+        assert!(Value::from_json(&(i128::MAX as u128 + 1).to_string()).is_err());
+    }
+
+    #[test]
+    fn malformed_json_is_refused() {
+        for text in [
+            "",
+            "{",
+            "[1,]",
+            "{\"a\":1,}",
+            "01",
+            "1.",
+            ".5",
+            "+1",
+            "nul",
+            "NaN",
+            "Infinity",
+            "'x'",
+            "\"unterminated",
+            "\"\\q\"",
+            "1 2",
+            "\"\\ud800\"",
+            "\"\\udc00\"",
+        ] {
+            assert!(Value::from_json(text).is_err(), "{text:?} parsed");
+        }
+    }
+
+    #[test]
+    fn surrogate_pairs_combine_and_raw_control_characters_do_not() {
+        assert_eq!(
+            Value::from_json("\"\\ud83d\\ude00\"").unwrap(),
+            Value::string("😀")
+        );
+        assert!(Value::from_json("\"\u{01}\"").is_err());
+    }
+
+    #[test]
+    fn the_encoder_round_trips_through_the_decoder() {
+        // Anything this implementation writes it must be able to read back,
+        // or a log it produced would be one it cannot audit.
+        let value = Value::object([
+            (
+                "ctrl",
+                Value::string("\t\n\r\u{08}\u{0c}\u{00}\u{1f}\u{7f}"),
+            ),
+            ("uni", Value::string("é 日本 😀")),
+            (
+                "nums",
+                Value::Array(vec![
+                    Value::Int(i128::MIN),
+                    Value::Int(0),
+                    Value::Int(i128::MAX),
+                ]),
+            ),
+            (
+                "nested",
+                Value::object([("/", Value::Null), ("\\", Value::Bool(true))]),
+            ),
+        ]);
+        let text = value.canonical_string();
+        assert_eq!(Value::from_json(&text).unwrap(), value);
+        assert_eq!(Value::from_json(&text).unwrap().canonical_string(), text);
+    }
+
+    #[test]
+    fn merkle_promotes_the_odd_node_rather_than_duplicating_it() {
+        // Duplicating the last leaf lets two leaf sets share a root --
+        // Bitcoin's CVE-2012-2459.
+        let a = digest_bytes(b"a");
+        let b = digest_bytes(b"b");
+        let three = merkle_root(&[a.clone(), b.clone(), a.clone()]).unwrap();
+        let four = merkle_root(&[a.clone(), b.clone(), a.clone(), a.clone()]).unwrap();
+        assert_ne!(three, four);
+        assert_eq!(merkle_root(&[]), None);
+        assert_eq!(merkle_root(std::slice::from_ref(&a)), Some(a));
+    }
+
+    #[test]
+    fn short_never_panics_on_multi_byte_identifiers() {
+        assert_eq!(short("sha256:1234567é9"), "sha256:1234567é");
+        assert_eq!(short("é234567890"), "é2345678");
+    }
+}

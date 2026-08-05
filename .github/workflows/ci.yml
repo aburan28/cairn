@@ -118,6 +118,10 @@ jobs:
       - run: ./reference/rust/target/release/proofwork-reference conformance conformance/vectors.json
       - run: ./scripts/interop.sh
       - run: ./scripts/differential.sh
+      # Randomized, and seeded from the clock so each CI run explores
+      # different inputs. A failure prints its seed, which is what makes it
+      # reproducible rather than a ghost.
+      - run: ./scripts/fuzz-differential.sh 3000
 
   audit:
     # Known-vulnerable dependencies fail the build. Deliberately not advisory:

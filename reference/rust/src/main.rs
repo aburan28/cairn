@@ -43,7 +43,7 @@ fn main() -> ExitCode {
                 .map(String::as_str),
         ),
         Some("audit") | Some("post") | Some("commit") | Some("reveal") | Some("settle")
-        | Some("log") | Some("decode") => cli(&args),
+        | Some("log") | Some("decode") | Some("canon") => cli(&args),
         Some("--help") | Some("help") | None => {
             eprintln!(
                 "proofwork-reference — an independent check on the primary implementation\n\n\
@@ -468,6 +468,21 @@ fn cli(args: &[String]) -> Result<(), String> {
                     println!("refused");
                     eprintln!("  {reason}");
                     return Err("record refused".into());
+                }
+            }
+        }
+        // Canonicalize one JSON value: the format contract at its narrowest.
+        // `scripts/fuzz-differential.sh` drives this on random input, which is
+        // where an encoder disagreement shows up before it ever reaches a
+        // record.
+        "canon" => {
+            let path = flag("--input").ok_or("canon needs --input <file>")?;
+            match Value::from_json(&read(Some(&path), "a JSON value")?) {
+                Ok(value) => println!("ok {} {}", value.digest(), value.canonical_string()),
+                Err(error) => {
+                    println!("refused");
+                    eprintln!("  {error}");
+                    return Err("input refused".into());
                 }
             }
         }
