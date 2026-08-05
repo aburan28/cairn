@@ -46,3 +46,13 @@ The quickest way to see one run:
 ./scripts/ratchet-demo.sh      # capset_progressive: the progressive bounty
 examples/ecdsa-fail/demo.sh    # the minimize-direction ratchet
 ```
+
+## Objectives that accept only signed identities
+
+Set `"require_signed_submitter": true` and the network refuses any submitter
+that is not an ed25519 public key with a matching signature — so every claim on
+that bounty is attributable to a key nobody else holds. The cost is real and is
+the funder's to weigh: it turns away contributors who have not made an
+identity, which is why it is per-objective and off by default. Contributors
+make one with `proofwork identity --out alice.json` and submit with
+`--identity alice.json`.

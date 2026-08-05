@@ -83,6 +83,19 @@ class Objective:
     #: source for the artifact's shape is the attacker-authored statement.
     #: Omitted when absent, so adding it moved no ids.
     artifact_schema: dict[str, Any] | None = None
+    #: Refuse submissions from anyone but a signed identity.
+    #:
+    #: A funder who wants an authenticated bounty could previously only *ask*
+    #: in the statement, which is prose nothing enforces. With this set,
+    #: ``Node.commit`` and ``Node.reveal`` refuse any submitter that is not
+    #: key-shaped -- and a key-shaped submitter must already carry a valid
+    #: signature, so the two rules compose into "every claim here is
+    #: attributable to a key nobody else holds".
+    #:
+    #: The cost is real and belongs to the funder: it turns away contributors
+    #: who have not made an identity. Hence per-objective and off by default.
+    #: ``False`` is omitted from the canonical form, so adding it moved no ids.
+    require_signed_submitter: bool = False
 
     def __post_init__(self) -> None:
         if not self.statement.strip():
@@ -117,6 +130,8 @@ class Objective:
         # Shape only. What the hint *says* is never checked -- see the field.
         if self.artifact_schema is not None and not isinstance(self.artifact_schema, dict):
             raise RecordError("artifact_schema must be an object")
+        if not isinstance(self.require_signed_submitter, bool):
+            raise RecordError("require_signed_submitter must be a boolean")
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -141,6 +156,10 @@ class Objective:
         # Omitted when absent, for the reason every optional field here is.
         if self.artifact_schema is not None:
             body["artifact_schema"] = self.artifact_schema
+        # Omitted when False: that is what every objective written before this
+        # field existed meant, so emitting it would move every id.
+        if self.require_signed_submitter:
+            body["require_signed_submitter"] = True
         return body
 
     @property
@@ -171,6 +190,7 @@ class Objective:
             confidentiality=confidentiality,
             # Absent and null both mean "no hint", exactly as for ``ratchet``.
             artifact_schema=data.get("artifact_schema"),
+            require_signed_submitter=_require_signed_flag(data),
         )
 
 
@@ -189,6 +209,21 @@ def commitment_hash(objective_id: str, submitter: str, artifact: dict, nonce: st
         + b"|"
         + nonce.encode()
     )
+
+
+def _require_signed_flag(data: dict[str, Any]) -> bool:
+    """Decode ``require_signed_submitter``, refusing anything but a boolean.
+
+    Coercion is what a split looks like: ``"yes"`` meaning True here and
+    False in the Rust decoder is two implementations disagreeing about which
+    submissions are admissible.
+    """
+    flag = data.get("require_signed_submitter")
+    if flag is None:
+        return False
+    if not isinstance(flag, bool):
+        raise RecordError("require_signed_submitter must be a boolean")
+    return flag
 
 
 def signed_submitter(submitter: str) -> str | None:

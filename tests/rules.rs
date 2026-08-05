@@ -1637,3 +1637,89 @@ fn a_signature_is_covered_by_the_record_id() {
     // way it could be produced at all.
     assert_eq!(unsigned.signing_payload(), signed.signing_payload());
 }
+
+/// A funder can demand signed identities, and the demand is enforced on both
+/// halves of a submission.
+#[test]
+fn an_objective_can_refuse_nickname_submitters() {
+    use proofwork::crypto::identity::Identity;
+    use proofwork::records::Commitment;
+
+    let dir = TempDir::new("requires-signed");
+    let sha = write_pinned(&dir, "c.py", CHECKER);
+    let mut node = node_at(&dir);
+    let objective = Objective::new(
+        "G",
+        "find n = 42",
+        certificate_verifier("c.py", &sha),
+        1000,
+        "treasury",
+        TS,
+        None,
+        None,
+    )
+    .expect("valid objective")
+    .requiring_signed_submitters();
+    let objective_id = objective.id();
+    node.post_objective(&objective, TS).expect("post");
+
+    // A nickname is refused, and the message names the fix rather than only
+    // the rule -- a contributor who has never made an identity needs to be
+    // told how, not told no.
+    let nickname = Commitment::new(&objective_id, "alice", "sha256:h", TS);
+    let refused = node.commit(&nickname, TS).expect_err("nickname refused");
+    let message = refused.to_string();
+    assert!(message.contains("only signed identities"), "{message}");
+    assert!(message.contains("proofwork identity"), "{message}");
+
+    // A signed identity goes through.
+    let alice = Identity::from_secret_bytes([17u8; 32]);
+    let signed =
+        Commitment::new(&objective_id, alice.submitter_id(), "sha256:h", TS).signed_with(&alice);
+    node.commit(&signed, TS)
+        .expect("a signed submitter is fine");
+}
+
+/// The flag is off by default and omitted when off, so adding it moved no ids.
+#[test]
+fn requiring_signed_submitters_is_off_by_default_and_omitted() {
+    let plain = Objective::new(
+        "G",
+        "s",
+        certificate_verifier("c.py", &"ab".repeat(32)),
+        1000,
+        "treasury",
+        TS,
+        None,
+        None,
+    )
+    .expect("valid");
+    assert!(!plain.require_signed_submitter);
+    assert!(plain.to_value().get("require_signed_submitter").is_none());
+
+    // Setting it is a different objective, exactly as changing the verifier
+    // is: the admission rules are part of what was funded.
+    let strict = plain.clone().requiring_signed_submitters();
+    assert_ne!(plain.id(), strict.id());
+    assert_eq!(
+        strict.to_value().get("require_signed_submitter"),
+        Some(&proofwork::canonical::Value::Bool(true))
+    );
+
+    // And it round-trips.
+    let decoded = Objective::from_value(&strict.to_value()).expect("decodes");
+    assert!(decoded.require_signed_submitter);
+    assert_eq!(decoded.id(), strict.id());
+
+    // A non-boolean is refused rather than coerced: "yes" meaning true here
+    // and false in the reference is a split over what is admissible.
+    let mut body = match plain.to_value() {
+        proofwork::canonical::Value::Object(map) => map,
+        _ => unreachable!(),
+    };
+    body.insert(
+        "require_signed_submitter".to_string(),
+        proofwork::canonical::Value::string("yes"),
+    );
+    assert!(Objective::from_value(&proofwork::canonical::Value::Object(body)).is_err());
+}

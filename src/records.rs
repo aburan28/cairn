@@ -342,6 +342,24 @@ pub struct Objective {
     /// Omitted when absent, like every other optional field, so adding it
     /// moved no ids.
     pub artifact_schema: Option<Value>,
+    /// Refuse submissions from anyone but a signed identity.
+    ///
+    /// A funder who wants an authenticated bounty could previously only *ask*
+    /// for one in the statement, which is prose nothing enforces. With this
+    /// set, [`Node::commit`](crate::node::Node::commit) and
+    /// [`reveal`](crate::node::Node::reveal) refuse any submitter that is not
+    /// key-shaped -- and a key-shaped submitter already has to carry a valid
+    /// signature, so the two rules compose into "every claim here is
+    /// attributable to a key nobody else holds".
+    ///
+    /// The cost is real and belongs to the funder: it turns away contributors
+    /// who have not made an identity. That is why it is per-objective and off
+    /// by default rather than a network-wide switch.
+    ///
+    /// `false` is omitted from the canonical form, so adding this field moved
+    /// no ids -- and, as with `confidentiality`, the default had to be
+    /// whatever every pre-existing objective already meant.
+    pub require_signed_submitter: bool,
 }
 
 impl Objective {
@@ -371,6 +389,7 @@ impl Objective {
             ratchet,
             confidentiality: Confidentiality::Public,
             artifact_schema: None,
+            require_signed_submitter: false,
         };
         objective.validate()?;
         Ok(objective)
@@ -383,6 +402,12 @@ impl Objective {
     /// say so by name.
     ///
     /// [`with_confidentiality`]: Objective::with_confidentiality
+    /// Refuse anyone but a signed identity. See the field.
+    pub fn requiring_signed_submitters(mut self) -> Objective {
+        self.require_signed_submitter = true;
+        self
+    }
+
     pub fn with_artifact_schema(mut self, schema: Value) -> Result<Objective, RecordError> {
         self.artifact_schema = Some(schema);
         self.validate()?;
@@ -497,6 +522,11 @@ impl Objective {
         if let Some(schema) = &self.artifact_schema {
             body.insert("artifact_schema".to_string(), schema.clone());
         }
+        // Omitted when false: that is what every objective written before this
+        // field existed meant, so emitting it would move every id.
+        if self.require_signed_submitter {
+            body.insert("require_signed_submitter".to_string(), Value::Bool(true));
+        }
         Value::Object(body)
     }
 
@@ -556,6 +586,20 @@ impl Objective {
             deadline: optional_string(value, RECORD, "deadline")?,
             ratchet,
             confidentiality,
+            require_signed_submitter: match value.get("require_signed_submitter") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(flag)) => *flag,
+                // Refused rather than coerced: "1" or "yes" meaning true here
+                // and false in the other implementation is a split over which
+                // submissions are admissible.
+                Some(_) => {
+                    return Err(RecordError::InvalidField {
+                        record: RECORD,
+                        field: "require_signed_submitter",
+                        expected: "a boolean",
+                    })
+                }
+            },
             artifact_schema,
         };
         objective.validate()?;
@@ -1050,6 +1094,7 @@ mod tests {
             ratchet: None,
             confidentiality: Confidentiality::Public,
             artifact_schema: None,
+            require_signed_submitter: false,
         }
     }
 

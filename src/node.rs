@@ -169,6 +169,17 @@ pub enum RuleViolation {
     /// paying a string anyone could type; a key-shaped name now has to be
     /// signed for. See [`crate::records::signed_submitter`].
     UnsignedIdentity(crate::records::SignatureError),
+    /// The objective admits only signed identities, and this submitter is a
+    /// nickname.
+    ///
+    /// Distinct from [`RuleViolation::UnsignedIdentity`], which is "you named
+    /// a key and did not prove it". This one is "this bounty does not accept
+    /// names at all", which is the funder's policy rather than a broken
+    /// submission -- and the fix is different, so the message has to be too.
+    SignedSubmitterRequired {
+        objective_id: String,
+        submitter: String,
+    },
     /// A reveal into an epoch whose settlement batch has already been paid.
     ///
     /// Refused rather than queued for the next batch. An epoch's batch is
@@ -261,6 +272,16 @@ impl fmt::Display for RuleViolation {
                  epoch it settles in cannot be derived"
             ),
             RuleViolation::UnsignedIdentity(error) => write!(f, "{error}"),
+            RuleViolation::SignedSubmitterRequired {
+                objective_id,
+                submitter,
+            } => write!(
+                f,
+                "objective {} accepts only signed identities, and {submitter:?} is not one. \
+                 Create one with `proofwork identity --out <file>` and submit with \
+                 --identity; the public key it prints becomes your submitter name",
+                crate::canonical::short(objective_id)
+            ),
             RuleViolation::EpochAlreadySettled { epoch } => write!(
                 f,
                 "epoch {epoch} has already settled; a reveal cannot join a batch \
@@ -599,6 +620,14 @@ impl Node {
                 objective_id: commitment.objective_id.clone(),
             }
         })?;
+        if objective.require_signed_submitter
+            && crate::records::signed_submitter(&commitment.submitter).is_none()
+        {
+            return Err(RuleViolation::SignedSubmitterRequired {
+                objective_id: commitment.objective_id.clone(),
+                submitter: commitment.submitter.clone(),
+            });
+        }
         if objective.ratchet.is_none() && self.settlement_of(&commitment.objective_id).is_some() {
             return Err(RuleViolation::AlreadySettled {
                 objective_id: commitment.objective_id.clone(),
@@ -683,6 +712,18 @@ impl Node {
                 objective_id: claim.objective_id.clone(),
             })?
             .clone();
+
+        // The funder's policy, checked on both halves of the submission: a
+        // commitment admitted before the objective was known would otherwise
+        // open into a claim this rule should have refused.
+        if objective.require_signed_submitter
+            && crate::records::signed_submitter(&claim.submitter).is_none()
+        {
+            return Err(RuleViolation::SignedSubmitterRequired {
+                objective_id: claim.objective_id.clone(),
+                submitter: claim.submitter.clone(),
+            });
+        }
 
         let commitment = match self.matching_commitment(claim) {
             Some(commitment) => commitment.clone(),

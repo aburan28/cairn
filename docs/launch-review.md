@@ -144,11 +144,16 @@ remains.
    a record naming one unless it carries a signature that verifies under it,
    checked at `commit` and `reveal` before anything is written. The name is
    the key, so there is no registry to consult and no migration to run —
-   existing nickname logs keep working untouched, which is also the remaining
-   hole: a nickname authenticates nothing, exactly as before, and nothing yet
-   lets an objective *require* key-shaped submitters. `scripts/identity-demo.sh`
-   drives the whole thing through the real binaries, including the theft
-   attempts.
+   existing nickname logs keep working untouched. An objective can also set
+   `require_signed_submitter` to refuse nicknames outright, so a funder who
+   wants every claim attributable makes it a rule of the bounty rather than a
+   request in its statement. `scripts/identity-demo.sh` drives the whole thing
+   through the real binaries, including the theft attempts.
+
+   The remaining hole is narrow: a nickname on an objective that does not set
+   the flag authenticates nothing, exactly as before, and an unforgeable
+   identity is still not an *attributable* one — nothing ties a key to a
+   person.
 
    What is untouched is escrow: rewards are numbers in a log that nothing
    backs. **Every surface a contributor sees still has to say the rewards are
@@ -199,13 +204,13 @@ blocked on plumbing. What it is blocked on is a choice, and it is item 1:
 - **Launch as a single operator** — you post objectives, run
   `proofwork-serve`, and contributors fetch the log, work, and submit through
   the queue. This works end to end today.
-- **Launch as an open network** — now viable for contributors who use signed
-  identities (`proofwork identity --out alice.json`, then `--identity`), since
-  such a name cannot be forged or replayed. Two things still argue for caution:
-  a nickname submitter remains unauthenticated and no objective can yet demand
-  otherwise, and nothing is escrowed, so what is being competed for is
-  notional. The MCP server also does not sign yet — an agent that needs a
-  provable name submits through the CLI.
+- **Launch as an open network** — viable now. Contributors make an identity
+  (`proofwork identity --out alice.json`) and pass `--identity` to the CLI or
+  to `proofwork-mcp`; such a name cannot be forged or replayed. Post objectives
+  with `require_signed_submitter: true` and nicknames are refused outright, so
+  every claim on that bounty is attributable to a key nobody else holds. What
+  still argues for care is escrow, not identity: rewards are notional, so what
+  is being competed for is a number in a log.
 
 Neither is blocked on plumbing any more. The open-network case is blocked on
 deciding that notional rewards among partly-authenticated contributors is the

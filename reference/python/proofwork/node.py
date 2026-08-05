@@ -13,7 +13,8 @@ from . import blobs, verifiers
 from .frontier import FrontierEntry, Ratchet
 from .ledger import Ledger
 from .partition import epoch_of, epoch_seconds, settlement_rank
-from .records import Claim, Commitment, Objective
+from .canonical import short
+from .records import Claim, Commitment, Objective, signed_submitter
 from .verifiers import Status, Verdict
 
 #: Ledger entry kind marking one reveal epoch as settled. See ``Node.settle_due``.
@@ -305,6 +306,13 @@ class Node:
         if commitment.objective_id not in self.objectives():
             raise RuleViolation("commitment references an unknown objective")
         objective = self.objectives()[commitment.objective_id]
+        if objective.require_signed_submitter and signed_submitter(commitment.submitter) is None:
+            raise RuleViolation(
+                f"objective {short(commitment.objective_id)} accepts only signed "
+                f"identities, and {commitment.submitter!r} is not one. Create one with "
+                "`proofwork identity --out <file>` and submit with --identity; the "
+                "public key it prints becomes your submitter name"
+            )
         # A progressive objective stays open until its pool is exhausted: the
         # whole point is that improvements keep arriving.
         if objective.ratchet is None and self.settlement_of(commitment.objective_id):
@@ -384,6 +392,16 @@ class Node:
         objective = objectives.get(claim.objective_id)
         if objective is None:
             raise RuleViolation("claim references an unknown objective")
+        # The funder's policy, checked on both halves: a commitment admitted
+        # before the objective was known would otherwise open into a claim
+        # this rule should have refused.
+        if objective.require_signed_submitter and signed_submitter(claim.submitter) is None:
+            raise RuleViolation(
+                f"objective {short(claim.objective_id)} accepts only signed identities, "
+                f"and {claim.submitter!r} is not one. Create one with `proofwork identity "
+                "--out <file>` and submit with --identity; the public key it prints "
+                "becomes your submitter name"
+            )
 
         commitment = self._matching_commitment(claim)
         if commitment is None:

@@ -98,6 +98,34 @@ rule "nicknames still work, unchanged"
   --artifact examples/reversible-adder/artifact-truncated.json --nonce n5 >/dev/null
 echo "  a nickname submitter needs no signature -- Stage 0 logs keep working"
 
+rule "an objective that accepts only signed identities"
+# Until now the rule protected a name someone chose to sign for. A funder who
+# wants *every* claim attributable had to ask in the statement, which is prose
+# nothing enforces. `require_signed_submitter` makes it a rule of the bounty.
+python3 - "$WORK" <<'PY'
+import json, sys
+work = sys.argv[1]
+objective = json.load(open("examples/reversible-adder/objective.json"))
+objective["require_signed_submitter"] = True
+objective["statement"] = "Signed-identity-only variant. " + objective["statement"]
+json.dump(objective, open(f"{work}/strict.json", "w"), indent=2)
+PY
+STRICT=$("$RUST" --log "$LOG" --root . post "$WORK/strict.json" | head -1 | awk '{print $2}')
+echo "  posted $STRICT"
+
+if "$RUST" --log "$LOG" --root . commit "$STRICT" --submitter alice \
+     --artifact examples/reversible-adder/artifact-cuccaro.json --nonce s1 >"$WORK/out" 2>&1; then
+  fail "a nickname was accepted by a signed-identity-only objective"
+fi
+grep -q "only signed identities" "$WORK/out" || fail "wrong refusal: $(cat "$WORK/out")"
+grep -q "proofwork identity" "$WORK/out" \
+  || fail "the refusal does not tell a contributor how to get an identity"
+sed 's/^/  /' "$WORK/out"
+
+"$RUST" --log "$LOG" --root . commit "$STRICT" --identity "$WORK/alice.json" \
+  --artifact examples/reversible-adder/artifact-cuccaro.json --nonce s1 >/dev/null
+echo "  a signed identity is admitted"
+
 rule "the log audits, and both implementations agree"
 sleep 1.1
 "$RUST" --log "$LOG" --root . settle >/dev/null 2>&1 || true

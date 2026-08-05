@@ -146,3 +146,49 @@ def test_a_malformed_signature_is_refused_rather_than_raising_something_else():
     for bad in ["", "zz", "00", "not-hex" * 8]:
         with pytest.raises(RecordError):
             verify_record_signature("claim", "a" * 64, {"a": 1}, bad)
+
+
+def test_requiring_signed_submitters_is_off_by_default_and_omitted():
+    # Adding the field must not have moved any id, so the default has to be
+    # what every pre-existing objective already meant.
+    from proofwork.records import Objective
+
+    plain = Objective(
+        goal="G",
+        statement="s",
+        verifier={"kind": "certificate", "checker": "c.py",
+                  "checker_sha256": "ab" * 32, "entrypoint": "check"},
+        reward=1000,
+        funder="treasury",
+        created_at=TS,
+    )
+    assert plain.require_signed_submitter is False
+    assert "require_signed_submitter" not in plain.to_dict()
+
+    strict = Objective(**{**plain.__dict__, "require_signed_submitter": True})
+    # Admission rules are part of what was funded, so this is a different
+    # objective -- exactly as changing the verifier is.
+    assert strict.id != plain.id
+    assert strict.to_dict()["require_signed_submitter"] is True
+    assert Objective.from_dict(strict.to_dict()).require_signed_submitter is True
+
+
+@pytest.mark.parametrize("value", ["yes", 1, 0, "true", []])
+def test_a_non_boolean_policy_flag_is_refused_not_coerced(value):
+    # Coercion is what a split looks like: "yes" meaning True here and False
+    # in the Rust decoder is two implementations disagreeing about which
+    # submissions are admissible.
+    from proofwork.records import Objective
+
+    body = Objective(
+        goal="G",
+        statement="s",
+        verifier={"kind": "certificate", "checker": "c.py",
+                  "checker_sha256": "ab" * 32, "entrypoint": "check"},
+        reward=1000,
+        funder="treasury",
+        created_at=TS,
+    ).to_dict()
+    body["require_signed_submitter"] = value
+    with pytest.raises(RecordError, match="boolean"):
+        Objective.from_dict(body)
