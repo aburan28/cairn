@@ -228,7 +228,7 @@ downstream is unbacked.
       citations recover four fifths of what the ratchet promised the frontier
       holder. A change to how settled money splits, so it lands *before* the
       first agent-funded objective, not after — and it moves the conformance
-      vectors and the Python reference with it.
+      vectors and the reference implementation with it.
 - [ ] Surface the **decomposition floor** at post time. A sub-objective the
       network verifies for more than it settles is subsidized by everything else;
       the break-even is a function of the objective's verifier tier and is

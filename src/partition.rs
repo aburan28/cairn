@@ -65,8 +65,10 @@ type HmacSha256 = Hmac<Sha256>;
 ///
 /// Ten minutes: long enough that a node can finish a useful chunk of search
 /// inside one assignment, short enough that a squatted region is released again
-/// soon. The Python reference uses this as the default argument of
-/// [`epoch_of`]; Rust has no default arguments, so callers pass it explicitly.
+/// soon. Passed explicitly at every call site rather than defaulted inside
+/// [`epoch_of`]: an epoch length that a caller can forget to supply is one that
+/// silently differs between two nodes, and the length is exactly the kind of
+/// parameter a consensus split hides in.
 pub const EPOCH_SECONDS: u64 = 600;
 
 /// Size of the assignment space: the unit interval scaled to `2^32`.

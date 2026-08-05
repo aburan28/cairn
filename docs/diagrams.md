@@ -98,7 +98,7 @@ flowchart TD
 Three things this picture is making a claim about:
 
 **`canonical` is the root and depends on nothing.** It is the cross-implementation
-contract — the Python reference has to agree with it byte for byte — so it is
+contract — the reference implementation has to agree with it byte for byte — so it is
 kept free of every other concern. Its `Value` has no float variant, which means
 an object whose identity could differ between two honest nodes *cannot be
 constructed*.

@@ -311,7 +311,9 @@ pub struct Ledger {
 #[derive(Debug, Default)]
 pub enum Codec {
     /// JSONL, one record per line. The format every existing log is in, and the
-    /// one the Python reference reads.
+    /// only one the reference implementation reads -- sealing is a storage
+    /// concern of this crate, not part of the format two implementations have
+    /// to agree on. `proofwork store export` is how a sealed log reaches it.
     #[default]
     Plain,
     /// Each line sealed with ChaCha20-Poly1305 under a local key.

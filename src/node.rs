@@ -24,15 +24,18 @@
 //! 3. **Novelty is necessary but never sufficient.** A duplicate artifact
 //!    verifies fine and mints zero.
 //!
-//! # Differences from the Python reference
+//! # A malformed record is skipped, not fatal
 //!
-//! The reference implementation raises on a malformed record: `objectives()`
-//! calls `Objective.from_dict` and lets the exception out. Here the accessors
-//! return plain collections, so an entry this version cannot decode is **skipped
-//! by the readers and reported by [`Node::audit`]** rather than taking the
-//! process down. Skipping is the safe direction for every accessor that feeds a
-//! rule: an objective that cannot be decoded is not found, so submissions
-//! against it are refused rather than admitted on a partially understood record.
+//! An entry this version cannot decode is **skipped by the readers and reported
+//! by [`Node::audit`]** rather than taking the process down. Skipping is the
+//! safe direction for every accessor that feeds a rule: an objective that cannot
+//! be decoded is not found, so submissions against it are refused rather than
+//! admitted on a partially understood record.
+//!
+//! This was a departure when it was written — the Python reference this crate
+//! replaced raised out of `objectives()` — and it is now what both
+//! implementations do, which is why `scripts/differential.sh` can compare their
+//! verdicts on a corpus of deliberately malformed records at all.
 //!
 //! The one place where "skip it" would be *unsafe* is the frontier, because a
 //! missing frontier means no citation is required and the payout curve restarts
@@ -40,9 +43,12 @@
 //! therefore uses the strict internal reader, which refuses the submission
 //! instead; only the informational [`Node::frontier_of`] softens it to `None`.
 //!
-//! Money arithmetic that Python does in bignums is checked here: `payout` and
-//! the running `paid_cumulative` return errors on overflow rather than wrapping,
-//! because a wrapped payout is an invented or destroyed unit of account.
+//! Money arithmetic is checked rather than wrapping: `payout` and the running
+//! `paid_cumulative` return errors on overflow, because a wrapped payout is an
+//! invented or destroyed unit of account. The original Python reference got this
+//! free from bignums and so never had to think about it, which is precisely why
+//! the boundary is tested here on purpose — a reward above `u64::MAX` is in
+//! `conformance/adversarial.jsonl` for exactly that reason.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

@@ -106,7 +106,7 @@ Also:
   allows it (best-effort; failure to set is logged in evidence, not a reject).
 - Update `SANDBOXING` to describe what is enforced and what still is not
   (no gVisor/Firecracker yet; path-pin / code-distribution still open).
-- Python reference: document parity gap or spawn under the same wrappers when
+- Reference implementation: document parity gap or spawn under the same wrappers when
   available; do not silently claim a jail it does not have.
 
 Threat-model: malicious objective code moves from *launch blocker / not

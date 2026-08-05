@@ -1410,8 +1410,8 @@ fn independently_generated_identities_are_unrelated_to_any_seed() {
     assert_eq!(reloaded.public(), throwaway.public());
 }
 
-/// Regenerate `conformance/signatures.json`, which the Python reference
-/// verifies against.
+/// Regenerate `conformance/signatures.json`, which the reference
+/// implementation verifies against via `proofwork-reference signatures`.
 ///
 /// The other conformance vectors flow Python -> Rust. These flow the other
 /// way, and they have to: Python verifies signatures with a hand-written

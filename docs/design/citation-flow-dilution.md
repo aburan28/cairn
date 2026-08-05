@@ -163,7 +163,7 @@ expect.
 **The design note's 408,226 is exact-rational; the implementations produce
 408,225.** Integer arithmetic floors. What matters is not which figure is
 "right" but that both implementations floor *identically*, which they do —
-checked against the Python reference directly, and the odd unit has a
+checked against the reference implementation directly, and the odd unit has a
 deterministic owner.
 
 ## Where the next attempt should start
@@ -181,5 +181,5 @@ downstream citer's contribution must be exactly equal across every slicing.
 
 One warning, because it is what makes this expensive rather than merely
 hard: **this changes how settled money splits.** It moves the conformance
-vectors and the Python reference with them, so it has to land before an
+vectors and the reference implementation with them, so it has to land before an
 objective anyone cares about is funded, not after.

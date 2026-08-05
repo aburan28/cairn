@@ -7,6 +7,13 @@
 //!   point: they are the surviving evidence from an implementation written in
 //!   another language, and they keep proving the format is a format rather
 //!   than a description of one program's behaviour.
+//! * `signed-records <signed-records.json>` and `signatures <signatures.json>`
+//!   — the same, for the two vector files that cover signing. They are separate
+//!   commands because they are separate files, and they exist because when the
+//!   Python reference went away those two lost their only independent checker.
+//!   A signature is inside the record, so it is inside the id: an implementation
+//!   that got the signing payload right and the *id* wrong would settle a
+//!   different claim while verifying every signature perfectly.
 //! * `audit <log.jsonl>` — re-derive a log the primary implementation wrote:
 //!   chain integrity, record ids, signatures, Merkle root.
 
@@ -36,12 +43,9 @@ fn main() -> ExitCode {
         })
         .map(|(_, arg)| arg.as_str());
     let result = match command {
-        Some("conformance") => conformance(
-            args.iter()
-                .position(|a| a == "conformance")
-                .and_then(|at| args.get(at + 1))
-                .map(String::as_str),
-        ),
+        Some("conformance") => conformance(after(&args, "conformance")),
+        Some("signed-records") => signed_records(after(&args, "signed-records")),
+        Some("signatures") => signatures(after(&args, "signatures")),
         Some("audit") | Some("post") | Some("commit") | Some("reveal") | Some("settle")
         | Some("log") | Some("decode") | Some("canon") => cli(&args),
         Some("--help") | Some("help") | None => {
@@ -49,6 +53,8 @@ fn main() -> ExitCode {
                 "proofwork-reference — an independent check on the primary implementation\n\n\
                  USAGE\n    \
                  proofwork-reference conformance <vectors.json>\n    \
+                 proofwork-reference signed-records <signed-records.json>\n    \
+                 proofwork-reference signatures <signatures.json>\n    \
                  proofwork-reference [--log P] [--root D] post <objective.json>\n    \
                  proofwork-reference [--log P] [--root D] commit <id> --submitter S --artifact F [--nonce N]\n    \
                  proofwork-reference [--log P] [--root D] reveal <id> --submitter S --artifact F --nonce N [--cites ID]\n    \
@@ -71,6 +77,14 @@ fn main() -> ExitCode {
 fn read(path: Option<&str>, what: &str) -> Result<String, String> {
     let path = path.ok_or_else(|| format!("expected a path to {what}"))?;
     std::fs::read_to_string(path).map_err(|error| format!("cannot read {path}: {error}"))
+}
+
+/// The argument following `word`, wherever `word` sits in the argument list.
+fn after<'a>(args: &'a [String], word: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == word)
+        .and_then(|at| args.get(at + 1))
+        .map(String::as_str)
 }
 
 /// Every failure is collected rather than returned at the first one: knowing
@@ -316,6 +330,141 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
 }
 
 // -- vector helpers ---------------------------------------------------------
+
+/// Reproduce `conformance/signed-records.json`.
+///
+/// One case per record kind, each holding the record, its canonical bytes, and
+/// its id. All three are checked, and the third is the one that matters: the
+/// signature is a field of the record, so it is inside the digest. An
+/// implementation that agreed about the signing payload and disagreed about the
+/// *id* would verify every signature perfectly and still settle a different
+/// claim.
+fn signed_records(path: Option<&str>) -> Result<(), String> {
+    let text = read(path, "conformance/signed-records.json")?;
+    let cases = Value::from_json(&text).map_err(|e| e.to_string())?;
+    let Value::Object(by_kind) = &cases else {
+        return Err(String::from("signed-records.json must be an object"));
+    };
+    let mut f = Failures(Vec::new());
+    let mut checked = 0usize;
+
+    for (kind, case) in by_kind {
+        let record = case
+            .get("record")
+            .ok_or_else(|| format!("{kind}: case needs a record"))?;
+        let want_canonical = str_of(case, "canonical")?;
+        let want_id = str_of(case, "id")?;
+
+        // Decoded and re-encoded rather than hashed as given, so this exercises
+        // the reader too: a decoder that dropped `signature` would still
+        // reproduce the bytes if they were hashed straight from the file.
+        let (canonical, id, verified) = match kind.as_str() {
+            "commitment" => {
+                let commitment = Commitment::from_value(record).map_err(|e| e.0)?;
+                (
+                    commitment.to_value().canonical_string(),
+                    commitment.id(),
+                    commitment.verify_signature(),
+                )
+            }
+            "claim" => {
+                let claim = Claim::from_value(record).map_err(|e| e.0)?;
+                (
+                    claim.to_value().canonical_string(),
+                    claim.id(),
+                    claim.verify_signature(),
+                )
+            }
+            other => return Err(format!("unknown record kind {other:?}")),
+        };
+        f.check(kind, "canonical", &canonical, want_canonical.to_string());
+        f.check(kind, "id", &id, want_id.to_string());
+        // And the signature really verifies. A vector whose signature was
+        // wrong would still round-trip through the two checks above, which
+        // would make this file a test of the encoder alone.
+        f.check(kind, "signature verifies", verified.is_ok(), true);
+        checked += 1;
+    }
+
+    report(f, checked, "signed record")
+}
+
+/// Reproduce `conformance/signatures.json`: raw ed25519 verification.
+///
+/// The one vector file that flows the other way — these were produced here and
+/// checked by an implementation that shared no code with `ed25519-dalek`. What
+/// they pin is `verify_strict` behaviour, so a rebuild against a library that
+/// quietly accepted a small-order key or a non-canonical `s` would show up.
+fn signatures(path: Option<&str>) -> Result<(), String> {
+    let text = read(path, "conformance/signatures.json")?;
+    let cases = Value::from_json(&text).map_err(|e| e.to_string())?;
+    let Value::Array(cases) = &cases else {
+        return Err(String::from("signatures.json must be an array"));
+    };
+    let mut f = Failures(Vec::new());
+    let mut checked = 0usize;
+
+    for (index, case) in cases.iter().enumerate() {
+        let message = unhex(str_of(case, "message_hex")?)
+            .ok_or_else(|| format!("case {index}: message_hex is not hex"))?;
+        let key_hex = str_of(case, "public_key")?;
+        let signature_hex = str_of(case, "signature")?;
+        // `valid` absent means the case is a positive one. Absent and `false`
+        // are not interchangeable anywhere in this format, and a negative
+        // vector that silently read as positive would invert the whole check.
+        let want = case
+            .get("valid")
+            .map(|value| matches!(value, Value::Bool(true)))
+            .unwrap_or(true);
+
+        let verified = match (
+            proofwork_reference::sig::public_key(key_hex),
+            proofwork_reference::sig::signature(signature_hex),
+        ) {
+            (Some(key), Some(signature)) => {
+                proofwork_reference::sig::verify(&key, &message, &signature)
+            }
+            // A key or signature this implementation cannot even parse is a
+            // failure to verify, not an error: that is exactly what a negative
+            // vector for a malformed key is testing.
+            _ => false,
+        };
+        f.check("signatures", &format!("case {index}"), verified, want);
+        checked += 1;
+    }
+
+    report(f, checked, "signature")
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let bytes = text.as_bytes();
+    for pair in bytes.chunks(2) {
+        let value = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        out.push((value(pair[0])? << 4) | value(pair[1])?);
+    }
+    Some(out)
+}
+
+fn report(f: Failures, checked: usize, noun: &str) -> Result<(), String> {
+    if f.0.is_empty() {
+        println!("conformance ok: {checked} {noun} vector(s) reproduced independently");
+        Ok(())
+    } else {
+        for failure in &f.0 {
+            println!("  {failure}");
+        }
+        Err(format!("{} vector(s) disagree", f.0.len()))
+    }
+}
 
 fn section<'a>(vectors: &'a Value, name: &str) -> Result<&'a [Value], String> {
     vectors

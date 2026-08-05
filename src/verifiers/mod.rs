@@ -40,11 +40,15 @@
 //! | `lean` | a proof-assistant kernel accepted the proof | seconds to minutes |
 //! | `replay` | a pinned computation reproduces its declared fields | a full re-run |
 //!
-//! # Architectural change from the Python reference: jailed subprocess, not `exec`
+//! # Jailed subprocess, not in-process execution
 //!
-//! The reference implementation `exec`s pinned checker and evaluator source
-//! **in-process**. This port runs it as a **subprocess inside an OS jail**
-//! instead. Two reasons, both real:
+//! Pinned checker and evaluator source runs as a **subprocess inside an OS
+//! jail**. Neither reference implementation does this — the Python one this
+//! crate replaced `exec`d in-process, and `reference/rust` spawns an
+//! interpreter with no jail at all. That is the correct division of labour: a
+//! reference implementation exists to be an independent second opinion on the
+//! *rules*, and it is not something anybody should point at a stranger's code.
+//! Two reasons this one is jailed, both real:
 //!
 //! 1. *Security.* In-process execution gives a malicious objective author the
 //!    address space of every contributor who touches the objective -- their
@@ -60,8 +64,8 @@
 //! file that no longer matches its pin means the *objective* is broken, not that
 //! the submitted artifact is bad.
 //!
-//! The other consequence of the subprocess design is a liveness one: an
-//! in-process `exec` of a looping checker hangs the node forever, while every
+//! The other consequence of the subprocess design is a liveness one:
+//! in-process execution of a looping checker hangs the node forever, while every
 //! child spawned here runs under a wall-clock bound and is killed on expiry.
 //! Expiry yields `Unavailable`, so a slow checker can never become a rejection.
 

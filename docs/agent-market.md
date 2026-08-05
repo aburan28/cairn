@@ -151,7 +151,7 @@ general answer:
   costs real money and real verification. This is the general answer and it is
   more expensive: `flow()` takes claims and an amount, not settlement values, so
   it is an interface change and a **conformance change** — attribution is pinned
-  in `conformance/vectors.json` and shared with the Python reference.
+  in `conformance/vectors.json` and shared with the reference implementation.
 
 Both must land *before* agent funding, for the same reason confidentiality
 classes had to land before objectives are funded: it is a change to how money
@@ -400,7 +400,7 @@ retrofitted onto settled claims.
 - [ ] Reserved citation share for protocol-enforced citations, so the ratchet's
       guarantee survives a free supply of citable claims.
 - [ ] Reward-weighted discretionary split, with the conformance vectors and the
-      Python reference moved together.
+      reference implementation moved together.
 
 **Stage 1 — agent as funder.** Everything here is enabling an existing field.
 

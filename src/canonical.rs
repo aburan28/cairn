@@ -2,9 +2,11 @@
 //!
 //! Consensus-critical. Two implementations that disagree about an object's bytes
 //! disagree about its identity, and therefore about which objective was funded
-//! and which artifact was accepted. `conformance/vectors.json` pins the format
-//! against the Python reference implementation; if this module and that file
-//! disagree, this module is wrong.
+//! and which artifact was accepted. `conformance/vectors.json` pins the format,
+//! and is frozen rather than regenerated: it was produced by a Python reference
+//! implementation this crate replaced, which is exactly why it is kept —
+//! evidence from another language beats a description of this program's own
+//! behaviour. If this module and that file disagree, this module is wrong.
 //!
 //! # The format
 //!
@@ -17,10 +19,11 @@
 //!
 //! # Why floats are unrepresentable rather than rejected
 //!
-//! The Python reference checks for floats at runtime and raises. Here [`Value`]
-//! simply has no float variant, so a float cannot enter a record at all -- the
-//! failure moves from a test that has to remember to run to a program that does
-//! not compile. IEEE-754 doubles do not round-trip identically through every
+//! [`Value`] has no float variant, so a float cannot enter a record at all --
+//! the failure moves from a check that has to run to a program that does not
+//! compile. The Python reference this crate replaced could only test for floats
+//! at runtime and raise; making it unrepresentable is the whole advantage of
+//! the type system here. IEEE-754 doubles do not round-trip identically through every
 //! JSON implementation and do not reproduce bitwise across heterogeneous
 //! hardware, which is exactly the disagreement this type prevents.
 //!
@@ -163,10 +166,12 @@ impl Value {
     /// JSON library gives that library's private conventions consensus weight:
     /// `serde_json` with `arbitrary_precision` decodes an object whose first
     /// key is its internal number token (`$serde_json::private::Number`) as a
-    /// *number*, so the same bytes parsed here and by the Python reference
-    /// produced two different values — and therefore two different digests.
-    /// A decoder spelled out in this file cannot drift under a dependency
-    /// update, and every rule below is the same rule `json.loads` applies.
+    /// *number*, so the same bytes parsed here and by any decoder without that
+    /// quirk produced two different values — and therefore two different
+    /// digests. That was found against the Python reference of the day and is
+    /// not a fact about Python: a second implementation reaching for the same
+    /// crate today would reintroduce it. A decoder spelled out in this file
+    /// cannot drift under a dependency update.
     pub fn from_json(text: &str) -> Result<Value, CanonicalError> {
         let mut parser = Parser { text, pos: 0 };
         parser.skip_whitespace();
@@ -589,8 +594,8 @@ mod tests {
     fn a_library_private_number_token_stays_an_object() {
         // Regression. `serde_json` with `arbitrary_precision` decodes an object
         // whose first key is its internal number token as a *number*, so this
-        // input used to parse as `{"x":42}` here while the Python reference —
-        // and the encoder in this very file — saw an object. Same bytes, two
+        // input used to parse as `{"x":42}` here while the reference of the day
+        // — and the encoder in this very file — saw an object. Same bytes, two
         // digests: a consensus split one crafted record away.
         let text = r#"{"x":{"$serde_json::private::Number":"42"}}"#;
         let value = Value::from_json(text).expect("valid JSON object");

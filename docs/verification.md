@@ -209,7 +209,7 @@ name — replay's `cwd`, lean's `project_root` — resolve against the objective
 root and are refused when they escape it. A record cannot choose which host
 paths are bound into its own jail.
 
-**The Python reference does not jail at all.** It `exec`s pinned code in-process
-by design — it is the readable specification of the *rules*, not a hardened
-node — and `proofwork.verifiers.base.SANDBOXING` says so in those words. Do not
-point it at an objective you have not read.
+**The reference implementation does not jail at all.** It spawns the
+interpreter directly, by design — it exists to be an independent second opinion
+on the *rules*, not a hardened node — and `reference/rust/src/verifiers.rs` says
+so in those words. Do not point it at an objective you have not read.

@@ -19,11 +19,11 @@
 //!
 //! # Why the argument parser is hand-rolled
 //!
-//! The reference implementation uses `argparse`. There is no `clap` in this
-//! crate's dependency set, and adding one to parse six subcommands would be a
-//! poor trade: the grammar below reads top to bottom, and every failure in it is
-//! a typed error rather than a process abort. `clap` and `argparse` both call
-//! `exit()` from inside the parser; this one returns.
+//! There is no `clap` in this crate's dependency set, and adding one to parse a
+//! handful of subcommands would be a poor trade: the grammar below reads top to
+//! bottom, and every failure in it is a typed error rather than a process abort.
+//! `clap` calls `exit()` from inside the parser; this one returns, which is what
+//! lets every command below be tested by calling it rather than by spawning it.
 //!
 //! # No panics, including the ones a CLI usually gets away with
 //!

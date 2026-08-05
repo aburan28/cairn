@@ -78,8 +78,9 @@ fn oversized_integers_are_refused_rather_than_becoming_floats() {
     assert!(Value::from_json(&format!(r#"{{"x": {too_big}}}"#)).is_err());
 }
 
-/// Regenerate `conformance/signed-records.json`, which the Python reference
-/// reproduces field for field.
+/// Regenerate `conformance/signed-records.json`, which the reference
+/// implementation reproduces field for field via
+/// `proofwork-reference signed-records`.
 ///
 /// A signature is part of the record, so it is part of the id. Two
 /// implementations that disagreed about how a signed record digests would give

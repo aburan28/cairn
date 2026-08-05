@@ -56,6 +56,13 @@ jobs:
       - run: cargo fmt --check --manifest-path reference/rust/Cargo.toml
       - run: cargo clippy --manifest-path reference/rust/Cargo.toml --all-targets -- -D warnings
       - run: ./reference/rust/target/release/proofwork-reference conformance conformance/vectors.json
+      # The two vector files that cover signing. They lost their independent
+      # checker when the Python reference went away, which mattered more than
+      # it looked: a signature is a field of the record, so it is inside the
+      # id -- an implementation could verify every signature perfectly and
+      # still settle a different claim.
+      - run: ./reference/rust/target/release/proofwork-reference signed-records conformance/signed-records.json
+      - run: ./reference/rust/target/release/proofwork-reference signatures conformance/signatures.json
 
   msrv:
     # The crate claims rust-version 1.89 (`File::try_lock` stabilized there).
@@ -116,6 +123,13 @@ jobs:
       # Python reference this crate replaced, which is exactly why they are
       # kept: evidence from an implementation in another language.
       - run: ./reference/rust/target/release/proofwork-reference conformance conformance/vectors.json
+      # The two vector files that cover signing. They lost their independent
+      # checker when the Python reference went away, which mattered more than
+      # it looked: a signature is a field of the record, so it is inside the
+      # id -- an implementation could verify every signature perfectly and
+      # still settle a different claim.
+      - run: ./reference/rust/target/release/proofwork-reference signed-records conformance/signed-records.json
+      - run: ./reference/rust/target/release/proofwork-reference signatures conformance/signatures.json
       - run: ./scripts/interop.sh
       # Here rather than in the `main` job because it ends by handing the
       # rotated store's plaintext export to the reference, and this job is

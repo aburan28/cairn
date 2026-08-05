@@ -426,8 +426,8 @@ fn ingest_rejects_an_inflated_score() {
 #[test]
 fn ingest_rejects_a_candidate_that_crashes_the_scorer() {
     // A crash while scoring a peer's candidate says nothing about the candidate
-    // and must not be recorded as a score of its own. The Python reference
-    // catches the exception; here the contract is that a scorer signals failure
+    // and must not be recorded as a score of its own. The contract here is
+    // that a scorer signals failure
     // with `None`, because `catch_unwind` does nothing under `panic = "abort"`
     // and a defence that silently stops working is worse than none.
     let mut population = Population::new(2, 4).expect("positive bounds");

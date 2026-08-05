@@ -179,11 +179,13 @@ pub fn parse_rfc3339(text: &str) -> Option<i64> {
     if day > days_in_month(year, month) {
         return None;
     }
-    // A leap second (`:60`) is refused, not normalised. The Python reference
-    // (`datetime.fromisoformat`) refuses it, and both implementations walk the
-    // whole log deciding which entries move the settlement anchor -- one
-    // spelling accepted here and refused there is a different anchor, a
-    // different beacon order, and different payouts for the same log.
+    // A leap second (`:60`) is refused, not normalised. Both implementations
+    // walk the whole log deciding which entries move the settlement anchor --
+    // one spelling accepted here and refused there is a different anchor, a
+    // different beacon order, and different payouts for the same log. The rule
+    // came from the Python reference's `datetime.fromisoformat`, which refused
+    // it; it is pinned by `conformance/vectors.json` now, so it holds whatever
+    // the second implementation happens to be written in.
     if hour > 23 || minute > 59 || second > 59 {
         return None;
     }
@@ -347,8 +349,8 @@ mod tests {
             "1900-02-29T00:00:00Z",
             "1970-01-01T24:00:00Z",
             "1970-01-01T00:60:00Z",
-            // A leap second: the Python reference refuses it, so accepting it
-            // here would move the settlement anchor for a log containing one.
+            // A leap second: the format refuses it, so accepting it here would
+            // move the settlement anchor for a log containing one.
             "1970-01-01T00:00:60Z",
             "1970-01-01T00:00:00+24:00",
             "1970-01-01T00:00:00+0000",

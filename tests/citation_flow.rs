@@ -147,7 +147,8 @@ fn slicing_ever_more_finely_no_longer_drains_the_upstream() {
     // 408,225 and not the 408,226 the design note quotes: that figure comes
     // from the exact-rational harness, and this is integer arithmetic that
     // floors. Both implementations floor identically -- checked against the
-    // Python reference -- which is the property that matters. A conservation
+    // reference implementation -- which is the property that matters. A
+    // conservation
     // test covers where the odd unit goes.
     assert_eq!(sixteen, 408_225);
 
