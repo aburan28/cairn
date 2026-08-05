@@ -119,3 +119,23 @@ for label, steps in (("bob unsliced", honest), ("bob x4", sliced), ("bob x16", s
     by = inflow_by_payer(steps)
     parts = "  ".join(f"from {k}={float(v):>9.0f}" for k, v in sorted(by.items()))
     print(f"  {label:14s} {parts}")
+
+# --------------------------------------------------------------------------
+# The decisive question: does the slicer's gain converge, or grow without
+# limit? A bounded premium for publishing incrementally is what the ratchet
+# exists to encourage. Unbounded extraction is an attack.
+# --------------------------------------------------------------------------
+def sliced_n(n):
+    return [("alice", 300_000)] + [("bob", 400_000 // n)] * n + [("carol", 400_000)]
+
+print()
+print("Convergence: alice's total as bob slices ever more finely")
+print(f"  {'slices':>7} | {'current':>10} | {'weighted':>10}")
+for n in (1, 4, 16, 64, 256):
+    cur = current_flow(chain(sliced_n(n)))["alice"]
+    prop = proposed_flow(chain(sliced_n(n)))["alice"]
+    print(f"  {n:>7} | {float(cur):>10.0f} | {float(prop):>10.0f}")
+print("  current  -> 300,521: alice's citation flow is driven to ZERO (she keeps")
+print("             only her own direct reward). Unbounded extraction.")
+print("  weighted -> 406,510: converges. She keeps ~75% of her flow however")
+print("             finely the work above her is chopped. Bounded premium.")

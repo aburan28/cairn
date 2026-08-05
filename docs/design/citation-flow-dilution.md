@@ -71,6 +71,42 @@ two sees ancestors {slice one, alice} with weights 100,000 and 300,000, so
 alice takes only 300/400 of that slice's δ — and it worsens with each further
 slice.
 
+## The decisive measurement: bounded, not merely smaller
+
+The 8% figure is not the interesting number. What matters is whether the
+slicer's gain **converges**, and the two rules differ qualitatively rather
+than by degree:
+
+| slices | alice, current rule | alice, reward-weighted |
+|---|---|---|
+| 1 | 425,000 | 442,857 |
+| 4 | 333,594 | 414,107 |
+| 16 | 308,331 | 408,226 |
+| 64 | 302,083 | 406,853 |
+| 256 | 300,521 | 406,510 |
+
+Under the current rule alice tends to **300,521** — her own direct reward of
+300,000 and essentially nothing else. Her citation flow is driven to *zero*.
+The extraction is unbounded: a determined slicer takes all of it.
+
+Under reward weighting she converges to **406,510** and stays there. She keeps
+roughly three quarters of her flow however finely the work above her is
+chopped, and the slicer's premium converges to about 10% rather than growing.
+
+That reframes the residual. It is not a leak that a better rule would remove —
+it is the mechanism correctly pricing a longer dependency chain, and it is
+bounded. Two properties make that defensible rather than a rationalisation:
+
+**It is identity-blind.** If bob's four slices were four different people, the
+rule returns exactly the same numbers. Nothing keys on who submitted what, so
+there is no sybil version of the attack — which matters more now than it did,
+because `proofwork identity` makes minting a name one command.
+
+**It rewards the behaviour the ratchet exists to encourage.** A small bounded
+premium for publishing in many steps rather than one is not a bug in a system
+whose entire design goal is to make publishing immediately profitable. The
+current rule *punishes* incremental publication, which is backwards.
+
 ## Why the obvious repairs are wrong
 
 **Collapse consecutive same-submitter citations into one hop.** Fixes the
@@ -83,26 +119,37 @@ this shape.
 is most of what a citation chain is — and it would penalise honest incremental
 work by different people, which is the behaviour the ratchet exists to reward.
 
+## Status: designed and validated, not implemented
+
+The rule meets both constraints below on measurement rather than argument, so
+what remains is implementation rather than design:
+
+1. **Slicing-invariance** — exact for downstream citers, bounded and
+   converging for the slicer's own chain.
+2. **Exact conservation** — the harness asserts it at every step, in exact
+   rational arithmetic.
+
+What has *not* been done, and is deliberately not a footnote: porting it to
+both implementations, regenerating the conformance vectors, and re-proving
+integer conservation with the odd-unit rule at every δ. This changes how
+settled money splits, so it must land before an objective anyone cares about
+is funded — and it must land in one piece, in both languages, or the two
+disagree about what everyone is owed.
+
 ## Where the next attempt should start
 
-The residual has a clean statement: bob's earlier slices are themselves built
-on alice, so money reaching them *should* flow onward to her rather than
-stopping. That points at a hybrid — reward-weighted for the split, but with the
-weight of an ancestor inheriting the weight of its own ancestors, so a chain of
-slices resolves to the same distribution as the single claim it replaced.
-Whether that composes without reintroducing per-hop decay, and whether it still
-conserves exactly in integers, is the open question.
+Implement `payouts_over` against the transitive-ancestor set with reward
+weights, in `src/attribution.rs` and `reference/python/proofwork/attribution.py`
+together. The existing conservation machinery carries over unchanged — the odd
+unit still needs its deterministic owner, and the property tests that pin
+conservation across amounts and δs are the bar.
 
-Two constraints any candidate has to meet before it is worth implementing:
+`tests/citation_flow.rs` currently *pins the attack*: its assertions encode
+that slicing pays. Those assertions become the regression test for the fix,
+inverted — alice's inflow must stay bounded as the slice count rises, and the
+downstream citer's contribution must be exactly equal across every slicing.
 
-1. **Slicing-invariance for both payers**, measured with the harness, not
-   argued. The table above is the test.
-2. **Exact conservation at every δ and every reward**, in integers, with a
-   deterministic rule for the odd unit. The existing property tests are the
-   bar and they are not negotiable — attribution that conserves approximately
-   is attribution that mints.
-
-And one warning, because it is what makes this expensive rather than merely
+One warning, because it is what makes this expensive rather than merely
 hard: **this changes how settled money splits.** It moves the conformance
 vectors and the Python reference with them, so it has to land before an
 objective anyone cares about is funded, not after.
