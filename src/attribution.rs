@@ -290,34 +290,25 @@ pub fn flow(
     }
     payouts
 }
-
-/// Total payouts across a batch of settlements -- the port of the reference
-/// implementation's `ledger_payouts`.
+/// Total payouts across a set of settlements.
 ///
-/// The reference reads claims and settlements straight off a node's log. Here
-/// the caller does that decoding and passes the results in, so attribution does
-/// not depend on the node module that depends on attribution. `settlements` is
-/// `(claim_id, reward)` in log order; order does not affect the totals.
+/// Uses [`payouts_weighted`]: δ split among all transitive ancestors weighted
+/// by each one's settled reward. The per-hop rule this replaced let a
+/// submitter chop one improvement into many steps and drive an upstream
+/// contributor's citation flow to *zero* -- free in direct reward because the
+/// pool telescopes, and strictly profitable in flow, so slicing was the
+/// dominant strategy rather than an exotic attack. See
+/// `docs/design/citation-flow-dilution.md`.
 ///
-/// Unlike [`flow`], this can genuinely overflow: a single flow is bounded by
-/// its own `amount`, but a sum over many settlements is bounded by nothing.
-/// Overflow is an error, never a wrap.
+/// [`flow`] still implements the per-hop rule and is kept for a caller that
+/// has one claim and no settlement context. It is **not** the money path: it
+/// cannot be, because the weights come from what each ancestor settled for.
 pub fn payouts_over(
     settlements: &[(String, u64)],
     claims: &BTreeMap<String, Claim>,
     params: &FlowParams,
 ) -> Result<BTreeMap<String, u64>, FlowError> {
-    let mut totals: BTreeMap<String, u64> = BTreeMap::new();
-    for (claim_id, reward) in settlements {
-        for (who, units) in flow(claim_id, *reward, claims, params) {
-            let total = totals.entry(who.clone()).or_insert(0);
-            match total.checked_add(units) {
-                Some(sum) => *total = sum,
-                None => return Err(FlowError::PayoutOverflow { who }),
-            }
-        }
-    }
-    Ok(totals)
+    payouts_weighted(settlements, claims, params)
 }
 
 /// Reward-weighted attribution: `delta` split among **all transitive
@@ -856,15 +847,61 @@ mod tests {
         let settlements = vec![(dave.id(), 1000u64), (bob.id(), 40), (carol.id(), 100)];
         let totals = payouts_over(&settlements, &claims, &params(1, 4, 6))
             .expect("no overflow at this size");
+        // Alice is absent from `settlements`, so she has no *measured*
+        // contribution and takes no weight -- see
+        // `an_unsettled_ancestor_takes_no_share` for why that is the rule and
+        // when it matters. Dave's delta therefore splits between bob and
+        // carol in the ratio of what they settled for, 40:100.
         assert_eq!(
             totals,
-            expect(&[("dave", 750), ("alice", 152), ("carol", 169), ("bob", 69)])
+            expect(&[("dave", 750), ("carol", 254), ("bob", 136)])
         );
         assert_eq!(
             total(&totals),
             1140,
             "conservation holds across settlements"
         );
+    }
+
+    #[test]
+    fn an_unsettled_ancestor_takes_no_share() {
+        // The weights are settled rewards, because on a ratchet that is the
+        // progress a claim moved. An ancestor with nothing settled has no
+        // measured contribution, so it takes nothing and its share goes to
+        // the ancestors that do -- rather than being burned, which would
+        // break conservation, or guessed at, which would invent a number the
+        // log does not contain.
+        //
+        // This is a statement about *timing*, not entitlement: `ledger_payouts`
+        // draws settlements from the whole log, so a claim that has settled at
+        // all is weighted. A claim whose epoch has not closed yet is simply
+        // not paid yet, and neither is its upstream flow.
+        let (records, claims) = diamond();
+        let dave = records.get(3).expect("diamond has four claims");
+        let bob = records.get(1).expect("diamond has four claims");
+
+        let without_alice = payouts_over(
+            &[(dave.id(), 1000u64), (bob.id(), 100)],
+            &claims,
+            &params(1, 4, 6),
+        )
+        .expect("no overflow");
+        assert_eq!(without_alice.get("alice"), None);
+        assert_eq!(total(&without_alice), 1100, "still conserves exactly");
+
+        // Once alice settles, she is weighted like anyone else.
+        let alice = records.first().expect("diamond has four claims");
+        let with_alice = payouts_over(
+            &[(dave.id(), 1000u64), (bob.id(), 100), (alice.id(), 500)],
+            &claims,
+            &params(1, 4, 6),
+        )
+        .expect("no overflow");
+        assert!(
+            with_alice.get("alice").copied().unwrap_or(0) > 500,
+            "alice should receive her own settlement plus upstream flow"
+        );
+        assert_eq!(total(&with_alice), 1600, "still conserves exactly");
     }
 
     #[test]

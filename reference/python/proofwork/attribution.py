@@ -96,15 +96,117 @@ def flow(
     return dict(payouts)
 
 
+def ancestors_of(claim_id: str, claims: dict[str, Claim]) -> list[str]:
+    """Every transitive ancestor of ``claim_id``, sorted, excluding itself.
+
+    **Deliberately not bounded by ``max_depth``.** That bound belongs to the
+    per-hop rule, where it caps how far decay compounds. Applying it here would
+    make entitlement depend on hop distance again -- and worse than the decay
+    it replaced, because a cliff is sharper than a slope: a submitter could
+    push an upstream contributor past the horizon by slicing and cut them to
+    *zero* rather than merely thinning them.
+
+    Cycle-safe by the visited set rather than by a path check: with a flat
+    split there is no path, and an ancestor reached twice is still one
+    ancestor.
+    """
+    root = claims.get(claim_id)
+    if root is None:
+        return []
+    seen: set[str] = set()
+    frontier = [c for c in root.cites if c in claims]
+    while frontier:
+        nxt: list[str] = []
+        for node_id in frontier:
+            if node_id == claim_id or node_id in seen:
+                continue
+            seen.add(node_id)
+            claim = claims.get(node_id)
+            if claim is None:
+                continue
+            nxt.extend(c for c in claim.cites if c in claims and c not in seen)
+        frontier = nxt
+    return sorted(seen)
+
+
+def payouts_weighted(
+    settlements: list[tuple[str, int]],
+    claims: dict[str, Claim],
+    params: FlowParams | None = None,
+) -> dict[str, int]:
+    """``delta`` split among all transitive ancestors, weighted by settled reward.
+
+    The replacement for per-hop decay. Per-hop decay lets a submitter chop one
+    improvement into many steps and drive an upstream contributor's citation
+    flow to *zero* -- free in direct reward because the pool telescopes, and
+    strictly profitable in flow. Here a downstream citer pays the upstream
+    contributor the same however the middle was chopped, and the slicer's own
+    premium converges instead of growing.
+
+    Weighted by settled reward because on a ratchet that *is* the progress a
+    claim moved, and telescoping guarantees the slices of one improvement sum
+    to the reward of the single claim they replaced -- so the weights are
+    slicing-invariant by construction, with no new input needed.
+
+    Identity-blind: four slices by one submitter and four claims by four
+    submitters produce identical numbers. Anything keyed on *who* submitted
+    would have a sybil version, and minting an identity is one command.
+    """
+    params = params or FlowParams()
+    weights = dict(settlements)
+    totals: dict[str, int] = defaultdict(int)
+
+    for claim_id, reward in settlements:
+        if reward == 0:
+            continue
+        claim = claims.get(claim_id)
+        if claim is None:
+            continue
+
+        # An ancestor that settled for nothing moved no ground to be paid for,
+        # and including it would let a chain of them thin everyone who did.
+        weighted = [
+            (a, weights[a])
+            for a in ancestors_of(claim_id, claims)
+            if weights.get(a, 0) > 0
+        ]
+        total_weight = sum(w for _, w in weighted)
+        if not weighted or total_weight == 0:
+            totals[claim.submitter] += reward
+            continue
+
+        upstream = reward * params.delta_num // params.delta_den
+        totals[claim.submitter] += reward - upstream
+        if upstream == 0:
+            continue
+
+        # Largest-remainder, ties by sorted id. Any rule conserves; only one
+        # every node reproduces from the record keeps them in agreement.
+        shares = []
+        for ancestor_id, weight in weighted:
+            numerator = upstream * weight
+            shares.append([ancestor_id, numerator // total_weight, numerator % total_weight])
+        leftover = upstream - sum(share for _, share, _ in shares)
+        for entry in sorted(shares, key=lambda e: (-e[2], e[0]))[:leftover]:
+            entry[1] += 1
+
+        for ancestor_id, share, _ in shares:
+            if share == 0:
+                continue
+            ancestor = claims.get(ancestor_id)
+            if ancestor is not None:
+                totals[ancestor.submitter] += share
+    return dict(totals)
+
+
 def ledger_payouts(node, params: FlowParams | None = None) -> dict[str, int]:
     """Total payouts across every settlement recorded in a node's log."""
     claims = {
         Claim.from_dict(e.payload).id: Claim.from_dict(e.payload)
         for e in node.ledger.entries("claim")
     }
-    totals: dict[str, int] = defaultdict(int)
-    for entry in node.ledger.entries("settlement"):
-        payload = entry.payload
-        for who, units in flow(payload["claim_id"], payload["reward"], claims, params).items():
-            totals[who] += units
-    return dict(totals)
+    settlements = [
+        (entry.payload["claim_id"], entry.payload["reward"])
+        for entry in node.ledger.entries("settlement")
+    ]
+    return payouts_weighted(settlements, claims, params)

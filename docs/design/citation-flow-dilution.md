@@ -7,12 +7,11 @@ an exotic attack. This note records a design exploration — what was measured,
 which half of the attack a reward-weighted rule closes, and precisely why the
 other half survives.
 
-**The rule is now implemented** as `attribution::payouts_weighted`, with its
-properties proven in `tests/citation_flow.rs` and its numbers cross-checked
-against `scripts/citation-flow-harness.py`, which computes in exact rationals.
-It is **not yet the default**: switching the money path moves the conformance
-vectors and must happen in one piece across both implementations. What that
-costs is at the end of this note.
+**The rule is the default**, in both implementations. `payouts_over` and the
+Python `ledger_payouts` weight by settled reward; `tests/citation_flow.rs`,
+which used to pin the theft, now pins its absence. The conformance vectors did
+not move — they fix record *encoding*, and this changes how settled money is
+divided, not what a record's bytes are.
 
 ## The attack
 
@@ -84,7 +83,7 @@ than by degree:
 |---|---|---|
 | 1 | 425,000 | 442,857 |
 | 4 | 333,594 | 414,107 |
-| 16 | 308,331 | 408,226 |
+| 16 | 308,331 | 408,226 (408,225 in integers) |
 | 64 | 302,083 | 406,853 |
 | 256 | 300,521 | 406,510 |
 
@@ -151,13 +150,21 @@ distance decide entitlement reintroduces exactly the attack being fixed.
 Ancestor discovery is therefore over the whole closure, `O(edges)` — the same
 order as the audit that re-derives the log anyway.
 
-### What switching the default still costs
+### Two things the switch turned up
 
-Porting `payouts_weighted` to `reference/python/proofwork/attribution.py`,
-flipping `payouts_over` and the `attribute` CLI to it, and regenerating the
-conformance vectors. It has to land in one piece in both languages, or the two
-implementations disagree about what everyone is owed — which is the one
-disagreement this project cannot survive.
+**An unsettled ancestor takes no share.** The weights are settled rewards, so
+a claim with nothing settled has no measured contribution and its share goes
+to the ancestors that do have one. That is a statement about timing rather
+than entitlement — `ledger_payouts` draws from the whole log, so a claim that
+has settled at all is weighted — but it is a real semantic and it now has its
+own test rather than being discovered by someone reading a number they did not
+expect.
+
+**The design note's 408,226 is exact-rational; the implementations produce
+408,225.** Integer arithmetic floors. What matters is not which figure is
+"right" but that both implementations floor *identically*, which they do —
+checked against the Python reference directly, and the odd unit has a
+deterministic owner.
 
 ## Where the next attempt should start
 
