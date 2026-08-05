@@ -71,6 +71,16 @@ pub struct Service {
     /// threading `&mut self` through would make two concurrent sessions
     /// impossible for a reason that has nothing to do with correctness.
     directory: Mutex<Directory>,
+    /// Holders a finished lookup found, keyed by content address.
+    ///
+    /// Deliberately **not** in the provider store: these are relayed claims,
+    /// and the rule that keeps an unsigned DHT from being an amplifier is that
+    /// a relayed claim is never re-served. Kept here they are consulted by this
+    /// node's own dialling and answered to nobody, and consumed on use, so a
+    /// wrong one costs exactly one dial. See [`Service::adopt`].
+    hints: Mutex<std::collections::BTreeMap<String, Vec<super::dht::Holder>>>,
+    /// Keys served that did not hash to the id asked for.
+    bad_keys: std::sync::atomic::AtomicUsize,
 }
 
 impl Service {
@@ -80,6 +90,8 @@ impl Service {
             identity,
             book: Mutex::new(AddressBook::new()),
             directory: Mutex::new(Directory::new(local)),
+            hints: Mutex::new(std::collections::BTreeMap::new()),
+            bad_keys: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -138,11 +150,13 @@ impl Service {
     /// 1. **Peers that said, first-hand, that they hold it.** Strictly better
     ///    than anything routing can offer — asking a holder gets the bytes;
     ///    asking a router gets a pointer.
-    /// 2. **The next hop of a lookup**, for the addresses no holder is known
+    /// 2. **Holders a previous lookup found.** Relayed claims, so they are
+    ///    consumed on use rather than stored — see [`Service::adopt`].
+    /// 3. **The next hop of a lookup**, for the addresses no holder is known
     ///    for. This is what makes a lookup *multi*-hop: `next_hops` names the
     ///    peers the iterative search wants to query, so the next session this
     ///    node opens is the next hop, and the answer rides that session.
-    /// 3. **Peers near the key**, then the random sample. The fallback is not a
+    /// 4. **Peers near the key**, then the random sample. The fallback is not a
     ///    formality: it is what runs when nothing has been announced yet, which
     ///    is every node's first tick.
     ///
@@ -190,7 +204,29 @@ impl Service {
             }
         }
 
-        // 2. One hop of a lookup, for what no holder is known for. Bounded by
+        // 2. Holders a previous lookup found. Consumed on use: they are
+        //    relayed claims, so one wrong one costs a dial and is gone rather
+        //    than being retried for ever.
+        if !unheld.is_empty() {
+            let taken: Vec<Vec<super::dht::Holder>> = {
+                let mut hints = self.hints.lock().unwrap_or_else(|e| e.into_inner());
+                unheld
+                    .iter()
+                    .filter_map(|address| hints.remove(address.as_str()))
+                    .collect()
+            };
+            for holder in taken.into_iter().flatten() {
+                if let Some(endpoint) =
+                    self.with_book(|book| book.for_peer(&holder.peer_id()).first().cloned())
+                {
+                    if seen.insert(endpoint.peer.id()) {
+                        chosen.push(endpoint);
+                    }
+                }
+            }
+        }
+
+        // 3. One hop of a lookup, for what no holder is known for. Bounded by
         //    the remaining capacity so every contact handed out is resolved
         //    here rather than dropped by a later truncation.
         let remaining = fanout.saturating_sub(chosen.len());
@@ -229,7 +265,7 @@ impl Service {
             return chosen;
         }
 
-        // 3. Peers near the key, then the sample.
+        // 4. Peers near the key, then the sample.
         for address in needs {
             for candidate in self.with_directory(|d| d.candidates(address, now)) {
                 let Some(endpoint) = self.with_book(|book| {
@@ -495,6 +531,16 @@ impl Service {
     /// *introduce* a peer rather than only reorder the ones already known. The
     /// key was verified against the id before it got here, so adopting it needs
     /// no further check.
+    ///
+    /// A finished lookup's holders become **dial hints**, and where they are
+    /// kept is the whole point. They are relayed claims: a peer said "C holds
+    /// D" and could not prove it, so [`super::dht`] refuses to enter them in the
+    /// provider store. That refusal is what stops an unsigned DHT being an
+    /// amplifier — name a victim as the holder of a popular blob and the network
+    /// dials the victim — and it turns on *never re-serving* a relayed claim,
+    /// not on never acting on one. So the hints live here, are consulted only by
+    /// this node's own dialling, are answered to nobody, and are consumed on
+    /// use: a wrong one costs one dial and is gone.
     fn adopt(&self, round: session::DhtRound) {
         for (peer, key) in round.learned {
             let Ok(public) = PeerPublic::from_bytes(&key) else {
@@ -514,6 +560,41 @@ impl Service {
                 self.with_book(|book| book.insert(Endpoint::new(addr, public)));
             }
         }
+        if !round.finished.is_empty() {
+            let mut hints = self.hints.lock().unwrap_or_else(|e| e.into_inner());
+            for (address, holders) in round.finished {
+                if !holders.is_empty() {
+                    hints.insert(address, holders);
+                }
+            }
+        }
+        if round.bad_keys > 0 {
+            self.bad_keys
+                .fetch_add(round.bad_keys, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Adopt a finished lookup's holders without a live connection.
+    ///
+    /// The same path [`Service::adopt`] takes, reachable from a test that
+    /// drives the directory directly. The alternative is a test that stands up
+    /// three real McEliece sessions to assert a `BTreeMap` insert, which would
+    /// take a minute to run and test the transport rather than the rule.
+    pub fn adopt_for_test(&self, finished: Vec<(String, Vec<super::dht::Holder>)>) {
+        self.adopt(session::DhtRound {
+            finished,
+            ..session::DhtRound::default()
+        });
+    }
+
+    /// Keys served that did not hash to the id asked for, since start.
+    ///
+    /// A peer doing this is broken or lying, and either way it is the kind of
+    /// thing an operator should be able to see a number for rather than guess
+    /// at. Never zeroed: a rate is what matters and the caller can difference
+    /// it.
+    pub fn bad_keys_seen(&self) -> usize {
+        self.bad_keys.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

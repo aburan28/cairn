@@ -684,3 +684,87 @@ fn a_forged_key_never_reaches_the_address_book() {
     let honest = proofwork::p2p::dht::encode_key(carol.public_key().as_ref());
     assert!(proofwork::p2p::dht::decode_key(carol_node, &honest).is_some());
 }
+
+#[test]
+fn a_lookup_that_finds_a_holder_actually_dials_it() {
+    // The step that makes a lookup worth running. The search can walk the
+    // network perfectly and still accomplish nothing if the answer is dropped
+    // on the floor -- which is exactly what the first draft did: `take_finished`
+    // returned the holders and the service ignored them.
+    //
+    // The holders are relayed claims, so they must not enter the provider store
+    // (that is what stops an unsigned DHT amplifying a lie). They are kept as
+    // local dial hints instead: acted on, never re-served, consumed on use.
+    let carol = PeerIdentity::generate();
+    let bob = PeerIdentity::generate();
+    let bob_addr: std::net::SocketAddr = "127.0.0.1:9301".parse().expect("loopback");
+    let carol_addr: std::net::SocketAddr = "127.0.0.1:9302".parse().expect("loopback");
+
+    let mut alice = Service::new(Arc::new(PeerIdentity::generate()));
+    alice.add_bootstrap(Endpoint::new(bob_addr, bob.to_public()));
+    // Alice can already reach carol; what she does not know is that carol has
+    // the blob. That is the fact the lookup is for.
+    alice.add_bootstrap(Endpoint::new(carol_addr, carol.to_public()));
+
+    let wanted = "ef".repeat(32);
+    let mut needs = std::collections::BTreeSet::new();
+    needs.insert(wanted.clone());
+
+    // Whichever peer the lookup picked as its next hop is the one that owes an
+    // answer -- asserting it is bob would be asserting the XOR ordering of two
+    // randomly generated ids, which is a coin flip rather than a test.
+    let dialled = alice.peers_for(&needs, 2);
+    assert!(!dialled.is_empty(), "the lookup chose nobody to ask");
+    for endpoint in &dialled {
+        let node = proofwork::p2p::dht::NodeId::from_bytes(endpoint.peer.id());
+        if alice.with_directory(|d| d.ask_of(node)).is_empty() {
+            continue;
+        }
+        alice.with_directory(|directory| {
+            directory.on_providers(
+                node,
+                &[proofwork::p2p::dht::ProviderAnswer {
+                    address: wanted.clone(),
+                    holders: vec![proofwork::p2p::dht::Holder::new(carol.id(), carol_addr)],
+                    closer: Vec::new(),
+                }],
+            )
+        });
+    }
+
+    // The round hands the finished lookup to the service, which is the step
+    // `exchange_dht` performs on a live connection.
+    let finished = alice.with_directory(|directory| directory.take_finished());
+    assert_eq!(finished.len(), 1, "the lookup did not finish");
+    assert_eq!(
+        finished[0].1.len(),
+        1,
+        "the holder was lost before adoption"
+    );
+    alice.adopt_for_test(finished);
+
+    // Never stored: a relayed claim that entered the provider store would be
+    // re-served to other peers, which is the amplification this design refuses.
+    let now = proofwork::time::unix_seconds();
+    let (stored, _) = alice.with_directory(|d| d.lookup_providers(&wanted, now));
+    assert!(
+        stored.is_empty(),
+        "a relayed holder entered the provider store"
+    );
+
+    // But acted on: carol is dialled for the blob she was named as holding.
+    let chosen = alice.peers_for(&needs, 1);
+    assert_eq!(chosen.len(), 1);
+    assert_eq!(
+        chosen[0].peer.id(),
+        carol.id(),
+        "the lookup found carol and the service dialled somebody else"
+    );
+
+    // And consumed: a wrong hint costs one dial, not a permanent detour.
+    let again = alice.peers_for(&needs, 1);
+    assert!(
+        again.is_empty() || again[0].peer.id() != carol.id(),
+        "the hint was not consumed, so a bad one would be retried for ever"
+    );
+}
