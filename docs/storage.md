@@ -8,6 +8,7 @@ proofwork --data-dir /Volumes/ext/pw post obj.json # data where you want it, sea
 proofwork --data-dir /Volumes/ext/pw store status
 proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
 proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
+proofwork --data-dir /Volumes/ext/pw store rekey    # fresh key, same root
 ```
 
 ## Encryption at rest
@@ -116,6 +117,81 @@ ciphertext), writes a new sealed file, **reads it back and compares every entry
 and the Merkle root**, and only then swaps it in. The plaintext original is
 renamed to `<log>.plaintext.bak` rather than deleted — this command must not be
 able to destroy your only copy — and you are told, loudly, to remove it yourself.
+
+### Rotating the key
+
+```sh
+proofwork store rekey
+proofwork store rekey --new-passphrase-file ~/new-phrase   # and wrap the new one
+```
+
+Without this, rotating means decrypting the log by hand, generating a key,
+re-encrypting, and swapping files: four destructive steps with the plaintext of
+the whole log on disk in the middle. An operator who suspects their key has
+leaked is exactly the operator who should not be improvising that at 2am.
+
+The order below is chosen so that **no step leaves the store unreadable**, and
+the plaintext never lands:
+
+1. The new key is generated *in memory*. Nothing on disk has changed.
+2. The log is re-sealed into `<log>.rekeying`. A crash here leaves a file nobody
+   holds the key for — garbage, removed by the next run.
+3. That file is reopened and required to re-derive the same entries and the same
+   Merkle root. This is the proof, and it happens before anything moves.
+4. `<key>` is renamed to `<key>.previous` and the new key written in its place.
+   A failure here puts the old key back.
+5. `<log>.rekeying` is renamed over `<log>`. A failure here puts the old key back
+   too, so the untouched log still opens.
+
+**The old key is kept; the old ciphertext is not** — the reverse of what `store
+encrypt` does, and for a reason. `store encrypt` keeps the plaintext original
+because it is the only copy of the data. Here the new file has already been
+proved to hold the same entries under the same root, so keeping the old
+ciphertext would only leave a copy readable by the key you are retiring. The
+*key* is kept, at `<key>.previous`, because copies made before now — a `sync`
+mirror, a backup, an external drive — are still sealed under it, and this command
+cannot see them. It is never overwritten: a second rotation refuses while it is
+there.
+
+`--new-passphrase-file` is separate from `--passphrase-file` on purpose. The
+commonest reason to rotate is that the old secret is suspect, and a command that
+could only reuse it would be no help in the case it exists for. Give both to
+change a passphrase, one to add or drop one; dropping one is a downgrade and is
+said out loud.
+
+Two things it will not do. It refuses a **plaintext** log rather than encrypting
+it sideways — `store encrypt` is the command that converts a log, on purpose and
+with its own warnings. And it refuses a log that does not `verify_chain` under
+the current key, because re-sealing a broken log under a key whose predecessor is
+about to be set aside turns a diagnosable problem into an archaeological one.
+
+An empty or absent log rotates the key alone. Otherwise there would be no way to
+rotate before the first record: `keygen` refuses to overwrite, which is the right
+answer for `keygen` and leaves that case with no command at all.
+
+### Handing someone a readable copy
+
+```sh
+proofwork store export --out /tmp/public.jsonl
+```
+
+The inverse of `store encrypt`, and it has to exist. The project's central claim
+is that anyone holding a copy of the log can re-derive every settled result —
+and until this existed, sealing a store was a one-way door out of it. `sync`
+mirrors ciphertext by design, `log` prints a summary rather than records, and the
+only route left was decrypting by hand.
+
+It writes a copy and leaves the store sealed, because the need is to hand
+somebody a log rather than to stop encrypting. It verifies the chain first, reads
+the copy back and requires the same entries under the same root before reporting
+success, and **refuses to overwrite** — the destination is by definition
+somewhere you are about to share, so a silent overwrite would be a way to lose a
+log to a typo. When the source was sealed it says out loud that the copy is not.
+
+`scripts/rekey-demo.sh` is the end-to-end version of both commands: it rotates a
+real store, then exports it and has the *independent* reference implementation
+audit the result and agree on the root. That is the strongest available statement
+that rotating a key changes every byte on disk and moves no record.
 
 ## A data directory of your choosing
 
@@ -312,10 +388,14 @@ opinion at all.
 - **No integrity guarantee at the destination.** `sync` copies; it does not
   re-verify. Run `audit` against the copy, which is a one-line command and the
   only thing that actually proves the backup is good.
-- **No concurrent access.** One `Ledger` handle per log, unchanged from before.
-  Two nodes on one synced folder will corrupt it, and nothing here detects that.
-- **No key rotation.** Re-keying means decrypting and re-sealing the whole log,
-  which is a command that does not exist yet.
+- **No cross-machine locking.** `Ledger::open_exclusive` takes an advisory lock
+  that binds writers on one machine; two machines appending to one log over a
+  synced folder or NFS are outside what an advisory lock promises, and nothing
+  here detects it.
+- **No rotation of anything but the log.** `store rekey` re-seals the log,
+  because the log is the only thing at-rest encryption covers. The blob store and
+  the `--population` file were never sealed — see the paragraph above on what
+  that leaks.
 - **No protection from a live attacker.** Stated at the top and worth repeating:
   anyone who can run code as the operator can read the key.
 - **No encryption of anything the network publishes.** By design. See the table

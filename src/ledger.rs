@@ -535,6 +535,22 @@ impl Ledger {
         matches!(self.codec, Codec::Sealed(_))
     }
 
+    /// Consume this handle and hand the codec back.
+    ///
+    /// A [`Cipher`] is deliberately not `Clone` -- a key with an unknown number
+    /// of copies is a key whose lifetime cannot be reasoned about -- so a caller
+    /// that has to write one log and then read it back has no way to get its own
+    /// key returned. Re-reading the key file is the usual answer and does not
+    /// work for a key that is not on disk yet, which is exactly the position
+    /// `store rekey` is in. Taking the codec back keeps that flow to a single
+    /// live copy of the key rather than adding a second one.
+    ///
+    /// By value, so the handle -- and its advisory lock -- is gone before the
+    /// caller reopens the same path.
+    pub fn into_codec(self) -> Codec {
+        self.codec
+    }
+
     // -- storage ---------------------------------------------------------
 
     fn load(&mut self) -> Result<(), LedgerError> {

@@ -36,8 +36,15 @@ behaviour ships and is tested, not that TLC has checked it.
       the key defaults to outside the data directory, `sync` mirrors ciphertext
       without ever carrying the key, and the cap refuses rather than pruning a
       hash-linked log. See [storage.md](storage.md).
-- [ ] Key rotation: re-key an existing store without a manual decrypt and
-      re-seal. Cheap to add, and not yet needed by anyone.
+- [x] Key rotation: `proofwork store rekey` re-seals every line under a fresh
+      key and proves the new file re-derives the same entries and the same root
+      *before* anything is swapped. The old key is kept at `<key>.previous`,
+      because copies made earlier — a `sync` mirror, a backup — are still sealed
+      under it; the old ciphertext is not kept, because keeping it would leave a
+      readable copy under the key being retired. `--new-passphrase-file` is
+      separate from `--passphrase-file` so a rotation prompted by a leaked
+      secret is not forced to reuse it. See
+      [storage.md](storage.md#rotating-the-key).
 - [x] Signed checkpoints: publish `(merkle_root, height, signature)` with a
       separate FIPS 204 ML-DSA-65 root key so a reader can pin what the operator
       claimed at a point in time and detect a rewrite. The daemon writes one

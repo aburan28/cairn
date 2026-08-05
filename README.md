@@ -412,14 +412,27 @@ buys is that reaching the threshold does not pay.
 ## Local storage: encrypted, bounded, yours
 
 Where a node's data lives is the operator's choice, and what leaks off their disk
-is their risk. Three things, one command each:
+is their risk. Four things, one command each:
 
 ```sh
 proofwork keygen                                   # 32-byte key at ~/.proofwork/key, 0600
 proofwork --data-dir /Volumes/ext/pw audit         # data wherever you want it
 proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
 proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
+proofwork --data-dir /Volumes/ext/pw store rekey   # new key, same root, no plaintext on disk
+proofwork --data-dir /Volumes/ext/pw store export --out public.jsonl
 ```
+
+`rekey` is the one worth a sentence. It re-seals every line under a fresh key and
+requires the new file to re-derive the same entries and the same Merkle root
+*before* anything is swapped. It keeps the old key at `<key>.previous` — a mirror
+you made last month is still sealed under it — and does **not** keep the old
+ciphertext, which would otherwise sit there readable by the key you are retiring.
+
+`export` is the inverse of `store encrypt`, and it exists because sealing a store
+must not be a one-way door out of the claim at the top of this file. Without it,
+an operator who encrypted their own copy could no longer produce the readable log
+anyone else would audit.
 
 ### `src/swarm/`: piece-level transfer and a DHT, alongside `p2p`
 

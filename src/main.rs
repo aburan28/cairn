@@ -410,16 +410,25 @@ impl Options {
     /// worse than not offering the option.
     fn passphrase(&self) -> Result<Option<String>, CliError> {
         if let Some(path) = &self.passphrase_file {
-            let text = fs::read_to_string(path).map_err(|source| CliError::Io {
-                context: format!("reading {path}"),
-                source,
-            })?;
-            return Ok(Some(text.trim_end_matches(['\n', '\r']).to_string()));
+            return read_passphrase_file(path).map(Some);
         }
         Ok(env::var("PROOFWORK_PASSPHRASE")
             .ok()
             .filter(|value| !value.is_empty()))
     }
+}
+
+/// Read a passphrase from a file.
+///
+/// Only the trailing newline is stripped. A passphrase with leading or interior
+/// whitespace is a passphrase, and trimming it would silently open a different
+/// key than the one the operator wrote down.
+fn read_passphrase_file(path: &str) -> Result<String, CliError> {
+    let text = fs::read_to_string(path).map_err(|source| CliError::Io {
+        context: format!("reading {path}"),
+        source,
+    })?;
+    Ok(text.trim_end_matches(['\n', '\r']).to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,7 +558,7 @@ enum BlobAction {
     Collect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum StoreAction {
     /// How much is used, split into what can and cannot be evicted.
     Status,
@@ -557,6 +566,26 @@ enum StoreAction {
     Gc,
     /// Convert a plaintext log to a sealed one, in place.
     Encrypt,
+    /// Write a plaintext copy of the log somewhere, leaving the store sealed.
+    ///
+    /// The inverse of `Encrypt`, and the reason it has to exist: without it,
+    /// sealing a store is a one-way door out of the network's own verifiability
+    /// claim -- the operator can no longer produce the readable log anyone else
+    /// would audit.
+    Export {
+        /// Where to write it. Never the store's own log.
+        out: String,
+    },
+    /// Re-seal the log under a fresh at-rest key.
+    Rekey {
+        /// Passphrase to wrap the *new* key with, from a file.
+        ///
+        /// Separate from `--passphrase-file`, which opens the *old* key. They
+        /// have to be separable: the commonest reason to rotate is that the old
+        /// secret is suspect, and a command that could only reuse it would be
+        /// no help in the case it exists for.
+        new_passphrase_file: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -723,7 +752,9 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
                 } else if is_flag(&token) {
                     return Err(CliError::Usage(format!("canon: unknown option {token:?}")));
                 } else if input.is_some() {
-                    return Err(CliError::Usage(format!("canon: unexpected argument {token:?}")));
+                    return Err(CliError::Usage(format!(
+                        "canon: unexpected argument {token:?}"
+                    )));
                 } else {
                     input = Some(token);
                 }
@@ -1120,9 +1151,45 @@ fn parse_store(cursor: &mut Cursor) -> Result<Command, CliError> {
         Some("status") | None => StoreAction::Status,
         Some("gc") => StoreAction::Gc,
         Some("encrypt") => StoreAction::Encrypt,
+        Some("rekey") => {
+            let mut new_passphrase_file: Option<String> = None;
+            while let Some(token) = cursor.take() {
+                if token == "--new-passphrase-file" {
+                    new_passphrase_file = Some(cursor.value("--new-passphrase-file")?);
+                } else {
+                    return Err(CliError::Usage(format!(
+                        "store rekey: unknown option {token:?}"
+                    )));
+                }
+            }
+            StoreAction::Rekey {
+                new_passphrase_file,
+            }
+        }
+        Some("export") => {
+            let mut destination: Option<String> = None;
+            while let Some(token) = cursor.take() {
+                if token == "--out" {
+                    destination = Some(cursor.value("--out")?);
+                } else if is_flag(&token) {
+                    return Err(CliError::Usage(format!(
+                        "store export: unknown option {token:?}"
+                    )));
+                } else if destination.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "store export: unexpected argument {token:?}"
+                    )));
+                } else {
+                    destination = Some(token);
+                }
+            }
+            StoreAction::Export {
+                out: require(destination, "store export", "--out <file>")?,
+            }
+        }
         Some(other) => {
             return Err(CliError::Usage(format!(
-                "store: unknown action {other:?}; try status, gc, or encrypt"
+                "store: unknown action {other:?}; try status, gc, encrypt, rekey, or export"
             )))
         }
     };
@@ -1315,7 +1382,10 @@ fn print_help(out: &mut dyn Write) {
     say(out, "  log");
     say(out, "      print the log");
     say(out, "  canon --input <file>");
-    say(out, "      canonicalize one JSON value and print its digest");
+    say(
+        out,
+        "      canonicalize one JSON value and print its digest",
+    );
     say(out, "  decode <objective|commitment|claim> --record <file>");
     say(
         out,
@@ -1339,6 +1409,20 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      report local usage, reclaim space, or seal an existing log",
+    );
+    say(out, "  store rekey [--new-passphrase-file PATH]");
+    say(
+        out,
+        "      re-seal the log under a fresh at-rest key; the old key is kept",
+    );
+    say(
+        out,
+        "      at <key>.previous, because older copies are still sealed under it",
+    );
+    say(out, "  store export --out <file>");
+    say(
+        out,
+        "      write a plaintext copy of the log for someone else to audit",
     );
     say(out, "  sync <dir> [--prune] [--dry-run]");
     say(
@@ -1520,7 +1604,10 @@ fn decode_hex32(text: &str) -> Option<[u8; 32]> {
 fn cmd_canon(out: &mut dyn Write, input_path: &str) -> Result<i32, CliError> {
     match read_json(input_path) {
         Ok(value) => {
-            say(out, format!("ok {} {}", value.digest(), value.canonical_string()));
+            say(
+                out,
+                format!("ok {} {}", value.digest(), value.canonical_string()),
+            );
             Ok(0)
         }
         Err(error) => {
@@ -2331,7 +2418,11 @@ fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32,
     Ok(0)
 }
 
-fn cmd_store(out: &mut dyn Write, options: &Options, action: StoreAction) -> Result<i32, CliError> {
+fn cmd_store(
+    out: &mut dyn Write,
+    options: &Options,
+    action: &StoreAction,
+) -> Result<i32, CliError> {
     let store = options.store();
     match action {
         StoreAction::Status => {
@@ -2406,7 +2497,97 @@ fn cmd_store(out: &mut dyn Write, options: &Options, action: StoreAction) -> Res
             Ok(0)
         }
         StoreAction::Encrypt => cmd_encrypt(out, options),
+        StoreAction::Rekey {
+            new_passphrase_file,
+        } => cmd_rekey(out, options, new_passphrase_file.as_deref()),
+        StoreAction::Export { out: destination } => cmd_export(out, options, destination),
     }
+}
+
+/// Write a plaintext copy of the log somewhere, leaving the store alone.
+///
+/// # Why the inverse of `store encrypt` has to exist
+///
+/// The project's central claim is that anyone holding a copy of the log can
+/// re-derive every settled result. `store encrypt` seals an operator's own copy,
+/// and until this existed it was a one-way door: an operator who sealed their
+/// store had no way to *produce* the readable log that claim depends on. `sync`
+/// mirrors ciphertext by design, and `log` prints a summary rather than records.
+/// The only route left was decrypting by hand, which is the improvisation this
+/// whole module exists to remove.
+///
+/// It writes a copy rather than converting in place, because the need is to hand
+/// somebody a log, not to stop encrypting. Converting is `store encrypt`'s
+/// business, running the other way.
+///
+/// The output is plaintext, and refusing to overwrite is the one safety property
+/// available: an export that silently replaced a file would be a way to lose data
+/// by typo, and the destination is by definition somewhere the operator is about
+/// to share.
+fn cmd_export(out: &mut dyn Write, options: &Options, destination: &str) -> Result<i32, CliError> {
+    if Path::new(destination).exists() {
+        return Err(CliError::Refused(format!(
+            "{destination} already exists; exporting over it would be a way to \
+             lose a log to a typo. Choose another path or move that one aside"
+        )));
+    }
+    let source =
+        Ledger::open_with(&options.log, resolve_codec(options)?).map_err(CliError::Ledger)?;
+    let problems = source.verify_chain();
+    if !problems.is_empty() {
+        // Exporting a broken log would hand somebody a copy that fails their
+        // audit, and they have no way to tell whose fault that is.
+        for problem in &problems {
+            say(out, format!("  {problem}"));
+        }
+        return Err(CliError::Refused(String::from(
+            "the log does not verify; fix that before handing out a copy",
+        )));
+    }
+
+    {
+        let mut plain = Ledger::open_with(destination, Codec::Plain).map_err(CliError::Ledger)?;
+        for entry in source.entries() {
+            plain
+                .append(&entry.kind, entry.payload.clone(), &entry.ts)
+                .map_err(CliError::Ledger)?;
+        }
+    }
+    // Read it back before saying it worked. The point of the copy is that
+    // somebody else can audit it, so it has to re-derive the same root here
+    // first.
+    let check = Ledger::open(destination).map_err(CliError::Ledger)?;
+    if check.entries() != source.entries() || check.root() != source.root() {
+        let _ = fs::remove_file(destination);
+        return Err(CliError::Refused(String::from(
+            "the exported copy does not re-derive the original; nothing was written",
+        )));
+    }
+
+    say(
+        out,
+        format!(
+            "exported {} entries to {destination}; root {}",
+            check.len(),
+            check.root().unwrap_or_default()
+        ),
+    );
+    if source.is_sealed() {
+        say(out, "");
+        say(
+            out,
+            "This copy is PLAINTEXT. That is the point -- it is what a reader",
+        );
+        say(
+            out,
+            "audits -- but it is now a readable copy of a store you chose to",
+        );
+        say(
+            out,
+            "encrypt. Put it where you meant to, and not beside the key.",
+        );
+    }
+    Ok(0)
 }
 
 /// Convert a plaintext log to a sealed one.
@@ -2478,7 +2659,7 @@ fn cmd_encrypt(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> 
         )));
     }
 
-    let backup = format!("{}.plaintext.bak", options.log);
+    let backup = format!("{}{}", options.log, mirror::PLAINTEXT_BACKUP_SUFFIX);
     fs::rename(&options.log, &backup).map_err(|source| CliError::Io {
         context: format!("moving {} aside", options.log),
         source,
@@ -2510,6 +2691,245 @@ fn cmd_encrypt(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> 
         "It is left in place because this command must not be able to",
     );
     say(out, "destroy your only copy.");
+    Ok(0)
+}
+
+/// A sibling path, `path` with `suffix` glued on.
+///
+/// Through `OsString` rather than `format!("{}", path.display())`, which is
+/// lossy on a path that is not valid UTF-8, and rather than
+/// `Path::with_extension`, which would turn `key.pw` into `key.previous`
+/// instead of `key.pw.previous`.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Take the cipher back out of a codec this function just built.
+///
+/// The `Plain` arm cannot arise -- the codec was constructed as `Sealed` a few
+/// lines above every call site -- but it is reported rather than unwrapped,
+/// because "cannot arise" is an argument about today's code.
+fn reclaim_cipher(codec: Codec) -> Result<Cipher, CliError> {
+    match codec {
+        Codec::Sealed(cipher) => Ok(*cipher),
+        Codec::Plain => Err(CliError::Refused(String::from(
+            "internal: the staged log came back without its key; nothing was changed",
+        ))),
+    }
+}
+
+/// Rotate the at-rest key, re-sealing the log under a fresh one.
+///
+/// # Why this is a command rather than a runbook
+///
+/// Without it, rotating a key means decrypting the log by hand, generating a
+/// key, re-encrypting, and swapping the files -- four steps, each destructive,
+/// with the plaintext of the entire log sitting on disk in the middle. An
+/// operator who suspects their key has leaked is exactly the operator who should
+/// not be improvising that at 2am. The whole point of the sequence below is that
+/// **no step leaves the store unreadable**, and the plaintext never lands.
+///
+/// # The order of operations, and what a crash at each point leaves behind
+///
+/// 1. The new key is generated *in memory*. Nothing on disk has changed.
+/// 2. The log is re-sealed into `<log>.rekeying`. A crash here leaves a file
+///    nobody holds the key for -- garbage, and removed by the next run.
+/// 3. That file is reopened and required to re-derive the original entries and
+///    the original root. This is the proof, and it happens before anything is
+///    moved.
+/// 4. `<key>` is renamed to `<key>.previous`, and the new key written in its
+///    place. A failure here puts the old key back.
+/// 5. `<log>.rekeying` is renamed over `<log>`. A failure here puts the old key
+///    back too, so the untouched log still opens.
+///
+/// # The old key is kept; the old ciphertext is not
+///
+/// The reverse of what [`cmd_encrypt`] does, and for a reason. `store encrypt`
+/// keeps the plaintext original because it is the only copy of the data. Here
+/// the new file has already been proved to hold the same entries under the same
+/// root, so keeping the old ciphertext would only mean leaving a copy readable
+/// by the key the operator is trying to retire.
+///
+/// The *key* is kept, at `<key>.previous`, because copies of this store made
+/// before now -- a `proofwork sync` mirror, a backup, an external drive -- are
+/// still sealed under it, and this command cannot see them.
+fn cmd_rekey(
+    out: &mut dyn Write,
+    options: &Options,
+    new_passphrase_file: Option<&str>,
+) -> Result<i32, CliError> {
+    let key_path = options.key_path();
+    if !key_path.exists() {
+        return Err(CliError::AtRest(AtRestError::NoKeyFile { path: key_path }));
+    }
+    let previous_path = sibling(&key_path, ".previous");
+    if previous_path.exists() {
+        // Never clobbered: an earlier rotation put it there, and something
+        // somewhere may still be sealed under it.
+        return Err(CliError::Refused(format!(
+            "{} already exists -- an earlier rotation left it there. Move it \
+             somewhere safe (copies of this store made before that rotation \
+             still need it) and run this again",
+            previous_path.display()
+        )));
+    }
+
+    let sealed_on_disk = first_line_is_sealed(&options.log)?;
+    if sealed_on_disk == Some(false) {
+        return Err(CliError::Refused(format!(
+            "{} is in plaintext, so no at-rest key is protecting it and there is \
+             nothing to rotate; run `proofwork store encrypt` first",
+            options.log
+        )));
+    }
+    let has_log = sealed_on_disk == Some(true);
+
+    let old_passphrase = options.passphrase()?;
+    let old =
+        Cipher::read_key_file(&key_path, old_passphrase.as_deref()).map_err(CliError::AtRest)?;
+    let old_was_wrapped = Cipher::key_file_is_wrapped(&key_path).unwrap_or(false);
+    let new_passphrase = match new_passphrase_file {
+        Some(path) => Some(read_passphrase_file(path)?),
+        None => None,
+    };
+
+    let mut new = Cipher::generate(&mut rand_core::OsRng);
+    let staged = sibling(Path::new(&options.log), ".rekeying");
+    let mut resealed = 0usize;
+    let mut root = String::new();
+
+    if has_log {
+        let current = Ledger::open_with(&options.log, Codec::Sealed(Box::new(old)))
+            .map_err(CliError::Ledger)?;
+        let problems = current.verify_chain();
+        if !problems.is_empty() {
+            // Rotating a broken log would re-seal the breakage under a key
+            // whose predecessor is about to be set aside, which turns a
+            // diagnosable problem into an archaeological one.
+            for problem in &problems {
+                say(out, format!("  {problem}"));
+            }
+            return Err(CliError::Refused(String::from(
+                "the log does not verify under the current key; fix that before rotating",
+            )));
+        }
+
+        let _ = fs::remove_file(&staged);
+        let written = {
+            let mut next = Ledger::open_with(&staged, Codec::Sealed(Box::new(new)))
+                .map_err(CliError::Ledger)?;
+            for entry in current.entries() {
+                next.append(&entry.kind, entry.payload.clone(), &entry.ts)
+                    .map_err(CliError::Ledger)?;
+            }
+            next.into_codec()
+        };
+
+        // Read it back, with the handle that wrote it already dropped, and
+        // demand the same entries under the same root. A rotation that cannot
+        // be proved reversible before the swap is one nobody should run.
+        let check = Ledger::open_with(&staged, written).map_err(CliError::Ledger)?;
+        if check.entries() != current.entries() || check.root() != current.root() {
+            let _ = fs::remove_file(&staged);
+            return Err(CliError::Refused(String::from(
+                "the re-sealed copy does not re-derive the original; nothing was changed",
+            )));
+        }
+        resealed = check.len();
+        root = check.root().unwrap_or_default();
+        new = reclaim_cipher(check.into_codec())?;
+    }
+
+    // From here the disk changes. Every failure below puts back what it moved.
+    fs::rename(&key_path, &previous_path).map_err(|source| CliError::Io {
+        context: format!("moving {} aside", key_path.display()),
+        source,
+    })?;
+    if let Err(error) =
+        new.write_key_file(&key_path, new_passphrase.as_deref(), &mut rand_core::OsRng)
+    {
+        let _ = fs::rename(&previous_path, &key_path);
+        let _ = fs::remove_file(&staged);
+        return Err(CliError::AtRest(error));
+    }
+    if has_log {
+        if let Err(source) = fs::rename(&staged, &options.log) {
+            let _ = fs::remove_file(&key_path);
+            let _ = fs::rename(&previous_path, &key_path);
+            return Err(CliError::Io {
+                context: format!("installing {}", options.log),
+                source,
+            });
+        }
+    }
+
+    say(
+        out,
+        format!("rotated the at-rest key at {}", key_path.display()),
+    );
+    if has_log {
+        say(
+            out,
+            format!("re-sealed {resealed} entries; root unchanged at {root}"),
+        );
+    } else {
+        say(out, "the log is empty, so only the key changed");
+    }
+    if new_passphrase.is_some() {
+        say(out, "  the new key is wrapped with a passphrase (argon2id)");
+    } else if old_was_wrapped {
+        say(
+            out,
+            "  the new key is NOT passphrase-wrapped, and the old one was;",
+        );
+        say(
+            out,
+            "  pass --new-passphrase-file PATH if that was not deliberate",
+        );
+    }
+    if !proofwork::store::atrest::private_permissions_supported() {
+        say(
+            out,
+            "  warning: this platform cannot restrict the key to its owner",
+        );
+    }
+    say(out, "");
+    say(
+        out,
+        format!(
+            "The OLD key is still on disk at {}",
+            previous_path.display()
+        ),
+    );
+    say(
+        out,
+        "Nothing in this store needs it now. Copies made before now do: a mirror",
+    );
+    say(
+        out,
+        "from `proofwork sync`, a backup, an external drive. Re-seal or destroy",
+    );
+    say(
+        out,
+        "those, then delete it -- while the old key and old ciphertext both exist",
+    );
+    say(out, "somewhere, this rotation has bought nothing.");
+
+    let plaintext_backup = format!("{}{}", options.log, mirror::PLAINTEXT_BACKUP_SUFFIX);
+    if Path::new(&plaintext_backup).exists() {
+        say(out, "");
+        say(
+            out,
+            format!("WARNING: {plaintext_backup} is a PLAINTEXT copy left by"),
+        );
+        say(
+            out,
+            "`store encrypt`. Rotating a key does nothing for a copy that was",
+        );
+        say(out, "never sealed by one.");
+    }
     Ok(0)
 }
 
@@ -2948,7 +3368,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Decode { kind, record } => cmd_decode(out, kind, record),
         Command::Identity { out: path } => cmd_identity(out, path),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
-        Command::Store { action } => cmd_store(out, options, *action),
+        Command::Store { action } => cmd_store(out, options, action),
         Command::Sync {
             destination,
             options: mirror_options,
@@ -3102,7 +3522,380 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // -- key rotation ------------------------------------------------------
+
+    /// A scratch store with a sealed log holding one objective, plus the
+    /// `Options` pointing at it. The key deliberately lives *outside* the data
+    /// directory, which is the layout the docs ask for.
+    fn sealed_store(tag: &str) -> (std::path::PathBuf, Options) {
+        use proofwork::canonical::digest_bytes;
+        let dir = std::env::temp_dir().join(format!(
+            "proofwork-rekey-{tag}-{}",
+            digest_bytes(&std::time::Instant::now().elapsed().as_nanos().to_le_bytes())
+        ));
+        std::fs::create_dir_all(dir.join("data")).expect("scratch dir");
+        let options = Options {
+            log: dir.join("data/log.jsonl").display().to_string(),
+            root: dir.display().to_string(),
+            data: Some(dir.join("data").display().to_string()),
+            key_file: Some(dir.join("key").display().to_string()),
+            passphrase_file: None,
+            max_size: None,
+        };
+        let mut sink: Vec<u8> = Vec::new();
+        cmd_keygen(&mut sink, &options, false).expect("keygen");
+        (dir, options)
+    }
+
+    /// Append one entry to `options`'s log, through whatever codec applies.
+    fn append_entry(options: &Options, i: i128) {
+        let codec = resolve_codec(options).expect("codec");
+        let mut ledger = Ledger::open_with(&options.log, codec).expect("opens");
+        ledger
+            .append(
+                "note",
+                Value::object([("i", Value::Int(i))]),
+                "2026-07-28T00:00:00+00:00",
+            )
+            .expect("appends");
+    }
+
+    fn root_of(options: &Options) -> Option<String> {
+        let codec = resolve_codec(options).expect("codec");
+        Ledger::open_with(&options.log, codec)
+            .expect("opens")
+            .root()
+    }
+
+    #[test]
+    fn rekey_reseals_the_log_under_a_new_key_and_changes_no_identity() {
+        // The whole promise: after a rotation the same entries are there under
+        // the same root, the bytes on disk are different, and the key that used
+        // to open them no longer does.
+        let (dir, options) = sealed_store("reseal");
+        append_entry(&options, 1);
+        append_entry(&options, 2);
+
+        let before_root = root_of(&options).expect("a root");
+        let before_bytes = std::fs::read(&options.log).expect("reads");
+        let before_key = std::fs::read(options.key_path()).expect("reads");
+
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(cmd_rekey(&mut out, &options, None).expect("rotates"), 0);
+        let said = String::from_utf8(out).expect("utf-8");
+
+        assert_eq!(root_of(&options), Some(before_root.clone()));
+        assert!(
+            said.contains(&before_root),
+            "the unchanged root is the thing to report: {said}"
+        );
+        let after_bytes = std::fs::read(&options.log).expect("reads");
+        assert_ne!(
+            before_bytes, after_bytes,
+            "the log was not actually re-sealed"
+        );
+        let after_key = std::fs::read(options.key_path()).expect("reads");
+        assert_ne!(before_key, after_key, "the key did not change");
+
+        // The old key is kept, and it opens nothing here any more.
+        let previous = sibling(&options.key_path(), ".previous");
+        assert_eq!(std::fs::read(&previous).expect("reads"), before_key);
+        let stale = Cipher::read_key_file(&previous, None).expect("still a key file");
+        assert!(
+            Ledger::open_with(&options.log, Codec::Sealed(Box::new(stale))).is_err(),
+            "the retired key still opens the log"
+        );
+
+        // And no staging file survives a success.
+        assert!(!sibling(Path::new(&options.log), ".rekeying").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rekey_can_add_a_passphrase_and_take_one_away() {
+        // Rotating *because a secret leaked* means the new passphrase cannot be
+        // the old one, so the two are separate flags. Both directions have to
+        // work, and dropping a passphrase has to be said out loud.
+        let (dir, options) = sealed_store("passphrase");
+        append_entry(&options, 7);
+        let phrase = dir.join("phrase");
+        std::fs::write(&phrase, "correct horse\n").expect("writes");
+
+        let mut out: Vec<u8> = Vec::new();
+        cmd_rekey(&mut out, &options, Some(&phrase.display().to_string())).expect("wraps");
+        assert!(Cipher::key_file_is_wrapped(&options.key_path()).expect("reads"));
+        assert!(String::from_utf8(out).expect("utf-8").contains("argon2id"));
+
+        // The log now needs the passphrase, and opens with it.
+        assert!(Cipher::read_key_file(&options.key_path(), None).is_err());
+        let wrapped = Options {
+            passphrase_file: Some(phrase.display().to_string()),
+            ..options.clone()
+        };
+        assert!(root_of(&wrapped).is_some());
+
+        // Back the other way, which is a downgrade and says so.
+        std::fs::remove_file(sibling(&options.key_path(), ".previous")).expect("clears");
+        let mut out: Vec<u8> = Vec::new();
+        cmd_rekey(&mut out, &wrapped, None).expect("unwraps");
+        let said = String::from_utf8(out).expect("utf-8");
+        assert!(said.contains("NOT passphrase-wrapped"), "{said}");
+        assert!(!Cipher::key_file_is_wrapped(&options.key_path()).expect("reads"));
+        assert!(root_of(&options).is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rekey_never_clobbers_a_key_an_older_copy_might_still_need() {
+        // `<key>.previous` is not scratch space. Something the operator made
+        // before the last rotation -- a mirror, a backup -- may be the only
+        // thing that key still opens, and this command cannot see it.
+        let (dir, options) = sealed_store("previous");
+        append_entry(&options, 1);
+        let mut sink: Vec<u8> = Vec::new();
+        cmd_rekey(&mut sink, &options, None).expect("first rotation");
+
+        let previous = sibling(&options.key_path(), ".previous");
+        let kept = std::fs::read(&previous).expect("reads");
+        let key = std::fs::read(options.key_path()).expect("reads");
+        let log = std::fs::read(&options.log).expect("reads");
+
+        let error = cmd_rekey(&mut sink, &options, None).expect_err("refuses");
+        assert!(matches!(error, CliError::Refused(_)), "got {error:?}");
+        assert_eq!(std::fs::read(&previous).expect("reads"), kept);
+        assert_eq!(std::fs::read(options.key_path()).expect("reads"), key);
+        assert_eq!(std::fs::read(&options.log).expect("reads"), log);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rekey_refuses_a_plaintext_log_rather_than_encrypting_it_sideways() {
+        // `store encrypt` is the command that converts a log, on purpose and
+        // with its own warnings. Rotating a key must not become a second, quiet
+        // way to do it.
+        let (dir, options) = sealed_store("plaintext");
+        std::fs::write(&options.log, "").expect("truncates");
+        append_entry(
+            &Options {
+                key_file: Some(dir.join("absent").display().to_string()),
+                ..options.clone()
+            },
+            1,
+        );
+
+        let mut sink: Vec<u8> = Vec::new();
+        let error = cmd_rekey(&mut sink, &options, None).expect_err("refuses");
+        assert!(
+            matches!(&error, CliError::Refused(why) if why.contains("store encrypt")),
+            "got {error:?}"
+        );
+        assert!(!sibling(&options.key_path(), ".previous").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rekey_rotates_the_key_of_a_store_with_nothing_in_it_yet() {
+        // Otherwise there is no way to rotate at all before the first record:
+        // `keygen` refuses to overwrite, which is exactly the right answer for
+        // `keygen` and leaves this case with no command.
+        let (dir, options) = sealed_store("empty");
+        let before = std::fs::read(options.key_path()).expect("reads");
+
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(cmd_rekey(&mut out, &options, None).expect("rotates"), 0);
+        assert!(String::from_utf8(out).expect("utf-8").contains("empty"));
+        assert_ne!(std::fs::read(options.key_path()).expect("reads"), before);
+        assert_eq!(
+            std::fs::read(sibling(&options.key_path(), ".previous")).expect("reads"),
+            before
+        );
+
+        // And the store still works: a record written now opens back.
+        append_entry(&options, 3);
+        assert!(root_of(&options).is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rekey_says_a_plaintext_backup_is_still_plaintext() {
+        // `store encrypt` leaves one behind by design. An operator rotating a
+        // key is trying to make old bytes unreadable, and a copy that was never
+        // sealed does not care which key is current.
+        let (dir, options) = sealed_store("leftover");
+        append_entry(&options, 1);
+        let leftover = format!("{}{}", options.log, mirror::PLAINTEXT_BACKUP_SUFFIX);
+        std::fs::write(&leftover, "{\"seq\":0}\n").expect("writes");
+
+        let mut out: Vec<u8> = Vec::new();
+        cmd_rekey(&mut out, &options, None).expect("rotates");
+        let said = String::from_utf8(out).expect("utf-8");
+        assert!(said.contains("PLAINTEXT"), "{said}");
+        assert!(said.contains(&leftover), "{said}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rekey_without_a_key_names_the_missing_file() {
+        let (dir, options) = sealed_store("nokey");
+        std::fs::remove_file(options.key_path()).expect("removes");
+        let mut sink: Vec<u8> = Vec::new();
+        let error = cmd_rekey(&mut sink, &options, None).expect_err("refuses");
+        assert!(
+            matches!(error, CliError::AtRest(AtRestError::NoKeyFile { .. })),
+            "got {error:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_hands_out_a_plaintext_log_that_re_derives_the_same_root() {
+        // The inverse of `store encrypt`, and the reason it exists: sealing a
+        // store must not be a one-way door out of "anyone with a copy of the log
+        // can re-derive every settled result".
+        let (dir, options) = sealed_store("export");
+        append_entry(&options, 1);
+        append_entry(&options, 2);
+        let sealed_root = root_of(&options).expect("a root");
+        let destination = dir.join("public.jsonl").display().to_string();
+
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_export(&mut out, &options, &destination).expect("exports"),
+            0
+        );
+        let said = String::from_utf8(out).expect("utf-8");
+        assert!(
+            said.contains("PLAINTEXT"),
+            "an unwarned plaintext copy: {said}"
+        );
+
+        // Plaintext, opens with no key at all, same root.
+        let text = std::fs::read_to_string(&destination).expect("reads");
+        assert!(!text.contains("pwenc1:"), "the export is still sealed");
+        let copy = Ledger::open(&destination).expect("opens with no key");
+        assert_eq!(copy.root(), Some(sealed_root));
+        assert!(copy.verify_chain().is_empty());
+
+        // And the store it came from is untouched -- still sealed.
+        assert_eq!(
+            first_line_is_sealed(&options.log).expect("reads"),
+            Some(true)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_refuses_to_write_over_an_existing_file() {
+        // The destination is by definition somewhere the operator is about to
+        // share, and a silent overwrite is a way to lose a log to a typo.
+        let (dir, options) = sealed_store("clobber");
+        append_entry(&options, 1);
+        let destination = dir.join("taken").display().to_string();
+        std::fs::write(&destination, "important\n").expect("writes");
+
+        let mut sink: Vec<u8> = Vec::new();
+        let error = cmd_export(&mut sink, &options, &destination).expect_err("refuses");
+        assert!(matches!(error, CliError::Refused(_)), "got {error:?}");
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("reads"),
+            "important\n"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_sibling_path_appends_rather_than_replacing_an_extension() {
+        // `Path::with_extension` would turn `key.pw` into `key.previous`, which
+        // is a different file from the one meant and possibly somebody else's.
+        assert_eq!(
+            sibling(Path::new("key"), ".previous"),
+            PathBuf::from("key.previous")
+        );
+        assert_eq!(
+            sibling(Path::new("/a/b/key.pw"), ".previous"),
+            PathBuf::from("/a/b/key.pw.previous")
+        );
+    }
+
     // -- argument parsing --------------------------------------------------
+
+    #[test]
+    fn store_actions_parse_including_rekeys_own_passphrase_flag() {
+        assert_eq!(
+            parse(argv(&["store"])).expect("parses").command,
+            Command::Store {
+                action: StoreAction::Status
+            }
+        );
+        assert_eq!(
+            parse(argv(&["store", "rekey"])).expect("parses").command,
+            Command::Store {
+                action: StoreAction::Rekey {
+                    new_passphrase_file: None
+                }
+            }
+        );
+        assert_eq!(
+            parse(argv(&["store", "rekey", "--new-passphrase-file", "/tmp/p"]))
+                .expect("parses")
+                .command,
+            Command::Store {
+                action: StoreAction::Rekey {
+                    new_passphrase_file: Some(String::from("/tmp/p"))
+                }
+            }
+        );
+        // The old key's passphrase is a *global* flag and stays one, so both can
+        // be given at once -- which is what changing a passphrase needs.
+        let parsed = parse(argv(&[
+            "--passphrase-file",
+            "/tmp/old",
+            "store",
+            "rekey",
+            "--new-passphrase-file",
+            "/tmp/new",
+        ]))
+        .expect("parses");
+        assert_eq!(parsed.options.passphrase_file.as_deref(), Some("/tmp/old"));
+        assert!(matches!(
+            parsed.command,
+            Command::Store {
+                action: StoreAction::Rekey { .. }
+            }
+        ));
+        assert_eq!(
+            parse(argv(&["store", "export", "--out", "/tmp/x.jsonl"]))
+                .expect("parses")
+                .command,
+            Command::Store {
+                action: StoreAction::Export {
+                    out: String::from("/tmp/x.jsonl")
+                }
+            }
+        );
+        assert_eq!(
+            parse(argv(&["store", "export", "/tmp/x.jsonl"]))
+                .expect("a bare path works too")
+                .command,
+            Command::Store {
+                action: StoreAction::Export {
+                    out: String::from("/tmp/x.jsonl")
+                }
+            }
+        );
+        assert!(matches!(
+            parse(argv(&["store", "export"])).expect_err("needs a destination"),
+            CliError::Usage(_)
+        ));
+        assert!(matches!(
+            parse(argv(&["store", "rekey", "--wat"])).expect_err("unknown option"),
+            CliError::Usage(_)
+        ));
+        assert!(matches!(
+            parse(argv(&["store", "rotate"])).expect_err("unknown action"),
+            CliError::Usage(_)
+        ));
+    }
 
     #[test]
     fn global_options_precede_the_command() {
