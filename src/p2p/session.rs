@@ -13,7 +13,9 @@
 //! boundary and [`exchange_dht`] for the third.
 
 use super::code::{self, CodeError, CodeLimits, CodeMessage, CodeReport};
-use super::dht::{DhtError, DhtMessage, Directory, MAX_ASK_ADDRESSES};
+use super::dht::{
+    DhtError, DhtMessage, Directory, NodeId, MAX_ASK_ADDRESSES, MAX_KEYS_PER_MESSAGE,
+};
 use super::pop::{self, PopError, PopLimits, PopMessage, PopReport};
 use super::sync::{Message, Peer, SyncError};
 use super::transport::{Connection, TransportError};
@@ -285,40 +287,163 @@ pub fn reconcile_code(
 /// answer — a node that stopped talking the moment it wanted nothing would be
 /// useless to every peer that wants something from it.
 ///
-/// Returns how many provider records were stored.
-pub fn exchange_dht(
+/// # The lookup hop, and why it rides this round rather than its own connection
+///
+/// After the ask/tell pair the round carries one hop of every lookup in flight:
+/// a `GetProviders` naming the addresses this peer was chosen to answer, and the
+/// answer folded back through [`Directory::on_providers`]. A dedicated
+/// connection per hop would be the textbook shape and would cost a McEliece
+/// handshake — tens of milliseconds and 261 KiB of key material — for two small
+/// messages. Riding the session the daemon was opening anyway makes a hop free,
+/// and [`Directory::next_hops`] is what steers *which* session gets opened.
+///
+/// The last pair fetches a public key. A routing answer names a peer by id and
+/// address and never by key, so a newly-heard-of contact is undialable until its
+/// key arrives; without this the DHT could only ever reorder peers a node
+/// already knew. Verified against the id asked for, which needs no trust: a peer
+/// id is `sha256(public key)`.
+///
+/// All three pairs are exchanged unconditionally, empty when there is nothing to
+/// ask. Skipping a pair would need both ends to agree it is being skipped, and
+/// they cannot — each side independently has or has not a lookup in flight.
+///
+/// Returns what the round learned.
+pub fn exchange_dht<K>(
     connection: &mut Connection,
     directory: &mut Directory,
     needs: &BTreeSet<String>,
     held: &BTreeSet<String>,
     dialable: Option<std::net::SocketAddr>,
     now: u64,
-) -> Result<usize, SessionError> {
+    key_of: K,
+) -> Result<DhtRound, SessionError>
+where
+    K: Fn(NodeId) -> Option<Vec<u8>>,
+{
+    let remote = connection.remote();
+    let remote_id = NodeId::from_bytes(remote);
     let asked: BTreeSet<String> = needs.iter().take(MAX_ASK_ADDRESSES).cloned().collect();
-    let mine = DhtMessage::Ask {
-        addresses: asked.iter().cloned().collect(),
-    };
-    connection.send(&mine.encode(), super::dht::CONTEXT)?;
 
+    connection.send(
+        &DhtMessage::Ask {
+            addresses: asked.iter().cloned().collect(),
+        }
+        .encode(),
+        super::dht::CONTEXT,
+    )?;
     let their_ask = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
         DhtMessage::Ask { addresses } => addresses,
         _ => return Err(SessionError::Protocol("expected dht_ask".into())),
     };
-    let answer = DhtMessage::Tell {
-        addresses: Directory::answer_ask(&their_ask, held),
-    };
-    connection.send(&answer.encode(), super::dht::CONTEXT)?;
-
+    connection.send(
+        &DhtMessage::Tell {
+            addresses: Directory::answer_ask(&their_ask, held),
+        }
+        .encode(),
+        super::dht::CONTEXT,
+    )?;
     let their_tell = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
         DhtMessage::Tell { addresses } => addresses,
         _ => return Err(SessionError::Protocol("expected dht_tell".into())),
     };
 
-    let remote = connection.remote();
-    let Some(addr) = dialable else {
-        return Ok(0);
+    // -- one hop of every lookup this peer was chosen for -------------------
+    let seeking = directory.ask_of(remote_id);
+    connection.send(
+        &DhtMessage::GetProviders {
+            addresses: seeking.clone(),
+        }
+        .encode(),
+        super::dht::CONTEXT,
+    )?;
+    let their_seek = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+        DhtMessage::GetProviders { addresses } => addresses,
+        _ => return Err(SessionError::Protocol("expected dht_get_providers".into())),
     };
-    Ok(directory.record_tell(remote, addr, &asked, &their_tell, now))
+    connection.send(
+        &DhtMessage::Providers {
+            answers: directory.answer_get_providers(&their_seek, now),
+        }
+        .encode(),
+        super::dht::CONTEXT,
+    )?;
+    let their_answers = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+        DhtMessage::Providers { answers } => answers,
+        _ => return Err(SessionError::Protocol("expected dht_providers".into())),
+    };
+
+    // -- one public key, so a contact heard of can become one dialled -------
+    let wanted_keys = directory.key_wants();
+    connection.send(
+        &DhtMessage::GetKey {
+            peers: wanted_keys.clone(),
+        }
+        .encode(),
+        super::dht::CONTEXT,
+    )?;
+    let their_key_want = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+        DhtMessage::GetKey { peers } => peers,
+        _ => return Err(SessionError::Protocol("expected dht_get_key".into())),
+    };
+    connection.send(
+        &DhtMessage::Keys {
+            keys: their_key_want
+                .iter()
+                .filter_map(|peer| key_of(*peer).map(|bytes| super::dht::encode_key(&bytes)))
+                .take(MAX_KEYS_PER_MESSAGE)
+                .collect(),
+        }
+        .encode(),
+        super::dht::CONTEXT,
+    )?;
+    let their_keys = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+        DhtMessage::Keys { keys } => keys,
+        _ => return Err(SessionError::Protocol("expected dht_keys".into())),
+    };
+
+    // Every message is in before any state changes, so a peer that hangs up
+    // mid-round leaves this node exactly as it was.
+    let mut round = DhtRound::default();
+
+    // A key is matched against the ids this node asked for, in order, and
+    // checked by re-deriving the id from the bytes. An answer for a peer
+    // nobody asked about has nowhere to land.
+    for (peer, hex) in wanted_keys.iter().zip(their_keys.iter()) {
+        match super::dht::decode_key(*peer, hex) {
+            Some(bytes) => {
+                directory.resolved_key(*peer);
+                round.learned.push((*peer, bytes));
+            }
+            // Wrong bytes for the id asked for. Dropped without ceremony: the
+            // want stays queued and some other peer may answer it correctly.
+            None => round.bad_keys += 1,
+        }
+    }
+
+    directory.on_providers(remote_id, &their_answers);
+    round.finished = directory.take_finished();
+
+    if let Some(addr) = dialable {
+        round.stored = directory.record_tell(remote, addr, &asked, &their_tell, now);
+    }
+    Ok(round)
+}
+
+/// What one DHT round learned.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DhtRound {
+    /// First-hand provider records stored from the peer's `Tell`.
+    pub stored: usize,
+    /// Public keys learned and verified, ready for the address book.
+    pub learned: Vec<(NodeId, Vec<u8>)>,
+    /// Lookups that completed this round, with the holders they found.
+    pub finished: Vec<(String, Vec<super::dht::Holder>)>,
+    /// Keys the peer answered that did not hash to the id asked for.
+    ///
+    /// Counted rather than ignored: a peer doing this is broken or hostile, and
+    /// a number an operator can see is the difference between diagnosing that
+    /// and guessing.
+    pub bad_keys: usize,
 }
 
 fn send_pop(connection: &mut Connection, message: PopMessage) -> Result<(), SessionError> {

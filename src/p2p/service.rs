@@ -1,9 +1,9 @@
 //! High-level bootstrap and session orchestration.
 
 use super::code::{CodeLimits, CodeReport};
-use super::dht::{Directory, PeerContact};
+use super::dht::{Directory, NodeId, PeerContact};
 use super::discovery::{AddressBook, Endpoint};
-use super::handshake::{PeerId, PeerIdentity};
+use super::handshake::{PeerId, PeerIdentity, PeerPublic};
 use super::pop::{PopLimits, PopReport};
 use super::session::{self, SessionError};
 use super::sync::{Peer, SyncError};
@@ -57,7 +57,13 @@ impl From<SessionError> for ServiceError {
 /// Owns the local identity, the non-consensus address book, and the DHT view.
 pub struct Service {
     identity: Arc<PeerIdentity>,
-    book: AddressBook,
+    /// Whom this node can dial, and the public key needed to do it.
+    ///
+    /// Behind a `Mutex` for the same reason the directory is: a DHT round can
+    /// *learn a peer* now — a verified public key turns a contact the routing
+    /// table only heard about into one this node can reach — and the dial and
+    /// accept paths that learn it hold `&self`.
+    book: Mutex<AddressBook>,
     /// Who holds which blob, and whom to route through to find out.
     ///
     /// Behind a `Mutex` because every dial and accept path takes `&self` — a
@@ -72,7 +78,7 @@ impl Service {
         let local = identity.id();
         Service {
             identity,
-            book: AddressBook::new(),
+            book: Mutex::new(AddressBook::new()),
             directory: Mutex::new(Directory::new(local)),
         }
     }
@@ -81,8 +87,15 @@ impl Service {
         self.identity.id()
     }
 
-    pub fn address_book(&self) -> &AddressBook {
-        &self.book
+    /// Read the address book briefly. Held behind a lock; see [`Service::book`].
+    pub fn with_book<T>(&self, f: impl FnOnce(&mut AddressBook) -> T) -> T {
+        let mut guard = self.book.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+
+    /// How many peers this node can dial.
+    pub fn known_peers(&self) -> usize {
+        self.with_book(|book| book.len())
     }
 
     pub fn add_bootstrap(&mut self, endpoint: Endpoint) {
@@ -91,7 +104,7 @@ impl Service {
             // the only thing a fresh node can route through, and leaving it out
             // would mean the DHT stayed empty until somebody else volunteered.
             self.note_contact(endpoint.peer.id(), endpoint.addr);
-            self.book.insert(endpoint);
+            self.with_book(|book| book.insert(endpoint));
         }
     }
 
@@ -120,16 +133,36 @@ impl Service {
 
     /// The endpoints worth dialling when specific blobs are missing.
     ///
-    /// Known holders first, then peers near the key, then whatever the random
-    /// sample turns up — and the fallback is not a formality: it is what runs
-    /// when nothing has been announced yet, which is every node's first tick.
+    /// In priority order:
+    ///
+    /// 1. **Peers that said, first-hand, that they hold it.** Strictly better
+    ///    than anything routing can offer — asking a holder gets the bytes;
+    ///    asking a router gets a pointer.
+    /// 2. **The next hop of a lookup**, for the addresses no holder is known
+    ///    for. This is what makes a lookup *multi*-hop: `next_hops` names the
+    ///    peers the iterative search wants to query, so the next session this
+    ///    node opens is the next hop, and the answer rides that session.
+    /// 3. **Peers near the key**, then the random sample. The fallback is not a
+    ///    formality: it is what runs when nothing has been announced yet, which
+    ///    is every node's first tick.
     ///
     /// **A DHT candidate that is not in the address book is skipped**, and that
     /// is the cost of a contact not carrying its key. A 261 KiB McEliece public
-    /// key cannot live in a routing table (see [`super::dht`]), so this stack can
-    /// learn *that* a peer holds a blob before it can learn how to talk to it.
-    /// Until peer records carry keys, the DHT reorders the peers a node already
-    /// knows rather than introducing new ones.
+    /// key cannot live in a routing table (see [`super::dht`]), so this stack
+    /// can learn *that* a peer holds a blob before it can learn how to talk to
+    /// it. The key is now fetched on demand — [`DhtMessage::GetKey`] — so the
+    /// gap closes after a round rather than never, and a contact that is still
+    /// keyless this tick is skipped this tick and queued for a key.
+    ///
+    /// # The contract this owes the driver
+    ///
+    /// Every contact taken from [`Directory::next_hops`] is resolved before this
+    /// returns: dialable ones into the result, undialable ones through
+    /// [`Directory::on_unreachable`]. A contact left outstanding is a lookup
+    /// that never terminates. The caller owes the other half — a failed dial
+    /// must come back through [`Service::unreachable`].
+    ///
+    /// [`DhtMessage::GetKey`]: super::dht::DhtMessage::GetKey
     pub fn peers_for(&self, needs: &BTreeSet<String>, fanout: usize) -> Vec<Endpoint> {
         if needs.is_empty() {
             return self.sample_peers(fanout);
@@ -137,14 +170,73 @@ impl Service {
         let now = crate::time::unix_seconds();
         let mut chosen: Vec<Endpoint> = Vec::new();
         let mut seen: BTreeSet<PeerId> = BTreeSet::new();
+
+        // 1. Known holders, and the addresses that have none.
+        let mut unheld: Vec<&String> = Vec::new();
+        for address in needs {
+            let (holders, _) = self.with_directory(|d| d.lookup_providers(address, now));
+            if holders.is_empty() {
+                unheld.push(address);
+                continue;
+            }
+            for holder in holders {
+                if let Some(endpoint) =
+                    self.with_book(|book| book.for_peer(&holder.peer_id()).first().cloned())
+                {
+                    if seen.insert(endpoint.peer.id()) {
+                        chosen.push(endpoint);
+                    }
+                }
+            }
+        }
+
+        // 2. One hop of a lookup, for what no holder is known for. Bounded by
+        //    the remaining capacity so every contact handed out is resolved
+        //    here rather than dropped by a later truncation.
+        let remaining = fanout.saturating_sub(chosen.len());
+        if remaining > 0 {
+            for address in &unheld {
+                self.with_directory(|directory| directory.seek(address));
+            }
+            let dialable: BTreeSet<NodeId> = self.with_book(|book| {
+                book.endpoints()
+                    .map(|endpoint| NodeId::from_bytes(endpoint.peer.id()))
+                    .collect()
+            });
+            // "Dialable" is "its key is in the address book". A contact that
+            // fails it is deferred and its key queued, inside `next_hops` — not
+            // written off here, because the key it is waiting for arrives on a
+            // later round and a peer marked queried never gets another turn.
+            let hops = self.with_directory(|directory| {
+                directory.next_hops(remaining, |peer| {
+                    // The book is a separate lock, so it is read into a set the
+                    // predicate can consult without nesting the two.
+                    dialable.contains(&peer)
+                })
+            });
+            for contact in hops {
+                if let Some(endpoint) =
+                    self.with_book(|book| book.for_peer(contact.id.as_bytes()).first().cloned())
+                {
+                    if seen.insert(endpoint.peer.id()) {
+                        chosen.push(endpoint);
+                    }
+                }
+            }
+        }
+        if chosen.len() >= fanout {
+            chosen.truncate(fanout);
+            return chosen;
+        }
+
+        // 3. Peers near the key, then the sample.
         for address in needs {
             for candidate in self.with_directory(|d| d.candidates(address, now)) {
-                let Some(endpoint) = self
-                    .book
-                    .endpoints()
-                    .find(|held| held.addr == candidate)
-                    .cloned()
-                else {
+                let Some(endpoint) = self.with_book(|book| {
+                    book.endpoints()
+                        .find(|held| held.addr == candidate)
+                        .cloned()
+                }) else {
                     continue;
                 };
                 if seen.insert(endpoint.peer.id()) {
@@ -164,6 +256,17 @@ impl Service {
             }
         }
         chosen
+    }
+
+    /// Report that a dial failed, so the lookups waiting on that peer move on.
+    ///
+    /// The other half of [`Service::peers_for`]'s contract. A driver that
+    /// dialled and forgot would leave the peer marked in-flight in every lookup
+    /// that chose it, and those lookups would never terminate — the failure
+    /// would look like a DHT that simply stops answering rather than like the
+    /// missing call it is.
+    pub fn unreachable(&self, peer: PeerId) {
+        self.with_directory(|directory| directory.on_unreachable(NodeId::from_bytes(peer)));
     }
 
     /// Bind a listener. The caller may run `accept_once` in a loop and apply
@@ -205,8 +308,12 @@ impl Service {
 
     /// Look up a bootstrap endpoint by id. This keeps callers from reaching
     /// into the address-book representation when scheduling retries.
-    pub fn endpoints_for(&self, peer: &PeerId) -> &[Endpoint] {
-        self.book.for_peer(peer)
+    ///
+    /// Cloned rather than borrowed: the book is behind a lock, and handing out
+    /// a reference into it would mean holding that lock for as long as the
+    /// caller kept the slice.
+    pub fn endpoints_for(&self, peer: &PeerId) -> Vec<Endpoint> {
+        self.with_book(|book| book.for_peer(peer).to_vec())
     }
 
     /// The peers to dial this tick: a random subset of the address book.
@@ -216,7 +323,7 @@ impl Service {
     /// front of. See [`AddressBook::sample`] for what this does *not* defend
     /// against — a forged majority of the book itself.
     pub fn sample_peers(&self, fanout: usize) -> Vec<Endpoint> {
-        self.book.sample(fanout, &mut OsRng)
+        self.with_book(|book| book.sample(fanout, &mut OsRng))
     }
 
     /// Dial one endpoint and reconcile records, then verifier code, then the
@@ -330,7 +437,7 @@ impl Service {
     /// Only the address book can answer this. An inbound connection's source
     /// port is not it — see [`session::exchange_dht`].
     fn dialable(&self, peer: &PeerId) -> Option<SocketAddr> {
-        self.book.for_peer(peer).first().map(|held| held.addr)
+        self.with_book(|book| book.for_peer(peer).first().map(|held| held.addr))
     }
 
     /// Ask the peer which of this node's pins it holds, and answer the same
@@ -356,10 +463,57 @@ impl Service {
         if let Some(addr) = dialable {
             self.note_contact(connection.remote(), addr);
         }
-        self.with_directory(|directory| {
-            session::exchange_dht(connection, directory, wanted, &held, dialable, now)
+        // Serving a key means handing out somebody else's public key, which is
+        // public by construction — it is what every dialer needs and what the
+        // peer id is derived from. The book is read here rather than inside the
+        // session so the session keeps no view of the address book at all.
+        let round = self.with_directory(|directory| {
+            session::exchange_dht(
+                connection,
+                directory,
+                wanted,
+                &held,
+                dialable,
+                now,
+                |peer| {
+                    self.with_book(|book| {
+                        book.endpoints()
+                            .find(|endpoint| NodeId::from_bytes(endpoint.peer.id()) == peer)
+                            .map(|endpoint| endpoint.peer.as_bytes().to_vec())
+                    })
+                },
+            )
         })?;
+        self.adopt(round);
         Ok(())
+    }
+
+    /// Take what a DHT round learned into the parts of the service that hold it.
+    ///
+    /// A learned key is what turns a contact the routing table heard about into
+    /// a peer this node can dial — the step that makes the DHT able to
+    /// *introduce* a peer rather than only reorder the ones already known. The
+    /// key was verified against the id before it got here, so adopting it needs
+    /// no further check.
+    fn adopt(&self, round: session::DhtRound) {
+        for (peer, key) in round.learned {
+            let Ok(public) = PeerPublic::from_bytes(&key) else {
+                continue;
+            };
+            // The address comes from the routing table, which is where the
+            // contact was heard of. A key with no address is not yet an
+            // endpoint, and is dropped rather than guessed at.
+            let addr = self.with_directory(|directory| {
+                directory
+                    .routing()
+                    .contacts()
+                    .find(|contact| contact.id == peer)
+                    .map(|contact| contact.addr)
+            });
+            if let Some(addr) = addr {
+                self.with_book(|book| book.insert(Endpoint::new(addr, public)));
+            }
+        }
     }
 }
 

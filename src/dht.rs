@@ -453,6 +453,21 @@ impl<C: Contact, P: Provider> Lookup<C, P> {
         self.queried.insert(from);
     }
 
+    /// A peer that could not be asked *yet*, and should be offered again.
+    ///
+    /// The difference from [`Lookup::on_timeout`] is the whole point: a timeout
+    /// says "this peer had its turn", a deferral says "this peer has not had a
+    /// turn at all". The case is a contact whose address is known and whose key
+    /// is not — it cannot be dialled this round, and marking it queried would
+    /// write it off a round before the key that makes it reachable arrives.
+    ///
+    /// **A deferral on its own does not terminate**, and the caller owns that:
+    /// a contact deferred forever is offered forever. [`crate::p2p::dht`] bounds
+    /// it by counting deferrals per contact and converting to a timeout.
+    pub fn defer(&mut self, from: NodeId) {
+        self.in_flight.remove(&from);
+    }
+
     /// True when nothing is outstanding and the `k` closest have all been asked.
     pub fn is_done(&self) -> bool {
         if !self.in_flight.is_empty() {

@@ -82,10 +82,25 @@ behaviour ships and is tested, not that TLC has checked it.
       the iterative lookup as a pure state machine. Safe to get wrong here in a
       way it is not elsewhere: every answer is a hint and the digest decides, so
       eclipse costs liveness and never correctness.
-- [ ] The multi-hop lookup driver. `Lookup` is built and tested; nothing yet
-      feeds it across connections, so lookups are one hop rather than `O(log n)`.
-      Plus bucket refresh, provider republication, and announcing to the `k`
-      nodes nearest a key rather than to whoever is on the line.
+- [x] **The multi-hop lookup driver** (`p2p::dht::Directory`). `Lookup` was a
+      tested state machine with nothing feeding it across connections, so
+      lookups stopped at the peers a node already had. `seek` starts a search,
+      `next_hops` names whom to dial, `on_providers`/`on_unreachable` feed
+      answers back, `take_finished` drains results — and a hop rides an ordinary
+      session rather than opening its own, because a dedicated connection per
+      hop would spend a McEliece handshake on two small messages.
+      The enabling piece was `DhtMessage::GetKey`. A routing answer names a peer
+      by id and address and *never* by key — a 261 KiB McEliece key cannot live
+      in a routing table — so a contact heard of was undialable forever, and the
+      DHT could only reorder peers a node already knew. Fetching one on demand
+      costs 261 KiB once per peer actually dialled, and checking it needs no
+      trust at all: a peer id *is* `sha256(public key)`.
+      One rule holds it together, and it is stated on every method that assumes
+      it: for each contact `next_hops` hands out, exactly one of `on_providers`
+      or `on_unreachable` must follow. A contact left outstanding is a lookup
+      that never terminates.
+      Still open: **bucket refresh**, **provider republication**, and announcing
+      to the `k` nodes nearest a key rather than to whoever is on the line.
 - [x] **One Kademlia, not two** (`src/dht.rs`). The metric, the k-buckets, the
       iterative lookup and the provider store are generic over a contact type;
       `swarm::dht` and `p2p::dht` are instantiations. Written twice they would

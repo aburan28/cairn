@@ -397,7 +397,14 @@ fn main() {
                     &root_key,
                     population_path.as_ref(),
                 ),
-                Err(error) => eprintln!("outbound session: {error}"),
+                Err(error) => {
+                    eprintln!("outbound session: {error}");
+                    // Tell the DHT, or every lookup that chose this peer waits
+                    // on it forever. `peers_for` hands out the next hop of each
+                    // lookup in flight and expects exactly one answer per
+                    // contact; this is the failure half.
+                    service.unreachable(endpoint.peer.id());
+                }
             }
         }
         thread::sleep(Duration::from_secs(5));

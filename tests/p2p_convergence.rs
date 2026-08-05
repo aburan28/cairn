@@ -570,3 +570,117 @@ fn a_needed_blob_puts_its_known_holder_ahead_of_the_random_sample() {
     let sampled = service.peers_for(&std::collections::BTreeSet::new(), 2);
     assert_eq!(sampled.len(), 2);
 }
+
+#[test]
+fn a_lookup_crosses_a_hop_and_learns_the_key_it_needs_to_do_it() {
+    // The roadmap item, end to end over the real objects: alice can reach bob
+    // and nobody else; carol holds what alice wants; bob knows carol.
+    //
+    // Before the multi-hop driver alice's search ended at bob, because a
+    // routing answer names a peer by id and address and never by key — so
+    // carol was a name alice could hear and never dial. Two things have to
+    // work together for this to pass: bob's answer has to *route* alice toward
+    // carol, and alice has to be able to turn that name into a session by
+    // fetching carol's key and checking it against the id.
+    let alice_identity = Arc::new(PeerIdentity::generate());
+    let bob = Arc::new(PeerIdentity::generate());
+    let carol = Arc::new(PeerIdentity::generate());
+    let bob_addr: std::net::SocketAddr = "127.0.0.1:9201".parse().expect("loopback");
+    let carol_addr: std::net::SocketAddr = "127.0.0.1:9202".parse().expect("loopback");
+
+    let mut alice = Service::new(alice_identity);
+    alice.add_bootstrap(Endpoint::new(bob_addr, bob.to_public()));
+
+    let wanted = "cd".repeat(32);
+    let mut needs = std::collections::BTreeSet::new();
+    needs.insert(wanted.clone());
+
+    // Alice knows bob and nothing else, so the first hop can only be bob.
+    let first = alice.peers_for(&needs, 2);
+    assert_eq!(first.len(), 1, "alice can only reach bob");
+    assert_eq!(first[0].peer.id(), bob.id());
+    let bob_node = proofwork::p2p::dht::NodeId::from_bytes(bob.id());
+    assert_eq!(
+        alice.with_directory(|d| d.ask_of(bob_node)),
+        vec![wanted.clone()],
+        "the lookup did not choose bob as its next hop"
+    );
+
+    // Bob answers: no holders, but carol is closer. This is the shape
+    // `exchange_dht` puts on the wire; driving it through the directory keeps
+    // the test about routing rather than about sockets, which
+    // `a_dht_round_records_who_holds_a_blob` already covers.
+    let carol_contact = proofwork::p2p::dht::PeerContact::new(carol.id(), carol_addr, 0);
+    alice.with_directory(|directory| {
+        directory.on_providers(
+            bob_node,
+            &[proofwork::p2p::dht::ProviderAnswer {
+                address: wanted.clone(),
+                holders: Vec::new(),
+                closer: vec![carol_contact],
+            }],
+        )
+    });
+
+    // Alice has heard of carol. She cannot dial her yet — no key — so the hop
+    // is deferred and carol's key is queued.
+    let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
+    let second = alice.peers_for(&needs, 2);
+    assert!(
+        !second.iter().any(|e| e.peer.id() == carol.id()),
+        "alice dialled a peer whose key she does not have"
+    );
+    assert!(
+        alice
+            .with_directory(|d| d.key_wants())
+            .contains(&carol_node),
+        "carol's key was not queued, so alice can never reach her"
+    );
+
+    // Bob serves the key on the next round. Verified against the id, which is
+    // what makes relaying it safe: a peer id *is* sha256(public key).
+    let key = proofwork::p2p::dht::encode_key(carol.public_key().as_ref());
+    let adopted = proofwork::p2p::dht::decode_key(carol_node, &key).expect("carol's real key");
+    alice.with_book(|book| {
+        book.insert(Endpoint::new(
+            carol_addr,
+            proofwork::p2p::handshake::PeerPublic::from_bytes(&adopted).expect("a key"),
+        ))
+    });
+    alice.with_directory(|directory| directory.resolved_key(carol_node));
+
+    // And now the hop lands: the second hop of a lookup that started with one
+    // reachable peer reaches a peer alice had never heard of.
+    let third = alice.peers_for(&needs, 2);
+    assert!(
+        third.iter().any(|e| e.peer.id() == carol.id()),
+        "alice still cannot reach carol after learning her key"
+    );
+    assert_eq!(
+        alice.with_directory(|d| d.ask_of(carol_node)),
+        vec![wanted],
+        "carol was dialled but not asked the question"
+    );
+}
+
+#[test]
+fn a_forged_key_never_reaches_the_address_book() {
+    // The one check that makes fetching a key from a stranger safe. There is
+    // no signature anywhere in this path and none is needed: the bytes hash to
+    // the id that was asked for, or they are discarded.
+    let carol = PeerIdentity::generate();
+    let mallory = PeerIdentity::generate();
+    let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
+
+    // Mallory's real, well-formed key, offered under carol's name.
+    let forged = proofwork::p2p::dht::encode_key(mallory.public_key().as_ref());
+    assert_eq!(
+        proofwork::p2p::dht::decode_key(carol_node, &forged),
+        None,
+        "a key that does not hash to the id asked for was accepted"
+    );
+    // Carol's own key still works, so the check is not simply refusing
+    // everything.
+    let honest = proofwork::p2p::dht::encode_key(carol.public_key().as_ref());
+    assert!(proofwork::p2p::dht::decode_key(carol_node, &honest).is_some());
+}
