@@ -73,7 +73,10 @@ use proofwork::incentive::design::Report as IncentiveReport;
 use proofwork::incentive::{NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError, Proof};
 use proofwork::node::Node;
-use proofwork::records::{commitment_hash, Claim, Commitment, Objective, PeerRecord, RecordError};
+use proofwork::records::{
+    commitment_hash, Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord,
+    RecordError, Undertaking,
+};
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
 use proofwork::serve::Spool;
 use proofwork::store::atrest::{AtRestError, Cipher};
@@ -147,6 +150,10 @@ fn post_objective(node: &mut Node, objective: &Objective, ts: &str) -> Result<St
 fn post_peer_record(node: &mut Node, record: &PeerRecord, ts: &str) -> Result<String, CliError> {
     node.post_peer(record, ts)
         .map_err(|violation| CliError::Refused(violation.to_string()))
+}
+
+fn refused<T>(result: Result<T, proofwork::node::RuleViolation>) -> Result<T, CliError> {
+    result.map_err(|violation| CliError::Refused(violation.to_string()))
 }
 
 fn post_commitment(node: &mut Node, commitment: &Commitment, ts: &str) -> Result<(), CliError> {
@@ -529,6 +536,13 @@ enum Command {
         /// it the checkpoint authenticates nothing -- see [`cmd_check`].
         root_key: Option<String>,
     },
+    /// Availability: promise to hold the log, answer a sample, fund and pay.
+    ///
+    /// Grouped under one command because the four are one mechanism and a
+    /// reader meeting `undertake` needs to find `answer` next to it.
+    Availability {
+        action: AvailabilityAction,
+    },
     Attribute {
         params: FlowParams,
     },
@@ -620,6 +634,32 @@ enum BlobAction {
         peers: Vec<String>,
         seconds: u64,
     },
+}
+
+/// The four steps of the availability mechanism.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AvailabilityAction {
+    /// Promise to hold this log at a root and height.
+    Undertake {
+        identity: String,
+        height: Option<u64>,
+    },
+    /// Answer this epoch's sample for every promise this identity made.
+    Answer {
+        identity: String,
+        epoch: Option<u64>,
+    },
+    /// Put up money for a run of epochs.
+    Fund {
+        funder: String,
+        per_epoch: u64,
+        from_epoch: u64,
+        to_epoch: u64,
+    },
+    /// Pay the answers to a closed epoch and name the silence.
+    Settle { epoch: Option<u64> },
+    /// What is promised, what is funded, what has been answered.
+    Status,
 }
 
 /// How long a `blob fetch` waits before giving up on a digest.
@@ -815,6 +855,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "verify" => parse_verify(&mut cursor)?,
         "prove" => parse_prove(&mut cursor)?,
         "check" => parse_check(&mut cursor)?,
+        "availability" => parse_availability(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
@@ -1108,6 +1149,77 @@ fn parse_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
         audit,
         rerun,
     })
+}
+
+fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = cursor.take().unwrap_or_else(|| String::from("status"));
+    let mut identity: Option<String> = None;
+    let mut funder: Option<String> = None;
+    let mut numbers: BTreeMap<&'static str, u64> = BTreeMap::new();
+    while let Some(token) = cursor.take() {
+        let name = match token.as_str() {
+            "--identity" => {
+                identity = Some(cursor.value("--identity")?);
+                continue;
+            }
+            "--funder" => {
+                funder = Some(cursor.value("--funder")?);
+                continue;
+            }
+            "--height" => "height",
+            "--epoch" => "epoch",
+            "--per-epoch" => "per-epoch",
+            "--from-epoch" => "from-epoch",
+            "--to-epoch" => "to-epoch",
+            other => {
+                return Err(CliError::Usage(format!(
+                    "availability {action}: unknown option {other:?}"
+                )))
+            }
+        };
+        let text = cursor.value(name)?;
+        numbers.insert(name, parse_u64(&text, name)?);
+    }
+    let need_identity = |what: &str| -> Result<String, CliError> {
+        identity
+            .clone()
+            .ok_or_else(|| CliError::Usage(format!("availability {what}: --identity <file>")))
+    };
+    let action = match action.as_str() {
+        "undertake" => AvailabilityAction::Undertake {
+            identity: need_identity("undertake")?,
+            height: numbers.get("height").copied(),
+        },
+        "answer" => AvailabilityAction::Answer {
+            identity: need_identity("answer")?,
+            epoch: numbers.get("epoch").copied(),
+        },
+        "fund" => {
+            let need = |name: &'static str| -> Result<u64, CliError> {
+                numbers
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| CliError::Usage(format!("availability fund: --{name} <units>")))
+            };
+            AvailabilityAction::Fund {
+                funder: require(funder, "availability fund", "--funder <name>")?,
+                per_epoch: need("per-epoch")?,
+                from_epoch: need("from-epoch")?,
+                to_epoch: need("to-epoch")?,
+            }
+        }
+        "settle" => AvailabilityAction::Settle {
+            epoch: numbers.get("epoch").copied(),
+        },
+        "status" => AvailabilityAction::Status,
+        other => {
+            return Err(CliError::Usage(format!(
+                "availability: unknown action {other:?}; \
+                 expected undertake, answer, fund, settle or status"
+            )))
+        }
+    };
+    Ok(Command::Availability { action })
 }
 
 fn parse_prove(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -2514,6 +2626,245 @@ fn cmd_verify(
     }
     say(out, "  signed prefix re-derives cleanly");
     Ok(0)
+}
+
+/// The availability mechanism, from the operator's side.
+///
+/// Nothing here talks to a network. A promise is a record, the challenge is a
+/// pure function of the log, and the answer is a record -- so all four steps
+/// are local, and an auditor re-derives every one of them from the log alone.
+fn cmd_availability(
+    out: &mut dyn Write,
+    options: &Options,
+    action: &AvailabilityAction,
+) -> Result<i32, CliError> {
+    match action {
+        AvailabilityAction::Undertake { identity, height } => {
+            let signer = load_identity(Some(identity))?.ok_or_else(|| {
+                CliError::Usage(String::from(
+                    "availability undertake: --identity is required",
+                ))
+            })?;
+            let mut node = open_node_for_writing(options)?;
+            let full = ledger_of(&node).len();
+            let height = height.map(|h| h as usize).unwrap_or(full);
+            let root = ledger_of(&node)
+                .prefix(height)
+                .and_then(|prefix| prefix.root())
+                .ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "no prefix of {height} entries to undertake; the log has {full}"
+                    ))
+                })?;
+            let record = Undertaking::new(signer.submitter_id(), &root, height as u64, timestamp())
+                .signed_with(&signer);
+            let id = refused(node.post_undertaking(&record, &timestamp()))?;
+            say(out, format!("undertaking {id}"));
+            say(
+                out,
+                format!("  {height} entries rooted at {}", short(&root)),
+            );
+            say(
+                out,
+                "  Answer each epoch's sample with `proofwork availability answer`;",
+            );
+            say(
+                out,
+                "  a promise that goes unanswered is named in the settlement.",
+            );
+            Ok(0)
+        }
+        AvailabilityAction::Answer { identity, epoch } => {
+            let signer = load_identity(Some(identity))?.ok_or_else(|| {
+                CliError::Usage(String::from("availability answer: --identity is required"))
+            })?;
+            let mut node = open_node_for_writing(options)?;
+            let epoch = match epoch {
+                Some(epoch) => *epoch,
+                None => current_epoch()?,
+            };
+            let mine: Vec<Undertaking> = node
+                .undertakings()
+                .into_iter()
+                .filter(|promise| promise.identity == signer.submitter_id())
+                .collect();
+            if mine.is_empty() {
+                say(out, "no undertakings for this identity");
+                say(
+                    out,
+                    "  Promise first with `proofwork availability undertake --identity <file>`.",
+                );
+                return Ok(2);
+            }
+            let mut answered = 0usize;
+            for promise in &mine {
+                let index = node
+                    .sampled_index(promise, epoch)
+                    .map_err(|why| CliError::Usage(format!("cannot draw a sample: {why}")))?;
+                let height = usize::try_from(promise.height)
+                    .map_err(|_| CliError::Overflow(String::from("undertaking height")))?;
+                // Built from this node's own copy of the log, which is the
+                // whole point: a node that does not hold it cannot get here.
+                let path = ledger_of(&node)
+                    .prefix(height)
+                    .and_then(|prefix| prefix.inclusion(index))
+                    .map(|inclusion| inclusion.siblings);
+                let Some(path) = path else {
+                    say(
+                        out,
+                        format!(
+                            "  ! {} cannot be answered: entry {index} is not in this copy",
+                            short(&promise.id())
+                        ),
+                    );
+                    continue;
+                };
+                let record = Availability::new(
+                    signer.submitter_id(),
+                    promise.id(),
+                    epoch,
+                    path,
+                    timestamp(),
+                )
+                .signed_with(&signer);
+                match node.post_availability(&record, &timestamp()) {
+                    Ok(id) => {
+                        answered += 1;
+                        say(out, format!("answered {id}"));
+                        say(
+                            out,
+                            format!(
+                                "  undertaking {}  epoch {epoch}  entry {index}",
+                                short(&promise.id())
+                            ),
+                        );
+                    }
+                    Err(why) => say(out, format!("  ! {}: {why}", short(&promise.id()))),
+                }
+            }
+            Ok(if answered > 0 { 0 } else { 2 })
+        }
+        AvailabilityAction::Fund {
+            funder,
+            per_epoch,
+            from_epoch,
+            to_epoch,
+        } => {
+            let mut node = open_node_for_writing(options)?;
+            let pool = AvailabilityPool {
+                funder: funder.clone(),
+                per_epoch: *per_epoch,
+                from_epoch: *from_epoch,
+                to_epoch: *to_epoch,
+                created_at: timestamp(),
+            };
+            let id = refused(node.post_availability_pool(&pool, &timestamp()))?;
+            say(out, format!("pool {id}"));
+            say(
+                out,
+                format!(
+                    "  {per_epoch} units per epoch, epochs {from_epoch}..={to_epoch}, ceiling {}",
+                    pool.ceiling()
+                ),
+            );
+            Ok(0)
+        }
+        AvailabilityAction::Settle { epoch } => {
+            let mut node = open_node_for_writing(options)?;
+            let now = current_epoch()?;
+            // Only closed epochs, for the same reason claims settle a closed
+            // epoch: a node still inside the epoch has not run out of time to
+            // answer, and paying early would record silence that was not.
+            let epoch = match epoch {
+                Some(epoch) => *epoch,
+                None => match now.checked_sub(1) {
+                    Some(previous) => previous,
+                    None => {
+                        say(out, "no epoch has closed yet");
+                        return Ok(0);
+                    }
+                },
+            };
+            if epoch >= now {
+                return Err(CliError::Usage(format!(
+                    "epoch {epoch} has not closed yet (it is now {now}); a node inside \
+                     an epoch has not run out of time to answer"
+                )));
+            }
+            match refused(node.settle_availability(epoch, &timestamp()))? {
+                None => {
+                    say(out, format!("epoch {epoch}: nothing to settle"));
+                    Ok(0)
+                }
+                Some(outcome) => {
+                    say(
+                        out,
+                        format!(
+                            "epoch {}: {} answered, {} silent",
+                            outcome.epoch, outcome.answered, outcome.silent
+                        ),
+                    );
+                    say(
+                        out,
+                        format!(
+                            "  {} units each, {} left in the pot",
+                            outcome.share, outcome.unpaid
+                        ),
+                    );
+                    Ok(0)
+                }
+            }
+        }
+        AvailabilityAction::Status => {
+            let node = open_node(options)?;
+            let now = current_epoch()?;
+            let promises = node.undertakings();
+            let pools = node.availability_pools();
+            say(
+                out,
+                format!(
+                    "epoch {now}  {} promise(s)  {} pool(s)  {} units offered this epoch",
+                    promises.len(),
+                    pools.len(),
+                    node.availability_offered(now)
+                ),
+            );
+            let answers = node.availability_answers();
+            for promise in &promises {
+                let id = promise.id();
+                let answered = answers
+                    .iter()
+                    .filter(|answer| answer.undertaking == id)
+                    .count();
+                let sample = node
+                    .sampled_index(promise, now)
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|_| String::from("-"));
+                say(
+                    out,
+                    format!(
+                        "  {}  {} entries by {}  {answered} answer(s)  this epoch: entry {sample}",
+                        short(&id),
+                        promise.height,
+                        short(&promise.identity),
+                    ),
+                );
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// The epoch containing this moment, by the same rule every record uses.
+fn current_epoch() -> Result<u64, CliError> {
+    let ts = timestamp();
+    let seconds = proofwork::time::parse_rfc3339(&ts)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .ok_or_else(|| CliError::Usage(format!("cannot read the current time {ts:?}")))?;
+    Ok(proofwork::partition::epoch_of(
+        seconds,
+        proofwork::partition::epoch_seconds(),
+    ))
 }
 
 /// Emit a Merkle inclusion proof for one entry.
@@ -4185,6 +4536,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             checkpoint.as_deref(),
             root_key.as_deref(),
         ),
+        Command::Availability { action } => cmd_availability(out, options, action),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Blob { action } => cmd_blob(out, options, action),
         Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),

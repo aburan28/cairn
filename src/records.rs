@@ -1477,6 +1477,120 @@ impl Undertaking {
     }
 }
 
+/// Money put up to pay for availability, for a stated run of epochs.
+///
+/// The other half of the promise, and the reason the two arrive in one change.
+/// `docs/roadmap.md`: *"a record nothing pays against is bookkeeping, and a
+/// payment with no record to challenge is unenforceable."* An
+/// [`Undertaking`] with no pool behind it is the first; a pool with no
+/// undertaking to sample is the second.
+///
+/// Shaped like an objective on purpose — a funder names a sum and settlement
+/// spends it, never more. `per_epoch` times the epoch count is the ceiling, and
+/// [`crate::node::Node::audit`] checks the total paid against it in `u128` for
+/// the same reason objective pools are checked: a wrapped sum turns an
+/// overspent pool into a small number and hides the fault being looked for.
+///
+/// # What a fixed pot buys, and what it does not
+///
+/// The pot is split equally among the epoch's verified answers, so the cost to
+/// a funder is bounded no matter how many nodes appear. What that does *not*
+/// buy is sybil resistance: ten identities behind one disk answer ten different
+/// samples from one copy of the log and take ten shares. Bounding that needs a
+/// bond — it is [`crate::incentive::NodeParams::stake`] in the model, and
+/// `docs/roadmap.md` puts bonded availability sampling in Stage 2. So this pays
+/// for answers, and it does not yet price the identity giving them. Stated here
+/// rather than left to be discovered, because a funder reading only the
+/// ceiling would conclude something stronger than is true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailabilityPool {
+    /// Who is paying. A name, not necessarily a key: funding is not a claim
+    /// about anything, so it needs no signature to be meaningful.
+    pub funder: String,
+    /// Units available for each epoch in range.
+    pub per_epoch: u64,
+    /// First epoch this pool pays for, inclusive.
+    pub from_epoch: u64,
+    /// Last epoch this pool pays for, inclusive.
+    pub to_epoch: u64,
+    pub created_at: String,
+}
+
+impl AvailabilityPool {
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("type", Value::string("availability_pool")),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("from_epoch", Value::Int(i128::from(self.from_epoch))),
+            ("funder", Value::string(self.funder.clone())),
+            ("per_epoch", Value::Int(i128::from(self.per_epoch))),
+            ("to_epoch", Value::Int(i128::from(self.to_epoch))),
+        ])
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Total this pool can ever pay: `per_epoch × epochs`, in `u128`.
+    ///
+    /// Widened deliberately. Both factors are `u64`, and their product is not:
+    /// computing the ceiling in `u64` would wrap a large pool into a small one
+    /// and let the audit certify an overspend as fine.
+    pub fn ceiling(&self) -> u128 {
+        let epochs = u128::from(self.to_epoch.saturating_sub(self.from_epoch)) + 1;
+        u128::from(self.per_epoch) * epochs
+    }
+
+    pub fn covers(&self, epoch: u64) -> bool {
+        self.from_epoch <= epoch && epoch <= self.to_epoch
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "availability_pool";
+        if self.funder.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "funder",
+                expected: "a non-empty name",
+            });
+        }
+        // A pool that pays nothing is not a pool, and an inverted range is a
+        // record whose ceiling arithmetic would be nonsense. Both refused
+        // rather than normalised: a record two implementations might normalise
+        // differently is a consensus split.
+        if self.per_epoch == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "per_epoch",
+                expected: "at least one unit",
+            });
+        }
+        if self.from_epoch > self.to_epoch {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "to_epoch",
+                expected: "an epoch at or after from_epoch",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<AvailabilityPool, RecordError> {
+        const RECORD: &str = "availability_pool";
+        let value = expect_object(value, RECORD)?;
+        let record = AvailabilityPool {
+            funder: required_string(value, RECORD, "funder")?,
+            per_epoch: required_u64(value, RECORD, "per_epoch")?,
+            from_epoch: required_u64(value, RECORD, "from_epoch")?,
+            to_epoch: required_u64(value, RECORD, "to_epoch")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
 /// An answer to one availability sample: the path the holder produced.
 ///
 /// # Why this carries a path and not a proof

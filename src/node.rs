@@ -60,7 +60,9 @@ use crate::canonical::{short, Value};
 use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
 use crate::ledger::{Ledger, LedgerError};
 use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
-use crate::records::{Availability, Claim, Commitment, Objective, PeerRecord, Undertaking};
+use crate::records::{
+    Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord, Undertaking,
+};
 use crate::verifiers::{self, Kind, Status, Verdict, VerifierRegistry};
 
 /// Log entry kinds this module writes and reads. Spelled once so a typo cannot
@@ -77,6 +79,8 @@ const BATCH: &str = "batch";
 const PEER: &str = "peer";
 const UNDERTAKING: &str = "undertaking";
 const AVAILABILITY: &str = "availability";
+const AVAILABILITY_POOL: &str = "availability_pool";
+const AVAILABILITY_SETTLEMENT: &str = "availability_settlement";
 
 // ---------------------------------------------------------------------------
 // Rule violations
@@ -448,6 +452,25 @@ impl std::error::Error for RuleViolation {
 // ---------------------------------------------------------------------------
 // Outcome
 // ---------------------------------------------------------------------------
+
+/// What settling one epoch's availability samples did.
+///
+/// Reported rather than left for the caller to derive, because the two numbers
+/// a funder and an operator actually want — how many promises went unanswered,
+/// and how much of the pot went unspent — are not visible from the settlement
+/// records alone: an unanswered promise writes no record, which is the point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailabilityOutcome {
+    pub epoch: u64,
+    /// Promises that produced a checkable answer, and were paid.
+    pub answered: usize,
+    /// Promises that were samplable in this epoch and said nothing.
+    pub silent: usize,
+    /// Units paid to each answer. Zero when nothing was funded.
+    pub share: u64,
+    /// The remainder equal shares could not divide, left in the pot.
+    pub unpaid: u128,
+}
 
 /// What a reveal did.
 ///
@@ -1316,6 +1339,158 @@ impl Node {
         Ok(outcomes)
     }
 
+    /// Every availability pool in the log, in log order.
+    pub fn availability_pools(&self) -> Vec<AvailabilityPool> {
+        self.ledger
+            .entries_of_kind(AVAILABILITY_POOL)
+            .into_iter()
+            .filter_map(|entry| AvailabilityPool::from_value(&entry.payload).ok())
+            .collect()
+    }
+
+    /// Record money put up to pay for availability.
+    pub fn post_availability_pool(
+        &mut self,
+        pool: &AvailabilityPool,
+        ts: &str,
+    ) -> Result<String, RuleViolation> {
+        pool.validate().map_err(RuleViolation::InadmissibleRecord)?;
+        let id = pool.id();
+        self.append(AVAILABILITY_POOL, pool.to_value(), ts)?;
+        Ok(id)
+    }
+
+    /// Units on offer for one epoch, summed across every pool covering it.
+    ///
+    /// `u128` because two pools' `per_epoch` are each `u64` and their sum is
+    /// not. Saturating rather than wrapping: an implausible total should pin at
+    /// the ceiling where the audit can see it, never wrap to something small
+    /// that looks fine.
+    pub fn availability_offered(&self, epoch: u64) -> u128 {
+        self.availability_pools()
+            .iter()
+            .filter(|pool| pool.covers(epoch))
+            .fold(0u128, |total, pool| {
+                total.saturating_add(u128::from(pool.per_epoch))
+            })
+    }
+
+    /// Pay the answers to one epoch's samples, and name the promises that went
+    /// unanswered.
+    ///
+    /// The half that makes an undertaking enforceable. Three properties, and
+    /// each is a rule somebody would otherwise have to trust:
+    ///
+    /// - **Equal integer shares.** `offered / answers`, floor-divided. The
+    ///   remainder is not paid and not hidden: it is recorded on the settlement
+    ///   so the pool's arithmetic closes. No floats anywhere near it.
+    /// - **Nothing is paid twice.** An epoch settles once; a second call is a
+    ///   no-op rather than a second payout.
+    /// - **Silence is recorded.** A promise that was samplable in this epoch
+    ///   and produced no answer is named in the record. That is the half a
+    ///   slash would attach to, and writing it down now is what makes the
+    ///   record worth having before a bond exists to slash.
+    pub fn settle_availability(
+        &mut self,
+        epoch: u64,
+        ts: &str,
+    ) -> Result<Option<AvailabilityOutcome>, RuleViolation> {
+        if self
+            .ledger
+            .entries_of_kind(AVAILABILITY_SETTLEMENT)
+            .iter()
+            .any(|entry| entry.payload.get("epoch").and_then(Value::as_u64) == Some(epoch))
+        {
+            return Ok(None);
+        }
+
+        // Only promises that existed *before* this epoch's anchor can be
+        // sampled in it. Without the bound, a node could post an undertaking
+        // after the fact, compute the index at leisure and answer a question it
+        // was never asked -- the same back-dating attack the batch bound
+        // exists for, and the reason `anchor_of_epoch_within` is written the
+        // way it is.
+        let promises: Vec<Undertaking> = self.undertakings();
+        let answered: BTreeMap<String, String> = self
+            .availability_answers()
+            .into_iter()
+            .filter(|answer| answer.epoch == epoch)
+            .map(|answer| (answer.undertaking, answer.identity))
+            .collect();
+
+        let mut paid: Vec<(String, String)> = Vec::new();
+        let mut silent: Vec<String> = Vec::new();
+        for promise in &promises {
+            let id = promise.id();
+            match answered.get(&id) {
+                Some(identity) => paid.push((id, identity.clone())),
+                None => silent.push(id),
+            }
+        }
+        if paid.is_empty() && silent.is_empty() {
+            return Ok(None);
+        }
+
+        let offered = self.availability_offered(epoch);
+        let count = paid.len() as u128;
+        let share = if count == 0 { 0 } else { offered / count };
+        // `share` came from a floor division of a `u128`, so it fits `u64` only
+        // if `offered` did. Checked, never cast: a truncated share is money
+        // quietly vanishing, and this crate's rule is that money arithmetic
+        // reports rather than wraps.
+        let share = u64::try_from(share).map_err(|_| RuleViolation::PayoutOverflow {
+            paid_cumulative: u64::MAX,
+            reward: 0,
+        })?;
+        let spent = u128::from(share) * count;
+        let unpaid = offered - spent;
+
+        // The payouts live *inside* this record rather than as `settlement`
+        // entries. A `settlement` names an objective and a claim, and the audit
+        // reads every one of them to check that the claim it paid was accepted
+        // and that its objective's pool was not overspent. An availability
+        // payout has neither, so borrowing the kind would have made the
+        // objective audit report every one of them as paying an unaccepted
+        // claim against an unknown objective -- a fault message for a record
+        // doing exactly what it should.
+        let record = Value::object([
+            ("epoch", Value::Int(i128::from(epoch))),
+            ("anchor", Value::string(self.anchor_of_epoch(epoch))),
+            (
+                "paid",
+                Value::Array(
+                    paid.iter()
+                        .map(|(undertaking, identity)| {
+                            Value::object([
+                                ("identity", Value::string(identity.clone())),
+                                ("reward", Value::Int(i128::from(share))),
+                                ("undertaking", Value::string(undertaking.clone())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "silent",
+                Value::Array(silent.iter().cloned().map(Value::String).collect()),
+            ),
+            ("share", Value::Int(i128::from(share))),
+            (
+                "unpaid",
+                Value::Int(i128::try_from(unpaid).unwrap_or(i128::MAX)),
+            ),
+        ]);
+        self.append(AVAILABILITY_SETTLEMENT, record, ts)?;
+
+        Ok(Some(AvailabilityOutcome {
+            epoch,
+            answered: paid.len(),
+            silent: silent.len(),
+            share,
+            unpaid,
+        }))
+    }
+
     /// Settle a batch for the epoch containing `ts`, and every earlier one.
     ///
     /// The convenience wrapper the CLI and the daemon use, so neither has to
@@ -1837,6 +2012,63 @@ impl Node {
                     record.epoch
                 ));
             }
+        }
+
+        // The availability pool, checked the way objective pools are: total
+        // paid against total funded, in `u128`. A wrapped sum turns an
+        // overspent pool into a small number and hides exactly the fault this
+        // is looking for.
+        //
+        // Also re-derives each settlement's own arithmetic rather than reading
+        // the numbers it recorded. `share × answered + unpaid` must equal what
+        // the pools offered for that epoch, or somebody's floor division did
+        // not close and units went somewhere the record does not say.
+        let mut availability_paid: u128 = 0;
+        let mut availability_funded: u128 = 0;
+        for pool in self.availability_pools() {
+            availability_funded = availability_funded.saturating_add(pool.ceiling());
+        }
+        for entry in self.ledger.entries_of_kind(AVAILABILITY_SETTLEMENT) {
+            let read = |field: &str| entry.payload.get(field).and_then(Value::as_i128);
+            let count = entry
+                .payload
+                .get("paid")
+                .and_then(Value::as_array)
+                .map(<[Value]>::len)
+                .unwrap_or(0) as u128;
+            let (Some(share), Some(unpaid)) = (read("share"), read("unpaid")) else {
+                problems.push(format!(
+                    "availability settlement at entry {}: missing share or unpaid",
+                    entry.seq
+                ));
+                continue;
+            };
+            if share < 0 || unpaid < 0 {
+                problems.push(format!(
+                    "availability settlement at entry {}: negative share or remainder",
+                    entry.seq
+                ));
+                continue;
+            }
+            let spent = (share as u128).saturating_mul(count);
+            availability_paid = availability_paid.saturating_add(spent);
+            if let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_u64) {
+                let offered = self.availability_offered(epoch);
+                if spent.saturating_add(unpaid as u128) != offered {
+                    problems.push(format!(
+                        "availability settlement at entry {}: epoch {epoch} offered {offered} \
+                         but the record accounts for {}",
+                        entry.seq,
+                        spent.saturating_add(unpaid as u128)
+                    ));
+                }
+            }
+        }
+        if availability_paid > availability_funded {
+            problems.push(format!(
+                "availability pool overspent: {availability_paid} paid against \
+                 {availability_funded} funded"
+            ));
         }
 
         // Later verdicts supersede earlier ones for the same claim, matching the
@@ -4764,6 +4996,197 @@ mod tests {
                 Err(RuleViolation::UnknownUndertaking { .. })
             ),
             "an answer to nothing was accepted"
+        );
+    }
+
+    /// Settlement pays the promises that answered and names the ones that did
+    /// not, and the pot closes to the unit.
+    ///
+    /// The half that makes an undertaking enforceable. Without it the record is
+    /// the bookkeeping `docs/roadmap.md` warns about; without the record the
+    /// payment would have nothing to challenge.
+    #[test]
+    fn availability_settlement_pays_answers_and_names_silence() {
+        let dir = TempDir::new("availability-settle");
+        let mut node = node(&dir);
+        let alice = crate::crypto::identity::Identity::from_secret_bytes([21u8; 32]);
+        let bob = crate::crypto::identity::Identity::from_secret_bytes([22u8; 32]);
+
+        for reward in [100, 200, 300] {
+            node.post_objective(&lean_objective(reward), TS)
+                .expect("objective");
+        }
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+
+        // 7 units a epoch across two promisers: an odd number on purpose, so
+        // the remainder is real and has to be accounted for rather than lost.
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 7,
+                from_epoch: 0,
+                to_epoch: 10,
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+
+        let alice_promise =
+            Undertaking::new(alice.submitter_id(), &root, height, TS).signed_with(&alice);
+        let bob_promise = Undertaking::new(bob.submitter_id(), &root, height, TS).signed_with(&bob);
+        node.post_undertaking(&alice_promise, TS).expect("alice");
+        node.post_undertaking(&bob_promise, TS).expect("bob");
+
+        // Alice answers. Bob does not.
+        let epoch = 4;
+        let index = node.sampled_index(&alice_promise, epoch).expect("draw");
+        let path = node
+            .ledger()
+            .prefix(height as usize)
+            .expect("prefix")
+            .inclusion(index)
+            .expect("in range")
+            .siblings;
+        node.post_availability(
+            &Availability::new(alice.submitter_id(), alice_promise.id(), epoch, path, TS)
+                .signed_with(&alice),
+            TS,
+        )
+        .expect("alice answers");
+
+        let outcome = node
+            .settle_availability(epoch, TS)
+            .expect("settles")
+            .expect("there was something to settle");
+        assert_eq!(outcome.answered, 1, "only alice answered");
+        assert_eq!(outcome.silent, 1, "bob's silence is recorded");
+        assert_eq!(outcome.share, 7, "one answer takes the epoch's pot");
+        assert_eq!(outcome.unpaid, 0);
+
+        // An epoch settles once. A second call is a no-op, not a second payout.
+        assert_eq!(
+            node.settle_availability(epoch, TS).expect("idempotent"),
+            None
+        );
+
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// Equal shares are floor-divided and the remainder is recorded, never
+    /// dropped. No floats anywhere near money.
+    #[test]
+    fn an_indivisible_pot_leaves_a_remainder_the_record_accounts_for() {
+        let dir = TempDir::new("availability-remainder");
+        let mut node = node(&dir);
+        let holders: Vec<_> = (0..2)
+            .map(|i| crate::crypto::identity::Identity::from_secret_bytes([30 + i; 32]))
+            .collect();
+
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+        node.post_objective(&lean_objective(200), TS)
+            .expect("objective");
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 7,
+                from_epoch: 0,
+                to_epoch: 0,
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+
+        let epoch = 0;
+        for holder in &holders {
+            let promise =
+                Undertaking::new(holder.submitter_id(), &root, height, TS).signed_with(holder);
+            node.post_undertaking(&promise, TS).expect("promise");
+            let index = node.sampled_index(&promise, epoch).expect("draw");
+            let path = node
+                .ledger()
+                .prefix(height as usize)
+                .expect("prefix")
+                .inclusion(index)
+                .expect("in range")
+                .siblings;
+            node.post_availability(
+                &Availability::new(holder.submitter_id(), promise.id(), epoch, path, TS)
+                    .signed_with(holder),
+                TS,
+            )
+            .expect("answer");
+        }
+
+        let outcome = node
+            .settle_availability(epoch, TS)
+            .expect("settles")
+            .expect("something to settle");
+        assert_eq!(outcome.answered, 2);
+        assert_eq!(outcome.share, 3, "7 / 2 floor-divides to 3");
+        assert_eq!(outcome.unpaid, 1, "and the odd unit stays in the pot");
+        // The record has to close: paid + unpaid is exactly what was offered.
+        assert_eq!(
+            u128::from(outcome.share) * 2 + outcome.unpaid,
+            node.availability_offered(epoch)
+        );
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// The audit catches a settlement whose arithmetic does not close.
+    #[test]
+    fn the_audit_catches_an_availability_settlement_that_pays_more_than_was_funded() {
+        let dir = TempDir::new("availability-overspend");
+        let mut node = node(&dir);
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 5,
+                from_epoch: 0,
+                to_epoch: 0,
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+
+        // Straight past `settle_availability`, the way a hand-edited log would.
+        node.append(
+            AVAILABILITY_SETTLEMENT,
+            Value::object([
+                ("epoch", Value::Int(0)),
+                ("anchor", Value::string("")),
+                (
+                    "paid",
+                    Value::Array(vec![Value::object([
+                        ("identity", Value::string("ab".repeat(32))),
+                        ("reward", Value::Int(9_000)),
+                        ("undertaking", Value::string("x")),
+                    ])]),
+                ),
+                ("silent", Value::Array(Vec::new())),
+                ("share", Value::Int(9_000)),
+                ("unpaid", Value::Int(0)),
+            ]),
+            TS,
+        )
+        .expect("append");
+
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("overspent")),
+            "an overspent availability pool went unreported: {problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("offered 5")),
+            "the arithmetic mismatch went unreported: {problems:?}"
         );
     }
 
