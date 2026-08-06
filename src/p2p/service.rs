@@ -370,6 +370,16 @@ impl Service {
         taken
     }
 
+    /// The transport key this node holds for `peer`, if any.
+    ///
+    /// The address book is already the cache: an endpoint is an address *and* a
+    /// key, and `p2p::dht`'s `GetKey` is what fills it. This exposes that cache
+    /// so a subsystem holding only an id can complete it -- see
+    /// [`crate::swarm::tcp::KeySource`], which `Service` implements over this.
+    pub fn key_for(&self, peer: &PeerId) -> Option<PeerPublic> {
+        self.with_book(|book| book.for_peer(peer).first().map(|e| e.peer.clone()))
+    }
+
     /// Report that a dial failed, so the lookups waiting on that peer move on.
     ///
     /// The other half of [`Service::peers_for`]'s contract. A driver that
@@ -851,4 +861,15 @@ fn apply_records(node: &mut Node, peer: &Peer) {
     // deferred to the close of the reveal epoch, so a node that never drains
     // holds a log full of accepted claims that nobody was ever paid for.
     let _ = node.settle_at(&timestamp());
+}
+
+/// `Service` is the key source `swarm` needs.
+///
+/// This is the fold arriving as an interface rather than a deletion: `swarm`
+/// stops having its own answer to "where does a transport key come from" and
+/// consumes `p2p`'s, which is the direction `docs/roadmap.md` asks for.
+impl crate::swarm::tcp::KeySource for Service {
+    fn key_for(&self, peer: &PeerId) -> Option<PeerPublic> {
+        Service::key_for(self, peer)
+    }
 }

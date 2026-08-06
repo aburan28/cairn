@@ -542,6 +542,108 @@ fn serve_peers_only(mut connection: Connection, book: &Book, dht: &Dht) -> io::R
     Ok(())
 }
 
+/// Somewhere to get the transport key for a peer this node only has an id for.
+///
+/// # Why this is a trait and not a message
+///
+/// Encrypting the transport cost peer exchange its self-sufficiency: a relayed
+/// record names a peer and where it was, and an authenticated dial needs the
+/// responder's 261,120-byte McEliece key, which no record carries. Something has
+/// to close that gap.
+///
+/// The obvious move — add a `WantKey`/`Key` pair to [`super::wire::Message`] —
+/// is the wrong one. [`crate::p2p::dht`] already fetches keys on demand over an
+/// existing session, and a second implementation of exactly that inside `swarm`
+/// is the duplication `docs/roadmap.md` wants removed rather than doubled.
+///
+/// So this module states what it *needs* and lets the stack that already has it
+/// supply the answer. `Service` implements this over its own address book, which
+/// makes `swarm` a consumer of `p2p` rather than a parallel stack beside it —
+/// the direction the fold is going, arrived at one interface rather than one
+/// large deletion.
+///
+/// # Nothing here is trusted
+///
+/// A key that comes back is checked by the handshake: a peer id *is* the
+/// `sha256` of a public key, so a wrong key derives a wrong id and the session
+/// never opens. An implementation that lied would cost a failed dial, which is
+/// the bound every hint in this crate carries.
+pub trait KeySource {
+    /// The transport key for `peer`, if this source has one.
+    fn key_for(
+        &self,
+        peer: &crate::p2p::handshake::PeerId,
+    ) -> Option<crate::p2p::handshake::PeerPublic>;
+}
+
+/// A source that knows nothing, for a caller with no `p2p` stack.
+///
+/// Named rather than an `Option`, because "I have no way to resolve keys" is a
+/// real configuration and should read as one at the call site.
+pub struct NoKeys;
+
+impl KeySource for NoKeys {
+    fn key_for(
+        &self,
+        _peer: &crate::p2p::handshake::PeerId,
+    ) -> Option<crate::p2p::handshake::PeerPublic> {
+        None
+    }
+}
+
+/// Complete the address book's hints into dialable endpoints.
+///
+/// A book entry names a peer and an address; `keys` supplies the rest. Entries
+/// whose key is unavailable are skipped rather than dialled, because a dial
+/// without the responder's key cannot complete a handshake and would only spend
+/// a connection to find that out.
+///
+/// This is what restores the property encryption cost: with a source that can
+/// answer, a node that learned an address by asking can use it, and the second
+/// fetch needs no endpoint handed to it.
+pub fn complete(book: &Book, keys: &dyn KeySource) -> Vec<Endpoint> {
+    let mut out = Vec::new();
+    let records = book.lock().unwrap_or_else(|e| e.into_inner()).share("");
+    for signed in &records {
+        let Ok(record) = super::discovery::PeerRecord::open(signed) else {
+            continue;
+        };
+        let Some(transport) = record.transport.as_deref() else {
+            // An address with no transport id can never become a dial, whatever
+            // fetches the key: there is nothing to look the key up by and
+            // nothing to check a fetched one against.
+            continue;
+        };
+        let Some(id) = decode_transport_id(transport) else {
+            continue;
+        };
+        let Some(public) = keys.key_for(&id) else {
+            continue;
+        };
+        for addr in &record.addrs {
+            out.push(Endpoint::new(*addr, public.clone()));
+        }
+    }
+    out
+}
+
+/// Hex to a 32-byte transport id.
+fn decode_transport_id(text: &str) -> Option<crate::p2p::handshake::PeerId> {
+    if text.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, pair) in text.as_bytes().chunks(2).enumerate() {
+        let value = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        };
+        out[index] = (value(pair[0])? << 4) | value(pair[1])?;
+    }
+    Some(out)
+}
+
 /// Fetch `digest` from `peers`, writing it into `blobs` on success.
 ///
 /// Returns the bytes as well as storing them, because the caller usually wants
@@ -585,6 +687,33 @@ pub fn fetch_with(
     deadline: Duration,
     book: Book,
 ) -> Result<Vec<u8>, TransferError> {
+    fetch_using(digest, peers, local, blobs, limits, deadline, book, &NoKeys)
+}
+
+/// Fetch, completing the address book's hints through `keys`.
+///
+/// The form that restores what encryption cost. Everything the book learned by
+/// asking is dialled alongside `peers`, for every entry whose transport key
+/// `keys` can supply — so a node handed one endpoint once needs none the second
+/// time, which is the entire point of peer exchange.
+#[allow(clippy::too_many_arguments)]
+pub fn fetch_using(
+    digest: &str,
+    peers: &[Endpoint],
+    local: Arc<PeerIdentity>,
+    blobs: &BlobStore,
+    limits: Limits,
+    deadline: Duration,
+    book: Book,
+    keys: &dyn KeySource,
+) -> Result<Vec<u8>, TransferError> {
+    let mut peers: Vec<Endpoint> = peers.to_vec();
+    for endpoint in complete(&book, keys) {
+        if !peers.iter().any(|known| known.addr == endpoint.addr) {
+            peers.push(endpoint);
+        }
+    }
+    let peers = &peers[..];
     if peers.is_empty() {
         return Err(TransferError::NoPeers);
     }
@@ -1329,5 +1458,107 @@ mod tests {
     /// Substring search over bytes. `Vec` has no `contains` for slices.
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn a_key_source_restores_the_fetch_that_needs_no_endpoint() {
+        // The property encryption cost, given back. C learns B's address by
+        // asking A, and with something that can supply B's transport key it
+        // fetches from B having been *handed* nothing -- which is what peer
+        // exchange was always for.
+        use crate::crypto::identity::Identity;
+        use crate::swarm::discovery::PeerRecord;
+
+        struct OneKey(
+            crate::p2p::handshake::PeerId,
+            crate::p2p::handshake::PeerPublic,
+        );
+        impl KeySource for OneKey {
+            fn key_for(
+                &self,
+                peer: &crate::p2p::handshake::PeerId,
+            ) -> Option<crate::p2p::handshake::PeerPublic> {
+                (peer == &self.0).then(|| self.1.clone())
+            }
+        }
+
+        let dir = scratch("keysource");
+        let only_b = evaluator(30_000);
+        let digest = crate::canonical::digest_bytes(&only_b);
+
+        let b_store = store(&dir, "b");
+        put(&b_store, &only_b);
+        let (b, b_endpoint) = seeder_at(b_store);
+        let b_id = b_endpoint.peer.id();
+
+        // A book holding what peer exchange would have taught: an address and a
+        // transport id, and no key.
+        let book = new_book();
+        let record = PeerRecord::sign_for(
+            &Identity::from_secret_bytes([12u8; 32]),
+            &[b.addr()],
+            1,
+            Some(&crate::p2p::handshake::peer_id_hex(&b_id)),
+        )
+        .expect("signs");
+        assert!(book.lock().expect("lock").offer(&record).expect("verifies"));
+
+        // Without a key source the hint stays a hint: nothing to dial.
+        assert!(
+            complete(&book, &NoKeys).is_empty(),
+            "a hint became an endpoint with no key to complete it"
+        );
+
+        // With one, it is an endpoint -- and the fetch needs no `peers` at all.
+        let keys = OneKey(b_id, b_endpoint.peer.clone());
+        assert_eq!(complete(&book, &keys).len(), 1);
+        let c_store = store(&dir, "c");
+        let got = fetch_using(
+            &digest,
+            &[],
+            leech_identity(),
+            &c_store,
+            Limits::default(),
+            Duration::from_secs(20),
+            book,
+            &keys,
+        )
+        .expect("a completed hint needs no endpoint handed in");
+        assert_eq!(got, only_b);
+
+        b.shutdown();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_with_no_transport_id_is_never_completed() {
+        // An address with nothing to look a key up by, and nothing to check a
+        // fetched one against, can never become a dial however good the source.
+        use crate::crypto::identity::Identity;
+        use crate::swarm::discovery::PeerRecord;
+
+        struct Anything(crate::p2p::handshake::PeerPublic);
+        impl KeySource for Anything {
+            fn key_for(
+                &self,
+                _peer: &crate::p2p::handshake::PeerId,
+            ) -> Option<crate::p2p::handshake::PeerPublic> {
+                Some(self.0.clone())
+            }
+        }
+
+        let book = new_book();
+        let record = PeerRecord::sign(
+            &Identity::from_secret_bytes([13u8; 32]),
+            &["127.0.0.1:9999".parse().expect("addr")],
+            1,
+        )
+        .expect("signs");
+        assert!(book.lock().expect("lock").offer(&record).expect("verifies"));
+        let source = Anything(PeerIdentity::generate().to_public());
+        assert!(
+            complete(&book, &source).is_empty(),
+            "an id-less record was completed into something dialable"
+        );
     }
 }

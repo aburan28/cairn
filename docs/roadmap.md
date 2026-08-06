@@ -152,9 +152,14 @@ behaviour ships and is tested, not that TLC has checked it.
       the responder's key, so `fetch` takes endpoints; a relayed record carries
       an id and not a key, so an address learned by peer exchange is now a hint
       something must complete. The second fetch on a node used to need no
-      `--peer` and now needs the key too. `p2p::dht`'s `GetKey` already fetches
-      keys on demand, and wiring this module to it restores the property — that
-      is the remaining half of the fold, below.
+      `--peer` and now needs the key too — and that is **given back** by
+      `tcp::KeySource`, which `Service` implements over the address book
+      `p2p::dht`'s `GetKey` already fills. `fetch_using` completes the book's
+      hints through it, so a node handed one endpoint once needs none the second
+      time. Deliberately a trait rather than a `WantKey` message: a second
+      key-fetch inside `swarm` would double the duplication the fold exists to
+      remove, and stating the need instead makes `swarm` a *consumer* of `p2p`,
+      which is the direction the fold goes.
 - [x] **Decided: at-rest encryption covers the log and stops there.** The
       threat is a copy of the data directory reaching somewhere the operator did
       not intend, and what sealing buys is that the copy is inert. The log is
@@ -177,17 +182,17 @@ behaviour ships and is tested, not that TLC has checked it.
       there, or **unaccounted for**, and `store status` reports the last two and
       exits 1. A future feature that writes plaintext state into a data
       directory trips it instead of slipping past.
-- [ ] Fold the rest of `src/swarm/` into `src/p2p/`. The DHT is shared now; the
-      signed peer records and the piece machinery are not. `swarm::discovery` is
-      exactly the peer-list exchange `p2p` is missing, against a different
-      identity scheme, and the McEliece transport is what `swarm::tcp` lacks.
-      Reviewed again in the launch pass and deliberately **not** attempted
-      then: the two identity schemes (ed25519 for `swarm` peer records, a
-      261,120-byte McEliece key for the encrypted transport) have to be
-      reconciled before the merge means anything, and a rushed version would
-      trade a contained duplication for an uncontained one. The containment
-      -- `insecure-swarm-tcp` off by default, so the unencrypted socket cannot
-      reach a binary by accident -- is what makes deferring it safe.
+- [ ] Fold the rest of `src/swarm/` into `src/p2p/`. Substantially narrowed:
+      the DHT is shared, the transport is shared, and `tcp::KeySource` makes
+      `swarm` consume `p2p`'s key distribution rather than grow its own — so
+      what is left is one *discovery* stack instead of two, not one network
+      stack instead of two.
+      That last step deletes public API: `swarm::discovery`'s signed records
+      overlap `records::PeerRecord` almost exactly now (same shape, same
+      transport id, same `seq`-supersedes rule), and keeping both means two
+      places to change one rule. It is a scope decision rather than an
+      engineering one, which is why it is still open — the liability that made
+      it urgent, an unencrypted socket, is gone.
 - [x] **Peer identities in the log** (`records::PeerRecord`, `proofwork peer`).
       A fourth record kind binding a permanent ed25519 identity to the transport
       id it answers on, plus an address hint and a `seq` that supersedes — so
