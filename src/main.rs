@@ -2456,8 +2456,22 @@ fn cmd_incentives(
             out,
             "robustness -- how far each parameter moves before honesty stops holding",
         );
-        let margins = proofwork::incentive::robustness::margins(params)
-            .map_err(|error| CliError::Usage(error.to_string()))?;
+        // Progress to stderr, so `incentives --robustness > report.txt` still
+        // writes exactly the report. The sweep re-evaluates the whole mechanism
+        // once per rung and takes minutes; silent, that is indistinguishable
+        // from a hang, and the usual response to a hang is to kill it.
+        eprintln!(
+            "  (each parameter is walked out along a 12-rung ladder in both \
+             directions, re-evaluating the whole mechanism at every rung -- \
+             this takes minutes)"
+        );
+        let margins = proofwork::incentive::robustness::margins_reporting(
+            params,
+            |parameter, done, total| {
+                eprintln!("  [{done}/{total}] {parameter}");
+            },
+        )
+        .map_err(|error| CliError::Usage(error.to_string()))?;
         for margin in &margins {
             say(out, format!("  {margin}"));
         }

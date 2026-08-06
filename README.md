@@ -69,8 +69,12 @@ cargo test                    # the full suite, loopback only
 ./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
 ./scripts/blob-demo.sh        # a node with only the log fetches its verifier and uses it
 ./scripts/p2p-demo.sh         # two daemons: an empty node syncs, then audits under both
-proofwork incentives          # evaluate the node-operator game
-proofwork incentives --robustness   # ...and how far each parameter can move before it breaks
+proofwork incentives          # evaluate the node-operator game (~2s)
+proofwork incentives --robustness   # ...and how far each parameter can move before it
+                                    # breaks. Seventeen parameters walked out along a
+                                    # twelve-rung ladder in both directions, the whole
+                                    # mechanism re-evaluated at every rung: ~6 minutes,
+                                    # with progress on stderr so stdout stays the report.
 ```
 
 On Linux, install [bubblewrap](https://github.com/containers/bubblewrap)

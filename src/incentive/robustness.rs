@@ -321,11 +321,32 @@ impl fmt::Display for Margin {
 /// sorted by margin is a **priority list**, and its first row is the number
 /// worth measuring before anything else is built.
 pub fn margins(params: &NodeParams) -> Result<Vec<Margin>, DesignError> {
+    margins_reporting(params, |_, _, _| {})
+}
+
+/// [`margins`], calling `progress` as each parameter is settled.
+///
+/// The sweep evaluates the whole mechanism once per rung -- six parameters, a
+/// twelve-rung ladder, both directions -- and one evaluation is not fast. Run
+/// silently that is several minutes with nothing on the terminal after the
+/// header, which is indistinguishable from a hang, and the first thing anybody
+/// does about a hang is kill it.
+///
+/// `progress` receives `(parameter, done, total)` as each one lands. The caller
+/// decides where that goes; the CLI sends it to stderr so redirecting stdout
+/// still yields exactly the report.
+pub fn margins_reporting(
+    params: &NodeParams,
+    mut progress: impl FnMut(&'static str, usize, usize),
+) -> Result<Vec<Margin>, DesignError> {
     params.validate()?;
     let broken_here = !passes(params)?;
     let mut found = Vec::new();
-    for knob in knobs() {
+    let all = knobs();
+    let total = all.len();
+    for (done, knob) in all.into_iter().enumerate() {
         found.push(margin_of(params, &knob, broken_here)?);
+        progress(knob.name, done + 1, total);
     }
     // Tightest first; unbreakable last; ties keep table order so the output is
     // deterministic.
