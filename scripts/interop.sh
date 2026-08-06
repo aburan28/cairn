@@ -11,8 +11,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/proofwork}"
-export PYTHONPATH="reference/python"
-PY="python3 -m proofwork.cli"
+REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+if [ ! -x "$REF" ]; then
+  echo "building the reference implementation..." >&2
+  cargo build --release --locked --manifest-path reference/rust/Cargo.toml
+fi
 
 if [ ! -x "$RUST" ]; then
   echo "building release binary..." >&2
@@ -32,10 +35,13 @@ export PROOFWORK_EPOCH_SECONDS=1
 tick() { sleep 1.1; }
 
 A=$(mktemp -u /tmp/pw-interop-rust-XXXXXX.jsonl)
-B=$(mktemp -u /tmp/pw-interop-py-XXXXXX.jsonl)
-trap 'rm -f "$A" "$B"' EXIT
+B=$(mktemp -u /tmp/pw-interop-ref-XXXXXX.jsonl)
+C=$(mktemp -u /tmp/pw-interop-min-XXXXXX.jsonl)
+D=$(mktemp -u /tmp/pw-interop-lean-XXXXXX.jsonl)
+E=$(mktemp -u /tmp/pw-interop-lean2-XXXXXX.jsonl)
+trap 'rm -f "$A" "$B" "$C" "$D" "$E"' EXIT
 
-# --- Rust writes, Python reads -------------------------------------------
+# --- the primary writes, the reference reads ------------------------------
 rule "Rust produces a log"
 RUST_OID=$($RUST --log "$A" --root . post examples/collatz/objective.json | head -1 | awk '{print $2}')
 $RUST --log "$A" --root . commit "$RUST_OID" --submitter alice \
@@ -46,35 +52,95 @@ $RUST --log "$A" --root . reveal "$RUST_OID" --submitter alice \
 tick
 $RUST --log "$A" --root . settle
 
-rule "Python audits the Rust log"
-# Includes the settlement batch: Python re-derives the anchor and the beacon
+rule "the reference implementation audits the primary log"
+# Includes the settlement batch: the reference re-derives the anchor and the beacon
 # order Rust recorded. A disagreement here is a disagreement about who got paid.
-PY_VIEW=$($PY --log "$A" --root . audit)
-echo "$PY_VIEW"
-echo "$PY_VIEW" | grep -q "log verified" || fail "Python could not verify the Rust log"
+REF_VIEW=$("$REF" --log "$A" --root . audit)
+echo "$REF_VIEW"
+echo "$REF_VIEW" | grep -q "log verified" || fail "the reference could not verify the primary log"
 
-# --- Python writes, Rust reads -------------------------------------------
-rule "Python produces a log"
-PY_OID=$($PY --log "$B" --root . post examples/capset/objective.json | head -1 | awk '{print $2}')
-$PY --log "$B" --root . commit "$PY_OID" --submitter bob \
+# --- the reference writes, the primary reads ------------------------------
+rule "the reference implementation produces a log"
+REF_OID=$("$REF" --log "$B" --root . post examples/capset/objective.json | head -1 | awk '{print $2}')
+"$REF" --log "$B" --root . commit "$REF_OID" --submitter bob \
     --artifact examples/capset/artifact.json --nonce n2 >/dev/null
 tick
-$PY --log "$B" --root . reveal "$PY_OID" --submitter bob \
+"$REF" --log "$B" --root . reveal "$REF_OID" --submitter bob \
     --artifact examples/capset/artifact.json --nonce n2
 tick
-$PY --log "$B" --root . settle
+"$REF" --log "$B" --root . settle
 
-rule "Rust audits the Python log"
+# --- a minimize objective, which neither had ever run against the other ----
+#
+# The first two rounds cover `certificate` and an `evaluator` that maximizes.
+# `direction` decides who clears a threshold and therefore who gets paid, and
+# until now the *minimize* branch of `Direction::clears` had never executed in
+# the reference at all: the ratchet vectors pin the arithmetic, but nothing
+# drove a real minimize objective end to end through both implementations.
+# `statistical` is likewise a verifier kind neither had run for the other.
+rule "a minimize objective, verified by the implementation that did not post it"
+MIN_OID=$($RUST --log "$C" --root . post examples/permutation/objective.json | head -1 | awk '{print $2}')
+$RUST --log "$C" --root . commit "$MIN_OID" --submitter carol \
+      --artifact examples/permutation/artifact.json --nonce n3 >/dev/null
+tick
+$RUST --log "$C" --root . reveal "$MIN_OID" --submitter carol \
+      --artifact examples/permutation/artifact.json --nonce n3
+tick
+$RUST --log "$C" --root . settle
+
+MIN_VIEW=$("$REF" --log "$C" --root . audit)
+echo "$MIN_VIEW"
+echo "$MIN_VIEW" | grep -q "log verified" \
+  || fail "the reference could not verify a minimize objective the primary settled"
+
+# --- a lean rejection, which needs no Lean toolchain to reproduce ----------
+#
+# `lean` was the last kind the reference implementation did not implement, and
+# a kind an implementation lacks answers `Unavailable` for every claim -- which
+# is correct, settles nothing, and used to be skipped by the audit in silence.
+# So the kind with the least coverage was the one whose absence was hardest to
+# notice.
+#
+# This round closes it without either side needing a proof assistant. A proof
+# containing `sorry` is screened *before* the toolchain is ever looked for, so
+# both implementations must record and re-derive the same `reject` on any host.
+# It is a real cross-implementation check on the kind, not a stand-in: remove
+# the `lean` arm from either dispatcher and this fails.
+#
+# Nothing settles, deliberately. A rejection pays nobody, and an audit that
+# only re-checks what was *paid* would let a rejection nobody else can
+# reproduce pass in silence -- the same hole one rung down. Both audits now
+# report any settled verdict they cannot re-derive, paid or not, which is what
+# gives this round its teeth.
+rule "a lean rejection: reproduced by the implementation that did not record it"
+for pair in "$RUST|$REF|the reference|$D" "$REF|$RUST|the primary|$E"; do
+  IFS='|' read -r WRITER READER WHO LOG <<< "$pair"
+  LEAN_OID=$("$WRITER" --log "$LOG" --root . post examples/lean/objective.json \
+    | head -1 | awk '{print $2}')
+  "$WRITER" --log "$LOG" --root . commit "$LEAN_OID" --submitter mallory \
+      --artifact examples/lean/hole.json --nonce n4 >/dev/null
+  tick
+  VERDICT=$("$WRITER" --log "$LOG" --root . reveal "$LEAN_OID" --submitter mallory \
+      --artifact examples/lean/hole.json --nonce n4)
+  echo "$VERDICT" | grep -q "reject" \
+    || fail "a proof containing \`sorry\` was not rejected: $VERDICT"
+  LEAN_VIEW=$("$READER" --log "$LOG" --root . audit)
+  echo "$LEAN_VIEW"
+  echo "$LEAN_VIEW" | grep -q "log verified" \
+    || fail "$WHO could not re-derive a lean rejection"
+done
+
+rule "the primary implementation audits the reference log"
 RUST_VIEW=$($RUST --log "$B" --root . audit)
 echo "$RUST_VIEW"
-echo "$RUST_VIEW" | grep -q "log verified" || fail "Rust could not verify the Python log"
+echo "$RUST_VIEW" | grep -q "log verified" || fail "the primary could not verify the reference log"
 
 # --- and on the batch each of them wrote ---------------------------------
 rule "Both implementations agree a settled batch is correctly ordered"
 for LOG in "$A" "$B"; do
   grep -q '"kind": *"batch"' "$LOG" || fail "no settlement batch in $LOG"
   $RUST --log "$LOG" --root . audit | grep -q "log verified" || fail "Rust rejects the batch in $LOG"
-  $PY   --log "$LOG" --root . audit | grep -q "log verified" || fail "Python rejects the batch in $LOG"
+  "$REF"   --log "$LOG" --root . audit | grep -q "log verified" || fail "the reference rejects the batch in $LOG"
 done
 echo "  both implementations re-derived every batch's beacon order"
 
@@ -82,7 +148,7 @@ echo "  both implementations re-derived every batch's beacon order"
 rule "Merkle roots agree across implementations"
 for LOG in "$A" "$B"; do
   R=$($RUST --log "$LOG" --root . audit | awk '/^merkle/ {print $2}')
-  P=$($PY   --log "$LOG" --root . audit | awk '/^merkle/ {print $2}')
+  P=$("$REF"   --log "$LOG" --root . audit | awk '/^merkle/ {print $2}')
   [ -n "$R" ] || fail "no Merkle root from Rust for $LOG"
   [ "$R" = "$P" ] || fail "Merkle root mismatch on $LOG: rust=$R python=$P"
   echo "  $R  (identical in both)"
@@ -90,8 +156,15 @@ done
 
 # --- and so must record identity -----------------------------------------
 rule "Objective ids agree across implementations"
-R_ID=$($RUST --log /dev/null --root . post examples/capset/objective.json 2>/dev/null | head -1 | awk '{print $2}' || true)
-[ "$PY_OID" = "${R_ID:-$PY_OID}" ] || fail "objective id mismatch: python=$PY_OID rust=$R_ID"
-echo "  $PY_OID"
+# The same objective posted by each implementation must land on the same id.
+# This is the narrowest form of the whole claim: identity is a function of the
+# bytes, not of who computed them.
+PRIMARY_LOG=$(mktemp -u /tmp/pw-interop-id-XXXXXX.jsonl)
+PRIMARY_ID=$($RUST --log "$PRIMARY_LOG" --root . post examples/capset/objective.json \
+  | head -1 | awk '{print $2}')
+rm -f "$PRIMARY_LOG"
+[ "$REF_OID" = "$PRIMARY_ID" ] \
+  || fail "objective id mismatch: reference=$REF_OID primary=$PRIMARY_ID"
+echo "  $REF_OID"
 
 printf '\n\033[32mINTEROP OK: each implementation verifies the other.\033[0m\n'

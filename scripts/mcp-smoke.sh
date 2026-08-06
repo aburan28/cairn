@@ -204,7 +204,28 @@ echo "  ledger still holds 1 entry: the refusal cost nothing"
 # -- so it has to survive in a sidecar file. Restarting the process between the
 # two calls is the only way to check that it does.
 # --------------------------------------------------------------------------
-export PROOFWORK_EPOCH_SECONDS=1
+# Two assertions below must land inside the *same* epoch as the commit that
+# precedes them. Raising the epoch length does not make that safe, which is
+# the trap: what those assertions have is not the epoch length but whatever
+# is *left* of the epoch when the commit lands, and that is uniformly random.
+# A longer epoch only makes the failure rarer -- and it fails looking exactly
+# like the bug being hunted ("a repeat call made a second commitment"), so a
+# rare version of it is worse than a common one.
+#
+# wait_for_fresh_epoch removes the randomness rather than shrinking it:
+# commit just after a boundary and the assertions have a whole epoch, every
+# run, on any runner.
+export PROOFWORK_EPOCH_SECONDS=4
+
+wait_for_fresh_epoch() {
+  python3 -c '
+import sys, time
+length = int(sys.argv[1])
+# Sleep to just past the next boundary. The margin is for the process spawn
+# that follows -- landing exactly on the boundary would race it.
+time.sleep(length - (time.time() % length) + 0.15)
+' "$PROOFWORK_EPOCH_SECONDS"
+}
 rule "submit_claim commits, then reveals an epoch later"
 
 call_tool() {
@@ -217,6 +238,7 @@ call_submit() {
   call_tool submit_claim "$(printf '{"objective_id":"%s","submitter":"agent","artifact":%s}' "$OID" "$ARTIFACT")"
 }
 
+wait_for_fresh_epoch
 FIRST=$(call_submit)
 echo "$FIRST" | sed 's/^/  /'
 echo "$FIRST" | grep -q "Committed in epoch" || fail "first submit_claim did not commit"
@@ -230,13 +252,23 @@ echo "$PENDING" | grep -q "$OID" || fail "pending_reveals does not list the open
 echo "  pending_reveals lists the open commitment across a server restart"
 
 # Same epoch, same artifact: the server must recognise its own outstanding
-# commitment rather than making a second one the agent can never open.
+# commitment rather than making a second one the agent can never open. First,
+# because it is the assertion with the deadline -- anything run between the
+# commit and this call is spending the epoch it needs.
 SAME=$(call_submit)
 echo "$SAME" | grep -q "Already committed" || fail "a repeat call in the same epoch made a second commitment"
 [ "$(grep -c '"kind": *"commitment"' "$LOG")" = "1" ] || fail "a repeat call wrote a second commitment"
 echo "  a repeat inside the same epoch is a no-op, not a second commitment"
 
-sleep 1.1
+# The open commitment must be discoverable after a restart -- an agent whose
+# session was compacted has no other way to learn it owes a reveal. Not
+# epoch-sensitive: an entry is listed whether or not its reveal window has
+# opened, so this is safe to run after the deadline above has been met.
+PENDING=$(call_tool pending_reveals '{"submitter":"agent"}')
+echo "$PENDING" | grep -q "$OID" || fail "pending_reveals does not list the open commitment"
+echo "  pending_reveals lists the open commitment across a server restart"
+
+sleep 4.2
 SECOND=$(call_submit)
 echo "$SECOND" | sed 's/^/  /'
 echo "$SECOND" | grep -q "^claim sha256:" || fail "second submit_claim did not reveal"
@@ -245,7 +277,7 @@ echo "$SECOND" | grep -q "beacon order" || fail "the agent was not told why paym
 echo "  the nonce survived a restart of the server and opened the commitment"
 
 rule "the epoch closes and the batch settles -- over MCP alone"
-sleep 1.1
+sleep 4.2
 # No CLI settle here, deliberately: an agent that reveals and then polls
 # frontier_status must get paid without the operator running anything. The
 # server drains due epochs on any read.

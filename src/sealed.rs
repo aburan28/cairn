@@ -680,8 +680,8 @@ mod tests {
 
     // -- the commitment is the plain flow's commitment ---------------------
 
-    /// The strongest statement available: the sealed path reproduces a vector
-    /// pinned against the Python reference in `conformance/vectors.json`
+    /// The strongest statement available: the sealed path reproduces a frozen
+    /// vector from `conformance/vectors.json`
     /// (`records.commitment_hash_cases[0]`). If sealing ever changed what is
     /// committed to, the two flows would settle different things.
     #[test]

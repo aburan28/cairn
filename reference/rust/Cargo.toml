@@ -1,0 +1,32 @@
+# Its own workspace, deliberately.
+#
+# This crate must not depend on `proofwork`, and being a separate workspace is
+# what makes that structural rather than a rule somebody remembers. A path
+# dependency would let a shared helper leak across, and the moment the two
+# implementations share the code that decides an id, they stop being two
+# implementations.
+[workspace]
+
+[package]
+name = "proofwork-reference"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.89"
+description = "An independent reference implementation of the proofwork protocol, for cross-checking the primary one."
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "proofwork-reference"
+path = "src/main.rs"
+
+[dependencies]
+# Only what cryptography genuinely requires. Everything the protocol defines --
+# canonical encoding, record identity, the ledger chain, the rules -- is
+# written out here rather than pulled in, because a shared library between the
+# two implementations would make agreement circular.
+sha2 = "0.10"
+ed25519-dalek = "2"
+
+[profile.release]
+overflow-checks = true

@@ -178,6 +178,30 @@ pub struct PeerRecord {
     /// cannot displace a newer one, so a relay's only power is to be out of date.
     /// Ethereum's ENR uses the same construction for the same reason.
     pub seq: u64,
+    /// The transport id this identity answers on: `sha256` of a Classic
+    /// McEliece public key, hex. `None` on a record written before the field
+    /// existed.
+    ///
+    /// # Why the id and not the key
+    ///
+    /// This is the field that lets an encrypted dial happen at all, and it is
+    /// the one that reconciles the two identity schemes this crate grew. An
+    /// ed25519 key signs the record and is the peer's *name*; a McEliece key
+    /// secures the *session* and cannot sign, being a KEM. Neither replaces the
+    /// other, so the record carries the name as the authority and the transport
+    /// id as the thing vouched for.
+    ///
+    /// The 261,120-byte key itself stays off the wire here. A record is
+    /// relayable by design — that is the whole point of signing it — and
+    /// relaying a quarter-megabyte per peer would make peer exchange more
+    /// expensive than the transfers it exists to bootstrap. The key is fetched
+    /// on demand and checked against this id, which needs no trust because the
+    /// id *is* its hash.
+    ///
+    /// Deliberately the same construction as [`crate::records::PeerRecord`],
+    /// which does this for the log. Two records this similar are evidence they
+    /// should be one; see the fold in `docs/roadmap.md`.
+    pub transport: Option<String>,
 }
 
 impl PeerRecord {
@@ -187,18 +211,46 @@ impl PeerRecord {
         addrs: &[SocketAddr],
         seq: u64,
     ) -> Result<SignedRecord, DiscoveryError> {
+        PeerRecord::sign_for(identity, addrs, seq, None)
+    }
+
+    /// Sign a record that also names the transport id this identity answers on.
+    ///
+    /// Separate from [`PeerRecord::sign`] rather than replacing it, because a
+    /// record without a transport is still a useful record: it is an address
+    /// hint that some other source can complete. Forcing every caller to supply
+    /// one would make the field look mandatory when the format tolerates its
+    /// absence.
+    pub fn sign_for(
+        identity: &Identity,
+        addrs: &[SocketAddr],
+        seq: u64,
+        transport: Option<&str>,
+    ) -> Result<SignedRecord, DiscoveryError> {
         if addrs.is_empty() || addrs.len() > MAX_ADDRS {
             return Err(DiscoveryError::BadAddrCount { count: addrs.len() });
         }
-        let body = Value::object([
+        if let Some(id) = transport {
+            if !is_transport_id(id) {
+                return Err(DiscoveryError::Malformed { field: "transport" });
+            }
+        }
+        // Absent when there is none, rather than present and null. The signature
+        // covers these bytes, so "absent" and "null" would be two different
+        // records saying the same thing -- the rule `canonical` enforces for
+        // ledger records, applied here for the same reason.
+        let mut fields = vec![
             ("type", Value::string("peer")),
             (
                 "addrs",
                 Value::array(addrs.iter().map(|a| Value::string(a.to_string()))),
             ),
             ("seq", Value::Int(i128::from(seq))),
-        ]);
-        Ok(SignedRecord::sign(identity, body))
+        ];
+        if let Some(id) = transport {
+            fields.push(("transport", Value::string(id)));
+        }
+        Ok(SignedRecord::sign(identity, Value::object(fields)))
     }
 
     /// Verify a record and decode it.
@@ -231,12 +283,42 @@ impl PeerRecord {
             .get("seq")
             .and_then(Value::as_u64)
             .ok_or(DiscoveryError::Malformed { field: "seq" })?;
+        // Absent is fine; present and malformed is not. A transport id that is
+        // not 64 hex characters cannot be a `sha256`, so it can only ever be a
+        // dial that fails -- refusing it here costs nothing and keeps the field
+        // meaning one thing.
+        let transport = match signed.record.get("transport") {
+            None => None,
+            Some(value) => {
+                let text = value
+                    .as_str()
+                    .ok_or(DiscoveryError::Malformed { field: "transport" })?;
+                if !is_transport_id(text) {
+                    return Err(DiscoveryError::Malformed { field: "transport" });
+                }
+                Some(text.to_string())
+            }
+        };
         Ok(PeerRecord {
             peer: signed.submitter_id(),
             addrs,
             seq,
+            transport,
         })
     }
+}
+
+/// Is this the hex of a 32-byte transport id?
+///
+/// Same shape test [`crate::records::signed_submitter`] applies to a submitter
+/// name, and for the same reason: a fixed-length lowercase-hex string is either
+/// a hash or it is not, and guessing is what lets a typo become a different
+/// identity.
+fn is_transport_id(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// One entry: the decoded record and the signed bytes it came from.
@@ -614,6 +696,81 @@ mod tests {
         assert!(matches!(
             PeerRecord::open(&missing),
             Err(DiscoveryError::Malformed { field: "addrs" })
+        ));
+    }
+
+    // -- the transport id, which is what an encrypted dial needs -----------
+
+    #[test]
+    fn a_record_can_name_the_transport_it_answers_on() {
+        let identity = Identity::from_secret_bytes([3u8; 32]);
+        let addr: SocketAddr = "127.0.0.1:9000".parse().expect("addr");
+        let transport = "ab".repeat(32);
+        let signed = PeerRecord::sign_for(&identity, &[addr], 1, Some(&transport)).expect("signs");
+        let opened = PeerRecord::open(&signed).expect("opens");
+        assert_eq!(opened.transport.as_deref(), Some(transport.as_str()));
+        assert_eq!(opened.peer, identity.submitter_id());
+    }
+
+    #[test]
+    fn a_record_without_a_transport_is_still_a_record() {
+        // The field is optional because an address hint some other source can
+        // complete is still useful. Making it mandatory would be claiming the
+        // format cannot express what it plainly can.
+        let identity = Identity::from_secret_bytes([4u8; 32]);
+        let addr: SocketAddr = "127.0.0.1:9001".parse().expect("addr");
+        let signed = PeerRecord::sign(&identity, &[addr], 1).expect("signs");
+        assert_eq!(PeerRecord::open(&signed).expect("opens").transport, None);
+    }
+
+    #[test]
+    fn absent_and_present_are_different_records() {
+        // The signature covers the body, so a field that is absent must not
+        // encode the same bytes as one that is present and empty. Same rule
+        // `canonical` enforces for ledger records, and the same reason: two
+        // spellings of one record are two ids for one fact.
+        let identity = Identity::from_secret_bytes([5u8; 32]);
+        let addr: SocketAddr = "127.0.0.1:9002".parse().expect("addr");
+        let without = PeerRecord::sign(&identity, &[addr], 1).expect("signs");
+        let with =
+            PeerRecord::sign_for(&identity, &[addr], 1, Some(&"cd".repeat(32))).expect("signs");
+        assert_ne!(without.record, with.record);
+        assert!(without.record.get("transport").is_none());
+    }
+
+    #[test]
+    fn a_transport_id_that_is_not_a_hash_is_refused_at_both_ends() {
+        // It can only ever be a dial that fails, so refusing costs nothing and
+        // keeps the field meaning exactly one thing.
+        let identity = Identity::from_secret_bytes([6u8; 32]);
+        let addr: SocketAddr = "127.0.0.1:9003".parse().expect("addr");
+        for bad in [
+            "",
+            "xyz",
+            &"ab".repeat(31),
+            &"AB".repeat(32),
+            &"ab".repeat(33),
+        ] {
+            assert!(
+                PeerRecord::sign_for(&identity, &[addr], 1, Some(bad)).is_err(),
+                "signing accepted {bad:?}"
+            );
+        }
+        // And a record that arrived from a stranger with a bad one is refused
+        // on the way in, not merely on the way out.
+        let body = crate::canonical::Value::object([
+            ("type", crate::canonical::Value::string("peer")),
+            (
+                "addrs",
+                crate::canonical::Value::array([crate::canonical::Value::string(addr.to_string())]),
+            ),
+            ("seq", crate::canonical::Value::Int(1)),
+            ("transport", crate::canonical::Value::string("not-a-hash")),
+        ]);
+        let forged = SignedRecord::sign(&identity, body);
+        assert!(matches!(
+            PeerRecord::open(&forged),
+            Err(DiscoveryError::Malformed { field: "transport" })
         ));
     }
 }

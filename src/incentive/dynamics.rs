@@ -197,7 +197,7 @@ fn others_of(state: &[u32], action: usize) -> Option<Counts> {
 ///
 /// Start the population at `mutants` operators playing `mutant` and the rest
 /// playing `resident`, then let it run. If it settles somewhere payoff-identical
-/// to universal honesty ([`absorbed`]), the network self-healed from a shock of
+/// to universal honesty (`absorbed`), the network self-healed from a shock of
 /// that size. The first size it does not heal from is the tipping point -- and
 /// it is the honest summary of how much slack a mechanism has, in a way "the
 /// honest profile is a strict Nash equilibrium" is not.

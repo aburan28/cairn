@@ -20,7 +20,7 @@
 //! are modelled expectations over a hypothetical parameter set, so there is no
 //! value to protect and no caller who can act on an `Err`. Writing a payoff
 //! function in terms of `Result` would make the interesting code -- the payoff
-//! algebra in [`super::node`] -- unreadable, which is a real cost against a
+//! algebra in [`super::game`] -- unreadable, which is a real cost against a
 //! benefit that does not exist.
 //!
 //! Instead, saturation is made *unreachable* rather than merely handled:
@@ -69,7 +69,7 @@ impl Rat {
     /// A zero denominator is not "very large"; it is a division with no answer,
     /// so it is refused at construction rather than saturated. `i128::MIN` in
     /// either position is refused for the same reason it is excluded from
-    /// [`LIMIT`]: it has no negation.
+    /// `LIMIT`: it has no negation.
     pub fn new(num: i128, den: i128) -> Option<Rat> {
         if den == 0 || num == i128::MIN || den == i128::MIN {
             return None;
@@ -137,7 +137,7 @@ impl Rat {
     /// [`super::NodeParams::validate`] this is unreachable, and
     /// `saturation_is_unreachable_under_validated_params` is the test that keeps
     /// it that way.
-    /// Equality rather than `>=`, because [`LIMIT`] *is* `i128::MAX`: a
+    /// Equality rather than `>=`, because `LIMIT` *is* `i128::MAX`: a
     /// numerator cannot exceed it, so the comparison would be one that can never
     /// be true. The saturating operators are the only way to reach this value
     /// and they land on it exactly.

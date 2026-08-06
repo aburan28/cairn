@@ -1409,3 +1409,95 @@ fn independently_generated_identities_are_unrelated_to_any_seed() {
     let reloaded = Identity::from_secret_bytes(*throwaway.to_secret_bytes());
     assert_eq!(reloaded.public(), throwaway.public());
 }
+
+/// Regenerate `conformance/signatures.json`, which the reference
+/// implementation verifies against via `proofwork-reference signatures`.
+///
+/// The other conformance vectors flow Python -> Rust. These flow the other
+/// way, and they have to: Python verifies signatures with a hand-written
+/// ed25519 and deliberately cannot sign, so "both implementations agree" can
+/// only be shown against signatures this one actually produced. Passing the
+/// same RFC vectors would not establish it -- two implementations can both
+/// satisfy RFC 8032 and still disagree on the strictness rules where honest
+/// implementations differ, which is exactly where a consensus split would
+/// live.
+///
+/// Set `PROOFWORK_WRITE_VECTORS=1` to rewrite the file; otherwise this
+/// asserts the committed vectors still verify, so a change to signing or to
+/// canonical encoding fails here rather than in a peer's log.
+#[test]
+fn signature_vectors_match_the_committed_file() {
+    use proofwork::canonical::Value;
+    use proofwork::crypto::identity::{verify_value, Identity, Signature, VerifyingKeyBytes};
+
+    let mut vectors = Vec::new();
+    for seed in 0u8..6 {
+        let identity = Identity::from_secret_bytes([seed.wrapping_mul(37).wrapping_add(1); 32]);
+        let record = Value::object([
+            ("type", Value::string("claim")),
+            ("submitter", Value::string(identity.submitter_id())),
+            ("n", Value::Int(i128::from(seed))),
+        ]);
+        let signature = identity.sign_value(&record);
+        vectors.push(Value::object([
+            ("public_key", Value::string(identity.submitter_id())),
+            (
+                "message_hex",
+                Value::string(
+                    record
+                        .canonical_bytes()
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>(),
+                ),
+            ),
+            ("signature", Value::string(signature.to_hex())),
+        ]));
+    }
+    let produced = Value::Array(vectors).canonical_string();
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/conformance/signatures.json");
+
+    if std::env::var("PROOFWORK_WRITE_VECTORS").is_ok() {
+        std::fs::write(path, format!("{produced}\n")).expect("write vectors");
+        return;
+    }
+
+    let committed = std::fs::read_to_string(path).expect("conformance/signatures.json is missing");
+    assert_eq!(
+        committed.trim(),
+        produced,
+        "signature vectors moved -- signing or canonical encoding changed"
+    );
+
+    // And every committed vector must verify here, so the file cannot rot
+    // into something only the generator agrees with.
+    let parsed = Value::from_json(committed.trim()).expect("vectors parse");
+    for vector in parsed.as_array().expect("an array") {
+        let key = VerifyingKeyBytes::from_hex(
+            vector
+                .get("public_key")
+                .and_then(Value::as_str)
+                .expect("key"),
+        )
+        .expect("valid key");
+        let message: Vec<u8> = {
+            let hex = vector
+                .get("message_hex")
+                .and_then(Value::as_str)
+                .expect("message");
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
+                .collect()
+        };
+        let signature = Signature::from_hex(
+            vector
+                .get("signature")
+                .and_then(Value::as_str)
+                .expect("sig"),
+        )
+        .expect("valid signature");
+        let value = Value::from_json(&String::from_utf8(message).expect("utf8")).expect("record");
+        verify_value(key.as_bytes(), &value, &signature).expect("committed vector verifies");
+    }
+}

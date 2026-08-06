@@ -56,7 +56,7 @@ const MAX_PROFILES: u128 = 1 << 22;
 /// Everything the solvers refuse to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GameError {
-    /// The profile space exceeds [`MAX_PROFILES`].
+    /// The profile space exceeds `MAX_PROFILES`.
     TooLarge { profiles: u128 },
     /// A profile whose length or contents do not match the game.
     MalformedProfile,
@@ -473,7 +473,7 @@ pub fn dominant_action<G: Game + ?Sized>(
 /// operator running forty machines. This is the `k`-resilience test -- if it
 /// returns `None` for `max_size = k`, no group of `k` or fewer can gain.
 ///
-/// The search is `C(n, k) * a^k` and is bounded by [`MAX_PROFILES`]; for the
+/// The search is `C(n, k) * a^k` and is bounded by `MAX_PROFILES`; for the
 /// large-`n` case use [`invasion`] on the symmetric representation instead,
 /// which answers the same question in the shape that scales.
 pub fn coalition_deviation<G: Game + ?Sized>(
@@ -737,7 +737,7 @@ pub fn symmetric_stability<S: Symmetric + ?Sized>(
 ///
 /// Enumerates compositions of `n` into `actions()` parts. That is
 /// `C(n + a - 1, a - 1)` profiles -- a few hundred thousand for a thousand nodes
-/// and three actions, and refused above [`MAX_PROFILES`].
+/// and three actions, and refused above `MAX_PROFILES`.
 pub fn symmetric_equilibria<S: Symmetric + ?Sized>(
     game: &S,
 ) -> Result<Vec<(Counts, Stability)>, GameError> {

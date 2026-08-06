@@ -7,8 +7,8 @@ payment is settled by a checker that anyone can re-run. No trust in the operator
 no trust in the contributor, no trust in the model that produced the answer.
 
 This repository contains **proofwork**, the protocol implementation: a Rust
-library and CLI, a Python reference implementation, and the conformance vectors
-that bind them to the same answers.
+library and CLI, a second and deliberately independent Rust implementation in
+`reference/`, and the conformance vectors that bind them to the same answers.
 
 Stage 0 — one operator, no token, no consensus. What it does provide is the
 property that actually matters: *anyone can independently re-derive every result
@@ -17,10 +17,10 @@ the network has settled*, from nothing but a copy of the log.
 ```
 $ ./scripts/interop.sh
 
-== Python audits the Rust log
+== the reference implementation audits the primary log
 log verified: chain intact, every settled claim re-verified
 
-== Rust audits the Python log
+== the primary implementation audits the reference log
 log verified: chain intact, every settled claim re-verified
 
 == Merkle roots agree across implementations
@@ -31,8 +31,15 @@ INTEROP OK: each implementation verifies the other.
 
 That is the claim made concrete. "Anyone can re-derive every result" is worth
 nothing if it means "anyone running my code"; two implementations written
-separately in different languages, agreeing on every id and every Merkle root, is
-what makes it real.
+separately, sharing no code and not even a cargo workspace, agreeing on every
+id and every Merkle root, is what makes it real.
+
+The second implementation earns its place by disagreeing. Building it caught
+two bugs the primary's own test suite could not see: work assignment reading
+four bytes of the HMAC where the format takes eight (two nodes would silently
+overlap regions), and the genesis `prev` written as `""` rather than `null`
+(every entry hash shifts, while the stored Merkle root still matches). Neither
+would ever have raised an error.
 
 ## The one idea
 
@@ -60,8 +67,14 @@ cargo test                    # the full suite, loopback only
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
 ./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
-proofwork incentives          # evaluate the node-operator game
-proofwork incentives --robustness   # ...and how far each parameter can move before it breaks
+./scripts/blob-demo.sh        # a node with only the log fetches its verifier and uses it
+./scripts/p2p-demo.sh         # two daemons: an empty node syncs, then audits under both
+proofwork incentives          # evaluate the node-operator game (~2s)
+proofwork incentives --robustness   # ...and how far each parameter can move before it
+                                    # breaks. Seventeen parameters walked out along a
+                                    # twelve-rung ladder in both directions, the whole
+                                    # mechanism re-evaluated at every rung: ~6 minutes,
+                                    # with progress on stderr so stdout stays the report.
 ```
 
 On Linux, install [bubblewrap](https://github.com/containers/bubblewrap)
@@ -69,6 +82,54 @@ On Linux, install [bubblewrap](https://github.com/containers/bubblewrap)
 OS jail, and set `PROOFWORK_REQUIRE_SANDBOX=1` on any node that verifies
 objectives it did not write — without a jail mechanism the code runs
 unconfined, and that variable turns "unconfined" into `Unavailable` instead.
+
+### A log you can check right now
+
+`launch/` holds a real settled log, the checkpoint signing it, and the public
+key — so the claim above can be tested before you build anything of your own:
+
+```sh
+proofwork --log launch/proofwork.jsonl --root . audit
+proofwork --log launch/proofwork.jsonl --root . verify \
+    --from launch/checkpoint.json --root-key launch/root-key.pub --audit
+
+# and the check that matters: the independent implementation re-deriving it
+./reference/rust/target/release/proofwork-reference \
+    --log launch/proofwork.jsonl --root . audit
+```
+
+Both print the same Merkle root. See [launch/README.md](launch/README.md) for
+what is in it and the two caveats that come with a sample artifact.
+
+Checking one entry does not need the log at all:
+
+```sh
+proofwork --log launch/proofwork.jsonl prove 12 --out proof.json
+proofwork check proof.json --from launch/checkpoint.json \
+    --root-key launch/root-key.pub
+```
+
+`check` opens no log — the proof and the signed root are the whole input, which
+is what makes it something a light client can run. Five hashes here; fifteen for
+a log of twenty thousand.
+
+### Publish your log so others can check it
+
+```sh
+proofwork-serve --log proofwork.jsonl --root . --listen 0.0.0.0:8080
+```
+
+`GET /log` returns the log byte for byte; `GET /objectives` and
+`GET /frontier/{id}` are conveniences over it. A contributor fetches it and
+re-derives everything themselves with `proofwork verify --from`, which is the
+whole point — they need not trust the server that served it.
+
+Add `--queue ./queue` to accept `POST /submit`. Submissions are *queued*, never
+appended: the operator's node admits them, re-checking every rule against the
+whole log. That is `proofwork-p2p --queue ./queue` if a daemon is running — it
+holds the ledger's single write lock, so nothing else can — or
+`proofwork drain --queue ./queue` if one is not. See
+[serving.md](docs/serving.md).
 
 ### Start a p2p node
 
@@ -116,21 +177,25 @@ Use separate `LOCAL_DIR`, `LOG`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT`
 paths for each node. The root checkpoint key is ML-DSA-65 and is separate from
 the transport identity.
 
-Rust 1.85+ (verified in CI, not asserted). No network access needed at runtime.
+Rust 1.89+ (verified in CI, and asserted by `rust-version`). No network access
+needed at runtime.
 
 ## How it works
 
 An **objective** is a funded question that comes with a runnable verifier, pinned
 by hash:
 
+This is [`examples/capset/objective.json`](examples/capset/objective.json)
+verbatim — every value real, so it posts as it stands:
+
 ```json
 {
   "goal": "GOAL-capset-lower-bounds",
-  "statement": "Exhibit a cap set in F_3^4 of size at least 20.",
+  "statement": "Exhibit a cap set in F_3^4 of size at least 20 (no three distinct points collinear). Score is the set size; the maximum is known to be 20.",
   "verifier": {
     "kind": "evaluator",
     "evaluator": "examples/capset/evaluators/cap_set.py",
-    "evaluator_sha256": "05ad14fa...",
+    "evaluator_sha256": "05ad14fa10bd3055a8f3b1962a6a909832887676558035e40e44c4bd0aa271c4",
     "entrypoint": "score",
     "threshold": 20,
     "direction": "maximize"
@@ -140,6 +205,15 @@ by hash:
   "created_at": "2026-07-28T00:00:00+00:00"
 }
 ```
+
+The hash is the real one, and abbreviating it would not be a tidier example —
+it would be a broken one. A wrong pin does not fail: the id covers the
+verifier, so it mints a *different* objective, one whose every claim returns
+`InvalidSpec` forever and whose reward is stranded. `post` warns when a pin
+does not resolve locally but cannot refuse, because posting an objective whose
+checker a peer will serve is exactly how content-addressed distribution works.
+Key order does not matter here — the record is canonicalized before hashing —
+but the bytes of every *value* do.
 
 An objective's id **is** the hash of that whole record, verifier included. There
 is no operation that changes the rules of a funded bounty — editing the evaluator
@@ -153,6 +227,10 @@ proofwork commit <objective-id> --submitter bob --artifact solution.json --nonce
 proofwork reveal <objective-id> --submitter bob --artifact solution.json --nonce s3cret
 proofwork audit
 proofwork attribute
+proofwork checkpoint --root-key key.json --out checkpoint.json   # sign it
+proofwork prove 12 --out proof.json                              # one entry, provably
+proofwork check proof.json --from checkpoint.json                # ... checked without the log
+proofwork drain --queue ./queue                                  # admit what arrived over HTTP
 ```
 
 ### Four verifiers, four trust assumptions
@@ -215,13 +293,20 @@ eve:   copies alice         reward 0        (does not improve)
 bob:   16, citing alice     reward 400000
 carol: 20, citing bob       reward 400000   (pool exhausted)
 
-after citation flow:  alice 425000 · bob 375000 · carol 300000
+after citation flow:  alice 442857 · bob 357143 · carol 300000
 ```
 
 Alice ends up with the **largest total from the smallest direct reward**, because
 two people built on her. Publishing immediately becomes the profitable move,
 copying earns zero, and an improvement **must cite the frontier it beat** —
 enforced at submission, so attribution needs no judgement.
+
+Flow is weighted by each cited claim's *settled reward* — which on a ratchet is
+the progress it moved — rather than decaying by citation depth. That is what
+stops an improver chopping one advance into many steps to dilute the person
+below them: a later contributor pays alice the same however bob packaged his
+work, and slicing converges to a small premium instead of draining her. See
+[the design note](docs/design/citation-flow-dilution.md).
 
 ### Three kinds of state, three consistency requirements
 
@@ -364,14 +449,27 @@ buys is that reaching the threshold does not pay.
 ## Local storage: encrypted, bounded, yours
 
 Where a node's data lives is the operator's choice, and what leaks off their disk
-is their risk. Three things, one command each:
+is their risk. Four things, one command each:
 
 ```sh
 proofwork keygen                                   # 32-byte key at ~/.proofwork/key, 0600
 proofwork --data-dir /Volumes/ext/pw audit         # data wherever you want it
 proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
 proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
+proofwork --data-dir /Volumes/ext/pw store rekey   # new key, same root, no plaintext on disk
+proofwork --data-dir /Volumes/ext/pw store export --out public.jsonl
 ```
+
+`rekey` is the one worth a sentence. It re-seals every line under a fresh key and
+requires the new file to re-derive the same entries and the same Merkle root
+*before* anything is swapped. It keeps the old key at `<key>.previous` — a mirror
+you made last month is still sealed under it — and does **not** keep the old
+ciphertext, which would otherwise sit there readable by the key you are retiring.
+
+`export` is the inverse of `store encrypt`, and it exists because sealing a store
+must not be a one-way door out of the claim at the top of this file. Without it,
+an operator who encrypted their own copy could no longer produce the readable log
+anyone else would audit.
 
 ### `src/swarm/`: piece-level transfer and a DHT, alongside `p2p`
 
@@ -430,22 +528,44 @@ full routing table holding one per contact would cost about 1.3 GB; the key
 comes from the address book at dial time, which is why a `p2p` routing answer is
 a hint checked by dialling rather than a proof.
 
-**`swarm::tcp` is not encrypted, and is now gated.** No handshake, no AEAD, no
-peer authentication — it predates `p2p::transport` and never grew one, because
-`swarm` peer records carry an ed25519 identity while the encrypted transport
-needs a 261,120-byte McEliece key. It sits behind the off-by-default
-`insecure-swarm-tcp` feature so it cannot reach a binary by accident; only the
-socket-facing part is gated, and the state machines are always compiled.
-Everything the daemon runs — records, code, DHT, populations — goes over the
-encrypted transport, and `tests/wire_encryption.rs` proves it by recording the
-bytes between two real nodes rather than by asserting it in a comment.
+**Everything that opens a socket goes over the encrypted transport.** Records,
+code, DHT, populations — and now `swarm::tcp`, which spent a while in plaintext
+behind an off-by-default feature because `swarm`'s peer records named an ed25519
+identity while the transport needs a 261,120-byte McEliece key. Giving the
+record the 32-byte *id* of one settled that, and the feature gate is gone.
+Neither claim is asserted in a comment: `tests/wire_encryption.rs` and
+`a_transfer_puts_no_plaintext_on_the_wire` each put a recording relay between
+two real nodes and check the captured bytes.
 
-What remains duplicated is `swarm::tcp` and `swarm::discovery`: a second
-transport and a second address book beside `p2p::transport` and
-`p2p::discovery`, built before those landed and not wired into the CLI. They
-resolve blobs through `crate::blobs`, so there is exactly one blob store — but
-two transports is one more than a repo should carry, and `swarm::discovery`'s
-signed peer records are exactly the peer-list exchange `p2p` is missing. See
+`swarm::tcp` is now driven by `proofwork blob serve` and `proofwork blob fetch`,
+and `scripts/blob-demo.sh` runs both sides in CI: a node holding only the log
+fetches its pinned verifier from a stranger and settles a claim with it. That
+was worth doing for its own sake and it also found two bugs that no unit test on
+either side could reach, because the module had **no caller in any shipped
+binary** and so had only ever been checked against itself. See
+[storage.md](docs/storage.md#moving-one-between-peers).
+
+The two address books look like a duplicate and are not, which took reading
+both to establish. `p2p::discovery::AddressBook` maps a transport id to an
+endpoint — an address *and* the 261 KiB McEliece key needed to dial it. It is a
+local key cache and nothing about it is relayable. `swarm::discovery` holds
+**signed** peer records — ed25519 identity, addresses, a monotonic sequence — and
+exists to be handed to strangers: `offer` and `share` are peer exchange, with
+bounds and persistence. One says *how to open a session*, the other says *who a
+peer is and where it claims to be*, verifiably. `swarm::tcp::KeySource` is the
+join between them, and it is what lets an address learned by asking become a
+dial.
+
+What *was* duplicated — two transports — is gone: `swarm::tcp` runs over
+`p2p::transport` like everything else here.
+
+The real remaining gap was narrower and is closed: `p2p` had the signed
+sequence available and was throwing it away. `seed_from_log` reads `peer`
+records out of the log, where `Node::peers` has already resolved
+highest-seq-wins and the audit reports one that fails to advance — and then
+handed the routing table a hardcoded zero. Since the table takes a contact when
+`seq >= held`, at zero a replayed record always won, so anyone who had once seen
+a peer record could steer traffic back to an address that peer had left. See
 [discovery.md](docs/discovery.md) for the design and the survey, including why
 encrypted DNS answers a different question than the one people ask it.
 
@@ -532,7 +652,6 @@ src/                 Rust implementation (primary)
   incentive/         the node-operator mechanism, and the harness that evaluates it
   store/             at-rest encryption, the data directory, the size cap, the mirror
   swarm/             piece-level transfer and a Kademlia DHT, alongside p2p/
-reference/python/    Python reference implementation
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
 examples/            worked objectives with real artifacts
@@ -552,12 +671,17 @@ examples/            worked objectives with real artifacts
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
+- [serving.md](docs/serving.md) — publishing a log over HTTP, and why submissions queue instead of appending
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [launch-review.md](docs/launch-review.md) — the pre-launch pass: what was fixed, and the gaps that remain, in priority order
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
 - [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
+- [.claude/skills/proofwork/](.claude/skills/proofwork/) — the Claude Code skill: ask Claude to start the network and it builds, wires MCP, and posts objectives
 - [AGENTS.md](AGENTS.md) — instructions agents read: contributing here, and contributing *to* the network
+- [CONTRIBUTING.md](CONTRIBUTING.md) — the two different things "contributing" means here, and the gate for each
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
+- [formal-model.md](docs/formal-model.md) — which rules TLC actually checks, and which are only tested
+- [design-stage0-completion.md](docs/design-stage0-completion.md) — what "Stage 0 is done" was defined to mean
 - [conformance/README.md](conformance/README.md) — the cross-implementation contract
 
 ## What this is not

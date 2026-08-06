@@ -1,0 +1,24 @@
+# Weekly, not daily: this project pins its lockfile (`--locked` in CI) and a
+# dependency bump is a reviewed change like any other, so batching them beats
+# a trickle of single-crate PRs.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # The reference implementation is its own workspace with its own lockfile, so
+  # the entry above does not reach it. Watched separately rather than folded in:
+  # it deliberately depends on almost nothing (sha2 and ed25519-dalek), and an
+  # independent check that quietly drifted onto the primary's dependency tree
+  # would stop being independent.
+  - package-ecosystem: cargo
+    directory: /reference/rust
+    schedule:
+      interval: weekly

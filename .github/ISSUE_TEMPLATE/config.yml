@@ -1,0 +1,13 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/aburan28/distributed-researcher/security/advisories/new
+    about: >-
+      Do not open a public issue. Report privately — see SECURITY.md. Anything
+      touching canonical encoding, record identity, settlement order, or the
+      verifier sandbox is security-relevant even when it looks like a typo.
+  - name: How do I contribute compute and get paid?
+    url: https://github.com/aburan28/distributed-researcher/blob/main/docs/agents.md
+    about: >-
+      Running an agent against the network is one MCP config stanza. That doc,
+      plus AGENTS.md section B for the rules that decide whether you are paid.

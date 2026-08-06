@@ -8,6 +8,7 @@ proofwork --data-dir /Volumes/ext/pw post obj.json # data where you want it, sea
 proofwork --data-dir /Volumes/ext/pw store status
 proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
 proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
+proofwork --data-dir /Volumes/ext/pw store rekey    # fresh key, same root
 ```
 
 ## Encryption at rest
@@ -117,6 +118,134 @@ and the Merkle root**, and only then swaps it in. The plaintext original is
 renamed to `<log>.plaintext.bak` rather than deleted — this command must not be
 able to destroy your only copy — and you are told, loudly, to remove it yourself.
 
+### Rotating the key
+
+```sh
+proofwork store rekey
+proofwork store rekey --new-passphrase-file ~/new-phrase   # and wrap the new one
+```
+
+Without this, rotating means decrypting the log by hand, generating a key,
+re-encrypting, and swapping files: four destructive steps with the plaintext of
+the whole log on disk in the middle. An operator who suspects their key has
+leaked is exactly the operator who should not be improvising that at 2am.
+
+The order below is chosen so that **no step leaves the store unreadable**, and
+the plaintext never lands:
+
+1. The new key is generated *in memory*. Nothing on disk has changed.
+2. The log is re-sealed into `<log>.rekeying`. A crash here leaves a file nobody
+   holds the key for — garbage, removed by the next run.
+3. That file is reopened and required to re-derive the same entries and the same
+   Merkle root. This is the proof, and it happens before anything moves.
+4. `<key>` is renamed to `<key>.previous` and the new key written in its place.
+   A failure here puts the old key back.
+5. `<log>.rekeying` is renamed over `<log>`. A failure here puts the old key back
+   too, so the untouched log still opens.
+
+**The old key is kept; the old ciphertext is not** — the reverse of what `store
+encrypt` does, and for a reason. `store encrypt` keeps the plaintext original
+because it is the only copy of the data. Here the new file has already been
+proved to hold the same entries under the same root, so keeping the old
+ciphertext would only leave a copy readable by the key you are retiring. The
+*key* is kept, at `<key>.previous`, because copies made before now — a `sync`
+mirror, a backup, an external drive — are still sealed under it, and this command
+cannot see them. It is never overwritten: a second rotation refuses while it is
+there.
+
+`--new-passphrase-file` is separate from `--passphrase-file` on purpose. The
+commonest reason to rotate is that the old secret is suspect, and a command that
+could only reuse it would be no help in the case it exists for. Give both to
+change a passphrase, one to add or drop one; dropping one is a downgrade and is
+said out loud.
+
+Two things it will not do. It refuses a **plaintext** log rather than encrypting
+it sideways — `store encrypt` is the command that converts a log, on purpose and
+with its own warnings. And it refuses a log that does not `verify_chain` under
+the current key, because re-sealing a broken log under a key whose predecessor is
+about to be set aside turns a diagnosable problem into an archaeological one.
+
+An empty or absent log rotates the key alone. Otherwise there would be no way to
+rotate before the first record: `keygen` refuses to overwrite, which is the right
+answer for `keygen` and leaves that case with no command at all.
+
+### Handing someone a readable copy
+
+```sh
+proofwork store export --out /tmp/public.jsonl
+```
+
+The inverse of `store encrypt`, and it has to exist. The project's central claim
+is that anyone holding a copy of the log can re-derive every settled result —
+and until this existed, sealing a store was a one-way door out of it. `sync`
+mirrors ciphertext by design, `log` prints a summary rather than records, and the
+only route left was decrypting by hand.
+
+It writes a copy and leaves the store sealed, because the need is to hand
+somebody a log rather than to stop encrypting. It verifies the chain first, reads
+the copy back and requires the same entries under the same root before reporting
+success, and **refuses to overwrite** — the destination is by definition
+somewhere you are about to share, so a silent overwrite would be a way to lose a
+log to a typo. When the source was sealed it says out loud that the copy is not.
+
+`scripts/rekey-demo.sh` is the end-to-end version of both commands: it rotates a
+real store, then exports it and has the *independent* reference implementation
+audit the result and agree on the root. That is the strongest available statement
+that rotating a key changes every byte on disk and moves no record.
+
+### What encryption covers, and what it does not
+
+The log is sealed. Nothing else is, and that is a decision rather than a default.
+
+The threat is the narrow one stated at the top: a copy of the data directory
+reaching somewhere the operator did not intend. What sealing buys is that the
+copy is inert.
+
+| | sealed? | why |
+|---|---|---|
+| `log/` | **yes** | a stolen disk would otherwise yield the node's whole operating record in one readable file |
+| `.proofwork/blobs/` | no | every byte *and every name* is something this node hands to any peer that asks. `p2p::code` serves them on request; the name is the content address the objective itself declares |
+| the `--population` file | no | gossiped candidates were shared with peers on purpose |
+| `cache/`, `tmp/` | no | reclaimable by construction — a local copy of something fetchable, and scratch |
+
+**The residue, stated rather than waved away.** The set is not the contents. An
+adversary holding the disk learns *which objectives this node works on* without
+having to ask a peer and be observed doing it, and that difference in cost is
+real. [threat-model.md](threat-model.md) carries it as not handled.
+
+Closing it is possible and was rejected on the merits. Filing blobs under
+`HMAC(key, address)` instead of `address` would hide the set while keeping O(1)
+lookup — at the cost of the property that makes the store trustworthy in the
+first place: *the name is the hash*, so a read re-hashes and refuses bytes that
+do not match the name they were filed under, and integrity needs no second record
+to keep in sync. An encrypted name means an index, and an index is exactly that
+second record. Paying for it to hide a fact any peer will confirm on request is a
+bad trade.
+
+**The decision is checked, not just written down.** A decision that lives only in
+prose decays the first time somebody adds a file, so
+[`store::exposure`](../src/store/exposure.rs) classifies every file in a store as
+sealed, plaintext for a stated reason, a key that should not be there, or
+*unaccounted for*. `store status` reports the last two and **exits 1**:
+
+```
+at rest log sealed (1.7 KiB); 4.2 KiB plaintext by decision -- blobs, cache, tmp
+```
+
+```
+at rest log sealed (1.7 KiB); 0 B plaintext by decision -- blobs, cache, tmp; 88 B UNACCOUNTED FOR
+        KEY INSIDE THE STORE: /srv/pw/cache/notes.txt
+        unaccounted plaintext: /srv/pw/inference-receipts.json
+        Each is readable on any disk holding this directory.
+        A key here makes everything beside it readable too, which
+        is not encryption at all. Move it out of the store.
+```
+
+A future feature that writes plaintext state into a data directory trips this
+instead of slipping past, and whoever adds it has to either seal it or put it in
+the table above with a reason. Keys are found by **content, not filename** — the
+same rule `sync` applies, and for the same reason.
+
 ## A data directory of your choosing
 
 ```
@@ -147,15 +276,9 @@ of what the log pins and what is missing. **The name is the hash**, so reads
 re-hash and refuse bytes that do not match the name they were filed under, and
 integrity needs no second record to keep in sync.
 
-**At-rest encryption covers the log, and only the log.** The blob store is not
-sealed, and neither is the `--population` file the daemon writes. Neither holds
-a secret exactly: a pinned checker is named in the log and fetchable from any
-peer, and gossiped candidates were shared with peers on purpose. What is
-readable is the *set* rather than the contents — blob filenames are content
-addresses, so anyone with the disk learns which objectives this node works on,
-which is the same signal `p2p::code` declines to publish on the wire. The
-asymmetry is worth naming rather than assuming it was considered;
-[threat-model.md](threat-model.md) carries it as not handled.
+**At-rest encryption covers the log, and only the log — decided, not defaulted.**
+See [the boundary](#what-encryption-covers-and-what-it-does-not) below for the
+reasoning and for the check that keeps it honest.
 
 A blob that is present but *corrupt* is `Unavailable`, never `Reject` and never
 `INVALID_SPEC`: a damaged local cache is a fact about that disk, and letting it
@@ -170,14 +293,45 @@ There are two paths, against the same store, and they overlap:
   This is what the daemon uses, and at `blobs::MAX_BLOB_BYTES` — 1 MiB — it is
   adequate.
 - [`src/swarm/`](../src/swarm/) moves one in the BitTorrent shape: pieces, a
-  manifest of piece hashes, bitfields, rarest-first, choking, endgame. It is
-  library-only — no CLI subcommand drives it yet — and sized for artifacts the
-  1 MiB cap does not currently allow. Groundwork, not a current need.
+  manifest of piece hashes, bitfields, rarest-first, choking, endgame. Sized for
+  artifacts the 1 MiB cap does not currently allow.
 
 What both get for free is the part BitTorrent cannot do: the digest an objective
 already commits to *is* the swarm id, so there is no tracker and nothing to sign.
 A manifest arrives from a stranger and is checked against a digest the log fixed
 before the transfer started.
+
+```sh
+# On the node that has the code:
+proofwork blob serve --identity transport.json --listen 0.0.0.0:9900
+#   … prints an {addr, public} endpoint. The key is 261,120 bytes of Classic
+#   McEliece public key, which is why a relayed peer record carries its 32-byte
+#   id instead and something has to complete the hint before a dial.
+
+# On the node that has only the log:
+proofwork blob fetch --identity transport.json --peer seed-endpoint.json
+```
+
+`scripts/blob-demo.sh` runs both sides and then verifies a claim with what was
+fetched. It is in CI because this path went a long time with **no caller in any
+shipped binary**: `swarm::tcp` was complete, encrypted and end-to-end tested,
+and a subsystem tested only against itself agrees with itself about conventions
+nobody else uses. Two bugs were sitting in the seam, and neither was reachable
+from either side's unit tests:
+
+* `Handshake::encode` wrote a content address bare and `decode` returned it
+  `sha256:`-prefixed, so the two ends of a session held different strings for
+  the same blob. Every test used the prefixed spelling its own helpers produced;
+  every *real* caller holds the bare one, which is what `blobs::address` and an
+  objective's `checker_sha256` produce. Bare could never fetch anything, and the
+  failure surfaced as "no peer could be reached" — which reads like a network
+  fault and is not one.
+* A blob's filename *is* its hash, so it never ends in `.py`, and Python's
+  `spec_from_file_location` returns `None` for an extension it does not
+  recognise. The content-addressed fallback — the entire reason this module
+  exists — could not load a single fetched checker, so a node that fetched one
+  answered `unavailable` on every claim: exactly the failure blobs were built to
+  remove.
 
 [discovery.md](discovery.md) is how a node finds a peer it was not given.
 
@@ -312,10 +466,14 @@ opinion at all.
 - **No integrity guarantee at the destination.** `sync` copies; it does not
   re-verify. Run `audit` against the copy, which is a one-line command and the
   only thing that actually proves the backup is good.
-- **No concurrent access.** One `Ledger` handle per log, unchanged from before.
-  Two nodes on one synced folder will corrupt it, and nothing here detects that.
-- **No key rotation.** Re-keying means decrypting and re-sealing the whole log,
-  which is a command that does not exist yet.
+- **No cross-machine locking.** `Ledger::open_exclusive` takes an advisory lock
+  that binds writers on one machine; two machines appending to one log over a
+  synced folder or NFS are outside what an advisory lock promises, and nothing
+  here detects it.
+- **No rotation of anything but the log.** `store rekey` re-seals the log,
+  because the log is the only thing at-rest encryption covers. The blob store and
+  the `--population` file were never sealed — see the paragraph above on what
+  that leaks.
 - **No protection from a live attacker.** Stated at the top and worth repeating:
   anyone who can run code as the operator can read the key.
 - **No encryption of anything the network publishes.** By design. See the table

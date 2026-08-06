@@ -10,7 +10,7 @@
 //!
 //! 1. **A verifier that cannot run returns [`Status::Unavailable`], never
 //!    `Reject`.** A missing toolchain or a crash is an infrastructure fact, not
-//!    a fact about the artifact, and [`Verdict::settling`] is the only path by
+//!    a fact about the artifact, and [`Verdict::settles`](crate::verifiers::Verdict::settles) is the only path by
 //!    which a verdict can move value.
 //! 2. **Floats are unrepresentable**, not merely rejected: [`canonical::Value`]
 //!    has no float variant, so an object whose identity could differ between
@@ -34,6 +34,7 @@ pub mod partition;
 pub mod records;
 pub mod schema;
 pub mod sealed;
+pub mod serve;
 pub mod store;
 pub mod swarm;
 pub mod time;
@@ -41,7 +42,7 @@ pub mod verifiers;
 
 pub use attribution::{flow, FlowParams};
 pub use blobs::{BlobError, BlobStore};
-pub use canonical::{digest_bytes, merkle_root, CanonicalError, Value};
+pub use canonical::{digest_bytes, merkle_proof, merkle_root, CanonicalError, Inclusion, Value};
 pub use frontier::{FrontierEntry, Ratchet, RatchetError};
 pub use gossip::{ingest, Candidate, Population};
 pub use incentive::{design::Report as IncentiveReport, NodeParams};

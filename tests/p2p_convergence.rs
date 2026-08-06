@@ -570,3 +570,446 @@ fn a_needed_blob_puts_its_known_holder_ahead_of_the_random_sample() {
     let sampled = service.peers_for(&std::collections::BTreeSet::new(), 2);
     assert_eq!(sampled.len(), 2);
 }
+
+#[test]
+fn a_lookup_crosses_a_hop_and_learns_the_key_it_needs_to_do_it() {
+    // The roadmap item, end to end over the real objects: alice can reach bob
+    // and nobody else; carol holds what alice wants; bob knows carol.
+    //
+    // Before the multi-hop driver alice's search ended at bob, because a
+    // routing answer names a peer by id and address and never by key — so
+    // carol was a name alice could hear and never dial. Two things have to
+    // work together for this to pass: bob's answer has to *route* alice toward
+    // carol, and alice has to be able to turn that name into a session by
+    // fetching carol's key and checking it against the id.
+    let alice_identity = Arc::new(PeerIdentity::generate());
+    let bob = Arc::new(PeerIdentity::generate());
+    let carol = Arc::new(PeerIdentity::generate());
+    let bob_addr: std::net::SocketAddr = "127.0.0.1:9201".parse().expect("loopback");
+    let carol_addr: std::net::SocketAddr = "127.0.0.1:9202".parse().expect("loopback");
+
+    let mut alice = Service::new(alice_identity);
+    alice.add_bootstrap(Endpoint::new(bob_addr, bob.to_public()));
+
+    let wanted = "cd".repeat(32);
+    let mut needs = std::collections::BTreeSet::new();
+    needs.insert(wanted.clone());
+
+    // Alice knows bob and nothing else, so the first hop can only be bob.
+    let first = alice.peers_for(&needs, 2);
+    assert_eq!(first.len(), 1, "alice can only reach bob");
+    assert_eq!(first[0].peer.id(), bob.id());
+    let bob_node = proofwork::p2p::dht::NodeId::from_bytes(bob.id());
+    assert_eq!(
+        alice.with_directory(|d| d.ask_of(bob_node)),
+        vec![wanted.clone()],
+        "the lookup did not choose bob as its next hop"
+    );
+
+    // Bob answers: no holders, but carol is closer. This is the shape
+    // `exchange_dht` puts on the wire; driving it through the directory keeps
+    // the test about routing rather than about sockets, which
+    // `a_dht_round_records_who_holds_a_blob` already covers.
+    let carol_contact = proofwork::p2p::dht::PeerContact::new(carol.id(), carol_addr, 0);
+    alice.with_directory(|directory| {
+        directory.on_providers(
+            bob_node,
+            &[proofwork::p2p::dht::ProviderAnswer {
+                address: wanted.clone(),
+                holders: Vec::new(),
+                closer: vec![carol_contact],
+            }],
+        )
+    });
+
+    // Alice has heard of carol. She cannot dial her yet — no key — so the hop
+    // is deferred and carol's key is queued.
+    let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
+    let second = alice.peers_for(&needs, 2);
+    assert!(
+        !second.iter().any(|e| e.peer.id() == carol.id()),
+        "alice dialled a peer whose key she does not have"
+    );
+    assert!(
+        alice
+            .with_directory(|d| d.key_wants())
+            .contains(&carol_node),
+        "carol's key was not queued, so alice can never reach her"
+    );
+
+    // Bob serves the key on the next round. Verified against the id, which is
+    // what makes relaying it safe: a peer id *is* sha256(public key).
+    let key = proofwork::p2p::dht::encode_key(carol.public_key().as_ref());
+    let adopted = proofwork::p2p::dht::decode_key(carol_node, &key).expect("carol's real key");
+    alice.with_book(|book| {
+        book.insert(Endpoint::new(
+            carol_addr,
+            proofwork::p2p::handshake::PeerPublic::from_bytes(&adopted).expect("a key"),
+        ))
+    });
+    alice.with_directory(|directory| directory.resolved_key(carol_node));
+
+    // And now the hop lands: the second hop of a lookup that started with one
+    // reachable peer reaches a peer alice had never heard of.
+    let third = alice.peers_for(&needs, 2);
+    assert!(
+        third.iter().any(|e| e.peer.id() == carol.id()),
+        "alice still cannot reach carol after learning her key"
+    );
+    assert_eq!(
+        alice.with_directory(|d| d.ask_of(carol_node)),
+        vec![wanted],
+        "carol was dialled but not asked the question"
+    );
+}
+
+#[test]
+fn a_forged_key_never_reaches_the_address_book() {
+    // The one check that makes fetching a key from a stranger safe. There is
+    // no signature anywhere in this path and none is needed: the bytes hash to
+    // the id that was asked for, or they are discarded.
+    let carol = PeerIdentity::generate();
+    let mallory = PeerIdentity::generate();
+    let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
+
+    // Mallory's real, well-formed key, offered under carol's name.
+    let forged = proofwork::p2p::dht::encode_key(mallory.public_key().as_ref());
+    assert_eq!(
+        proofwork::p2p::dht::decode_key(carol_node, &forged),
+        None,
+        "a key that does not hash to the id asked for was accepted"
+    );
+    // Carol's own key still works, so the check is not simply refusing
+    // everything.
+    let honest = proofwork::p2p::dht::encode_key(carol.public_key().as_ref());
+    assert!(proofwork::p2p::dht::decode_key(carol_node, &honest).is_some());
+}
+
+#[test]
+fn a_lookup_that_finds_a_holder_actually_dials_it() {
+    // The step that makes a lookup worth running. The search can walk the
+    // network perfectly and still accomplish nothing if the answer is dropped
+    // on the floor -- which is exactly what the first draft did: `take_finished`
+    // returned the holders and the service ignored them.
+    //
+    // The holders are relayed claims, so they must not enter the provider store
+    // (that is what stops an unsigned DHT amplifying a lie). They are kept as
+    // local dial hints instead: acted on, never re-served, consumed on use.
+    let carol = PeerIdentity::generate();
+    let bob = PeerIdentity::generate();
+    let bob_addr: std::net::SocketAddr = "127.0.0.1:9301".parse().expect("loopback");
+    let carol_addr: std::net::SocketAddr = "127.0.0.1:9302".parse().expect("loopback");
+
+    let mut alice = Service::new(Arc::new(PeerIdentity::generate()));
+    alice.add_bootstrap(Endpoint::new(bob_addr, bob.to_public()));
+    // Alice can already reach carol; what she does not know is that carol has
+    // the blob. That is the fact the lookup is for.
+    alice.add_bootstrap(Endpoint::new(carol_addr, carol.to_public()));
+
+    let wanted = "ef".repeat(32);
+    let mut needs = std::collections::BTreeSet::new();
+    needs.insert(wanted.clone());
+
+    // Whichever peer the lookup picked as its next hop is the one that owes an
+    // answer -- asserting it is bob would be asserting the XOR ordering of two
+    // randomly generated ids, which is a coin flip rather than a test.
+    let dialled = alice.peers_for(&needs, 2);
+    assert!(!dialled.is_empty(), "the lookup chose nobody to ask");
+    for endpoint in &dialled {
+        let node = proofwork::p2p::dht::NodeId::from_bytes(endpoint.peer.id());
+        if alice.with_directory(|d| d.ask_of(node)).is_empty() {
+            continue;
+        }
+        alice.with_directory(|directory| {
+            directory.on_providers(
+                node,
+                &[proofwork::p2p::dht::ProviderAnswer {
+                    address: wanted.clone(),
+                    holders: vec![proofwork::p2p::dht::Holder::new(carol.id(), carol_addr)],
+                    closer: Vec::new(),
+                }],
+            )
+        });
+    }
+
+    // The round hands the finished lookup to the service, which is the step
+    // `exchange_dht` performs on a live connection.
+    let finished = alice.with_directory(|directory| directory.take_finished());
+    assert_eq!(finished.len(), 1, "the lookup did not finish");
+    assert_eq!(
+        finished[0].1.len(),
+        1,
+        "the holder was lost before adoption"
+    );
+    alice.adopt_for_test(finished);
+
+    // Never stored: a relayed claim that entered the provider store would be
+    // re-served to other peers, which is the amplification this design refuses.
+    let now = proofwork::time::unix_seconds();
+    let (stored, _) = alice.with_directory(|d| d.lookup_providers(&wanted, now));
+    assert!(
+        stored.is_empty(),
+        "a relayed holder entered the provider store"
+    );
+
+    // But acted on: carol is dialled for the blob she was named as holding.
+    assert_eq!(alice.pending_hints(), 1, "the holder never became a hint");
+    let chosen = alice.peers_for(&needs, 1);
+    assert_eq!(chosen.len(), 1);
+    assert_eq!(
+        chosen[0].peer.id(),
+        carol.id(),
+        "the lookup found carol and the service dialled somebody else"
+    );
+
+    // And consumed: a wrong hint costs one dial, not a permanent detour.
+    // Checked on the hint itself rather than on who gets dialled next -- carol
+    // is in the address book, so the random sample can return her again for
+    // reasons that have nothing to do with the hint.
+    assert_eq!(
+        alice.pending_hints(),
+        0,
+        "the hint was not consumed, so a bad one would be retried for ever"
+    );
+}
+
+#[test]
+fn a_node_handed_a_log_is_handed_the_network_with_it() {
+    // The roadmap item: identity discovery was a *second* bootstrap problem —
+    // a node needed a log and an address list, obtained separately, with
+    // nothing tying them together. A peer record puts the permanent half in the
+    // permanent record.
+    //
+    // What it deliberately cannot do on its own is complete a dial: the record
+    // carries a transport *id*, not the 261 KiB McEliece key. So a seeded
+    // contact is routable immediately and dialable once its key arrives, which
+    // is the same two-step the DHT already uses for a contact it hears about.
+    use proofwork::records::PeerRecord;
+
+    let carol = PeerIdentity::generate();
+    let carol_addr: std::net::SocketAddr = "127.0.0.1:9401".parse().expect("loopback");
+    let announcer = proofwork::crypto::identity::Identity::from_secret_bytes([11u8; 32]);
+
+    let mut writer = Node::new(
+        Ledger::open(scratch("peer-log")).expect("open ledger"),
+        repo_root(),
+    );
+    let record = PeerRecord::new(
+        announcer.submitter_id(),
+        proofwork::p2p::dht::NodeId::from_bytes(carol.id()).to_hex(),
+        carol_addr.to_string(),
+        1,
+        TS,
+    )
+    .signed_with(&announcer);
+    writer
+        .post_peer(&record, TS)
+        .expect("the record is admitted");
+
+    // A node that has only the log.
+    let alice = Service::new(Arc::new(PeerIdentity::generate()));
+    assert_eq!(alice.known_peers(), 0, "alice starts with no address book");
+    assert_eq!(alice.seed_from_log(&writer), 1);
+
+    // Routable now.
+    let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
+    let known: Vec<_> = alice.with_directory(|d| {
+        d.routing()
+            .contacts()
+            .map(|c| (c.id, c.addr))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(known, vec![(carol_node, carol_addr)]);
+    // And queued for the key that makes it dialable, rather than silently
+    // stuck as a name alice can never reach.
+    assert!(
+        alice
+            .with_directory(|d| d.key_wants())
+            .contains(&carol_node),
+        "a seeded contact was not queued for its key"
+    );
+
+    // A second seeding is idempotent, which matters because a daemon runs it
+    // every tick.
+    assert_eq!(alice.seed_from_log(&writer), 1);
+    assert_eq!(alice.with_directory(|d| d.routing().len()), 1);
+}
+
+#[test]
+fn a_replayed_peer_record_cannot_steer_the_routing_table_back() {
+    // What `dht::Contact::seq` exists for, in its own words: without a
+    // freshness counter "a table has no way to tell a peer that *moved* from a
+    // peer being *impersonated* by a stale record".
+    //
+    // The counter was available and simply not passed. `seed_from_log` called
+    // the seq-less form, so every contact arrived at zero — and the table takes
+    // the new contact when `seq >= held`, which at zero is always. Anyone who
+    // once saw a peer record could re-offer the address that peer had left and
+    // go on steering traffic at it, while the log itself was fully protected:
+    // `Node::peers` resolves highest-seq-wins and the audit reports a record
+    // that does not advance. All of that stopped at the routing table's edge.
+    use proofwork::records::PeerRecord;
+
+    let moved = PeerIdentity::generate();
+    let old_addr: std::net::SocketAddr = "127.0.0.1:9501".parse().expect("loopback");
+    let new_addr: std::net::SocketAddr = "127.0.0.1:9502".parse().expect("loopback");
+    let announcer = proofwork::crypto::identity::Identity::from_secret_bytes([21u8; 32]);
+    let transport = proofwork::p2p::dht::NodeId::from_bytes(moved.id());
+
+    let mut writer = Node::new(
+        Ledger::open(scratch("peer-replay")).expect("open ledger"),
+        repo_root(),
+    );
+    for (seq, addr) in [(1u64, old_addr), (2, new_addr)] {
+        let record = PeerRecord::new(
+            announcer.submitter_id(),
+            transport.to_hex(),
+            addr.to_string(),
+            seq,
+            TS,
+        )
+        .signed_with(&announcer);
+        writer.post_peer(&record, TS).expect("admitted");
+    }
+
+    let alice = Service::new(Arc::new(PeerIdentity::generate()));
+    assert_eq!(alice.seed_from_log(&writer), 1);
+    let held = |service: &Service| -> Vec<std::net::SocketAddr> {
+        service.with_directory(|d| d.routing().contacts().map(|c| c.addr).collect())
+    };
+    assert_eq!(held(&alice), vec![new_addr], "the move was not followed");
+
+    // The replay: the old record, offered again, exactly as an attacker who
+    // kept a copy would. Its signature is perfectly good — that is the point,
+    // and why signature checking alone does not cover this.
+    alice.note_contact_at(moved.id(), old_addr, 1);
+    assert_eq!(
+        held(&alice),
+        vec![new_addr],
+        "a stale record steered the table back to an address the peer had left"
+    );
+
+    // And a genuine later move is still followed, so this is freshness rather
+    // than a table that has stopped listening.
+    alice.note_contact_at(moved.id(), old_addr, 3);
+    assert_eq!(held(&alice), vec![old_addr], "a newer record was ignored");
+}
+
+#[test]
+fn a_peer_record_a_node_cannot_parse_is_skipped_not_fatal() {
+    // The consensus layer bounds an address and never parses one — two
+    // implementations disagreeing about an IPv6 form would be a split. So the
+    // network layer is where a form this build cannot dial gets dropped, and
+    // dropping one contact must not cost the rest of the log.
+    use proofwork::records::PeerRecord;
+
+    let announcer = proofwork::crypto::identity::Identity::from_secret_bytes([12u8; 32]);
+    let other = proofwork::crypto::identity::Identity::from_secret_bytes([13u8; 32]);
+    let reachable = PeerIdentity::generate();
+
+    let mut writer = Node::new(
+        Ledger::open(scratch("peer-log-unparseable")).expect("open ledger"),
+        repo_root(),
+    );
+    writer
+        .post_peer(
+            &PeerRecord::new(
+                announcer.submitter_id(),
+                "ab".repeat(32),
+                // Admissible as a record; not a socket address this build dials.
+                "peer.example.onion:9000",
+                1,
+                TS,
+            )
+            .signed_with(&announcer),
+            TS,
+        )
+        .expect("an onion address is a legal record");
+    writer
+        .post_peer(
+            &PeerRecord::new(
+                other.submitter_id(),
+                proofwork::p2p::dht::NodeId::from_bytes(reachable.id()).to_hex(),
+                "127.0.0.1:9402",
+                1,
+                TS,
+            )
+            .signed_with(&other),
+            TS,
+        )
+        .expect("post");
+
+    let alice = Service::new(Arc::new(PeerIdentity::generate()));
+    assert_eq!(
+        alice.seed_from_log(&writer),
+        1,
+        "the unparseable record cost the parseable one"
+    );
+    assert_eq!(alice.with_directory(|d| d.routing().len()), 1);
+}
+
+/// A beacon heard on the local segment becomes a routable contact, by the same
+/// path a peer record does.
+///
+/// The point of the third hint source is that it needs no new machinery: an
+/// address and a transport id, neither trusted, both settled by the handshake.
+/// This asserts the two arrive in the routing table with the key queued, which
+/// is exactly what `seed_from_log` promises for records.
+#[test]
+fn a_beacon_becomes_a_routable_contact_with_its_key_queued() {
+    use proofwork::p2p::multicast;
+
+    let heard_id = PeerIdentity::generate();
+    let alice = Service::new(Arc::new(PeerIdentity::generate()));
+    assert_eq!(alice.known_peers(), 0);
+
+    // Bind on a pid-derived port so concurrent runs do not collide, and step
+    // over a host with no multicast route rather than failing there -- that is
+    // the documented degradation, not a defect.
+    let port = 41_000 + (std::process::id() % 20_000) as u16;
+    let Ok(responder) = multicast::Responder::bind(alice.identity(), 9500, port) else {
+        eprintln!("skipped: multicast unavailable on this host");
+        return;
+    };
+    let Ok(sender) = std::net::UdpSocket::bind(("0.0.0.0", 0)) else {
+        eprintln!("skipped: cannot bind a sender");
+        return;
+    };
+    let _ = sender.set_multicast_loop_v4(true);
+    let frame = multicast::Beacon::new(heard_id.id(), 9600).encode();
+    if sender
+        .send_to(
+            &frame,
+            std::net::SocketAddr::new(multicast::GROUP.into(), port),
+        )
+        .is_err()
+    {
+        eprintln!("skipped: multicast send unavailable on this host");
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(250));
+
+    let taken = alice.absorb_beacons(&responder, 16);
+    if taken == 0 {
+        eprintln!("skipped: no multicast delivery on this host");
+        return;
+    }
+    assert_eq!(taken, 1, "one beacon, one contact");
+
+    let node_id = proofwork::p2p::dht::NodeId::from_bytes(heard_id.id());
+    let known: Vec<_> = alice.with_directory(|d| {
+        d.routing()
+            .contacts()
+            .map(|c| (c.id, c.addr.port()))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        known,
+        vec![(node_id, 9600)],
+        "the session port must come from the beacon, not from the sending socket"
+    );
+    assert!(
+        alice.with_directory(|d| d.key_wants()).contains(&node_id),
+        "a contact from a beacon was not queued for the key that makes it dialable"
+    );
+}

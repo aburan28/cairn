@@ -1,7 +1,7 @@
 //! Cutting a blob into verifiable pieces, and the manifest that describes them.
 //!
 //! A blob is named by the SHA-256 of its whole content
-//! ([`crate::store::blobs`]), which is exactly the guarantee needed *after* a
+//! ([`crate::blobs`]), which is exactly the guarantee needed *after* a
 //! transfer and useless *during* one. A peer feeding you 400 MB of noise is
 //! indistinguishable from a peer feeding you the real thing until the last byte
 //! lands and the digest comes out wrong -- at which point you know you were

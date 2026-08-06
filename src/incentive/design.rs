@@ -421,7 +421,7 @@ pub struct ServiceFinding {
     /// mechanism can have. A *strict* rival is different: it pays better and
     /// nobody leaves it.
     ///
-    /// Capped at [`MAX_RIVALS`] entries; the count in `equilibria` is exact.
+    /// Capped at `MAX_RIVALS` entries; the count in `equilibria` is exact.
     pub rivals: Vec<Counts>,
     /// The smallest group that strictly gains by defecting together.
     pub defection: Option<Invasion>,

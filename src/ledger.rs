@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use rand_core::OsRng;
 
-use crate::canonical::{merkle_root, CanonicalError, Value};
+use crate::canonical::{merkle_proof, merkle_root, CanonicalError, Inclusion, Value};
 use crate::store::atrest::Cipher;
 
 /// A single record in the log.
@@ -107,7 +107,17 @@ impl Entry {
     /// either implementation -- which is the only interop property that matters,
     /// since nothing hashes this line.
     pub fn to_json_line(&self) -> String {
-        let record = match self.body() {
+        self.body_with_hash().canonical_string()
+    }
+
+    /// The stored object: [`Entry::body`] with `hash` added.
+    ///
+    /// Shared by [`Entry::to_json_line`] and [`Proof::to_value`] so that an
+    /// entry travelling alone in a proof is byte-identical to the same entry
+    /// sitting in the log -- if the two spellings could drift, a reader would
+    /// have to know which one they were holding before they could hash it.
+    pub fn body_with_hash(&self) -> Value {
+        match self.body() {
             Value::Object(mut map) => {
                 map.insert(String::from("hash"), Value::String(self.hash.clone()));
                 Value::Object(map)
@@ -116,8 +126,7 @@ impl Entry {
             // fallback rather than an `unwrap` because this crate does not
             // panic in library code.
             other => other,
-        };
-        record.canonical_string()
+        }
     }
 
     /// Parse one stored line into an entry.
@@ -128,6 +137,15 @@ impl Entry {
     /// than wrapping into a plausible-looking number, and a payload integer
     /// outside the canonical 128-bit range is refused rather than degrading to
     /// a float and hashing differently than it did when it was written.
+    /// Decode one entry from a canonical value.
+    ///
+    /// The public spelling of the line parser, for readers who receive a single
+    /// entry outside a log file -- a [`Proof`] carries one, and a light client
+    /// checking that proof has no log to parse it out of.
+    pub fn from_value(value: &Value) -> Result<Entry, LedgerError> {
+        Entry::parse(value, "entry")
+    }
+
     fn parse(value: &Value, location: &str) -> Result<Entry, LedgerError> {
         let bad = |field: &str| LedgerError::Malformed {
             location: location.to_string(),
@@ -171,6 +189,184 @@ impl Entry {
         })
     }
 }
+
+/// One entry, plus the path that puts it under a Merkle root.
+///
+/// What a holder of the log hands to somebody who does not have it. The reader
+/// needs one thing they did not get from the holder -- the root -- and a signed
+/// checkpoint is where that comes from. With those two, [`Proof::check`] settles
+/// the question without either side trusting the other and without moving the
+/// log: at 20,000 entries the proof is fifteen hashes.
+///
+/// This is the challenge half of paid availability. `docs/node-incentives.md`
+/// says of storage that you "sample it -- a node that can't answer didn't store
+/// it"; a node that cannot produce this for an entry it was paid to hold has
+/// answered the sample, in the negative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proof {
+    /// The entry being proved, in full. Not just its hash: a reader checking a
+    /// settlement wants to *read* the settlement, and a hash they cannot open
+    /// tells them only that some opaque thing is in the log.
+    pub entry: Entry,
+    /// The path from that entry's hash to the root.
+    pub inclusion: Inclusion,
+}
+
+impl Proof {
+    /// Check this proof against a root, usually one from a signed checkpoint.
+    ///
+    /// Three failures, kept apart because they accuse different people. A
+    /// mismatched entry hash is the *prover's* file being edited; a wrong
+    /// position is a proof for some other slot; a path that does not reach the
+    /// root means the entry is not in the log that root pins -- or the reader
+    /// pinned a root from a different height. Collapsing them into one boolean
+    /// would leave a reader with a failure and no idea whom to disbelieve.
+    ///
+    /// The leaf comes from `self.entry`, recomputed, never from the prover's
+    /// `hash` field -- see [`Inclusion::verify`] for why a prover who gets to
+    /// name the leaf can offer an internal node instead of one.
+    pub fn check(&self, root: &str) -> Result<(), ProofError> {
+        let recomputed = self.entry.recompute_hash();
+        if recomputed != self.entry.hash {
+            return Err(ProofError::EntryAltered {
+                declared: self.entry.hash.clone(),
+                recomputed,
+            });
+        }
+        // `seq` is the entry's position, which is the leaf index. The path
+        // check below would catch a mismatch on its own -- `seq` is inside the
+        // hashed body, so an entry's leaf hash can only sit at its own index --
+        // but it would report "does not reach the root", which reads as an
+        // accusation of fraud when the everyday cause is two files that do not
+        // belong together. Say which it is.
+        if u64::try_from(self.inclusion.index).ok() != Some(self.entry.seq) {
+            return Err(ProofError::WrongPosition {
+                seq: self.entry.seq,
+                index: self.inclusion.index,
+            });
+        }
+        if !self.inclusion.verify(&recomputed, root) {
+            return Err(ProofError::NotUnderRoot {
+                root: root.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The shipped form: `{entry, index, leaves, siblings}`.
+    ///
+    /// Flat rather than nested, because every field is about the same entry and
+    /// a reader hand-checking one of these should not have to descend.
+    ///
+    /// The `-1` fallbacks below are unreachable -- `i128` covers every `usize`
+    /// on every platform this builds for -- and are written as a *rejected*
+    /// value rather than an `unwrap` because this crate does not panic in
+    /// library code. [`Proof::from_value`] refuses a negative count, so if the
+    /// impossible ever happened the proof would fail to decode rather than
+    /// decode into something plausible.
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("entry", self.entry.body_with_hash()),
+            (
+                "index",
+                Value::Int(i128::try_from(self.inclusion.index).unwrap_or(-1)),
+            ),
+            (
+                "leaves",
+                Value::Int(i128::try_from(self.inclusion.leaves).unwrap_or(-1)),
+            ),
+            (
+                "siblings",
+                Value::Array(
+                    self.inclusion
+                        .siblings
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+
+    /// Decode what [`Proof::to_value`] wrote.
+    ///
+    /// Refuses a negative or oversized `index`/`leaves` rather than clamping:
+    /// this is the input a stranger controls, and a proof that decodes to
+    /// something other than what was written is worse than one that fails.
+    pub fn from_value(value: &Value) -> Result<Proof, LedgerError> {
+        let bad = |field: &str| LedgerError::Malformed {
+            location: String::from("proof"),
+            reason: format!("missing or invalid field {field:?}"),
+        };
+        let entry = Entry::from_value(value.get("entry").ok_or_else(|| bad("entry"))?)?;
+        let count = |field: &str| -> Result<usize, LedgerError> {
+            value
+                .get(field)
+                .and_then(Value::as_i128)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| bad(field))
+        };
+        let index = count("index")?;
+        let leaves = count("leaves")?;
+        let siblings = match value.get("siblings") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|item| match item {
+                    Value::String(hash) => Ok(hash.clone()),
+                    _ => Err(bad("siblings")),
+                })
+                .collect::<Result<Vec<String>, LedgerError>>()?,
+            _ => return Err(bad("siblings")),
+        };
+        Ok(Proof {
+            entry,
+            inclusion: Inclusion {
+                index,
+                leaves,
+                siblings,
+            },
+        })
+    }
+}
+
+/// Why a [`Proof`] did not check out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofError {
+    /// The entry's contents do not hash to the `hash` it carries.
+    EntryAltered {
+        declared: String,
+        recomputed: String,
+    },
+    /// The path is for a different leaf index than the entry's `seq`.
+    WrongPosition { seq: u64, index: usize },
+    /// The path does not reach the root it was checked against.
+    NotUnderRoot { root: String },
+}
+
+impl fmt::Display for ProofError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProofError::EntryAltered {
+                declared,
+                recomputed,
+            } => write!(
+                f,
+                "the entry does not hash to the digest it carries \
+                 (says {declared}, hashes to {recomputed})"
+            ),
+            ProofError::WrongPosition { seq, index } => write!(
+                f,
+                "the path is for leaf {index} but the entry's seq is {seq}"
+            ),
+            ProofError::NotUnderRoot { root } => {
+                write!(f, "the path does not reach root {root}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProofError {}
 
 /// Something went wrong reading or extending the log.
 ///
@@ -223,6 +419,15 @@ pub enum LedgerError {
         location: String,
         source: crate::store::atrest::AtRestError,
     },
+    /// Another process holds the writer lock on this log.
+    ///
+    /// Refused rather than queued. Two writers over one file each compute
+    /// `prev` from their own view of the tail, so both append entries claiming
+    /// the same predecessor and the same `seq` -- a forked log written by one
+    /// honest operator, which `audit` catches only afterwards. Waiting would
+    /// be worse than refusing: the second writer's view of the tail is already
+    /// stale by the time the lock frees.
+    Locked { path: String },
 }
 
 impl fmt::Display for LedgerError {
@@ -236,6 +441,12 @@ impl fmt::Display for LedgerError {
                 "this is a read-only view of the first {height} entries; it cannot be appended to"
             ),
             LedgerError::Sealed { location, source } => write!(f, "{location}: {source}"),
+            LedgerError::Locked { path } => write!(
+                f,
+                "another process is already writing {path}. Two writers fork a hash-linked \
+                 log -- both would append entries claiming the same predecessor. Stop the \
+                 other process, or give this one its own --log"
+            ),
         }
     }
 }
@@ -246,7 +457,9 @@ impl std::error::Error for LedgerError {
             LedgerError::Io { source, .. } => Some(source),
             LedgerError::Canonical { source, .. } => Some(source),
             LedgerError::Sealed { source, .. } => Some(source),
-            LedgerError::Malformed { .. } | LedgerError::ReadOnlyPrefix { .. } => None,
+            LedgerError::Malformed { .. }
+            | LedgerError::ReadOnlyPrefix { .. }
+            | LedgerError::Locked { .. } => None,
         }
     }
 }
@@ -272,6 +485,14 @@ pub struct Ledger {
     /// Set on a prefix view. See [`LedgerError::ReadOnlyPrefix`].
     read_only_prefix: bool,
     codec: Codec,
+    /// Held open for as long as this handle lives when opened through
+    /// [`Ledger::open_exclusive`]. Dropping the file releases the lock, so the
+    /// field is the lock: it is never read, and removing it would silently
+    /// un-enforce single-writer.
+    _lock: Option<fs::File>,
+    /// Size and mtime of the file as of the last load, for
+    /// [`Ledger::reload_if_changed`].
+    loaded_stamp: Option<(u64, std::time::SystemTime)>,
 }
 
 /// How lines are written to and read from the file.
@@ -286,7 +507,9 @@ pub struct Ledger {
 #[derive(Debug, Default)]
 pub enum Codec {
     /// JSONL, one record per line. The format every existing log is in, and the
-    /// one the Python reference reads.
+    /// only one the reference implementation reads -- sealing is a storage
+    /// concern of this crate, not part of the format two implementations have
+    /// to agree on. `proofwork store export` is how a sealed log reaches it.
     #[default]
     Plain,
     /// Each line sealed with ChaCha20-Poly1305 under a local key.
@@ -369,11 +592,101 @@ impl Ledger {
             entries: Vec::new(),
             read_only_prefix: false,
             codec,
+            _lock: None,
+            loaded_stamp: None,
         };
         if ledger.path.exists() {
             ledger.load()?;
         }
         Ok(ledger)
+    }
+
+    /// Open the log and take the writer lock, refusing if another process
+    /// holds it.
+    ///
+    /// The type has always said one writer per log ([`Ledger`] is not
+    /// `Clone`); this is the part the type could not enforce, because a second
+    /// *process* is not a second handle. Without it two servers over one file
+    /// fork it silently and `audit` reports the damage afterwards, which is
+    /// too late for the writes that already landed.
+    ///
+    /// Advisory, on the log file itself: `flock` semantics via
+    /// [`std::fs::File::try_lock`], released when the handle drops or the
+    /// process exits — including on a crash, so a killed node leaves no stale
+    /// lock to clear by hand. It binds processes on one machine, which is the
+    /// failure this guards; two machines sharing a log over NFS are outside
+    /// what any advisory lock promises and outside Stage 0.
+    ///
+    /// Readers ([`Ledger::open`]) take no lock: reading a log somebody else is
+    /// appending to is safe here, since an append never rewrites an existing
+    /// line.
+    pub fn open_exclusive(path: impl Into<PathBuf>) -> Result<Ledger, LedgerError> {
+        Ledger::open_exclusive_with(path, Codec::Plain)
+    }
+
+    /// [`Ledger::open_exclusive`], reading through `codec`.
+    pub fn open_exclusive_with(
+        path: impl Into<PathBuf>,
+        codec: Codec,
+    ) -> Result<Ledger, LedgerError> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| io_error(format!("creating {}", parent.display()), e))?;
+            }
+        }
+        // `create(true).append(true)` rather than `write`: taking the lock must
+        // not truncate a log that already exists, and must still work before
+        // the first append has created one.
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| io_error(format!("opening {} for writing", path.display()), e))?;
+        // Held by somebody else, or the platform/filesystem cannot lock. Both
+        // are refusals: a lock that silently does nothing is worse than no
+        // lock, because it reads as a guarantee.
+        if file.try_lock().is_err() {
+            return Err(LedgerError::Locked {
+                path: path.display().to_string(),
+            });
+        }
+        let mut ledger = Ledger::open_with(path, codec)?;
+        ledger._lock = Some(file);
+        Ok(ledger)
+    }
+
+    /// Re-read the file if it changed on disk since the last load.
+    ///
+    /// For a long-lived reader — the MCP server holds one handle for a whole
+    /// agent session — whose log the operator appends to meanwhile. Without
+    /// this, a server started before an objective was posted reports "no
+    /// objectives" until it is restarted, which for a launch where objectives
+    /// arrive as contributors do is the difference between working and not.
+    ///
+    /// Returns whether anything was re-read. A writer holding the lock never
+    /// needs this and calling it there is harmless: its own appends update the
+    /// stamp.
+    pub fn reload_if_changed(&mut self) -> Result<bool, LedgerError> {
+        if self.read_only_prefix {
+            return Ok(false);
+        }
+        let stamp = match fs::metadata(&self.path) {
+            Ok(meta) => match meta.modified() {
+                Ok(modified) => Some((meta.len(), modified)),
+                Err(_) => None,
+            },
+            // A log that is not there yet is not a change to re-read.
+            Err(_) => return Ok(false),
+        };
+        if stamp.is_some() && stamp == self.loaded_stamp {
+            return Ok(false);
+        }
+        let previous = self.entries.len();
+        self.entries.clear();
+        self.load()?;
+        Ok(self.entries.len() != previous)
     }
 
     /// A read-only view of the first `height` entries.
@@ -403,6 +716,10 @@ impl Ledger {
             entries: self.entries[..height].to_vec(),
             read_only_prefix: true,
             codec: Codec::Plain,
+            // A view holds no lock: it never writes, and duplicating the
+            // handle would release the real one when the view dropped.
+            _lock: None,
+            loaded_stamp: None,
         })
     }
 
@@ -414,6 +731,22 @@ impl Ledger {
     /// Whether this handle seals what it writes.
     pub fn is_sealed(&self) -> bool {
         matches!(self.codec, Codec::Sealed(_))
+    }
+
+    /// Consume this handle and hand the codec back.
+    ///
+    /// A [`Cipher`] is deliberately not `Clone` -- a key with an unknown number
+    /// of copies is a key whose lifetime cannot be reasoned about -- so a caller
+    /// that has to write one log and then read it back has no way to get its own
+    /// key returned. Re-reading the key file is the usual answer and does not
+    /// work for a key that is not on disk yet, which is exactly the position
+    /// `store rekey` is in. Taking the codec back keeps that flow to a single
+    /// live copy of the key rather than adding a second one.
+    ///
+    /// By value, so the handle -- and its advisory lock -- is gone before the
+    /// caller reopens the same path.
+    pub fn into_codec(self) -> Codec {
+        self.codec
     }
 
     // -- storage ---------------------------------------------------------
@@ -454,7 +787,15 @@ impl Ledger {
             let entry = Entry::parse(&value, &location)?;
             self.entries.push(entry);
         }
+        self.loaded_stamp = self.stamp();
         Ok(())
+    }
+
+    /// Size and mtime of the backing file, for change detection.
+    fn stamp(&self) -> Option<(u64, std::time::SystemTime)> {
+        let meta = fs::metadata(&self.path).ok()?;
+        let modified = meta.modified().ok()?;
+        Some((meta.len(), modified))
     }
 
     /// Append a record and return it.
@@ -518,6 +859,8 @@ impl Ledger {
             .map_err(|e| io_error(format!("appending to {}", self.path.display()), e))?;
 
         self.entries.push(entry);
+        // Our own write must not read back as somebody else's change.
+        self.loaded_stamp = self.stamp();
         self.entries.last().ok_or_else(|| LedgerError::Malformed {
             location: self.path.display().to_string(),
             reason: String::from("internal: appended entry is missing"),
@@ -564,12 +907,47 @@ impl Ledger {
     /// entry is in the log without shipping the log, which is what a third
     /// party auditing a single settlement actually needs.
     pub fn root(&self) -> Option<String> {
-        let hashes: Vec<String> = self
-            .entries
+        merkle_root(&self.leaf_hashes())
+    }
+
+    fn leaf_hashes(&self) -> Vec<String> {
+        self.entries
             .iter()
             .map(|entry| entry.hash.clone())
-            .collect();
-        merkle_root(&hashes)
+            .collect()
+    }
+
+    /// The proof that entry `seq` is under [`Ledger::root`].
+    ///
+    /// The capability [`Ledger::root`] has always claimed -- "proving that one
+    /// specific entry is in the log without shipping the log" -- and could not
+    /// deliver, because there was a root and no path to it. A holder answers a
+    /// challenge with this; a light client with nothing but a signed checkpoint
+    /// checks it. `docs/node-incentives.md` needs exactly this to make
+    /// availability the easy service it calls it: *"sample it. A node that
+    /// can't answer didn't store it."*
+    ///
+    /// Indexed by `seq`, which is the entry's position, so the caller does not
+    /// have to know that the two coincide.
+    pub fn inclusion(&self, seq: u64) -> Option<Inclusion> {
+        let index = usize::try_from(seq).ok()?;
+        merkle_proof(&self.leaf_hashes(), index)
+    }
+
+    /// [`Ledger::inclusion`] together with the entry it is about.
+    ///
+    /// The shippable form. An inclusion path on its own proves that *some*
+    /// leaf is under the root, which is worth nothing to a reader who does not
+    /// already have the leaf -- and a reader who already had the entry did not
+    /// need a proof. [`Proof`] carries both, so one file answers the whole
+    /// question.
+    pub fn prove(&self, seq: u64) -> Option<Proof> {
+        let index = usize::try_from(seq).ok()?;
+        let entry = self.entries.get(index)?.clone();
+        Some(Proof {
+            entry,
+            inclusion: merkle_proof(&self.leaf_hashes(), index)?,
+        })
     }
 
     // -- integrity -------------------------------------------------------
@@ -1107,6 +1485,8 @@ mod tests {
             entries: vec![Entry { hash, ..entry }],
             read_only_prefix: false,
             codec: Codec::Plain,
+            _lock: None,
+            loaded_stamp: None,
         };
         let problems = ledger.verify_chain();
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -1403,6 +1783,123 @@ mod tests {
     }
 
     #[test]
+    fn every_entry_of_a_log_proves_against_that_log_s_root() {
+        let dir = TempDir::new("prove");
+        let mut ledger = Ledger::open(dir.file("log.jsonl")).expect("open");
+        // Every length from 1 to 9 exercises both shapes of the promotion rule
+        // -- an even level pairs, an odd one carries the last node up.
+        for count in 1..=9u64 {
+            ledger
+                .append("note", note(count.into()), "t")
+                .expect("append");
+            let root = ledger.root().expect("non-empty log has a root");
+            for seq in 0..count {
+                let proof = ledger.prove(seq).expect("every entry has a proof");
+                assert_eq!(proof.entry.seq, seq);
+                assert_eq!(
+                    proof.check(&root),
+                    Ok(()),
+                    "entry {seq} of {count} did not check"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_proof_survives_the_trip_through_json() {
+        let dir = TempDir::new("proof-json");
+        let mut ledger = Ledger::open(dir.file("log.jsonl")).expect("open");
+        for i in 0..5 {
+            ledger.append("note", note(i), "t").expect("append");
+        }
+        let root = ledger.root().expect("root");
+        let proof = ledger.prove(3).expect("proof");
+        let text = proof.to_value().canonical_string();
+        let decoded = Proof::from_value(&Value::from_json(&text).expect("parse")).expect("decode");
+        assert_eq!(decoded, proof);
+        assert_eq!(decoded.check(&root), Ok(()));
+    }
+
+    #[test]
+    fn a_proof_does_not_check_against_a_root_from_a_different_height() {
+        let dir = TempDir::new("proof-height");
+        let mut ledger = Ledger::open(dir.file("log.jsonl")).expect("open");
+        for i in 0..4 {
+            ledger.append("note", note(i), "t").expect("append");
+        }
+        let proof = ledger.prove(1).expect("proof");
+        let four = ledger.root().expect("root");
+        ledger.append("note", note(4), "t").expect("append");
+        let five = ledger.root().expect("root");
+        assert_eq!(proof.check(&four), Ok(()));
+        // The reader pinned yesterday's checkpoint against today's proof, or
+        // the other way round. Either way the answer is no, not "probably".
+        assert!(matches!(
+            proof.check(&five),
+            Err(ProofError::NotUnderRoot { .. })
+        ));
+    }
+
+    #[test]
+    fn an_edited_entry_is_caught_before_the_path_is_walked() {
+        let dir = TempDir::new("proof-edit");
+        let mut ledger = Ledger::open(dir.file("log.jsonl")).expect("open");
+        for i in 0..4 {
+            ledger.append("note", note(i), "t").expect("append");
+        }
+        let root = ledger.root().expect("root");
+        let mut proof = ledger.prove(2).expect("proof");
+        // The prover keeps the real leaf hash -- so the *path* still reaches
+        // the root -- and edits only the contents the reader will go on to
+        // read. Checking the path alone would pass this.
+        proof.entry.payload = note(99);
+        assert!(matches!(
+            proof.check(&root),
+            Err(ProofError::EntryAltered { .. })
+        ));
+    }
+
+    #[test]
+    fn a_path_for_a_different_slot_does_not_pass_as_this_entry_s() {
+        let dir = TempDir::new("proof-slot");
+        let mut ledger = Ledger::open(dir.file("log.jsonl")).expect("open");
+        for i in 0..8 {
+            ledger.append("note", note(i), "t").expect("append");
+        }
+        let root = ledger.root().expect("root");
+        let mut proof = ledger.prove(5).expect("proof");
+        proof.inclusion = ledger.prove(2).expect("proof").inclusion;
+        assert!(matches!(
+            proof.check(&root),
+            Err(ProofError::WrongPosition { seq: 5, index: 2 })
+        ));
+    }
+
+    #[test]
+    fn there_is_no_proof_for_an_entry_the_log_does_not_have() {
+        let dir = TempDir::new("proof-missing");
+        let mut ledger = Ledger::open(dir.file("log.jsonl")).expect("open");
+        assert_eq!(ledger.prove(0), None, "an empty log proves nothing");
+        ledger.append("note", note(0), "t").expect("append");
+        assert!(ledger.prove(0).is_some());
+        assert_eq!(ledger.prove(1), None);
+        assert_eq!(ledger.prove(u64::MAX), None);
+    }
+
+    #[test]
+    fn an_entry_travelling_in_a_proof_is_byte_identical_to_the_stored_one() {
+        let dir = TempDir::new("proof-bytes");
+        let mut ledger = Ledger::open(dir.file("log.jsonl")).expect("open");
+        let payload = Value::object([("msg", Value::string("héllo")), ("n", Value::Int(-3))]);
+        ledger.append("claim", payload, "t").expect("append");
+        let proof = ledger.prove(0).expect("proof");
+        assert_eq!(
+            proof.to_value().get("entry").expect("entry").clone(),
+            Value::from_json(&ledger.entries()[0].to_json_line()).expect("parse"),
+        );
+    }
+
+    #[test]
     fn invalid_utf8_is_reported_as_a_data_problem() {
         let dir = TempDir::new("utf8");
         let path = dir.file("log.jsonl");
@@ -1413,6 +1910,75 @@ mod tests {
             }
             other => panic!("expected a UTF-8 error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_second_writer_is_refused_rather_than_allowed_to_fork_the_log() {
+        // The failure this guards: two handles each compute `prev` from their
+        // own view of the tail, so both append an entry claiming the same
+        // predecessor and the same seq. `audit` catches that afterwards,
+        // which is too late for the entries already on disk.
+        let dir = TempDir::new("ledger-lock");
+        let path = dir.path.join("log.jsonl");
+
+        let mut first = Ledger::open_exclusive(&path).expect("first writer takes the lock");
+        first
+            .append("note", Value::object([("i", Value::Int(0))]), "t")
+            .expect("first writer appends");
+
+        match Ledger::open_exclusive(&path) {
+            Err(LedgerError::Locked { path: named }) => {
+                assert!(named.contains("log.jsonl"), "{named}");
+            }
+            other => panic!("a second writer was allowed in: {other:?}"),
+        }
+
+        // A reader is not blocked: an append never rewrites an existing line,
+        // so reading alongside a writer is safe and `audit` must stay usable
+        // while a daemon runs.
+        let reader = Ledger::open(&path).expect("readers are not locked out");
+        assert_eq!(reader.len(), 1);
+
+        // And the lock is released with the handle, not held to process exit.
+        drop(first);
+        let mut second = Ledger::open_exclusive(&path).expect("lock freed on drop");
+        second
+            .append("note", Value::object([("i", Value::Int(1))]), "t")
+            .expect("second writer appends");
+        assert_eq!(second.len(), 2);
+    }
+
+    #[test]
+    fn a_long_lived_reader_picks_up_appends_it_did_not_make() {
+        // The MCP server holds one handle for a whole agent session. Without
+        // this, an objective the operator posts after startup is invisible
+        // until the client restarts.
+        let dir = TempDir::new("ledger-reload");
+        let path = dir.path.join("log.jsonl");
+        let mut writer = Ledger::open_exclusive(&path).expect("writer");
+        writer
+            .append("note", Value::object([("i", Value::Int(0))]), "t")
+            .expect("append");
+
+        let mut reader = Ledger::open(&path).expect("reader");
+        assert_eq!(reader.len(), 1);
+        assert!(!reader.reload_if_changed().expect("no change yet"));
+
+        writer
+            .append("note", Value::object([("i", Value::Int(1))]), "t")
+            .expect("second append");
+        assert!(reader.reload_if_changed().expect("change seen"));
+        assert_eq!(reader.len(), 2);
+        // The chain the reader now holds is the one on disk, not a splice.
+        assert!(reader.verify_chain().is_empty());
+    }
+
+    #[test]
+    fn a_missing_log_is_not_a_change_to_reload() {
+        let dir = TempDir::new("ledger-reload-missing");
+        let mut ledger = Ledger::open(dir.path.join("absent.jsonl")).expect("empty log");
+        assert!(!ledger.reload_if_changed().expect("nothing to re-read"));
+        assert_eq!(ledger.len(), 0);
     }
 
     #[test]

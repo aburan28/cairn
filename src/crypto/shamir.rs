@@ -45,7 +45,7 @@
 //!
 //! # Timing
 //!
-//! Read [`gf`] before assuming anything. Summary: the multiply is branch-free
+//! Read `gf` before assuming anything. Summary: the multiply is branch-free
 //! and **table-free**, specifically so that no memory access is indexed by a
 //! secret byte — the standard log/exp-table implementation leaks the secret
 //! through the cache and is not used here. What is *not* claimed: that the
@@ -591,7 +591,7 @@ fn hex_decode(text: &str) -> Result<Vec<u8>, ShamirError> {
     }
 
     let bytes = text.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(ShamirError::InvalidField {
             field: "data",
             expected: SHAPE,

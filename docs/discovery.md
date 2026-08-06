@@ -95,7 +95,15 @@ replicates a hash-linked log, so **discovery is not a new bootstrap problem — 
 is the same one as obtaining the log.** Solving it twice is the mistake. The
 split that makes it work: *identity* is permanent and belongs in the log;
 *location* is ephemeral and does not, because the log is append-only and an IP is
-not. *Not built; the natural next step.*
+not. *Built — `records::PeerRecord`, appended with `proofwork peer`.*
+
+The location half is handled by a `seq` rather than by leaving it out: a peer
+that moves appends a record with a higher one and the highest wins, which is
+last-writer-wins with an audit trail. What the record actually vouches for is
+the 32-byte `sha256` of a McEliece transport key, not the key — 261,120 bytes
+does not go in a structure every node replicates — and the key is fetched on
+demand and checked against the id, which needs no trust because the id is its
+hash. `Service::seed_from_log` fills the address book from the log at startup.
 
 **Kademlia DHT with provider records.** *Built — `src/swarm/dht.rs`.* The
 standard answer to "who has content X", and the right one: a fetch wants exactly
@@ -114,6 +122,13 @@ want different structures:
 |---|---|---|
 | peer identity | permanent | the log |
 | who holds digest `D` right now | constant | the DHT |
+| who *undertook* to seed `D`, and when | permanent (a past promise) | the log — but only once something pays or slashes against it |
+
+The third row is the one that catches people out, this project's own roadmap
+included: it once carried a line proposing a `blob` record "announcing who holds
+what", which is row two wearing row one's clothes. The test is not whether the
+fact is useful, it is whether the fact can stop being true. Holdership can.
+A promise made at a point in time cannot.
 
 The bootstrap objection also dissolves: the DHT bootstraps from the address book,
 which is already there.
@@ -131,8 +146,24 @@ stronger version and is not built.
 
 **Local multicast (mDNS-style).** Genuinely zero-configuration on a LAN: no DNS,
 no hardcoded address, no anchor at all. Limited to a broadcast domain, and often
-disabled in exactly the container environments a node runs in. Cheap to add and
-worth having as one hint source among several.
+disabled in exactly the container environments a node runs in. *Built —
+`p2p::multicast`, and it really was cheap, which is this document's thesis
+collecting on itself: a hint source nobody has to trust needs no new security
+argument, so the whole feature is a 39-byte frame and a socket.*
+
+Three omissions carry the design. The frame has **no address field** — the
+address comes from the datagram's source, because an address in the body is a
+claim by the sender, and a listener that believed it would let one host point an
+entire segment at a third party. It is **announce-only**: there is no query, so
+there is no spoofed query, so there is no reflector. And it carries **no
+inventory**, because `p2p::code` refuses to publish which blobs a node holds and
+a beacon listing them would broadcast exactly that to a whole office, without
+even a handshake. What a listener learns is that a proofwork node exists here.
+
+Unsigned, and deliberately: a false beacon names a transport id whose McEliece
+key the liar does not have, so the handshake fails and the cost is one dial. Same
+bound as a peer record, same bound as a DHT routing answer — which is the point
+of making every hint source equal.
 
 **Ethereum's discv5 / ENR.** The closest thing to state of the art for this exact
 problem, and the design the records here follow: a signed key-value record
@@ -233,3 +264,40 @@ to whoever you happen to be talking to.
 - **A peer record proves identity, not honesty.** It says the key holder claims
   this address. Whether that node serves what it advertises is the bitfield
   problem in [threat-model.md](threat-model.md), and it is unattributed.
+
+## Using a hostname
+
+A bootstrap address and a signed peer record may both carry `host:port` as well
+as a literal `IP:port`. The name is resolved on the **dial path only**:
+
+```json
+{ "addr": "ec2-203-0-113-10.compute-1.amazonaws.com:9000", "public": "…" }
+```
+
+This is the useful shape for a cloud instance. An EC2 box without an Elastic IP
+gets a new address every time it restarts, and a literal address in a bootstrap
+file is stale the moment that happens; its public DNS name is not.
+
+**Resolution never reaches the rules.** `records::MAX_PEER_ADDR` already refuses
+to let the record format decide what a valid address is, because `SocketAddr`
+parsing differs between languages at the edges and two implementations
+disagreeing about admissibility is a consensus split. A DNS answer is that
+hazard several times over — it depends on the resolver, the network, the moment,
+and whoever runs the zone. So `audit` never consults it, and a name that does not
+resolve costs a dial, exactly as a wrong IP does. A literal address is parsed
+without touching the resolver at all, so a host with no DNS is unaffected.
+
+**A hostile answer buys nothing**, which is what makes a name safe to accept from
+a stranger. Whoever controls the zone can send your dial anywhere; the handshake
+then fails, because a peer id *is* `sha256(public key)` and no impostor can
+produce a key hashing to somebody else's id. That is the rule above, applied:
+DNS carries the hint, and the hash decides.
+
+Bootstrap files are local configuration and are gitignored, which is why
+nothing generates one into the repository. `proofwork-gen-bootstrap` writes a
+structurally valid file for an address you name — `make p2p` calls it for
+`SEED_ADDR` on first run — and it accepts a hostname for the same reason the
+daemon does. The key it writes is a **placeholder**: only the seed's real public
+key makes the connection mean anything, and that key comes from the seed
+operator (`proofwork blob serve --identity <file>` prints it). See
+[p2p.md](p2p.md).

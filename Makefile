@@ -11,6 +11,8 @@ RELEASE_DIR ?= target/release
 CLI := $(RELEASE_DIR)/proofwork
 MCP := $(RELEASE_DIR)/proofwork-mcp
 P2P := $(RELEASE_DIR)/proofwork-p2p
+SERVE := $(RELEASE_DIR)/proofwork-serve
+FUZZ_CASES ?= 2000
 IDENTITY ?= $(abspath $(LOCAL_DIR)/node.identity.json)
 ROOT_KEY ?= $(abspath $(LOCAL_DIR)/root.key)
 CHECKPOINT ?= $(abspath $(LOCAL_DIR)/checkpoint.json)
@@ -19,18 +21,22 @@ GEN_BOOTSTRAP := $(RELEASE_DIR)/proofwork-gen-bootstrap
 SEED_ADDR ?= 44.229.170.164:5000
 SEED_BOOTSTRAP ?= $(abspath $(LOCAL_DIR)/seed.json)
 BOOTSTRAP_ARGS ?= --bootstrap $(SEED_BOOTSTRAP)
+SERVE_LISTEN ?= 127.0.0.1:8080
+SERVE_ARGS ?=
 P2P_ARGS ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp p2p demo ratchet interop mcp-smoke test test-rust \
-	test-python fmt clippy tla check
+.PHONY: help build debug cli mcp p2p serve demo ratchet identity interop differential fuzz mcp-smoke serve-smoke \
+	test test-rust \
+	test-reference fmt clippy tla check
 
 help:
 	@printf '%s\n' \
 	  'proofwork local commands:' \
 	  '  make mcp                 Build and run the local MCP server (stdio).' \
 	  '  make p2p                 Build and run a local p2p node.' \
+	  '  make serve               Publish this log over HTTP (read-only).' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
@@ -78,11 +84,20 @@ p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 cli: build | $(LOCAL_DIR)
 	"$(CLI)" --log "$(LOG)" --root "$(ROOT)" $(ARGS)
 
+identity: build
+	./scripts/identity-demo.sh
+
 demo: build
 	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/demo.sh
 
 ratchet: build
 	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/ratchet-demo.sh
+
+differential: build
+	./scripts/differential.sh
+
+fuzz: build
+	./scripts/fuzz-differential.sh $(FUZZ_CASES)
 
 interop: build
 	RUST_BIN="$(abspath $(CLI))" ./scripts/interop.sh
@@ -90,13 +105,23 @@ interop: build
 mcp-smoke: build
 	RUST_BIN="$(abspath $(CLI))" MCP_BIN="$(abspath $(MCP))" ./scripts/mcp-smoke.sh
 
+serve-smoke: build
+	RUST_BIN="$(abspath $(CLI))" SERVE_BIN="$(abspath $(SERVE))" ./scripts/serve-smoke.sh
+
+# Publish this node's log over HTTP. Read-only unless QUEUE is set, because
+# publishing is safe for anyone and accepting is a decision.
+serve: build
+	$(SERVE) --log "$(LOG)" --root "$(ROOT)" --listen "$(SERVE_LISTEN)" $(SERVE_ARGS)
+
+test-reference:
+	cargo test --manifest-path reference/rust/Cargo.toml
+	cargo build --release --locked --manifest-path reference/rust/Cargo.toml
+	./reference/rust/target/release/proofwork-reference conformance conformance/vectors.json
+
 test-rust:
 	$(CARGO) test --all-targets
 
-test-python:
-	cd reference/python && $(PYTHON) -m pytest -q
-
-test: test-rust test-python
+test: test-rust test-reference
 
 fmt:
 	$(CARGO) fmt --check
@@ -115,4 +140,4 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy demo ratchet interop mcp-smoke tla
+check: test fmt clippy demo ratchet identity interop differential fuzz mcp-smoke serve-smoke tla

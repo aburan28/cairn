@@ -33,9 +33,83 @@ proofwork incentives --settled 500000          # what breaks at bootstrap
 Two of the three are easy for the same reason: the protocol already knows the
 correct answer, so a node that fails a challenge has proved something about
 itself, unconditionally and without anyone's cooperation. Verification has no
-such oracle. The whole point of re-verifying is that nobody yet knows whether
+such oracle: the whole point of re-verifying is that nobody yet knows whether
 the artifact is good, so a node that says "accept" without running anything is
 indistinguishable from a node that ran everything — and it is cheaper.
+
+"Sample it" is a sentence, and for a while it was only a sentence: the log had
+a Merkle root and no way to prove anything against it, so a challenge had no
+answer shorter than the whole log. It has one now.
+
+```
+proofwork prove 12 --height 25 --out proof.json     # the holder answers
+proofwork check proof.json --from checkpoint.json \
+  --root-key operator.pub                           # the challenger checks
+```
+
+`check` reads no log — that is the property that makes it a challenge rather
+than a second audit. It needs the proof and a root, and a signed checkpoint is
+where the root comes from. The cost is `log2(n)` hashes: five for the
+twenty-five-entry log in `launch/`, fifteen for twenty thousand. A node that
+cannot produce one for an entry it was paid to hold has answered the sample, in
+the negative, and the answer is checkable by anyone.
+
+Three things can go wrong and they accuse different people, so they are
+reported separately: an entry that does not hash to the digest it carries is
+the *holder's* file being edited; a path for the wrong slot is a proof about
+some other entry; a path that does not reach the root means the entry is not in
+that log — or, far more often, that the checkpoint is older than the proof.
+That last case is common enough to name its own remedy, and `check` prints it.
+
+The payment is in the log too, because a challenge nobody is paid to answer is
+a challenge nobody answers:
+
+```
+proofwork availability fund --funder treasury --per-epoch 7 \
+    --from-epoch 0 --to-epoch 4000
+proofwork availability undertake --identity node.json   # the promise
+proofwork availability answer    --identity node.json   # this epoch's sample
+proofwork availability settle                           # pay it, name the silent
+```
+
+The sample is drawn `assign(identity, undertaking, beacon(epoch, anchor),
+height)` — a pure function of the log, so nobody issues the challenge and
+nobody can decline to issue it. Identity is in the draw so a coalition cannot
+pool one stored entry; the undertaking id is in it so a node that promised
+twice answers two questions; the beacon is in it so the answer is not knowable
+in advance.
+
+Settlement divides the epoch's pot **by weight** — floor-divided in proportion
+to how much each identity promised — records the remainder it could not divide,
+and names every promise that was samplable and said nothing. The silence is the half a slash would attach to. Writing it down
+before a bond exists is what makes the record worth having: the accusation is
+permanent and checkable, even while the penalty is not yet money.
+
+The answer carries the sampled **entry** as well as its path, and that is the
+difference between proving storage and proving arithmetic. It did not, at first:
+the verifier recomputed the leaf from its own copy, so an answerer needed only
+the entry hashes — every path is derivable from those — and a node that kept 10%
+of a log reproduced the honest answer byte for byte. The pool was buying a hash
+tree.
+
+The promise is not the promiser's to size, either. With the height free,
+promising *one* entry drew index 0 every epoch, answered with an empty path, and
+collected exactly what promising the whole log collected. An undertaking now
+covers the log as it stood, the share is weighted by that height, and one
+identity is paid once however many promises it made.
+
+**One bound remains, stated plainly.** The answer proves a node *produced* the
+challenged entry, not that it *stored* it — fetching it from a peer the moment
+the epoch opens is not ruled out, and ruling it out needs a time bound or
+sequential work this stage does not have. So it excludes a node that stored
+nothing and has no source, which is the population the payment exists to
+exclude, and it does not catch a cache. And a fixed pot bounds a funder's cost
+however many nodes appear, but it does not price **identity**: ten identities
+behind one disk answer ten samples from one copy and take ten shares. Weighting
+by height stops one identity multiplying itself through extra promises; nothing
+here stops ten identities. That is what `stake` above is for, and why the
+roadmap lists availability sampling as *bonded* at Stage 2 — **so a pool should
+not carry real money until it exists.**
 
 ## The verifier's dilemma is structural, not quantitative
 

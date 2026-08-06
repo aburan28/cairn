@@ -2,9 +2,11 @@
 //!
 //! Consensus-critical. Two implementations that disagree about an object's bytes
 //! disagree about its identity, and therefore about which objective was funded
-//! and which artifact was accepted. `conformance/vectors.json` pins the format
-//! against the Python reference implementation; if this module and that file
-//! disagree, this module is wrong.
+//! and which artifact was accepted. `conformance/vectors.json` pins the format,
+//! and is frozen rather than regenerated: it was produced by a Python reference
+//! implementation this crate replaced, which is exactly why it is kept —
+//! evidence from another language beats a description of this program's own
+//! behaviour. If this module and that file disagree, this module is wrong.
 //!
 //! # The format
 //!
@@ -17,10 +19,11 @@
 //!
 //! # Why floats are unrepresentable rather than rejected
 //!
-//! The Python reference checks for floats at runtime and raises. Here [`Value`]
-//! simply has no float variant, so a float cannot enter a record at all -- the
-//! failure moves from a test that has to remember to run to a program that does
-//! not compile. IEEE-754 doubles do not round-trip identically through every
+//! [`Value`] has no float variant, so a float cannot enter a record at all --
+//! the failure moves from a check that has to run to a program that does not
+//! compile. The Python reference this crate replaced could only test for floats
+//! at runtime and raise; making it unrepresentable is the whole advantage of
+//! the type system here. IEEE-754 doubles do not round-trip identically through every
 //! JSON implementation and do not reproduce bitwise across heterogeneous
 //! hardware, which is exactly the disagreement this type prevents.
 //!
@@ -163,10 +166,12 @@ impl Value {
     /// JSON library gives that library's private conventions consensus weight:
     /// `serde_json` with `arbitrary_precision` decodes an object whose first
     /// key is its internal number token (`$serde_json::private::Number`) as a
-    /// *number*, so the same bytes parsed here and by the Python reference
-    /// produced two different values — and therefore two different digests.
-    /// A decoder spelled out in this file cannot drift under a dependency
-    /// update, and every rule below is the same rule `json.loads` applies.
+    /// *number*, so the same bytes parsed here and by any decoder without that
+    /// quirk produced two different values — and therefore two different
+    /// digests. That was found against the Python reference of the day and is
+    /// not a fact about Python: a second implementation reaching for the same
+    /// crate today would reintroduce it. A decoder spelled out in this file
+    /// cannot drift under a dependency update.
     pub fn from_json(text: &str) -> Result<Value, CanonicalError> {
         let mut parser = Parser { text, pos: 0 };
         parser.skip_whitespace();
@@ -571,6 +576,120 @@ pub fn merkle_root(leaves: &[String]) -> Option<String> {
     Some(level.remove(0))
 }
 
+/// A path from one leaf to a [`merkle_root`], and where in the tree it starts.
+///
+/// The point of a Merkle tree that [`merkle_root`] alone cannot deliver: a
+/// reader who has the root can be convinced that one leaf is under it without
+/// being handed the other leaves. `log2(n)` hashes instead of `n` -- fifteen
+/// hashes for a log of twenty thousand entries.
+///
+/// `leaves` is here because the *shape* of the tree decides which levels
+/// promote, and a verifier walking the path has to know that shape to know
+/// whether to expect a sibling at each step. It is a shape parameter, not an
+/// independent commitment: two counts that produce the same path shape are
+/// interchangeable, and only a count that reshapes the walk is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inclusion {
+    /// Which leaf this proves, counting from zero.
+    pub index: usize,
+    /// How many leaves the tree had. See the type docs: shape, not commitment.
+    pub leaves: usize,
+    /// One hash per level that pairs, bottom up. A level that *promotes* this
+    /// node contributes nothing, which is why this is shorter than the tree is
+    /// deep for most indices.
+    pub siblings: Vec<String>,
+}
+
+/// The path proving `leaves[index]` is under `merkle_root(leaves)`.
+///
+/// `None` when `index` is out of range -- there is no proof of a leaf that is
+/// not there, which is the whole point.
+///
+/// Follows [`merkle_root`] step for step, including the promotion rule: when
+/// this node is the odd one at the end of a level it rises unchanged and
+/// contributes no sibling. Written as one loop with the tree-building rather
+/// than derived from the index arithmetic, because the two must agree exactly
+/// and a second derivation is a second thing to get wrong.
+pub fn merkle_proof(leaves: &[String], index: usize) -> Option<Inclusion> {
+    if index >= leaves.len() {
+        return None;
+    }
+    let mut siblings = Vec::new();
+    let mut level: Vec<String> = leaves.to_vec();
+    let mut at = index;
+    while level.len() > 1 {
+        let promoted = level.len() % 2 == 1 && at == level.len() - 1;
+        if !promoted {
+            // `at ^ 1` is the other half of this pair: even nodes take the one
+            // to their right, odd nodes the one to their left.
+            siblings.push(level[at ^ 1].clone());
+        }
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0;
+        while i + 1 < level.len() {
+            next.push(digest_bytes(
+                format!("{}{}", level[i], level[i + 1]).as_bytes(),
+            ));
+            i += 2;
+        }
+        if level.len() % 2 == 1 {
+            next.push(level[level.len() - 1].clone());
+        }
+        level = next;
+        at /= 2;
+    }
+    Some(Inclusion {
+        index,
+        leaves: leaves.len(),
+        siblings,
+    })
+}
+
+impl Inclusion {
+    /// Walk this path from `leaf` and report whether it arrives at `root`.
+    ///
+    /// # The leaf is an argument, deliberately
+    ///
+    /// This tree has no domain separation between leaves and internal nodes, so
+    /// an internal node *is* a valid leaf of a shallower tree with the same
+    /// root -- the classic second-preimage property of a plain binary Merkle
+    /// tree. It does not bite here because the verifier supplies the leaf: a
+    /// prover cannot offer an internal node as one, since the only leaf checked
+    /// is the one the caller already had in hand. See [`crate::ledger::Proof`],
+    /// where the caller recomputes it from the entry rather than accepting the
+    /// prover's word for it.
+    ///
+    /// A path with the wrong number of hashes is refused rather than ignored:
+    /// leftover siblings mean the prover and the verifier disagree about the
+    /// tree, and a proof that "works" under two different readings of its own
+    /// bytes is not a proof.
+    pub fn verify(&self, leaf: &str, root: &str) -> bool {
+        if self.index >= self.leaves {
+            return false;
+        }
+        let mut hash = leaf.to_string();
+        let mut at = self.index;
+        let mut width = self.leaves;
+        let mut steps = self.siblings.iter();
+        while width > 1 {
+            let promoted = width % 2 == 1 && at == width - 1;
+            if !promoted {
+                let Some(sibling) = steps.next() else {
+                    return false;
+                };
+                hash = if at.is_multiple_of(2) {
+                    digest_bytes(format!("{hash}{sibling}").as_bytes())
+                } else {
+                    digest_bytes(format!("{sibling}{hash}").as_bytes())
+                };
+            }
+            at /= 2;
+            width = width.div_ceil(2);
+        }
+        steps.next().is_none() && hash == root
+    }
+}
+
 /// Convenience for building object values in record code.
 #[macro_export]
 macro_rules! obj {
@@ -589,8 +708,8 @@ mod tests {
     fn a_library_private_number_token_stays_an_object() {
         // Regression. `serde_json` with `arbitrary_precision` decodes an object
         // whose first key is its internal number token as a *number*, so this
-        // input used to parse as `{"x":42}` here while the Python reference —
-        // and the encoder in this very file — saw an object. Same bytes, two
+        // input used to parse as `{"x":42}` here while the reference of the day
+        // — and the encoder in this very file — saw an object. Same bytes, two
         // digests: a consensus split one crafted record away.
         let text = r#"{"x":{"$serde_json::private::Number":"42"}}"#;
         let value = Value::from_json(text).expect("valid JSON object");
@@ -717,6 +836,112 @@ mod tests {
             Value::from_json(&too_deep),
             Err(CanonicalError::Malformed(_))
         ));
+    }
+
+    /// Leaves that are distinguishable and not themselves digests, so a bug
+    /// that confused a leaf with an internal node would show.
+    fn leaves(count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("leaf-{i}")).collect()
+    }
+
+    #[test]
+    fn every_leaf_of_every_shape_proves_against_its_own_root() {
+        // Exhaustive over shapes rather than sampled: the promotion rule fires
+        // on a different set of levels for every odd width, and a proof that
+        // works for eight leaves says nothing about seven.
+        for count in 1..=40 {
+            let leaves = leaves(count);
+            let root = merkle_root(&leaves).expect("non-empty");
+            for index in 0..count {
+                let proof = merkle_proof(&leaves, index).expect("in range");
+                assert!(
+                    proof.verify(&leaves[index], &root),
+                    "leaf {index} of {count} did not verify"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_proof_for_one_leaf_does_not_verify_another() {
+        let leaves = leaves(9);
+        let root = merkle_root(&leaves).expect("non-empty");
+        let proof = merkle_proof(&leaves, 3).expect("in range");
+        for (index, leaf) in leaves.iter().enumerate() {
+            assert_eq!(
+                proof.verify(leaf, &root),
+                index == 3,
+                "leaf {index} against the proof for leaf 3"
+            );
+        }
+    }
+
+    #[test]
+    fn a_truncated_or_padded_proof_is_refused() {
+        let leaves = leaves(16);
+        let root = merkle_root(&leaves).expect("non-empty");
+        let proof = merkle_proof(&leaves, 5).expect("in range");
+        assert!(proof.verify(&leaves[5], &root));
+
+        let mut short = proof.clone();
+        short.siblings.pop();
+        assert!(
+            !short.verify(&leaves[5], &root),
+            "a short path must not pass"
+        );
+
+        let mut long = proof.clone();
+        long.siblings.push(digest_bytes(b"extra"));
+        assert!(
+            !long.verify(&leaves[5], &root),
+            "a leftover sibling means the two sides disagree about the tree"
+        );
+
+        // `leaves` is a shape parameter, not a commitment: 15 and 16 walk the
+        // same path for index 5, so that one is accepted. A count that
+        // *reshapes* the walk is not.
+        let mut same_shape = proof.clone();
+        same_shape.leaves = 15;
+        assert!(same_shape.verify(&leaves[5], &root));
+        let mut reshaped = proof.clone();
+        reshaped.leaves = 7;
+        assert!(!reshaped.verify(&leaves[5], &root));
+    }
+
+    #[test]
+    fn a_promoted_leaf_carries_no_sibling_for_that_level() {
+        // Three leaves: [a,b,c] pairs a+b and promotes c, so c's path has one
+        // hash where a's and b's have two. Getting this wrong is the bug that
+        // makes odd trees verify only by accident.
+        let leaves = leaves(3);
+        let root = merkle_root(&leaves).expect("non-empty");
+        assert_eq!(
+            merkle_proof(&leaves, 0).expect("in range").siblings.len(),
+            2
+        );
+        assert_eq!(
+            merkle_proof(&leaves, 1).expect("in range").siblings.len(),
+            2
+        );
+        let promoted = merkle_proof(&leaves, 2).expect("in range");
+        assert_eq!(promoted.siblings.len(), 1);
+        assert!(promoted.verify(&leaves[2], &root));
+    }
+
+    #[test]
+    fn a_single_leaf_is_its_own_root_and_needs_no_siblings() {
+        let leaves = leaves(1);
+        let proof = merkle_proof(&leaves, 0).expect("in range");
+        assert!(proof.siblings.is_empty());
+        assert!(proof.verify(&leaves[0], &leaves[0]));
+        assert!(!proof.verify("something else", &leaves[0]));
+    }
+
+    #[test]
+    fn an_index_past_the_end_has_no_proof() {
+        assert_eq!(merkle_proof(&leaves(0), 0), None);
+        assert_eq!(merkle_proof(&leaves(4), 4), None);
+        assert_eq!(merkle_proof(&leaves(4), usize::MAX), None);
     }
 
     #[test]

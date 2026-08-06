@@ -451,6 +451,21 @@ impl IngestReport {
 pub struct Limits {
     pub max_ids_per_message: usize,
     pub max_records_per_message: usize,
+    /// Canonical bytes a single record may occupy.
+    ///
+    /// This existed on the HTTP path and not here, which made one record
+    /// admissible at two different sizes depending on how it arrived:
+    /// [`crate::serve::MAX_BODY_BYTES`] caps a submission from a stranger at a
+    /// mebibyte, while a peer over `p2p` was bounded only by the transport's
+    /// generic frame ceiling -- sixteen times larger, and a number chosen by a
+    /// module that knows nothing about records.
+    ///
+    /// Two ingress paths with different admission rules is a policy split, not
+    /// a consensus one: both nodes still agree about any record they both hold.
+    /// It is still wrong. Whether a record may enter the log is a rules
+    /// question and the answer should not depend on which socket it came
+    /// through, so the bound is the same number, named in one place.
+    pub max_record_bytes: usize,
 }
 
 impl Default for Limits {
@@ -458,6 +473,7 @@ impl Default for Limits {
         Limits {
             max_ids_per_message: 10_000,
             max_records_per_message: 512,
+            max_record_bytes: crate::serve::MAX_BODY_BYTES as usize,
         }
     }
 }
@@ -613,6 +629,23 @@ impl Peer {
 
         for record in records {
             let id = record.id();
+
+            // Size before anything else that touches the payload. A record is
+            // measured by its *canonical* bytes rather than by whatever the
+            // sender's encoding happened to cost, because the canonical form is
+            // the one every node agrees on -- measuring the wire form would
+            // make admission depend on a peer's whitespace.
+            let size = record.payload.canonical_string().len();
+            if size > self.limits.max_record_bytes {
+                report.refused.push((
+                    id,
+                    SyncError::TooMany {
+                        limit: self.limits.max_record_bytes,
+                        got: size,
+                    },
+                ));
+                continue;
+            }
 
             if !EXCHANGEABLE.contains(&record.kind.as_str()) {
                 report.refused.push((
@@ -963,6 +996,7 @@ mod tests {
         let limits = Limits {
             max_ids_per_message: 4,
             max_records_per_message: 2,
+            ..Limits::default()
         };
         let mut a = Peer::with_limits(limits);
         let ids: Vec<String> = (0..10).map(|n| claim(n).id()).collect();
@@ -1058,5 +1092,62 @@ mod tests {
         let (n, frame) = client.seal(&msg.encode(), b"sync").unwrap();
         let plain = server.open(n, &frame, b"sync").unwrap();
         assert_eq!(Message::decode(&plain).unwrap(), msg);
+    }
+
+    #[test]
+    fn one_record_is_admissible_at_one_size_however_it_arrived() {
+        // `serve` capped a submitted record at a mebibyte; this path capped
+        // nothing and inherited the transport's generic sixteen. Two ingress
+        // paths with different admission rules is not a consensus split -- both
+        // nodes agree about any record they both hold -- but whether a record
+        // may enter the log is a rules question, and the answer should not
+        // depend on which socket it came through.
+        assert_eq!(
+            Limits::default().max_record_bytes,
+            crate::serve::MAX_BODY_BYTES as usize,
+            "the two ingress paths disagree about how big a record may be"
+        );
+    }
+
+    #[test]
+    fn an_oversized_record_is_refused_and_the_rest_of_the_batch_survives() {
+        // Refused per record rather than per message: one peer sending one
+        // absurd claim alongside good ones must not cost the good ones. That
+        // is the same rule the verdict taxonomy runs on -- a fact about one
+        // artifact is not a fact about the others.
+        let limits = Limits {
+            max_record_bytes: 512,
+            ..Limits::default()
+        };
+        let mut peer = Peer::with_limits(limits);
+
+        let small = record_of("claim", "small");
+        let big = record_of("claim", &"x".repeat(4096));
+        let (small_id, big_id) = (small.id(), big.id());
+        peer.outstanding.insert(small_id.clone());
+        peer.outstanding.insert(big_id.clone());
+
+        let report = peer.ingest(vec![big, small], |_| Ok(()));
+        assert_eq!(report.accepted, vec![small_id], "the good record was lost");
+        assert!(
+            report
+                .refused
+                .iter()
+                .any(|(id, error)| id == &big_id && matches!(error, SyncError::TooMany { .. })),
+            "the oversized record was not refused: {:?}",
+            report.refused
+        );
+    }
+
+    /// A record whose canonical bytes grow with `filler`.
+    fn record_of(kind: &str, filler: &str) -> Record {
+        Record {
+            kind: kind.to_string(),
+            payload: crate::canonical::Value::object([
+                ("objective_id", crate::canonical::Value::string("obj")),
+                ("submitter", crate::canonical::Value::string("alice")),
+                ("artifact", crate::canonical::Value::string(filler)),
+            ]),
+        }
     }
 }

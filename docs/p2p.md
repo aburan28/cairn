@@ -186,7 +186,10 @@ B -> A   PopRecords
 
 **Why not more record kinds.** The record path refuses `verdict`, `settlement`
 and `frontier` outright, because importing a peer's conclusion is the trust this
-project exists to remove. A shared message enum would mean one decoder, one set
+project exists to remove. `peer` is the one kind added since, and it passes the
+same test: it is a *claim by a key about itself*, checked by signature and by a
+handshake that an impostor cannot complete, not a conclusion anybody has to
+believe. A shared message enum would mean one decoder, one set
 of ceilings and one `match` covering both families, and the next person to add a
 variant would have to notice that half of them must never reach the record path.
 So: separate type, separate limits, and a **separate AEAD context string**, which
@@ -206,6 +209,14 @@ locally and dropped if the number does not reproduce, which is affordable for
 the same reason everything else here is: checking costs one evaluation. A scorer
 that *cannot* answer is a refusal, not an acceptance — the population layer's
 version of `UNAVAILABLE` is never `ACCEPT`.
+
+`scripts/p2p-demo.sh` runs this through two daemons rather than through the
+library: one node gossips an honest candidate and a lie about the *same*
+artifact, and the other must end up with the first and not the second. Only
+re-scoring can tell them apart, and a node that believed what it was told would
+let a liar own the frontier of every ratcheted objective on the network. The
+`--population` path had library coverage and no end-to-end coverage, which is
+the gap that mattered — the daemon is where the scorer is actually wired up.
 
 Two ordering facts that are easy to get wrong:
 
@@ -260,14 +271,20 @@ handshake prefix is necessarily cleartext, because a responder must know which
 peer to expect before a key exists. Unlinkability is a transport-layer problem —
 onion routing, or rendezvous under a derived key — and is not solved here.
 
-**`swarm::tcp` is not encrypted.** No handshake, no AEAD, no peer
-authentication. It is behind the off-by-default `insecure-swarm-tcp` feature so
-it cannot reach a binary by accident, and only the socket-facing part is gated:
-`swarm::piece`, `swarm::wire`, `swarm::dht` and `swarm::discovery` are pure and
-always compiled. The reason it never grew a handshake is the identity mismatch
-this document keeps returning to — `swarm` records carry an ed25519 key, the
-encrypted transport needs a 261,120-byte McEliece key — so closing it is the
-fold-the-stacks work, not a missing call.
+**`swarm::tcp` runs over this transport too.** It did not for a long time — no
+handshake, no AEAD, no peer authentication, behind an off-by-default feature so
+it could not reach a binary by accident. The blocker was the identity mismatch
+this document keeps returning to: `swarm` records carry an ed25519 key and the
+transport needs a 261,120-byte McEliece key, which cannot be relayed. Giving the
+record the 32-byte *id* of one closed it, the same construction the log's own
+peer record uses.
+
+What it cost is worth naming. An authenticated dial needs the responder's key,
+so `swarm::tcp::fetch` takes endpoints rather than addresses, and an address
+learned by peer exchange is now a hint something must complete before it can be
+dialled. `p2p::dht`'s `GetKey` already fetches keys on demand over an existing
+session; wiring `swarm` to it restores the property and is the remaining half of
+folding the two stacks together.
 
 ## Provider lookup
 
@@ -360,6 +377,21 @@ bucket-id, want, records, and done exchange — and, separately, the population
 digest/want/records exchange — while `p2p::service::Service` connects those
 pieces for dialing and inbound accepts. The service does one anti-entropy round
 at a time; a daemon schedules retries around it without changing the protocol.
+
+**Accept the socket before you take the node's lock.** `Service` offers both
+`accept_node_once` (listener in, blocks) and `serve_node_once` (accepted stream
+in, does not), and the split is not stylistic. `proofwork-p2p`'s accept thread
+took the node's mutex and *then* called the blocking `accept`, so on a node
+nobody was dialling it held the lock for the life of the process. The main loop
+ran exactly once, at startup, and then waited on that mutex forever: no
+dialling, no peer seeding, no beacons, no DHT lookups, no fetching of missing
+verifier code, no draining of the submission queue.
+
+Nothing caught it for a long time because it looks like a healthy node. One
+startup pass is all a two-node sync needs, so every test that starts two daemons
+and checks that records moved passes either way. `scripts/p2p-demo.sh` queues a
+submission *after* startup — work that can only be done by a loop still going
+round — and that is what tells the difference.
 
 The responder still cannot authenticate the initiator from the KEM alone. A
 deployment that needs mutual authentication must restrict inbound ids to its

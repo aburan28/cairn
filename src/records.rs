@@ -57,6 +57,9 @@ pub enum RecordKind {
     Objective,
     Commitment,
     Claim,
+    Peer,
+    Undertaking,
+    Availability,
 }
 
 impl RecordKind {
@@ -65,6 +68,9 @@ impl RecordKind {
             RecordKind::Objective => "objective",
             RecordKind::Commitment => "commitment",
             RecordKind::Claim => "claim",
+            RecordKind::Peer => "peer",
+            RecordKind::Undertaking => "undertaking",
+            RecordKind::Availability => "availability",
         }
     }
 }
@@ -324,6 +330,42 @@ pub struct Objective {
     /// existing objective. The conformance vectors that predate it still pass
     /// unchanged, which is the check that this is true rather than intended.
     pub confidentiality: Confidentiality,
+    /// What shape of artifact the verifier expects, for a submitter who has
+    /// only the record.
+    ///
+    /// Documentation, **not** a rule. Nothing validates an artifact against it
+    /// and nothing may start: the pinned verifier is the only thing that
+    /// decides what passes, and a second gate here would be a second answer to
+    /// that question -- one the two implementations could disagree about, on a
+    /// field the funder writes.
+    ///
+    /// It exists because without it an agent has no honest source for the
+    /// artifact's shape. The verifier spec names a checker file and a hash,
+    /// not a schema; the *statement* is attacker-authored prose. An agent that
+    /// had to guess would guess from the statement, which is precisely the
+    /// input the rest of this design refuses to trust.
+    ///
+    /// Omitted when absent, like every other optional field, so adding it
+    /// moved no ids.
+    pub artifact_schema: Option<Value>,
+    /// Refuse submissions from anyone but a signed identity.
+    ///
+    /// A funder who wants an authenticated bounty could previously only *ask*
+    /// for one in the statement, which is prose nothing enforces. With this
+    /// set, [`Node::commit`](crate::node::Node::commit) and
+    /// [`reveal`](crate::node::Node::reveal) refuse any submitter that is not
+    /// key-shaped -- and a key-shaped submitter already has to carry a valid
+    /// signature, so the two rules compose into "every claim here is
+    /// attributable to a key nobody else holds".
+    ///
+    /// The cost is real and belongs to the funder: it turns away contributors
+    /// who have not made an identity. That is why it is per-objective and off
+    /// by default rather than a network-wide switch.
+    ///
+    /// `false` is omitted from the canonical form, so adding this field moved
+    /// no ids -- and, as with `confidentiality`, the default had to be
+    /// whatever every pre-existing objective already meant.
+    pub require_signed_submitter: bool,
 }
 
 impl Objective {
@@ -352,9 +394,30 @@ impl Objective {
             deadline,
             ratchet,
             confidentiality: Confidentiality::Public,
+            artifact_schema: None,
+            require_signed_submitter: false,
         };
         objective.validate()?;
         Ok(objective)
+    }
+
+    /// Attach an artifact-shape hint, re-validating.
+    ///
+    /// A builder step for the same reason [`with_confidentiality`] is one:
+    /// every existing caller keeps the default, and the ones that want this
+    /// say so by name.
+    ///
+    /// [`with_confidentiality`]: Objective::with_confidentiality
+    /// Refuse anyone but a signed identity. See the field.
+    pub fn requiring_signed_submitters(mut self) -> Objective {
+        self.require_signed_submitter = true;
+        self
+    }
+
+    pub fn with_artifact_schema(mut self, schema: Value) -> Result<Objective, RecordError> {
+        self.artifact_schema = Some(schema);
+        self.validate()?;
+        Ok(self)
     }
 
     /// Set the confidentiality class, re-validating.
@@ -390,6 +453,18 @@ impl Objective {
                 return Err(RecordError::InvalidField {
                     record: "objective",
                     field: "ratchet",
+                    expected: "an object",
+                });
+            }
+        }
+        // Shape only. What the hint *says* is never checked -- the pinned
+        // verifier decides what passes, and validating an artifact against
+        // this would be a second answer to that question.
+        if let Some(schema) = &self.artifact_schema {
+            if schema.as_object().is_none() {
+                return Err(RecordError::InvalidField {
+                    record: "objective",
+                    field: "artifact_schema",
                     expected: "an object",
                 });
             }
@@ -449,6 +524,15 @@ impl Objective {
                 Value::string(self.confidentiality.as_str()),
             );
         }
+        // Omitted when absent, for the reason every optional field here is.
+        if let Some(schema) = &self.artifact_schema {
+            body.insert("artifact_schema".to_string(), schema.clone());
+        }
+        // Omitted when false: that is what every objective written before this
+        // field existed meant, so emitting it would move every id.
+        if self.require_signed_submitter {
+            body.insert("require_signed_submitter".to_string(), Value::Bool(true));
+        }
         Value::Object(body)
     }
 
@@ -492,6 +576,12 @@ impl Objective {
             }
         };
 
+        // Absent and null both mean "no hint", exactly as for `ratchet`.
+        let artifact_schema = match value.get("artifact_schema") {
+            None | Some(Value::Null) => None,
+            Some(other) => Some(other.clone()),
+        };
+
         let objective = Objective {
             goal: required_string(value, RECORD, "goal")?,
             statement: required_string(value, RECORD, "statement")?,
@@ -502,6 +592,21 @@ impl Objective {
             deadline: optional_string(value, RECORD, "deadline")?,
             ratchet,
             confidentiality,
+            require_signed_submitter: match value.get("require_signed_submitter") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(flag)) => *flag,
+                // Refused rather than coerced: "1" or "yes" meaning true here
+                // and false in the other implementation is a split over which
+                // submissions are admissible.
+                Some(_) => {
+                    return Err(RecordError::InvalidField {
+                        record: RECORD,
+                        field: "require_signed_submitter",
+                        expected: "a boolean",
+                    })
+                }
+            },
+            artifact_schema,
         };
         objective.validate()?;
         Ok(objective)
@@ -548,6 +653,120 @@ pub fn commitment_hash(
     digest_bytes(&buf)
 }
 
+/// The public key a submitter name commits to, when it is one.
+///
+/// `submitter` has always been a free string, which means a name is worth
+/// exactly nothing: anyone can submit as `alice`, and under citation flow that
+/// name is being paid. This is the rule that fixes it without a registry, a
+/// new record kind, or a migration.
+///
+/// **A submitter that is 64 lowercase hex characters is an ed25519 public key,
+/// and a record carrying one must be signed by it.** Anything else is an
+/// unauthenticated nickname and stays exactly as permissive as it always was.
+///
+/// The binding needs no state to look up because the name *is* the key, which
+/// is what [`crate::crypto::identity::Identity::submitter_id`] has produced
+/// all along. Two consequences worth being explicit about:
+///
+/// * Existing logs keep working. `alice` is not hex, so nothing is required of
+///   it and no pre-existing record changes meaning. Stage 0 stays usable.
+/// * A signed identity cannot be stolen. Forging a claim as
+///   `8a88e3dd…` needs that key, and taking the name means taking the key.
+///
+/// What it does *not* do: stop anyone claiming an unsigned nickname, and stop
+/// someone registering a key nobody has heard of. It makes an identity
+/// unforgeable once used, which is what citation flow needs, rather than
+/// making it *attributable to a person*, which nothing at this layer can do.
+///
+/// Lowercase only, and exactly 64 characters. Accepting mixed case would make
+/// `AB…` and `ab…` two names for one key, so the same key could hold two
+/// reputations and cite itself.
+pub fn signed_submitter(submitter: &str) -> Option<&str> {
+    let is_key = submitter.len() == 64
+        && submitter
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    is_key.then_some(submitter)
+}
+
+/// Why a record's signature was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureError {
+    /// The submitter names a key, and the record carries no signature.
+    Missing {
+        record: &'static str,
+        submitter: String,
+    },
+    /// The submitter is not a usable key, or the signature is malformed or
+    /// wrong. One variant deliberately: an attacker learns nothing from which
+    /// of those it was, and a caller cannot act on the difference.
+    Invalid {
+        record: &'static str,
+        submitter: String,
+    },
+}
+
+impl fmt::Display for SignatureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SignatureError::Missing { record, submitter } => write!(
+                f,
+                "{record} submitter {} is a public key, so the record must carry a \
+                 signature from it; sign it or submit under a name that is not a key",
+                crate::canonical::short(submitter)
+            ),
+            SignatureError::Invalid { record, submitter } => write!(
+                f,
+                "{record} signature does not verify under submitter {}",
+                crate::canonical::short(submitter)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SignatureError {}
+
+/// The shared rule behind `Commitment::verify_signature` and `Claim`'s.
+///
+/// Kept in one place because the two must agree exactly: a rule enforced
+/// slightly differently on commitments and claims is a rule an attacker gets
+/// to choose between.
+fn verify_record_signature(
+    record: &'static str,
+    submitter: &str,
+    payload: &Value,
+    signature: Option<&str>,
+) -> Result<(), SignatureError> {
+    use crate::crypto::identity::{verify_value, Signature, VerifyingKeyBytes};
+
+    let Some(key_hex) = signed_submitter(submitter) else {
+        // A nickname. Nothing is claimed and nothing is checked -- but a
+        // signature attached to one is still refused below rather than
+        // ignored, so it cannot look like authentication it is not.
+        return match signature {
+            None => Ok(()),
+            Some(_) => Err(SignatureError::Invalid {
+                record,
+                submitter: submitter.to_string(),
+            }),
+        };
+    };
+
+    let Some(signature) = signature else {
+        return Err(SignatureError::Missing {
+            record,
+            submitter: submitter.to_string(),
+        });
+    };
+    let invalid = || SignatureError::Invalid {
+        record,
+        submitter: submitter.to_string(),
+    };
+    let key = VerifyingKeyBytes::from_hex(key_hex).map_err(|_| invalid())?;
+    let signature = Signature::from_hex(signature).map_err(|_| invalid())?;
+    verify_value(key.as_bytes(), payload, &signature).map_err(|_| invalid())
+}
+
 /// Phase 1: bind to an artifact without revealing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commitment {
@@ -557,6 +776,12 @@ pub struct Commitment {
     /// [`Claim`] reproduces it.
     pub hash: String,
     pub created_at: String,
+    /// Ed25519 signature over this record, hex, or `None`.
+    ///
+    /// Omitted from the canonical form when absent, so adding this field moved
+    /// no ids: every record written before it existed digests to exactly what
+    /// it always did. See [`signed_submitter`] for when one is *required*.
+    pub signature: Option<String>,
 }
 
 impl Commitment {
@@ -571,10 +796,26 @@ impl Commitment {
             submitter: submitter.into(),
             hash: hash.into(),
             created_at: created_at.into(),
+            signature: None,
         }
     }
 
     pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    /// The bytes a signature covers: this record without its own signature.
+    ///
+    /// Excluded rather than zeroed, because a signature over a field holding
+    /// that signature is not something anyone can produce. The record's `id`
+    /// still covers the signature, so a signed record and its unsigned twin
+    /// are different records -- which is what stops a signature being stripped
+    /// without changing the id anyone cited.
+    pub fn signing_payload(&self) -> Value {
         Value::object([
             ("type", Value::string(RecordKind::Commitment.as_str())),
             ("objective_id", Value::string(self.objective_id.clone())),
@@ -588,6 +829,29 @@ impl Commitment {
         self.to_value().digest()
     }
 
+    /// Sign this record with `identity`, returning the signed copy.
+    ///
+    /// The signature covers [`Commitment::signing_payload`], so the resulting
+    /// record's `id` covers the signature in turn.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Commitment {
+        self.submitter = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    /// Check the signature this record carries, if the rules demand one.
+    ///
+    /// See [`signed_submitter`] for when that is. Returns `Ok(())` for a
+    /// nickname-shaped submitter, which is Stage-0 behaviour unchanged.
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        verify_record_signature(
+            "commitment",
+            &self.submitter,
+            &self.signing_payload(),
+            self.signature.as_deref(),
+        )
+    }
+
     /// Decode a commitment from a log payload. The reference implementation
     /// reads these payloads as raw dicts; a typed decoder is the Rust-side
     /// equivalent and keeps the field names in one place.
@@ -599,6 +863,7 @@ impl Commitment {
             submitter: required_string(value, RECORD, "submitter")?,
             hash: required_string(value, RECORD, "hash")?,
             created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
         })
     }
 }
@@ -617,6 +882,10 @@ pub struct Claim {
     pub created_at: String,
     /// Claim ids this one builds on. A set, not a list: duplicates are refused.
     pub cites: Vec<String>,
+    /// Ed25519 signature over this record, hex, or `None`. Omitted from the
+    /// canonical form when absent, so adding it moved no ids. See
+    /// [`signed_submitter`].
+    pub signature: Option<String>,
 }
 
 impl Claim {
@@ -637,6 +906,7 @@ impl Claim {
             nonce: nonce.into(),
             created_at: created_at.into(),
             cites,
+            signature: None,
         };
         claim.validate()?;
         Ok(claim)
@@ -669,6 +939,17 @@ impl Claim {
     /// not an optional field, and omitting it when empty would give the same
     /// claim two different ids depending on how it was built.
     pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    /// The bytes a signature covers: this record without its own signature.
+    /// See [`Commitment::signing_payload`] for why it is excluded rather than
+    /// zeroed.
+    pub fn signing_payload(&self) -> Value {
         Value::object([
             ("type", Value::string(RecordKind::Claim.as_str())),
             ("objective_id", Value::string(self.objective_id.clone())),
@@ -690,6 +971,23 @@ impl Claim {
 
     pub fn id(&self) -> String {
         self.to_value().digest()
+    }
+
+    /// Sign this record with `identity`, returning the signed copy.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Claim {
+        self.submitter = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    /// Check the signature this record carries, if the rules demand one.
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        verify_record_signature(
+            "claim",
+            &self.submitter,
+            &self.signing_payload(),
+            self.signature.as_deref(),
+        )
     }
 
     /// Identity of the artifact alone -- used to detect duplicate submissions.
@@ -761,9 +1059,781 @@ impl Claim {
             nonce: required_string(value, RECORD, "nonce")?,
             created_at: required_string(value, RECORD, "created_at")?,
             cites,
+            signature: optional_string(value, RECORD, "signature")?,
         };
         claim.validate()?;
         Ok(claim)
+    }
+}
+
+/// A peer's permanent identity, and the transport it currently answers on.
+///
+/// # Why identity belongs in the log and location does not
+///
+/// Finding the network was a second bootstrap problem: a node needed a log
+/// *and* an address list, obtained separately, and nothing tied the two
+/// together. A peer's identity is permanent, so it belongs in the permanent
+/// record — the same argument that puts objectives there and keeps provider
+/// records out, since who *holds* a blob is a statement about right now and an
+/// append-only structure has no way to say "no longer true".
+///
+/// An address is not permanent either, which is why this record carries a
+/// [`PeerRecord::seq`]: a peer that moves appends a new record with a higher
+/// one, and the highest wins. Append-only plus a sequence number is
+/// last-writer-wins with an audit trail, which is strictly better than mutable
+/// state for the same job.
+///
+/// # Two keys, and the binding between them is the point
+///
+/// This crate has two identity schemes and they are not interchangeable:
+///
+/// * **ed25519** signs. It is what a submitter name already *is* (see
+///   [`signed_submitter`]), it is 32 bytes, and it is affordable in a log every
+///   node replicates.
+/// * **McEliece** keys the transport. It cannot sign — it is a KEM — and its
+///   public key is 261,120 bytes, which is not affordable in a log at all.
+///
+/// So the record carries the ed25519 key as the **authority** and the McEliece
+/// *peer id* — a 32-byte `sha256` of that key — as the thing being vouched for.
+/// The transport key itself is fetched on demand over the wire and checked
+/// against the id, which needs no trust because the id is its hash. Two hundred
+/// bytes in the log instead of half a megabyte, and the expensive half is paid
+/// only by nodes that actually dial.
+///
+/// # What a lie costs
+///
+/// Anyone may append a record for an identity they hold, naming any transport
+/// id and any address. Doing so buys nothing: dialling that transport id
+/// requires a key that hashes to it, and an impostor cannot produce one, so the
+/// handshake fails. A wrong record costs a dial, never a wrong result — the
+/// same bound [`crate::p2p::dht`] gives for a wrong routing answer, and for the
+/// same reason.
+///
+/// What it cannot do is speak for somebody else's identity: the signature is
+/// checked against the `identity` field, so a record is only ever a statement
+/// by the key that signed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRecord {
+    /// Ed25519 public key, hex. The permanent name, and the record's authority.
+    pub identity: String,
+    /// The transport peer id this identity vouches for: `sha256` of a McEliece
+    /// public key, hex.
+    pub transport: String,
+    /// Where to try. A hint, superseded by any later record with a higher
+    /// [`PeerRecord::seq`], and never load-bearing: an address that does not
+    /// work costs a dial.
+    pub addr: String,
+    /// Freshness. Strictly increasing per identity; a record that does not
+    /// advance it is a replay and is refused.
+    pub seq: u64,
+    pub created_at: String,
+    /// Ed25519 signature over [`PeerRecord::signing_payload`], hex.
+    ///
+    /// **Required**, unlike a claim's. A claim may be posted under a nickname,
+    /// because a nickname claims nothing; a peer record whose entire purpose is
+    /// to authenticate an address would authenticate nothing without one.
+    pub signature: Option<String>,
+}
+
+/// Longest `addr` a peer record may carry.
+///
+/// A generous bound on `host:port`, and a bound rather than a parse. The
+/// consensus layer deliberately does **not** decide whether an address is
+/// well-formed: `SocketAddr` parsing differs between languages at the edges —
+/// IPv6 bracket forms, leading zeros, zone identifiers — and two
+/// implementations disagreeing about whether a record is admissible is a
+/// consensus split. So the rule here is length and printable ASCII, and
+/// [`crate::p2p`] parses what it can and ignores the rest.
+pub const MAX_PEER_ADDR: usize = 255;
+
+impl PeerRecord {
+    pub fn new(
+        identity: impl Into<String>,
+        transport: impl Into<String>,
+        addr: impl Into<String>,
+        seq: u64,
+        created_at: impl Into<String>,
+    ) -> PeerRecord {
+        PeerRecord {
+            identity: identity.into(),
+            transport: transport.into(),
+            addr: addr.into(),
+            seq,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    /// The bytes a signature covers: this record without its own signature.
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::Peer.as_str())),
+            ("addr", Value::string(self.addr.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("identity", Value::string(self.identity.clone())),
+            ("seq", Value::Int(i128::from(self.seq))),
+            ("transport", Value::string(self.transport.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Sign this record with `identity`, returning the signed copy.
+    ///
+    /// The signing key's public half *becomes* the `identity` field, for the
+    /// reason a signed claim's submitter becomes its key: a name you sign for
+    /// cannot be worn by anyone else, and a record whose name and key disagreed
+    /// would be a record about somebody else.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> PeerRecord {
+        self.identity = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    /// Check the signature. Always required — see the field's documentation.
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "peer";
+        if signed_submitter(&self.identity).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        }
+        let Some(signature) = self.signature.as_deref() else {
+            return Err(SignatureError::Missing {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        };
+        verify_record_signature(
+            RECORD,
+            &self.identity,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    /// Structural rules, checked before the signature is looked at.
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "peer";
+        let hex64 = |text: &str| {
+            text.len() == 64
+                && text
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if !hex64(&self.identity) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "identity",
+                expected: "64 lowercase hex characters of ed25519 public key",
+            });
+        }
+        if !hex64(&self.transport) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "transport",
+                expected: "64 lowercase hex characters of transport peer id",
+            });
+        }
+        // Length and printable ASCII, never a parse. See [`MAX_PEER_ADDR`].
+        if self.addr.is_empty()
+            || self.addr.len() > MAX_PEER_ADDR
+            || !self
+                .addr
+                .bytes()
+                .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
+        {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "addr",
+                expected: "1 to 255 printable ASCII characters, no quote or backslash",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<PeerRecord, RecordError> {
+        const RECORD: &str = "peer";
+        let value = expect_object(value, RECORD)?;
+        let seq = match required(value, RECORD, "seq")? {
+            // `u64` and not wider: a sequence number is a counter, and the
+            // range check happens here rather than at a cast so a record from
+            // an arbitrary-precision implementation is refused rather than
+            // silently truncated into a *different* record.
+            Value::Int(n) if *n >= 0 && *n <= i128::from(u64::MAX) => *n as u64,
+            _ => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "seq",
+                    expected: "an integer in [0, 2^64)",
+                })
+            }
+        };
+        let record = PeerRecord {
+            identity: required_string(value, RECORD, "identity")?,
+            transport: required_string(value, RECORD, "transport")?,
+            addr: required_string(value, RECORD, "addr")?,
+            seq,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// A past promise to hold the log: identity `K` undertook to keep the log whose
+/// Merkle root is `R` at height `H`.
+///
+/// # Why this is a statement about the past
+///
+/// An append-only log cannot say "no longer true". A record meaning *"K is
+/// holding the log"* would advertise a dead node forever and get less accurate
+/// the longer it ran — the same argument that keeps provider records out of the
+/// log and into [`crate::dht`]'s expiring provider store. A record meaning *"K
+/// undertook, at time T, to hold this"* never needs retracting, because it
+/// stays true whatever K does next. What K does next is answered by a different
+/// record: the sample response.
+///
+/// # Why the root and not a blob digest
+///
+/// `docs/node-incentives.md` names availability as one of the two easy services
+/// — easy because *the protocol already knows the right answer*, so a node that
+/// fails a challenge has proved something about itself without anyone's
+/// cooperation. That oracle is the Merkle root. Undertaking to hold a bag of
+/// blobs would be a promise with no oracle behind it; undertaking to hold a log
+/// at a pinned root is a promise anyone can sample with
+/// [`crate::ledger::Ledger::prove`].
+///
+/// `height` is not redundant with `root`. A Merkle path's shape depends on the
+/// leaf count, so a challenger who knows only the root cannot tell a valid
+/// answer from one shaped for a different tree. Both are pinned here, by the
+/// signature, before any challenge exists.
+///
+/// # What an undertaking is worth on its own
+///
+/// Nothing, deliberately. Anyone may sign one for a log they have never seen —
+/// the root is public. It becomes worth something only when a challenge is
+/// derived against it and the answer is checked, which is why the undertaking
+/// and the settlement that reads it belong to one change rather than two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Undertaking {
+    /// Ed25519 public key, hex. Who promised, and the record's authority.
+    pub identity: String,
+    /// `sha256:` Merkle root of the log being undertaken.
+    pub root: String,
+    /// How many entries that root covers. See the type docs: a challenge needs
+    /// the tree's shape, not only its root.
+    pub height: u64,
+    pub created_at: String,
+    /// Ed25519 signature over [`Undertaking::signing_payload`], hex.
+    ///
+    /// **Required.** A promise nobody signed is a promise by nobody, and this
+    /// record exists to be held against one identity in particular.
+    pub signature: Option<String>,
+}
+
+/// Tallest log an undertaking may name.
+///
+/// The sample index is drawn with [`crate::partition::assign`], whose partition
+/// count is a `u32` -- and reusing that function rather than writing a second
+/// modular reduction is deliberate: it is pinned by `conformance/vectors.json`,
+/// so both implementations agree about which entry was challenged for free, and
+/// a bespoke draw here would be a new consensus surface.
+///
+/// So the bound is declared in the *format* and checked once, on the way in,
+/// rather than discovered at settlement time when a height that does not fit
+/// would have to be capped or refused with money on the table. Four billion
+/// entries is far beyond anything Stage 0 contemplates; a network that reaches
+/// it needs this design revisited rather than silently truncated.
+pub const MAX_UNDERTAKING_HEIGHT: u64 = u32::MAX as u64;
+
+impl Undertaking {
+    pub fn new(
+        identity: impl Into<String>,
+        root: impl Into<String>,
+        height: u64,
+        created_at: impl Into<String>,
+    ) -> Undertaking {
+        Undertaking {
+            identity: identity.into(),
+            root: root.into(),
+            height,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    /// The bytes a signature covers: this record without its own signature.
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::Undertaking.as_str())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("height", Value::Int(i128::from(self.height))),
+            ("identity", Value::string(self.identity.clone())),
+            ("root", Value::string(self.root.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Sign with `identity`, whose public half *becomes* the `identity` field.
+    ///
+    /// Same rule as a signed claim's submitter and a peer record's identity: a
+    /// name you sign for cannot be worn by anyone else, and a record whose name
+    /// and key disagreed would be a record about somebody else.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Undertaking {
+        self.identity = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    /// Check the signature. Always required — see the field's documentation.
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "undertaking";
+        if signed_submitter(&self.identity).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        }
+        let Some(signature) = self.signature.as_deref() else {
+            return Err(SignatureError::Missing {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        };
+        verify_record_signature(
+            RECORD,
+            &self.identity,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "undertaking";
+        if !is_hex64(&self.identity) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "identity",
+                expected: "64 lowercase hex characters of ed25519 public key",
+            });
+        }
+        if !is_digest(&self.root) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "root",
+                expected: "sha256: followed by 64 lowercase hex characters",
+            });
+        }
+        // Zero is refused rather than treated as "the empty log". An empty log
+        // has no root at all, so a height of zero beside a well-formed root is
+        // a record that contradicts itself, and there is nothing in it to
+        // sample.
+        if self.height == 0 || self.height > MAX_UNDERTAKING_HEIGHT {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "height",
+                expected: "between 1 and 2^32 - 1 entries",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Undertaking, RecordError> {
+        const RECORD: &str = "undertaking";
+        let value = expect_object(value, RECORD)?;
+        let record = Undertaking {
+            identity: required_string(value, RECORD, "identity")?,
+            root: required_string(value, RECORD, "root")?,
+            height: required_u64(value, RECORD, "height")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// Money put up to pay for availability, for a stated run of epochs.
+///
+/// The other half of the promise, and the reason the two arrive in one change.
+/// `docs/roadmap.md`: *"a record nothing pays against is bookkeeping, and a
+/// payment with no record to challenge is unenforceable."* An
+/// [`Undertaking`] with no pool behind it is the first; a pool with no
+/// undertaking to sample is the second.
+///
+/// Shaped like an objective on purpose — a funder names a sum and settlement
+/// spends it, never more. `per_epoch` times the epoch count is the ceiling, and
+/// [`crate::node::Node::audit`] checks the total paid against it in `u128` for
+/// the same reason objective pools are checked: a wrapped sum turns an
+/// overspent pool into a small number and hides the fault being looked for.
+///
+/// # What a fixed pot buys, and what it does not
+///
+/// The pot is split equally among the epoch's verified answers, so the cost to
+/// a funder is bounded no matter how many nodes appear. What that does *not*
+/// buy is sybil resistance: ten identities behind one disk answer ten different
+/// samples from one copy of the log and take ten shares. Bounding that needs a
+/// bond — it is [`crate::incentive::NodeParams::stake`] in the model, and
+/// `docs/roadmap.md` puts bonded availability sampling in Stage 2. So this pays
+/// for answers, and it does not yet price the identity giving them. Stated here
+/// rather than left to be discovered, because a funder reading only the
+/// ceiling would conclude something stronger than is true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailabilityPool {
+    /// Who is paying. A name, not necessarily a key: funding is not a claim
+    /// about anything, so it needs no signature to be meaningful.
+    pub funder: String,
+    /// Units available for each epoch in range.
+    pub per_epoch: u64,
+    /// First epoch this pool pays for, inclusive.
+    pub from_epoch: u64,
+    /// Last epoch this pool pays for, inclusive.
+    pub to_epoch: u64,
+    pub created_at: String,
+}
+
+impl AvailabilityPool {
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("type", Value::string("availability_pool")),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("from_epoch", Value::Int(i128::from(self.from_epoch))),
+            ("funder", Value::string(self.funder.clone())),
+            ("per_epoch", Value::Int(i128::from(self.per_epoch))),
+            ("to_epoch", Value::Int(i128::from(self.to_epoch))),
+        ])
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Total this pool can ever pay: `per_epoch × epochs`, in `u128`.
+    ///
+    /// Widened deliberately. Both factors are `u64`, and their product is not:
+    /// computing the ceiling in `u64` would wrap a large pool into a small one
+    /// and let the audit certify an overspend as fine.
+    pub fn ceiling(&self) -> u128 {
+        let epochs = u128::from(self.to_epoch.saturating_sub(self.from_epoch)) + 1;
+        u128::from(self.per_epoch) * epochs
+    }
+
+    pub fn covers(&self, epoch: u64) -> bool {
+        self.from_epoch <= epoch && epoch <= self.to_epoch
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "availability_pool";
+        if self.funder.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "funder",
+                expected: "a non-empty name",
+            });
+        }
+        // A pool that pays nothing is not a pool, and an inverted range is a
+        // record whose ceiling arithmetic would be nonsense. Both refused
+        // rather than normalised: a record two implementations might normalise
+        // differently is a consensus split.
+        if self.per_epoch == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "per_epoch",
+                expected: "at least one unit",
+            });
+        }
+        if self.from_epoch > self.to_epoch {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "to_epoch",
+                expected: "an epoch at or after from_epoch",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<AvailabilityPool, RecordError> {
+        const RECORD: &str = "availability_pool";
+        let value = expect_object(value, RECORD)?;
+        let record = AvailabilityPool {
+            funder: required_string(value, RECORD, "funder")?,
+            per_epoch: required_u64(value, RECORD, "per_epoch")?,
+            from_epoch: required_u64(value, RECORD, "from_epoch")?,
+            to_epoch: required_u64(value, RECORD, "to_epoch")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// An answer to one availability sample: the path the holder produced.
+///
+/// # Why this carries a path and not a proof
+///
+/// [`crate::ledger::Proof`] ships an entry beside its path, because it is meant
+/// for a reader who does not have the log. This record goes *into* the log, and
+/// the entry being proved is already sitting in it at the sampled index. So the
+/// entry is left out and the auditor reads it locally — the redundancy would be
+/// a whole record duplicated per node per epoch, forever.
+///
+/// # What this proves, and what it does not
+///
+/// The signature is the load-bearing part, and without it the record would be
+/// worthless: an auditor holding the log can compute this path themselves, so
+/// an unsigned path is evidence of nothing. Signed, it says *K produced the
+/// path for the entry K was challenged on*, which K could only do by holding
+/// that entry, and which nobody can forge on K's behalf.
+///
+/// What it does **not** prove is that K stored the log rather than fetching the
+/// challenged entry from somebody else the moment the epoch opened. That is the
+/// outsourcing attack, and no challenge–response of this shape can rule it out
+/// — ruling it out needs a time bound or sequential work, neither of which
+/// Stage 0 has. So this catches a node that stored nothing *and* has no source,
+/// which is the population the availability payment exists to exclude, and it
+/// does not catch a node running a cache. Said here rather than left for
+/// somebody to discover, because a check whose strength is overestimated is
+/// worse than one that is known to be partial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Availability {
+    /// Ed25519 public key, hex. Who is answering — and it must be the identity
+    /// that made the promise: you cannot answer somebody else's sample.
+    pub identity: String,
+    /// The [`Undertaking::id`] being answered.
+    pub undertaking: String,
+    /// Which epoch's sample. The epoch decides the index, so an answer is
+    /// good for exactly one of them and a replay is caught by its own field.
+    pub epoch: u64,
+    /// The sampled entry itself, in its stored form. See the type docs: without
+    /// this the record proves possession of hashes rather than of the log.
+    pub entry: Value,
+    /// The inclusion path for that entry, bottom up.
+    pub path: Vec<String>,
+    pub created_at: String,
+    /// Ed25519 signature over [`Availability::signing_payload`], hex.
+    /// **Required** — see the type docs for why it is the whole record.
+    pub signature: Option<String>,
+}
+
+/// Longest inclusion path an answer may carry.
+///
+/// A path has one hash per level that pairs, so a log of `n` entries needs at
+/// most `ceil(log2(n))` of them: 32 covers every log up to four billion
+/// entries, which is [`MAX_UNDERTAKING_HEIGHT`]. A bound rather than an exact
+/// length because the exact length depends on the index — a promoted node
+/// contributes nothing at its level — and because the *check* that matters is
+/// whether the path reaches the root, which [`crate::canonical::Inclusion`]
+/// already makes exact. This only stops a record big enough to be a nuisance.
+pub const MAX_AVAILABILITY_PATH: usize = 32;
+
+impl Availability {
+    pub fn new(
+        identity: impl Into<String>,
+        undertaking: impl Into<String>,
+        epoch: u64,
+        entry: Value,
+        path: Vec<String>,
+        created_at: impl Into<String>,
+    ) -> Availability {
+        Availability {
+            identity: identity.into(),
+            undertaking: undertaking.into(),
+            epoch,
+            entry,
+            path,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::Availability.as_str())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("entry", self.entry.clone()),
+            ("epoch", Value::Int(i128::from(self.epoch))),
+            ("identity", Value::string(self.identity.clone())),
+            (
+                "path",
+                Value::Array(self.path.iter().cloned().map(Value::String).collect()),
+            ),
+            ("undertaking", Value::string(self.undertaking.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Availability {
+        self.identity = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "availability";
+        if signed_submitter(&self.identity).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        }
+        let Some(signature) = self.signature.as_deref() else {
+            return Err(SignatureError::Missing {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        };
+        verify_record_signature(
+            RECORD,
+            &self.identity,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "availability";
+        if !is_hex64(&self.identity) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "identity",
+                expected: "64 lowercase hex characters of ed25519 public key",
+            });
+        }
+        if !is_digest(&self.undertaking) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "undertaking",
+                expected: "sha256: followed by 64 lowercase hex characters",
+            });
+        }
+        // The entry has to be an object at least; whether it is *the* entry is
+        // decided by the rules layer, which recomputes its hash and walks the
+        // path. Shape here, meaning there.
+        if self.entry.as_object().is_none() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "entry",
+                expected: "the sampled log entry as an object",
+            });
+        }
+        // An empty path is legal: a one-entry log's only leaf *is* the root, so
+        // the honest answer to it carries no hashes at all. Refusing that would
+        // make the first entry of every log unsamplable.
+        if self.path.len() > MAX_AVAILABILITY_PATH || !self.path.iter().all(|h| is_digest(h)) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "path",
+                expected: "at most 32 sha256: digests",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Availability, RecordError> {
+        const RECORD: &str = "availability";
+        let value = expect_object(value, RECORD)?;
+        let path = match required(value, RECORD, "path")? {
+            Value::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    Value::String(hash) => Ok(hash.clone()),
+                    _ => Err(RecordError::InvalidField {
+                        record: RECORD,
+                        field: "path",
+                        expected: "an array of strings",
+                    }),
+                })
+                .collect::<Result<Vec<String>, RecordError>>()?,
+            _ => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "path",
+                    expected: "an array of strings",
+                })
+            }
+        };
+        let record = Availability {
+            identity: required_string(value, RECORD, "identity")?,
+            undertaking: required_string(value, RECORD, "undertaking")?,
+            epoch: required_u64(value, RECORD, "epoch")?,
+            entry: required(value, RECORD, "entry")?.clone(),
+            path,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// 64 lowercase hex characters, the shape of an ed25519 key or a bare digest.
+fn is_hex64(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `sha256:` followed by 64 lowercase hex characters.
+fn is_digest(text: &str) -> bool {
+    match text.strip_prefix(crate::canonical::DIGEST_PREFIX) {
+        Some(rest) => is_hex64(rest),
+        None => false,
+    }
+}
+
+/// An integer field that must fit `u64`.
+///
+/// Range-checked here rather than at a cast, so a record written by an
+/// arbitrary-precision implementation is *refused* rather than silently
+/// truncated into a different record.
+fn required_u64(
+    value: &Value,
+    record: &'static str,
+    field: &'static str,
+) -> Result<u64, RecordError> {
+    match required(value, record, field)? {
+        Value::Int(n) if *n >= 0 && *n <= i128::from(u64::MAX) => Ok(*n as u64),
+        _ => Err(RecordError::InvalidField {
+            record,
+            field,
+            expected: "an integer in [0, 2^64)",
+        }),
     }
 }
 
@@ -800,6 +1870,8 @@ mod tests {
             deadline: None,
             ratchet: None,
             confidentiality: Confidentiality::Public,
+            artifact_schema: None,
+            require_signed_submitter: false,
         }
     }
 
@@ -983,6 +2055,72 @@ mod tests {
         let decoded = Objective::from_value(&original.to_value()).unwrap();
         assert_eq!(decoded, original);
         assert_eq!(decoded.id(), original.id());
+    }
+
+    // -- artifact shape -----------------------------------------------------
+
+    #[test]
+    fn an_objective_without_an_artifact_schema_keeps_the_id_it_had_before_the_field_existed() {
+        // Same argument as the confidentiality default, and the same
+        // consequence if it ever fails: every objective in every deployed log
+        // reissued, every claim against a live bounty orphaned. The
+        // conformance vectors are the stronger check -- they were generated
+        // before this field existed and still pass byte for byte.
+        let plain = objective();
+        assert!(plain.artifact_schema.is_none());
+        assert!(
+            plain.to_value().get("artifact_schema").is_none(),
+            "an absent hint must not appear in the canonical form"
+        );
+
+        // Absent and explicitly-null decode the same, and neither is the
+        // record a *present* hint produces.
+        let mut nulled = match plain.to_value() {
+            Value::Object(map) => map,
+            _ => unreachable!(),
+        };
+        nulled.insert("artifact_schema".to_string(), Value::Null);
+        let decoded = Objective::from_value(&Value::Object(nulled)).expect("decodes");
+        assert_eq!(decoded.id(), plain.id());
+        assert!(decoded.artifact_schema.is_none());
+    }
+
+    #[test]
+    fn a_declared_artifact_shape_is_part_of_the_objective() {
+        // It is a hint about what passes, so it belongs to the funded question
+        // the way the verifier does: a funder cannot swap the documented shape
+        // out from under work already submitted, because that is a different
+        // objective.
+        let plain = objective();
+        let hinted = plain
+            .clone()
+            .with_artifact_schema(Value::object([("type", Value::string("object"))]))
+            .expect("valid hint");
+        assert_ne!(plain.id(), hinted.id());
+        assert_eq!(
+            hinted.to_value().get("artifact_schema").unwrap(),
+            &Value::object([("type", Value::string("object"))])
+        );
+        let decoded = Objective::from_value(&hinted.to_value()).expect("round trips");
+        assert_eq!(decoded, hinted);
+        assert_eq!(decoded.id(), hinted.id());
+    }
+
+    #[test]
+    fn an_artifact_schema_must_be_an_object_but_is_never_interpreted() {
+        // Shape is checked so the field cannot be a bare string that one
+        // implementation iterates and the other refuses. What it *says* is
+        // never checked: the pinned verifier decides what passes, and a second
+        // gate here would be a second answer to that question.
+        let refused = objective().with_artifact_schema(Value::string("an object, honest"));
+        assert!(refused.is_err(), "a non-object hint must be refused");
+
+        // Nonsense that is shaped correctly is accepted, because validating it
+        // is not this layer's business.
+        let accepted = objective()
+            .with_artifact_schema(Value::object([("wat", Value::Int(-1))]))
+            .expect("shape is all that is checked");
+        assert!(accepted.artifact_schema.is_some());
     }
 
     // -- confidentiality ----------------------------------------------------
@@ -1340,5 +2478,169 @@ mod tests {
         assert!((RecordError::RewardOutOfRange { reward: -1 })
             .to_string()
             .contains("-1"));
+    }
+
+    // -- peer records -------------------------------------------------------
+
+    fn peer_identity(byte: u8) -> crate::crypto::identity::Identity {
+        crate::crypto::identity::Identity::from_secret_bytes([byte; 32])
+    }
+
+    fn peer_record(identity: &crate::crypto::identity::Identity, seq: u64) -> PeerRecord {
+        PeerRecord::new(
+            identity.submitter_id(),
+            "ab".repeat(32),
+            "203.0.113.9:9000",
+            seq,
+            "2026-07-28T00:00:00+00:00",
+        )
+        .signed_with(identity)
+    }
+
+    #[test]
+    fn a_peer_record_round_trips_and_its_id_covers_its_signature() {
+        // The same property every signed record here has: strip the signature
+        // and you have a *different* record, so a signature cannot be removed
+        // from something somebody cited.
+        let identity = peer_identity(1);
+        let record = peer_record(&identity, 1);
+        assert!(record.verify_signature().is_ok());
+
+        let decoded = PeerRecord::from_value(&record.to_value()).expect("decodes");
+        assert_eq!(decoded, record);
+        assert!(decoded.verify_signature().is_ok());
+
+        let mut stripped = record.clone();
+        stripped.signature = None;
+        assert_ne!(stripped.id(), record.id());
+    }
+
+    #[test]
+    fn a_peer_record_must_be_signed_and_only_for_itself() {
+        // A claim may be posted under a nickname because a nickname claims
+        // nothing. A peer record exists to authenticate an address, so an
+        // unsigned one authenticates nothing and is refused rather than
+        // admitted as a weaker statement.
+        let identity = peer_identity(2);
+        let mut unsigned = peer_record(&identity, 1);
+        unsigned.signature = None;
+        assert!(matches!(
+            unsigned.verify_signature(),
+            Err(SignatureError::Missing { .. })
+        ));
+
+        // Signed by one identity, claiming another's name.
+        let mallory = peer_identity(3);
+        let mut forged = peer_record(&mallory, 1);
+        forged.identity = identity.submitter_id();
+        assert!(matches!(
+            forged.verify_signature(),
+            Err(SignatureError::Invalid { .. })
+        ));
+
+        // And a nickname is not an identity here at all.
+        let mut nickname = peer_record(&identity, 1);
+        nickname.identity = String::from("alice");
+        assert!(nickname.verify_signature().is_err());
+    }
+
+    #[test]
+    fn every_signed_field_is_covered_by_the_signature() {
+        // The check that makes the record worth anything: an attacker who
+        // could change the address without breaking the signature would have
+        // the whole prize, since redirecting dials is the only thing this
+        // record can be abused for.
+        let identity = peer_identity(4);
+        let record = peer_record(&identity, 1);
+        for tamper in [
+            |r: &mut PeerRecord| r.addr = String::from("198.51.100.1:9000"),
+            |r: &mut PeerRecord| r.transport = "cd".repeat(32),
+            |r: &mut PeerRecord| r.seq = 99,
+            |r: &mut PeerRecord| r.created_at = String::from("2030-01-01T00:00:00+00:00"),
+        ] {
+            let mut tampered = record.clone();
+            tamper(&mut tampered);
+            assert!(
+                tampered.verify_signature().is_err(),
+                "a field outside the signature: {tampered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_is_bounded_and_never_parsed() {
+        // Deliberately not `SocketAddr::from_str`. Two implementations
+        // disagreeing about whether an IPv6 form is well-formed is a consensus
+        // split, so the rule is length and printable ASCII and the network
+        // layer parses what it can.
+        let identity = peer_identity(5);
+        let mut record = peer_record(&identity, 1);
+
+        record.addr = String::new();
+        assert!(record.validate().is_err(), "an empty address was admitted");
+
+        record.addr = "a".repeat(MAX_PEER_ADDR + 1);
+        assert!(
+            record.validate().is_err(),
+            "an unbounded address was admitted"
+        );
+
+        record.addr = "a".repeat(MAX_PEER_ADDR);
+        assert!(record.validate().is_ok());
+
+        // A form this crate cannot dial is still admissible: the consensus
+        // layer does not get to decide what a network layer can reach.
+        record.addr = String::from("peer.example.onion:9000");
+        assert!(record.validate().is_ok());
+
+        for bad in ["with space:1", "quote\":1", "back\\slash:1", "tab\t:1"] {
+            record.addr = bad.to_string();
+            assert!(record.validate().is_err(), "{bad:?} was admitted");
+        }
+    }
+
+    #[test]
+    fn identity_and_transport_must_both_be_key_shaped() {
+        let identity = peer_identity(6);
+        let mut record = peer_record(&identity, 1);
+        record.transport = "AB".repeat(32);
+        assert!(record.validate().is_err(), "uppercase hex was admitted");
+        record.transport = String::from("ab");
+        assert!(
+            record.validate().is_err(),
+            "a short transport id was admitted"
+        );
+        record.transport = "ab".repeat(32);
+        assert!(record.validate().is_ok());
+    }
+
+    #[test]
+    fn a_sequence_outside_u64_is_refused_rather_than_truncated() {
+        // The boundary an arbitrary-precision implementation reaches and this
+        // one has to agree about. Truncating would make a record that is
+        // *admissible elsewhere* decode here as a different record.
+        let identity = peer_identity(7);
+        let record = peer_record(&identity, 1);
+        let Value::Object(mut body) = record.to_value() else {
+            panic!("a record is an object");
+        };
+        for bad in [
+            Value::Int(-1),
+            Value::Int(i128::from(u64::MAX) + 1),
+            Value::string("3"),
+        ] {
+            body.insert("seq".to_string(), bad.clone());
+            assert!(
+                PeerRecord::from_value(&Value::Object(body.clone())).is_err(),
+                "seq {bad:?} was admitted"
+            );
+        }
+        body.insert("seq".to_string(), Value::Int(i128::from(u64::MAX)));
+        assert_eq!(
+            PeerRecord::from_value(&Value::Object(body))
+                .expect("the top of the range decodes")
+                .seq,
+            u64::MAX
+        );
     }
 }

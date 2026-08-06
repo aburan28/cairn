@@ -20,9 +20,9 @@ weakens it is wrong however convenient it is.
 
 **Canonical encoding is consensus-critical.** Two implementations that disagree
 about an object's bytes disagree about its identity, and therefore about which
-bounty was funded. `conformance/vectors.json` pins the format against the Python
-reference. If `src/canonical.rs` and that file disagree, `src/canonical.rs` is
-wrong.
+bounty was funded. `conformance/vectors.json` pins the format, and
+`reference/rust/` re-derives it independently. If `src/canonical.rs` and that
+file disagree, `src/canonical.rs` is wrong.
 
 **A record's id covers its content.** Adding a field to `Objective` changes
 every objective's digest unless the field is *omitted* when it holds its
@@ -30,11 +30,18 @@ default. Absent and `null` are not interchangeable. Get this wrong and you
 orphan every claim posted against a live bounty. See the module docs in
 `src/records.rs`, and `Objective::confidentiality` for the shape this forces.
 
-**Both implementations change together.** Rust and Python must agree. If you
-touch a record, a hash, or an encoding: change both, regenerate
-`conformance/vectors.json` with `scripts/gen_conformance.py`, and check that
-every *pre-existing* vector is unchanged byte for byte. A diff in an old vector
-means you moved ids.
+**Both implementations change together.** `src/` and `reference/rust/` must
+agree. If you touch a record, a hash, or an encoding: change both, and check
+that `proofwork-reference conformance conformance/vectors.json` still passes.
+
+`conformance/vectors.json` is **frozen**. Nothing regenerates it, and nothing
+should: it was produced by a Python reference implementation that no longer
+exists, and that provenance is the whole of its value -- it is evidence from
+an implementation in another language, with different integer semantics and a
+different type discipline. Regenerating it from either Rust implementation
+would quietly turn the contract into a description of one program's behaviour.
+If a change genuinely requires new vectors, add them alongside; a *diff* in an
+existing one means you moved ids.
 
 **`Unavailable` is never `Reject`.** A verifier that could not run says nothing
 about the artifact. Collapsing the two hands an attacker a way to fail every
@@ -64,10 +71,19 @@ claim and you hand every submitter a free lottery ticket per restamp.
 
 ## Before you claim something works
 
-- `cargo test --all-targets` and `cd reference/python && pytest -q`
+- `cargo test --all-targets`
+- `cargo test --manifest-path reference/rust/Cargo.toml` and
+  `proofwork-reference conformance conformance/vectors.json`
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
-- `./scripts/interop.sh` — the strongest check in the repo: each implementation
-  audits a log the other produced
+- `./scripts/interop.sh` — each implementation audits a log the other produced
+- `./scripts/fuzz-differential.sh` — the same agreement on *random* input,
+  which is the only way to find a disagreement nobody has already thought of.
+  A failure prints its seed; rerun with it to get the same case back
+- `./scripts/differential.sh` — both implementations classify every record in
+  `conformance/adversarial.jsonl` the same way. Interop proves they agree on
+  *valid* logs; this proves they agree on the boundary, which is where a split
+  actually lives: two nodes disagreeing about whether a record is admissible
+  disagree about what was settled, and neither ever errors
 - `./scripts/mcp-smoke.sh` if you touched `src/bin/mcp.rs`
 - `./scripts/demo.sh` and `./scripts/ratchet-demo.sh` if you touched the CLI or
   the rules; they are the only checks that exercise epoch boundaries against a

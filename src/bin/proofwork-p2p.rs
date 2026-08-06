@@ -10,9 +10,12 @@ use proofwork::ledger::Ledger;
 use proofwork::node::Node;
 use proofwork::p2p::discovery::Endpoint;
 use proofwork::p2p::handshake::{PeerIdentity, PeerPublic};
+use proofwork::p2p::multicast;
 use proofwork::p2p::pop::PopLimits;
 use proofwork::p2p::service::{Service, DEFAULT_FANOUT};
 use proofwork::records::Objective;
+use proofwork::serve;
+use proofwork::time::timestamp;
 use proofwork::verifiers::VerifierRegistry;
 use std::collections::BTreeMap;
 use std::env;
@@ -23,13 +26,27 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-fn usage() -> ! {
-    eprintln!("usage: proofwork-p2p --identity FILE --root-key FILE --checkpoint FILE --listen ADDR --log FILE --root DIR [--bootstrap FILE ...] [--population FILE] [--fanout N]");
-    std::process::exit(2);
+/// Beacons folded in per tick.
+///
+/// Bounded because the beacon socket is reachable by anyone on the segment: an
+/// unbounded drain is a way for one host to hold the daemon's main loop. Any
+/// backlog is picked up next tick, and a node re-announces every
+/// `multicast::INTERVAL_SECONDS` regardless, so nothing is lost by deferring it.
+const BEACONS_PER_TICK: usize = 64;
+
+/// Print the usage and exit with `code`.
+///
+/// `--help` exits 0 and a bad or missing argument exits 2. Sharing one exit of
+/// 2 tells somebody who asked a question, and asked it correctly, that they
+/// used the tool wrong -- and `cmd --help >/dev/null || fail` is how a
+/// packaging check asks whether a binary runs at all.
+fn usage(code: i32) -> ! {
+    eprintln!("usage: proofwork-p2p --identity FILE --root-key FILE --checkpoint FILE --listen ADDR --log FILE --root DIR [--bootstrap FILE ...] [--population FILE] [--queue DIR] [--fanout N]");
+    std::process::exit(code);
 }
 
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err("hex has odd length".into());
     }
     let mut out = Vec::with_capacity(text.len() / 2);
@@ -76,9 +93,14 @@ fn load_endpoint(path: &Path) -> Result<Endpoint, String> {
     let addr = value
         .get("addr")
         .and_then(Value::as_str)
-        .ok_or("bootstrap.addr missing")?
-        .parse::<SocketAddr>()
-        .map_err(|e| e.to_string())?;
+        .ok_or("bootstrap.addr missing")?;
+    // A bootstrap address may be a hostname. An EC2 instance reached by its
+    // public DNS name keeps working across a restart that moves its IP, and a
+    // name is safe to accept because the peer id decides -- see
+    // `p2p::discovery::dialable`.
+    let addr = proofwork::p2p::discovery::dialable(addr).ok_or_else(|| {
+        format!("bootstrap.addr {addr:?} is neither an address nor a name that resolves")
+    })?;
     let public = hex_decode(
         value
             .get("public")
@@ -220,6 +242,7 @@ fn main() {
     let mut log = None;
     let mut root = None;
     let mut population_path = None;
+    let mut queue_path = None;
     let mut fanout = None;
     let mut bootstrap = Vec::new();
     let mut args = env::args().skip(1);
@@ -232,28 +255,49 @@ fn main() {
             "--log" => &mut log,
             "--root" => &mut root,
             "--population" => &mut population_path,
+            "--queue" => &mut queue_path,
             "--fanout" => &mut fanout,
             "--bootstrap" => {
-                bootstrap.push(args.next().unwrap_or_else(|| usage()));
+                bootstrap.push(args.next().unwrap_or_else(|| usage(2)));
                 continue;
             }
-            _ => usage(),
+            "--help" | "-h" => usage(0),
+            _ => usage(2),
         };
-        *slot = Some(args.next().unwrap_or_else(|| usage()));
+        *slot = Some(args.next().unwrap_or_else(|| usage(2)));
     }
-    let identity_path = identity_path.unwrap_or_else(|| usage());
-    let root_key_path = root_key_path.unwrap_or_else(|| usage());
-    let checkpoint_path = checkpoint_path.unwrap_or_else(|| usage());
+    let identity_path = identity_path.unwrap_or_else(|| usage(2));
+    let root_key_path = root_key_path.unwrap_or_else(|| usage(2));
+    let checkpoint_path = checkpoint_path.unwrap_or_else(|| usage(2));
     let listen_addr = listen_addr
-        .unwrap_or_else(|| usage())
+        .unwrap_or_else(|| usage(2))
         .parse::<SocketAddr>()
-        .unwrap_or_else(|_| usage());
-    let log = log.unwrap_or_else(|| usage());
-    let root = root.unwrap_or_else(|| usage());
+        .unwrap_or_else(|_| usage(2));
+    let log = log.unwrap_or_else(|| usage(2));
+    let root = root.unwrap_or_else(|| usage(2));
     let fanout = match fanout {
-        Some(text) => text.parse::<usize>().unwrap_or_else(|_| usage()),
+        Some(text) => text.parse::<usize>().unwrap_or_else(|_| usage(2)),
         None => DEFAULT_FANOUT,
     };
+    // The ledger first, and the ordering is deliberate.
+    //
+    // It is the cheapest check and the likeliest failure -- another daemon
+    // already holds the log, which is what an operator hits when a restart
+    // overlaps the old process. Doing it last meant ~243 ms of Classic McEliece
+    // keygen, an identity file written for a node that cannot start, and a
+    // bound listener, all before the refusal. The bound port is the part that
+    // bites: during that window the address is taken and then released again,
+    // so a restart flaps a port the operator is watching.
+    //
+    // The cost, stated rather than discovered later: opening creates the file,
+    // so a start that fails *after* this — a missing bootstrap file, an
+    // unbindable address — now leaves an empty log where it used to leave
+    // nothing. That file is byte-for-byte the one a successful start would have
+    // created, so the next run simply uses it. Worth an empty file.
+    let ledger = Ledger::open_exclusive(log).unwrap_or_else(|e| {
+        eprintln!("ledger: {e}");
+        std::process::exit(2)
+    });
     let identity = Arc::new(
         load_identity(Path::new(&identity_path)).unwrap_or_else(|e| {
             eprintln!("identity: {e}");
@@ -276,17 +320,32 @@ fn main() {
             }
         }
     }
+    // Zero-configuration discovery on the local segment. Optional by design:
+    // a host with no multicast route is a node without LAN discovery, not a
+    // node that cannot start, so a failure here is reported and stepped over.
+    let beacon =
+        match multicast::Responder::bind(service.identity(), listen_addr.port(), multicast::PORT) {
+            Ok(responder) => Some(responder),
+            Err(error) => {
+                eprintln!("multicast: {error} -- continuing without LAN discovery");
+                None
+            }
+        };
+
     let listener = service.listen(listen_addr).unwrap_or_else(|e| {
         eprintln!("listen: {e}");
         std::process::exit(2)
     });
-    let node = Node::new(
-        Ledger::open(log).unwrap_or_else(|e| {
-            eprintln!("ledger: {e}");
-            std::process::exit(2)
-        }),
-        root,
-    );
+    // Exclusive, opened above: the daemon appends every record it imports from
+    // a peer, so it is a writer and must not share a log with another one.
+    let node = Node::new(ledger, root);
+    // `Spool::at` only names a directory; the server creates it when it first
+    // queues something, and an absent one simply drains nothing.
+    let spool = queue_path.as_ref().map(serve::Spool::at);
+    match &queue_path {
+        Some(path) => eprintln!("queue: draining {path} each round"),
+        None => eprintln!("queue: none -- submissions arrive only from peers"),
+    }
     let population = match &population_path {
         Some(path) => load_population(Path::new(path)).unwrap_or_else(|e| {
             eprintln!("population: {e}");
@@ -322,6 +381,24 @@ fn main() {
     let accept_population_path = population_path.clone();
     let accept_registry = registry.clone();
     thread::spawn(move || loop {
+        // Accept **before** taking the lock, and this ordering is the whole
+        // reason `Service::serve_node_once` exists.
+        //
+        // `listener.accept()` blocks until somebody dials. Holding the node's
+        // mutex across it meant that on a node nobody was dialling, this thread
+        // held the lock forever -- so the main loop below ran exactly once, at
+        // startup, and then waited on the mutex for the life of the process. No
+        // dialling, no peer seeding, no beacons, no DHT, no fetching of missing
+        // verifier code, no draining of the submission queue. It looked healthy
+        // because that single startup pass is enough to sync from a bootstrap
+        // peer, which is exactly what a two-node test exercises.
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) => {
+                eprintln!("accept: {error}");
+                continue;
+            }
+        };
         let mut guard = accept_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -330,8 +407,8 @@ fn main() {
             Some(_) => {
                 let mut scorer = RoundScorer::new(accept_registry.clone());
                 accept_service
-                    .accept_node_and_population(
-                        &listener,
+                    .serve_node_and_population(
+                        stream,
                         node,
                         population,
                         PopLimits::default(),
@@ -339,7 +416,7 @@ fn main() {
                     )
                     .map(|_| ())
             }
-            None => accept_service.accept_node_once(&listener, node).map(|_| ()),
+            None => accept_service.serve_node_once(stream, node).map(|_| ()),
         };
         match outcome {
             Ok(()) => persist(
@@ -362,10 +439,67 @@ fn main() {
         // has that blob, rather than three at random. With nothing missing this
         // is exactly the old random sample, so the DHT costs nothing in the
         // steady state. See `Service::peers_for` for what it cannot do yet.
+        // Peer records first: the log names identities this node may never
+        // have been given an address for, and seeding is what makes finding
+        // the network part of obtaining the log rather than a second bootstrap
+        // problem. Idempotent, so running it every tick costs a walk of the
+        // peer records and picks up anything a sync round just imported.
+        // Admit whatever `proofwork-serve` queued, before dialling anybody.
+        //
+        // This is what makes the topology in `docs/serving.md` actually
+        // compose. A submission "lands in a spool directory, and the operator's
+        // own node admits it" -- but a `Ledger` is single-writer by
+        // enforcement, so `proofwork drain` wanted the write lock this daemon
+        // holds. A node that was online could not accept a submission at all.
+        //
+        // The daemon *is* the operator's node and already holds the lock, so it
+        // drains. The rules come from `serve::drain_into`, one copy shared with
+        // the CLI: a second copy of admission in a second binary is the same
+        // mistake as a second copy in a request handler, which is the argument
+        // `docs/serving.md` already makes.
+        //
+        // Before the dial, deliberately: a record admitted this tick is one a
+        // peer can learn about this tick, rather than five seconds later.
+        if let Some(queue) = &spool {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let admissions = serve::drain_into(&mut guard.node, queue, &timestamp(), false);
+            let drained = !admissions.is_empty();
+            for (path, admission) in admissions {
+                eprintln!("drain: {}", admission.note);
+                // Removed whether admitted or refused. Nearly every refusal is
+                // permanent -- a stale epoch, a citation that is not an
+                // accepted claim -- and a queue that retries one never empties.
+                if let Err(error) = queue.take(&path) {
+                    eprintln!("drain: cannot remove {}: {error}", path.display());
+                }
+            }
+            if drained {
+                // Settlement is deferred to the close of the reveal epoch, so a
+                // drain that admitted a reveal into an epoch that has already
+                // closed settles here rather than waiting for a peer to dial.
+                let _ = guard.node.settle_at(&timestamp());
+                persist(
+                    &guard,
+                    &checkpoint_path,
+                    &root_key,
+                    population_path.as_ref(),
+                );
+            }
+        }
+
         let needs = {
             let guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            service.seed_from_log(&guard.node);
+            if let Some(responder) = &beacon {
+                // Announce first, then listen: a node that has just started
+                // becomes findable this tick rather than next.
+                let _ = responder.announce(multicast::PORT);
+                service.absorb_beacons(responder, BEACONS_PER_TICK);
+            }
             guard.node.missing_code()
         };
         for endpoint in service.peers_for(&needs, fanout) {
@@ -395,7 +529,14 @@ fn main() {
                     &root_key,
                     population_path.as_ref(),
                 ),
-                Err(error) => eprintln!("outbound session: {error}"),
+                Err(error) => {
+                    eprintln!("outbound session: {error}");
+                    // Tell the DHT, or every lookup that chose this peer waits
+                    // on it forever. `peers_for` hands out the next hop of each
+                    // lookup in flight and expects exactly one answer per
+                    // contact; this is the failure half.
+                    service.unreachable(endpoint.peer.id());
+                }
             }
         }
         thread::sleep(Duration::from_secs(5));

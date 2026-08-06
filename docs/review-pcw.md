@@ -80,7 +80,7 @@ verifiers *by construction*. "Occasional expensive audits" is an admission that
 `V` has a heavy tail.
 
 This is the same arithmetic as the decomposition floor in
-[knowledge-store.md](knowledge-store.md), where the reference parameters put the
+[agent-market.md](agent-market.md), where the reference parameters put the
 break-even at 800,000 units of settled value per artifact under full redundancy.
 The conclusion transfers: **redundant verification is affordable for a market
 that settles a few valuable things and unaffordable for a chain that validates

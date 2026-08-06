@@ -209,7 +209,246 @@ name — replay's `cwd`, lean's `project_root` — resolve against the objective
 root and are refused when they escape it. A record cannot choose which host
 paths are bound into its own jail.
 
-**The Python reference does not jail at all.** It `exec`s pinned code in-process
-by design — it is the readable specification of the *rules*, not a hardened
-node — and `proofwork.verifiers.base.SANDBOXING` says so in those words. Do not
-point it at an objective you have not read.
+One thing that is *not* a gap, because it is checked: directories a spec can
+name — replay's `cwd`, lean's `project_root` — resolve against the objective
+root and are refused when they escape it. A record cannot choose which host
+paths are bound into its own jail.
+
+**The reference implementation does not jail at all.** It spawns the
+interpreter directly, by design — it exists to be an independent second opinion
+on the *rules*, not a hardened node — and `reference/rust/src/verifiers.rs` says
+so in those words. Do not point it at an objective you have not read.
+
+It implements **every kind the primary settles**: `certificate`, `evaluator`,
+`statistical`, `replay` and `lean`. That list was shorter for a long time, and
+the way it stayed short is the point. A kind an implementation lacks answers
+`Unavailable` for every claim — which is *correct*, since `Unavailable` is never
+`Reject` — and the audit used to skip non-settling statuses without comment. So
+an entire kind could have no cross-implementation coverage at all while every
+run reported full coverage: two correct behaviours composing into a hole.
+
+Three things now keep it closed.
+
+**Both audits report any settled verdict they cannot re-derive.** Not only the
+paid ones. Reporting only payments was the first version and it left the same
+hole one rung down: a `reject` never pays, so a rejection no other node could
+reproduce passed every audit in silence. That is the worse direction of the
+two. A payment somebody will eventually contest; a rejected submitter has no
+money to point at and no way to show the rejection was not reproducible.
+Censorship that leaves no trace in any audit is precisely what re-derivation
+exists to prevent. An `unavailable` the log never settled is still skipped —
+nothing was claimed then and nothing is claimed now.
+
+**One list of kinds, not two.** `verifiers::KINDS` is what the reference
+consults when deciding whether it can post an objective. There used to be a
+second list inside `node.rs`, and it still named `certificate` and `evaluator`
+long after three more kinds were implemented — so the crate refused to post
+objectives it could verify perfectly well, and interop could only ever drive
+those kinds in one direction.
+
+**A test walks the list** and fails on a kind that is advertised but not
+dispatched, with the primary's kinds spelled out separately so that dropping
+one from both places at once still fails.
+
+And `scripts/interop.sh` drives a `lean` rejection through both implementations
+in both directions. It needs no Lean toolchain — a proof containing `sorry` is
+screened before the toolchain is ever looked for — so it runs on any host, and
+it fails if the `lean` arm is removed from either dispatcher.
+
+`lean` needs a Lean toolchain, which is not a build dependency of this crate: a
+node without one answers `Unavailable`, which is the honest answer. The verdict
+rules — a non-zero exit is a real `Reject` because the exit code *is* the
+kernel's answer, a signal kill is not, and a clean exit that warns about `sorry`
+is still a rejection — are tested against a stand-in binary, because what needs
+checking is how an exit code maps to a verdict, and that does not need a kernel.
+
+## What an audit actually re-derives
+
+`proofwork audit` prints one line — *chain intact, every settled claim
+re-verified* — and the value of the whole project rests on that sentence being
+literally true. What follows is what it did not check, found by asking what a
+log could carry that the line would still be printed over, and then by running
+the tools rather than reading them.
+
+**A verdict this node cannot reproduce.** Covered above. Any settled verdict,
+not only the paid ones.
+
+**A verdict with a status nobody recognises.** A `"probably"` in the status
+field used to surface only as a *disagreement* with a re-run, so on a node
+without the relevant toolchain it was silent, and under `--no-rerun` it was
+silent everywhere. It is a malformed record, which makes it exactly the kind of
+defect the cheap structural pass exists for, so both implementations now report
+it there.
+
+**A batch that omitted a claim.** The reference re-sorted the claim list the
+batch record itself supplied, which is a check that a batch dropping somebody
+always passes. Which claims are in an epoch's batch is what decides who gets
+paid that epoch, and it is the last thing an independent implementation should
+take from the record it is auditing. Membership is now derived from the log in
+both.
+
+**A back-dated record invalidating an honest batch.** The inverse failure, and
+an attack rather than an omission. Records arrive over sync stamped with their
+own `created_at` and land at the tail, so a peer can append an accepted claim
+dated into an epoch that already paid. The *anchor* derivation was already
+bounded to the log as it stood when the batch was written; membership was not,
+so the same append worked one field over — instead of "the anchor is wrong" the
+audit said the operator "settled 1 claim(s) in an order the beacon does not
+produce", forever, at a peer's choosing, about a batch that was correct when
+written and could not have known about a record that did not yet exist.
+
+The bound has to cover the *verdicts* as well as the claims, which is a second
+version of the same attack and not an implementation detail: a claim already in
+the log when the batch was drawn, whose accepting verdict arrives afterwards,
+was correctly left out — counting its acceptance now faults the batch just as
+surely. Both derivations in both implementations now take the bound, and each
+half has a test that fails when its half of the bound is removed.
+
+**The money.** The largest, and the last one looked for, because it is not
+about records at all. The reference re-derived every id, every Merkle root,
+every batch anchor — and never once added up what an objective had paid against
+what it had funded. An operator could have overspent a pool by any amount and
+the independent auditor would have said *log verified*. It now checks the pool
+ceiling, double settlement of a non-ratcheted objective, a settlement whose
+reward is not an integer, and an overflowing total (reported, never wrapped — a
+wrapped sum resets an overspent pool to something small and hides exactly the
+fault being looked for).
+
+**And the rest of what one implementation checked and the other did not.** The
+frontier of a ratcheted objective only moves forward, asked of `improves` rather
+than by comparison, because `direction` decides which way forward is and
+`min_improvement` is what stops a thousand claims each advancing by one unit —
+the pool total can stay under the ceiling while the money went to the wrong
+claims in the wrong order. A peer record supersedes only by advancing its
+identity's sequence, which is what lets a mutable address hint live in an
+append-only log; without it a replayed record puts a stale address back in
+front, and it is perfectly signed, which is why signature checking alone does
+not cover it. A claim with no matching commitment, meaning commit–reveal never
+bound it to an epoch. A claim with no verdict, or naming an objective the log
+does not contain. A batch with no epoch, no claim list, or a second batch for
+an epoch that already settled — each of which the reference had been skipping
+with a bare `continue`.
+
+Porting the peer-sequence check is what found the next two, which is the
+argument for a second implementation in miniature: writing the same rule twice
+makes a disagreement visible, and each disagreement is a bug in one of them.
+
+The primary tracked the *last* sequence seen rather than the highest. Given
+seq 3, a replayed 1, then a 2, `Node::peers` still answers 3 — so neither
+superseded and both are findings — but the audit reported the 1, adopted its
+stale value as current, and passed the 2. An audit contradicting its own
+implementation's resolution rule, on exactly the hand-assembled log an audit
+exists for.
+
+And the reference let a *forged* record's sequence participate. A record whose
+signature does not verify is not a statement by anybody; counting it means
+anyone can make the audit accuse an identity of replaying its own records by
+appending an unsigned forgery — a finding manufactured out of nothing.
+
+**A `peer` record its own decoder would refuse.** Found by running the command
+rather than reading it. `proofwork peer --transport <a libp2p-style id>`
+appended happily, and every subsequent audit in both implementations reported
+the record as undecodable: one command, no error, and a log that can no longer
+be audited. Every other record kind reaches the rules engine already decoded, so
+`from_value` has run and the fields are known good; `PeerRecord::new` is a plain
+constructor that takes what it is handed, which left `peer` as the only kind
+that could enter the log without meeting its own decoder. `post_peer` now
+validates first.
+
+**A tripwire nobody would read.** `proofwork store status` listed every
+unaccounted file it found. Pointed at a working directory that is seven hundred
+lines, and the `KEY INSIDE THE STORE` finding — the one that means everything
+beside it is readable — was somewhere in the middle of them. Keys are now said
+first and never elided; the rest is capped with a count of what was left out.
+The alarm was always the exit code and the total, not the list.
+
+**`--help` exiting 2.** `proofwork-serve` and `proofwork-p2p` shared one usage
+function between "you asked for help" and "you used me wrong", so asking a
+question correctly returned a failure. `cmd --help >/dev/null || fail` is how a
+packaging check or a container healthcheck asks whether a binary runs at all.
+All four binaries now answer 0 for `--help` and 2 for misuse, and CI pins it.
+
+**The reference could not audit a node that synced.** The case an independent
+check exists for — no bundle, no authored objective, verifier code obtained by
+hash — and the reference had no content-addressed fallback at all: it read the
+pin from the bundle path and stopped. So on every peer that learned an objective
+over the wire, the independent auditor reported *"was settled but can no longer
+be re-verified"* for claims that re-verify perfectly. Found by running two
+`proofwork-p2p` daemons and auditing the one that synced, which nothing had ever
+done — the daemon is the largest surface in the repository and `--help` was all
+CI touched. `scripts/p2p-demo.sh` now runs both sides.
+
+**A verdict that never settled, reported as contradicted.** The opposite
+mistake, and the one an ordinary workflow reaches first. A node without a
+pinned checker records `unavailable`, fetches the checker from a peer, and
+audits — and every claim recorded before the fetch came back as *recorded
+unavailable, re-verification says accept*. That is the node learning something,
+not catching somebody: nothing settled, nobody was paid, the objective is still
+open, and an `unavailable` was never a statement about the artifact. The
+reference had this rule right and the primary did not. It failed
+`scripts/blob-demo.sh` on its last line the first day there was a fetch path to
+run.
+
+The shape recurs often enough to be worth naming: **the summary line is a
+claim, and every branch that quietly skips something is a way for it to be
+false.** A skip is right only when nothing was ever asserted — an `unavailable`
+the log also recorded as `unavailable`. Everywhere else, silence is the bug.
+And the converse, which the last one earned: a *finding* about something that
+was never asserted is noise, and noise in an audit is how a real finding gets
+ignored.
+
+And the corollary the last one earned: an independent implementation drifts
+where nothing compares it. The two are checked against each other on ids, roots
+and verdicts, so those stayed honest; the *arithmetic* and the output plumbing
+had no cross-check, and both had quietly diverged. `proofwork-reference` was
+still using `println!`, which panics when the reader closes the pipe —
+`… post | head -1`, which `scripts/interop.sh` itself does. The primary fixed
+that before this crate existed and wrote a paragraph about it. It never crossed
+over, and it surfaced as a flaky script rather than as a bug, because the race
+is only lost under load.
+
+## Checking one entry without the log
+
+`audit` and `verify` both need a copy of the log. That is the right shape for
+somebody re-deriving the whole network's history, and the wrong one for
+somebody who wants to know whether a single settlement happened.
+
+```sh
+proofwork prove 12 --height 25 --out proof.json
+proofwork check proof.json --from checkpoint.json --root-key operator.pub
+```
+
+`check` opens no log, no bundle, and no socket. Its whole input is the proof
+and a root, and the root arrives inside a checkpoint somebody signed — which is
+why `--root-key` matters and why its absence prints a warning rather than
+passing quietly: a checkpoint checked against the key inside it is a checkpoint
+checked against itself, and an operator rewriting history signs the rewrite
+with a fresh key.
+
+The cost is `log2(n)` hashes: five for the twenty-five-entry log in `launch/`,
+fifteen for twenty thousand.
+
+Three ways to fail, kept apart because they accuse different people:
+
+| failure | what it means |
+|---|---|
+| the entry does not hash to the digest it carries | the holder's copy of that entry was edited |
+| the path is for leaf *i* but the entry's seq is *j* | a proof about some other entry |
+| the path does not reach the root | the entry is not in the log that root pins |
+
+The third has an innocent cause that is far more common than the guilty one:
+the log grew after the checkpoint was signed, so the proof is against a taller
+tree. `check` catches that before it walks the path — comparing the proof's
+leaf count against the checkpoint's height — and names the remedy
+(`prove <seq> --height <the checkpoint's height>`) rather than reporting a
+mismatch that reads as fraud.
+
+This is consensus-critical in the same way roots are: a challenger who rejects a
+proof an honest holder produced slashes a node that did its job, and one who
+accepts a proof the holder could not have produced pays a node that stored
+nothing. So it is not enough for each implementation to check its own proofs.
+`scripts/differential.sh` runs both against the published log and requires that
+each accept what the *other* emitted, byte for byte, in both directions, plus
+that both refuse an entry edited under a path that still reaches the root. An
+implementation wrong in a self-consistent way passes the first arrangement and
+fails this one.

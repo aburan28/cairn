@@ -1,16 +1,17 @@
 //! High-level bootstrap and session orchestration.
 
 use super::code::{CodeLimits, CodeReport};
-use super::dht::{Directory, PeerContact};
+use super::dht::{Directory, NodeId, PeerContact};
 use super::discovery::{AddressBook, Endpoint};
-use super::handshake::{PeerId, PeerIdentity};
+use super::handshake::{PeerId, PeerIdentity, PeerPublic};
+use super::multicast;
 use super::pop::{PopLimits, PopReport};
 use super::session::{self, SessionError};
 use super::sync::{Peer, SyncError};
 use super::transport::{self, Connection, TransportError};
 use crate::gossip::{Candidate, Population};
 use crate::node::Node;
-use crate::records::{Claim, Commitment, Objective};
+use crate::records::{Claim, Commitment, Objective, PeerRecord};
 use crate::time::timestamp;
 use rand_core::OsRng;
 use std::collections::BTreeSet;
@@ -57,7 +58,13 @@ impl From<SessionError> for ServiceError {
 /// Owns the local identity, the non-consensus address book, and the DHT view.
 pub struct Service {
     identity: Arc<PeerIdentity>,
-    book: AddressBook,
+    /// Whom this node can dial, and the public key needed to do it.
+    ///
+    /// Behind a `Mutex` for the same reason the directory is: a DHT round can
+    /// *learn a peer* now — a verified public key turns a contact the routing
+    /// table only heard about into one this node can reach — and the dial and
+    /// accept paths that learn it hold `&self`.
+    book: Mutex<AddressBook>,
     /// Who holds which blob, and whom to route through to find out.
     ///
     /// Behind a `Mutex` because every dial and accept path takes `&self` — a
@@ -65,6 +72,16 @@ pub struct Service {
     /// threading `&mut self` through would make two concurrent sessions
     /// impossible for a reason that has nothing to do with correctness.
     directory: Mutex<Directory>,
+    /// Holders a finished lookup found, keyed by content address.
+    ///
+    /// Deliberately **not** in the provider store: these are relayed claims,
+    /// and the rule that keeps an unsigned DHT from being an amplifier is that
+    /// a relayed claim is never re-served. Kept here they are consulted by this
+    /// node's own dialling and answered to nobody, and consumed on use, so a
+    /// wrong one costs exactly one dial. See `Service::adopt`.
+    hints: Mutex<std::collections::BTreeMap<String, Vec<super::dht::Holder>>>,
+    /// Keys served that did not hash to the id asked for.
+    bad_keys: std::sync::atomic::AtomicUsize,
 }
 
 impl Service {
@@ -72,8 +89,10 @@ impl Service {
         let local = identity.id();
         Service {
             identity,
-            book: AddressBook::new(),
+            book: Mutex::new(AddressBook::new()),
             directory: Mutex::new(Directory::new(local)),
+            hints: Mutex::new(std::collections::BTreeMap::new()),
+            bad_keys: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -81,8 +100,15 @@ impl Service {
         self.identity.id()
     }
 
-    pub fn address_book(&self) -> &AddressBook {
-        &self.book
+    /// Read the address book briefly. Held behind a lock; see `Service::book`.
+    pub fn with_book<T>(&self, f: impl FnOnce(&mut AddressBook) -> T) -> T {
+        let mut guard = self.book.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+
+    /// How many peers this node can dial.
+    pub fn known_peers(&self) -> usize {
+        self.with_book(|book| book.len())
     }
 
     pub fn add_bootstrap(&mut self, endpoint: Endpoint) {
@@ -91,7 +117,7 @@ impl Service {
             // the only thing a fresh node can route through, and leaving it out
             // would mean the DHT stayed empty until somebody else volunteered.
             self.note_contact(endpoint.peer.id(), endpoint.addr);
-            self.book.insert(endpoint);
+            self.with_book(|book| book.insert(endpoint));
         }
     }
 
@@ -101,35 +127,77 @@ impl Service {
         f(&mut guard)
     }
 
-    /// Note that a peer is reachable at an address.
+    /// Note that a peer is reachable at an address, with no freshness claim.
     ///
-    /// `seq` is the routing table's tiebreak between two records for one peer,
-    /// and this stack has no signed record to take one from. Zero is honest
-    /// about that: every contact is equally fresh, so "seen again" keeps what is
-    /// already held rather than pretending the newest arrival is the truest.
-    /// Wiring [`super::discovery`]'s signed records through would give it a real
-    /// value; see `docs/discovery.md`.
+    /// For the hint sources that genuinely have none: a bootstrap file, a
+    /// multicast beacon, the source address of an inbound connection. Zero is
+    /// honest about that.
+    ///
+    /// It is *not* honest for a hint that came from a signed record, and
+    /// [`Service::note_contact_at`] is what those use.
     pub fn note_contact(&self, peer: PeerId, addr: SocketAddr) {
+        self.note_contact_at(peer, addr, 0);
+    }
+
+    /// Note a peer, carrying the freshness its record claimed.
+    ///
+    /// # Why the sequence has to travel
+    ///
+    /// [`crate::dht::Contact::seq`] says it plainly: without a freshness
+    /// counter "a table has no way to tell a peer that *moved* from a peer
+    /// being *impersonated* by a stale record". The routing table takes the new
+    /// contact when `seq >= held`, so with everything pinned at zero **a
+    /// replayed old record always wins** — anyone who once saw a peer record can
+    /// re-offer the address that peer has left and go on steering traffic at it.
+    ///
+    /// The value was available and simply not passed. `peer` records in the log
+    /// carry a signed, monotonic `seq`; [`Node::peers`] already resolves them
+    /// highest-seq-wins, and the audit reports one that does not advance. All of
+    /// that protection stopped at the edge of the routing table, because
+    /// `seed_from_log` called the seq-less form.
+    pub fn note_contact_at(&self, peer: PeerId, addr: SocketAddr, seq: u64) {
         if peer == self.identity.id() {
             return;
         }
         self.with_directory(|directory| {
-            directory.saw(PeerContact::new(peer, addr, 0));
+            directory.saw(PeerContact::new(peer, addr, seq));
         });
     }
 
     /// The endpoints worth dialling when specific blobs are missing.
     ///
-    /// Known holders first, then peers near the key, then whatever the random
-    /// sample turns up — and the fallback is not a formality: it is what runs
-    /// when nothing has been announced yet, which is every node's first tick.
+    /// In priority order:
+    ///
+    /// 1. **Peers that said, first-hand, that they hold it.** Strictly better
+    ///    than anything routing can offer — asking a holder gets the bytes;
+    ///    asking a router gets a pointer.
+    /// 2. **Holders a previous lookup found.** Relayed claims, so they are
+    ///    consumed on use rather than stored — see `Service::adopt`.
+    /// 3. **The next hop of a lookup**, for the addresses no holder is known
+    ///    for. This is what makes a lookup *multi*-hop: `next_hops` names the
+    ///    peers the iterative search wants to query, so the next session this
+    ///    node opens is the next hop, and the answer rides that session.
+    /// 4. **Peers near the key**, then the random sample. The fallback is not a
+    ///    formality: it is what runs when nothing has been announced yet, which
+    ///    is every node's first tick.
     ///
     /// **A DHT candidate that is not in the address book is skipped**, and that
     /// is the cost of a contact not carrying its key. A 261 KiB McEliece public
-    /// key cannot live in a routing table (see [`super::dht`]), so this stack can
-    /// learn *that* a peer holds a blob before it can learn how to talk to it.
-    /// Until peer records carry keys, the DHT reorders the peers a node already
-    /// knows rather than introducing new ones.
+    /// key cannot live in a routing table (see [`super::dht`]), so this stack
+    /// can learn *that* a peer holds a blob before it can learn how to talk to
+    /// it. The key is now fetched on demand — [`DhtMessage::GetKey`] — so the
+    /// gap closes after a round rather than never, and a contact that is still
+    /// keyless this tick is skipped this tick and queued for a key.
+    ///
+    /// # The contract this owes the driver
+    ///
+    /// Every contact taken from [`Directory::next_hops`] is resolved before this
+    /// returns: dialable ones into the result, undialable ones through
+    /// [`Directory::on_unreachable`]. A contact left outstanding is a lookup
+    /// that never terminates. The caller owes the other half — a failed dial
+    /// must come back through [`Service::unreachable`].
+    ///
+    /// [`DhtMessage::GetKey`]: super::dht::DhtMessage::GetKey
     pub fn peers_for(&self, needs: &BTreeSet<String>, fanout: usize) -> Vec<Endpoint> {
         if needs.is_empty() {
             return self.sample_peers(fanout);
@@ -137,14 +205,95 @@ impl Service {
         let now = crate::time::unix_seconds();
         let mut chosen: Vec<Endpoint> = Vec::new();
         let mut seen: BTreeSet<PeerId> = BTreeSet::new();
+
+        // 1. Known holders, and the addresses that have none.
+        let mut unheld: Vec<&String> = Vec::new();
+        for address in needs {
+            let (holders, _) = self.with_directory(|d| d.lookup_providers(address, now));
+            if holders.is_empty() {
+                unheld.push(address);
+                continue;
+            }
+            for holder in holders {
+                if let Some(endpoint) =
+                    self.with_book(|book| book.for_peer(&holder.peer_id()).first().cloned())
+                {
+                    if seen.insert(endpoint.peer.id()) {
+                        chosen.push(endpoint);
+                    }
+                }
+            }
+        }
+
+        // 2. Holders a previous lookup found. Consumed on use: they are
+        //    relayed claims, so one wrong one costs a dial and is gone rather
+        //    than being retried for ever.
+        if !unheld.is_empty() {
+            let taken: Vec<Vec<super::dht::Holder>> = {
+                let mut hints = self.hints.lock().unwrap_or_else(|e| e.into_inner());
+                unheld
+                    .iter()
+                    .filter_map(|address| hints.remove(address.as_str()))
+                    .collect()
+            };
+            for holder in taken.into_iter().flatten() {
+                if let Some(endpoint) =
+                    self.with_book(|book| book.for_peer(&holder.peer_id()).first().cloned())
+                {
+                    if seen.insert(endpoint.peer.id()) {
+                        chosen.push(endpoint);
+                    }
+                }
+            }
+        }
+
+        // 3. One hop of a lookup, for what no holder is known for. Bounded by
+        //    the remaining capacity so every contact handed out is resolved
+        //    here rather than dropped by a later truncation.
+        let remaining = fanout.saturating_sub(chosen.len());
+        if remaining > 0 {
+            for address in &unheld {
+                self.with_directory(|directory| directory.seek(address));
+            }
+            let dialable: BTreeSet<NodeId> = self.with_book(|book| {
+                book.endpoints()
+                    .map(|endpoint| NodeId::from_bytes(endpoint.peer.id()))
+                    .collect()
+            });
+            // "Dialable" is "its key is in the address book". A contact that
+            // fails it is deferred and its key queued, inside `next_hops` — not
+            // written off here, because the key it is waiting for arrives on a
+            // later round and a peer marked queried never gets another turn.
+            let hops = self.with_directory(|directory| {
+                directory.next_hops(remaining, |peer| {
+                    // The book is a separate lock, so it is read into a set the
+                    // predicate can consult without nesting the two.
+                    dialable.contains(&peer)
+                })
+            });
+            for contact in hops {
+                if let Some(endpoint) =
+                    self.with_book(|book| book.for_peer(contact.id.as_bytes()).first().cloned())
+                {
+                    if seen.insert(endpoint.peer.id()) {
+                        chosen.push(endpoint);
+                    }
+                }
+            }
+        }
+        if chosen.len() >= fanout {
+            chosen.truncate(fanout);
+            return chosen;
+        }
+
+        // 4. Peers near the key, then the sample.
         for address in needs {
             for candidate in self.with_directory(|d| d.candidates(address, now)) {
-                let Some(endpoint) = self
-                    .book
-                    .endpoints()
-                    .find(|held| held.addr == candidate)
-                    .cloned()
-                else {
+                let Some(endpoint) = self.with_book(|book| {
+                    book.endpoints()
+                        .find(|held| held.addr == candidate)
+                        .cloned()
+                }) else {
                     continue;
                 };
                 if seen.insert(endpoint.peer.id()) {
@@ -164,6 +313,112 @@ impl Service {
             }
         }
         chosen
+    }
+
+    /// Seed the routing table from the peer records in a log.
+    ///
+    /// This is what makes finding the network part of *obtaining the log*
+    /// rather than a second bootstrap problem: a node handed a log is handed
+    /// every identity that ever announced itself, with a transport id and an
+    /// address hint for each.
+    ///
+    /// What it cannot do is finish the job on its own, and the reason is the
+    /// one [`super::dht`] gives at length: a record carries a transport *id*,
+    /// not the 261 KiB McEliece key needed to dial it. So each peer enters the
+    /// routing table and its key is queued, and one round with any peer that
+    /// has it turns the contact into an endpoint. Records for identities this
+    /// node can already dial cost nothing and are still noted, because the
+    /// address may have moved.
+    ///
+    /// Returns how many contacts were taken.
+    pub fn seed_from_log(&self, node: &Node) -> usize {
+        let mut seeded = 0;
+        for record in node.peers().values() {
+            let Some(transport) = decode_peer_id(&record.transport) else {
+                continue;
+            };
+            if transport == self.identity.id() {
+                continue;
+            }
+            // The address is a hint and this is the one place it is resolved.
+            // The record format deliberately does not decide what a valid
+            // address is -- see `records::MAX_PEER_ADDR` -- so a form this
+            // build cannot dial is skipped here rather than refused there.
+            //
+            // `dialable` accepts a hostname as well as a literal, which is what
+            // lets a peer record name a host whose address moves. It is safe to
+            // take from a stranger for the reason `discovery::dialable` gives:
+            // the peer id is the hash of the key, so a hostile answer costs a
+            // failed handshake and never a wrong peer.
+            let Some(addr) = crate::p2p::discovery::dialable(&record.addr) else {
+                continue;
+            };
+            // The record's own signed sequence, not zero. `Node::peers` has
+            // already resolved highest-seq-wins across every peer record in the
+            // log, so this is the freshest claim that identity has made and the
+            // signature is what makes it worth anything.
+            self.note_contact_at(transport, addr, record.seq);
+            let node_id = NodeId::from_bytes(transport);
+            if self.with_book(|book| book.for_peer(&transport).is_empty()) {
+                self.with_directory(|directory| directory.wants_key(node_id));
+            }
+            seeded += 1;
+        }
+        seeded
+    }
+
+    /// Fold beacons heard on the local segment into the routing table.
+    ///
+    /// The third hint source, and interchangeable with the other two by
+    /// construction: a beacon is an address and a transport id, which is exactly
+    /// what a peer record carries and exactly what a DHT contact carries. None
+    /// of them is trusted, so none of them needs a different code path -- the
+    /// handshake decides, and a wrong hint costs one dial.
+    ///
+    /// Takes the [`multicast::Responder`] rather than owning it, because whether
+    /// a node has one at all depends on the host: `Responder::bind` fails on a
+    /// container with no multicast route, and that is a node without LAN
+    /// discovery rather than a node that cannot run.
+    ///
+    /// Returns how many contacts were taken.
+    pub fn absorb_beacons(&self, responder: &multicast::Responder, limit: usize) -> usize {
+        let mut taken = 0;
+        for (peer, addr) in responder.poll(limit) {
+            if peer == self.identity.id() {
+                continue;
+            }
+            self.note_contact(peer, addr);
+            // Same as `seed_from_log`: a beacon carries a transport *id*, not
+            // the 261 KiB key needed to dial it, so the key is queued and one
+            // round with any peer that has it turns the contact into an
+            // endpoint.
+            if self.with_book(|book| book.for_peer(&peer).is_empty()) {
+                self.with_directory(|directory| directory.wants_key(NodeId::from_bytes(peer)));
+            }
+            taken += 1;
+        }
+        taken
+    }
+
+    /// The transport key this node holds for `peer`, if any.
+    ///
+    /// The address book is already the cache: an endpoint is an address *and* a
+    /// key, and `p2p::dht`'s `GetKey` is what fills it. This exposes that cache
+    /// so a subsystem holding only an id can complete it -- see
+    /// [`crate::swarm::tcp::KeySource`], which `Service` implements over this.
+    pub fn key_for(&self, peer: &PeerId) -> Option<PeerPublic> {
+        self.with_book(|book| book.for_peer(peer).first().map(|e| e.peer.clone()))
+    }
+
+    /// Report that a dial failed, so the lookups waiting on that peer move on.
+    ///
+    /// The other half of [`Service::peers_for`]'s contract. A driver that
+    /// dialled and forgot would leave the peer marked in-flight in every lookup
+    /// that chose it, and those lookups would never terminate — the failure
+    /// would look like a DHT that simply stops answering rather than like the
+    /// missing call it is.
+    pub fn unreachable(&self, peer: PeerId) {
+        self.with_directory(|directory| directory.on_unreachable(NodeId::from_bytes(peer)));
     }
 
     /// Bind a listener. The caller may run `accept_once` in a loop and apply
@@ -205,8 +460,12 @@ impl Service {
 
     /// Look up a bootstrap endpoint by id. This keeps callers from reaching
     /// into the address-book representation when scheduling retries.
-    pub fn endpoints_for(&self, peer: &PeerId) -> &[Endpoint] {
-        self.book.for_peer(peer)
+    ///
+    /// Cloned rather than borrowed: the book is behind a lock, and handing out
+    /// a reference into it would mean holding that lock for as long as the
+    /// caller kept the slice.
+    pub fn endpoints_for(&self, peer: &PeerId) -> Vec<Endpoint> {
+        self.with_book(|book| book.for_peer(peer).to_vec())
     }
 
     /// The peers to dial this tick: a random subset of the address book.
@@ -216,7 +475,7 @@ impl Service {
     /// front of. See [`AddressBook::sample`] for what this does *not* defend
     /// against — a forged majority of the book itself.
     pub fn sample_peers(&self, fanout: usize) -> Vec<Endpoint> {
-        self.book.sample(fanout, &mut OsRng)
+        self.with_book(|book| book.sample(fanout, &mut OsRng))
     }
 
     /// Dial one endpoint and reconcile records, then verifier code, then the
@@ -280,22 +539,13 @@ impl Service {
         node: &mut Node,
         population: &mut Population,
         limits: PopLimits,
-        mut rescore: F,
+        rescore: F,
     ) -> Result<(PeerId, PopReport), ServiceError>
     where
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
         let (stream, _) = listener.accept().map_err(TransportError::from)?;
-        let mut connection = transport::accept(stream, &self.identity)?;
-        let remote = connection.remote();
-        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
-        self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
-        let settled: &Node = node;
-        let report =
-            session::reconcile_population(&mut connection, population, limits, |candidate| {
-                rescore(settled, candidate)
-            })?;
-        Ok((remote, report))
+        self.serve_node_and_population(stream, node, population, limits, rescore)
     }
 
     /// Synchronize a live node and replay newly admitted inputs into its own
@@ -318,6 +568,30 @@ impl Service {
         node: &mut Node,
     ) -> Result<PeerId, ServiceError> {
         let (stream, _) = listener.accept().map_err(TransportError::from)?;
+        self.serve_node_once(stream, node)
+    }
+
+    /// The same, on a stream the caller already accepted.
+    ///
+    /// # Why this split exists
+    ///
+    /// `listener.accept()` blocks. A caller that holds a lock over its node
+    /// while calling [`Service::accept_node_once`] therefore holds it until an
+    /// inbound connection arrives — which, on a node nobody is dialling, is
+    /// forever. `proofwork-p2p` did exactly that, and the effect was that its
+    /// main loop ran **once** and then waited on a mutex for the rest of the
+    /// process's life: no dialling, no peer seeding, no beacons, no DHT, no
+    /// fetching of missing verifier code. It looked healthy because the single
+    /// pass at startup is enough to sync from a bootstrap peer.
+    ///
+    /// Accepting outside the lock and passing the stream in is the whole fix.
+    /// The blocking wait happens with nothing held; the lock is taken only for
+    /// the session, which is bounded by the transport's own timeouts.
+    pub fn serve_node_once(
+        &self,
+        stream: std::net::TcpStream,
+        node: &mut Node,
+    ) -> Result<PeerId, ServiceError> {
         let mut connection = transport::accept(stream, &self.identity)?;
         let remote = connection.remote();
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
@@ -325,12 +599,38 @@ impl Service {
         Ok(remote)
     }
 
+    /// [`Service::accept_node_and_population`], on an accepted stream.
+    ///
+    /// Split for the reason [`Service::serve_node_once`] gives at length.
+    pub fn serve_node_and_population<F>(
+        &self,
+        stream: std::net::TcpStream,
+        node: &mut Node,
+        population: &mut Population,
+        limits: PopLimits,
+        mut rescore: F,
+    ) -> Result<(PeerId, PopReport), ServiceError>
+    where
+        F: FnMut(&Node, &Candidate) -> Option<i64>,
+    {
+        let mut connection = transport::accept(stream, &self.identity)?;
+        let remote = connection.remote();
+        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
+        let settled: &Node = node;
+        let report =
+            session::reconcile_population(&mut connection, population, limits, |candidate| {
+                rescore(settled, candidate)
+            })?;
+        Ok((remote, report))
+    }
+
     /// An address this node could use to *reach* `peer`, if it knows one.
     ///
     /// Only the address book can answer this. An inbound connection's source
     /// port is not it — see [`session::exchange_dht`].
     fn dialable(&self, peer: &PeerId) -> Option<SocketAddr> {
-        self.book.for_peer(peer).first().map(|held| held.addr)
+        self.with_book(|book| book.for_peer(peer).first().map(|held| held.addr))
     }
 
     /// Ask the peer which of this node's pins it holds, and answer the same
@@ -356,10 +656,112 @@ impl Service {
         if let Some(addr) = dialable {
             self.note_contact(connection.remote(), addr);
         }
-        self.with_directory(|directory| {
-            session::exchange_dht(connection, directory, wanted, &held, dialable, now)
+        // Serving a key means handing out somebody else's public key, which is
+        // public by construction — it is what every dialer needs and what the
+        // peer id is derived from. The book is read here rather than inside the
+        // session so the session keeps no view of the address book at all.
+        let round = self.with_directory(|directory| {
+            session::exchange_dht(
+                connection,
+                directory,
+                wanted,
+                &held,
+                dialable,
+                now,
+                |peer| {
+                    self.with_book(|book| {
+                        book.endpoints()
+                            .find(|endpoint| NodeId::from_bytes(endpoint.peer.id()) == peer)
+                            .map(|endpoint| endpoint.peer.as_bytes().to_vec())
+                    })
+                },
+            )
         })?;
+        self.adopt(round);
         Ok(())
+    }
+
+    /// Take what a DHT round learned into the parts of the service that hold it.
+    ///
+    /// A learned key is what turns a contact the routing table heard about into
+    /// a peer this node can dial — the step that makes the DHT able to
+    /// *introduce* a peer rather than only reorder the ones already known. The
+    /// key was verified against the id before it got here, so adopting it needs
+    /// no further check.
+    ///
+    /// A finished lookup's holders become **dial hints**, and where they are
+    /// kept is the whole point. They are relayed claims: a peer said "C holds
+    /// D" and could not prove it, so [`super::dht`] refuses to enter them in the
+    /// provider store. That refusal is what stops an unsigned DHT being an
+    /// amplifier — name a victim as the holder of a popular blob and the network
+    /// dials the victim — and it turns on *never re-serving* a relayed claim,
+    /// not on never acting on one. So the hints live here, are consulted only by
+    /// this node's own dialling, are answered to nobody, and are consumed on
+    /// use: a wrong one costs one dial and is gone.
+    fn adopt(&self, round: session::DhtRound) {
+        for (peer, key) in round.learned {
+            let Ok(public) = PeerPublic::from_bytes(&key) else {
+                continue;
+            };
+            // The address comes from the routing table, which is where the
+            // contact was heard of. A key with no address is not yet an
+            // endpoint, and is dropped rather than guessed at.
+            let addr = self.with_directory(|directory| {
+                directory
+                    .routing()
+                    .contacts()
+                    .find(|contact| contact.id == peer)
+                    .map(|contact| contact.addr)
+            });
+            if let Some(addr) = addr {
+                self.with_book(|book| book.insert(Endpoint::new(addr, public)));
+            }
+        }
+        if !round.finished.is_empty() {
+            let mut hints = self.hints.lock().unwrap_or_else(|e| e.into_inner());
+            for (address, holders) in round.finished {
+                if !holders.is_empty() {
+                    hints.insert(address, holders);
+                }
+            }
+        }
+        if round.bad_keys > 0 {
+            self.bad_keys
+                .fetch_add(round.bad_keys, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Adopt a finished lookup's holders without a live connection.
+    ///
+    /// The same path `Service::adopt` takes, reachable from a test that
+    /// drives the directory directly. The alternative is a test that stands up
+    /// three real McEliece sessions to assert a `BTreeMap` insert, which would
+    /// take a minute to run and test the transport rather than the rule.
+    pub fn adopt_for_test(&self, finished: Vec<(String, Vec<super::dht::Holder>)>) {
+        self.adopt(session::DhtRound {
+            finished,
+            ..session::DhtRound::default()
+        });
+    }
+
+    /// How many addresses currently have a lookup hint waiting.
+    ///
+    /// Reporting, and the only way to observe consumption from outside: once a
+    /// hint has been used the peer it named may still be dialled for other
+    /// reasons, so dial order cannot distinguish "the hint was consumed" from
+    /// "the sample happened to pick the same peer".
+    pub fn pending_hints(&self) -> usize {
+        self.hints.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Keys served that did not hash to the id asked for, since start.
+    ///
+    /// A peer doing this is broken or lying, and either way it is the kind of
+    /// thing an operator should be able to see a number for rather than guess
+    /// at. Never zeroed: a rate is what matters and the caller can difference
+    /// it.
+    pub fn bad_keys_seen(&self) -> usize {
+        self.bad_keys.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -414,7 +816,7 @@ fn needed_code(node: &Node, peer: &Peer) -> BTreeSet<String> {
 fn records_from_node(node: &Node) -> Peer {
     let mut peer = Peer::new();
     for entry in node.ledger().entries() {
-        if ["objective", "commitment", "claim"].contains(&entry.kind.as_str()) {
+        if ["objective", "commitment", "claim", "peer"].contains(&entry.kind.as_str()) {
             let _ = peer.insert(super::sync::Record::new(
                 entry.kind.clone(),
                 entry.payload.clone(),
@@ -424,11 +826,31 @@ fn records_from_node(node: &Node) -> Peer {
     peer
 }
 
+/// A 64-character hex peer id as bytes.
+///
+/// `None` for anything else. The record layer already enforces the shape, so
+/// reaching `None` here means a log assembled by other means -- and skipping
+/// one contact is a better failure than refusing to read the log.
+fn decode_peer_id(hex: &str) -> Option<PeerId> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
 fn decode_record(record: &super::sync::Record) -> Result<(), SyncError> {
     let result = match record.kind.as_str() {
         "objective" => Objective::from_value(&record.payload).map(|_| ()),
         "commitment" => Commitment::from_value(&record.payload).map(|_| ()),
         "claim" => Claim::from_value(&record.payload).map(|_| ()),
+        // Peer records travel, and that is the point of them: a node that
+        // obtains the log obtains the network with it, rather than needing an
+        // address list from somewhere else.
+        "peer" => PeerRecord::from_value(&record.payload).map(|_| ()),
         other => return Err(SyncError::NotExchangeable { kind: other.into() }),
     };
     result.map_err(|error| SyncError::MalformedMessage {
@@ -494,6 +916,14 @@ fn apply_records(node: &mut Node, peer: &Peer) {
                         let _ = node.reveal(&value, &stamp);
                     }
                 }
+                "peer" => {
+                    // Replayed through the rules like everything else, so a
+                    // stale or unsigned record is refused here exactly as it
+                    // would be if this node had been asked to post it.
+                    if let Ok(value) = PeerRecord::from_value(&record.payload) {
+                        let _ = node.post_peer(&value, &stamp);
+                    }
+                }
                 _ => {}
             }
         }
@@ -502,4 +932,15 @@ fn apply_records(node: &mut Node, peer: &Peer) {
     // deferred to the close of the reveal epoch, so a node that never drains
     // holds a log full of accepted claims that nobody was ever paid for.
     let _ = node.settle_at(&timestamp());
+}
+
+/// `Service` is the key source `swarm` needs.
+///
+/// This is the fold arriving as an interface rather than a deletion: `swarm`
+/// stops having its own answer to "where does a transport key come from" and
+/// consumes `p2p`'s, which is the direction `docs/roadmap.md` asks for.
+impl crate::swarm::tcp::KeySource for Service {
+    fn key_for(&self, peer: &PeerId) -> Option<PeerPublic> {
+        Service::key_for(self, peer)
+    }
 }

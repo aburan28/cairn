@@ -8,7 +8,7 @@ use super::handshake::{peer_id_hex, PeerId, PeerPublic};
 use rand_core::RngCore;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 
 /// A dialable address together with the key expected at that address.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +21,49 @@ impl Endpoint {
     pub fn new(addr: SocketAddr, peer: PeerPublic) -> Endpoint {
         Endpoint { addr, peer }
     }
+}
+
+/// Turn a written address into something dialable, resolving a name if needed.
+///
+/// # Why this is not in the rules layer
+///
+/// It is called from the dial path and from nowhere else, and that placement is
+/// the whole design. [`crate::records::MAX_PEER_ADDR`] already explains why the
+/// *record* format refuses to decide what a valid address is: two
+/// implementations that disagree about whether a record is admissible are a
+/// consensus split, and `SocketAddr` parsing differs between languages at the
+/// edges. A DNS lookup is that hazard several times over — the answer depends
+/// on the resolver, the network, the moment, and whoever runs the zone. A rule
+/// that consulted it would make admissibility depend on the weather.
+///
+/// So nothing here is ever consulted by [`crate::node::Node::audit`]. A name
+/// that does not resolve costs a dial, exactly as a wrong IP does.
+///
+/// # Why a hostile answer is not worth anything
+///
+/// `docs/discovery.md` states the rule this implements: *DNS may carry signed
+/// records. It may never be the thing that decides.* An attacker who controls
+/// the zone can send a dial anywhere they like, and the handshake then fails,
+/// because a peer id **is** `sha256(public key)` and no impostor can produce a
+/// key that hashes to somebody else's id. Hostile DNS costs a wasted connection
+/// and cannot produce a wrong peer, which is what makes a name safe to accept
+/// from a stranger.
+///
+/// A literal `IP:port` is parsed without touching the resolver at all, so the
+/// common case pays nothing and a node with no DNS at all is unaffected.
+pub fn dialable(addr: &str) -> Option<SocketAddr> {
+    if let Ok(parsed) = addr.parse::<SocketAddr>() {
+        return Some(parsed);
+    }
+    // `to_socket_addrs` blocks. Every caller is already on a blocking dial
+    // path, so this adds no new class of stall -- but it is why this is not
+    // called from anywhere that holds a lock or answers a request.
+    //
+    // The first answer, not all of them: a multi-homed name is a hint list and
+    // the caller retries by dialling again, which is the same recovery an
+    // unreachable literal address gets. Trying every record here would bury a
+    // per-address timeout inside what callers treat as one attempt.
+    addr.to_socket_addrs().ok()?.next()
 }
 
 /// Errors while decoding peer ids or registering an endpoint.
@@ -176,6 +219,36 @@ fn pick<R: RngCore>(bound: usize, rng: &mut R) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_literal_address_never_touches_the_resolver_and_a_name_does() {
+        // The fast path: a literal parses byte for byte, so a node on a host
+        // with no DNS at all is unaffected by any of this.
+        assert_eq!(
+            dialable("127.0.0.1:9000"),
+            Some("127.0.0.1:9000".parse().expect("literal"))
+        );
+        assert_eq!(
+            dialable("[::1]:9000"),
+            Some("[::1]:9000".parse().expect("v6 literal"))
+        );
+
+        // A name resolves. `localhost` rather than a public zone: a test that
+        // needs the internet is a test that fails for reasons that have nothing
+        // to do with what it asserts.
+        let resolved = dialable("localhost:9000").expect("localhost resolves");
+        assert_eq!(resolved.port(), 9000);
+        assert!(resolved.ip().is_loopback(), "got {resolved}");
+
+        // Refused, not guessed. A name with no port has no dialable form, and
+        // inventing one would dial somewhere the operator never named.
+        assert_eq!(dialable("localhost"), None);
+        assert_eq!(dialable(""), None);
+        assert_eq!(dialable("127.0.0.1"), None);
+        // A name that cannot resolve costs a dial rather than a wrong peer, so
+        // it is `None` here and a skipped contact upstream.
+        assert_eq!(dialable("no-such-host.invalid:9000"), None);
+    }
+
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 

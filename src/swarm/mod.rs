@@ -1,19 +1,54 @@
 //! Peer-to-peer blob transfer, in the BitTorrent shape.
 //!
-//! # This module's transport is not encrypted
+//! # The transport is `p2p`'s
 //!
-//! `swarm::tcp` speaks a plaintext framing over a bare `TcpStream`: no handshake, no
-//! AEAD, no peer authentication. It is behind the off-by-default
-//! `insecure-swarm-tcp` feature so it cannot be built into anything by accident,
-//! and [`crate::p2p::transport`] — Classic McEliece to an AEAD channel — is the
-//! transport everything the daemon runs goes through.
+//! [`tcp`] runs over [`crate::p2p::transport`] — Classic McEliece to an AEAD
+//! channel — like everything else in this crate that opens a socket. It was
+//! plaintext for a while, behind an off-by-default feature so it could not ship
+//! by accident; that gate is gone because the reason for it is.
 //!
-//! The gap is not an oversight so much as an unfinished merge. The two stacks
-//! were written independently; `swarm`'s peer records carry an ed25519 identity,
-//! and the encrypted transport needs the responder's McEliece public key, which
-//! is 261,120 bytes and has no place in a gossiped record. Closing it properly
-//! means folding this module onto `p2p`'s identity, which `docs/roadmap.md`
-//! tracks.
+//! Two things had to exist first, and neither was the socket work:
+//!
+//! * **An identity both stacks could agree on.** `swarm`'s peer records name an
+//!   ed25519 key; the transport needs a 261,120-byte McEliece key, which has no
+//!   place in a record meant to be relayed. [`discovery::PeerRecord`] now
+//!   carries the 32-byte *id* of one — the same construction
+//!   [`crate::records::PeerRecord`] uses for the log — so a record locates a
+//!   peer and names what to check a fetched key against.
+//! * **A session that can be in two threads.** The writer thread below is
+//!   deliberate: a peer that stops reading must block its own socket rather than
+//!   the state machine every other peer is waiting on. A `Connection` takes
+//!   `&mut self` on both halves, and a mutex would starve the writer whenever
+//!   the reader blocked. [`crate::p2p::transport::Connection::split`] is the
+//!   answer, and it is sound because a session's two directions share no state.
+//!
+//! `a_transfer_puts_no_plaintext_on_the_wire` is the check that this is true of
+//! the bytes rather than only of the API: a recording relay sits between leech
+//! and seed, and neither the blob nor its digest appears in the capture.
+//!
+//! # What this cost, and what is still owed
+//!
+//! An authenticated dial needs the responder's key, so [`tcp::fetch`] takes
+//! endpoints rather than bare addresses. A relayed peer record carries an id and
+//! not a key, so **an address learned by peer exchange is now a hint that
+//! something must complete before it can be dialled**. Before this, the second
+//! fetch on a node needed no `--peer` at all; now it needs the key too.
+//!
+//! [`tcp::KeySource`] is the seam that gives it back, and
+//! [`crate::p2p::service::Service`] implements it over the address book
+//! [`crate::p2p::dht`]'s `GetKey` fills. `tcp::complete` turns every hint the
+//! book holds into a dialable endpoint for each one a source can supply a key
+//! for, so a node with a running `p2p` stack needs an endpoint handed to it
+//! once and never again.
+//!
+//! This is the fold arriving as an interface rather than a deletion, and the
+//! shape is the point: the two address books here and in
+//! [`crate::p2p::discovery`] are **not** duplicates, which is worth saying
+//! because the two were described as duplicates for a long time. This one holds
+//! signed, relayable records — who a peer is and where it claims to be, with a
+//! monotonic sequence so a stale claim cannot supersede a fresh one. That one
+//! holds a 261 KiB McEliece key per peer, which can never be relayed and is
+//! only ever a local cache. Neither can do the other's job.
 //!
 //! Everything else here is a pure state machine with no socket: [`piece`],
 //! [`wire`], [`dht`] and [`discovery`] are always compiled, and
@@ -100,15 +135,14 @@
 //! rules -- rarest-first, endgame, choking -- be tested by asserting on exact
 //! output rather than by running a network and hoping.
 //!
-//! `swarm::tcp` is where the clock, the sockets and the threads live, and it is the
+//! [`tcp`] is where the clock, the sockets and the threads live, and it is the
 //! only part of this module that can fail for reasons that are nobody's fault.
 
 pub mod dht;
 pub mod discovery;
 pub mod piece;
-/// The TCP driver, gated because it is **not encrypted**. See the
-/// `insecure-swarm-tcp` feature in `Cargo.toml`.
-#[cfg(feature = "insecure-swarm-tcp")]
+/// The TCP driver. Runs over `p2p::transport` -- Classic McEliece to an
+/// AEAD channel -- like everything else that opens a socket in this crate.
 pub mod tcp;
 pub mod wire;
 
@@ -121,7 +155,6 @@ use wire::Message;
 pub use dht::{Contact, Lookup, NodeId, ProviderStore, RoutingTable};
 pub use discovery::{AddressBook, PeerRecord};
 pub use piece::{Layout, Manifest as PieceManifest, DEFAULT_PIECE_LEN};
-#[cfg(feature = "insecure-swarm-tcp")]
 pub use tcp::{fetch, serve, Listener, TransferError};
 pub use wire::{Handshake, WireError};
 

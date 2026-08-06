@@ -28,6 +28,17 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// A host and a port, without deciding what the host means.
+///
+/// `[::1]:9000` splits at the last colon, which is why this uses `rsplit_once`
+/// rather than counting them.
+fn is_host_port(addr: &str) -> bool {
+    match addr.rsplit_once(':') {
+        Some((host, port)) => !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p != 0),
+        None => false,
+    }
+}
+
 fn main() {
     let mut addr = None;
     let mut out = None;
@@ -44,7 +55,14 @@ fn main() {
     }
     let addr = addr.unwrap_or_else(|| usage());
     let out = out.unwrap_or_else(|| usage());
-    if addr.parse::<std::net::SocketAddr>().is_err() {
+    // Shape only, and deliberately not `SocketAddr::parse`: this tool writes
+    // config for a host that may be down, or not yet built, so resolving here
+    // would refuse a perfectly good file for a peer that is merely offline.
+    // A hostname is a legal address everywhere it is dialled -- see
+    // `p2p::discovery::dialable` -- and the usage line has always said
+    // HOST:PORT, so refusing a name here contradicted both the daemon and this
+    // program's own help text.
+    if !is_host_port(&addr) {
         eprintln!("--addr {addr:?} is not a host:port address");
         std::process::exit(2);
     }
