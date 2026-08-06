@@ -33,8 +33,9 @@ cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/proofwork}"
 DAEMON="${P2P_BIN:-./target/release/proofwork-p2p}"
+SERVE="${SERVE_BIN:-./target/release/proofwork-serve}"
 REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
-if [ ! -x "$RUST" ] || [ ! -x "$DAEMON" ]; then
+if [ ! -x "$RUST" ] || [ ! -x "$DAEMON" ] || [ ! -x "$SERVE" ]; then
   echo "building release binaries..." >&2
   cargo build --release
 fi
@@ -51,7 +52,7 @@ A="$WORK/a"
 B="$WORK/b"
 mkdir -p "$A" "$B"
 cleanup() {
-  for pid in ${APID:-} ${BPID:-}; do kill "$pid" 2>/dev/null || true; done
+  for pid in ${APID:-} ${BPID:-} ${SERVE_PID:-}; do kill "$pid" 2>/dev/null || true; done
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -85,8 +86,6 @@ sleep 1.1
 sleep 1.1
 "$RUST" --log "$A/log.jsonl" --root "$A" settle | sed 's/^/  /'
 
-# The daemon generates a root key if the file is absent; the CLI's `checkpoint`
-# does not, so one is made here rather than relying on which ran first.
 # A second objective, left open. The collatz one above has settled, and a plain
 # objective settles once -- so a commitment against it is correctly refused, and
 # a queue test using it would prove only that the daemon can say no.
@@ -94,6 +93,8 @@ OPEN_OID=$("$RUST" --log "$A/log.jsonl" --root "$A" post examples/capset/objecti
   | head -1 | awk '{print $2}')
 echo "  a second objective, still open: $OPEN_OID"
 
+# The daemon generates a root key if the file is absent; the CLI's `checkpoint`
+# does not, so one is made here rather than relying on which ran first.
 python3 -c "
 import json, secrets
 json.dump({'secret': secrets.token_bytes(32).hex()}, open('$A/rootkey.json', 'w'))"
@@ -166,6 +167,26 @@ echo "$REF_VIEW" | sed 's/^/  /'
 echo "$REF_VIEW" | grep -q "log verified" \
   || fail "the reference cannot audit a node that got its verifier over the wire"
 
+rule "the whole documented topology, on one log"
+# `proofwork-serve` beside the daemon, both on A's log. This is the deployment
+# `docs/serving.md` describes and nothing ran until now: the server is a reader
+# and a spooler, the daemon is the single writer, and a submission crosses from
+# one to the other through the queue.
+#
+# It did not compose. `proofwork drain` wants the write lock the daemon holds,
+# so for as long as the daemon was the only thing that could run alongside the
+# server, an *online* node could not accept a submission at all.
+SERVE_PORT=$(free_port)
+"$SERVE" --log "$A/log.jsonl" --root "$A" --listen "127.0.0.1:$SERVE_PORT" \
+  --queue "$A/queue" > "$A/serve.log" 2>&1 &
+SERVE_PID=$!
+for _ in $(seq 1 100); do
+  grep -q "listening on" "$A/serve.log" 2>/dev/null && break
+  sleep 0.2
+done
+grep -q "listening on" "$A/serve.log" || fail "proofwork-serve never bound"
+sed 's/^/  /' "$A/serve.log"
+
 rule "A's main loop is still running, several ticks in"
 # The regression check for a deadlock a unit test cannot reach. The accept
 # thread used to take the node's mutex and *then* block on `listener.accept()`,
@@ -178,18 +199,24 @@ rule "A's main loop is still running, several ticks in"
 # submission *after* startup is what tells the difference: it can only be
 # admitted by a loop that is still going round.
 BEFORE=$(entries "$A/log.jsonl")
+# Submitted the way a stranger would, over HTTP, rather than by writing the
+# spool file directly: that exercises the boundary shape check and the 202 as
+# well as the admission.
 python3 - <<PY
-import hashlib, json
+import hashlib, json, urllib.request
 oid = "$OPEN_OID"
 inner = json.dumps({"cap": []}, sort_keys=True, separators=(',', ':'))
 digest = hashlib.sha256((oid + "|" + inner + "|late|late-nonce").encode()).hexdigest()
 record = {"type": "commitment", "objective_id": oid, "submitter": "late",
           "hash": "sha256:" + digest, "created_at": "2026-08-06T09:00:00+00:00"}
-body = json.dumps({"kind": "commitment", "record": record},
-                  sort_keys=True, separators=(',', ':'))
-name = hashlib.sha256(body.encode()).hexdigest()
-open("$A/queue/" + name + ".json", "w").write(body)
-print("  queued a commitment into the running node's spool")
+request = urllib.request.Request(
+    "http://127.0.0.1:$SERVE_PORT/submit?kind=commitment",
+    data=json.dumps(record).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST")
+status = urllib.request.urlopen(request, timeout=10).status
+print(f"  POST /submit -> {status} (queued, explicitly not admitted)")
+raise SystemExit(0 if status == 202 else 1)
 PY
 for _ in $(seq 1 40); do
   [ "$(entries "$A/log.jsonl")" -gt "$BEFORE" ] && break

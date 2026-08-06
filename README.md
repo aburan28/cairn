@@ -109,8 +109,10 @@ re-derives everything themselves with `proofwork verify --from`, which is the
 whole point — they need not trust the server that served it.
 
 Add `--queue ./queue` to accept `POST /submit`. Submissions are *queued*, never
-appended: the operator admits them with `proofwork drain --queue ./queue`,
-which re-checks every rule against the whole log. See
+appended: the operator's node admits them, re-checking every rule against the
+whole log. That is `proofwork-p2p --queue ./queue` if a daemon is running — it
+holds the ledger's single write lock, so nothing else can — or
+`proofwork drain --queue ./queue` if one is not. See
 [serving.md](docs/serving.md).
 
 ### Start a p2p node

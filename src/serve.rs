@@ -394,8 +394,19 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
     let local = listener.local_addr()?;
     eprintln!("proofwork-serve: listening on {local}");
     if let Some(spool) = &serving.spool {
+        // Both admitters are named, because which one applies depends on
+        // something this process cannot see. `proofwork drain` wants the
+        // ledger's write lock, so it works only when no daemon holds it;
+        // pointing an operator at it alone is pointing half of them at a
+        // command that will refuse.
         eprintln!(
-            "proofwork-serve: accepting submissions into {} (drain them with `proofwork drain`)",
+            "proofwork-serve: accepting submissions into {}",
+            spool.dir().display()
+        );
+        eprintln!(
+            "proofwork-serve:   admitted by `proofwork-p2p --queue {}` if a daemon \
+             is running, or `proofwork drain --queue {}` if not",
+            spool.dir().display(),
             spool.dir().display()
         );
     } else {
