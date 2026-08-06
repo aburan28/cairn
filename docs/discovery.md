@@ -95,7 +95,15 @@ replicates a hash-linked log, so **discovery is not a new bootstrap problem — 
 is the same one as obtaining the log.** Solving it twice is the mistake. The
 split that makes it work: *identity* is permanent and belongs in the log;
 *location* is ephemeral and does not, because the log is append-only and an IP is
-not. *Not built; the natural next step.*
+not. *Built — `records::PeerRecord`, appended with `proofwork peer`.*
+
+The location half is handled by a `seq` rather than by leaving it out: a peer
+that moves appends a record with a higher one and the highest wins, which is
+last-writer-wins with an audit trail. What the record actually vouches for is
+the 32-byte `sha256` of a McEliece transport key, not the key — 261,120 bytes
+does not go in a structure every node replicates — and the key is fetched on
+demand and checked against the id, which needs no trust because the id is its
+hash. `Service::seed_from_log` fills the address book from the log at startup.
 
 **Kademlia DHT with provider records.** *Built — `src/swarm/dht.rs`.* The
 standard answer to "who has content X", and the right one: a fetch wants exactly

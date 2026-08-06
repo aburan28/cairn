@@ -186,7 +186,10 @@ B -> A   PopRecords
 
 **Why not more record kinds.** The record path refuses `verdict`, `settlement`
 and `frontier` outright, because importing a peer's conclusion is the trust this
-project exists to remove. A shared message enum would mean one decoder, one set
+project exists to remove. `peer` is the one kind added since, and it passes the
+same test: it is a *claim by a key about itself*, checked by signature and by a
+handshake that an impostor cannot complete, not a conclusion anybody has to
+believe. A shared message enum would mean one decoder, one set
 of ceilings and one `match` covering both families, and the next person to add a
 variant would have to notice that half of them must never reach the record path.
 So: separate type, separate limits, and a **separate AEAD context string**, which

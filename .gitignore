@@ -1,5 +1,7 @@
-# Rust
-/target/
+# Rust. Unanchored, so it catches `reference/rust/target/` too -- that is its
+# own workspace with its own build directory, and `/target/` matched only the
+# root one. 1,386 build artifacts were tracked before this was noticed.
+target/
 **/*.rs.bk
 Cargo.lock.orig
 

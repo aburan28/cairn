@@ -172,9 +172,23 @@ behaviour ships and is tested, not that TLC has checked it.
       trade a contained duplication for an uncontained one. The containment
       -- `insecure-swarm-tcp` off by default, so the unencrypted socket cannot
       reach a binary by accident -- is what makes deferring it safe.
-- [ ] Peer identities in the log, so *identity* discovery stops being a separate
-      bootstrap problem from obtaining the log. Identity is permanent and belongs
-      there; provider records are not and must not.
+- [x] **Peer identities in the log** (`records::PeerRecord`, `proofwork peer`).
+      A fourth record kind binding a permanent ed25519 identity to the transport
+      id it answers on, plus an address hint and a `seq` that supersedes — so
+      obtaining the log *is* obtaining the address book, and finding the network
+      stops being a second bootstrap problem solved by a separate file.
+      The two identity schemes are reconciled rather than merged: ed25519 signs
+      the record and is the authority, and what it vouches for is the 32-byte
+      `sha256` of a McEliece transport key, not the key itself — a McEliece
+      public key is 261,120 bytes and does not belong in a structure every node
+      replicates. The transport key is fetched on demand and checked against the
+      id, which needs no trust because the id is its hash.
+      Provider records stay out, as this line always said: who *holds* a blob is
+      a statement about right now, and an append-only log cannot say "no longer
+      true". A false record costs a dial and never a wrong result — an impostor
+      cannot produce a key hashing to a transport id they do not hold, so the
+      handshake fails. `Service::seed_from_log` feeds the address book from the
+      log at startup.
 - [ ] Local multicast as a second hint source: genuinely zero-configuration on a
       LAN, and cheap now that every source is interchangeable.
 - [ ] NAT traversal. Not discovery, and routinely confused with it -- knowing an

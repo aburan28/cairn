@@ -71,7 +71,7 @@ use proofwork::incentive::design::Report as IncentiveReport;
 use proofwork::incentive::{NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError};
 use proofwork::node::Node;
-use proofwork::records::{commitment_hash, Claim, Commitment, Objective, RecordError};
+use proofwork::records::{commitment_hash, Claim, Commitment, Objective, PeerRecord, RecordError};
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
 use proofwork::serve::Spool;
 use proofwork::store::atrest::{AtRestError, Cipher};
@@ -139,6 +139,11 @@ fn ledger_of(node: &Node) -> &Ledger {
 
 fn post_objective(node: &mut Node, objective: &Objective, ts: &str) -> Result<String, CliError> {
     node.post_objective(objective, ts)
+        .map_err(|violation| CliError::Refused(violation.to_string()))
+}
+
+fn post_peer_record(node: &mut Node, record: &PeerRecord, ts: &str) -> Result<String, CliError> {
+    node.post_peer(record, ts)
         .map_err(|violation| CliError::Refused(violation.to_string()))
 }
 
@@ -522,6 +527,19 @@ enum Command {
     Identity {
         out: String,
     },
+    /// Announce a peer identity in the log, or move one to a new address.
+    ///
+    /// The record that makes finding the network part of obtaining the log
+    /// rather than a second bootstrap problem. See [`proofwork::records::PeerRecord`].
+    Peer {
+        identity: String,
+        transport: String,
+        addr: String,
+        /// `None` means "one past whatever this identity has already said",
+        /// which is what an operator moving house actually wants and what they
+        /// would otherwise have to look up by reading their own log.
+        seq: Option<u64>,
+    },
     Keygen {
         wrap: bool,
     },
@@ -784,6 +802,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
                 record: require(record, "decode", "--record <file>")?,
             }
         }
+        "peer" => parse_peer(&mut cursor)?,
         "identity" => {
             let mut out: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1135,6 +1154,31 @@ fn parse_rate(text: &str, flag: &str) -> Result<Rat, CliError> {
     Rat::rate(num, den).ok_or_else(bad)
 }
 
+fn parse_peer(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut identity: Option<String> = None;
+    let mut transport: Option<String> = None;
+    let mut addr: Option<String> = None;
+    let mut seq: Option<u64> = None;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--identity" => identity = Some(cursor.value("--identity")?),
+            "--transport" => transport = Some(cursor.value("--transport")?),
+            "--addr" => addr = Some(cursor.value("--addr")?),
+            "--seq" => {
+                let text = cursor.value("--seq")?;
+                seq = Some(parse_u64(&text, "--seq")?);
+            }
+            other => return Err(CliError::Usage(format!("peer: unknown option {other:?}"))),
+        }
+    }
+    Ok(Command::Peer {
+        identity: require(identity, "peer", "--identity <file>")?,
+        transport: require(transport, "peer", "--transport <peer-id>")?,
+        addr: require(addr, "peer", "--addr <host:port>")?,
+        seq,
+    })
+}
+
 fn parse_keygen(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut wrap = false;
     while let Some(token) = cursor.take() {
@@ -1386,7 +1430,10 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      canonicalize one JSON value and print its digest",
     );
-    say(out, "  decode <objective|commitment|claim> --record <file>");
+    say(
+        out,
+        "  decode <objective|commitment|claim|peer> --record <file>",
+    );
     say(
         out,
         "      check one record without a log: is it admissible, and what is its id",
@@ -1399,6 +1446,18 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      so a name you sign for cannot be claimed by anyone else",
+    );
+    say(
+        out,
+        "  peer --identity <file> --transport <peer-id> --addr <host:port>",
+    );
+    say(
+        out,
+        "      announce where your identity answers, or move it; obtaining the log",
+    );
+    say(
+        out,
+        "      is then obtaining the address book, so discovery needs no second file",
     );
     say(out, "  keygen [--passphrase]");
     say(
@@ -1643,6 +1702,12 @@ fn cmd_decode(out: &mut dyn Write, kind: &str, record_path: &str) -> Result<i32,
                 record.verify_signature().map_err(|e| e.to_string())?;
                 Ok(record.id())
             }),
+        "peer" => PeerRecord::from_value(&value)
+            .map_err(|error| error.to_string())
+            .and_then(|record| {
+                record.verify_signature().map_err(|e| e.to_string())?;
+                Ok(record.id())
+            }),
         other => return Err(CliError::Usage(format!("unknown record kind {other:?}"))),
     };
     match decoded {
@@ -1656,6 +1721,55 @@ fn cmd_decode(out: &mut dyn Write, kind: &str, record_path: &str) -> Result<i32,
             Ok(1)
         }
     }
+}
+
+/// Append a peer record: this identity answers on this transport, here.
+///
+/// The signing key's public half *becomes* the record's identity — a name you
+/// sign for cannot be worn by anyone else — so there is no `--submitter` here
+/// and no way to announce on somebody else's behalf.
+fn cmd_peer(
+    out: &mut dyn Write,
+    options: &Options,
+    identity_path: &str,
+    transport: &str,
+    addr: &str,
+    seq: Option<u64>,
+) -> Result<i32, CliError> {
+    let identity = load_identity(Some(identity_path))?
+        .ok_or_else(|| CliError::Usage(String::from("peer: --identity is required")))?;
+    let mut node = open_node(options)?;
+
+    // Default to one past whatever this identity has already said. An operator
+    // moving house should not have to read their own log to find the number,
+    // and getting it wrong is a refusal rather than a silent no-op.
+    let seq = match seq {
+        Some(seq) => seq,
+        None => node
+            .peers()
+            .get(&identity.submitter_id())
+            .map(|held| held.seq.saturating_add(1))
+            .unwrap_or(1),
+    };
+    let record = PeerRecord::new(identity.submitter_id(), transport, addr, seq, timestamp())
+        .signed_with(&identity);
+
+    let id = post_peer_record(&mut node, &record, &timestamp())?;
+    say(out, format!("peer {id}"));
+    say(out, format!("  identity  {}", record.identity));
+    say(out, format!("  transport {}", short(&record.transport)));
+    say(out, format!("  addr      {} (seq {seq})", record.addr));
+    say(out, "");
+    say(
+        out,
+        "The address is a hint and the transport id is a promise: a peer dialling",
+    );
+    say(
+        out,
+        "it derives that id from the handshake or gets no session. A wrong record",
+    );
+    say(out, "costs a dial and can never cost a wrong result.");
+    Ok(0)
 }
 
 fn cmd_identity(out: &mut dyn Write, path: &str) -> Result<i32, CliError> {
@@ -3152,6 +3266,21 @@ fn summarize(kind: &str, payload: &Value) -> String {
     match kind {
         "objective" => truncate_chars(text("statement"), STATEMENT_WIDTH),
         "claim" | "commitment" => format!("by {}", text("submitter")),
+        // Identity first and truncated, because it is the part that is a name
+        // rather than a hint: two records for one identity are the same peer
+        // moving, and reading the log has to make that obvious at a glance.
+        "peer" => {
+            let seq = payload
+                .get("seq")
+                .and_then(Value::as_i128)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("?"));
+            format!(
+                "{} at {} (seq {seq})",
+                truncate_chars(text("identity"), 8),
+                text("addr")
+            )
+        }
         "verdict" => {
             let verdict = payload.get("verdict");
             let status = verdict
@@ -3410,6 +3539,12 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Canon { input } => cmd_canon(out, input),
         Command::Decode { kind, record } => cmd_decode(out, kind, record),
         Command::Identity { out: path } => cmd_identity(out, path),
+        Command::Peer {
+            identity,
+            transport,
+            addr,
+            seq,
+        } => cmd_peer(out, options, identity, transport, addr, *seq),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
         Command::Store { action } => cmd_store(out, options, action),
         Command::Sync {
@@ -4360,6 +4495,7 @@ mod tests {
             "verdict",
             "settlement",
             "frontier",
+            "peer",
             "nonsense",
         ] {
             let _ = summarize(kind, &empty);
@@ -4377,6 +4513,19 @@ mod tests {
         let claim = proofwork::obj! { "submitter" => Value::string("alice") };
         assert_eq!(summarize("claim", &claim), "by alice");
         assert_eq!(summarize("commitment", &claim), "by alice");
+
+        // The identity is truncated and the address is not: two records for one
+        // identity are the same peer moving, and a reader has to see that at a
+        // glance rather than by comparing two 64-character keys.
+        let peer = proofwork::obj! {
+            "identity" => Value::string("ab".repeat(32)),
+            "addr" => Value::string("10.0.0.9:9000"),
+            "seq" => Value::Int(2),
+        };
+        assert_eq!(
+            summarize("peer", &peer),
+            "abababab at 10.0.0.9:9000 (seq 2)"
+        );
 
         let verdict = proofwork::obj! {
             "verdict" => proofwork::obj! {

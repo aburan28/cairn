@@ -24,7 +24,7 @@ use proofwork_reference::frontier::Ratchet;
 use proofwork_reference::ledger::Ledger;
 use proofwork_reference::node::Node;
 use proofwork_reference::partition::{assign, beacon, settlement_rank};
-use proofwork_reference::records::{commitment_hash, Claim, Commitment, Objective};
+use proofwork_reference::records::{commitment_hash, Claim, Commitment, Objective, PeerRecord};
 use proofwork_reference::time::timestamp;
 
 fn main() -> ExitCode {
@@ -693,6 +693,12 @@ fn decode_record(kind: &str, value: &Value) -> Result<String, String> {
             })
             .map_err(|e| e.to_string()),
         "claim" => Claim::from_value(value)
+            .and_then(|record| {
+                record.verify_signature()?;
+                Ok(record.id())
+            })
+            .map_err(|e| e.to_string()),
+        "peer" => PeerRecord::from_value(value)
             .and_then(|record| {
                 record.verify_signature()?;
                 Ok(record.id())

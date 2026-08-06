@@ -364,10 +364,16 @@ fn main() {
         // has that blob, rather than three at random. With nothing missing this
         // is exactly the old random sample, so the DHT costs nothing in the
         // steady state. See `Service::peers_for` for what it cannot do yet.
+        // Peer records first: the log names identities this node may never
+        // have been given an address for, and seeding is what makes finding
+        // the network part of obtaining the log rather than a second bootstrap
+        // problem. Idempotent, so running it every tick costs a walk of the
+        // peer records and picks up anything a sync round just imported.
         let needs = {
             let guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            service.seed_from_log(&guard.node);
             guard.node.missing_code()
         };
         for endpoint in service.peers_for(&needs, fanout) {

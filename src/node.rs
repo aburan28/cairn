@@ -59,7 +59,7 @@ use crate::canonical::{short, Value};
 use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
 use crate::ledger::{Ledger, LedgerError};
 use crate::partition::{epoch_of, epoch_seconds, settlement_rank};
-use crate::records::{Claim, Commitment, Objective};
+use crate::records::{Claim, Commitment, Objective, PeerRecord};
 use crate::verifiers::{self, Kind, Status, Verdict, VerifierRegistry};
 
 /// Log entry kinds this module writes and reads. Spelled once so a typo cannot
@@ -73,6 +73,7 @@ const SETTLEMENT: &str = "settlement";
 const FRONTIER: &str = "frontier";
 /// Marks one reveal epoch as drained. See [`Node::settle_due`].
 const BATCH: &str = "batch";
+const PEER: &str = "peer";
 
 // ---------------------------------------------------------------------------
 // Rule violations
@@ -175,6 +176,19 @@ pub enum RuleViolation {
     /// paying a string anyone could type; a key-shaped name now has to be
     /// signed for. See [`crate::records::signed_submitter`].
     UnsignedIdentity(crate::records::SignatureError),
+    /// A peer record that does not advance its identity's sequence number.
+    ///
+    /// The rule that makes an append-only address hint behave like mutable
+    /// state without being mutable: the highest `seq` for an identity wins, so
+    /// a replayed old record cannot move a peer back to an address it has left.
+    /// Equal is refused as well as lower — two different records at one `seq`
+    /// would leave "the highest" ambiguous, and ambiguity in a rule two
+    /// implementations both apply is a consensus split.
+    StalePeerRecord {
+        identity: String,
+        seq: u64,
+        held: u64,
+    },
     /// The objective admits only signed identities, and this submitter is a
     /// nickname.
     ///
@@ -278,6 +292,16 @@ impl fmt::Display for RuleViolation {
                  epoch it settles in cannot be derived"
             ),
             RuleViolation::UnsignedIdentity(error) => write!(f, "{error}"),
+            RuleViolation::StalePeerRecord {
+                identity,
+                seq,
+                held,
+            } => write!(
+                f,
+                "peer record for {} has seq {seq}, and {held} is already held; a \
+                 record must advance its identity's sequence to supersede",
+                crate::canonical::short(identity)
+            ),
             RuleViolation::SignedSubmitterRequired {
                 objective_id,
                 submitter,
@@ -569,6 +593,63 @@ impl Node {
     /// referencing an unknown objective, and [`Node::audit`] names the entry.
     pub fn objectives(&self) -> BTreeMap<String, Objective> {
         self.decode_objectives().0
+    }
+
+    /// Announce a peer identity, or move one to a new address.
+    ///
+    /// See [`PeerRecord`] for why identity belongs in the log and location does
+    /// not, and why the sequence number is what makes an append-only record
+    /// behave like the mutable hint it has to be.
+    ///
+    /// Two checks, in this order. The signature first, because a record that
+    /// does not prove who it speaks for should be refused before its contents
+    /// are consulted at all. Then the sequence, against whatever this identity
+    /// has already said.
+    pub fn post_peer(&mut self, record: &PeerRecord, ts: &str) -> Result<String, RuleViolation> {
+        record.verify_signature()?;
+        if let Some(held) = self.peers().get(&record.identity) {
+            if record.seq <= held.seq {
+                return Err(RuleViolation::StalePeerRecord {
+                    identity: record.identity.clone(),
+                    seq: record.seq,
+                    held: held.seq,
+                });
+            }
+        }
+        let id = record.id();
+        self.append(PEER, record.to_value(), ts)?;
+        Ok(id)
+    }
+
+    /// The current peer record for each identity: highest `seq` wins.
+    ///
+    /// Keyed by identity rather than by record id, because the question every
+    /// caller asks is "where is this peer now" and a map of every record ever
+    /// written would make them all re-derive that. Ties cannot arise --
+    /// [`Node::post_peer`] refuses a record that does not advance the sequence
+    /// -- but a log assembled by other means might contain one, so the later
+    /// entry wins and the rule stays total.
+    pub fn peers(&self) -> BTreeMap<String, PeerRecord> {
+        let mut out: BTreeMap<String, PeerRecord> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(PEER) {
+            let Ok(record) = PeerRecord::from_value(&entry.payload) else {
+                continue;
+            };
+            // A record whose signature does not verify is not a statement by
+            // anybody, so it is skipped here as well as refused on admission.
+            // A log can be assembled by concatenation, and a reader must not
+            // reach a different answer from an appender.
+            if record.verify_signature().is_err() {
+                continue;
+            }
+            match out.get(&record.identity) {
+                Some(held) if held.seq > record.seq => {}
+                _ => {
+                    out.insert(record.identity.clone(), record);
+                }
+            }
+        }
+        out
     }
 
     /// The first settlement recorded for an objective, as its raw payload.
@@ -1224,6 +1305,43 @@ impl Node {
         let (objectives, mut undecodable) = self.decode_objectives();
         problems.append(&mut undecodable);
 
+        // Peer records settle nothing, so a bad one cannot cost money -- but a
+        // reader must be told rather than left to wonder why a peer the log
+        // names is never dialled. Both failures are named: one that cannot be
+        // decoded, and one that decodes and does not prove who it speaks for.
+        let mut peer_seqs: BTreeMap<&str, u64> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(PEER) {
+            let record = match PeerRecord::from_value(&entry.payload) {
+                Ok(record) => record,
+                Err(error) => {
+                    problems.push(format!(
+                        "peer at entry {}: cannot be decoded ({error})",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            if let Err(error) = record.verify_signature() {
+                problems.push(format!("peer at entry {}: {error}", entry.seq));
+                continue;
+            }
+            // A record that does not advance its identity's sequence is one
+            // `post_peer` would have refused, so finding one means the log was
+            // assembled by other means and a reader should know.
+            match peer_seqs.get(entry_identity(&entry.payload).unwrap_or_default()) {
+                Some(held) if *held >= record.seq => problems.push(format!(
+                    "peer at entry {}: seq {} does not advance {held} for {}",
+                    entry.seq,
+                    record.seq,
+                    crate::canonical::short(&record.identity)
+                )),
+                _ => {}
+            }
+            if let Some(identity) = entry_identity(&entry.payload) {
+                peer_seqs.insert(identity, record.seq);
+            }
+        }
+
         // Later verdicts supersede earlier ones for the same claim, matching the
         // reference implementation's dict assignment.
         let mut recorded: BTreeMap<&str, &Value> = BTreeMap::new();
@@ -1695,6 +1813,15 @@ impl Node {
 
 fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(Value::as_str)
+}
+
+/// The `identity` of a peer payload, borrowed from the entry.
+///
+/// Borrowed rather than taken from the decoded [`PeerRecord`], so the audit's
+/// per-identity sequence map can key on the entry without cloning a string per
+/// record.
+fn entry_identity(payload: &Value) -> Option<&str> {
+    payload_str(payload, "identity")
 }
 
 /// Which epoch an RFC-3339 instant falls in.
@@ -3341,5 +3468,123 @@ mod tests {
         }
         .to_string()
         .contains("certificate"));
+    }
+
+    // -- peer records -------------------------------------------------------
+
+    fn peer_of(byte: u8, seq: u64, addr: &str) -> PeerRecord {
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([byte; 32]);
+        PeerRecord::new(identity.submitter_id(), "ab".repeat(32), addr, seq, TS)
+            .signed_with(&identity)
+    }
+
+    #[test]
+    fn a_peer_record_supersedes_only_by_advancing_its_sequence() {
+        // What makes an append-only record behave like the mutable hint an
+        // address has to be, without being mutable: the highest seq wins, and a
+        // replayed old record cannot move a peer back to an address it left.
+        let dir = TempDir::new("peer-seq");
+        let mut node = node(&dir);
+
+        node.post_peer(&peer_of(1, 1, "203.0.113.1:9000"), TS)
+            .expect("first record");
+        node.post_peer(&peer_of(1, 2, "203.0.113.2:9000"), TS)
+            .expect("a higher seq supersedes");
+
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([1u8; 32]);
+        let held = node.peers();
+        assert_eq!(held.len(), 1, "one entry per identity, not per record");
+        assert_eq!(held[&identity.submitter_id()].addr, "203.0.113.2:9000");
+        assert_eq!(held[&identity.submitter_id()].seq, 2);
+
+        // The replay, which is the attack: an old signed record is still a
+        // valid signed record, so only the sequence rule stops it.
+        let error = node
+            .post_peer(&peer_of(1, 1, "203.0.113.1:9000"), TS)
+            .expect_err("a replayed record was admitted");
+        assert!(
+            matches!(error, RuleViolation::StalePeerRecord { .. }),
+            "got {error:?}"
+        );
+        // Equal is refused too: two records at one seq would make "the highest"
+        // ambiguous, and an ambiguous rule is a consensus split.
+        assert!(node
+            .post_peer(&peer_of(1, 2, "198.51.100.7:9000"), TS)
+            .is_err());
+        assert_eq!(
+            node.peers()[&identity.submitter_id()].addr,
+            "203.0.113.2:9000"
+        );
+    }
+
+    #[test]
+    fn an_unsigned_or_forged_peer_record_is_refused() {
+        let dir = TempDir::new("peer-sig");
+        let mut node = node(&dir);
+
+        let mut unsigned = peer_of(2, 1, "203.0.113.1:9000");
+        unsigned.signature = None;
+        assert!(matches!(
+            node.post_peer(&unsigned, TS).expect_err("unsigned"),
+            RuleViolation::UnsignedIdentity(_)
+        ));
+
+        // Mallory's real signature under alice's name.
+        let alice = crate::crypto::identity::Identity::from_secret_bytes([2u8; 32]);
+        let mut forged = peer_of(3, 1, "203.0.113.9:9000");
+        forged.identity = alice.submitter_id();
+        assert!(node.post_peer(&forged, TS).is_err());
+        assert!(node.peers().is_empty());
+    }
+
+    #[test]
+    fn a_reader_and_an_appender_agree_about_a_hand_assembled_log() {
+        // A log can be produced by concatenation rather than by this API, so
+        // `peers()` must apply the same rules `post_peer` does. A reader that
+        // trusted a record the appender would have refused is a fork.
+        let dir = TempDir::new("peer-assembled");
+        let mut node = node(&dir);
+        let alice = crate::crypto::identity::Identity::from_secret_bytes([4u8; 32]);
+
+        node.post_peer(&peer_of(4, 5, "203.0.113.5:9000"), TS)
+            .expect("a real record");
+        // Appended straight to the ledger, bypassing the rules: an unsigned
+        // record and a stale one.
+        let mut unsigned = peer_of(4, 9, "198.51.100.9:9000");
+        unsigned.signature = None;
+        node.ledger_mut()
+            .append("peer", unsigned.to_value(), TS)
+            .expect("append");
+
+        assert_eq!(
+            node.peers()[&alice.submitter_id()].addr,
+            "203.0.113.5:9000",
+            "an unsigned record spoke for an identity it could not prove"
+        );
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("peer at entry")),
+            "the audit said nothing about a bad peer record: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn peer_records_do_not_disturb_settlement() {
+        // They settle nothing and pay nobody, so their presence must not change
+        // a single derived value -- which is the property that makes adding a
+        // record kind to a live log safe.
+        let dir = TempDir::new("peer-inert");
+        let mut node = node(&dir);
+        let objective = lean_objective(1000);
+        node.post_objective(&objective, TS).expect("post");
+        let before = node.audit(false);
+        let root_before = node.ledger().root();
+
+        node.post_peer(&peer_of(6, 1, "203.0.113.6:9000"), TS)
+            .expect("peer");
+
+        assert_eq!(node.audit(false), before, "the audit changed");
+        assert_ne!(node.ledger().root(), root_before, "the log did not grow");
+        assert_eq!(node.objectives().len(), 1);
     }
 }

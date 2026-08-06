@@ -57,6 +57,7 @@ pub enum RecordKind {
     Objective,
     Commitment,
     Claim,
+    Peer,
 }
 
 impl RecordKind {
@@ -65,6 +66,7 @@ impl RecordKind {
             RecordKind::Objective => "objective",
             RecordKind::Commitment => "commitment",
             RecordKind::Claim => "claim",
+            RecordKind::Peer => "peer",
         }
     }
 }
@@ -1060,6 +1062,233 @@ impl Claim {
     }
 }
 
+/// A peer's permanent identity, and the transport it currently answers on.
+///
+/// # Why identity belongs in the log and location does not
+///
+/// Finding the network was a second bootstrap problem: a node needed a log
+/// *and* an address list, obtained separately, and nothing tied the two
+/// together. A peer's identity is permanent, so it belongs in the permanent
+/// record — the same argument that puts objectives there and keeps provider
+/// records out, since who *holds* a blob is a statement about right now and an
+/// append-only structure has no way to say "no longer true".
+///
+/// An address is not permanent either, which is why this record carries a
+/// [`PeerRecord::seq`]: a peer that moves appends a new record with a higher
+/// one, and the highest wins. Append-only plus a sequence number is
+/// last-writer-wins with an audit trail, which is strictly better than mutable
+/// state for the same job.
+///
+/// # Two keys, and the binding between them is the point
+///
+/// This crate has two identity schemes and they are not interchangeable:
+///
+/// * **ed25519** signs. It is what a submitter name already *is* (see
+///   [`signed_submitter`]), it is 32 bytes, and it is affordable in a log every
+///   node replicates.
+/// * **McEliece** keys the transport. It cannot sign — it is a KEM — and its
+///   public key is 261,120 bytes, which is not affordable in a log at all.
+///
+/// So the record carries the ed25519 key as the **authority** and the McEliece
+/// *peer id* — a 32-byte `sha256` of that key — as the thing being vouched for.
+/// The transport key itself is fetched on demand over the wire and checked
+/// against the id, which needs no trust because the id is its hash. Two hundred
+/// bytes in the log instead of half a megabyte, and the expensive half is paid
+/// only by nodes that actually dial.
+///
+/// # What a lie costs
+///
+/// Anyone may append a record for an identity they hold, naming any transport
+/// id and any address. Doing so buys nothing: dialling that transport id
+/// requires a key that hashes to it, and an impostor cannot produce one, so the
+/// handshake fails. A wrong record costs a dial, never a wrong result — the
+/// same bound [`crate::p2p::dht`] gives for a wrong routing answer, and for the
+/// same reason.
+///
+/// What it cannot do is speak for somebody else's identity: the signature is
+/// checked against the `identity` field, so a record is only ever a statement
+/// by the key that signed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRecord {
+    /// Ed25519 public key, hex. The permanent name, and the record's authority.
+    pub identity: String,
+    /// The transport peer id this identity vouches for: `sha256` of a McEliece
+    /// public key, hex.
+    pub transport: String,
+    /// Where to try. A hint, superseded by any later record with a higher
+    /// [`PeerRecord::seq`], and never load-bearing: an address that does not
+    /// work costs a dial.
+    pub addr: String,
+    /// Freshness. Strictly increasing per identity; a record that does not
+    /// advance it is a replay and is refused.
+    pub seq: u64,
+    pub created_at: String,
+    /// Ed25519 signature over [`PeerRecord::signing_payload`], hex.
+    ///
+    /// **Required**, unlike a claim's. A claim may be posted under a nickname,
+    /// because a nickname claims nothing; a peer record whose entire purpose is
+    /// to authenticate an address would authenticate nothing without one.
+    pub signature: Option<String>,
+}
+
+/// Longest `addr` a peer record may carry.
+///
+/// A generous bound on `host:port`, and a bound rather than a parse. The
+/// consensus layer deliberately does **not** decide whether an address is
+/// well-formed: `SocketAddr` parsing differs between languages at the edges —
+/// IPv6 bracket forms, leading zeros, zone identifiers — and two
+/// implementations disagreeing about whether a record is admissible is a
+/// consensus split. So the rule here is length and printable ASCII, and
+/// [`crate::p2p`] parses what it can and ignores the rest.
+pub const MAX_PEER_ADDR: usize = 255;
+
+impl PeerRecord {
+    pub fn new(
+        identity: impl Into<String>,
+        transport: impl Into<String>,
+        addr: impl Into<String>,
+        seq: u64,
+        created_at: impl Into<String>,
+    ) -> PeerRecord {
+        PeerRecord {
+            identity: identity.into(),
+            transport: transport.into(),
+            addr: addr.into(),
+            seq,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    /// The bytes a signature covers: this record without its own signature.
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::Peer.as_str())),
+            ("addr", Value::string(self.addr.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("identity", Value::string(self.identity.clone())),
+            ("seq", Value::Int(i128::from(self.seq))),
+            ("transport", Value::string(self.transport.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Sign this record with `identity`, returning the signed copy.
+    ///
+    /// The signing key's public half *becomes* the `identity` field, for the
+    /// reason a signed claim's submitter becomes its key: a name you sign for
+    /// cannot be worn by anyone else, and a record whose name and key disagreed
+    /// would be a record about somebody else.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> PeerRecord {
+        self.identity = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    /// Check the signature. Always required — see the field's documentation.
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "peer";
+        if signed_submitter(&self.identity).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        }
+        let Some(signature) = self.signature.as_deref() else {
+            return Err(SignatureError::Missing {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        };
+        verify_record_signature(
+            RECORD,
+            &self.identity,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    /// Structural rules, checked before the signature is looked at.
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "peer";
+        let hex64 = |text: &str| {
+            text.len() == 64
+                && text
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if !hex64(&self.identity) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "identity",
+                expected: "64 lowercase hex characters of ed25519 public key",
+            });
+        }
+        if !hex64(&self.transport) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "transport",
+                expected: "64 lowercase hex characters of transport peer id",
+            });
+        }
+        // Length and printable ASCII, never a parse. See [`MAX_PEER_ADDR`].
+        if self.addr.is_empty()
+            || self.addr.len() > MAX_PEER_ADDR
+            || !self
+                .addr
+                .bytes()
+                .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
+        {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "addr",
+                expected: "1 to 255 printable ASCII characters, no quote or backslash",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<PeerRecord, RecordError> {
+        const RECORD: &str = "peer";
+        let value = expect_object(value, RECORD)?;
+        let seq = match required(value, RECORD, "seq")? {
+            // `u64` and not wider: a sequence number is a counter, and the
+            // range check happens here rather than at a cast so a record from
+            // an arbitrary-precision implementation is refused rather than
+            // silently truncated into a *different* record.
+            Value::Int(n) if *n >= 0 && *n <= i128::from(u64::MAX) => *n as u64,
+            _ => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "seq",
+                    expected: "an integer in [0, 2^64)",
+                })
+            }
+        };
+        let record = PeerRecord {
+            identity: required_string(value, RECORD, "identity")?,
+            transport: required_string(value, RECORD, "transport")?,
+            addr: required_string(value, RECORD, "addr")?,
+            seq,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1701,5 +1930,169 @@ mod tests {
         assert!((RecordError::RewardOutOfRange { reward: -1 })
             .to_string()
             .contains("-1"));
+    }
+
+    // -- peer records -------------------------------------------------------
+
+    fn peer_identity(byte: u8) -> crate::crypto::identity::Identity {
+        crate::crypto::identity::Identity::from_secret_bytes([byte; 32])
+    }
+
+    fn peer_record(identity: &crate::crypto::identity::Identity, seq: u64) -> PeerRecord {
+        PeerRecord::new(
+            identity.submitter_id(),
+            "ab".repeat(32),
+            "203.0.113.9:9000",
+            seq,
+            "2026-07-28T00:00:00+00:00",
+        )
+        .signed_with(identity)
+    }
+
+    #[test]
+    fn a_peer_record_round_trips_and_its_id_covers_its_signature() {
+        // The same property every signed record here has: strip the signature
+        // and you have a *different* record, so a signature cannot be removed
+        // from something somebody cited.
+        let identity = peer_identity(1);
+        let record = peer_record(&identity, 1);
+        assert!(record.verify_signature().is_ok());
+
+        let decoded = PeerRecord::from_value(&record.to_value()).expect("decodes");
+        assert_eq!(decoded, record);
+        assert!(decoded.verify_signature().is_ok());
+
+        let mut stripped = record.clone();
+        stripped.signature = None;
+        assert_ne!(stripped.id(), record.id());
+    }
+
+    #[test]
+    fn a_peer_record_must_be_signed_and_only_for_itself() {
+        // A claim may be posted under a nickname because a nickname claims
+        // nothing. A peer record exists to authenticate an address, so an
+        // unsigned one authenticates nothing and is refused rather than
+        // admitted as a weaker statement.
+        let identity = peer_identity(2);
+        let mut unsigned = peer_record(&identity, 1);
+        unsigned.signature = None;
+        assert!(matches!(
+            unsigned.verify_signature(),
+            Err(SignatureError::Missing { .. })
+        ));
+
+        // Signed by one identity, claiming another's name.
+        let mallory = peer_identity(3);
+        let mut forged = peer_record(&mallory, 1);
+        forged.identity = identity.submitter_id();
+        assert!(matches!(
+            forged.verify_signature(),
+            Err(SignatureError::Invalid { .. })
+        ));
+
+        // And a nickname is not an identity here at all.
+        let mut nickname = peer_record(&identity, 1);
+        nickname.identity = String::from("alice");
+        assert!(nickname.verify_signature().is_err());
+    }
+
+    #[test]
+    fn every_signed_field_is_covered_by_the_signature() {
+        // The check that makes the record worth anything: an attacker who
+        // could change the address without breaking the signature would have
+        // the whole prize, since redirecting dials is the only thing this
+        // record can be abused for.
+        let identity = peer_identity(4);
+        let record = peer_record(&identity, 1);
+        for tamper in [
+            |r: &mut PeerRecord| r.addr = String::from("198.51.100.1:9000"),
+            |r: &mut PeerRecord| r.transport = "cd".repeat(32),
+            |r: &mut PeerRecord| r.seq = 99,
+            |r: &mut PeerRecord| r.created_at = String::from("2030-01-01T00:00:00+00:00"),
+        ] {
+            let mut tampered = record.clone();
+            tamper(&mut tampered);
+            assert!(
+                tampered.verify_signature().is_err(),
+                "a field outside the signature: {tampered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_is_bounded_and_never_parsed() {
+        // Deliberately not `SocketAddr::from_str`. Two implementations
+        // disagreeing about whether an IPv6 form is well-formed is a consensus
+        // split, so the rule is length and printable ASCII and the network
+        // layer parses what it can.
+        let identity = peer_identity(5);
+        let mut record = peer_record(&identity, 1);
+
+        record.addr = String::new();
+        assert!(record.validate().is_err(), "an empty address was admitted");
+
+        record.addr = "a".repeat(MAX_PEER_ADDR + 1);
+        assert!(
+            record.validate().is_err(),
+            "an unbounded address was admitted"
+        );
+
+        record.addr = "a".repeat(MAX_PEER_ADDR);
+        assert!(record.validate().is_ok());
+
+        // A form this crate cannot dial is still admissible: the consensus
+        // layer does not get to decide what a network layer can reach.
+        record.addr = String::from("peer.example.onion:9000");
+        assert!(record.validate().is_ok());
+
+        for bad in ["with space:1", "quote\":1", "back\\slash:1", "tab\t:1"] {
+            record.addr = bad.to_string();
+            assert!(record.validate().is_err(), "{bad:?} was admitted");
+        }
+    }
+
+    #[test]
+    fn identity_and_transport_must_both_be_key_shaped() {
+        let identity = peer_identity(6);
+        let mut record = peer_record(&identity, 1);
+        record.transport = "AB".repeat(32);
+        assert!(record.validate().is_err(), "uppercase hex was admitted");
+        record.transport = String::from("ab");
+        assert!(
+            record.validate().is_err(),
+            "a short transport id was admitted"
+        );
+        record.transport = "ab".repeat(32);
+        assert!(record.validate().is_ok());
+    }
+
+    #[test]
+    fn a_sequence_outside_u64_is_refused_rather_than_truncated() {
+        // The boundary an arbitrary-precision implementation reaches and this
+        // one has to agree about. Truncating would make a record that is
+        // *admissible elsewhere* decode here as a different record.
+        let identity = peer_identity(7);
+        let record = peer_record(&identity, 1);
+        let Value::Object(mut body) = record.to_value() else {
+            panic!("a record is an object");
+        };
+        for bad in [
+            Value::Int(-1),
+            Value::Int(i128::from(u64::MAX) + 1),
+            Value::string("3"),
+        ] {
+            body.insert("seq".to_string(), bad.clone());
+            assert!(
+                PeerRecord::from_value(&Value::Object(body.clone())).is_err(),
+                "seq {bad:?} was admitted"
+            );
+        }
+        body.insert("seq".to_string(), Value::Int(i128::from(u64::MAX)));
+        assert_eq!(
+            PeerRecord::from_value(&Value::Object(body))
+                .expect("the top of the range decodes")
+                .seq,
+            u64::MAX
+        );
     }
 }

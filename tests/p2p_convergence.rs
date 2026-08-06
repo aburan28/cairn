@@ -753,6 +753,7 @@ fn a_lookup_that_finds_a_holder_actually_dials_it() {
     );
 
     // But acted on: carol is dialled for the blob she was named as holding.
+    assert_eq!(alice.pending_hints(), 1, "the holder never became a hint");
     let chosen = alice.peers_for(&needs, 1);
     assert_eq!(chosen.len(), 1);
     assert_eq!(
@@ -762,9 +763,127 @@ fn a_lookup_that_finds_a_holder_actually_dials_it() {
     );
 
     // And consumed: a wrong hint costs one dial, not a permanent detour.
-    let again = alice.peers_for(&needs, 1);
-    assert!(
-        again.is_empty() || again[0].peer.id() != carol.id(),
+    // Checked on the hint itself rather than on who gets dialled next -- carol
+    // is in the address book, so the random sample can return her again for
+    // reasons that have nothing to do with the hint.
+    assert_eq!(
+        alice.pending_hints(),
+        0,
         "the hint was not consumed, so a bad one would be retried for ever"
     );
+}
+
+#[test]
+fn a_node_handed_a_log_is_handed_the_network_with_it() {
+    // The roadmap item: identity discovery was a *second* bootstrap problem —
+    // a node needed a log and an address list, obtained separately, with
+    // nothing tying them together. A peer record puts the permanent half in the
+    // permanent record.
+    //
+    // What it deliberately cannot do on its own is complete a dial: the record
+    // carries a transport *id*, not the 261 KiB McEliece key. So a seeded
+    // contact is routable immediately and dialable once its key arrives, which
+    // is the same two-step the DHT already uses for a contact it hears about.
+    use proofwork::records::PeerRecord;
+
+    let carol = PeerIdentity::generate();
+    let carol_addr: std::net::SocketAddr = "127.0.0.1:9401".parse().expect("loopback");
+    let announcer = proofwork::crypto::identity::Identity::from_secret_bytes([11u8; 32]);
+
+    let mut writer = Node::new(
+        Ledger::open(scratch("peer-log")).expect("open ledger"),
+        repo_root(),
+    );
+    let record = PeerRecord::new(
+        announcer.submitter_id(),
+        proofwork::p2p::dht::NodeId::from_bytes(carol.id()).to_hex(),
+        carol_addr.to_string(),
+        1,
+        TS,
+    )
+    .signed_with(&announcer);
+    writer
+        .post_peer(&record, TS)
+        .expect("the record is admitted");
+
+    // A node that has only the log.
+    let alice = Service::new(Arc::new(PeerIdentity::generate()));
+    assert_eq!(alice.known_peers(), 0, "alice starts with no address book");
+    assert_eq!(alice.seed_from_log(&writer), 1);
+
+    // Routable now.
+    let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
+    let known: Vec<_> = alice.with_directory(|d| {
+        d.routing()
+            .contacts()
+            .map(|c| (c.id, c.addr))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(known, vec![(carol_node, carol_addr)]);
+    // And queued for the key that makes it dialable, rather than silently
+    // stuck as a name alice can never reach.
+    assert!(
+        alice
+            .with_directory(|d| d.key_wants())
+            .contains(&carol_node),
+        "a seeded contact was not queued for its key"
+    );
+
+    // A second seeding is idempotent, which matters because a daemon runs it
+    // every tick.
+    assert_eq!(alice.seed_from_log(&writer), 1);
+    assert_eq!(alice.with_directory(|d| d.routing().len()), 1);
+}
+
+#[test]
+fn a_peer_record_a_node_cannot_parse_is_skipped_not_fatal() {
+    // The consensus layer bounds an address and never parses one — two
+    // implementations disagreeing about an IPv6 form would be a split. So the
+    // network layer is where a form this build cannot dial gets dropped, and
+    // dropping one contact must not cost the rest of the log.
+    use proofwork::records::PeerRecord;
+
+    let announcer = proofwork::crypto::identity::Identity::from_secret_bytes([12u8; 32]);
+    let other = proofwork::crypto::identity::Identity::from_secret_bytes([13u8; 32]);
+    let reachable = PeerIdentity::generate();
+
+    let mut writer = Node::new(
+        Ledger::open(scratch("peer-log-unparseable")).expect("open ledger"),
+        repo_root(),
+    );
+    writer
+        .post_peer(
+            &PeerRecord::new(
+                announcer.submitter_id(),
+                "ab".repeat(32),
+                // Admissible as a record; not a socket address this build dials.
+                "peer.example.onion:9000",
+                1,
+                TS,
+            )
+            .signed_with(&announcer),
+            TS,
+        )
+        .expect("an onion address is a legal record");
+    writer
+        .post_peer(
+            &PeerRecord::new(
+                other.submitter_id(),
+                proofwork::p2p::dht::NodeId::from_bytes(reachable.id()).to_hex(),
+                "127.0.0.1:9402",
+                1,
+                TS,
+            )
+            .signed_with(&other),
+            TS,
+        )
+        .expect("post");
+
+    let alice = Service::new(Arc::new(PeerIdentity::generate()));
+    assert_eq!(
+        alice.seed_from_log(&writer),
+        1,
+        "the unparseable record cost the parseable one"
+    );
+    assert_eq!(alice.with_directory(|d| d.routing().len()), 1);
 }

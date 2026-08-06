@@ -463,6 +463,136 @@ impl Claim {
     }
 }
 
+// -- peer -------------------------------------------------------------------
+
+/// A peer's permanent identity, and the transport it currently answers on.
+///
+/// Two keys, and the binding between them is the record's whole content:
+/// **ed25519** signs and is 32 bytes, so it is affordable in a log every node
+/// replicates; **McEliece** keys the transport, cannot sign at all, and its
+/// public key is 261,120 bytes, which is not. So the ed25519 key is the
+/// authority and the McEliece *peer id* -- the `sha256` of that key -- is what
+/// it vouches for. The transport key itself is fetched over the wire and
+/// checked against the id, which needs no trust because the id is its hash.
+///
+/// The address is a hint and not permanent, so a peer that moves appends a
+/// record with a higher `seq`; the highest wins. Append-only plus a sequence
+/// number is last-writer-wins with an audit trail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRecord {
+    pub identity: String,
+    pub transport: String,
+    pub addr: String,
+    pub seq: u64,
+    pub created_at: String,
+    pub signature: Option<String>,
+}
+
+/// Longest `addr` a peer record may carry.
+///
+/// A bound rather than a parse, and deliberately so: `SocketAddr` parsing
+/// differs between languages at the edges -- IPv6 bracket forms, leading
+/// zeros, zone identifiers -- and two implementations disagreeing about
+/// whether a record is admissible is a consensus split.
+pub const MAX_PEER_ADDR: usize = 255;
+
+impl PeerRecord {
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("peer")),
+            ("addr", Value::string(self.addr.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("identity", Value::string(self.identity.clone())),
+            ("seq", Value::Int(i128::from(self.seq))),
+            ("transport", Value::string(self.transport.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Always required, unlike a claim's. A claim may be posted under a
+    /// nickname because a nickname claims nothing; a record whose whole purpose
+    /// is to authenticate an address would authenticate nothing without one.
+    pub fn verify_signature(&self) -> Result<(), RecordError> {
+        if signed_submitter(&self.identity).is_none() {
+            return Err(RecordError(format!(
+                "peer identity {:?} is not a public key, so nothing authenticates the record",
+                self.identity
+            )));
+        }
+        verify_record_signature(
+            "peer",
+            &self.identity,
+            &self.signing_payload(),
+            self.signature.as_deref(),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        let hex64 = |text: &str| {
+            text.len() == 64
+                && text
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if !hex64(&self.identity) {
+            return Err(RecordError("peer identity must be 64 lowercase hex".into()));
+        }
+        if !hex64(&self.transport) {
+            return Err(RecordError(
+                "peer transport must be 64 lowercase hex".into(),
+            ));
+        }
+        if self.addr.is_empty()
+            || self.addr.len() > MAX_PEER_ADDR
+            || !self
+                .addr
+                .bytes()
+                .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
+        {
+            return Err(RecordError(
+                "peer addr must be 1 to 255 printable ASCII characters, no quote or backslash"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<PeerRecord, RecordError> {
+        let seq = match field(value, "seq")? {
+            // Checked here rather than at a cast: a record from an
+            // arbitrary-precision implementation must be refused rather than
+            // silently truncated into a *different* record.
+            Value::Int(n) if *n >= 0 && *n <= i128::from(u64::MAX) => *n as u64,
+            _ => {
+                return Err(RecordError(
+                    "peer seq must be an integer in [0, 2^64)".into(),
+                ))
+            }
+        };
+        let record = PeerRecord {
+            identity: text(value, "identity")?,
+            transport: text(value, "transport")?,
+            addr: text(value, "addr")?,
+            seq,
+            created_at: text(value, "created_at")?,
+            signature: optional_text(value, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

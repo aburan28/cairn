@@ -11,7 +11,7 @@ use crate::canonical::{short, Value};
 use crate::frontier::Ratchet;
 use crate::ledger::Ledger;
 use crate::partition::{epoch_of, epoch_seconds, settlement_rank};
-use crate::records::{signed_submitter, Claim, Commitment, Objective};
+use crate::records::{signed_submitter, Claim, Commitment, Objective, PeerRecord};
 use crate::time::{timestamp, unix_seconds};
 use crate::verifiers::{self, Status, Verdict};
 
@@ -22,6 +22,7 @@ pub const VERDICT: &str = "verdict";
 pub const SETTLEMENT: &str = "settlement";
 pub const FRONTIER: &str = "frontier";
 pub const BATCH: &str = "batch";
+pub const PEER: &str = "peer";
 
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -627,6 +628,15 @@ impl Node {
                     })
                     .map_err(|e| e.to_string()),
                 CLAIM => Claim::from_value(&entry.payload)
+                    .and_then(|r| {
+                        r.verify_signature()?;
+                        Ok(r.to_value())
+                    })
+                    .map_err(|e| e.to_string()),
+                // A peer record settles nothing, so a bad one cannot cost
+                // money -- but a reader must be told rather than left to
+                // wonder why a peer the log names is never dialled.
+                PEER => PeerRecord::from_value(&entry.payload)
                     .and_then(|r| {
                         r.verify_signature()?;
                         Ok(r.to_value())

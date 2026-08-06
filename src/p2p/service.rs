@@ -10,7 +10,7 @@ use super::sync::{Peer, SyncError};
 use super::transport::{self, Connection, TransportError};
 use crate::gossip::{Candidate, Population};
 use crate::node::Node;
-use crate::records::{Claim, Commitment, Objective};
+use crate::records::{Claim, Commitment, Objective, PeerRecord};
 use crate::time::timestamp;
 use rand_core::OsRng;
 use std::collections::BTreeSet;
@@ -292,6 +292,48 @@ impl Service {
             }
         }
         chosen
+    }
+
+    /// Seed the routing table from the peer records in a log.
+    ///
+    /// This is what makes finding the network part of *obtaining the log*
+    /// rather than a second bootstrap problem: a node handed a log is handed
+    /// every identity that ever announced itself, with a transport id and an
+    /// address hint for each.
+    ///
+    /// What it cannot do is finish the job on its own, and the reason is the
+    /// one [`super::dht`] gives at length: a record carries a transport *id*,
+    /// not the 261 KiB McEliece key needed to dial it. So each peer enters the
+    /// routing table and its key is queued, and one round with any peer that
+    /// has it turns the contact into an endpoint. Records for identities this
+    /// node can already dial cost nothing and are still noted, because the
+    /// address may have moved.
+    ///
+    /// Returns how many contacts were taken.
+    pub fn seed_from_log(&self, node: &Node) -> usize {
+        let mut seeded = 0;
+        for record in node.peers().values() {
+            let Some(transport) = decode_peer_id(&record.transport) else {
+                continue;
+            };
+            if transport == self.identity.id() {
+                continue;
+            }
+            // The address is a hint and this is the one place it is parsed.
+            // The record format deliberately does not decide what a valid
+            // address is -- see `records::MAX_PEER_ADDR` -- so a form this
+            // build cannot dial is skipped here rather than refused there.
+            let Ok(addr) = record.addr.parse::<SocketAddr>() else {
+                continue;
+            };
+            self.note_contact(transport, addr);
+            let node_id = NodeId::from_bytes(transport);
+            if self.with_book(|book| book.for_peer(&transport).is_empty()) {
+                self.with_directory(|directory| directory.wants_key(node_id));
+            }
+            seeded += 1;
+        }
+        seeded
     }
 
     /// Report that a dial failed, so the lookups waiting on that peer move on.
@@ -587,6 +629,16 @@ impl Service {
         });
     }
 
+    /// How many addresses currently have a lookup hint waiting.
+    ///
+    /// Reporting, and the only way to observe consumption from outside: once a
+    /// hint has been used the peer it named may still be dialled for other
+    /// reasons, so dial order cannot distinguish "the hint was consumed" from
+    /// "the sample happened to pick the same peer".
+    pub fn pending_hints(&self) -> usize {
+        self.hints.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
     /// Keys served that did not hash to the id asked for, since start.
     ///
     /// A peer doing this is broken or lying, and either way it is the kind of
@@ -649,7 +701,7 @@ fn needed_code(node: &Node, peer: &Peer) -> BTreeSet<String> {
 fn records_from_node(node: &Node) -> Peer {
     let mut peer = Peer::new();
     for entry in node.ledger().entries() {
-        if ["objective", "commitment", "claim"].contains(&entry.kind.as_str()) {
+        if ["objective", "commitment", "claim", "peer"].contains(&entry.kind.as_str()) {
             let _ = peer.insert(super::sync::Record::new(
                 entry.kind.clone(),
                 entry.payload.clone(),
@@ -659,11 +711,31 @@ fn records_from_node(node: &Node) -> Peer {
     peer
 }
 
+/// A 64-character hex peer id as bytes.
+///
+/// `None` for anything else. The record layer already enforces the shape, so
+/// reaching `None` here means a log assembled by other means -- and skipping
+/// one contact is a better failure than refusing to read the log.
+fn decode_peer_id(hex: &str) -> Option<PeerId> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
 fn decode_record(record: &super::sync::Record) -> Result<(), SyncError> {
     let result = match record.kind.as_str() {
         "objective" => Objective::from_value(&record.payload).map(|_| ()),
         "commitment" => Commitment::from_value(&record.payload).map(|_| ()),
         "claim" => Claim::from_value(&record.payload).map(|_| ()),
+        // Peer records travel, and that is the point of them: a node that
+        // obtains the log obtains the network with it, rather than needing an
+        // address list from somewhere else.
+        "peer" => PeerRecord::from_value(&record.payload).map(|_| ()),
         other => return Err(SyncError::NotExchangeable { kind: other.into() }),
     };
     result.map_err(|error| SyncError::MalformedMessage {
@@ -727,6 +799,14 @@ fn apply_records(node: &mut Node, peer: &Peer) {
                 "claim" => {
                     if let Ok(value) = Claim::from_value(&record.payload) {
                         let _ = node.reveal(&value, &stamp);
+                    }
+                }
+                "peer" => {
+                    // Replayed through the rules like everything else, so a
+                    // stale or unsigned record is refused here exactly as it
+                    // would be if this node had been asked to post it.
+                    if let Ok(value) = PeerRecord::from_value(&record.payload) {
+                        let _ = node.post_peer(&value, &stamp);
                     }
                 }
                 _ => {}
