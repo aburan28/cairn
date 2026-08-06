@@ -189,6 +189,15 @@ pub enum RuleViolation {
         seq: u64,
         held: u64,
     },
+    /// A record whose own decoder would refuse it.
+    ///
+    /// Every other kind arrives here already decoded, so `from_value` has run
+    /// and the fields are known good. [`PeerRecord::new`] is a plain
+    /// constructor, which left `peer` as the one kind that could be appended
+    /// without ever meeting its own decoder — and a record in the log that the
+    /// log's reader rejects makes the whole file unauditable in both
+    /// implementations.
+    InadmissibleRecord(crate::records::RecordError),
     /// The objective admits only signed identities, and this submitter is a
     /// nickname.
     ///
@@ -292,6 +301,9 @@ impl fmt::Display for RuleViolation {
                  epoch it settles in cannot be derived"
             ),
             RuleViolation::UnsignedIdentity(error) => write!(f, "{error}"),
+            RuleViolation::InadmissibleRecord(error) => {
+                write!(f, "record would not be readable back: {error}")
+            }
             RuleViolation::StalePeerRecord {
                 identity,
                 seq,
@@ -606,6 +618,19 @@ impl Node {
     /// are consulted at all. Then the sequence, against whatever this identity
     /// has already said.
     pub fn post_peer(&mut self, record: &PeerRecord, ts: &str) -> Result<String, RuleViolation> {
+        // Admissibility first, and it has to be here rather than at the caller.
+        //
+        // Every other record kind reaches this module already decoded, so
+        // `from_value` has run and the fields are known good. `PeerRecord::new`
+        // is a plain constructor -- it takes whatever it is handed -- so a
+        // `peer` record was the one kind that could enter the log without ever
+        // meeting its own decoder. `proofwork peer --transport <a libp2p-style
+        // id>` wrote a record every audit then rejected, in both
+        // implementations: a log made unauditable by the tool that maintains
+        // it, in a single command, with no error.
+        record
+            .validate()
+            .map_err(RuleViolation::InadmissibleRecord)?;
         record.verify_signature()?;
         if let Some(held) = self.peers().get(&record.identity) {
             if record.seq <= held.seq {
@@ -1388,7 +1413,15 @@ impl Node {
             // A record that does not advance its identity's sequence is one
             // `post_peer` would have refused, so finding one means the log was
             // assembled by other means and a reader should know.
-            match peer_seqs.get(entry_identity(&entry.payload).unwrap_or_default()) {
+            //
+            // The running *maximum*, not the last value seen. This used to
+            // overwrite, which made the audit disagree with [`Node::peers`] --
+            // where highest-seq-wins -- on any log containing a stale record.
+            // Given seq 3, then a replayed 1, then a 2: `peers` still answers
+            // 3, so the 2 did not supersede either and both are findings. The
+            // overwriting version reported the 1 and passed the 2, which is an
+            // audit contradicting its own implementation's resolution rule.
+            match peer_seqs.get(record.identity.as_str()) {
                 Some(held) if *held >= record.seq => problems.push(format!(
                     "peer at entry {}: seq {} does not advance {held} for {}",
                     entry.seq,
@@ -1398,7 +1431,8 @@ impl Node {
                 _ => {}
             }
             if let Some(identity) = entry_identity(&entry.payload) {
-                peer_seqs.insert(identity, record.seq);
+                let slot = peer_seqs.entry(identity).or_insert(record.seq);
+                *slot = (*slot).max(record.seq);
             }
         }
 
@@ -3859,6 +3893,82 @@ mod tests {
         let identity = crate::crypto::identity::Identity::from_secret_bytes([byte; 32]);
         PeerRecord::new(identity.submitter_id(), "ab".repeat(32), addr, seq, TS)
             .signed_with(&identity)
+    }
+
+    #[test]
+    fn the_peer_audit_resolves_sequences_the_way_peers_does() {
+        // Seq 3, a replayed 1, then a 2. `peers` answers 3 throughout, so
+        // neither the 1 nor the 2 superseded anything and both are findings.
+        //
+        // The audit used to track the *last* seq seen rather than the highest,
+        // so it reported the 1, then treated the stale value as current and
+        // passed the 2 -- an audit contradicting its own implementation's
+        // resolution rule, on a log that only a hand-assembled one can be,
+        // which is exactly the log an audit exists for. Found by porting the
+        // check to the reference and having the two disagree.
+        let dir = TempDir::new("peer-seq-resolution");
+        let mut node = node(&dir);
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([1u8; 32]);
+
+        node.post_peer(&peer_of(1, 3, "203.0.113.3:9000"), TS)
+            .expect("first record");
+        for (seq, addr) in [(1u64, "203.0.113.1:9000"), (2, "203.0.113.2:9000")] {
+            // `post_peer` refuses both, which is the rule working. The log is
+            // assembled past it, the way a concatenated or synced one can be.
+            assert!(node.post_peer(&peer_of(1, seq, addr), TS).is_err());
+            node.ledger_mut()
+                .append(PEER, peer_of(1, seq, addr).to_value(), TS)
+                .expect("append");
+        }
+
+        assert_eq!(node.peers()[&identity.submitter_id()].seq, 3);
+        let problems = node.audit(false);
+        let stale: Vec<&String> = problems
+            .iter()
+            .filter(|problem| problem.contains("does not advance"))
+            .collect();
+        assert_eq!(
+            stale.len(),
+            2,
+            "both stale records should be findings: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_peer_record_the_decoder_would_refuse_never_reaches_the_log() {
+        // Found by running `proofwork peer --transport <a libp2p-style id>`:
+        // it appended happily, and every subsequent audit -- in *both*
+        // implementations -- reported the record as undecodable. One command
+        // with no error left a log that cannot be audited.
+        //
+        // Every other kind arrives here already decoded, so `from_value` has
+        // run. `PeerRecord::new` takes whatever it is handed, which left this
+        // as the one kind that could enter the log without meeting its own
+        // decoder.
+        let dir = TempDir::new("peer-admissible");
+        let mut node = node(&dir);
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([9u8; 32]);
+
+        for (field, transport, addr) in [
+            ("transport", "12D3KooWNotHex", "203.0.113.1:9000"),
+            ("transport", "AB".repeat(32).as_str(), "203.0.113.1:9000"),
+            ("addr", "ab".repeat(32).as_str(), ""),
+            ("addr", "ab".repeat(32).as_str(), "a \"quoted\" host:9000"),
+        ] {
+            let record = PeerRecord::new(identity.submitter_id(), transport, addr, 1, TS)
+                .signed_with(&identity);
+            let error = node
+                .post_peer(&record, TS)
+                .expect_err("an inadmissible {field} was admitted");
+            assert!(
+                matches!(error, RuleViolation::InadmissibleRecord(_)),
+                "{field}: got {error:?}"
+            );
+        }
+
+        // Nothing was written, so the log still reads and still audits.
+        assert!(node.ledger().entries_of_kind(PEER).is_empty());
+        assert_eq!(node.audit(false), Vec::<String>::new());
     }
 
     #[test]

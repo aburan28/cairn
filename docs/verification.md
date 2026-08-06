@@ -261,8 +261,9 @@ checking is how an exit code maps to a verdict, and that does not need a kernel.
 
 `proofwork audit` prints one line — *chain intact, every settled claim
 re-verified* — and the value of the whole project rests on that sentence being
-literally true. Four things it did not check, found by asking what a log could
-carry that the line would still be printed over:
+literally true. What follows is what it did not check, found by asking what a
+log could carry that the line would still be printed over, and then by running
+the tools rather than reading them.
 
 **A verdict this node cannot reproduce.** Covered above. Any settled verdict,
 not only the paid ones.
@@ -298,17 +299,69 @@ was correctly left out — counting its acceptance now faults the batch just as
 surely. Both derivations in both implementations now take the bound, and each
 half has a test that fails when its half of the bound is removed.
 
-**The money.** The largest of the five and the last one looked for, because it
-is not about records at all. The reference re-derived every id, every Merkle
-root, every batch anchor — and never once added up what an objective had paid
-against what it had funded. An operator could have overspent a pool by any
-amount and the independent auditor would have said *log verified*. It now
-checks the pool ceiling, double settlement of a non-ratcheted objective, a
-settlement whose reward is not an integer, an overflowing total (reported, never
-wrapped — a wrapped sum resets an overspent pool to something small and hides
-exactly the fault being looked for), and the two claim-side orphans: a claim
-with no matching commitment, which means the commit–reveal binding never
-happened, and a claim with no verdict at all.
+**The money.** The largest, and the last one looked for, because it is not
+about records at all. The reference re-derived every id, every Merkle root,
+every batch anchor — and never once added up what an objective had paid against
+what it had funded. An operator could have overspent a pool by any amount and
+the independent auditor would have said *log verified*. It now checks the pool
+ceiling, double settlement of a non-ratcheted objective, a settlement whose
+reward is not an integer, and an overflowing total (reported, never wrapped — a
+wrapped sum resets an overspent pool to something small and hides exactly the
+fault being looked for).
+
+**And the rest of what one implementation checked and the other did not.** The
+frontier of a ratcheted objective only moves forward, asked of `improves` rather
+than by comparison, because `direction` decides which way forward is and
+`min_improvement` is what stops a thousand claims each advancing by one unit —
+the pool total can stay under the ceiling while the money went to the wrong
+claims in the wrong order. A peer record supersedes only by advancing its
+identity's sequence, which is what lets a mutable address hint live in an
+append-only log; without it a replayed record puts a stale address back in
+front, and it is perfectly signed, which is why signature checking alone does
+not cover it. A claim with no matching commitment, meaning commit–reveal never
+bound it to an epoch. A claim with no verdict, or naming an objective the log
+does not contain. A batch with no epoch, no claim list, or a second batch for
+an epoch that already settled — each of which the reference had been skipping
+with a bare `continue`.
+
+Porting the peer-sequence check is what found the next two, which is the
+argument for a second implementation in miniature: writing the same rule twice
+makes a disagreement visible, and each disagreement is a bug in one of them.
+
+The primary tracked the *last* sequence seen rather than the highest. Given
+seq 3, a replayed 1, then a 2, `Node::peers` still answers 3 — so neither
+superseded and both are findings — but the audit reported the 1, adopted its
+stale value as current, and passed the 2. An audit contradicting its own
+implementation's resolution rule, on exactly the hand-assembled log an audit
+exists for.
+
+And the reference let a *forged* record's sequence participate. A record whose
+signature does not verify is not a statement by anybody; counting it means
+anyone can make the audit accuse an identity of replaying its own records by
+appending an unsigned forgery — a finding manufactured out of nothing.
+
+**A `peer` record its own decoder would refuse.** Found by running the command
+rather than reading it. `proofwork peer --transport <a libp2p-style id>`
+appended happily, and every subsequent audit in both implementations reported
+the record as undecodable: one command, no error, and a log that can no longer
+be audited. Every other record kind reaches the rules engine already decoded, so
+`from_value` has run and the fields are known good; `PeerRecord::new` is a plain
+constructor that takes what it is handed, which left `peer` as the only kind
+that could enter the log without meeting its own decoder. `post_peer` now
+validates first.
+
+**A tripwire nobody would read.** `proofwork store status` listed every
+unaccounted file it found. Pointed at a working directory that is seven hundred
+lines, and the `KEY INSIDE THE STORE` finding — the one that means everything
+beside it is readable — was somewhere in the middle of them. Keys are now said
+first and never elided; the rest is capped with a count of what was left out.
+The alarm was always the exit code and the total, not the list.
+
+**`--help` exiting 2.** `proofwork-serve` and `proofwork-p2p` shared one usage
+function between "you asked for help" and "you used me wrong", so asking a
+question correctly returned a failure. `cmd --help >/dev/null || fail` is how a
+packaging check or a container healthcheck asks whether a binary runs at all.
+All four binaries now answer 0 for `--help` and 2 for misuse, and CI pins it.
 
 The shape recurs often enough to be worth naming: **the summary line is a
 claim, and every branch that quietly skips something is a way for it to be

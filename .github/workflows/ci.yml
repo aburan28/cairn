@@ -43,6 +43,22 @@ jobs:
       # where the client shares nothing with the node but an address, which is
       # the arrangement every outside contributor is in.
       - run: ./scripts/serve-smoke.sh
+      # Every binary answers `--help` with 0 and misuse with 2.
+      #
+      # Two of them exited 2 for `--help`, which tells somebody who asked a
+      # question, and asked it correctly, that they used the tool wrong.
+      # `cmd --help >/dev/null || fail` is how a packaging check or a container
+      # healthcheck asks whether a binary runs at all, so the wrong code here
+      # fails a build for no reason. Cheap to pin, and it drifted once already.
+      - run: |
+          for BIN in proofwork proofwork-serve proofwork-p2p; do
+            ./target/release/$BIN --help >/dev/null 2>&1 \
+              || { echo "$BIN --help exited $?" >&2; exit 1; }
+          done
+          for BIN in proofwork-serve proofwork-p2p; do
+            ./target/release/$BIN --definitely-not-a-flag >/dev/null 2>&1
+            [ $? -eq 2 ] || { echo "$BIN did not exit 2 on a bad argument" >&2; exit 1; }
+          done
 
   reference:
     # The second implementation, and the frozen vectors it must reproduce.

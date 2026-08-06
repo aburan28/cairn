@@ -779,6 +779,53 @@ impl Node {
             if !with_verdict.contains(&claim_id) {
                 problems.push(format!("claim {}: no verdict recorded", short(&claim_id)));
             }
+            if !objectives.contains_key(&claim.objective_id) {
+                problems.push(format!(
+                    "claim {}: names unknown objective {}",
+                    short(&claim_id),
+                    short(&claim.objective_id)
+                ));
+            }
+        }
+
+        // A peer record only supersedes by advancing its identity's sequence.
+        //
+        // The log is append-only and a peer's address is not, so `seq` is what
+        // lets a mutable hint live in an immutable log. Without the check, a
+        // replayed old record puts a stale address back in front of a current
+        // one -- the record is perfectly signed, which is exactly why signature
+        // verification alone does not cover it.
+        let mut peer_seqs: BTreeMap<String, u64> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(PEER) {
+            let record = match PeerRecord::from_value(&entry.payload) {
+                Ok(record) => record,
+                // Reported by the re-encode pass above with the decoder's own
+                // message.
+                Err(_) => continue,
+            };
+            // A record whose signature does not verify is not a statement by
+            // anybody, so its sequence does not participate -- and the failure
+            // is already reported by the pass above. Letting it count would
+            // mean anyone could make the audit accuse an identity of replaying
+            // its own records by appending an unsigned forgery, which is a
+            // finding manufactured out of nothing.
+            if record.verify_signature().is_err() {
+                continue;
+            }
+            if let Some(held) = peer_seqs.get(&record.identity) {
+                if record.seq <= *held {
+                    problems.push(format!(
+                        "entry {}: peer {} seq {} does not advance {held}",
+                        entry.seq,
+                        short(&record.identity),
+                        record.seq
+                    ));
+                }
+            }
+            let slot = peer_seqs
+                .entry(record.identity.clone())
+                .or_insert(record.seq);
+            *slot = (*slot).max(record.seq);
         }
 
         // No objective pays out more than it funded, and a plain one pays once.
@@ -861,15 +908,86 @@ impl Node {
             }
         }
 
+        // A ratcheted objective's frontier only ever moves forward.
+        //
+        // The frontier is the running record of the best result so far, and
+        // every payout is the *distance* from the previous one. A frontier that
+        // slid backwards means somebody was paid for a regression, and the
+        // pool-total check above cannot see it: the sum can stay under the
+        // ceiling while the money went to the wrong claims in the wrong order.
+        // `improves` is asked rather than a bare comparison, because
+        // `direction` decides which way is forward and `min_improvement` is
+        // what stops a thousand claims each advancing by one unit.
+        for (objective_id, objective) in &objectives {
+            let Some(block) = &objective.ratchet else {
+                continue;
+            };
+            let ratchet = match Ratchet::from_value(block) {
+                Ok(ratchet) => ratchet,
+                Err(error) => {
+                    problems.push(format!(
+                        "objective {}: ratchet cannot be decoded ({error})",
+                        short(objective_id)
+                    ));
+                    continue;
+                }
+            };
+            let mut best: Option<i64> = None;
+            for entry in self.ledger.entries_of_kind(FRONTIER) {
+                if entry.payload.get("objective_id").and_then(Value::as_str)
+                    != Some(objective_id.as_str())
+                {
+                    continue;
+                }
+                // Absent is not zero. A frontier entry with no readable score
+                // records no position at all, and treating it as the origin
+                // would let the next entry "improve" on a number nobody wrote.
+                let Some(score) = entry.payload.get("score").and_then(Value::as_i64) else {
+                    problems.push(format!(
+                        "objective {}: frontier entry {} has no recordable score",
+                        short(objective_id),
+                        entry.seq
+                    ));
+                    continue;
+                };
+                if let Some(previous) = best {
+                    if !ratchet.improves(Some(previous), score) {
+                        problems.push(format!(
+                            "objective {}: frontier moved to {score} without improving on \
+                             {previous}",
+                            short(objective_id)
+                        ));
+                    }
+                }
+                best = Some(score);
+            }
+        }
+
         // Every batch must name the anchor the log actually had at its epoch's
         // start, and the order the beacon produces.
         let mut batches = 0usize;
-        let mut faulted: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        let mut faulted: BTreeSet<u64> = BTreeSet::new();
+        let mut drained: BTreeSet<u64> = BTreeSet::new();
         for entry in self.ledger.entries_of_kind(BATCH) {
+            // Reported rather than skipped. A batch with no epoch settles
+            // claims into no period at all -- it cannot be checked against an
+            // anchor or a beacon order, so passing over it silently is the
+            // audit declining to look at the one record that decides a payment
+            // round.
             let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_u64) else {
+                problems.push(format!("entry {}: batch has no epoch", entry.seq));
                 continue;
             };
             batches += 1;
+            // An epoch settles once. Two batches for the same one is either a
+            // double payment or a rewritten history, and the pool ceiling only
+            // notices if the second one pushes the total over.
+            if !drained.insert(epoch) {
+                problems.push(format!(
+                    "entry {}: epoch {epoch} settled in more than one batch",
+                    entry.seq
+                ));
+            }
             let recorded_anchor = entry
                 .payload
                 .get("anchor")
@@ -888,17 +1006,22 @@ impl Node {
                     short(&expected)
                 ));
             }
-            let listed: Vec<String> = entry
-                .payload
-                .get("claims")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Named rather than defaulted to empty. A batch with no claim list
+            // and a batch that settled nobody are different records, and the
+            // membership check below would otherwise report the first as an
+            // ordering fault -- a true finding under a misleading name.
+            let Some(Value::Array(items)) = entry.payload.get("claims") else {
+                faulted.insert(epoch);
+                problems.push(format!(
+                    "entry {}: batch for epoch {epoch} has no claim list",
+                    entry.seq
+                ));
+                continue;
+            };
+            let listed: Vec<String> = items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
             // Membership is derived from the log, not read back out of the
             // batch. Re-sorting the list the batch itself supplied is a check
             // that a batch which *omitted* a claim always passes -- and which

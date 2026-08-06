@@ -18,7 +18,13 @@ use std::path::PathBuf;
 
 use proofwork::serve::{self, Serving};
 
-fn usage() -> ! {
+/// Print the usage and exit with `code`.
+///
+/// `--help` exits 0 and a bad argument exits 2. They used to share one exit of
+/// 2, which says "you used me wrong" to somebody who asked a question and
+/// answered it correctly -- and `cmd --help >/dev/null || fail` is how a
+/// packaging check or a smoke test asks whether a binary runs at all.
+fn usage(code: i32) -> ! {
     eprintln!(
         "proofwork-serve — publish a proofwork log over HTTP\n\n\
          USAGE\n    \
@@ -33,7 +39,7 @@ fn usage() -> ! {
          Everything served is public by design. Submissions are queued, never\n\
          admitted: drain them into the log with `proofwork drain --queue <dir>`.\n"
     );
-    std::process::exit(2);
+    std::process::exit(code);
 }
 
 fn main() {
@@ -72,10 +78,10 @@ fn main() {
                 }
             }
             "--checkpoint" => checkpoint = Some(PathBuf::from(next("--checkpoint"))),
-            "--help" | "-h" => usage(),
+            "--help" | "-h" => usage(0),
             other => {
                 eprintln!("proofwork-serve: unknown argument {other:?}");
-                usage();
+                usage(2);
             }
         }
     }

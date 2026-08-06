@@ -32,9 +32,15 @@ use std::time::Duration;
 /// `multicast::INTERVAL_SECONDS` regardless, so nothing is lost by deferring it.
 const BEACONS_PER_TICK: usize = 64;
 
-fn usage() -> ! {
+/// Print the usage and exit with `code`.
+///
+/// `--help` exits 0 and a bad or missing argument exits 2. Sharing one exit of
+/// 2 tells somebody who asked a question, and asked it correctly, that they
+/// used the tool wrong -- and `cmd --help >/dev/null || fail` is how a
+/// packaging check asks whether a binary runs at all.
+fn usage(code: i32) -> ! {
     eprintln!("usage: proofwork-p2p --identity FILE --root-key FILE --checkpoint FILE --listen ADDR --log FILE --root DIR [--bootstrap FILE ...] [--population FILE] [--fanout N]");
-    std::process::exit(2);
+    std::process::exit(code);
 }
 
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
@@ -243,24 +249,25 @@ fn main() {
             "--population" => &mut population_path,
             "--fanout" => &mut fanout,
             "--bootstrap" => {
-                bootstrap.push(args.next().unwrap_or_else(|| usage()));
+                bootstrap.push(args.next().unwrap_or_else(|| usage(2)));
                 continue;
             }
-            _ => usage(),
+            "--help" | "-h" => usage(0),
+            _ => usage(2),
         };
-        *slot = Some(args.next().unwrap_or_else(|| usage()));
+        *slot = Some(args.next().unwrap_or_else(|| usage(2)));
     }
-    let identity_path = identity_path.unwrap_or_else(|| usage());
-    let root_key_path = root_key_path.unwrap_or_else(|| usage());
-    let checkpoint_path = checkpoint_path.unwrap_or_else(|| usage());
+    let identity_path = identity_path.unwrap_or_else(|| usage(2));
+    let root_key_path = root_key_path.unwrap_or_else(|| usage(2));
+    let checkpoint_path = checkpoint_path.unwrap_or_else(|| usage(2));
     let listen_addr = listen_addr
-        .unwrap_or_else(|| usage())
+        .unwrap_or_else(|| usage(2))
         .parse::<SocketAddr>()
-        .unwrap_or_else(|_| usage());
-    let log = log.unwrap_or_else(|| usage());
-    let root = root.unwrap_or_else(|| usage());
+        .unwrap_or_else(|_| usage(2));
+    let log = log.unwrap_or_else(|| usage(2));
+    let root = root.unwrap_or_else(|| usage(2));
     let fanout = match fanout {
-        Some(text) => text.parse::<usize>().unwrap_or_else(|_| usage()),
+        Some(text) => text.parse::<usize>().unwrap_or_else(|_| usage(2)),
         None => DEFAULT_FANOUT,
     };
     let identity = Arc::new(

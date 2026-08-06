@@ -2574,19 +2574,42 @@ fn cmd_store(
             // `store::exposure` for the decision itself.
             let survey = exposure::survey(&store).map_err(CliError::Store)?;
             say(out, format!("at rest {}", survey.describe()));
-            let mut findings = 0;
-            for (path, what) in &survey.findings {
-                findings += 1;
-                match what {
-                    exposure::Exposure::Key => say(
-                        out,
-                        format!("        KEY INSIDE THE STORE: {}", path.display()),
+
+            // Keys first, then a bounded number of the rest.
+            //
+            // A tripwire that prints seven hundred lines is a tripwire nobody
+            // reads, and pointing this at a working directory produces exactly
+            // that. The count and the exit code carry the alarm; the list is
+            // there to start the investigation, not to finish it. Keys are
+            // never elided -- a key inside the store means everything beside it
+            // is readable, and that finding must not be the one that scrolled
+            // past.
+            const SHOWN: usize = 20;
+            let findings = survey.findings.len();
+            let (keys, rest): (Vec<_>, Vec<_>) = survey
+                .findings
+                .iter()
+                .partition(|(_, what)| matches!(what, exposure::Exposure::Key));
+            for (path, _) in &keys {
+                say(
+                    out,
+                    format!("        KEY INSIDE THE STORE: {}", path.display()),
+                );
+            }
+            for (path, _) in rest.iter().take(SHOWN) {
+                say(
+                    out,
+                    format!("        unaccounted plaintext: {}", path.display()),
+                );
+            }
+            if rest.len() > SHOWN {
+                say(
+                    out,
+                    format!(
+                        "        ... and {} more unaccounted file(s)",
+                        rest.len() - SHOWN
                     ),
-                    _ => say(
-                        out,
-                        format!("        unaccounted plaintext: {}", path.display()),
-                    ),
-                }
+                );
             }
             if findings > 0 {
                 say(
@@ -3990,6 +4013,30 @@ mod tests {
         let keyed = String::from_utf8(out).expect("utf-8");
         assert!(keyed.contains("KEY INSIDE THE STORE"), "{keyed}");
         assert!(keyed.contains("not encryption at all"), "{keyed}");
+
+        // Many findings are summarised, and the key is still the first thing
+        // said. Pointed at a working directory this printed seven hundred
+        // lines, which is a tripwire nobody reads -- and the key finding, the
+        // one that means everything beside it is readable, was somewhere in the
+        // middle of them.
+        for n in 0..60 {
+            std::fs::write(dir.join(format!("data/stray-{n}.json")), b"{}").expect("writes");
+        }
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_store(&mut out, &store_options, &StoreAction::Status).expect("status"),
+            1
+        );
+        let many = String::from_utf8(out).expect("utf-8");
+        let listed = many.matches("unaccounted plaintext:").count();
+        assert!(listed <= 20, "{listed} findings listed in full");
+        assert!(many.contains("more unaccounted file(s)"), "{many}");
+        let key_line = many.find("KEY INSIDE THE STORE").expect("key reported");
+        let first_plaintext = many.find("unaccounted plaintext:").expect("some listed");
+        assert!(
+            key_line < first_plaintext,
+            "the key finding was not said first"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
