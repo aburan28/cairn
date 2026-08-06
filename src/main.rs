@@ -3604,16 +3604,40 @@ mod tests {
             .collect()
     }
 
+    /// A scratch directory no other test will pick.
+    ///
+    /// The previous seed was `Instant::now().elapsed()`, which measures the gap
+    /// between those two calls: a handful of nanoseconds, and **four distinct
+    /// values in two hundred** on this machine. So directories that were meant
+    /// to be unique collided -- across tests sharing a tag, and across runs,
+    /// because the value barely depends on when it is taken.
+    ///
+    /// That is worse than a tidiness problem. A test that finds another test's
+    /// files fails for a reason that has nothing to do with what it asserts,
+    /// and a suite that fails intermittently is one whose failures stop being
+    /// read. `tests/storage.rs` already had the right pattern; this is it.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "proofwork-cli-{tag}-{}-{nanos}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("scratch dir");
+        path
+    }
+
     /// A scratch bundle: an objective whose pinned checker really is on disk,
     /// plus `Options` pointing at both. The pin is computed from the bytes
     /// written, so the fixture cannot drift out of agreement with itself.
     fn bundle_with_objective() -> (std::path::PathBuf, Options, Value) {
         use proofwork::canonical::digest_bytes;
-        let dir = std::env::temp_dir().join(format!(
-            "proofwork-cli-test-{}",
-            digest_bytes(&std::time::Instant::now().elapsed().as_nanos().to_le_bytes())
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let dir = scratch_dir("bundle");
         let source = b"def check(artifact):\n    return artifact.get('n') == 42\n";
         std::fs::write(dir.join("c.py"), source).expect("write checker");
         let pin = digest_bytes(source)
@@ -3706,11 +3730,7 @@ mod tests {
     /// `Options` pointing at it. The key deliberately lives *outside* the data
     /// directory, which is the layout the docs ask for.
     fn sealed_store(tag: &str) -> (std::path::PathBuf, Options) {
-        use proofwork::canonical::digest_bytes;
-        let dir = std::env::temp_dir().join(format!(
-            "proofwork-rekey-{tag}-{}",
-            digest_bytes(&std::time::Instant::now().elapsed().as_nanos().to_le_bytes())
-        ));
+        let dir = scratch_dir(tag);
         std::fs::create_dir_all(dir.join("data")).expect("scratch dir");
         let options = Options {
             log: dir.join("data/log.jsonl").display().to_string(),
@@ -4027,6 +4047,30 @@ mod tests {
             "important\n"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scratch_directories_are_actually_distinct() {
+        // The bug this replaced: `Instant::now().elapsed()` measures the gap
+        // between those two calls and produced four distinct values in two
+        // hundred, so directories meant to be unique collided and tests found
+        // each other's files. A suite that fails intermittently is one whose
+        // failures stop being read.
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            let dir = scratch_dir("distinct");
+            assert!(
+                seen.insert(dir.clone()),
+                "{} was handed out twice",
+                dir.display()
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+        // And two tags never share one, whatever the clock does.
+        let (a, b) = (scratch_dir("alpha"), scratch_dir("beta"));
+        assert_ne!(a, b);
+        std::fs::remove_dir_all(&a).ok();
+        std::fs::remove_dir_all(&b).ok();
     }
 
     #[test]
