@@ -256,3 +256,71 @@ rules — a non-zero exit is a real `Reject` because the exit code *is* the
 kernel's answer, a signal kill is not, and a clean exit that warns about `sorry`
 is still a rejection — are tested against a stand-in binary, because what needs
 checking is how an exit code maps to a verdict, and that does not need a kernel.
+
+## What an audit actually re-derives
+
+`proofwork audit` prints one line — *chain intact, every settled claim
+re-verified* — and the value of the whole project rests on that sentence being
+literally true. Four things it did not check, found by asking what a log could
+carry that the line would still be printed over:
+
+**A verdict this node cannot reproduce.** Covered above. Any settled verdict,
+not only the paid ones.
+
+**A verdict with a status nobody recognises.** A `"probably"` in the status
+field used to surface only as a *disagreement* with a re-run, so on a node
+without the relevant toolchain it was silent, and under `--no-rerun` it was
+silent everywhere. It is a malformed record, which makes it exactly the kind of
+defect the cheap structural pass exists for, so both implementations now report
+it there.
+
+**A batch that omitted a claim.** The reference re-sorted the claim list the
+batch record itself supplied, which is a check that a batch dropping somebody
+always passes. Which claims are in an epoch's batch is what decides who gets
+paid that epoch, and it is the last thing an independent implementation should
+take from the record it is auditing. Membership is now derived from the log in
+both.
+
+**A back-dated record invalidating an honest batch.** The inverse failure, and
+an attack rather than an omission. Records arrive over sync stamped with their
+own `created_at` and land at the tail, so a peer can append an accepted claim
+dated into an epoch that already paid. The *anchor* derivation was already
+bounded to the log as it stood when the batch was written; membership was not,
+so the same append worked one field over — instead of "the anchor is wrong" the
+audit said the operator "settled 1 claim(s) in an order the beacon does not
+produce", forever, at a peer's choosing, about a batch that was correct when
+written and could not have known about a record that did not yet exist.
+
+The bound has to cover the *verdicts* as well as the claims, which is a second
+version of the same attack and not an implementation detail: a claim already in
+the log when the batch was drawn, whose accepting verdict arrives afterwards,
+was correctly left out — counting its acceptance now faults the batch just as
+surely. Both derivations in both implementations now take the bound, and each
+half has a test that fails when its half of the bound is removed.
+
+**The money.** The largest of the five and the last one looked for, because it
+is not about records at all. The reference re-derived every id, every Merkle
+root, every batch anchor — and never once added up what an objective had paid
+against what it had funded. An operator could have overspent a pool by any
+amount and the independent auditor would have said *log verified*. It now
+checks the pool ceiling, double settlement of a non-ratcheted objective, a
+settlement whose reward is not an integer, an overflowing total (reported, never
+wrapped — a wrapped sum resets an overspent pool to something small and hides
+exactly the fault being looked for), and the two claim-side orphans: a claim
+with no matching commitment, which means the commit–reveal binding never
+happened, and a claim with no verdict at all.
+
+The shape recurs often enough to be worth naming: **the summary line is a
+claim, and every branch that quietly skips something is a way for it to be
+false.** A skip is right only when nothing was ever asserted — an `unavailable`
+the log also recorded as `unavailable`. Everywhere else, silence is the bug.
+
+And the corollary the last one earned: an independent implementation drifts
+where nothing compares it. The two are checked against each other on ids, roots
+and verdicts, so those stayed honest; the *arithmetic* and the output plumbing
+had no cross-check, and both had quietly diverged. `proofwork-reference` was
+still using `println!`, which panics when the reader closes the pipe —
+`… post | head -1`, which `scripts/interop.sh` itself does. The primary fixed
+that before this crate existed and wrote a paragraph about it. It never crossed
+over, and it surfaced as a flaky script rather than as a bug, because the race
+is only lost under load.

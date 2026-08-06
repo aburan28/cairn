@@ -198,15 +198,54 @@ impl Node {
     }
 
     fn accepted_claims_by_epoch(&self) -> Vec<(u64, Claim)> {
-        let accepted = self.accepted_claims();
+        self.accepted_claims_by_epoch_within(None)
+    }
+
+    /// The same, as the log stood at `positions` entries.
+    ///
+    /// `None` means the whole log, which is what settling wants -- it is
+    /// deciding what to pay *now*. Auditing a batch wants the bound, because a
+    /// record appended after the batch could not have influenced it whatever
+    /// timestamp it carries.
+    fn accepted_claims_by_epoch_within(&self, positions: Option<usize>) -> Vec<(u64, Claim)> {
+        let entries = self.ledger.entries();
+        let entries = match positions {
+            Some(limit) => &entries[..limit.min(entries.len())],
+            None => entries,
+        };
+
+        // The verdicts carry the bound too, not only the claims. A claim
+        // already in the log when a batch was written, whose accepting verdict
+        // arrived afterwards, was correctly left out of that batch -- counting
+        // it now faults an honest batch exactly as a back-dated claim would.
+        let mut accepted: BTreeSet<String> = BTreeSet::new();
+        for entry in entries.iter().filter(|entry| entry.kind == VERDICT) {
+            let Some(claim_id) = entry.payload.get("claim_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let is_accept = entry
+                .payload
+                .get("verdict")
+                .and_then(|v| v.get("status"))
+                .and_then(Value::as_str)
+                == Some("accept");
+            if is_accept {
+                accepted.insert(claim_id.to_string());
+            } else {
+                // A later verdict supersedes an earlier one, a withdrawal of
+                // acceptance included.
+                accepted.remove(claim_id);
+            }
+        }
+
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut out = Vec::new();
-        for entry in self.ledger.entries_of_kind(CLAIM) {
+        for entry in entries.iter().filter(|entry| entry.kind == CLAIM) {
             let Ok(claim) = Claim::from_value(&entry.payload) else {
                 continue;
             };
             let id = claim.id();
-            if !accepted.contains_key(&id) || !seen.insert(id) {
+            if !accepted.contains(&id) || !seen.insert(id) {
                 continue;
             }
             let Some(seconds) = unix_seconds(&entry.ts) else {
@@ -660,6 +699,31 @@ impl Node {
             }
         }
 
+        // Every verdict record must be readable. This is structural, not a
+        // re-run: a verdict naming no claim, or carrying a status no
+        // implementation recognises, is a malformed log whether or not this
+        // node can run the verifier. It used to be skipped in silence by the
+        // re-run loop below, which meant a log could carry a verdict that
+        // settles nothing anywhere and still audit clean.
+        for entry in self.ledger.entries_of_kind(VERDICT) {
+            let Some(claim_id) = entry.payload.get("claim_id").and_then(Value::as_str) else {
+                problems.push(format!("entry {}: verdict has no claim_id", entry.seq));
+                continue;
+            };
+            if entry
+                .payload
+                .get("verdict")
+                .and_then(Verdict::from_value)
+                .is_none()
+            {
+                problems.push(format!(
+                    "entry {}: verdict for {} has no readable status",
+                    entry.seq,
+                    short(claim_id)
+                ));
+            }
+        }
+
         // Every settlement must name a claim whose recorded verdict accepted.
         let accepted = self.accepted_claims();
         for entry in self.ledger.entries_of_kind(SETTLEMENT) {
@@ -676,12 +740,136 @@ impl Node {
             }
         }
 
+        // Every claim opens a commitment, and every claim has a verdict.
+        //
+        // The first is the commit-reveal scheme itself: a claim with no
+        // matching commitment was never bound to an epoch, so its submitter
+        // could have read everyone else's reveal before writing it. That is the
+        // one thing the scheme exists to prevent, and the independent auditor
+        // did not check it -- it looked only from verdicts and settlements
+        // *back* to claims, which cannot see a claim nothing points at.
+        let mut seen_claims: BTreeSet<String> = BTreeSet::new();
+        let with_verdict: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(VERDICT)
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .payload
+                    .get("claim_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            let Ok(claim) = Claim::from_value(&entry.payload) else {
+                // Reported above by the re-encode pass.
+                continue;
+            };
+            let claim_id = claim.id();
+            if !seen_claims.insert(claim_id.clone()) {
+                continue;
+            }
+            if self.matching_commitment(&claim).is_none() {
+                problems.push(format!(
+                    "claim {}: no matching commitment",
+                    short(&claim_id)
+                ));
+            }
+            if !with_verdict.contains(&claim_id) {
+                problems.push(format!("claim {}: no verdict recorded", short(&claim_id)));
+            }
+        }
+
+        // No objective pays out more than it funded, and a plain one pays once.
+        //
+        // The most consequential invariant in the file, and this crate did not
+        // check it at all. Everything above is about whether a *record* is
+        // well-formed; this is about whether the money adds up, and an
+        // independent auditor that re-derives every id and every root while
+        // taking the arithmetic on faith is checking the easy half. An operator
+        // could have overspent a pool by any amount and the reference would
+        // have said "log verified".
+        //
+        // `i128` throughout, and a total that cannot be represented is a
+        // problem rather than a wrap: a wrapped sum resets an overspent pool to
+        // something small and hides exactly the fault being looked for.
+        let mut settled_once: BTreeSet<String> = BTreeSet::new();
+        let mut paid: BTreeMap<String, i128> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(SETTLEMENT) {
+            let Some(objective_id) = entry.payload.get("objective_id").and_then(Value::as_str)
+            else {
+                problems.push(format!(
+                    "entry {}: settlement has no objective_id",
+                    entry.seq
+                ));
+                continue;
+            };
+            let objective = objectives.get(objective_id);
+            // A ratcheted objective pays each improvement, so more than one
+            // settlement is the design rather than a fault. Every other kind
+            // closes when it pays.
+            let progressive = objective.is_some_and(|o| o.ratchet.is_some());
+            if !settled_once.insert(objective_id.to_string()) && !progressive {
+                problems.push(format!(
+                    "objective {}: settled more than once",
+                    short(objective_id)
+                ));
+            }
+            let reward = match entry.payload.get("reward") {
+                Some(Value::Int(reward)) => *reward,
+                // Absent is not zero and a string is not a number. A settlement
+                // whose amount cannot be read is not one whose amount is
+                // harmless.
+                _ => {
+                    problems.push(format!(
+                        "entry {}: settlement of {} has no integer reward",
+                        entry.seq,
+                        short(objective_id)
+                    ));
+                    continue;
+                }
+            };
+            let running = paid.entry(objective_id.to_string()).or_insert(0);
+            match running.checked_add(reward) {
+                Some(total) => *running = total,
+                None => problems.push(format!(
+                    "objective {}: settled rewards overflow any representable total",
+                    short(objective_id)
+                )),
+            }
+        }
+        for (objective_id, total) in &paid {
+            let Some(objective) = objectives.get(objective_id) else {
+                problems.push(format!(
+                    "settlement references unknown objective {}",
+                    short(objective_id)
+                ));
+                continue;
+            };
+            if *total < 0 {
+                problems.push(format!(
+                    "objective {}: settled rewards sum to a negative total {total}",
+                    short(objective_id)
+                ));
+            } else if *total > i128::from(objective.reward) {
+                problems.push(format!(
+                    "objective {}: paid {total} against a pool of {}",
+                    short(objective_id),
+                    objective.reward
+                ));
+            }
+        }
+
         // Every batch must name the anchor the log actually had at its epoch's
         // start, and the order the beacon produces.
+        let mut batches = 0usize;
+        let mut faulted: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
         for entry in self.ledger.entries_of_kind(BATCH) {
             let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_u64) else {
                 continue;
             };
+            batches += 1;
             let recorded_anchor = entry
                 .payload
                 .get("anchor")
@@ -692,6 +880,7 @@ impl Node {
             // permanent audit failure.
             let expected = self.anchor_of_epoch(epoch, Some(entry.seq as usize));
             if expected != recorded_anchor {
+                faulted.insert(epoch);
                 problems.push(format!(
                     "entry {}: batch anchor is {}, expected {}",
                     entry.seq,
@@ -710,7 +899,24 @@ impl Node {
                         .collect()
                 })
                 .unwrap_or_default();
-            let mut expected_order = listed.clone();
+            // Membership is derived from the log, not read back out of the
+            // batch. Re-sorting the list the batch itself supplied is a check
+            // that a batch which *omitted* a claim always passes -- and which
+            // claims are in an epoch's batch is precisely what decides who gets
+            // paid that epoch, so it is the last thing an independent
+            // implementation should take on faith from the record it is
+            // auditing.
+            //
+            // Bounded to the log as it stood when the batch was written, for
+            // the same reason the anchor is: a peer can append a claim dated
+            // into an epoch that already paid, and an unbounded scan would call
+            // an honest batch wrong forever.
+            let mut expected_order: Vec<String> = self
+                .accepted_claims_by_epoch_within(Some(entry.seq as usize))
+                .into_iter()
+                .filter(|(candidate, _)| *candidate == epoch)
+                .map(|(_, claim)| claim.id())
+                .collect();
             expected_order.sort_by_key(|id| {
                 let commitment_hash = accepted
                     .get(id)
@@ -722,11 +928,37 @@ impl Node {
                 )
             });
             if expected_order != listed {
+                faulted.insert(epoch);
                 problems.push(format!(
-                    "entry {}: batch for epoch {epoch} is not in beacon order",
-                    entry.seq
+                    "entry {}: batch for epoch {epoch} settled {} claim(s) in an order the \
+                     beacon does not produce",
+                    entry.seq,
+                    listed.len()
                 ));
             }
+        }
+
+        // Every batch faulting at once usually means the auditor and the writer
+        // disagree about how long an epoch is, not that anybody was paid out of
+        // turn. Epochs are derived from timestamps and never stored, so a log
+        // written under `PROOFWORK_EPOCH_SECONDS=1` audits as thoroughly broken
+        // under the default 600 -- both implementations agree, and both are
+        // right.
+        //
+        // The primary prints this note; this crate did not, which is the wrong
+        // way round. A reader auditing with the *independent* implementation is
+        // exactly the reader with no reason to trust a reassuring explanation
+        // from the primary, and they were the one left staring at a wall of
+        // anchor mismatches that reads like proof the project's central claim
+        // is false.
+        if batches > 0 && faulted.len() == batches {
+            problems.push(format!(
+                "note: every batch in this log looks wrong, which is more often a mismatched \
+                 epoch length than a dishonest operator. Epochs are derived from record \
+                 timestamps and never stored, so a log written with a different \
+                 PROOFWORK_EPOCH_SECONDS (this audit used {}) cannot be re-derived without it.",
+                crate::partition::epoch_seconds()
+            ));
         }
 
         if rerun {

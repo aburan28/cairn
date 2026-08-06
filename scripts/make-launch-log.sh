@@ -23,12 +23,21 @@ fi
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 
-LOG="$OUT/proofwork.jsonl"
-KEY=$(mktemp -u /tmp/pw-launch-key-XXXXXX.json)
-trap 'rm -f "$KEY"' EXIT
-
-mkdir -p "$OUT"
-rm -f "$LOG" "$OUT/checkpoint.json"
+# Everything is built in a staging directory and moved into $OUT only once it
+# has audited and verified.
+#
+# The first version deleted the published log and then spent the better part of
+# an hour rebuilding it. Any interruption in that window -- a Ctrl-C, a job
+# timeout, a failed reveal under `set -e` -- left the repository's one published
+# artifact truncated or missing, and the thing it is evidence *for* is that a
+# copy of the log is enough to re-derive every settled result. Destroying it to
+# regenerate it is the one operation that must not be able to fail halfway.
+STAGE=$(mktemp -d /tmp/pw-launch-stage-XXXXXX)
+LOG="$STAGE/proofwork.jsonl"
+CHECKPOINT="$STAGE/checkpoint.json"
+PUBKEY="$STAGE/root-key.pub"
+KEY="$STAGE/secret.json"
+trap 'rm -rf "$STAGE"' EXIT
 
 # The *default* epoch length, deliberately, even though it makes this script
 # take the better part of an hour.
@@ -108,20 +117,32 @@ CLAIM16="$LAST_CLAIM"
 submit "$CAPSET" carol examples/capset_progressive/artifact-20.json n-20 --cites "$CLAIM16"
 
 rule "sign it"
-"$RUST" --log "$LOG" --root . checkpoint --root-key "$KEY" --out "$OUT/checkpoint.json" \
+"$RUST" --log "$LOG" --root . checkpoint --root-key "$KEY" --out "$CHECKPOINT" \
   | sed 's/^/  /'
-python3 - "$KEY" "$OUT/root-key.pub" <<'PY'
-import json, subprocess, sys
-# The public half only. The secret dies with the temp file.
-signed = json.load(open("launch/checkpoint.json"))
+# Reads the checkpoint it just wrote. This used to name `launch/checkpoint.json`
+# outright while every other path honoured $OUT_DIR, so building anywhere else
+# published the *committed* artifact's key beside a log it does not describe.
+python3 - "$CHECKPOINT" "$PUBKEY" <<'PY'
+import json, sys
+# The public half only. The secret dies with the staging directory.
+signed = json.load(open(sys.argv[1]))
 open(sys.argv[2], "w").write(signed["public_key"] + "\n")
 PY
-echo "  public key written to $OUT/root-key.pub"
+echo "  public key written to $PUBKEY"
 
 rule "check what was produced"
 "$RUST" --log "$LOG" --root . audit | sed 's/^/  /'
-"$RUST" --log "$LOG" --root . verify --from "$OUT/checkpoint.json" \
-  --root-key "$OUT/root-key.pub" --audit | sed 's/^/  /'
+"$RUST" --log "$LOG" --root . verify --from "$CHECKPOINT" \
+  --root-key "$PUBKEY" --audit | sed 's/^/  /'
 "$RUST" --log "$LOG" --root . attribute | sed 's/^/  /'
 
-printf '\n\033[32mLAUNCH LOG OK: %s (%s entries)\033[0m\n' "$LOG" "$(grep -c . "$LOG")"
+# Only now is the published copy touched.
+rule "publish"
+mkdir -p "$OUT"
+mv "$LOG" "$OUT/proofwork.jsonl"
+mv "$CHECKPOINT" "$OUT/checkpoint.json"
+mv "$PUBKEY" "$OUT/root-key.pub"
+echo "  $OUT/proofwork.jsonl, checkpoint.json, root-key.pub"
+
+printf '\n\033[32mLAUNCH LOG OK: %s (%s entries)\033[0m\n' \
+  "$OUT/proofwork.jsonl" "$(grep -c . "$OUT/proofwork.jsonl")"

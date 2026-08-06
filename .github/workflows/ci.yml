@@ -147,6 +147,25 @@ jobs:
       # different inputs. A failure prints its seed, which is what makes it
       # reproducible rather than a ghost.
       - run: ./scripts/fuzz-differential.sh 3000
+      # The published artifact, audited by both implementations on every run.
+      #
+      # `launch/proofwork.jsonl` is the project's central piece of evidence: a
+      # copy of a settled log that a stranger can re-derive from. It is a
+      # committed file, so nothing else in CI touches it -- which meant a change
+      # to the audit rules could make the published log fail to verify and every
+      # job would stay green. A contributor's first command is `proofwork audit`
+      # on this file, and it must not be the thing that discovers the breakage.
+      # No PROOFWORK_EPOCH_SECONDS here, deliberately: the log was built at the
+      # default and this reproduces what a reader with no configuration sees.
+      - run: |
+          for BIN in ./target/release/proofwork \
+                     ./reference/rust/target/release/proofwork-reference; do
+            "$BIN" --log launch/proofwork.jsonl --root . audit \
+              | tee /dev/stderr | grep -q "log verified" \
+              || { echo "$BIN rejects the published log" >&2; exit 1; }
+          done
+          ./target/release/proofwork --log launch/proofwork.jsonl --root . \
+            verify launch/checkpoint.json --root-key launch/root-key.pub
 
   audit:
     # Known-vulnerable dependencies fail the build. Deliberately not advisory:

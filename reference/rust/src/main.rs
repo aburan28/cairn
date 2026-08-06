@@ -17,6 +17,7 @@
 //! * `audit <log.jsonl>` — re-derive a log the primary implementation wrote:
 //!   chain integrity, record ids, signatures, Merkle root.
 
+use std::io::Write as _;
 use std::process::ExitCode;
 
 use proofwork_reference::attribution::{flow, FlowParams};
@@ -27,6 +28,26 @@ use proofwork_reference::node::Node;
 use proofwork_reference::partition::{assign, beacon, settlement_rank};
 use proofwork_reference::records::{commitment_hash, Claim, Commitment, Objective, PeerRecord};
 use proofwork_reference::time::timestamp;
+
+/// Write one line, treating a closed pipe as the end of output.
+///
+/// `println!` **panics** when the reader has gone away, and
+/// `proofwork-reference post … | head -1` is the everyday way to make that
+/// happen -- `scripts/interop.sh` does exactly that to pick an objective id out
+/// of field 2. `post` prints two lines, so whether the panic fires is a race
+/// between this process reaching the second line and `head` exiting after the
+/// first. It is quiet on an idle machine and loses under load, which is the
+/// worst shape a bug can have: it looked like a flaky script.
+///
+/// The primary implementation has had this fix and a `//!` paragraph explaining
+/// it since before this crate existed. It never made it across, and nothing
+/// noticed, because the divergence is in output plumbing rather than in the
+/// rules -- the one part of the two implementations nothing compares.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -396,11 +417,11 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
     }
 
     if f.0.is_empty() {
-        println!("conformance ok: {checked} vectors reproduced independently");
+        say!("conformance ok: {checked} vectors reproduced independently");
         Ok(())
     } else {
         for failure in &f.0 {
-            println!("  {failure}");
+            say!("  {failure}");
         }
         Err(format!("{} vector(s) disagree", f.0.len()))
     }
@@ -533,11 +554,11 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
 
 fn report(f: Failures, checked: usize, noun: &str) -> Result<(), String> {
     if f.0.is_empty() {
-        println!("conformance ok: {checked} {noun} vector(s) reproduced independently");
+        say!("conformance ok: {checked} {noun} vector(s) reproduced independently");
         Ok(())
     } else {
         for failure in &f.0 {
-            println!("  {failure}");
+            say!("  {failure}");
         }
         Err(format!("{} vector(s) disagree", f.0.len()))
     }
@@ -608,8 +629,8 @@ fn cli(args: &[String]) -> Result<(), String> {
             let objective = Objective::from_value(&value).map_err(|e| e.to_string())?;
             let id = node.post_objective(&objective, &ts)?;
             // Field 2 is the id, and interop.sh reads it with awk.
-            println!("objective {id}");
-            println!(
+            say!("objective {id}");
+            say!(
                 "  reward {}  verifier {}",
                 objective.reward,
                 objective.verifier_kind().unwrap_or("?")
@@ -632,8 +653,8 @@ fn cli(args: &[String]) -> Result<(), String> {
                 signature: None,
             };
             node.commit(&commitment, &ts)?;
-            println!("committed {}", proofwork_reference::canonical::short(&hash));
-            println!("  nonce {nonce}   <- keep this; you need it to reveal");
+            say!("committed {}", proofwork_reference::canonical::short(&hash));
+            say!("  nonce {nonce}   <- keep this; you need it to reveal");
         }
         "reveal" => {
             let objective_id = positional.ok_or("reveal needs an objective id")?;
@@ -658,23 +679,26 @@ fn cli(args: &[String]) -> Result<(), String> {
             };
             claim.validate().map_err(|e| e.to_string())?;
             let outcome = node.reveal(&claim, &ts)?;
-            println!("claim {}", outcome.claim_id);
-            println!(
+            say!("claim {}", outcome.claim_id);
+            say!(
                 "  verdict  {}: {}",
                 outcome.verdict.status.as_str(),
                 outcome.verdict.detail
             );
-            println!("  {}", outcome.note);
+            say!("  {}", outcome.note);
         }
         "settle" => {
             let outcomes = node.settle_at(&ts)?;
             if outcomes.is_empty() {
-                println!("no batch was due");
+                say!("no batch was due");
             }
             for outcome in outcomes {
-                println!(
+                say!(
                     "claim {}\n  settled  {}  reward {}  ({})",
-                    outcome.claim_id, outcome.settled, outcome.reward, outcome.note
+                    outcome.claim_id,
+                    outcome.settled,
+                    outcome.reward,
+                    outcome.note
                 );
             }
         }
@@ -689,9 +713,9 @@ fn cli(args: &[String]) -> Result<(), String> {
             let value =
                 Value::from_json(&read(Some(&path), "a record")?).map_err(|e| e.to_string())?;
             match decode_record(&kind, &value) {
-                Ok(id) => println!("ok {id}"),
+                Ok(id) => say!("ok {id}"),
                 Err(reason) => {
-                    println!("refused");
+                    say!("refused");
                     eprintln!("  {reason}");
                     return Err("record refused".into());
                 }
@@ -704,9 +728,9 @@ fn cli(args: &[String]) -> Result<(), String> {
         "canon" => {
             let path = flag("--input").ok_or("canon needs --input <file>")?;
             match Value::from_json(&read(Some(&path), "a JSON value")?) {
-                Ok(value) => println!("ok {} {}", value.digest(), value.canonical_string()),
+                Ok(value) => say!("ok {} {}", value.digest(), value.canonical_string()),
                 Err(error) => {
-                    println!("refused");
+                    say!("refused");
                     eprintln!("  {error}");
                     return Err("input refused".into());
                 }
@@ -714,22 +738,22 @@ fn cli(args: &[String]) -> Result<(), String> {
         }
         "log" => {
             for entry in node.ledger.entries() {
-                println!("{:>4}  {:<12} {}", entry.seq, entry.kind, entry.hash);
+                say!("{:>4}  {:<12} {}", entry.seq, entry.kind, entry.hash);
             }
         }
         "audit" => {
             // `rerun` on by default: re-running the pinned verifiers is the
             // thing that makes an audit an audit rather than a checksum.
             let problems = node.audit(!rest.iter().any(|a| a == "--no-rerun"));
-            println!("entries {}", node.ledger.len());
+            say!("entries {}", node.ledger.len());
             if let Some(root) = node.ledger.merkle_root() {
-                println!("merkle  {root}");
+                say!("merkle  {root}");
             }
             if problems.is_empty() {
-                println!("\nlog verified: chain intact, every settled claim re-verified");
+                say!("\nlog verified: chain intact, every settled claim re-verified");
             } else {
                 for problem in &problems {
-                    println!("  ! {problem}");
+                    say!("  ! {problem}");
                 }
                 return Err(format!("{} problem(s)", problems.len()));
             }

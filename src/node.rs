@@ -1076,11 +1076,71 @@ impl Node {
     }
 
     fn accepted_in_epoch(&self, epoch: u64) -> Vec<(String, Claim)> {
-        self.accepted_claims_by_epoch()
-            .into_iter()
-            .filter(|(candidate, _)| *candidate == epoch)
-            .map(|(_, pair)| pair)
-            .collect()
+        self.accepted_in_epoch_within(epoch, usize::MAX)
+    }
+
+    /// Accepted claims of `epoch`, as the log stood at `positions` entries.
+    ///
+    /// The bound is the same one the anchor gets and it is load-bearing for the
+    /// same reason. Records arrive over sync stamped with their own
+    /// `created_at` and land at the tail, so a peer can append an accepted
+    /// claim dated into an epoch that already paid. Deriving membership over
+    /// the whole log then says the batch omitted somebody -- forever, at a
+    /// peer's choosing, about a batch that was correct when it was written and
+    /// could not have known about a record that did not yet exist.
+    ///
+    /// The anchor was bounded and this was not, which left the same attack
+    /// working one field over: instead of "the anchor is wrong" the audit said
+    /// "settled 1 claim(s) in an order the beacon does not produce", which
+    /// reads as an accusation that the operator paid people out of turn.
+    fn accepted_in_epoch_within(&self, epoch: u64, positions: usize) -> Vec<(String, Claim)> {
+        // The *verdicts* are bounded too, not only the claims. A claim already
+        // in the log when the batch was written, whose accepting verdict was
+        // appended afterwards, was correctly left out of that batch -- counting
+        // it now would fault an honest batch just as surely as a back-dated
+        // claim would.
+        let mut accepted: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != VERDICT {
+                continue;
+            }
+            let Some(claim_id) = payload_str(&entry.payload, "claim_id") else {
+                continue;
+            };
+            let is_accept = entry
+                .payload
+                .get("verdict")
+                .and_then(Verdict::from_value)
+                .map(|verdict| verdict.accepted())
+                .unwrap_or(false);
+            if is_accept {
+                accepted.insert(claim_id.to_string());
+            } else {
+                accepted.remove(claim_id);
+            }
+        }
+
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut out = Vec::new();
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != CLAIM {
+                continue;
+            }
+            let Ok(claim) = Claim::from_value(&entry.payload) else {
+                continue;
+            };
+            let claim_id = claim.id();
+            if !accepted.contains(&claim_id) || !seen.insert(claim_id.clone()) {
+                continue;
+            }
+            let Some(seconds) = crate::time::parse_rfc3339(&entry.ts).filter(|s| *s >= 0) else {
+                continue;
+            };
+            if epoch_of(seconds as u64, epoch_seconds()) == epoch {
+                out.push((claim_id, claim));
+            }
+        }
+        out
     }
 
     /// Apply the settlement rules to one accepted claim of a closed batch.
@@ -1388,6 +1448,24 @@ impl Node {
                     continue;
                 }
             };
+            // A status no implementation recognises is a malformed log, and it
+            // is malformed whether or not this node can re-run the verifier --
+            // so it belongs here, ahead of the `rerun` gate, rather than being
+            // noticed only as a disagreement further down. It used to surface
+            // as a placeholder in a comparison, which meant it was reported
+            // when re-verification happened to settle and silent otherwise:
+            // the loudness of a structural defect depended on whether an
+            // unrelated toolchain was installed.
+            let was = match status_of(recorded_verdict).and_then(Status::from_wire) {
+                Some(status) => status.as_str(),
+                None => {
+                    problems.push(format!(
+                        "claim {claim_id}: recorded verdict has no readable status ({})",
+                        recorded_verdict.canonical_string()
+                    ));
+                    continue;
+                }
+            };
             if !rerun {
                 continue;
             }
@@ -1399,7 +1477,6 @@ impl Node {
                 }
             };
             let fresh = self.registry.run(&objective.verifier, &claim.artifact);
-            let was = status_of(recorded_verdict).unwrap_or("(unreadable)");
             if !fresh.settles() {
                 // This node cannot re-derive the verdict. Whether that is worth
                 // reporting is decided by what the *log* recorded, not by what
@@ -1656,7 +1733,7 @@ impl Node {
             // from a different anchor would report the same fault twice under
             // two names.
             let mut ranked: Vec<(String, String)> = self
-                .accepted_in_epoch(epoch)
+                .accepted_in_epoch_within(epoch, position)
                 .into_iter()
                 .map(|(claim_id, claim)| {
                     (
@@ -2747,6 +2824,203 @@ mod tests {
     }
 
     #[test]
+    fn a_back_dated_claim_cannot_invalidate_a_batch_that_already_settled() {
+        // The sibling test above appends a plain note, which moves the anchor
+        // and nothing else. A back-dated *accepted claim* is the sharper
+        // version of the same attack: batch membership is re-derived from the
+        // log, so a claim dated into an epoch that already paid makes the batch
+        // look like it omitted somebody. Same append, same peer, same choosing
+        // -- and the batch record's own log position has to bound this scan for
+        // the same reason it bounds the anchor.
+        let dir = TempDir::new("audit-backdate-claim");
+        let mut node = node(&dir);
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        node.post_objective(&objective, TS).expect("post");
+        submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+        let batches = node.ledger().entries_of_kind(BATCH).len();
+        assert!(batches > 0, "the fixture must actually settle a batch");
+        assert!(node.audit(false).is_empty(), "clean before the back-date");
+
+        // The *settled* claim's entry timestamp, so the plant below lands in
+        // the epoch that already paid rather than an empty one. Stamping it
+        // `TS` would put it in a different epoch and the test would pass
+        // without ever exercising the thing it is named for.
+        let settled_ts = node
+            .ledger()
+            .entries_of_kind(CLAIM)
+            .first()
+            .map(|entry| entry.ts.clone())
+            .expect("the fixture wrote a claim");
+        let settled_epoch = epoch_of(
+            crate::time::parse_rfc3339(&settled_ts).expect("stamp") as u64,
+            epoch_seconds(),
+        );
+        assert!(
+            node.ledger()
+                .entries_of_kind(BATCH)
+                .iter()
+                .any(|entry| entry.payload.get("epoch").and_then(Value::as_u64)
+                    == Some(settled_epoch)),
+            "the plant has to land in an epoch a batch actually settled"
+        );
+
+        // A second accepted claim, dated into the settled epoch, appended after
+        // the batch the way sync appends a peer's record.
+        let artifact = results(2);
+        let claim = Claim::new(
+            objective.id(),
+            "mallory",
+            artifact.clone(),
+            "n2",
+            &settled_ts,
+            vec![],
+        )
+        .expect("valid claim");
+        let claim_id = claim.id();
+        let hash = commitment_hash(&objective.id(), "mallory", &artifact, "n2");
+        node.ledger_mut()
+            .append(
+                COMMITMENT,
+                Commitment::new(objective.id(), "mallory", hash, &settled_ts).to_value(),
+                &settled_ts,
+            )
+            .expect("append");
+        node.ledger_mut()
+            .append(CLAIM, claim.to_value(), &settled_ts)
+            .expect("append");
+        node.ledger_mut()
+            .append(
+                VERDICT,
+                Value::object([
+                    ("claim_id", Value::string(claim_id)),
+                    ("objective_id", Value::string(objective.id())),
+                    (
+                        "verdict",
+                        Verdict::plain(Status::Accept, "planted").to_value(),
+                    ),
+                ]),
+                &settled_ts,
+            )
+            .expect("append");
+
+        let problems = node.audit(false);
+        assert!(
+            !problems.iter().any(|p| p.contains("the beacon does not")),
+            "a back-dated claim invalidated a settled batch: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_back_dated_verdict_cannot_invalidate_a_batch_that_already_settled() {
+        // The other half of the same bound. Here the *claim* was in the log
+        // before the batch and simply had not been accepted yet, so the batch
+        // was right to leave it out. Bounding only the claim scan would count
+        // it anyway and fault an honest batch -- the verdicts have to carry the
+        // same bound.
+        let dir = TempDir::new("audit-backdate-verdict");
+        let mut node = node(&dir);
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        node.post_objective(&objective, TS).expect("post");
+
+        // Driven by hand rather than through `submit`, because the two claims
+        // have to share a reveal epoch: mallory's claim record must sit in the
+        // epoch the batch settles, so that counting its later acceptance would
+        // make the batch look short.
+        let commit_at = stamp(0);
+        let reveal_at = stamp(EPOCH);
+        let settle_at = stamp(2 * EPOCH);
+
+        let pending_artifact = results(2);
+        let pending_hash = commitment_hash(&objective.id(), "mallory", &pending_artifact, "n2");
+        node.commit(
+            &Commitment::new(objective.id(), "mallory", pending_hash, &commit_at),
+            &commit_at,
+        )
+        .expect("commit");
+        let alice_hash = commitment_hash(&objective.id(), "alice", &results(1), "n1");
+        node.commit(
+            &Commitment::new(objective.id(), "alice", alice_hash, &commit_at),
+            &commit_at,
+        )
+        .expect("commit");
+
+        // mallory's claim, in the reveal epoch, recorded as *not* accepted --
+        // so the log is well-formed and the batch is right to leave it out.
+        let pending = Claim::new(
+            objective.id(),
+            "mallory",
+            pending_artifact,
+            "n2",
+            &reveal_at,
+            vec![],
+        )
+        .expect("valid claim");
+        let pending_id = pending.id();
+        node.ledger_mut()
+            .append(CLAIM, pending.to_value(), &reveal_at)
+            .expect("append");
+        node.ledger_mut()
+            .append(
+                VERDICT,
+                Value::object([
+                    ("claim_id", Value::string(pending_id.clone())),
+                    ("objective_id", Value::string(objective.id())),
+                    (
+                        "verdict",
+                        Verdict::plain(Status::Reject, "not yet").to_value(),
+                    ),
+                ]),
+                &reveal_at,
+            )
+            .expect("append");
+
+        let alice = Claim::new(
+            objective.id(),
+            "alice",
+            results(1),
+            "n1",
+            &reveal_at,
+            vec![],
+        )
+        .expect("valid claim");
+        node.reveal(&alice, &reveal_at).expect("reveal");
+        node.settle_at(&settle_at).expect("settle");
+        assert!(
+            !node.ledger().entries_of_kind(BATCH).is_empty(),
+            "the fixture must actually settle a batch"
+        );
+        assert!(node.audit(false).is_empty(), "clean before the back-date");
+
+        // The acceptance arrives after the batch was drawn.
+        node.ledger_mut()
+            .append(
+                VERDICT,
+                Value::object([
+                    ("claim_id", Value::string(pending_id)),
+                    ("objective_id", Value::string(objective.id())),
+                    (
+                        "verdict",
+                        Verdict::plain(Status::Accept, "planted").to_value(),
+                    ),
+                ]),
+                &reveal_at,
+            )
+            .expect("append");
+
+        let problems = node.audit(false);
+        assert!(
+            !problems.iter().any(|p| p.contains("the beacon does not")),
+            "a back-dated verdict invalidated a settled batch: {problems:?}"
+        );
+    }
+
+    #[test]
     fn an_audit_where_every_batch_faults_suggests_the_epoch_length() {
         // Found while building the published log: a log written under
         // PROOFWORK_EPOCH_SECONDS=1 audits as thoroughly broken under the
@@ -3198,6 +3472,58 @@ mod tests {
                 .any(|p| p.contains("no longer be re-verified")),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn a_verdict_with_an_unrecognised_status_is_a_problem_with_or_without_a_re_run() {
+        // A status no implementation knows is a malformed log, and it is
+        // malformed whether or not this node can run the verifier. It used to
+        // surface only as a *disagreement* with a re-run, so on a node lacking
+        // the toolchain it was silent -- the loudness of a structural defect
+        // depending on an unrelated install.
+        let dir = TempDir::new("audit-bad-status");
+        let mut node = node(&dir);
+        let objective = lean_objective(10);
+        node.post_objective(&objective, TS).expect("post");
+        let artifact = proof(":= by sorry");
+        let claim = claim_for(&objective, "alice", artifact.clone(), "n1");
+        let claim_id = claim.id();
+        let hash = commitment_hash(&objective.id(), "alice", &artifact, "n1");
+        node.ledger_mut()
+            .append(
+                COMMITMENT,
+                Commitment::new(objective.id(), "alice", hash, TS).to_value(),
+                TS,
+            )
+            .expect("append");
+        node.ledger_mut()
+            .append(CLAIM, claim.to_value(), TS)
+            .expect("append");
+        node.ledger_mut()
+            .append(
+                VERDICT,
+                Value::object([
+                    ("claim_id", Value::string(claim_id.clone())),
+                    ("objective_id", Value::string(objective.id())),
+                    (
+                        "verdict",
+                        Value::object([
+                            ("status", Value::string("probably")),
+                            ("detail", Value::string("")),
+                        ]),
+                    ),
+                ]),
+                TS,
+            )
+            .expect("append");
+
+        for rerun in [true, false] {
+            let problems = node.audit(rerun);
+            assert!(
+                problems.iter().any(|p| p.contains("no readable status")),
+                "rerun={rerun}: {problems:?}"
+            );
+        }
     }
 
     #[test]
