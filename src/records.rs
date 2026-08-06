@@ -58,6 +58,8 @@ pub enum RecordKind {
     Commitment,
     Claim,
     Peer,
+    Undertaking,
+    Availability,
 }
 
 impl RecordKind {
@@ -67,6 +69,8 @@ impl RecordKind {
             RecordKind::Commitment => "commitment",
             RecordKind::Claim => "claim",
             RecordKind::Peer => "peer",
+            RecordKind::Undertaking => "undertaking",
+            RecordKind::Availability => "availability",
         }
     }
 }
@@ -1286,6 +1290,420 @@ impl PeerRecord {
         };
         record.validate()?;
         Ok(record)
+    }
+}
+
+/// A past promise to hold the log: identity `K` undertook to keep the log whose
+/// Merkle root is `R` at height `H`.
+///
+/// # Why this is a statement about the past
+///
+/// An append-only log cannot say "no longer true". A record meaning *"K is
+/// holding the log"* would advertise a dead node forever and get less accurate
+/// the longer it ran — the same argument that keeps provider records out of the
+/// log and into [`crate::dht`]'s expiring provider store. A record meaning *"K
+/// undertook, at time T, to hold this"* never needs retracting, because it
+/// stays true whatever K does next. What K does next is answered by a different
+/// record: the sample response.
+///
+/// # Why the root and not a blob digest
+///
+/// `docs/node-incentives.md` names availability as one of the two easy services
+/// — easy because *the protocol already knows the right answer*, so a node that
+/// fails a challenge has proved something about itself without anyone's
+/// cooperation. That oracle is the Merkle root. Undertaking to hold a bag of
+/// blobs would be a promise with no oracle behind it; undertaking to hold a log
+/// at a pinned root is a promise anyone can sample with
+/// [`crate::ledger::Ledger::prove`].
+///
+/// `height` is not redundant with `root`. A Merkle path's shape depends on the
+/// leaf count, so a challenger who knows only the root cannot tell a valid
+/// answer from one shaped for a different tree. Both are pinned here, by the
+/// signature, before any challenge exists.
+///
+/// # What an undertaking is worth on its own
+///
+/// Nothing, deliberately. Anyone may sign one for a log they have never seen —
+/// the root is public. It becomes worth something only when a challenge is
+/// derived against it and the answer is checked, which is why the undertaking
+/// and the settlement that reads it belong to one change rather than two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Undertaking {
+    /// Ed25519 public key, hex. Who promised, and the record's authority.
+    pub identity: String,
+    /// `sha256:` Merkle root of the log being undertaken.
+    pub root: String,
+    /// How many entries that root covers. See the type docs: a challenge needs
+    /// the tree's shape, not only its root.
+    pub height: u64,
+    pub created_at: String,
+    /// Ed25519 signature over [`Undertaking::signing_payload`], hex.
+    ///
+    /// **Required.** A promise nobody signed is a promise by nobody, and this
+    /// record exists to be held against one identity in particular.
+    pub signature: Option<String>,
+}
+
+/// Tallest log an undertaking may name.
+///
+/// The sample index is drawn with [`crate::partition::assign`], whose partition
+/// count is a `u32` -- and reusing that function rather than writing a second
+/// modular reduction is deliberate: it is pinned by `conformance/vectors.json`,
+/// so both implementations agree about which entry was challenged for free, and
+/// a bespoke draw here would be a new consensus surface.
+///
+/// So the bound is declared in the *format* and checked once, on the way in,
+/// rather than discovered at settlement time when a height that does not fit
+/// would have to be capped or refused with money on the table. Four billion
+/// entries is far beyond anything Stage 0 contemplates; a network that reaches
+/// it needs this design revisited rather than silently truncated.
+pub const MAX_UNDERTAKING_HEIGHT: u64 = u32::MAX as u64;
+
+impl Undertaking {
+    pub fn new(
+        identity: impl Into<String>,
+        root: impl Into<String>,
+        height: u64,
+        created_at: impl Into<String>,
+    ) -> Undertaking {
+        Undertaking {
+            identity: identity.into(),
+            root: root.into(),
+            height,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    /// The bytes a signature covers: this record without its own signature.
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::Undertaking.as_str())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("height", Value::Int(i128::from(self.height))),
+            ("identity", Value::string(self.identity.clone())),
+            ("root", Value::string(self.root.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Sign with `identity`, whose public half *becomes* the `identity` field.
+    ///
+    /// Same rule as a signed claim's submitter and a peer record's identity: a
+    /// name you sign for cannot be worn by anyone else, and a record whose name
+    /// and key disagreed would be a record about somebody else.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Undertaking {
+        self.identity = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    /// Check the signature. Always required — see the field's documentation.
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "undertaking";
+        if signed_submitter(&self.identity).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        }
+        let Some(signature) = self.signature.as_deref() else {
+            return Err(SignatureError::Missing {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        };
+        verify_record_signature(
+            RECORD,
+            &self.identity,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "undertaking";
+        if !is_hex64(&self.identity) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "identity",
+                expected: "64 lowercase hex characters of ed25519 public key",
+            });
+        }
+        if !is_digest(&self.root) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "root",
+                expected: "sha256: followed by 64 lowercase hex characters",
+            });
+        }
+        // Zero is refused rather than treated as "the empty log". An empty log
+        // has no root at all, so a height of zero beside a well-formed root is
+        // a record that contradicts itself, and there is nothing in it to
+        // sample.
+        if self.height == 0 || self.height > MAX_UNDERTAKING_HEIGHT {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "height",
+                expected: "between 1 and 2^32 - 1 entries",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Undertaking, RecordError> {
+        const RECORD: &str = "undertaking";
+        let value = expect_object(value, RECORD)?;
+        let record = Undertaking {
+            identity: required_string(value, RECORD, "identity")?,
+            root: required_string(value, RECORD, "root")?,
+            height: required_u64(value, RECORD, "height")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// An answer to one availability sample: the path the holder produced.
+///
+/// # Why this carries a path and not a proof
+///
+/// [`crate::ledger::Proof`] ships an entry beside its path, because it is meant
+/// for a reader who does not have the log. This record goes *into* the log, and
+/// the entry being proved is already sitting in it at the sampled index. So the
+/// entry is left out and the auditor reads it locally — the redundancy would be
+/// a whole record duplicated per node per epoch, forever.
+///
+/// # What this proves, and what it does not
+///
+/// The signature is the load-bearing part, and without it the record would be
+/// worthless: an auditor holding the log can compute this path themselves, so
+/// an unsigned path is evidence of nothing. Signed, it says *K produced the
+/// path for the entry K was challenged on*, which K could only do by holding
+/// that entry, and which nobody can forge on K's behalf.
+///
+/// What it does **not** prove is that K stored the log rather than fetching the
+/// challenged entry from somebody else the moment the epoch opened. That is the
+/// outsourcing attack, and no challenge–response of this shape can rule it out
+/// — ruling it out needs a time bound or sequential work, neither of which
+/// Stage 0 has. So this catches a node that stored nothing *and* has no source,
+/// which is the population the availability payment exists to exclude, and it
+/// does not catch a node running a cache. Said here rather than left for
+/// somebody to discover, because a check whose strength is overestimated is
+/// worse than one that is known to be partial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Availability {
+    /// Ed25519 public key, hex. Who is answering — and it must be the identity
+    /// that made the promise: you cannot answer somebody else's sample.
+    pub identity: String,
+    /// The [`Undertaking::id`] being answered.
+    pub undertaking: String,
+    /// Which epoch's sample. The epoch decides the index, so an answer is
+    /// good for exactly one of them and a replay is caught by its own field.
+    pub epoch: u64,
+    /// The inclusion path for the sampled entry, bottom up. Not the entry: see
+    /// the type docs.
+    pub path: Vec<String>,
+    pub created_at: String,
+    /// Ed25519 signature over [`Availability::signing_payload`], hex.
+    /// **Required** — see the type docs for why it is the whole record.
+    pub signature: Option<String>,
+}
+
+/// Longest inclusion path an answer may carry.
+///
+/// A path has one hash per level that pairs, so a log of `n` entries needs at
+/// most `ceil(log2(n))` of them: 32 covers every log up to four billion
+/// entries, which is [`MAX_UNDERTAKING_HEIGHT`]. A bound rather than an exact
+/// length because the exact length depends on the index — a promoted node
+/// contributes nothing at its level — and because the *check* that matters is
+/// whether the path reaches the root, which [`crate::canonical::Inclusion`]
+/// already makes exact. This only stops a record big enough to be a nuisance.
+pub const MAX_AVAILABILITY_PATH: usize = 32;
+
+impl Availability {
+    pub fn new(
+        identity: impl Into<String>,
+        undertaking: impl Into<String>,
+        epoch: u64,
+        path: Vec<String>,
+        created_at: impl Into<String>,
+    ) -> Availability {
+        Availability {
+            identity: identity.into(),
+            undertaking: undertaking.into(),
+            epoch,
+            path,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::Availability.as_str())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("epoch", Value::Int(i128::from(self.epoch))),
+            ("identity", Value::string(self.identity.clone())),
+            (
+                "path",
+                Value::Array(self.path.iter().cloned().map(Value::String).collect()),
+            ),
+            ("undertaking", Value::string(self.undertaking.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Availability {
+        self.identity = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "availability";
+        if signed_submitter(&self.identity).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        }
+        let Some(signature) = self.signature.as_deref() else {
+            return Err(SignatureError::Missing {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        };
+        verify_record_signature(
+            RECORD,
+            &self.identity,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "availability";
+        if !is_hex64(&self.identity) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "identity",
+                expected: "64 lowercase hex characters of ed25519 public key",
+            });
+        }
+        if !is_digest(&self.undertaking) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "undertaking",
+                expected: "sha256: followed by 64 lowercase hex characters",
+            });
+        }
+        // An empty path is legal: a one-entry log's only leaf *is* the root, so
+        // the honest answer to it carries no hashes at all. Refusing that would
+        // make the first entry of every log unsamplable.
+        if self.path.len() > MAX_AVAILABILITY_PATH || !self.path.iter().all(|h| is_digest(h)) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "path",
+                expected: "at most 32 sha256: digests",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Availability, RecordError> {
+        const RECORD: &str = "availability";
+        let value = expect_object(value, RECORD)?;
+        let path = match required(value, RECORD, "path")? {
+            Value::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    Value::String(hash) => Ok(hash.clone()),
+                    _ => Err(RecordError::InvalidField {
+                        record: RECORD,
+                        field: "path",
+                        expected: "an array of strings",
+                    }),
+                })
+                .collect::<Result<Vec<String>, RecordError>>()?,
+            _ => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "path",
+                    expected: "an array of strings",
+                })
+            }
+        };
+        let record = Availability {
+            identity: required_string(value, RECORD, "identity")?,
+            undertaking: required_string(value, RECORD, "undertaking")?,
+            epoch: required_u64(value, RECORD, "epoch")?,
+            path,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// 64 lowercase hex characters, the shape of an ed25519 key or a bare digest.
+fn is_hex64(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `sha256:` followed by 64 lowercase hex characters.
+fn is_digest(text: &str) -> bool {
+    match text.strip_prefix(crate::canonical::DIGEST_PREFIX) {
+        Some(rest) => is_hex64(rest),
+        None => false,
+    }
+}
+
+/// An integer field that must fit `u64`.
+///
+/// Range-checked here rather than at a cast, so a record written by an
+/// arbitrary-precision implementation is *refused* rather than silently
+/// truncated into a different record.
+fn required_u64(
+    value: &Value,
+    record: &'static str,
+    field: &'static str,
+) -> Result<u64, RecordError> {
+    match required(value, record, field)? {
+        Value::Int(n) if *n >= 0 && *n <= i128::from(u64::MAX) => Ok(*n as u64),
+        _ => Err(RecordError::InvalidField {
+            record,
+            field,
+            expected: "an integer in [0, 2^64)",
+        }),
     }
 }
 

@@ -55,11 +55,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::blobs;
+use crate::canonical::Inclusion;
 use crate::canonical::{short, Value};
 use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
 use crate::ledger::{Ledger, LedgerError};
-use crate::partition::{epoch_of, epoch_seconds, settlement_rank};
-use crate::records::{Claim, Commitment, Objective, PeerRecord};
+use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
+use crate::records::{Availability, Claim, Commitment, Objective, PeerRecord, Undertaking};
 use crate::verifiers::{self, Kind, Status, Verdict, VerifierRegistry};
 
 /// Log entry kinds this module writes and reads. Spelled once so a typo cannot
@@ -74,6 +75,8 @@ const FRONTIER: &str = "frontier";
 /// Marks one reveal epoch as drained. See [`Node::settle_due`].
 const BATCH: &str = "batch";
 const PEER: &str = "peer";
+const UNDERTAKING: &str = "undertaking";
+const AVAILABILITY: &str = "availability";
 
 // ---------------------------------------------------------------------------
 // Rule violations
@@ -189,6 +192,40 @@ pub enum RuleViolation {
         seq: u64,
         held: u64,
     },
+    /// A second answer to a sample already answered. One index, one payment.
+    SampleAlreadyAnswered { undertaking: String, epoch: u64 },
+    /// An answer naming an undertaking this log does not hold, or holds only
+    /// in a form nobody can sample.
+    UnknownUndertaking { undertaking: String },
+    /// An answer to somebody else's promise.
+    ///
+    /// The draw keys on the *undertaking's* identity, so an impostor's answer
+    /// would be arithmetically correct -- which is exactly why the rule has to
+    /// be stated rather than left to fall out.
+    AvailabilityImpostor {
+        undertaking: String,
+        answered_by: String,
+    },
+    /// The sample index could not be drawn at all.
+    Unsamplable {
+        undertaking: String,
+        source: PartitionError,
+    },
+    /// The path does not put the sampled entry under the undertaken root.
+    AvailabilityDoesNotCheck {
+        undertaking: String,
+        epoch: u64,
+        index: u64,
+    },
+    /// An undertaking about a root and height this log never had.
+    ///
+    /// Refused rather than admitted-and-ignored, because the whole value of
+    /// the record is that it can be sampled: a challenge is an index into a
+    /// tree of `height` leaves rooted at `root`, and if no prefix of this log
+    /// matches, no answer could ever be checked either way. A promise nobody
+    /// can test is the "bookkeeping" `docs/roadmap.md` warns against, and it
+    /// would sit in the log permanently.
+    UnknownUndertakingRoot { root: String, height: u64 },
     /// A record whose own decoder would refuse it.
     ///
     /// Every other kind arrives here already decoded, so `from_value` has run
@@ -313,6 +350,54 @@ impl fmt::Display for RuleViolation {
                 "peer record for {} has seq {seq}, and {held} is already held; a \
                  record must advance its identity's sequence to supersede",
                 crate::canonical::short(identity)
+            ),
+            RuleViolation::SampleAlreadyAnswered { undertaking, epoch } => write!(
+                f,
+                "undertaking {} was already answered for epoch {epoch}; one sample is                  one piece of work and is paid once",
+                crate::canonical::short(undertaking)
+            ),
+            RuleViolation::UnknownUndertaking { undertaking } => write!(
+                f,
+                "no samplable undertaking {} in this log; an answer must name a \
+                 promise the log holds, and a promise about an unknown root is \
+                 not one",
+                crate::canonical::short(undertaking)
+            ),
+            RuleViolation::AvailabilityImpostor {
+                undertaking,
+                answered_by,
+            } => write!(
+                f,
+                "undertaking {} was promised by somebody else, and {} cannot answer \
+                 it; the sample is drawn against the promiser's identity",
+                crate::canonical::short(undertaking),
+                crate::canonical::short(answered_by)
+            ),
+            RuleViolation::Unsamplable {
+                undertaking,
+                source,
+            } => write!(
+                f,
+                "cannot draw a sample for undertaking {}: {source}",
+                crate::canonical::short(undertaking)
+            ),
+            RuleViolation::AvailabilityDoesNotCheck {
+                undertaking,
+                epoch,
+                index,
+            } => write!(
+                f,
+                "the path does not put entry {index} under the root undertaken by {} \
+                 (epoch {epoch}); entry {index} is what that undertaking was sampled on",
+                crate::canonical::short(undertaking)
+            ),
+            RuleViolation::UnknownUndertakingRoot { root, height } => write!(
+                f,
+                "no prefix of this log has {} entries rooted at {}; an undertaking \
+                 must name a root this log actually had, or nobody could ever check \
+                 an answer to it",
+                height,
+                crate::canonical::short(root)
             ),
             RuleViolation::SignedSubmitterRequired {
                 objective_id,
@@ -675,6 +760,248 @@ impl Node {
             }
         }
         out
+    }
+
+    /// Record a promise to hold the log at a pinned root and height.
+    ///
+    /// Admissible on its own terms only — decodable, signed by the identity it
+    /// names, and about a root this log could actually have had. That last
+    /// check is the one worth explaining, below.
+    pub fn post_undertaking(
+        &mut self,
+        record: &Undertaking,
+        ts: &str,
+    ) -> Result<String, RuleViolation> {
+        record
+            .validate()
+            .map_err(RuleViolation::InadmissibleRecord)?;
+        record.verify_signature()?;
+
+        // An undertaking about a root this log never had is unsamplable: the
+        // challenge is an index into a tree of `height` leaves whose root is
+        // `root`, and if no such prefix exists here, no answer could ever be
+        // checked. Admitting it would put a permanent unfalsifiable promise in
+        // the log -- exactly the "bookkeeping" a payment cannot be attached to.
+        //
+        // Checked against a *prefix*, not the current head, because the log
+        // grows: an undertaking signed at height 25 stays admissible at height
+        // 400, and must, or every promise would expire the moment somebody
+        // appended.
+        let height =
+            usize::try_from(record.height).map_err(|_| RuleViolation::UnknownUndertakingRoot {
+                root: record.root.clone(),
+                height: record.height,
+            })?;
+        let matches = self
+            .ledger
+            .prefix(height)
+            .and_then(|prefix| prefix.root())
+            .is_some_and(|root| root == record.root);
+        if !matches {
+            return Err(RuleViolation::UnknownUndertakingRoot {
+                root: record.root.clone(),
+                height: record.height,
+            });
+        }
+
+        let id = record.id();
+        self.append(UNDERTAKING, record.to_value(), ts)?;
+        Ok(id)
+    }
+
+    /// Every *samplable* undertaking in the log, in log order.
+    ///
+    /// Not keyed by identity: unlike a peer record, a later undertaking does
+    /// not supersede an earlier one. Each is a separate promise about a
+    /// separate root, and a node that undertook twice owes two answers.
+    ///
+    /// Three filters, and all three are the reader-side halves of rules
+    /// [`Node::post_undertaking`] applies on the way in. A log can be assembled
+    /// by concatenation, so an admission rule with no reader-side counterpart
+    /// binds only the people who use this tool to write. A record that does not
+    /// decode is not a record; one whose signature fails is nobody's promise;
+    /// and one naming a root this log never had cannot be sampled, so paying or
+    /// slashing against it would be paying against nothing.
+    pub fn undertakings(&self) -> Vec<Undertaking> {
+        // Memoised by height: `prefix(h).root()` is O(h), and a log where many
+        // nodes undertook at the same height -- which is the normal case, since
+        // they are all watching the same checkpoints -- would otherwise pay for
+        // the same walk once per record.
+        let mut roots: BTreeMap<u64, Option<String>> = BTreeMap::new();
+        self.ledger
+            .entries_of_kind(UNDERTAKING)
+            .into_iter()
+            .filter_map(|entry| Undertaking::from_value(&entry.payload).ok())
+            .filter(|record| record.verify_signature().is_ok())
+            .filter(|record| {
+                let at = roots.entry(record.height).or_insert_with(|| {
+                    usize::try_from(record.height)
+                        .ok()
+                        .and_then(|height| self.ledger.prefix(height))
+                        .and_then(|prefix| prefix.root())
+                });
+                at.as_deref() == Some(record.root.as_str())
+            })
+            .collect()
+    }
+
+    /// Which entry this undertaking must produce in `epoch`.
+    ///
+    /// The challenge, and it is a pure function of the log — nobody issues it,
+    /// nobody has to receive it, and anyone can recompute it for anyone. That
+    /// is the same property `docs/coordination.md` gets for work assignment,
+    /// and it is here for the same reason: a challenge somebody *sends* is a
+    /// challenge somebody can decline to send.
+    ///
+    /// ```text
+    /// index = assign(identity, undertaking_id, beacon(epoch, anchor), height)
+    /// ```
+    ///
+    /// Every input earns its place. **`identity`** so a coalition cannot pool
+    /// one stored entry between them. **`undertaking_id`** so a node that made
+    /// two promises answers two different questions rather than one twice.
+    /// **`beacon(epoch, anchor)`** so the answer is not knowable in advance: the
+    /// anchor is the log head as of the epoch's start, which nobody can predict
+    /// and everybody can recompute — the same anchor batch settlement uses, and
+    /// carrying the same Stage 0 caveat, that a sequencer free to choose the
+    /// head is a sequencer that could grind it.
+    ///
+    /// Reusing [`crate::partition::assign`] rather than writing a second draw
+    /// is what makes two implementations agree about which entry was
+    /// challenged: that function is pinned by `conformance/vectors.json`.
+    pub fn sampled_index(
+        &self,
+        undertaking: &Undertaking,
+        epoch: u64,
+    ) -> Result<u64, PartitionError> {
+        // Refused, never capped. `Undertaking::validate` already bounds the
+        // height, so this is unreachable through admission -- but a capped draw
+        // would silently sample only the first four billion entries of a taller
+        // log, which is a hole that pays out rather than an error that shows.
+        let partitions =
+            u32::try_from(undertaking.height).map_err(|_| PartitionError::Unrepresentable)?;
+        let beacon = partition::beacon(epoch, &self.anchor_of_epoch(epoch));
+        let index = partition::assign(
+            &undertaking.identity,
+            &undertaking.id(),
+            &beacon,
+            partitions,
+        )?;
+        Ok(u64::from(index))
+    }
+
+    /// Record an answer to an availability sample.
+    ///
+    /// Every rule is re-derived here rather than trusted from the submitter,
+    /// because the submitter is the party being paid.
+    pub fn post_availability(
+        &mut self,
+        record: &Availability,
+        ts: &str,
+    ) -> Result<String, RuleViolation> {
+        record
+            .validate()
+            .map_err(RuleViolation::InadmissibleRecord)?;
+        record.verify_signature()?;
+        self.check_availability(record)?;
+        // One answer per promise per epoch. A second answer is not a second
+        // service rendered -- the sample is the same index -- so admitting it
+        // would let one node be paid twice for one piece of work.
+        if self
+            .availability_answers()
+            .iter()
+            .any(|held| held.undertaking == record.undertaking && held.epoch == record.epoch)
+        {
+            return Err(RuleViolation::SampleAlreadyAnswered {
+                undertaking: record.undertaking.clone(),
+                epoch: record.epoch,
+            });
+        }
+        let id = record.id();
+        self.append(AVAILABILITY, record.to_value(), ts)?;
+        Ok(id)
+    }
+
+    /// Does this answer actually answer the sample it claims to?
+    ///
+    /// Split out from [`Node::post_availability`] so the audit can ask the same
+    /// question of a record that arrived some other way. An admission rule with
+    /// no reader-side counterpart binds only the people who use this tool to
+    /// write, and a log can be assembled by concatenation.
+    fn check_availability(&self, record: &Availability) -> Result<(), RuleViolation> {
+        let undertaking = self
+            .undertakings()
+            .into_iter()
+            .find(|u| u.id() == record.undertaking)
+            .ok_or_else(|| RuleViolation::UnknownUndertaking {
+                undertaking: record.undertaking.clone(),
+            })?;
+
+        // You answer your own promise. Without this, anybody could farm the
+        // availability pool by answering samples drawn against other people's
+        // undertakings -- and the draw itself keys on the *undertaking's*
+        // identity, so the answer would even be correct.
+        if undertaking.identity != record.identity {
+            return Err(RuleViolation::AvailabilityImpostor {
+                undertaking: record.undertaking.clone(),
+                answered_by: record.identity.clone(),
+            });
+        }
+
+        let index = self
+            .sampled_index(&undertaking, record.epoch)
+            .map_err(|source| RuleViolation::Unsamplable {
+                undertaking: record.undertaking.clone(),
+                source,
+            })?;
+
+        // The leaf is recomputed from the entry rather than read off anything
+        // the submitter sent. `Inclusion::verify` takes the leaf as an argument
+        // precisely so a prover cannot name it -- see its documentation on the
+        // second-preimage property of a tree with no domain separation.
+        let leaf = usize::try_from(index)
+            .ok()
+            .and_then(|index| self.ledger.entries().get(index))
+            .map(|entry| entry.recompute_hash())
+            .ok_or_else(|| RuleViolation::Unsamplable {
+                undertaking: record.undertaking.clone(),
+                source: PartitionError::Unrepresentable,
+            })?;
+
+        let inclusion = Inclusion {
+            index: usize::try_from(index).unwrap_or(usize::MAX),
+            leaves: usize::try_from(undertaking.height).unwrap_or(usize::MAX),
+            siblings: record.path.clone(),
+        };
+        if !inclusion.verify(&leaf, &undertaking.root) {
+            return Err(RuleViolation::AvailabilityDoesNotCheck {
+                undertaking: record.undertaking.clone(),
+                epoch: record.epoch,
+                index,
+            });
+        }
+        Ok(())
+    }
+
+    /// Every answer in the log that really answers its sample, in log order.
+    ///
+    /// The reader-side counterpart to [`Node::post_availability`], and what
+    /// settlement reads. An answer that does not check is not an answer, so it
+    /// is dropped here as well as refused on the way in.
+    /// First answer per `(undertaking, epoch)` wins, matching the rule
+    /// [`Node::post_availability`] enforces on the way in. A log assembled by
+    /// concatenation can hold two; resolving them differently here from there
+    /// would make an auditor and an appender disagree about who was paid.
+    pub fn availability_answers(&self) -> Vec<Availability> {
+        let mut seen: BTreeSet<(String, u64)> = BTreeSet::new();
+        self.ledger
+            .entries_of_kind(AVAILABILITY)
+            .into_iter()
+            .filter_map(|entry| Availability::from_value(&entry.payload).ok())
+            .filter(|record| record.verify_signature().is_ok())
+            .filter(|record| self.check_availability(record).is_ok())
+            .filter(|record| seen.insert((record.undertaking.clone(), record.epoch)))
+            .collect()
     }
 
     /// The first settlement recorded for an objective, as its raw payload.
@@ -1433,6 +1760,82 @@ impl Node {
             if let Some(identity) = entry_identity(&entry.payload) {
                 let slot = peer_seqs.entry(identity).or_insert(record.seq);
                 *slot = (*slot).max(record.seq);
+            }
+        }
+
+        // Undertakings. Same three failures as a peer record -- undecodable,
+        // unsigned, or signed by somebody else -- plus the one that is specific
+        // to this kind and is the reason the record exists: a root this log
+        // never had. `post_undertaking` refuses that, so finding one means the
+        // log was assembled by other means, and it matters more than the peer
+        // case does because a promise nobody can sample is a promise nobody can
+        // be paid or slashed against.
+        for entry in self.ledger.entries_of_kind(UNDERTAKING) {
+            let record = match Undertaking::from_value(&entry.payload) {
+                Ok(record) => record,
+                Err(error) => {
+                    problems.push(format!(
+                        "undertaking at entry {}: cannot be decoded ({error})",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            if let Err(error) = record.verify_signature() {
+                problems.push(format!("undertaking at entry {}: {error}", entry.seq));
+                continue;
+            }
+            let known = usize::try_from(record.height).ok().is_some_and(|height| {
+                self.ledger
+                    .prefix(height)
+                    .and_then(|prefix| prefix.root())
+                    .is_some_and(|root| root == record.root)
+            });
+            if !known {
+                problems.push(format!(
+                    "undertaking at entry {}: no prefix of {} entries is rooted at {}",
+                    entry.seq,
+                    record.height,
+                    crate::canonical::short(&record.root)
+                ));
+            }
+        }
+
+        // Availability answers. The findings that matter are the ones about
+        // money: an answer that does not check is one the availability pool
+        // must not pay, and a duplicate is one node claiming a sample twice.
+        let mut answered: BTreeSet<(String, u64)> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(AVAILABILITY) {
+            let record = match Availability::from_value(&entry.payload) {
+                Ok(record) => record,
+                Err(error) => {
+                    problems.push(format!(
+                        "availability at entry {}: cannot be decoded ({error})",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            if let Err(error) = record.verify_signature() {
+                problems.push(format!("availability at entry {}: {error}", entry.seq));
+                continue;
+            }
+            if let Err(error) = self.check_availability(&record) {
+                problems.push(format!("availability at entry {}: {error}", entry.seq));
+                continue;
+            }
+            // One answer per promise per epoch. A second is not a second
+            // service rendered -- the sample is the same index -- so paying it
+            // twice would pay for one piece of work twice.
+            let slot = (record.undertaking.clone(), record.epoch);
+            if !answered.insert(slot) {
+                problems.push(format!(
+                    "availability at entry {}: undertaking {} was already answered for \
+                     epoch {}",
+                    entry.seq,
+                    crate::canonical::short(&record.undertaking),
+                    record.epoch
+                ));
             }
         }
 
@@ -4020,6 +4423,348 @@ mod tests {
         // Nothing was written, so the log still reads and still audits.
         assert!(node.ledger().entries_of_kind(PEER).is_empty());
         assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// An undertaking has to name a root this log actually had.
+    ///
+    /// The rule that makes the record worth writing. A challenge is an index
+    /// into a tree of `height` leaves rooted at `root`; if no prefix matches,
+    /// no answer to it could ever be checked either way, and the log would
+    /// carry a permanent unfalsifiable promise. That is precisely the
+    /// "bookkeeping" `docs/roadmap.md` says a payment cannot attach to.
+    #[test]
+    fn an_undertaking_must_name_a_root_this_log_actually_had() {
+        let dir = TempDir::new("undertaking-root");
+        let mut node = node(&dir);
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([7u8; 32]);
+
+        // Something to undertake.
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+        node.post_objective(&lean_objective(200), TS)
+            .expect("a second, so there is more than one prefix");
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("a non-empty log has a root");
+
+        let good =
+            Undertaking::new(identity.submitter_id(), &root, height, TS).signed_with(&identity);
+        node.post_undertaking(&good, TS)
+            .expect("the log's own root at its own height");
+
+        // A root nobody has ever produced.
+        let invented = Undertaking::new(
+            identity.submitter_id(),
+            crate::canonical::digest_bytes(b"not a root of anything"),
+            height,
+            TS,
+        )
+        .signed_with(&identity);
+        assert!(
+            matches!(
+                node.post_undertaking(&invented, TS),
+                Err(RuleViolation::UnknownUndertakingRoot { .. })
+            ),
+            "an invented root was admitted"
+        );
+
+        // The log's real root, at the wrong height. Subtler and the reason
+        // `height` is signed: a root alone does not pin the tree's shape.
+        let mismatched =
+            Undertaking::new(identity.submitter_id(), &root, height - 1, TS).signed_with(&identity);
+        assert!(
+            matches!(
+                node.post_undertaking(&mismatched, TS),
+                Err(RuleViolation::UnknownUndertakingRoot { .. })
+            ),
+            "a real root at the wrong height was admitted"
+        );
+
+        // A height past the end of this log, but a legal number: there is no
+        // such prefix, so there is nothing to sample.
+        let future = Undertaking::new(identity.submitter_id(), &root, height + 1000, TS)
+            .signed_with(&identity);
+        assert!(
+            matches!(
+                node.post_undertaking(&future, TS),
+                Err(RuleViolation::UnknownUndertakingRoot { .. })
+            ),
+            "a height past the end was admitted"
+        );
+
+        // A height past what the *format* allows is refused earlier, by the
+        // record's own decoder, and reported as such: the draw reduces modulo a
+        // `u32`, so a taller promise could never be sampled in the first place.
+        // Two different refusals for two different reasons, and the format one
+        // comes first because it does not depend on this log at all.
+        let unrepresentable =
+            Undertaking::new(identity.submitter_id(), &root, u64::MAX, TS).signed_with(&identity);
+        assert!(
+            matches!(
+                node.post_undertaking(&unrepresentable, TS),
+                Err(RuleViolation::InadmissibleRecord(_))
+            ),
+            "a height past the format bound was admitted"
+        );
+
+        assert_eq!(node.undertakings().len(), 1, "only the good one is in");
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// A promise stays admissible as the log grows past it.
+    ///
+    /// The reason the root is checked against a *prefix* rather than the head.
+    /// Checking the head would expire every undertaking the moment anybody
+    /// appended, which is the opposite of what a permanent past promise is for.
+    #[test]
+    fn an_undertaking_signed_at_one_height_survives_the_log_growing() {
+        let dir = TempDir::new("undertaking-grow");
+        let mut node = node(&dir);
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([8u8; 32]);
+
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+
+        node.post_objective(&lean_objective(200), TS)
+            .expect("the log grows");
+        assert_ne!(node.ledger().root(), Some(root.clone()), "it really grew");
+
+        let late =
+            Undertaking::new(identity.submitter_id(), &root, height, TS).signed_with(&identity);
+        node.post_undertaking(&late, TS)
+            .expect("an older prefix is still a root this log had");
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// An undertaking speaks for exactly one identity: the one that signed it.
+    #[test]
+    fn an_undertaking_cannot_be_made_on_somebody_else_s_behalf() {
+        let dir = TempDir::new("undertaking-sig");
+        let mut node = node(&dir);
+        let alice = crate::crypto::identity::Identity::from_secret_bytes([1u8; 32]);
+        let mallory = crate::crypto::identity::Identity::from_secret_bytes([2u8; 32]);
+
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+
+        // Mallory signs, then relabels it as Alice's promise.
+        let mut forged =
+            Undertaking::new(mallory.submitter_id(), &root, height, TS).signed_with(&mallory);
+        forged.identity = alice.submitter_id();
+        assert!(
+            node.post_undertaking(&forged, TS).is_err(),
+            "a promise was recorded against a key that did not make it"
+        );
+
+        // And an unsigned one is nobody's promise at all.
+        let unsigned = Undertaking::new(alice.submitter_id(), &root, height, TS);
+        assert!(
+            node.post_undertaking(&unsigned, TS).is_err(),
+            "an unsigned promise was admitted"
+        );
+
+        assert!(node.undertakings().is_empty());
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// The audit reports what the appender would have refused.
+    ///
+    /// A log can be assembled by concatenation, so every admission rule needs
+    /// a reader-side counterpart or the rule only binds people who use this
+    /// tool to write.
+    #[test]
+    fn the_audit_names_an_undertaking_that_was_never_admissible() {
+        let dir = TempDir::new("undertaking-audit");
+        let mut node = node(&dir);
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([3u8; 32]);
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+        let height = node.ledger().len() as u64;
+
+        // Straight past `post_undertaking`, the way a concatenated log would.
+        let invented = Undertaking::new(
+            identity.submitter_id(),
+            crate::canonical::digest_bytes(b"invented"),
+            height,
+            TS,
+        )
+        .signed_with(&identity);
+        node.append(UNDERTAKING, invented.to_value(), TS)
+            .expect("append");
+
+        let problems = node.audit(false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("no prefix of 1 entries is rooted at"),
+            "{}",
+            problems[0]
+        );
+        // And it is not counted as a promise by anybody who reads the log.
+        assert!(node.undertakings().iter().all(|u| u.root != invented.root));
+    }
+
+    /// A node that holds the log answers its sample; a node that guesses cannot.
+    ///
+    /// The whole mechanism, end to end and from the log alone. Nobody issues
+    /// the challenge and nobody receives the answer — the index is a pure
+    /// function of the log, and the check is too.
+    #[test]
+    fn a_holder_answers_its_own_sample_and_a_guess_does_not_pass() {
+        let dir = TempDir::new("availability");
+        let mut node = node(&dir);
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([4u8; 32]);
+
+        for reward in [100, 200, 300, 400, 500] {
+            node.post_objective(&lean_objective(reward), TS)
+                .expect("objective");
+        }
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+        let promise =
+            Undertaking::new(identity.submitter_id(), &root, height, TS).signed_with(&identity);
+        node.post_undertaking(&promise, TS).expect("undertaking");
+
+        let epoch = 7;
+        let index = node
+            .sampled_index(&promise, epoch)
+            .expect("a samplable undertaking draws an index");
+        assert!(index < height, "the draw must land inside the tree");
+
+        // The holder answers: it has the log, so it can build the path.
+        let path = node
+            .ledger()
+            .prefix(height as usize)
+            .expect("prefix")
+            .inclusion(index)
+            .expect("in range")
+            .siblings;
+        let answer = Availability::new(
+            identity.submitter_id(),
+            promise.id(),
+            epoch,
+            path.clone(),
+            TS,
+        )
+        .signed_with(&identity);
+        node.post_availability(&answer, TS)
+            .expect("an honest answer is admitted");
+        assert_eq!(node.availability_answers().len(), 1);
+
+        // A node that did not hold the log has to guess the path. Every hash in
+        // it is wrong, and so is the root it reaches.
+        let bluff = Availability::new(
+            identity.submitter_id(),
+            promise.id(),
+            epoch,
+            path.iter()
+                .map(|_| crate::canonical::digest_bytes(b"guess"))
+                .collect(),
+            TS,
+        )
+        .signed_with(&identity);
+        assert!(
+            matches!(
+                node.post_availability(&bluff, TS),
+                Err(RuleViolation::AvailabilityDoesNotCheck { .. })
+            ),
+            "a guessed path was accepted"
+        );
+
+        // The same answer, one epoch over. The draw moves, so an answer is good
+        // for exactly the epoch it names -- which is what stops a node from
+        // storing one entry and replaying it forever.
+        let elsewhere = (0..40u64)
+            .map(|e| node.sampled_index(&promise, e).expect("draw"))
+            .filter(|&at| at != index)
+            .count();
+        assert!(elsewhere > 0, "the draw never moved across 40 epochs");
+        let replayed =
+            Availability::new(identity.submitter_id(), promise.id(), epoch + 1, path, TS)
+                .signed_with(&identity);
+        // It may coincidentally be right for the next epoch too -- the draw is
+        // a hash, not a permutation -- so this asserts about the rule, not
+        // about this particular pair of epochs.
+        let next = node.sampled_index(&promise, epoch + 1).expect("draw");
+        if next != index {
+            assert!(
+                node.post_availability(&replayed, TS).is_err(),
+                "a path for another epoch's entry was accepted"
+            );
+        }
+
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// The sample is drawn against the promiser, so an impostor's answer would
+    /// be arithmetically correct. Only the rule stops it.
+    #[test]
+    fn nobody_can_answer_somebody_else_s_sample() {
+        let dir = TempDir::new("availability-impostor");
+        let mut node = node(&dir);
+        let alice = crate::crypto::identity::Identity::from_secret_bytes([5u8; 32]);
+        let mallory = crate::crypto::identity::Identity::from_secret_bytes([6u8; 32]);
+
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+        node.post_objective(&lean_objective(200), TS)
+            .expect("objective");
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+        let promise = Undertaking::new(alice.submitter_id(), &root, height, TS).signed_with(&alice);
+        node.post_undertaking(&promise, TS).expect("undertaking");
+
+        let epoch = 3;
+        let index = node.sampled_index(&promise, epoch).expect("draw");
+        let path = node
+            .ledger()
+            .prefix(height as usize)
+            .expect("prefix")
+            .inclusion(index)
+            .expect("in range")
+            .siblings;
+
+        // Mallory holds the log too -- the path is correct. What Mallory does
+        // not have is Alice's promise, and the pool pays promises.
+        let poached = Availability::new(mallory.submitter_id(), promise.id(), epoch, path, TS)
+            .signed_with(&mallory);
+        assert!(
+            matches!(
+                node.post_availability(&poached, TS),
+                Err(RuleViolation::AvailabilityImpostor { .. })
+            ),
+            "an answer to somebody else's promise was accepted"
+        );
+        assert!(node.availability_answers().is_empty());
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// An answer whose promise this log does not hold is refused, not ignored.
+    #[test]
+    fn an_answer_needs_a_promise_the_log_actually_holds() {
+        let dir = TempDir::new("availability-orphan");
+        let mut node = node(&dir);
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([11u8; 32]);
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+
+        let orphan = Availability::new(
+            identity.submitter_id(),
+            crate::canonical::digest_bytes(b"no such promise"),
+            1,
+            Vec::new(),
+            TS,
+        )
+        .signed_with(&identity);
+        assert!(
+            matches!(
+                node.post_availability(&orphan, TS),
+                Err(RuleViolation::UnknownUndertaking { .. })
+            ),
+            "an answer to nothing was accepted"
+        );
     }
 
     #[test]
