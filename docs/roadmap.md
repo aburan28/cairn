@@ -232,10 +232,29 @@ behaviour ships and is tested, not that TLC has checked it.
       dependency or sixty lines of `sockaddr_in` FFI. A host with no multicast
       route gets an error from `Responder::bind`, logs it, and runs from
       bootstrap addresses as before.
-- [ ] NAT traversal. Not discovery, and routinely confused with it -- knowing an
-      address does not mean you can reach it. Until then a node behind a home
-      router can fetch and cannot seed, which makes the network more centralised
-      than the protocol suggests.
+- [x] **NAT traversal, the half that costs nothing** (`p2p::portmap`). NAT-PMP
+      (RFC 6886): a 12-byte UDP request to the default gateway asking it to
+      forward a port, so a node behind a home router can seed and not only
+      fetch. No dependency, no external service, no configuration.
+      Chosen over the alternatives on cost. UPnP-IGD does the same job over SOAP
+      and XML on HTTP discovered by SSDP — more routers, at the price of an XML
+      parser and an HTTP client in a crate that has neither, to speak a protocol
+      its own authors replaced. STUN plus hole punching is the only thing that
+      works behind a NAT that refuses to map, and it needs a third party: a
+      reachable server to reflect an address and a rendezvous peer to coordinate.
+      That is **infrastructure this network does not have**, so it stays out
+      until something reachable exists to host it — which is the honest
+      remaining gap on this line rather than a silent one.
+      Nothing here is trusted and it does not need to be. NAT-PMP has no
+      authentication at all, so a reported external address is a claim checked by
+      use: a peer either completes a McEliece handshake with this node or does
+      not. A lie costs one node a wrong idea of its own address and nobody
+      dialling — never a wrong result. Unsolicited replies are dropped, because
+      the router's own "your address changed" announcement is exactly the shape
+      an attacker would forge; renewal on a timer costs one packet and needs no
+      announcement. When there is no gateway the node is where it was — able to
+      fetch, unable to seed — but now says so instead of wondering why nobody
+      dials it.
 - [x] **Decided against as written: no `blob` record announcing who holds what.**
       This line contradicted [discovery.md](discovery.md), and the contradiction
       is the answer rather than something to resolve by building. "Who holds

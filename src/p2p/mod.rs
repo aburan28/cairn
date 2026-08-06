@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod handshake;
 pub mod multicast;
 pub mod pop;
+pub mod portmap;
 pub mod service;
 pub mod session;
 pub mod sync;
