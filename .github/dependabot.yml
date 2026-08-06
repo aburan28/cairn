@@ -12,6 +12,15 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Not an action version -- the `msrv` job pins this to the crate's
+      # *claimed* `rust-version` (see Cargo.toml and the job's own comment) so
+      # that job means something. Dependabot reads `dtolnay/rust-toolchain@X.Y.Z`
+      # the same way it reads any other `uses:` tag and offers to bump it to the
+      # latest toolchain release, which would make the MSRV job stop checking
+      # MSRV. Every other `dtolnay/rust-toolchain` reference in this repo floats
+      # on `@stable` and is unaffected by this ignore.
+      - dependency-name: "dtolnay/rust-toolchain"
 
   # The reference implementation is its own workspace with its own lockfile, so
   # the entry above does not reach it. Watched separately rather than folded in:
