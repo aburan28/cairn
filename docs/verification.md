@@ -363,6 +363,16 @@ question correctly returned a failure. `cmd --help >/dev/null || fail` is how a
 packaging check or a container healthcheck asks whether a binary runs at all.
 All four binaries now answer 0 for `--help` and 2 for misuse, and CI pins it.
 
+**The reference could not audit a node that synced.** The case an independent
+check exists for — no bundle, no authored objective, verifier code obtained by
+hash — and the reference had no content-addressed fallback at all: it read the
+pin from the bundle path and stopped. So on every peer that learned an objective
+over the wire, the independent auditor reported *"was settled but can no longer
+be re-verified"* for claims that re-verify perfectly. Found by running two
+`proofwork-p2p` daemons and auditing the one that synced, which nothing had ever
+done — the daemon is the largest surface in the repository and `--help` was all
+CI touched. `scripts/p2p-demo.sh` now runs both sides.
+
 **A verdict that never settled, reported as contradicted.** The opposite
 mistake, and the one an ordinary workflow reaches first. A node without a
 pinned checker records `unavailable`, fetches the checker from a peer, and

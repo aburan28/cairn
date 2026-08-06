@@ -110,12 +110,36 @@ impl Verdict {
     }
 }
 
+/// Where a node keeps blobs it obtained by content address.
+///
+/// The same relative location the primary uses, because it is the same
+/// directory on the same disk -- this crate is a second reader of one node's
+/// state, not a second node.
+const BLOB_STORE: &str = ".proofwork/blobs";
+
 /// Resolve a pinned path against the bundle root and check its hash.
 ///
 /// Containment first, then the hash. A pin whose path leaves the bundle is a
 /// malformed objective and content-addressing must not rescue it: otherwise an
 /// objective could name `../../.ssh/id_rsa` and start resolving the day
 /// somebody's node happened to hold a blob at that address.
+///
+/// # The bundle, then the blob store
+///
+/// The bundle file is consulted first so that an operator who edits a checker
+/// in place is told their edit no longer matches the pin, rather than having a
+/// cached blob silently stand in for the file they are looking at.
+///
+/// The fallback is not an optimization. A node that learned an objective over
+/// the wire has **no bundle at all** -- it has the log and a blob it fetched by
+/// hash -- and that is the normal state of every peer that did not author the
+/// objective. Without this, auditing such a node reported *"was settled but can
+/// no longer be re-verified"* for claims that re-verify perfectly, which is the
+/// independent check failing on exactly the nodes that most need one. Found by
+/// running two `proofwork-p2p` daemons and auditing the one that synced.
+///
+/// Containment does not apply to the store: its filenames are hashes, not
+/// paths, and the hash check below is what makes a fetched blob admissible.
 fn pinned(root: &Path, relative: &str, declared: &str) -> Result<PathBuf, Verdict> {
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let joined = normalize(&root.join(relative));
@@ -125,13 +149,27 @@ fn pinned(root: &Path, relative: &str, declared: &str) -> Result<PathBuf, Verdic
             format!("pinned path escapes the objective root: {relative}"),
         ));
     }
-    let source = std::fs::read(&joined).map_err(|error| {
-        // Cannot read is a fact about this node, not about the artifact.
-        Verdict::plain(
-            Status::Unavailable,
-            format!("cannot load pinned code {relative}: {error}"),
-        )
-    })?;
+    let (joined, source) = match std::fs::read(&joined) {
+        Ok(source) => (joined, source),
+        Err(bundle_error) => {
+            let blob = root.join(BLOB_STORE).join(declared);
+            match std::fs::read(&blob) {
+                Ok(source) => (blob, source),
+                // Cannot read is a fact about this node, not about the
+                // artifact. Both places are named: an operator staring at this
+                // needs to know the store was tried too.
+                Err(store_error) => {
+                    return Err(Verdict::plain(
+                        Status::Unavailable,
+                        format!(
+                            "cannot load pinned code {relative}: {bundle_error}; \
+                             and no blob {declared} in {BLOB_STORE}: {store_error}"
+                        ),
+                    ))
+                }
+            }
+        }
+    };
     let mut hasher = Sha256::new();
     hasher.update(&source);
     let actual: String = hasher

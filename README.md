@@ -67,6 +67,8 @@ cargo test                    # the full suite, loopback only
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
 ./scripts/interop.sh          # each implementation audits the other's log
 ./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
+./scripts/blob-demo.sh        # a node with only the log fetches its verifier and uses it
+./scripts/p2p-demo.sh         # two daemons: an empty node syncs, then audits under both
 proofwork incentives          # evaluate the node-operator game
 proofwork incentives --robustness   # ...and how far each parameter can move before it breaks
 ```

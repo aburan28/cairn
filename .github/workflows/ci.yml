@@ -167,6 +167,14 @@ jobs:
       # where both binaries already exist. Rotating a key changes every byte on
       # disk and must move neither a record nor the root -- the reference is
       # what makes that a claim about the log rather than about this binary.
+      # Two `proofwork-p2p` daemons. Here rather than in the `main` job because
+      # the last step needs the reference binary: auditing the node that
+      # *synced* is the case that matters -- no bundle, no authored objective,
+      # verifier code obtained by hash -- and it was broken, because the
+      # reference had no content-addressed fallback and called a re-verifiable
+      # claim unverifiable. Until this script the daemon was the largest surface
+      # in the repository with nothing running it.
+      - run: ./scripts/p2p-demo.sh
       - run: ./scripts/rekey-demo.sh
       - run: ./scripts/differential.sh
       # Randomized, and seeded from the clock so each CI run explores
