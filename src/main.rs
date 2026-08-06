@@ -2200,60 +2200,22 @@ fn cmd_drain(
     let ts = timestamp();
     let (mut admitted, mut refused) = (0usize, 0usize);
 
-    for (path, kind, record) in pending {
-        let outcome = match kind.as_str() {
-            "commitment" => Commitment::from_value(&record)
-                .map_err(|e| e.to_string())
-                .and_then(|commitment| {
-                    if dry_run {
-                        return Ok(String::from("would admit commitment"));
-                    }
-                    node.commit(&commitment, &ts)
-                        .map(|id| format!("commitment {}", short(&id)))
-                        .map_err(|violation| violation.to_string())
-                }),
-            "claim" => Claim::from_value(&record)
-                .map_err(|e| e.to_string())
-                .and_then(|claim| {
-                    validate_claim(&claim.to_value()).map_err(|e| e.to_string())?;
-                    if dry_run {
-                        return Ok(String::from("would admit claim"));
-                    }
-                    node.reveal(&claim, &ts)
-                        .map(|outcome| {
-                            format!(
-                                "claim {}  {}  reward {}",
-                                short(&outcome.claim_id),
-                                outcome.verdict.status.as_str(),
-                                outcome.reward
-                            )
-                        })
-                        .map_err(|violation| violation.to_string())
-                }),
-            other => Err(format!("unknown record kind {other:?}")),
-        };
-
-        match outcome {
-            Ok(note) => {
-                admitted += 1;
-                say(out, format!("  {note}"));
-                if !dry_run {
-                    spool.take(&path).map_err(|e| CliError::Io {
-                        context: format!("removing {}", path.display()),
-                        source: e,
-                    })?;
-                }
-            }
-            Err(why) => {
-                refused += 1;
-                say(out, format!("  refused: {why}"));
-                if !dry_run {
-                    spool.take(&path).map_err(|e| CliError::Io {
-                        context: format!("removing {}", path.display()),
-                        source: e,
-                    })?;
-                }
-            }
+    // The rules live in `serve::drain_into`, not here. They used to live here,
+    // which put them out of reach of `proofwork-p2p` -- so a node that was
+    // online could not accept a submission, because `drain` wanted the write
+    // lock the daemon holds. One copy, two callers.
+    for (path, admission) in proofwork::serve::drain_into(&mut node, &spool, &ts, dry_run) {
+        if admission.admitted {
+            admitted += 1;
+        } else {
+            refused += 1;
+        }
+        say(out, format!("  {}", admission.note));
+        if !dry_run {
+            spool.take(&path).map_err(|e| CliError::Io {
+                context: format!("removing {}", path.display()),
+                source: e,
+            })?;
         }
     }
 

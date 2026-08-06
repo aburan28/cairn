@@ -87,6 +87,13 @@ sleep 1.1
 
 # The daemon generates a root key if the file is absent; the CLI's `checkpoint`
 # does not, so one is made here rather than relying on which ran first.
+# A second objective, left open. The collatz one above has settled, and a plain
+# objective settles once -- so a commitment against it is correctly refused, and
+# a queue test using it would prove only that the daemon can say no.
+OPEN_OID=$("$RUST" --log "$A/log.jsonl" --root "$A" post examples/capset/objective.json \
+  | head -1 | awk '{print $2}')
+echo "  a second objective, still open: $OPEN_OID"
+
 python3 -c "
 import json, secrets
 json.dump({'secret': secrets.token_bytes(32).hex()}, open('$A/rootkey.json', 'w'))"
@@ -95,10 +102,11 @@ json.dump({'secret': secrets.token_bytes(32).hex()}, open('$A/rootkey.json', 'w'
 cp "$A/rootkey.json" "$B/rootkey.json"
 cp "$A/checkpoint.json" "$B/checkpoint.json"
 
-rule "A serves"
+rule "A serves, with a submission queue"
+mkdir -p "$A/queue"
 "$DAEMON" --identity "$A/id.json" --root-key "$A/rootkey.json" \
   --checkpoint "$A/checkpoint.json" --listen "127.0.0.1:$A_PORT" \
-  --log "$A/log.jsonl" --root "$A" > "$A/daemon.log" 2>&1 &
+  --log "$A/log.jsonl" --root "$A" --queue "$A/queue" > "$A/daemon.log" 2>&1 &
 APID=$!
 # The identity file appears after ~243 ms of Classic McEliece keygen. Poll for
 # it rather than sleeping a guessed amount.
@@ -157,6 +165,43 @@ REF_VIEW=$("$REF" --log "$B/log.jsonl" --root "$B" audit)
 echo "$REF_VIEW" | sed 's/^/  /'
 echo "$REF_VIEW" | grep -q "log verified" \
   || fail "the reference cannot audit a node that got its verifier over the wire"
+
+rule "A's main loop is still running, several ticks in"
+# The regression check for a deadlock a unit test cannot reach. The accept
+# thread used to take the node's mutex and *then* block on `listener.accept()`,
+# so on a node nobody was dialling it held the lock for the life of the process
+# and the main loop ran exactly once, at startup. Everything outbound stopped:
+# dialling, peer seeding, beacons, the DHT, fetching missing verifier code.
+#
+# It looked healthy, because one startup pass is all a two-node sync needs --
+# which is precisely what the rest of this script exercises. Queueing a
+# submission *after* startup is what tells the difference: it can only be
+# admitted by a loop that is still going round.
+BEFORE=$(entries "$A/log.jsonl")
+python3 - <<PY
+import hashlib, json
+oid = "$OPEN_OID"
+inner = json.dumps({"cap": []}, sort_keys=True, separators=(',', ':'))
+digest = hashlib.sha256((oid + "|" + inner + "|late|late-nonce").encode()).hexdigest()
+record = {"type": "commitment", "objective_id": oid, "submitter": "late",
+          "hash": "sha256:" + digest, "created_at": "2026-08-06T09:00:00+00:00"}
+body = json.dumps({"kind": "commitment", "record": record},
+                  sort_keys=True, separators=(',', ':'))
+name = hashlib.sha256(body.encode()).hexdigest()
+open("$A/queue/" + name + ".json", "w").write(body)
+print("  queued a commitment into the running node's spool")
+PY
+for _ in $(seq 1 40); do
+  [ "$(entries "$A/log.jsonl")" -gt "$BEFORE" ] && break
+  sleep 0.5
+done
+AFTER=$(entries "$A/log.jsonl")
+echo "  log went from $BEFORE to $AFTER entries"
+[ "$AFTER" -gt "$BEFORE" ] || {
+  sed 's/^/  /' "$A/daemon.log"
+  fail "the daemon never drained: its main loop stopped after the first tick"
+}
+[ "$(ls "$A/queue" | wc -l)" -eq 0 ] || fail "the drained record was left in the spool"
 
 rule "the roots differ, and that is the design"
 A_ROOT=$("$RUST" --log "$A/log.jsonl" --root "$A" audit | awk '/^merkle/ {print $2}')

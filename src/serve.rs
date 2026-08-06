@@ -238,6 +238,94 @@ impl Spool {
     }
 }
 
+/// What one queued record turned into.
+#[derive(Debug, Clone)]
+pub struct Admission {
+    /// Human-readable outcome, whether it was admitted or refused.
+    pub note: String,
+    pub admitted: bool,
+}
+
+/// Admit everything the spool holds, against a log this node holds the lock on.
+///
+/// # Why this is in the library rather than in `main.rs`
+///
+/// It was in `main.rs`, and that put it out of reach of the daemon — which is
+/// how the documented topology came not to compose. `docs/serving.md` says a
+/// submission "lands in a spool directory, and the operator's own node admits
+/// it", and `proofwork-serve`'s own comment says the operator's node is
+/// appending while the server runs. But a `Ledger` is single-writer *by
+/// enforcement*, so `proofwork drain` could not run while `proofwork-p2p` held
+/// the log: a node that was online could not accept a submission at all, which
+/// for a network whose purpose is accepting submissions is not a small gap.
+///
+/// The daemon is the operator's node and already holds the lock, so it drains.
+/// One copy of the rules, called from both places — the same argument
+/// `docs/serving.md` makes for why admission does not happen in a request
+/// handler applies just as well to a second copy in a second binary.
+///
+/// Settlement is deliberately *not* done here. A reveal admitted into an epoch
+/// that has since closed settles on the caller's next `settle`, and both
+/// callers do that on their own schedule.
+pub fn drain_into(
+    node: &mut Node,
+    spool: &Spool,
+    ts: &str,
+    dry_run: bool,
+) -> Vec<(PathBuf, Admission)> {
+    let mut out = Vec::new();
+    for (path, kind, record) in spool.pending() {
+        let outcome = match kind.as_str() {
+            "commitment" => Commitment::from_value(&record)
+                .map_err(|error| error.to_string())
+                .and_then(|commitment| {
+                    if dry_run {
+                        return Ok(String::from("would admit commitment"));
+                    }
+                    node.commit(&commitment, ts)
+                        .map(|id| format!("commitment {}", crate::canonical::short(&id)))
+                        .map_err(|violation| violation.to_string())
+                }),
+            "claim" => Claim::from_value(&record)
+                .map_err(|error| error.to_string())
+                .and_then(|claim| {
+                    crate::schema::validate_claim(&claim.to_value())
+                        .map_err(|error| error.to_string())?;
+                    if dry_run {
+                        return Ok(String::from("would admit claim"));
+                    }
+                    node.reveal(&claim, ts)
+                        .map(|outcome| {
+                            format!(
+                                "claim {}  {}  reward {}",
+                                crate::canonical::short(&outcome.claim_id),
+                                outcome.verdict.status.as_str(),
+                                outcome.reward
+                            )
+                        })
+                        .map_err(|violation| violation.to_string())
+                }),
+            other => Err(format!("unknown record kind {other:?}")),
+        };
+        let admission = match outcome {
+            Ok(note) => Admission {
+                note,
+                admitted: true,
+            },
+            // Refused records are dropped by the caller, not retried: nearly
+            // every refusal is permanent -- a stale epoch, a citation that is
+            // not an accepted claim -- and a queue that retries a permanent
+            // failure never empties.
+            Err(why) => Admission {
+                note: format!("refused: {why}"),
+                admitted: false,
+            },
+        };
+        out.push((path, admission));
+    }
+    out
+}
+
 /// What the server needs to answer a request.
 pub struct Serving {
     /// Path to the log, re-read per request rather than held open.

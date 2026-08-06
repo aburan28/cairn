@@ -370,6 +370,21 @@ digest/want/records exchange — while `p2p::service::Service` connects those
 pieces for dialing and inbound accepts. The service does one anti-entropy round
 at a time; a daemon schedules retries around it without changing the protocol.
 
+**Accept the socket before you take the node's lock.** `Service` offers both
+`accept_node_once` (listener in, blocks) and `serve_node_once` (accepted stream
+in, does not), and the split is not stylistic. `proofwork-p2p`'s accept thread
+took the node's mutex and *then* called the blocking `accept`, so on a node
+nobody was dialling it held the lock for the life of the process. The main loop
+ran exactly once, at startup, and then waited on that mutex forever: no
+dialling, no peer seeding, no beacons, no DHT lookups, no fetching of missing
+verifier code, no draining of the submission queue.
+
+Nothing caught it for a long time because it looks like a healthy node. One
+startup pass is all a two-node sync needs, so every test that starts two daemons
+and checks that records moved passes either way. `scripts/p2p-demo.sh` queues a
+submission *after* startup — work that can only be done by a loop still going
+round — and that is what tells the difference.
+
 The responder still cannot authenticate the initiator from the KEM alone. A
 deployment that needs mutual authentication must restrict inbound ids to its
 discovery/address-book policy or add a signed session greeting. The listener

@@ -53,11 +53,22 @@ authenticates nothing.
 ## Why `POST /submit` queues instead of appending
 
 A submission does not enter the log here. It lands in a spool directory, and
-the operator's own node admits it:
+the operator's own node admits it — the daemon each round if it is running, or
+the CLI if it is not:
 
 ```sh
+proofwork-p2p … --queue ./queue          # drains every round, holding the lock it has
 proofwork drain --queue ./queue          # or --dry-run to look first
 ```
+
+**Both, not either, and that took a while to be true.** A `Ledger` is
+single-writer by enforcement, so `proofwork drain` wants the write lock
+`proofwork-p2p` holds: for as long as the daemon was the only thing that could
+run alongside `proofwork-serve`, a node that was *online* could not accept a
+submission at all. For a network whose purpose is accepting submissions that is
+not a small gap. The daemon is the operator's node and already holds the lock,
+so it drains; the rules live in `serve::drain_into` and both callers use that
+one copy, for the same reason given below about request handlers.
 
 Two reasons, and the second is the load-bearing one.
 

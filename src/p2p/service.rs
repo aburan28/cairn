@@ -509,22 +509,13 @@ impl Service {
         node: &mut Node,
         population: &mut Population,
         limits: PopLimits,
-        mut rescore: F,
+        rescore: F,
     ) -> Result<(PeerId, PopReport), ServiceError>
     where
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
         let (stream, _) = listener.accept().map_err(TransportError::from)?;
-        let mut connection = transport::accept(stream, &self.identity)?;
-        let remote = connection.remote();
-        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
-        self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
-        let settled: &Node = node;
-        let report =
-            session::reconcile_population(&mut connection, population, limits, |candidate| {
-                rescore(settled, candidate)
-            })?;
-        Ok((remote, report))
+        self.serve_node_and_population(stream, node, population, limits, rescore)
     }
 
     /// Synchronize a live node and replay newly admitted inputs into its own
@@ -547,11 +538,61 @@ impl Service {
         node: &mut Node,
     ) -> Result<PeerId, ServiceError> {
         let (stream, _) = listener.accept().map_err(TransportError::from)?;
+        self.serve_node_once(stream, node)
+    }
+
+    /// The same, on a stream the caller already accepted.
+    ///
+    /// # Why this split exists
+    ///
+    /// `listener.accept()` blocks. A caller that holds a lock over its node
+    /// while calling [`Service::accept_node_once`] therefore holds it until an
+    /// inbound connection arrives — which, on a node nobody is dialling, is
+    /// forever. `proofwork-p2p` did exactly that, and the effect was that its
+    /// main loop ran **once** and then waited on a mutex for the rest of the
+    /// process's life: no dialling, no peer seeding, no beacons, no DHT, no
+    /// fetching of missing verifier code. It looked healthy because the single
+    /// pass at startup is enough to sync from a bootstrap peer.
+    ///
+    /// Accepting outside the lock and passing the stream in is the whole fix.
+    /// The blocking wait happens with nothing held; the lock is taken only for
+    /// the session, which is bounded by the transport's own timeouts.
+    pub fn serve_node_once(
+        &self,
+        stream: std::net::TcpStream,
+        node: &mut Node,
+    ) -> Result<PeerId, ServiceError> {
         let mut connection = transport::accept(stream, &self.identity)?;
         let remote = connection.remote();
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
         Ok(remote)
+    }
+
+    /// [`Service::accept_node_and_population`], on an accepted stream.
+    ///
+    /// Split for the reason [`Service::serve_node_once`] gives at length.
+    pub fn serve_node_and_population<F>(
+        &self,
+        stream: std::net::TcpStream,
+        node: &mut Node,
+        population: &mut Population,
+        limits: PopLimits,
+        mut rescore: F,
+    ) -> Result<(PeerId, PopReport), ServiceError>
+    where
+        F: FnMut(&Node, &Candidate) -> Option<i64>,
+    {
+        let mut connection = transport::accept(stream, &self.identity)?;
+        let remote = connection.remote();
+        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
+        let settled: &Node = node;
+        let report =
+            session::reconcile_population(&mut connection, population, limits, |candidate| {
+                rescore(settled, candidate)
+            })?;
+        Ok((remote, report))
     }
 
     /// An address this node could use to *reach* `peer`, if it knows one.
