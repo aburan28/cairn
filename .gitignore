@@ -41,9 +41,7 @@ venv/
 # Bootstrap addresses are local configuration, never repository content.
 # `proofwork-p2p`'s own module doc says it: "Identity files and bootstrap files
 # are local configuration. They are never placed in the append-only ledger."
-# A committed address is a fixed target that goes stale and reads as
-# authoritative, which is exactly what docs/discovery.md says no hint may be.
-# Copy bootstrap.json.example and fill in your own.
+# `.local/seed.json` above already covers the one `make p2p` generates; these
+# catch a hand-written one beside it.
 bootstrap.json
 bootstrap.*.json
-!bootstrap.json.example

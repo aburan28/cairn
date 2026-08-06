@@ -209,6 +209,11 @@ name — replay's `cwd`, lean's `project_root` — resolve against the objective
 root and are refused when they escape it. A record cannot choose which host
 paths are bound into its own jail.
 
+One thing that is *not* a gap, because it is checked: directories a spec can
+name — replay's `cwd`, lean's `project_root` — resolve against the objective
+root and are refused when they escape it. A record cannot choose which host
+paths are bound into its own jail.
+
 **The reference implementation does not jail at all.** It spawns the
 interpreter directly, by design — it exists to be an independent second opinion
 on the *rules*, not a hardened node — and `reference/rust/src/verifiers.rs` says

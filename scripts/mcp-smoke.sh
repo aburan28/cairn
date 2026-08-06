@@ -245,6 +245,12 @@ echo "$FIRST" | grep -q "Committed in epoch" || fail "first submit_claim did not
 grep -q '"kind": *"commitment"' "$LOG" || fail "no commitment reached the log"
 grep -q '"kind": *"claim"' "$LOG" && fail "the artifact was revealed in the same epoch as its commitment"
 
+# The open commitment must be discoverable after a restart -- an agent whose
+# session was compacted has no other way to learn it owes a reveal.
+PENDING=$(call_tool pending_reveals '{"submitter":"agent"}')
+echo "$PENDING" | grep -q "$OID" || fail "pending_reveals does not list the open commitment"
+echo "  pending_reveals lists the open commitment across a server restart"
+
 # Same epoch, same artifact: the server must recognise its own outstanding
 # commitment rather than making a second one the agent can never open. First,
 # because it is the assertion with the deadline -- anything run between the

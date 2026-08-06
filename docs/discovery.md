@@ -293,8 +293,11 @@ then fails, because a peer id *is* `sha256(public key)` and no impostor can
 produce a key hashing to somebody else's id. That is the rule above, applied:
 DNS carries the hint, and the hash decides.
 
-Bootstrap files are local configuration and are gitignored. Copy
-`bootstrap.json.example`, fill in the address and the peer's public key — print
-yours with `proofwork blob serve --identity <file>` — and pass it with
-`--bootstrap`. A committed address would be a fixed target that goes stale and
-reads as authoritative, which is the one thing this document says no hint may be.
+Bootstrap files are local configuration and are gitignored, which is why
+nothing generates one into the repository. `proofwork-gen-bootstrap` writes a
+structurally valid file for an address you name — `make p2p` calls it for
+`SEED_ADDR` on first run — and it accepts a hostname for the same reason the
+daemon does. The key it writes is a **placeholder**: only the seed's real public
+key makes the connection mean anything, and that key comes from the seed
+operator (`proofwork blob serve --identity <file>` prints it). See
+[p2p.md](p2p.md).
