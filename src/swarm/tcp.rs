@@ -385,6 +385,11 @@ fn serve_one(mut connection: Connection, ctx: Serving) -> io::Result<()> {
     // emphatically does not suit a transfer: a peer that goes quiet mid-piece
     // would hold this thread forever and never give its reservations back.
     connection.set_timeouts(Some(IO_TIMEOUT), Some(IO_TIMEOUT))?;
+    // And this module's own frame ceiling, which is a quarter of the
+    // transport's. The check is on the *declared* length before the buffer
+    // exists, so a peer claiming 16 MiB gets a refusal rather than 16 MiB of
+    // this node's memory. An authenticated peer is not a trusted one.
+    connection.set_max_frame(super::wire::MAX_FRAME as u32);
 
     // The transport handshake already ran, so the peer is authenticated before
     // a swarm byte moves. What is exchanged here is only *which blob* the
@@ -758,6 +763,7 @@ pub fn fetch_using(
             {
                 return;
             }
+            connection.set_max_frame(super::wire::MAX_FRAME as u32);
             let hello = Handshake {
                 digest: digest.clone(),
                 peer_id: [0u8; PEER_ID_LEN],
@@ -1629,19 +1635,38 @@ mod tests {
     }
 
     #[test]
-    fn a_transfer_sets_the_timeouts_its_liveness_depends_on() {
-        // The other half: the API above is only worth anything if the driver
-        // actually calls it. Both sides do -- `serve_one` on the responder and
-        // the dial thread on the initiator -- and a port that forgot either
-        // would leave one direction able to hang.
-        let source = std::fs::read_to_string("src/swarm/tcp.rs").expect("reads own source");
-        let calls = source
-            .matches("set_timeouts(Some(IO_TIMEOUT), Some(IO_TIMEOUT))")
-            .count();
+    fn a_served_connection_refuses_a_frame_above_this_protocols_ceiling() {
+        // The responder half of the ceiling, behaviourally. An earlier version
+        // of this test scraped `set_max_frame` out of the source and counted
+        // it, which broke the moment `cargo fmt` wrapped the line -- and would
+        // have passed just as happily if the call were dead code. This connects
+        // to a real `serve` and checks what the server does.
+        //
+        // A frame above `wire::MAX_FRAME` and below the transport's: the size
+        // the port made allocatable and this protocol never sends.
+        let dir = scratch("ceiling");
+        let seeder = store(&dir, "seed");
+        put(&seeder, b"anything");
+        let (listener, endpoint) = seeder_at(seeder);
+
+        let local = PeerIdentity::generate();
+        let mut connection =
+            transport::connect(&endpoint.peer, endpoint.addr, &local).expect("connects");
+        let oversized = vec![0u8; crate::swarm::wire::MAX_FRAME + 8192];
+        // The write may succeed into the socket buffer and the refusal arrive
+        // as a reset on the next call; either is the server declining. What
+        // must not happen is the server reading it as a frame and answering.
+        let _ = connection.send(&oversized, CONTEXT);
+        connection
+            .set_timeouts(Some(Duration::from_secs(5)), Some(Duration::from_secs(5)))
+            .expect("sets timeouts");
         assert!(
-            calls >= 2,
-            "found {calls} timeout call(s); the responder and the initiator \
-             each need one, or one direction can stall forever"
+            connection.receive(CONTEXT).is_err(),
+            "the server answered a frame four times larger than this protocol \
+             can legitimately send"
         );
+
+        listener.shutdown();
+        let _ = fs::remove_dir_all(&dir);
     }
 }
