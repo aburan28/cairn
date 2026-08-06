@@ -126,7 +126,7 @@ jobs:
           java-version: "21"
       # ~8 MB. The key is dated rather than fixed: a fixed key silently pins the
       # first jar ever cached, which is a stale toolchain nobody chose.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .local/tla2tools.jar
           key: tla2tools-2026-07
