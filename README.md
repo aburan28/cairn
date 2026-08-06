@@ -500,12 +500,19 @@ Neither claim is asserted in a comment: `tests/wire_encryption.rs` and
 `a_transfer_puts_no_plaintext_on_the_wire` each put a recording relay between
 two real nodes and check the captured bytes.
 
-What remains duplicated is `swarm::tcp` and `swarm::discovery`: a second
-transport and a second address book beside `p2p::transport` and
-`p2p::discovery`, built before those landed and not wired into the CLI. They
-resolve blobs through `crate::blobs`, so there is exactly one blob store — but
-two transports is one more than a repo should carry, and `swarm::discovery`'s
-signed peer records are exactly the peer-list exchange `p2p` is missing. See
+`swarm::tcp` is now driven by `proofwork blob serve` and `proofwork blob fetch`,
+and `scripts/blob-demo.sh` runs both sides in CI: a node holding only the log
+fetches its pinned verifier from a stranger and settles a claim with it. That
+was worth doing for its own sake and it also found two bugs that no unit test on
+either side could reach, because the module had **no caller in any shipped
+binary** and so had only ever been checked against itself. See
+[storage.md](docs/storage.md#moving-one-between-peers).
+
+What remains duplicated is `swarm::discovery`: a second address book beside
+`p2p::discovery`, built before it landed. Both resolve blobs through
+`crate::blobs`, so there is exactly one blob store — but `swarm::discovery`'s
+signed peer records are exactly the peer-list exchange `p2p` is missing, and
+folding them is a public-API decision rather than a coding one. See
 [discovery.md](docs/discovery.md) for the design and the survey, including why
 encrypted DNS answers a different question than the one people ask it.
 

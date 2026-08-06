@@ -1544,7 +1544,20 @@ impl Node {
                 }
                 continue;
             }
-            if fresh.status.as_str() != was {
+            // Only a *settled* recorded verdict can be contradicted. An
+            // `unavailable` was never a statement about the artifact, so a node
+            // that can now run the verifier and gets an answer has learned
+            // something rather than caught somebody -- nothing settled, nobody
+            // was paid, and the objective is still open.
+            //
+            // This fired on the ordinary workflow the moment there was one:
+            // fetch a pinned checker from a peer, then audit, and every claim
+            // recorded before the fetch was reported as a disagreement. The
+            // reference implementation had the rule right and this one did not,
+            // which is what a second implementation is for.
+            if Status::from_wire(was).is_some_and(|status| status.settles())
+                && fresh.status.as_str() != was
+            {
                 problems.push(format!(
                     "claim {claim_id}: recorded {was}, re-verification says {}",
                     fresh.status
@@ -3591,6 +3604,44 @@ mod tests {
                 .iter()
                 .any(|p| p.contains("recorded reject but can no longer be re-verified")),
             "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_recorded_unavailable_that_now_verifies_is_not_a_disagreement() {
+        // The inverse of the test above, and the case an ordinary workflow
+        // reaches: a node records `unavailable` because it lacks the pinned
+        // checker, fetches it from a peer, and audits. The verifier now runs
+        // and says `accept`.
+        //
+        // That is the node learning something, not catching somebody. Nothing
+        // settled, nobody was paid, the objective is still open, and an
+        // `unavailable` was never a statement about the artifact. Reporting it
+        // made `scripts/blob-demo.sh` fail on its last line the first time the
+        // fetch path existed to run.
+        let dir = TempDir::new("audit-learned");
+        let mut node = node(&dir);
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        node.post_objective(&objective, TS).expect("post");
+        // Recorded UNAVAILABLE, never settled; re-verification succeeds because
+        // the fixture's replay command really does run here.
+        plant(
+            &mut node,
+            &objective,
+            "alice",
+            results(1),
+            "n1",
+            Status::Unavailable,
+            None,
+        );
+
+        let problems = node.audit(true);
+        assert!(
+            !problems.iter().any(|p| p.contains("re-verification says")),
+            "a verdict that never settled was reported as contradicted: {problems:?}"
         );
     }
 

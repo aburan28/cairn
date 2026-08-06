@@ -43,6 +43,16 @@ jobs:
       # where the client shares nothing with the node but an address, which is
       # the arrangement every outside contributor is in.
       - run: ./scripts/serve-smoke.sh
+      # Two processes sharing nothing but a socket: a node with only the log
+      # fetches its pinned verifier from a stranger and settles a claim with it.
+      #
+      # This path had never been run. `swarm::tcp` was a complete, encrypted,
+      # end-to-end tested transfer with no caller in any shipped binary, and two
+      # bugs sat in the seam it left: a content address spelled one way on the
+      # wire and another in the decoded struct, and a Python loader that could
+      # not import a file whose name is a hash. Both were invisible to unit
+      # tests of either side.
+      - run: ./scripts/blob-demo.sh
       # Every binary answers `--help` with 0 and misuse with 2.
       #
       # Two of them exited 2 for `--help`, which tells somebody who asked a

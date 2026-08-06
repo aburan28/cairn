@@ -657,7 +657,38 @@ fn decode_transport_id(text: &str) -> Option<crate::p2p::handshake::PeerId> {
     Some(out)
 }
 
+/// One spelling of a content address, whichever spelling arrived.
+///
+/// A blob's address is bare lowercase hex — [`crate::blobs::address`] says so,
+/// and warns in as many words that "two spellings for one hash would be two
+/// names for one blob and half the network would fail to find the other half's
+/// copy". That is exactly what happened here, inside one module.
+///
+/// [`Handshake::encode`] writes the bare form and [`Handshake::decode`] returns
+/// it **prefixed**, so a session's two sides hold different strings for the
+/// same blob. Every call site was written against the prefixed spelling, the
+/// test helpers translated at their own boundary, and the tests passed — while
+/// a caller holding a real address (`missing_code`, `pinned_code`, anything
+/// from `blobs::address`, all bare) could never match a single reply.
+///
+/// It stayed invisible because nothing outside this file called `fetch`. A
+/// subsystem tested only against itself agrees with itself about a convention
+/// no real caller uses.
+///
+/// Normalized once, here, rather than by asking every caller to know: a
+/// boundary that accepts both spellings and speaks one internally cannot
+/// develop this fault again.
+fn one_spelling(digest: &str) -> String {
+    let bare = digest.strip_prefix("sha256:").unwrap_or(digest);
+    format!("sha256:{bare}")
+}
+
 /// Fetch `digest` from `peers`, writing it into `blobs` on success.
+///
+/// `digest` may be spelled bare (`ab12…`, what [`crate::blobs::address`]
+/// produces and what an objective's pin carries) or prefixed (`sha256:ab12…`,
+/// what [`crate::canonical::digest_bytes`] produces). Both name the same blob
+/// and both work.
 ///
 /// Returns the bytes as well as storing them, because the caller usually wants
 /// both and re-reading a blob it just wrote would be the only other way to get
@@ -720,6 +751,8 @@ pub fn fetch_using(
     book: Book,
     keys: &dyn KeySource,
 ) -> Result<Vec<u8>, TransferError> {
+    // Both spellings arrive here and only one leaves. See `one_spelling`.
+    let digest = &one_spelling(digest)[..];
     let mut peers: Vec<Endpoint> = peers.to_vec();
     for endpoint in complete(&book, keys) {
         if !peers.iter().any(|known| known.addr == endpoint.addr) {
@@ -1133,6 +1166,49 @@ mod tests {
         // Main's store hashes on read and refuses a mismatch, so a successful
         // read *is* the integrity check.
         assert!(holds(&leecher, &digest));
+        listener.shutdown();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bare_content_address_fetches_the_same_blob_as_a_prefixed_one() {
+        // Every test in this file spelled a digest `sha256:ab12…`, because the
+        // helpers here do. Every *real* caller holds the bare `ab12…` form:
+        // that is what `blobs::address` produces, what an objective's
+        // `checker_sha256` carries, and what `Node::missing_code` returns.
+        //
+        // Bare could never match. `Handshake::encode` writes the bare form and
+        // `Handshake::decode` returns it prefixed, so the leech compared its own
+        // bare string against a prefixed reply and hung up on every seed —
+        // reported as "no peer could be reached", which reads like a network
+        // fault and is not one. The subsystem agreed with itself about a
+        // convention no caller outside it used, and nothing noticed because
+        // nothing outside it called `fetch` at all.
+        let dir = scratch("spelling");
+        let data = evaluator(20_000);
+        let seeder = store(&dir, "seed");
+        let prefixed = put(&seeder, &data);
+        let bare = prefixed
+            .strip_prefix("sha256:")
+            .expect("the helper prefixes")
+            .to_string();
+        let (listener, endpoint) = seeder_at(seeder);
+
+        for (spelling, digest) in [("bare", &bare), ("prefixed", &prefixed)] {
+            let leecher = store(&dir, &format!("leech-{spelling}"));
+            let got = fetch(
+                digest,
+                std::slice::from_ref(&endpoint),
+                leech_identity(),
+                &leecher,
+                Limits::default(),
+                Duration::from_secs(20),
+            )
+            .unwrap_or_else(|error| panic!("{spelling} spelling did not transfer: {error}"));
+            assert_eq!(got, data, "{spelling}");
+            assert!(holds(&leecher, &bare), "{spelling}: not stored");
+        }
+
         listener.shutdown();
         let _ = fs::remove_dir_all(&dir);
     }

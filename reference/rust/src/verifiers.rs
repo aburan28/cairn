@@ -191,8 +191,14 @@ fn run_pinned_seeded(
     seed: Option<i64>,
 ) -> Result<Value, Verdict> {
     const DRIVER: &str = r#"
-import json, sys, importlib.util
-spec = importlib.util.spec_from_file_location("pinned", sys.argv[1])
+import json, sys, importlib.machinery, importlib.util
+# The loader is named rather than inferred from the extension: a blob's
+# filename is its hash, so it never ends in `.py`, and `spec_from_file_location`
+# returns None for an extension it does not recognise. Without this the
+# content-addressed fallback -- the whole reason a blob store exists -- cannot
+# load a checker a node fetched from a peer.
+loader = importlib.machinery.SourceFileLoader("pinned", sys.argv[1])
+spec = importlib.util.spec_from_file_location("pinned", sys.argv[1], loader=loader)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 artifact = json.loads(sys.stdin.read())

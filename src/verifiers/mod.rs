@@ -529,7 +529,8 @@ const NATIVE_DECIDE: Screen = Screen {
 /// Any uncaught exception in the pinned code becomes a traceback and a non-zero
 /// exit, which the caller reports as `Unavailable` -- a crashed checker is an
 /// infrastructure fact, exactly as in the reference implementation.
-const HARNESS: &str = r##"import importlib.util
+const HARNESS: &str = r##"import importlib.machinery
+import importlib.util
 import json
 import sys
 
@@ -545,7 +546,15 @@ def main():
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
-        spec = importlib.util.spec_from_file_location("pinned_verifier", path)
+        # The loader is named rather than inferred from the extension. A blob's
+        # filename is its hash, so it never ends in `.py`, and
+        # `spec_from_file_location` returns None for an extension it does not
+        # recognise -- which made the content-addressed fallback, the entire
+        # reason `blobs` exists, unable to load anything. A node that fetched a
+        # pinned checker from a peer got `unavailable` on every claim: exactly
+        # the failure the blob store was built to remove.
+        loader = importlib.machinery.SourceFileLoader("pinned_verifier", path)
+        spec = importlib.util.spec_from_file_location("pinned_verifier", path, loader=loader)
         if spec is None or spec.loader is None:
             sys.stderr.write("cannot load pinned module from %s\n" % (path,))
             return 3
@@ -2417,6 +2426,56 @@ mod tests {
     fn write_pinned(dir: &TempDir, name: &str, source: &str) -> String {
         fs::write(dir.path().join(name), source).expect("write pinned source");
         sha256_hex(source.as_bytes())
+    }
+
+    #[test]
+    fn a_checker_resolved_from_the_blob_store_actually_runs() {
+        // The content-addressed fallback is the entire reason `blobs` exists: a
+        // node that learned an objective over the wire has no bundle, fetches
+        // the pinned checker by its hash, and verifies against that.
+        //
+        // It could never load one. A blob's filename *is* its hash, so it never
+        // ends in `.py`, and `spec_from_file_location` returns None for an
+        // extension it does not recognise -- so the harness bailed and every
+        // claim on such a node came back `unavailable`, which is exactly the
+        // failure the blob store was built to remove.
+        //
+        // Nothing caught it because nothing fetched a blob: `swarm::tcp` had no
+        // caller outside its own tests, and the tests that exercise
+        // `resolve_pinned` check the path it returns rather than running Python
+        // against it. Two subsystems each correct, and the seam between them
+        // never traversed.
+        if !have("python3") {
+            return;
+        }
+        let bundle = tmpdir("blob-resolved-bundle");
+        let store_dir = tmpdir("blob-resolved-store");
+        let declared = sha256_hex(CHECKER.as_bytes());
+        // The blob store holds it; the bundle deliberately does not.
+        BlobStore::at(store_dir.path())
+            .put(&declared, CHECKER.as_bytes())
+            .expect("stores the blob");
+
+        let registry =
+            VerifierRegistry::new(bundle.path()).with_blob_dir(store_dir.path().to_path_buf());
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("checkers/absent.py")),
+            ("checker_sha256", Value::string(declared)),
+            ("entrypoint", Value::string("check")),
+        ]);
+
+        let accepted = registry.run(&spec, &Value::object([("n", Value::Int(42))]));
+        assert_eq!(
+            accepted.status,
+            Status::Accept,
+            "a fetched checker did not run: {}",
+            accepted.detail
+        );
+        // And it is a real verdict, not an accept-everything: the same checker
+        // rejects the artifact it should.
+        let rejected = registry.run(&spec, &Value::object([("n", Value::Int(41))]));
+        assert_eq!(rejected.status, Status::Reject, "{}", rejected.detail);
     }
 
     // -- status ------------------------------------------------------------

@@ -363,10 +363,24 @@ question correctly returned a failure. `cmd --help >/dev/null || fail` is how a
 packaging check or a container healthcheck asks whether a binary runs at all.
 All four binaries now answer 0 for `--help` and 2 for misuse, and CI pins it.
 
+**A verdict that never settled, reported as contradicted.** The opposite
+mistake, and the one an ordinary workflow reaches first. A node without a
+pinned checker records `unavailable`, fetches the checker from a peer, and
+audits — and every claim recorded before the fetch came back as *recorded
+unavailable, re-verification says accept*. That is the node learning something,
+not catching somebody: nothing settled, nobody was paid, the objective is still
+open, and an `unavailable` was never a statement about the artifact. The
+reference had this rule right and the primary did not. It failed
+`scripts/blob-demo.sh` on its last line the first day there was a fetch path to
+run.
+
 The shape recurs often enough to be worth naming: **the summary line is a
 claim, and every branch that quietly skips something is a way for it to be
 false.** A skip is right only when nothing was ever asserted — an `unavailable`
 the log also recorded as `unavailable`. Everywhere else, silence is the bug.
+And the converse, which the last one earned: a *finding* about something that
+was never asserted is noise, and noise in an audit is how a real finding gets
+ignored.
 
 And the corollary the last one earned: an independent implementation drifts
 where nothing compares it. The two are checked against each other on ids, roots

@@ -293,14 +293,45 @@ There are two paths, against the same store, and they overlap:
   This is what the daemon uses, and at `blobs::MAX_BLOB_BYTES` — 1 MiB — it is
   adequate.
 - [`src/swarm/`](../src/swarm/) moves one in the BitTorrent shape: pieces, a
-  manifest of piece hashes, bitfields, rarest-first, choking, endgame. It is
-  library-only — no CLI subcommand drives it yet — and sized for artifacts the
-  1 MiB cap does not currently allow. Groundwork, not a current need.
+  manifest of piece hashes, bitfields, rarest-first, choking, endgame. Sized for
+  artifacts the 1 MiB cap does not currently allow.
 
 What both get for free is the part BitTorrent cannot do: the digest an objective
 already commits to *is* the swarm id, so there is no tracker and nothing to sign.
 A manifest arrives from a stranger and is checked against a digest the log fixed
 before the transfer started.
+
+```sh
+# On the node that has the code:
+proofwork blob serve --identity transport.json --listen 0.0.0.0:9900
+#   … prints an {addr, public} endpoint. The key is 261,120 bytes of Classic
+#   McEliece public key, which is why a relayed peer record carries its 32-byte
+#   id instead and something has to complete the hint before a dial.
+
+# On the node that has only the log:
+proofwork blob fetch --identity transport.json --peer seed-endpoint.json
+```
+
+`scripts/blob-demo.sh` runs both sides and then verifies a claim with what was
+fetched. It is in CI because this path went a long time with **no caller in any
+shipped binary**: `swarm::tcp` was complete, encrypted and end-to-end tested,
+and a subsystem tested only against itself agrees with itself about conventions
+nobody else uses. Two bugs were sitting in the seam, and neither was reachable
+from either side's unit tests:
+
+* `Handshake::encode` wrote a content address bare and `decode` returned it
+  `sha256:`-prefixed, so the two ends of a session held different strings for
+  the same blob. Every test used the prefixed spelling its own helpers produced;
+  every *real* caller holds the bare one, which is what `blobs::address` and an
+  objective's `checker_sha256` produce. Bare could never fetch anything, and the
+  failure surfaced as "no peer could be reached" — which reads like a network
+  fault and is not one.
+* A blob's filename *is* its hash, so it never ends in `.py`, and Python's
+  `spec_from_file_location` returns `None` for an extension it does not
+  recognise. The content-addressed fallback — the entire reason this module
+  exists — could not load a single fetched checker, so a node that fetched one
+  answered `unavailable` on every claim: exactly the failure blobs were built to
+  remove.
 
 [discovery.md](discovery.md) is how a node finds a peer it was not given.
 

@@ -562,7 +562,7 @@ enum Command {
 /// past, and that is deliberate: a node cannot distinguish a blob nobody wants
 /// from a blob pinned by an objective it has not synced yet, so a timer-driven
 /// collector would delete exactly the code its peers are about to ask it for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BlobAction {
     /// Every content address held.
     List,
@@ -574,7 +574,27 @@ enum BlobAction {
     Publish,
     /// Drop blobs no objective in the log pins.
     Collect,
+    /// Seed this node's blobs to strangers over the encrypted transport.
+    ///
+    /// The other half of [`BlobAction::Need`], which has always said a missing
+    /// pin stays missing "until a peer serves them" while offering no way to
+    /// *be* that peer.
+    Serve { identity: String, listen: String },
+    /// Fetch every pin this log names and this node lacks.
+    Fetch {
+        identity: String,
+        peers: Vec<String>,
+        seconds: u64,
+    },
 }
+
+/// How long a `blob fetch` waits before giving up on a digest.
+///
+/// A blob fetch is a many-peer transfer over a network nobody controls, so
+/// there is no principled value -- only one large enough that a slow seed is
+/// not mistaken for an absent one, and small enough that an operator with a
+/// dead peer list gets an answer. `--timeout` overrides it.
+const DEFAULT_FETCH_SECONDS: u64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StoreAction {
@@ -1318,15 +1338,72 @@ fn parse_blob(cursor: &mut Cursor) -> Result<Command, CliError> {
             "need" => BlobAction::Need,
             "publish" => BlobAction::Publish,
             "gc" => BlobAction::Collect,
+            "serve" => parse_blob_serve(cursor)?,
+            "fetch" => parse_blob_fetch(cursor)?,
             other => {
                 return Err(CliError::Usage(format!(
-                    "blob: unknown action {other:?}; expected ls, need, publish, or gc"
+                    "blob: unknown action {other:?}; expected ls, need, publish, gc, serve, \
+                     or fetch"
                 )))
             }
         },
     };
     expect_end(cursor, "blob")?;
     Ok(Command::Blob { action })
+}
+
+fn parse_blob_serve(cursor: &mut Cursor) -> Result<BlobAction, CliError> {
+    let mut identity: Option<String> = None;
+    let mut listen: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--identity" => identity = Some(cursor.value("--identity")?),
+            "--listen" => listen = Some(cursor.value("--listen")?),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "blob serve: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+    Ok(BlobAction::Serve {
+        identity: require(identity, "blob serve", "--identity <file>")?,
+        // A loopback default, deliberately. Serving is publishing, and a
+        // command that binds every interface because the operator did not say
+        // otherwise has made that decision for them.
+        listen: listen.unwrap_or_else(|| String::from("127.0.0.1:0")),
+    })
+}
+
+fn parse_blob_fetch(cursor: &mut Cursor) -> Result<BlobAction, CliError> {
+    let mut identity: Option<String> = None;
+    let mut peers: Vec<String> = Vec::new();
+    let mut seconds = DEFAULT_FETCH_SECONDS;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--identity" => identity = Some(cursor.value("--identity")?),
+            "--peer" => peers.push(cursor.value("--peer")?),
+            "--timeout" => {
+                let raw = cursor.value("--timeout")?;
+                seconds = parse_u64(&raw, "--timeout")?;
+                if seconds == 0 {
+                    return Err(CliError::Usage(String::from(
+                        "blob fetch: --timeout must be at least 1 second",
+                    )));
+                }
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "blob fetch: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+    Ok(BlobAction::Fetch {
+        identity: require(identity, "blob fetch", "--identity <file>")?,
+        peers,
+        seconds,
+    })
 }
 
 /// Negative numbers are rejected by the type, not by a range check: `-1` does
@@ -1415,6 +1492,24 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      inspect the content-addressed store of pinned verifier code",
     );
+    say(out, "  blob serve --identity <file> [--listen <addr>]");
+    say(
+        out,
+        "      seed this node's blobs to strangers over the encrypted transport,",
+    );
+    say(
+        out,
+        "      and print the endpoint a fetcher needs; Ctrl-C to stop",
+    );
+    say(
+        out,
+        "  blob fetch --identity <file> --peer <file> [--peer <file>]... [--timeout N]",
+    );
+    say(
+        out,
+        "      fetch every pin this log names and this node lacks; --peer takes the",
+    );
+    say(out, "      {addr, public} file `blob serve` printed");
     say(
         out,
         "  incentives [--nodes N] [--settled N] [--canary-rate N/D] ...",
@@ -3160,7 +3255,7 @@ fn cmd_log(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
 /// `Unavailable` — this node cannot check something — and reporting it as a
 /// failure would make a script treat "I have not fetched the checker yet" as "the
 /// log is wrong". `audit` is where a log that does not re-derive is an error.
-fn cmd_blob(out: &mut dyn Write, options: &Options, action: BlobAction) -> Result<i32, CliError> {
+fn cmd_blob(out: &mut dyn Write, options: &Options, action: &BlobAction) -> Result<i32, CliError> {
     let node = open_node(options)?;
     let store = node.registry().blobs();
     match action {
@@ -3217,8 +3312,220 @@ fn cmd_blob(out: &mut dyn Write, options: &Options, action: BlobAction) -> Resul
             let dropped = store.retain(&node.pinned_code());
             say(out, format!("dropped {dropped} unreferenced blob(s)"));
         }
+        BlobAction::Serve { identity, listen } => {
+            return cmd_blob_serve(out, &node, store, identity, listen)
+        }
+        BlobAction::Fetch {
+            identity,
+            peers,
+            seconds,
+        } => return cmd_blob_fetch(out, &node, store, identity, peers, *seconds),
     }
     Ok(0)
+}
+
+/// Seed this node's blobs to strangers.
+///
+/// `blob need` has always told an operator that a missing pin stays missing
+/// "until a peer serves them", and nothing in this binary could *be* that peer:
+/// `swarm::tcp` is a complete, encrypted, end-to-end tested transfer that no
+/// shipped command called. A subsystem with no entry point is not a feature.
+///
+/// The endpoint is printed rather than written anywhere, in the shape
+/// `proofwork-p2p` already reads for `--bootstrap`, because a fetcher needs the
+/// 255 KB McEliece key as well as the address and there is nowhere in an
+/// append-only log for a quarter-megabyte hint that changes.
+fn cmd_blob_serve(
+    out: &mut dyn Write,
+    node: &Node,
+    store: &proofwork::blobs::BlobStore,
+    identity_path: &str,
+    listen: &str,
+) -> Result<i32, CliError> {
+    let identity = std::sync::Arc::new(load_transport_identity(identity_path)?);
+    let published = node.publish_local_code();
+    let listener = proofwork::swarm::tcp::serve(
+        listen,
+        std::sync::Arc::clone(&identity),
+        store.clone(),
+        proofwork::swarm::Limits::default(),
+    )
+    .map_err(|error| CliError::Usage(format!("blob serve: cannot listen on {listen}: {error}")))?;
+
+    say(out, format!("seeding on {}", listener.addr()));
+    say(
+        out,
+        format!(
+            "  {} blob(s) servable ({published} pinned file(s) published from the bundle)",
+            store.len()
+        ),
+    );
+    say(out, "");
+    say(
+        out,
+        "A fetcher needs this node's transport key as well as its",
+    );
+    say(out, "address. Hand them a file shaped like this:");
+    say(out, "");
+    say(
+        out,
+        Value::object([
+            ("addr", Value::string(listener.addr().to_string())),
+            (
+                "public",
+                Value::string(hex_of(identity.public_key().as_slice())),
+            ),
+        ])
+        .canonical_string(),
+    );
+    say(out, "");
+    say(out, "Ctrl-C to stop.");
+    // Parked deliberately rather than looped: the listener owns its threads, and
+    // there is nothing for this one to do but hold it alive.
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Fetch every pin this log names and this node lacks.
+fn cmd_blob_fetch(
+    out: &mut dyn Write,
+    node: &Node,
+    store: &proofwork::blobs::BlobStore,
+    identity_path: &str,
+    peers: &[String],
+    seconds: u64,
+) -> Result<i32, CliError> {
+    let missing = node.missing_code();
+    if missing.is_empty() {
+        say(
+            out,
+            "every pinned verifier in this log is available locally; nothing to fetch",
+        );
+        return Ok(0);
+    }
+    let identity = std::sync::Arc::new(load_transport_identity(identity_path)?);
+    let mut endpoints = Vec::with_capacity(peers.len());
+    for path in peers {
+        endpoints.push(load_endpoint(path)?);
+    }
+    if endpoints.is_empty() {
+        return Err(CliError::Usage(String::from(
+            "blob fetch: no peers. Pass --peer <file> with the {addr, public} a \
+             seeder printed; an address alone cannot complete an authenticated dial.",
+        )));
+    }
+
+    say(
+        out,
+        format!(
+            "fetching {} missing pin(s) from {} peer(s)",
+            missing.len(),
+            endpoints.len()
+        ),
+    );
+    let deadline = std::time::Duration::from_secs(seconds);
+    let mut got = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for address in &missing {
+        match proofwork::swarm::tcp::fetch(
+            address,
+            &endpoints,
+            std::sync::Arc::clone(&identity),
+            store,
+            proofwork::swarm::Limits::default(),
+            deadline,
+        ) {
+            Ok(bytes) => {
+                // Written through the store, which re-hashes: a seed that
+                // served the wrong bytes fails here rather than becoming a
+                // pinned blob whose address does not match its content.
+                match store.put(address, &bytes) {
+                    Ok(_) => {
+                        got += 1;
+                        say(out, format!("  ok   {}", short_address(address)));
+                    }
+                    Err(error) => {
+                        failed.push(address.clone());
+                        say(out, format!("  bad  {}: {error}", short_address(address)));
+                    }
+                }
+            }
+            Err(error) => {
+                failed.push(address.clone());
+                say(out, format!("  miss {}: {error}", short_address(address)));
+            }
+        }
+    }
+    say(
+        out,
+        format!("{got} fetched, {} still missing", failed.len()),
+    );
+    // Exit 1 on an incomplete fetch, so a script that runs this before `audit`
+    // stops rather than going on to report `unavailable` verdicts as though the
+    // pins had never been wanted.
+    Ok(i32::from(!failed.is_empty()))
+}
+
+/// Load a transport identity, creating one if the file does not exist.
+///
+/// Same `{public, secret}` shape `proofwork-p2p` reads, so one file serves
+/// both. Generating on absence costs ~243 ms of Classic McEliece keygen and is
+/// what makes `blob serve` a single command rather than a setup ritual.
+fn load_transport_identity(
+    path: &str,
+) -> Result<proofwork::p2p::handshake::PeerIdentity, CliError> {
+    use proofwork::p2p::handshake::PeerIdentity;
+    let file = std::path::Path::new(path);
+    if !file.exists() {
+        let identity = PeerIdentity::generate();
+        let body = Value::object([
+            ("public", Value::string(hex_of(identity.public_key()))),
+            ("secret", Value::string(hex_of(identity.secret_key()))),
+        ]);
+        // The secret is in here, so it gets the same 0600 treatment as a
+        // submitter identity rather than whatever the umask happens to be.
+        write_private_file(file, &body.canonical_string())
+            .map_err(|error| CliError::Usage(format!("{path}: {error}")))?;
+        return Ok(identity);
+    }
+    let text =
+        std::fs::read_to_string(file).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
+    let value = Value::from_json(&text).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
+    let field = |name: &str| -> Result<Vec<u8>, CliError> {
+        let hex = value
+            .get(name)
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::Usage(format!("{path}: {name} missing")))?;
+        decode_hex(hex).map_err(|e| CliError::Usage(format!("{path}: {name}: {e}")))
+    };
+    PeerIdentity::from_bytes(&field("public")?, &field("secret")?)
+        .map_err(|error| CliError::Usage(format!("{path}: {error}")))
+}
+
+/// Load one `{addr, public}` endpoint file.
+fn load_endpoint(path: &str) -> Result<proofwork::p2p::discovery::Endpoint, CliError> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
+    let value = Value::from_json(&text).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
+    let addr = value
+        .get("addr")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::Usage(format!("{path}: addr missing")))?
+        .parse::<std::net::SocketAddr>()
+        .map_err(|e| CliError::Usage(format!("{path}: addr: {e}")))?;
+    let hex = value
+        .get("public")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::Usage(format!("{path}: public missing")))?;
+    let bytes = decode_hex(hex).map_err(|e| CliError::Usage(format!("{path}: public: {e}")))?;
+    let peer = proofwork::p2p::handshake::PeerPublic::from_bytes(&bytes)
+        .map_err(|error| CliError::Usage(format!("{path}: public: {error}")))?;
+    Ok(proofwork::p2p::discovery::Endpoint::new(addr, peer))
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// A content address abbreviated the way [`short`] abbreviates a record hash, so
@@ -3557,7 +3864,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             *rerun,
         ),
         Command::Attribute { params } => cmd_attribute(out, options, params),
-        Command::Blob { action } => cmd_blob(out, options, *action),
+        Command::Blob { action } => cmd_blob(out, options, action),
         Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),
         Command::Canon { input } => cmd_canon(out, input),
         Command::Decode { kind, record } => cmd_decode(out, kind, record),
