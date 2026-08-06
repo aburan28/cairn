@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::canonical::{short, Inclusion, Value};
+use crate::canonical::{short, Value};
 use crate::frontier::Ratchet;
-use crate::ledger::Ledger;
+use crate::ledger::{Ledger, Proof};
 use crate::partition::{assign, beacon, epoch_of, epoch_seconds, settlement_rank};
 use crate::records::{
     signed_submitter, Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord,
@@ -186,6 +186,12 @@ impl Node {
     /// given length, which is what stops a later back-dated append changing
     /// the anchor of a batch that already settled.
     fn anchor_of_epoch(&self, epoch: u64, positions: Option<usize>) -> String {
+        self.anchor_at(epoch, positions, epoch_seconds())
+    }
+
+    /// The anchor of `epoch`, measuring epochs with an explicit length. The two
+    /// callers need different ones -- see `sampled_index`.
+    fn anchor_at(&self, epoch: u64, positions: Option<usize>, seconds_per_epoch: u64) -> String {
         let mut anchor = String::new();
         let entries = self.ledger.entries();
         let entries = match positions {
@@ -196,7 +202,7 @@ impl Node {
             // An entry this node cannot place in time is not evidence about
             // where the boundary was, so it does not move the anchor.
             if let Some(seconds) = unix_seconds(&entry.ts) {
-                if epoch_of(seconds, epoch_seconds()) < epoch {
+                if epoch_of(seconds, seconds_per_epoch) < epoch {
                     anchor = entry.hash.clone();
                 }
             }
@@ -218,11 +224,28 @@ impl Node {
     /// same number, and the bound is re-checked here rather than assumed from
     /// the decoder so the two stay pinned together even if one is called with a
     /// record the other would not have accepted.
-    fn sampled_index(&self, undertaking: &Undertaking, epoch: u64) -> Option<u64> {
+    fn sampled_index(
+        &self,
+        undertaking: &Undertaking,
+        epoch: u64,
+        positions: usize,
+    ) -> Option<u64> {
         if undertaking.height == 0 || undertaking.height > MAX_UNDERTAKING_HEIGHT {
             return None;
         }
-        let beacon = beacon(epoch, &self.anchor_of_epoch(epoch, None));
+        // `EPOCH_SECONDS`, the constant, never the `PROOFWORK_EPOCH_SECONDS`
+        // override: that is a demo affordance, and a demo affordance must not
+        // decide whether a record is admissible. Reading it here made the same
+        // log audit clean or dirty depending on an environment variable --
+        // measured at six failures in ten.
+        // Bounded by *position*, the same way a batch's anchor is: unbounded,
+        // the anchor is the last entry the whole log holds, so every later
+        // append moves the sampled index and an answer that was right when it
+        // was written becomes wrong two entries later.
+        let beacon = beacon(
+            epoch,
+            &self.anchor_at(epoch, Some(positions), crate::partition::EPOCH_SECONDS),
+        );
         assign(
             &undertaking.identity,
             &undertaking.id(),
@@ -744,7 +767,15 @@ impl Node {
             .ledger
             .entries_of_kind(UNDERTAKING)
             .into_iter()
-            .filter_map(|entry| Undertaking::from_value(&entry.payload).ok())
+            // `seq` is the number of entries below the record, which is the
+            // height it was required to name: a promise covers the whole log
+            // as it stood, because a promiser who could choose promised one
+            // entry and took a full share.
+            .filter_map(|entry| {
+                Undertaking::from_value(&entry.payload)
+                    .ok()
+                    .filter(|record| record.height == entry.seq)
+            })
             .filter(|record| record.verify_signature().is_ok())
             .filter(|record| {
                 usize::try_from(record.height)
@@ -762,6 +793,12 @@ impl Node {
                 Ok(record) => {
                     if let Err(error) = record.verify_signature() {
                         problems.push(format!("entry {}: {error}", entry.seq));
+                    } else if record.height != entry.seq {
+                        problems.push(format!(
+                            "entry {}: undertaking promises {} entries where the log below \
+                             it had {}; the size of a promise is not the promiser's to choose",
+                            entry.seq, record.height, entry.seq
+                        ));
                     } else if !promises.contains_key(&record.id()) {
                         problems.push(format!(
                             "entry {}: undertaking names {} entries rooted at {}, which no \
@@ -807,34 +844,39 @@ impl Node {
                 ));
                 continue;
             }
-            match self.sampled_index(promise, record.epoch) {
+            match self.sampled_index(promise, record.epoch, entry.seq as usize) {
                 None => problems.push(format!(
                     "entry {}: undertaking {} cannot be sampled",
                     entry.seq,
                     short(&record.undertaking)
                 )),
                 Some(index) => {
-                    // The leaf is recomputed from the entry, never taken from
-                    // the answer: a prover who names the leaf can offer an
-                    // internal node instead of one.
-                    let leaf = usize::try_from(index)
-                        .ok()
-                        .and_then(|at| self.ledger.entries().get(at))
-                        .map(|entry| entry.recompute_hash());
-                    let inclusion = Inclusion {
-                        index: usize::try_from(index).unwrap_or(usize::MAX),
-                        leaves: usize::try_from(promise.height).unwrap_or(usize::MAX),
-                        siblings: record.path.clone(),
-                    };
-                    match leaf {
-                        Some(leaf) if inclusion.verify(&leaf, &promise.root) => {}
-                        _ => problems.push(format!(
-                            "entry {}: the path does not put entry {index} under the root \
-                             undertaken by {} (epoch {})",
+                    // The leaf comes from the entry the *answerer* sent, not
+                    // from this node's copy. Recomputing it locally -- which is
+                    // what this did at first -- means an answerer needs only
+                    // the hashes every path is derivable from, and is paid for
+                    // storing a hash tree rather than a log.
+                    //
+                    // The index is derived, never read from the record: an
+                    // answerer who could name it would answer whichever entry
+                    // it happened to keep.
+                    let checked = Proof::from_parts(
+                        &record.entry,
+                        usize::try_from(index).unwrap_or(usize::MAX),
+                        usize::try_from(promise.height).unwrap_or(usize::MAX),
+                        record.path.clone(),
+                    )
+                    .map_or_else(
+                        || Err(String::from("the answer carries no readable entry")),
+                        |proof: Proof| proof.check(&promise.root),
+                    );
+                    if let Err(why) = checked {
+                        problems.push(format!(
+                            "entry {}: answer to {} for epoch {} does not check: {why}",
                             entry.seq,
                             short(&record.undertaking),
                             record.epoch
-                        )),
+                        ));
                     }
                 }
             }
@@ -870,32 +912,52 @@ impl Node {
         };
         let mut spent_total = 0u128;
         for entry in self.ledger.entries_of_kind(AVAILABILITY_SETTLEMENT) {
-            let read = |name: &str| entry.payload.get(name).and_then(Value::as_i128);
-            let count = entry
-                .payload
-                .get("paid")
-                .and_then(Value::as_array)
-                .map(<[Value]>::len)
-                .unwrap_or(0) as u128;
-            let (Some(share), Some(unpaid), Some(epoch)) = (
-                read("share"),
-                read("unpaid"),
-                entry.payload.get("epoch").and_then(Value::as_u64),
-            ) else {
+            let rows = entry.payload.get("paid").and_then(Value::as_array);
+            let unpaid = entry.payload.get("unpaid").and_then(Value::as_i128);
+            let epoch = entry.payload.get("epoch").and_then(Value::as_u64);
+            let (Some(rows), Some(unpaid), Some(epoch)) = (rows, unpaid, epoch) else {
                 problems.push(format!(
-                    "entry {}: availability settlement is missing share, unpaid or epoch",
+                    "entry {}: availability settlement is missing paid, unpaid or epoch",
                     entry.seq
                 ));
                 continue;
             };
-            if share < 0 || unpaid < 0 {
+            if unpaid < 0 {
                 problems.push(format!(
-                    "entry {}: availability settlement has a negative amount",
+                    "entry {}: availability settlement has a negative remainder",
                     entry.seq
                 ));
                 continue;
             }
-            let spent = (share as u128).saturating_mul(count);
+            // Summed row by row: a total taken from a summary field would agree
+            // with itself while disagreeing with the payments beside it. And
+            // one row per identity, because two rows for one key is a second
+            // helping for one epoch's work.
+            let mut spent = 0u128;
+            let mut bad = false;
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            for row in rows {
+                match row.get("reward").and_then(Value::as_i128) {
+                    Some(reward) if reward >= 0 => spent = spent.saturating_add(reward as u128),
+                    _ => bad = true,
+                }
+                if let Some(who) = row.get("identity").and_then(Value::as_str) {
+                    if !seen.insert(who) {
+                        problems.push(format!(
+                            "entry {}: {} is paid twice in one settlement",
+                            entry.seq,
+                            short(who)
+                        ));
+                    }
+                }
+            }
+            if bad {
+                problems.push(format!(
+                    "entry {}: a payment is missing or negative",
+                    entry.seq
+                ));
+                continue;
+            }
             spent_total = spent_total.saturating_add(spent);
             let accounted = spent.saturating_add(unpaid as u128);
             if accounted != offered(epoch) {

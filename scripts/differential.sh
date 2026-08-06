@@ -205,7 +205,31 @@ case "$SETTLED" in
   *"1 answered, 1 silent"*) ;;
   *) fail "the primary did not pay one answer and name one silence: $SETTLED" ;;
 esac
+# Grow the log after the answer. The anchor the sample is drawn from used to
+# be taken over the whole log, so every later append moved the index and an
+# answer that was right when written became wrong two entries later.
+"$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" post examples/collatz/objective.json \
+  >/dev/null 2>&1 || true
 unset PROOFWORK_EPOCH_SECONDS
+
+# The same log, audited under three different epoch lengths, must give the same
+# answer. `PROOFWORK_EPOCH_SECONDS` is a demo affordance -- it exists so a shell
+# script can cross an epoch boundary -- and `partition`'s own documentation
+# promises that "nothing derived from it enters a record". Availability sampling
+# broke that promise by reaching for it to place the anchor in time: the same
+# log then audited clean or dirty depending on how the auditor happened to be
+# configured, six times out of ten. A rule that depends on an environment
+# variable is not a consensus rule, and one that fails six times in ten reads as
+# flakiness rather than as a bug, which is the worst shape it could have.
+for LENGTH in 2 600 3600; do
+  PROOFWORK_EPOCH_SECONDS=$LENGTH "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" \
+    audit >/dev/null \
+    || fail "the primary rejects its own availability log at epoch length $LENGTH"
+  PROOFWORK_EPOCH_SECONDS=$LENGTH "$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" \
+    audit >/dev/null \
+    || fail "the reference rejects the availability log at epoch length $LENGTH"
+done
+echo "  both audit it clean at epoch lengths 2, 600 and 3600"
 
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit >/dev/null \
   || fail "the primary does not audit its own availability log"

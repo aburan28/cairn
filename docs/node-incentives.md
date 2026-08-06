@@ -79,22 +79,37 @@ pool one stored entry; the undertaking id is in it so a node that promised
 twice answers two questions; the beacon is in it so the answer is not knowable
 in advance.
 
-Settlement divides the epoch's pot equally by floor division, records the
-remainder it could not divide, and names every promise that was samplable and
-said nothing. The silence is the half a slash would attach to. Writing it down
+Settlement divides the epoch's pot **by weight** — floor-divided in proportion
+to how much each identity promised — records the remainder it could not divide,
+and names every promise that was samplable and said nothing. The silence is the half a slash would attach to. Writing it down
 before a bond exists is what makes the record worth having: the accusation is
 permanent and checkable, even while the penalty is not yet money.
 
-**Two bounds, stated plainly.** The answer proves a node *produced* the
+The answer carries the sampled **entry** as well as its path, and that is the
+difference between proving storage and proving arithmetic. It did not, at first:
+the verifier recomputed the leaf from its own copy, so an answerer needed only
+the entry hashes — every path is derivable from those — and a node that kept 10%
+of a log reproduced the honest answer byte for byte. The pool was buying a hash
+tree.
+
+The promise is not the promiser's to size, either. With the height free,
+promising *one* entry drew index 0 every epoch, answered with an empty path, and
+collected exactly what promising the whole log collected. An undertaking now
+covers the log as it stood, the share is weighted by that height, and one
+identity is paid once however many promises it made.
+
+**One bound remains, stated plainly.** The answer proves a node *produced* the
 challenged entry, not that it *stored* it — fetching it from a peer the moment
 the epoch opens is not ruled out, and ruling it out needs a time bound or
 sequential work this stage does not have. So it excludes a node that stored
 nothing and has no source, which is the population the payment exists to
 exclude, and it does not catch a cache. And a fixed pot bounds a funder's cost
-however many nodes appear, but it does not price identity: ten identities
-behind one disk answer ten samples from one copy and take ten shares. That is
-what `stake` above is for, and why the roadmap lists availability sampling as
-*bonded* at Stage 2.
+however many nodes appear, but it does not price **identity**: ten identities
+behind one disk answer ten samples from one copy and take ten shares. Weighting
+by height stops one identity multiplying itself through extra promises; nothing
+here stops ten identities. That is what `stake` above is for, and why the
+roadmap lists availability sampling as *bonded* at Stage 2 — **so a pool should
+not carry real money until it exists.**
 
 ## The verifier's dilemma is structural, not quantitative
 

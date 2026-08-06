@@ -1628,8 +1628,10 @@ pub struct Availability {
     /// Which epoch's sample. The epoch decides the index, so an answer is
     /// good for exactly one of them and a replay is caught by its own field.
     pub epoch: u64,
-    /// The inclusion path for the sampled entry, bottom up. Not the entry: see
-    /// the type docs.
+    /// The sampled entry itself, in its stored form. See the type docs: without
+    /// this the record proves possession of hashes rather than of the log.
+    pub entry: Value,
+    /// The inclusion path for that entry, bottom up.
     pub path: Vec<String>,
     pub created_at: String,
     /// Ed25519 signature over [`Availability::signing_payload`], hex.
@@ -1653,6 +1655,7 @@ impl Availability {
         identity: impl Into<String>,
         undertaking: impl Into<String>,
         epoch: u64,
+        entry: Value,
         path: Vec<String>,
         created_at: impl Into<String>,
     ) -> Availability {
@@ -1660,6 +1663,7 @@ impl Availability {
             identity: identity.into(),
             undertaking: undertaking.into(),
             epoch,
+            entry,
             path,
             created_at: created_at.into(),
             signature: None,
@@ -1670,6 +1674,7 @@ impl Availability {
         Value::object([
             ("type", Value::string(RecordKind::Availability.as_str())),
             ("created_at", Value::string(self.created_at.clone())),
+            ("entry", self.entry.clone()),
             ("epoch", Value::Int(i128::from(self.epoch))),
             ("identity", Value::string(self.identity.clone())),
             (
@@ -1736,6 +1741,16 @@ impl Availability {
                 expected: "sha256: followed by 64 lowercase hex characters",
             });
         }
+        // The entry has to be an object at least; whether it is *the* entry is
+        // decided by the rules layer, which recomputes its hash and walks the
+        // path. Shape here, meaning there.
+        if self.entry.as_object().is_none() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "entry",
+                expected: "the sampled log entry as an object",
+            });
+        }
         // An empty path is legal: a one-entry log's only leaf *is* the root, so
         // the honest answer to it carries no hashes at all. Refusing that would
         // make the first entry of every log unsamplable.
@@ -1776,6 +1791,7 @@ impl Availability {
             identity: required_string(value, RECORD, "identity")?,
             undertaking: required_string(value, RECORD, "undertaking")?,
             epoch: required_u64(value, RECORD, "epoch")?,
+            entry: required(value, RECORD, "entry")?.clone(),
             path,
             created_at: required_string(value, RECORD, "created_at")?,
             signature: optional_string(value, RECORD, "signature")?,

@@ -58,7 +58,7 @@ use crate::blobs;
 use crate::canonical::Inclusion;
 use crate::canonical::{short, Value};
 use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
-use crate::ledger::{Ledger, LedgerError};
+use crate::ledger::{Entry, Ledger, LedgerError, Proof};
 use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
 use crate::records::{
     Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord, Undertaking,
@@ -221,6 +221,12 @@ pub enum RuleViolation {
         epoch: u64,
         index: u64,
     },
+    /// An undertaking that does not cover the whole log as it stood.
+    ///
+    /// The promiser does not choose how much to promise, because when they
+    /// could, promising one entry paid the same as promising the log. See
+    /// [`Node::post_undertaking`].
+    PartialUndertaking { promised: u64, log: u64 },
     /// An undertaking about a root and height this log never had.
     ///
     /// Refused rather than admitted-and-ignored, because the whole value of
@@ -395,6 +401,12 @@ impl fmt::Display for RuleViolation {
                  (epoch {epoch}); entry {index} is what that undertaking was sampled on",
                 crate::canonical::short(undertaking)
             ),
+            RuleViolation::PartialUndertaking { promised, log } => write!(
+                f,
+                "an undertaking must cover the whole log as it stands ({log} entries), \
+                 and this one promises {promised}; the size of the promise is what the \
+                 availability pool pays for, so it is not the promiser's to choose"
+            ),
             RuleViolation::UnknownUndertakingRoot { root, height } => write!(
                 f,
                 "no prefix of this log has {} entries rooted at {}; an undertaking \
@@ -466,8 +478,8 @@ pub struct AvailabilityOutcome {
     pub answered: usize,
     /// Promises that were samplable in this epoch and said nothing.
     pub silent: usize,
-    /// Units paid to each answer. Zero when nothing was funded.
-    pub share: u64,
+    /// Units actually paid out across every identity.
+    pub paid: u128,
     /// The remainder equal shares could not divide, left in the pot.
     pub unpaid: u128,
 }
@@ -800,24 +812,38 @@ impl Node {
             .map_err(RuleViolation::InadmissibleRecord)?;
         record.verify_signature()?;
 
-        // An undertaking about a root this log never had is unsamplable: the
-        // challenge is an index into a tree of `height` leaves whose root is
-        // `root`, and if no such prefix exists here, no answer could ever be
-        // checked. Admitting it would put a permanent unfalsifiable promise in
-        // the log -- exactly the "bookkeeping" a payment cannot be attached to.
+        // The promise covers the whole log as it stands, and the promiser does
+        // not get to choose. That is a pricing rule, not a tidiness one.
         //
-        // Checked against a *prefix*, not the current head, because the log
-        // grows: an undertaking signed at height 25 stays admissible at height
-        // 400, and must, or every promise would expire the moment somebody
-        // appended.
-        let height =
-            usize::try_from(record.height).map_err(|_| RuleViolation::UnknownUndertakingRoot {
-                root: record.root.clone(),
-                height: record.height,
-            })?;
-        let matches = self
-            .ledger
-            .prefix(height)
+        // Left free, `height` was the mechanism's largest hole: the settlement
+        // paid every answer an equal share, so a node promising *one* entry
+        // drew index 0 every epoch, answered with an empty path, and collected
+        // exactly what a node promising twenty thousand entries collected.
+        // Measured, not feared -- 50 units each on a 3-entry log. Promising
+        // less was strictly dominant, so nothing bought any storage.
+        //
+        // Two ways to close it: price the promise, or remove the choice. Both,
+        // as it turns out. This is the second; [`Node::settle_availability`]
+        // weights the share by height, which is the first, and is still needed
+        // because promises made at different times cover different amounts.
+        //
+        // Expressed as "equals the length of the log below this record" so the
+        // rule is checkable *later*: at audit time the log is longer, but the
+        // record's own `seq` is exactly the height it must have named.
+        let now = self.ledger.len() as u64;
+        if record.height != now {
+            return Err(RuleViolation::PartialUndertaking {
+                promised: record.height,
+                log: now,
+            });
+        }
+        // And the root must be the root of that prefix. Without this an
+        // undertaking could name a root nobody can produce, which is a
+        // permanent unfalsifiable promise -- the "bookkeeping" a payment
+        // cannot attach to.
+        let matches = usize::try_from(record.height)
+            .ok()
+            .and_then(|height| self.ledger.prefix(height))
             .and_then(|prefix| prefix.root())
             .is_some_and(|root| root == record.root);
         if !matches {
@@ -854,7 +880,15 @@ impl Node {
         self.ledger
             .entries_of_kind(UNDERTAKING)
             .into_iter()
-            .filter_map(|entry| Undertaking::from_value(&entry.payload).ok())
+            // `seq` is the number of entries below this record, which is the
+            // height it was required to name. Reading it off the entry rather
+            // than off a clock or the current length is what makes the rule
+            // still checkable when the log is a thousand entries longer.
+            .filter_map(|entry| {
+                Undertaking::from_value(&entry.payload)
+                    .ok()
+                    .filter(|record| record.height == entry.seq)
+            })
             .filter(|record| record.verify_signature().is_ok())
             .filter(|record| {
                 let at = roots.entry(record.height).or_insert_with(|| {
@@ -896,6 +930,7 @@ impl Node {
         &self,
         undertaking: &Undertaking,
         epoch: u64,
+        positions: usize,
     ) -> Result<u64, PartitionError> {
         // Refused, never capped. `Undertaking::validate` already bounds the
         // height, so this is unreachable through admission -- but a capped draw
@@ -903,7 +938,34 @@ impl Node {
         // log, which is a hole that pays out rather than an error that shows.
         let partitions =
             u32::try_from(undertaking.height).map_err(|_| PartitionError::Unrepresentable)?;
-        let beacon = partition::beacon(epoch, &self.anchor_of_epoch(epoch));
+        // `EPOCH_SECONDS`, the constant -- never `epoch_seconds()`, which reads
+        // `PROOFWORK_EPOCH_SECONDS`.
+        //
+        // That override is a demo affordance: ten-minute epochs make the
+        // commit-in-N/reveal-in-N+1 rule impossible to show in a shell script.
+        // `partition`'s own documentation is explicit that it is a *policy*
+        // parameter and that "nothing derived from it enters a record" -- and
+        // this function broke that claim the moment it reached for it, because
+        // the anchor moves with the epoch length, so the beacon moves, so the
+        // sampled index moves, so an honest answer becomes inadmissible.
+        //
+        // Measured before it was fixed: the same ten logs audited clean under
+        // the length they were written with and failed **six times out of ten**
+        // under the default. A check that depends on an environment variable is
+        // not a consensus rule, and one that fails six times in ten is the
+        // worst shape a bug can have -- it looks like flakiness.
+        // Bounded by *position*, which is the same fix batch settlement needed
+        // and for the same reason. Unbounded, the anchor is the last entry the
+        // whole log holds -- so every later append moves it, moves the beacon,
+        // and moves the index. An answer that was right when it was written
+        // became wrong two entries later, and the audit reported an honest node
+        // as unpaid. `positions` is the answer's own place in the file:
+        // everything it could have seen precedes it, and nothing appended
+        // afterwards could have influenced it.
+        let beacon = partition::beacon(
+            epoch,
+            &self.anchor_at(epoch, positions, partition::EPOCH_SECONDS),
+        );
         let index = partition::assign(
             &undertaking.identity,
             &undertaking.id(),
@@ -926,7 +988,9 @@ impl Node {
             .validate()
             .map_err(RuleViolation::InadmissibleRecord)?;
         record.verify_signature()?;
-        self.check_availability(record)?;
+        // The position this record is about to land at. `append` is the very
+        // next thing that happens, so this is where it goes.
+        self.check_availability(record, self.ledger.len())?;
         // One answer per promise per epoch. A second answer is not a second
         // service rendered -- the sample is the same index -- so admitting it
         // would let one node be paid twice for one piece of work.
@@ -951,7 +1015,11 @@ impl Node {
     /// question of a record that arrived some other way. An admission rule with
     /// no reader-side counterpart binds only the people who use this tool to
     /// write, and a log can be assembled by concatenation.
-    fn check_availability(&self, record: &Availability) -> Result<(), RuleViolation> {
+    fn check_availability(
+        &self,
+        record: &Availability,
+        positions: usize,
+    ) -> Result<(), RuleViolation> {
         let undertaking = self
             .undertakings()
             .into_iter()
@@ -972,31 +1040,44 @@ impl Node {
         }
 
         let index = self
-            .sampled_index(&undertaking, record.epoch)
+            .sampled_index(&undertaking, record.epoch, positions)
             .map_err(|source| RuleViolation::Unsamplable {
                 undertaking: record.undertaking.clone(),
                 source,
             })?;
 
-        // The leaf is recomputed from the entry rather than read off anything
-        // the submitter sent. `Inclusion::verify` takes the leaf as an argument
-        // precisely so a prover cannot name it -- see its documentation on the
-        // second-preimage property of a tree with no domain separation.
-        let leaf = usize::try_from(index)
-            .ok()
-            .and_then(|index| self.ledger.entries().get(index))
-            .map(|entry| entry.recompute_hash())
-            .ok_or_else(|| RuleViolation::Unsamplable {
+        // The leaf comes from the entry the *submitter* sent, and this is the
+        // whole point of carrying it. Recomputing it from this node's own copy
+        // -- which is what this did at first -- means the answerer never has to
+        // hold any payload, only the hashes every path is derivable from. That
+        // version was measured: a node keeping 10% of a log reproduced the
+        // honest answer byte for byte.
+        //
+        // Which makes this exactly [`Proof::check`], so it is that and not a
+        // second copy of the same three checks: the entry must hash to the
+        // digest it carries, sit at the index that was sampled, and reach the
+        // undertaken root.
+        // A value that is not an entry at all is refused here rather than
+        // silently failing the path check, so the message names the real fault.
+        let entry = Entry::from_value(&record.entry).map_err(|_| {
+            RuleViolation::AvailabilityDoesNotCheck {
                 undertaking: record.undertaking.clone(),
-                source: PartitionError::Unrepresentable,
-            })?;
-
-        let inclusion = Inclusion {
-            index: usize::try_from(index).unwrap_or(usize::MAX),
-            leaves: usize::try_from(undertaking.height).unwrap_or(usize::MAX),
-            siblings: record.path.clone(),
+                epoch: record.epoch,
+                index,
+            }
+        })?;
+        let proof = Proof {
+            entry,
+            inclusion: Inclusion {
+                // Derived, never read from the record. A submitter who could
+                // name the index would answer whichever entry they happened to
+                // keep rather than the one they were asked for.
+                index: usize::try_from(index).unwrap_or(usize::MAX),
+                leaves: usize::try_from(undertaking.height).unwrap_or(usize::MAX),
+                siblings: record.path.clone(),
+            },
         };
-        if !inclusion.verify(&leaf, &undertaking.root) {
+        if proof.check(&undertaking.root).is_err() {
             return Err(RuleViolation::AvailabilityDoesNotCheck {
                 undertaking: record.undertaking.clone(),
                 epoch: record.epoch,
@@ -1020,9 +1101,14 @@ impl Node {
         self.ledger
             .entries_of_kind(AVAILABILITY)
             .into_iter()
-            .filter_map(|entry| Availability::from_value(&entry.payload).ok())
-            .filter(|record| record.verify_signature().is_ok())
-            .filter(|record| self.check_availability(record).is_ok())
+            .filter_map(|entry| {
+                Availability::from_value(&entry.payload)
+                    .ok()
+                    .map(|record| (entry.seq as usize, record))
+            })
+            .filter(|(_, record)| record.verify_signature().is_ok())
+            .filter(|(at, record)| self.check_availability(record, *at).is_ok())
+            .map(|(_, record)| record)
             .filter(|record| seen.insert((record.undertaking.clone(), record.epoch)))
             .collect()
     }
@@ -1418,12 +1504,33 @@ impl Node {
             .map(|answer| (answer.undertaking, answer.identity))
             .collect();
 
+        // Weighted by height, and grouped by **identity**, taking the largest
+        // promise each one answered. Both halves of that sentence are load
+        // bearing, and each closes a way of being paid for storage nobody
+        // bought.
+        //
+        // *Weighted*, because an equal split paid a one-entry promise what it
+        // paid a twenty-thousand-entry promise. Forcing the promise to cover
+        // the whole log ([`Node::post_undertaking`]) stops a node choosing a
+        // small one today, but promises made at different times cover different
+        // amounts and always will, so the share has to follow the size.
+        //
+        // *By identity, taking the max*, because otherwise one disk answers
+        // through many promises: undertaking repeatedly costs a signature and
+        // pays another full weight every time, which is the sybil attack
+        // without even needing new keys. One identity, one weight, whatever it
+        // promised most.
+        let mut weight: BTreeMap<String, u64> = BTreeMap::new();
         let mut paid: Vec<(String, String)> = Vec::new();
         let mut silent: Vec<String> = Vec::new();
         for promise in &promises {
             let id = promise.id();
             match answered.get(&id) {
-                Some(identity) => paid.push((id, identity.clone())),
+                Some(identity) => {
+                    let slot = weight.entry(identity.clone()).or_insert(0);
+                    *slot = (*slot).max(promise.height);
+                    paid.push((id, identity.clone()));
+                }
                 None => silent.push(id),
             }
         }
@@ -1432,17 +1539,33 @@ impl Node {
         }
 
         let offered = self.availability_offered(epoch);
-        let count = paid.len() as u128;
-        let share = if count == 0 { 0 } else { offered / count };
-        // `share` came from a floor division of a `u128`, so it fits `u64` only
-        // if `offered` did. Checked, never cast: a truncated share is money
-        // quietly vanishing, and this crate's rule is that money arithmetic
-        // reports rather than wraps.
-        let share = u64::try_from(share).map_err(|_| RuleViolation::PayoutOverflow {
-            paid_cumulative: u64::MAX,
-            reward: 0,
-        })?;
-        let spent = u128::from(share) * count;
+        let total: u128 = weight.values().fold(0u128, |sum, w| sum + u128::from(*w));
+        // Every share floor-divided from the same denominator, so the parts sum
+        // to at most the whole and the remainder is whatever equal division
+        // could not place. `u128` throughout and `checked_mul` at the one place
+        // two large numbers meet: this crate does not wrap near money, and an
+        // overspend that wrapped would certify as fine.
+        let mut awards: BTreeMap<String, u64> = BTreeMap::new();
+        let mut spent: u128 = 0;
+        for (identity, w) in &weight {
+            let share = if total == 0 {
+                0
+            } else {
+                offered
+                    .checked_mul(u128::from(*w))
+                    .ok_or(RuleViolation::PayoutOverflow {
+                        paid_cumulative: u64::MAX,
+                        reward: 0,
+                    })?
+                    / total
+            };
+            let share = u64::try_from(share).map_err(|_| RuleViolation::PayoutOverflow {
+                paid_cumulative: u64::MAX,
+                reward: 0,
+            })?;
+            spent += u128::from(share);
+            awards.insert(identity.clone(), share);
+        }
         let unpaid = offered - spent;
 
         // The payouts live *inside* this record rather than as `settlement`
@@ -1456,15 +1579,24 @@ impl Node {
         let record = Value::object([
             ("epoch", Value::Int(i128::from(epoch))),
             ("anchor", Value::string(self.anchor_of_epoch(epoch))),
+            // One row per *identity*, not per answer: an identity that
+            // answered two promises is paid once, and the record must say so or
+            // the audit's arithmetic would double-count it.
             (
                 "paid",
                 Value::Array(
-                    paid.iter()
-                        .map(|(undertaking, identity)| {
+                    awards
+                        .iter()
+                        .map(|(identity, reward)| {
                             Value::object([
                                 ("identity", Value::string(identity.clone())),
-                                ("reward", Value::Int(i128::from(share))),
-                                ("undertaking", Value::string(undertaking.clone())),
+                                ("reward", Value::Int(i128::from(*reward))),
+                                (
+                                    "weight",
+                                    Value::Int(i128::from(
+                                        weight.get(identity).copied().unwrap_or(0),
+                                    )),
+                                ),
                             ])
                         })
                         .collect(),
@@ -1474,7 +1606,6 @@ impl Node {
                 "silent",
                 Value::Array(silent.iter().cloned().map(Value::String).collect()),
             ),
-            ("share", Value::Int(i128::from(share))),
             (
                 "unpaid",
                 Value::Int(i128::try_from(unpaid).unwrap_or(i128::MAX)),
@@ -1484,9 +1615,9 @@ impl Node {
 
         Ok(Some(AvailabilityOutcome {
             epoch,
-            answered: paid.len(),
+            answered: awards.len(),
             silent: silent.len(),
-            share,
+            paid: spent,
             unpaid,
         }))
     }
@@ -1558,11 +1689,20 @@ impl Node {
     /// batch could have seen precedes it in the file; everything appended
     /// afterwards could not have influenced it, whatever date it carries.
     fn anchor_of_epoch_within(&self, epoch: u64, positions: usize) -> String {
+        self.anchor_at(epoch, positions, epoch_seconds())
+    }
+
+    /// The anchor of `epoch`, measuring epochs with an explicit length.
+    ///
+    /// The length is a parameter rather than a global read because the two
+    /// callers need different ones, and finding that out cost a 60%-flaky
+    /// audit. See [`Node::sampled_index`].
+    fn anchor_at(&self, epoch: u64, positions: usize, seconds_per_epoch: u64) -> String {
         let mut anchor = String::new();
         for entry in self.ledger.entries().iter().take(positions) {
             match crate::time::parse_rfc3339(&entry.ts) {
                 Some(seconds) if seconds >= 0 => {
-                    if epoch_of(seconds as u64, epoch_seconds()) < epoch {
+                    if epoch_of(seconds as u64, seconds_per_epoch) < epoch {
                         anchor = entry.hash.clone();
                     }
                 }
@@ -1960,6 +2100,17 @@ impl Node {
                 problems.push(format!("undertaking at entry {}: {error}", entry.seq));
                 continue;
             }
+            // The promise must cover the whole log as it stood below this
+            // record. `seq` is exactly that count, which is what makes the rule
+            // checkable now that the log is longer.
+            if record.height != entry.seq {
+                problems.push(format!(
+                    "undertaking at entry {}: promises {} entries where the log below it \
+                     had {}; the size of a promise is not the promiser's to choose",
+                    entry.seq, record.height, entry.seq
+                ));
+                continue;
+            }
             let known = usize::try_from(record.height).ok().is_some_and(|height| {
                 self.ledger
                     .prefix(height)
@@ -1995,7 +2146,7 @@ impl Node {
                 problems.push(format!("availability at entry {}: {error}", entry.seq));
                 continue;
             }
-            if let Err(error) = self.check_availability(&record) {
+            if let Err(error) = self.check_availability(&record, entry.seq as usize) {
                 problems.push(format!("availability at entry {}: {error}", entry.seq));
                 continue;
             }
@@ -2020,8 +2171,8 @@ impl Node {
         // is looking for.
         //
         // Also re-derives each settlement's own arithmetic rather than reading
-        // the numbers it recorded. `share × answered + unpaid` must equal what
-        // the pools offered for that epoch, or somebody's floor division did
+        // the numbers it recorded: the rewards must sum with the remainder to
+        // exactly what the pools offered that epoch, or somebody's division did
         // not close and units went somewhere the record does not say.
         let mut availability_paid: u128 = 0;
         let mut availability_funded: u128 = 0;
@@ -2029,28 +2180,52 @@ impl Node {
             availability_funded = availability_funded.saturating_add(pool.ceiling());
         }
         for entry in self.ledger.entries_of_kind(AVAILABILITY_SETTLEMENT) {
-            let read = |field: &str| entry.payload.get(field).and_then(Value::as_i128);
-            let count = entry
-                .payload
-                .get("paid")
-                .and_then(Value::as_array)
-                .map(<[Value]>::len)
-                .unwrap_or(0) as u128;
-            let (Some(share), Some(unpaid)) = (read("share"), read("unpaid")) else {
+            let rows = entry.payload.get("paid").and_then(Value::as_array);
+            let unpaid = entry.payload.get("unpaid").and_then(Value::as_i128);
+            let (Some(rows), Some(unpaid)) = (rows, unpaid) else {
                 problems.push(format!(
-                    "availability settlement at entry {}: missing share or unpaid",
+                    "availability settlement at entry {}: missing paid or unpaid",
                     entry.seq
                 ));
                 continue;
             };
-            if share < 0 || unpaid < 0 {
+            if unpaid < 0 {
                 problems.push(format!(
-                    "availability settlement at entry {}: negative share or remainder",
+                    "availability settlement at entry {}: negative remainder",
                     entry.seq
                 ));
                 continue;
             }
-            let spent = (share as u128).saturating_mul(count);
+            // Summed row by row, because the rows are what say who was paid.
+            // A total taken from a `share` field would agree with itself while
+            // disagreeing with the payments beside it.
+            let mut spent: u128 = 0;
+            let mut negative = false;
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            for row in rows {
+                match row.get("reward").and_then(Value::as_i128) {
+                    Some(reward) if reward >= 0 => spent = spent.saturating_add(reward as u128),
+                    _ => negative = true,
+                }
+                // One row per identity. Two rows for one key would be a second
+                // payment for one epoch's work, and summing them would hide it.
+                if let Some(who) = payload_str(row, "identity") {
+                    if !seen.insert(who) {
+                        problems.push(format!(
+                            "availability settlement at entry {}: {} is paid twice",
+                            entry.seq,
+                            crate::canonical::short(who)
+                        ));
+                    }
+                }
+            }
+            if negative {
+                problems.push(format!(
+                    "availability settlement at entry {}: a payment is missing or negative",
+                    entry.seq
+                ));
+                continue;
+            }
             availability_paid = availability_paid.saturating_add(spent);
             if let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_u64) {
                 let offered = self.availability_offered(epoch);
@@ -4683,7 +4858,10 @@ mod tests {
         node.post_undertaking(&good, TS)
             .expect("the log's own root at its own height");
 
-        // A root nobody has ever produced.
+        // A root nobody has ever produced, at the height the log now stands
+        // at -- so the size rule passes and only the root rule can refuse it.
+        // Re-read, because the good record above made the log one taller.
+        let height = node.ledger().len() as u64;
         let invented = Undertaking::new(
             identity.submitter_id(),
             crate::canonical::digest_bytes(b"not a root of anything"),
@@ -4699,26 +4877,27 @@ mod tests {
             "an invented root was admitted"
         );
 
-        // The log's real root, at the wrong height. Subtler and the reason
-        // `height` is signed: a root alone does not pin the tree's shape.
+        // An older prefix's real root at the height the log now stands at: the
+        // size rule passes and the root rule catches it. This is the reason
+        // both are signed -- a root alone does not pin the tree's shape.
         let mismatched =
-            Undertaking::new(identity.submitter_id(), &root, height - 1, TS).signed_with(&identity);
+            Undertaking::new(identity.submitter_id(), &root, height, TS).signed_with(&identity);
         assert!(
             matches!(
                 node.post_undertaking(&mismatched, TS),
                 Err(RuleViolation::UnknownUndertakingRoot { .. })
             ),
-            "a real root at the wrong height was admitted"
+            "a stale root at the current height was admitted"
         );
 
-        // A height past the end of this log, but a legal number: there is no
-        // such prefix, so there is nothing to sample.
+        // A height past the end of this log: refused by the size rule, which
+        // now runs first because it does not depend on the root at all.
         let future = Undertaking::new(identity.submitter_id(), &root, height + 1000, TS)
             .signed_with(&identity);
         assert!(
             matches!(
                 node.post_undertaking(&future, TS),
-                Err(RuleViolation::UnknownUndertakingRoot { .. })
+                Err(RuleViolation::PartialUndertaking { .. })
             ),
             "a height past the end was admitted"
         );
@@ -4730,6 +4909,7 @@ mod tests {
         // comes first because it does not depend on this log at all.
         let unrepresentable =
             Undertaking::new(identity.submitter_id(), &root, u64::MAX, TS).signed_with(&identity);
+        let _ = &unrepresentable;
         assert!(
             matches!(
                 node.post_undertaking(&unrepresentable, TS),
@@ -4742,31 +4922,52 @@ mod tests {
         assert_eq!(node.audit(false), Vec::<String>::new());
     }
 
-    /// A promise stays admissible as the log grows past it.
+    /// A promise already in the log survives the log growing past it, and a
+    /// *new* promise about an older prefix is refused.
     ///
-    /// The reason the root is checked against a *prefix* rather than the head.
-    /// Checking the head would expire every undertaking the moment anybody
-    /// appended, which is the opposite of what a permanent past promise is for.
+    /// Two halves of one rule, and they pull in opposite directions. A record
+    /// already written must stay samplable forever or every promise would
+    /// expire the moment somebody appended — so the root is checked against a
+    /// prefix, and the required height is read off the record's own `seq`. But
+    /// a promise being made *now* has to cover the log as it stands, or a node
+    /// would simply promise the shortest prefix it could find.
     #[test]
-    fn an_undertaking_signed_at_one_height_survives_the_log_growing() {
+    fn a_promise_survives_growth_but_a_new_one_cannot_reach_backwards() {
         let dir = TempDir::new("undertaking-grow");
         let mut node = node(&dir);
         let identity = crate::crypto::identity::Identity::from_secret_bytes([8u8; 32]);
 
         node.post_objective(&lean_objective(100), TS)
             .expect("objective");
-        let height = node.ledger().len() as u64;
-        let root = node.ledger().root().expect("root");
+        let early = promise(&mut node, &identity);
+        let stale_root = node
+            .ledger()
+            .prefix(early.height as usize)
+            .and_then(|prefix| prefix.root())
+            .expect("root");
 
-        node.post_objective(&lean_objective(200), TS)
-            .expect("the log grows");
-        assert_ne!(node.ledger().root(), Some(root.clone()), "it really grew");
+        for reward in [200, 300, 400] {
+            node.post_objective(&lean_objective(reward), TS)
+                .expect("the log grows");
+        }
+        assert_ne!(node.ledger().root(), Some(stale_root.clone()), "it grew");
 
-        let late =
-            Undertaking::new(identity.submitter_id(), &root, height, TS).signed_with(&identity);
-        node.post_undertaking(&late, TS)
-            .expect("an older prefix is still a root this log had");
+        // The old promise is still a promise, still samplable, still audited.
+        assert!(node.undertakings().iter().any(|u| u.id() == early.id()));
+        node.sampled_index(&early, 5, node.ledger().len())
+            .expect("still samplable");
         assert_eq!(node.audit(false), Vec::<String>::new());
+
+        // But nobody may make a *new* promise about that older, smaller prefix.
+        let backdated = Undertaking::new(identity.submitter_id(), &stale_root, early.height, TS)
+            .signed_with(&identity);
+        assert!(
+            matches!(
+                node.post_undertaking(&backdated, TS),
+                Err(RuleViolation::PartialUndertaking { .. })
+            ),
+            "a new promise reached backwards to a smaller prefix"
+        );
     }
 
     /// An undertaking speaks for exactly one identity: the one that signed it.
@@ -4838,6 +5039,43 @@ mod tests {
         assert!(node.undertakings().iter().all(|u| u.root != invented.root));
     }
 
+    /// The honest answer a node holding the log would produce: the sampled
+    /// entry, and the path putting it under the root it promised.
+    fn honest_answer(
+        node: &Node,
+        promise: &Undertaking,
+        epoch: u64,
+        who: &crate::crypto::identity::Identity,
+    ) -> Availability {
+        let index = node
+            .sampled_index(promise, epoch, node.ledger().len())
+            .expect("draw");
+        let proof = node
+            .ledger()
+            .prefix(promise.height as usize)
+            .expect("prefix")
+            .prove(index)
+            .expect("in range");
+        Availability::new(
+            who.submitter_id(),
+            promise.id(),
+            epoch,
+            proof.entry.body_with_hash(),
+            proof.inclusion.siblings,
+            TS,
+        )
+        .signed_with(who)
+    }
+
+    /// Promise the whole log as it stands, which is the only promise there is.
+    fn promise(node: &mut Node, who: &crate::crypto::identity::Identity) -> Undertaking {
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+        let record = Undertaking::new(who.submitter_id(), &root, height, TS).signed_with(who);
+        node.post_undertaking(&record, TS).expect("undertaking");
+        record
+    }
+
     /// A node that holds the log answers its sample; a node that guesses cannot.
     ///
     /// The whole mechanism, end to end and from the log alone. Nobody issues
@@ -4853,45 +5091,27 @@ mod tests {
             node.post_objective(&lean_objective(reward), TS)
                 .expect("objective");
         }
-        let height = node.ledger().len() as u64;
-        let root = node.ledger().root().expect("root");
-        let promise =
-            Undertaking::new(identity.submitter_id(), &root, height, TS).signed_with(&identity);
-        node.post_undertaking(&promise, TS).expect("undertaking");
+        let held = promise(&mut node, &identity);
 
         let epoch = 7;
         let index = node
-            .sampled_index(&promise, epoch)
-            .expect("a samplable undertaking draws an index");
-        assert!(index < height, "the draw must land inside the tree");
+            .sampled_index(&held, epoch, node.ledger().len())
+            .expect("draw");
+        assert!(index < held.height, "the draw must land inside the tree");
 
-        // The holder answers: it has the log, so it can build the path.
-        let path = node
-            .ledger()
-            .prefix(height as usize)
-            .expect("prefix")
-            .inclusion(index)
-            .expect("in range")
-            .siblings;
-        let answer = Availability::new(
-            identity.submitter_id(),
-            promise.id(),
-            epoch,
-            path.clone(),
-            TS,
-        )
-        .signed_with(&identity);
-        node.post_availability(&answer, TS)
+        node.post_availability(&honest_answer(&node, &held, epoch, &identity), TS)
             .expect("an honest answer is admitted");
         assert_eq!(node.availability_answers().len(), 1);
 
-        // A node that did not hold the log has to guess the path. Every hash in
-        // it is wrong, and so is the root it reaches.
+        // A node that did not hold the log has to guess the path.
+        let good = honest_answer(&node, &held, epoch, &identity);
         let bluff = Availability::new(
             identity.submitter_id(),
-            promise.id(),
+            held.id(),
             epoch,
-            path.iter()
+            good.entry.clone(),
+            good.path
+                .iter()
                 .map(|_| crate::canonical::digest_bytes(b"guess"))
                 .collect(),
             TS,
@@ -4905,28 +5125,154 @@ mod tests {
             "a guessed path was accepted"
         );
 
-        // The same answer, one epoch over. The draw moves, so an answer is good
-        // for exactly the epoch it names -- which is what stops a node from
-        // storing one entry and replaying it forever.
+        // The draw moves with the epoch, which is what stops a node storing one
+        // entry and replaying it forever.
         let elsewhere = (0..40u64)
-            .map(|e| node.sampled_index(&promise, e).expect("draw"))
+            .map(|e| {
+                node.sampled_index(&held, e, node.ledger().len())
+                    .expect("draw")
+            })
             .filter(|&at| at != index)
             .count();
         assert!(elsewhere > 0, "the draw never moved across 40 epochs");
-        let replayed =
-            Availability::new(identity.submitter_id(), promise.id(), epoch + 1, path, TS)
-                .signed_with(&identity);
-        // It may coincidentally be right for the next epoch too -- the draw is
-        // a hash, not a permutation -- so this asserts about the rule, not
-        // about this particular pair of epochs.
-        let next = node.sampled_index(&promise, epoch + 1).expect("draw");
-        if next != index {
-            assert!(
-                node.post_availability(&replayed, TS).is_err(),
-                "a path for another epoch's entry was accepted"
-            );
-        }
 
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// The answer has to carry the sampled entry, not merely a path to it.
+    ///
+    /// This is the finding that made the first version of the mechanism
+    /// hollow. The verifier used to recompute the leaf from its *own* copy of
+    /// the log, so an answerer never needed any payload — only the entry
+    /// hashes, from which every path is derivable. Measured at the time: a node
+    /// keeping 10% of a log reproduced the honest answer byte for byte, and was
+    /// paid in full for storing a hash tree.
+    #[test]
+    fn an_answer_carrying_the_wrong_entry_is_refused_even_with_a_perfect_path() {
+        let dir = TempDir::new("availability-entry");
+        let mut node = node(&dir);
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([12u8; 32]);
+        for reward in [100, 200, 300, 400] {
+            node.post_objective(&lean_objective(reward), TS)
+                .expect("objective");
+        }
+        let held = promise(&mut node, &identity);
+        let epoch = 3;
+        let index = node
+            .sampled_index(&held, epoch, node.ledger().len())
+            .expect("draw");
+        let honest = honest_answer(&node, &held, epoch, &identity);
+
+        // A node holding every hash but no payload can still build the path.
+        // Substituting *any* other entry, or a plausible forgery, must fail --
+        // that is the whole difference between proving storage and proving
+        // arithmetic.
+        let other = usize::try_from(index).expect("fits") ^ 1;
+        let substitute = node
+            .ledger()
+            .entries()
+            .get(other.min(node.ledger().len() - 1))
+            .expect("another entry")
+            .body_with_hash();
+        let swapped = Availability::new(
+            identity.submitter_id(),
+            held.id(),
+            epoch,
+            substitute,
+            honest.path.clone(),
+            TS,
+        )
+        .signed_with(&identity);
+        assert!(
+            matches!(
+                node.post_availability(&swapped, TS),
+                Err(RuleViolation::AvailabilityDoesNotCheck { .. })
+            ),
+            "an answer about a different entry was accepted"
+        );
+
+        // And a value that is not an entry at all is a refusal, not a panic.
+        let rubbish = Availability::new(
+            identity.submitter_id(),
+            held.id(),
+            epoch,
+            Value::string("not an entry"),
+            honest.path.clone(),
+            TS,
+        )
+        .signed_with(&identity);
+        assert!(node.post_availability(&rubbish, TS).is_err());
+
+        // The honest one still passes, so the check is not simply always-no.
+        node.post_availability(&honest, TS).expect("honest answer");
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// An answer stays valid as the log grows, and does not depend on how long
+    /// this process thinks an epoch is.
+    ///
+    /// Two defects in one test, both measured before they were fixed and both
+    /// of the shape that reads as flakiness rather than as a bug.
+    ///
+    /// The anchor used to be taken over the whole log, so every later append
+    /// moved it, moved the beacon, and moved the sampled index — an answer that
+    /// was right when written became wrong two entries later. And the epoch
+    /// length came from `PROOFWORK_EPOCH_SECONDS`, an environment variable, so
+    /// the same log audited clean or dirty depending on how the auditor was
+    /// configured: six failures in ten across a dozen logs.
+    ///
+    /// A rule that depends on a process's environment is not a consensus rule.
+    #[test]
+    fn an_answer_survives_the_log_growing_under_it() {
+        let dir = TempDir::new("availability-stable");
+        let mut node = node(&dir);
+        let identity = crate::crypto::identity::Identity::from_secret_bytes([14u8; 32]);
+        for reward in [100, 200, 300, 400, 500, 600, 700] {
+            node.post_objective(&lean_objective(reward), TS)
+                .expect("objective");
+        }
+        let held = promise(&mut node, &identity);
+        // An epoch the fixture timestamps actually fall *before*, so entries
+        // qualify and the anchor is a real hash. The first version of this test
+        // used epoch 11, which is long before 2026: no entry qualified, the
+        // anchor was the empty string whatever the log did, and the test passed
+        // against both bugs it was written to catch. A test that cannot fail is
+        // worse than no test, so this one is checked by injection.
+        let epoch = crate::time::parse_rfc3339(TS)
+            .map(|seconds| epoch_of(seconds as u64, partition::EPOCH_SECONDS) + 1)
+            .expect("the fixture timestamp parses");
+        assert_ne!(
+            node.anchor_at(epoch, node.ledger().len(), partition::EPOCH_SECONDS),
+            String::new(),
+            "the fixture must produce a real anchor or this test proves nothing"
+        );
+        let before = node
+            .sampled_index(&held, epoch, node.ledger().len())
+            .expect("draw");
+        node.post_availability(&honest_answer(&node, &held, epoch, &identity), TS)
+            .expect("answer");
+
+        // The log grows by every kind that can follow an answer.
+        for reward in [800, 900, 1000] {
+            node.post_objective(&lean_objective(reward), TS)
+                .expect("the log grows");
+        }
+        let at = node
+            .ledger()
+            .entries_of_kind(AVAILABILITY)
+            .first()
+            .map(|entry| entry.seq as usize)
+            .expect("the answer is in the log");
+        assert_eq!(
+            node.sampled_index(&held, epoch, at).expect("draw"),
+            before,
+            "the sampled index moved when the log grew"
+        );
+        assert_eq!(
+            node.availability_answers().len(),
+            1,
+            "the answer stopped checking"
+        );
         assert_eq!(node.audit(false), Vec::<String>::new());
     }
 
@@ -4943,25 +5289,20 @@ mod tests {
             .expect("objective");
         node.post_objective(&lean_objective(200), TS)
             .expect("objective");
-        let height = node.ledger().len() as u64;
-        let root = node.ledger().root().expect("root");
-        let promise = Undertaking::new(alice.submitter_id(), &root, height, TS).signed_with(&alice);
-        node.post_undertaking(&promise, TS).expect("undertaking");
+        let held = promise(&mut node, &alice);
 
-        let epoch = 3;
-        let index = node.sampled_index(&promise, epoch).expect("draw");
-        let path = node
-            .ledger()
-            .prefix(height as usize)
-            .expect("prefix")
-            .inclusion(index)
-            .expect("in range")
-            .siblings;
-
-        // Mallory holds the log too -- the path is correct. What Mallory does
-        // not have is Alice's promise, and the pool pays promises.
-        let poached = Availability::new(mallory.submitter_id(), promise.id(), epoch, path, TS)
-            .signed_with(&mallory);
+        // Mallory holds the log too -- the entry and path are correct. What
+        // Mallory does not have is Alice's promise, and the pool pays promises.
+        let honest = honest_answer(&node, &held, 3, &alice);
+        let poached = Availability::new(
+            mallory.submitter_id(),
+            held.id(),
+            3,
+            honest.entry,
+            honest.path,
+            TS,
+        )
+        .signed_with(&mallory);
         assert!(
             matches!(
                 node.post_availability(&poached, TS),
@@ -4986,6 +5327,7 @@ mod tests {
             identity.submitter_id(),
             crate::canonical::digest_bytes(b"no such promise"),
             1,
+            Value::object([("seq", Value::Int(0))]),
             Vec::new(),
             TS,
         )
@@ -4999,32 +5341,86 @@ mod tests {
         );
     }
 
-    /// Settlement pays the promises that answered and names the ones that did
-    /// not, and the pot closes to the unit.
+    /// A promise must cover the whole log as it stood, and the promiser does
+    /// not choose.
     ///
-    /// The half that makes an undertaking enforceable. Without it the record is
-    /// the bookkeeping `docs/roadmap.md` warns about; without the record the
-    /// payment would have nothing to challenge.
+    /// The measured attack this closes: with the height free, promising one
+    /// entry drew index 0 every epoch, answered with an empty path, and
+    /// collected exactly what promising the whole log collected -- 50 units
+    /// each on a 3-entry log with a 100-unit pot. Promising less was strictly
+    /// dominant, so the pool bought no storage at all.
     #[test]
-    fn availability_settlement_pays_answers_and_names_silence() {
-        let dir = TempDir::new("availability-settle");
+    fn a_promise_must_cover_the_whole_log_and_the_promiser_does_not_choose() {
+        let dir = TempDir::new("undertaking-partial");
         let mut node = node(&dir);
-        let alice = crate::crypto::identity::Identity::from_secret_bytes([21u8; 32]);
-        let bob = crate::crypto::identity::Identity::from_secret_bytes([22u8; 32]);
-
+        let cheat = crate::crypto::identity::Identity::from_secret_bytes([13u8; 32]);
         for reward in [100, 200, 300] {
             node.post_objective(&lean_objective(reward), TS)
                 .expect("objective");
         }
-        let height = node.ledger().len() as u64;
-        let root = node.ledger().root().expect("root");
+        let full = node.ledger().len() as u64;
+        let small = node
+            .ledger()
+            .prefix(1)
+            .and_then(|prefix| prefix.root())
+            .expect("a one-entry prefix has a root");
 
-        // 7 units a epoch across two promisers: an odd number on purpose, so
-        // the remainder is real and has to be accounted for rather than lost.
+        // The whole point: this is a *real* root of a *real* prefix, signed by
+        // a real key. Only the size rule refuses it.
+        let partial = Undertaking::new(cheat.submitter_id(), &small, 1, TS).signed_with(&cheat);
+        assert!(
+            matches!(
+                node.post_undertaking(&partial, TS),
+                Err(RuleViolation::PartialUndertaking { promised: 1, .. })
+            ),
+            "a one-entry promise was admitted"
+        );
+
+        // Appended past the rule, the way a concatenated log would carry it: it
+        // is not counted as a promise and the audit names it.
+        node.append(UNDERTAKING, partial.to_value(), TS)
+            .expect("append");
+        assert!(
+            node.undertakings().is_empty(),
+            "a partial promise was counted"
+        );
+        assert!(
+            node.audit(false)
+                .iter()
+                .any(|p| p.contains("not the promiser's to choose")),
+            "the audit passed a partial promise"
+        );
+
+        // And the honest promise -- the whole log as it now stands, one entry
+        // taller for the rejected record appended above -- is admitted.
+        assert!(full > 1, "the fixture needs more than one entry");
+        let now = node.ledger().len() as u64;
+        let honest = Undertaking::new(
+            cheat.submitter_id(),
+            node.ledger().root().expect("root"),
+            now,
+            TS,
+        )
+        .signed_with(&cheat);
+        node.post_undertaking(&honest, TS)
+            .expect("the whole log is the promise");
+    }
+
+    /// Settlement pays by weight, so a small promise earns proportionally.
+    #[test]
+    fn availability_settlement_pays_answers_and_names_silence() {
+        let dir = TempDir::new("availability-settle");
+        let mut node = node(&dir);
+        let early = crate::crypto::identity::Identity::from_secret_bytes([21u8; 32]);
+        let late = crate::crypto::identity::Identity::from_secret_bytes([22u8; 32]);
+        let quiet = crate::crypto::identity::Identity::from_secret_bytes([23u8; 32]);
+
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
         node.post_availability_pool(
             &AvailabilityPool {
                 funder: "treasury".to_string(),
-                per_epoch: 7,
+                per_epoch: 90,
                 from_epoch: 0,
                 to_epoch: 10,
                 created_at: TS.to_string(),
@@ -5033,63 +5429,129 @@ mod tests {
         )
         .expect("pool");
 
-        let alice_promise =
-            Undertaking::new(alice.submitter_id(), &root, height, TS).signed_with(&alice);
-        let bob_promise = Undertaking::new(bob.submitter_id(), &root, height, TS).signed_with(&bob);
-        node.post_undertaking(&alice_promise, TS).expect("alice");
-        node.post_undertaking(&bob_promise, TS).expect("bob");
+        // `early` promises a short log; the log then grows and `late` promises
+        // the long one. Both promises are honest -- neither chose its size --
+        // and the weighting is what makes the larger one worth more.
+        let early_promise = promise(&mut node, &early);
+        for reward in [200, 300, 400, 500, 600] {
+            node.post_objective(&lean_objective(reward), TS)
+                .expect("objective");
+        }
+        let late_promise = promise(&mut node, &late);
+        let _quiet_promise = promise(&mut node, &quiet);
+        assert!(late_promise.height > early_promise.height);
 
-        // Alice answers. Bob does not.
         let epoch = 4;
-        let index = node.sampled_index(&alice_promise, epoch).expect("draw");
-        let path = node
-            .ledger()
-            .prefix(height as usize)
-            .expect("prefix")
-            .inclusion(index)
-            .expect("in range")
-            .siblings;
-        node.post_availability(
-            &Availability::new(alice.submitter_id(), alice_promise.id(), epoch, path, TS)
-                .signed_with(&alice),
-            TS,
-        )
-        .expect("alice answers");
+        for (who, held) in [(&early, &early_promise), (&late, &late_promise)] {
+            node.post_availability(&honest_answer(&node, held, epoch, who), TS)
+                .expect("answer");
+        }
 
         let outcome = node
             .settle_availability(epoch, TS)
             .expect("settles")
             .expect("there was something to settle");
-        assert_eq!(outcome.answered, 1, "only alice answered");
-        assert_eq!(outcome.silent, 1, "bob's silence is recorded");
-        assert_eq!(outcome.share, 7, "one answer takes the epoch's pot");
-        assert_eq!(outcome.unpaid, 0);
+        assert_eq!(outcome.answered, 2, "two identities answered");
+        assert_eq!(outcome.silent, 1, "the quiet one is named");
+
+        // The larger promise took the larger share, and the split follows the
+        // heights rather than the head count.
+        let paid = availability_payouts(&node);
+        let early_paid = paid[&early.submitter_id()];
+        let late_paid = paid[&late.submitter_id()];
+        assert!(
+            late_paid > early_paid,
+            "the bigger promise earned no more: {late_paid} vs {early_paid}"
+        );
+        assert_eq!(
+            u128::from(early_paid) + u128::from(late_paid) + outcome.unpaid,
+            node.availability_offered(epoch),
+            "the pot did not close"
+        );
+        assert!(!paid.contains_key(&quiet.submitter_id()));
 
         // An epoch settles once. A second call is a no-op, not a second payout.
         assert_eq!(
             node.settle_availability(epoch, TS).expect("idempotent"),
             None
         );
-
         assert_eq!(node.audit(false), Vec::<String>::new());
     }
 
-    /// Equal shares are floor-divided and the remainder is recorded, never
+    /// Extra promises from one identity do not multiply its share.
+    ///
+    /// Weighting by height alone would have opened a sybil attack that needs no
+    /// new keys: undertake repeatedly, answer each, collect a full weight every
+    /// time, all from one copy of the log. One identity, one weight.
+    #[test]
+    fn undertaking_twice_does_not_pay_twice() {
+        let dir = TempDir::new("availability-double");
+        let mut node = node(&dir);
+        let greedy = crate::crypto::identity::Identity::from_secret_bytes([24u8; 32]);
+        let plain = crate::crypto::identity::Identity::from_secret_bytes([25u8; 32]);
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 100,
+                from_epoch: 0,
+                to_epoch: 10,
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+
+        let plain_promise = promise(&mut node, &plain);
+        let first = promise(&mut node, &greedy);
+        node.post_objective(&lean_objective(200), TS)
+            .expect("objective");
+        let second = promise(&mut node, &greedy);
+
+        let epoch = 2;
+        for (who, held) in [
+            (&plain, &plain_promise),
+            (&greedy, &first),
+            (&greedy, &second),
+        ] {
+            node.post_availability(&honest_answer(&node, held, epoch, who), TS)
+                .expect("answer");
+        }
+        node.settle_availability(epoch, TS)
+            .expect("settles")
+            .expect("something to settle");
+
+        let paid = availability_payouts(&node);
+        assert_eq!(paid.len(), 2, "one row per identity, not per promise");
+
+        // The precise property, read off the record: greedy's weight is the
+        // *larger* of its two promises, not their sum. Greedy still earns more
+        // than plain -- its promise really is bigger, because the log grew --
+        // and what it does not get is a second helping for saying so twice.
+        let weights = availability_weights(&node);
+        assert_eq!(
+            weights[&greedy.submitter_id()],
+            first.height.max(second.height),
+            "weight should be the largest promise"
+        );
+        assert_ne!(
+            weights[&greedy.submitter_id()],
+            first.height + second.height,
+            "two promises were added together"
+        );
+        assert_eq!(weights[&plain.submitter_id()], plain_promise.height);
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// Weighted shares floor-divide and the remainder is recorded, never
     /// dropped. No floats anywhere near money.
     #[test]
     fn an_indivisible_pot_leaves_a_remainder_the_record_accounts_for() {
         let dir = TempDir::new("availability-remainder");
         let mut node = node(&dir);
-        let holders: Vec<_> = (0..2)
-            .map(|i| crate::crypto::identity::Identity::from_secret_bytes([30 + i; 32]))
-            .collect();
-
         node.post_objective(&lean_objective(100), TS)
             .expect("objective");
-        node.post_objective(&lean_objective(200), TS)
-            .expect("objective");
-        let height = node.ledger().len() as u64;
-        let root = node.ledger().root().expect("root");
         node.post_availability_pool(
             &AvailabilityPool {
                 funder: "treasury".to_string(),
@@ -5103,39 +5565,70 @@ mod tests {
         .expect("pool");
 
         let epoch = 0;
-        for holder in &holders {
-            let promise =
-                Undertaking::new(holder.submitter_id(), &root, height, TS).signed_with(holder);
-            node.post_undertaking(&promise, TS).expect("promise");
-            let index = node.sampled_index(&promise, epoch).expect("draw");
-            let path = node
-                .ledger()
-                .prefix(height as usize)
-                .expect("prefix")
-                .inclusion(index)
-                .expect("in range")
-                .siblings;
-            node.post_availability(
-                &Availability::new(holder.submitter_id(), promise.id(), epoch, path, TS)
-                    .signed_with(holder),
-                TS,
-            )
-            .expect("answer");
+        let mut held = Vec::new();
+        for i in 0..3u8 {
+            let who = crate::crypto::identity::Identity::from_secret_bytes([30 + i; 32]);
+            let promise = promise(&mut node, &who);
+            held.push((who, promise));
+        }
+        for (who, promise) in &held {
+            node.post_availability(&honest_answer(&node, promise, epoch, who), TS)
+                .expect("answer");
         }
 
         let outcome = node
             .settle_availability(epoch, TS)
             .expect("settles")
             .expect("something to settle");
-        assert_eq!(outcome.answered, 2);
-        assert_eq!(outcome.share, 3, "7 / 2 floor-divides to 3");
-        assert_eq!(outcome.unpaid, 1, "and the odd unit stays in the pot");
-        // The record has to close: paid + unpaid is exactly what was offered.
+        assert_eq!(outcome.answered, 3);
+        assert!(
+            outcome.unpaid > 0,
+            "7 units cannot divide three ways evenly"
+        );
         assert_eq!(
-            u128::from(outcome.share) * 2 + outcome.unpaid,
-            node.availability_offered(epoch)
+            outcome.paid + outcome.unpaid,
+            node.availability_offered(epoch),
+            "the pot did not close"
         );
         assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// The weight each identity was credited with, read back out of the record.
+    fn availability_weights(node: &Node) -> BTreeMap<String, u64> {
+        let mut out = BTreeMap::new();
+        for entry in node.ledger().entries_of_kind(AVAILABILITY_SETTLEMENT) {
+            let Some(rows) = entry.payload.get("paid").and_then(Value::as_array) else {
+                continue;
+            };
+            for row in rows {
+                if let (Some(who), Some(weight)) = (
+                    payload_str(row, "identity"),
+                    row.get("weight").and_then(Value::as_u64),
+                ) {
+                    out.insert(who.to_string(), weight);
+                }
+            }
+        }
+        out
+    }
+
+    /// Who was paid what, read back out of the settlement record.
+    fn availability_payouts(node: &Node) -> BTreeMap<String, u64> {
+        let mut out = BTreeMap::new();
+        for entry in node.ledger().entries_of_kind(AVAILABILITY_SETTLEMENT) {
+            let Some(rows) = entry.payload.get("paid").and_then(Value::as_array) else {
+                continue;
+            };
+            for row in rows {
+                if let (Some(who), Some(reward)) = (
+                    payload_str(row, "identity"),
+                    row.get("reward").and_then(Value::as_u64),
+                ) {
+                    *out.entry(who.to_string()).or_insert(0) += reward;
+                }
+            }
+        }
+        out
     }
 
     /// The audit catches a settlement whose arithmetic does not close.
@@ -5168,11 +5661,10 @@ mod tests {
                     Value::Array(vec![Value::object([
                         ("identity", Value::string("ab".repeat(32))),
                         ("reward", Value::Int(9_000)),
-                        ("undertaking", Value::string("x")),
+                        ("weight", Value::Int(1)),
                     ])]),
                 ),
                 ("silent", Value::Array(Vec::new())),
-                ("share", Value::Int(9_000)),
                 ("unpaid", Value::Int(0)),
             ]),
             TS,
@@ -5187,6 +5679,49 @@ mod tests {
         assert!(
             problems.iter().any(|p| p.contains("offered 5")),
             "the arithmetic mismatch went unreported: {problems:?}"
+        );
+    }
+
+    /// One identity paid twice in one settlement is a second helping.
+    #[test]
+    fn the_audit_catches_an_identity_paid_twice_in_one_epoch() {
+        let dir = TempDir::new("availability-twice");
+        let mut node = node(&dir);
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 10,
+                from_epoch: 0,
+                to_epoch: 0,
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+        let row = |reward: i128| {
+            Value::object([
+                ("identity", Value::string("ab".repeat(32))),
+                ("reward", Value::Int(reward)),
+                ("weight", Value::Int(1)),
+            ])
+        };
+        node.append(
+            AVAILABILITY_SETTLEMENT,
+            Value::object([
+                ("epoch", Value::Int(0)),
+                ("anchor", Value::string("")),
+                ("paid", Value::Array(vec![row(5), row(5)])),
+                ("silent", Value::Array(Vec::new())),
+                ("unpaid", Value::Int(0)),
+            ]),
+            TS,
+        )
+        .expect("append");
+        assert!(
+            node.audit(false).iter().any(|p| p.contains("paid twice")),
+            "one identity taking two shares went unreported"
         );
     }
 

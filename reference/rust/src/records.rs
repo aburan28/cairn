@@ -882,16 +882,22 @@ impl Undertaking {
     }
 }
 
-/// An answer to one availability sample: the path, and nothing else.
+/// An answer to one availability sample: the sampled entry and its path.
 ///
-/// The entry being proved is already in the log at the sampled index, so it is
-/// not repeated here. The signature is the load-bearing part: anyone holding
-/// the log can compute this path, so an unsigned one is evidence of nothing.
+/// The entry is carried, and that is the difference between proving storage
+/// and proving arithmetic. Without it the verifier recomputes the leaf from its
+/// own copy, so an answerer needs only the entry hashes -- every path is
+/// derivable from those -- and a node keeping a tenth of a log reproduces the
+/// honest answer byte for byte.
+///
+/// The signature is the other half: anyone holding the log could assemble this
+/// record, so an unsigned one is evidence of nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Availability {
     pub identity: String,
     pub undertaking: String,
     pub epoch: u64,
+    pub entry: Value,
     pub path: Vec<String>,
     pub created_at: String,
     pub signature: Option<String>,
@@ -902,6 +908,7 @@ impl Availability {
         Value::object([
             ("type", Value::string("availability")),
             ("created_at", Value::string(self.created_at.clone())),
+            ("entry", self.entry.clone()),
             ("epoch", Value::Int(i128::from(self.epoch))),
             ("identity", Value::string(self.identity.clone())),
             (
@@ -950,6 +957,11 @@ impl Availability {
                 "availability undertaking must be sha256: and 64 lowercase hex".into(),
             ));
         }
+        if self.entry.as_object().is_none() {
+            return Err(RecordError(
+                "availability entry must be the sampled log entry".into(),
+            ));
+        }
         // An empty path is legal: a one-entry log's only leaf is its root, so
         // the honest answer to it carries no hashes.
         if self.path.len() > MAX_AVAILABILITY_PATH
@@ -978,6 +990,7 @@ impl Availability {
             identity: text(value, "identity")?,
             undertaking: text(value, "undertaking")?,
             epoch: count(value, "epoch")?,
+            entry: field(value, "entry")?.clone(),
             path,
             created_at: text(value, "created_at")?,
             signature: optional_text(value, "signature")?,

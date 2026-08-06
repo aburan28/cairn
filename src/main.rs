@@ -639,11 +639,12 @@ enum BlobAction {
 /// The four steps of the availability mechanism.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AvailabilityAction {
-    /// Promise to hold this log at a root and height.
-    Undertake {
-        identity: String,
-        height: Option<u64>,
-    },
+    /// Promise to hold this log at its current root and height.
+    ///
+    /// No `--height`. The promise covers the whole log as it stands, because
+    /// the size of the promise is what the pool pays for, and a promiser who
+    /// could choose it chose one entry and took a full share.
+    Undertake { identity: String },
     /// Answer this epoch's sample for every promise this identity made.
     Answer {
         identity: String,
@@ -1166,7 +1167,6 @@ fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
                 funder = Some(cursor.value("--funder")?);
                 continue;
             }
-            "--height" => "height",
             "--epoch" => "epoch",
             "--per-epoch" => "per-epoch",
             "--from-epoch" => "from-epoch",
@@ -1188,7 +1188,6 @@ fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
     let action = match action.as_str() {
         "undertake" => AvailabilityAction::Undertake {
             identity: need_identity("undertake")?,
-            height: numbers.get("height").copied(),
         },
         "answer" => AvailabilityAction::Answer {
             identity: need_identity("answer")?,
@@ -2639,23 +2638,17 @@ fn cmd_availability(
     action: &AvailabilityAction,
 ) -> Result<i32, CliError> {
     match action {
-        AvailabilityAction::Undertake { identity, height } => {
+        AvailabilityAction::Undertake { identity } => {
             let signer = load_identity(Some(identity))?.ok_or_else(|| {
                 CliError::Usage(String::from(
                     "availability undertake: --identity is required",
                 ))
             })?;
             let mut node = open_node_for_writing(options)?;
-            let full = ledger_of(&node).len();
-            let height = height.map(|h| h as usize).unwrap_or(full);
+            let height = ledger_of(&node).len();
             let root = ledger_of(&node)
-                .prefix(height)
-                .and_then(|prefix| prefix.root())
-                .ok_or_else(|| {
-                    CliError::Usage(format!(
-                        "no prefix of {height} entries to undertake; the log has {full}"
-                    ))
-                })?;
+                .root()
+                .ok_or_else(|| CliError::Usage(String::from("the log is empty")))?;
             let record = Undertaking::new(signer.submitter_id(), &root, height as u64, timestamp())
                 .signed_with(&signer);
             let id = refused(node.post_undertaking(&record, &timestamp()))?;
@@ -2698,18 +2691,25 @@ fn cmd_availability(
             }
             let mut answered = 0usize;
             for promise in &mine {
+                // The position this answer will land at, which is where the
+                // rules will re-derive the index from.
+                let landing = ledger_of(&node).len();
                 let index = node
-                    .sampled_index(promise, epoch)
+                    .sampled_index(promise, epoch, landing)
                     .map_err(|why| CliError::Usage(format!("cannot draw a sample: {why}")))?;
                 let height = usize::try_from(promise.height)
                     .map_err(|_| CliError::Overflow(String::from("undertaking height")))?;
                 // Built from this node's own copy of the log, which is the
                 // whole point: a node that does not hold it cannot get here.
-                let path = ledger_of(&node)
-                    .prefix(height)
-                    .and_then(|prefix| prefix.inclusion(index))
-                    .map(|inclusion| inclusion.siblings);
-                let Some(path) = path else {
+                // Both halves come from this node's own copy, which is the
+                // point: the entry proves it held the bytes, the path proves
+                // they are under the root it promised.
+                let answer = ledger_of(&node).prefix(height).and_then(|prefix| {
+                    prefix
+                        .prove(index)
+                        .map(|proof| (proof.entry.body_with_hash(), proof.inclusion.siblings))
+                });
+                let Some((entry, path)) = answer else {
                     say(
                         out,
                         format!(
@@ -2723,6 +2723,7 @@ fn cmd_availability(
                     signer.submitter_id(),
                     promise.id(),
                     epoch,
+                    entry,
                     path,
                     timestamp(),
                 )
@@ -2807,8 +2808,8 @@ fn cmd_availability(
                     say(
                         out,
                         format!(
-                            "  {} units each, {} left in the pot",
-                            outcome.share, outcome.unpaid
+                            "  {} units paid by weight, {} left in the pot",
+                            outcome.paid, outcome.unpaid
                         ),
                     );
                     Ok(0)
@@ -2837,7 +2838,7 @@ fn cmd_availability(
                     .filter(|answer| answer.undertaking == id)
                     .count();
                 let sample = node
-                    .sampled_index(promise, now)
+                    .sampled_index(promise, now, node.ledger().len())
                     .map(|index| index.to_string())
                     .unwrap_or_else(|_| String::from("-"));
                 say(

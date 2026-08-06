@@ -287,14 +287,25 @@ behaviour ships and is tested, not that TLC has checked it.
       same log to the same root and refuse the same forged promise, checked by
       `scripts/differential.sh`.
 
-      Two bounds are stated rather than papered over. The answer proves a node
-      **produced** the challenged entry, not that it **stored** it: fetching it
-      from a peer the moment the epoch opens is not ruled out, and ruling it
-      out needs a time bound or sequential work that Stage 0 does not have. And
-      a fixed pot bounds a funder's cost but does not price identity, so ten
-      identities behind one disk take ten shares — which is what the bond in
-      [node-incentives.md](node-incentives.md) is for, and why Stage 2 lists
-      availability sampling as *bonded*.
+      The pricing was wrong when it first landed and the attacks were run
+      against it rather than argued about. Promising *one* entry paid what
+      promising the whole log paid, so promising less was strictly dominant; and
+      the answer carried only a path, so an answerer needed the entry hashes and
+      no payloads at all — 10% of a log reproduced the honest answer byte for
+      byte. A promise now covers the log as it stood, the share is weighted by
+      that height, one identity is paid once, and the answer carries the entry.
+      Two consensus defects came out of the same review: the sampled index moved
+      whenever the log grew, and it read `PROOFWORK_EPOCH_SECONDS`, so the same
+      log audited clean or dirty depending on the auditor's environment — six
+      times in ten. Both are pinned by injection and by a cross-configuration
+      run in `scripts/differential.sh`.
+
+      One bound remains and is not fixable at this stage. The answer proves a
+      node **produced** the challenged entry, not that it **stored** it, and a
+      fixed pot does not price identity: ten identities behind one disk take ten
+      shares. That is the bond in [node-incentives.md](node-incentives.md), and
+      why Stage 2 lists availability sampling as *bonded* — **an availability
+      pool should not carry real money until it exists.**
 - [x] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [x] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while

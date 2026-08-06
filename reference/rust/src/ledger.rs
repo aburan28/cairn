@@ -287,6 +287,28 @@ impl Proof {
         value
     }
 
+    /// Assemble a proof from an entry value and a derived path shape.
+    ///
+    /// The index and leaf count are the *caller's*, never the record's: an
+    /// availability answer that could name its own index would answer whichever
+    /// entry the answerer happened to keep rather than the one it was asked
+    /// for.
+    pub fn from_parts(
+        entry: &Value,
+        index: usize,
+        leaves: usize,
+        siblings: Vec<String>,
+    ) -> Option<Proof> {
+        Some(Proof {
+            entry: Entry::from_value(entry).ok()?,
+            inclusion: Inclusion {
+                index,
+                leaves,
+                siblings,
+            },
+        })
+    }
+
     pub fn from_value(value: &Value) -> Result<Proof, String> {
         Ok(Proof {
             entry: Entry::from_value(value.get("entry").ok_or("a proof needs an entry")?)?,
