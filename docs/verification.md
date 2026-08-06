@@ -213,3 +213,11 @@ paths are bound into its own jail.
 interpreter directly, by design — it exists to be an independent second opinion
 on the *rules*, not a hardened node — and `reference/rust/src/verifiers.rs` says
 so in those words. Do not point it at an objective you have not read.
+
+It now implements `certificate`, `evaluator`, `statistical` and `replay`.
+`lean` is the one it does not, and the gap is named rather than silent: a kind
+an implementation lacks answers `Unavailable` for every claim, which is correct
+— `Unavailable` is never `Reject` — and used to be skipped by the audit without
+comment, so an entire kind could have no cross-implementation coverage while
+every run reported full coverage. Both audits now report a *settled* claim they
+cannot re-verify, so the hole is loud.

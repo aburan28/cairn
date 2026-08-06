@@ -250,6 +250,7 @@ pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
         Some("certificate") => certificate(root, spec, artifact),
         Some("evaluator") => evaluator(root, spec, artifact),
         Some("statistical") => statistical(root, spec, artifact),
+        Some("replay") => replay(root, spec, artifact),
         // An unknown kind says nothing about the artifact: another node may
         // well implement it.
         Some(other) => Verdict::plain(
@@ -292,6 +293,186 @@ fn certificate(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
         }
         _ => Verdict::plain(Status::Unavailable, "checker returned a non-boolean"),
     }
+}
+
+/// Fields a `replay` objective may never declare reproducible.
+///
+/// A timing or a memory figure measures the *host*, not the computation. Two
+/// honest nodes replaying the same command get different numbers, so declaring
+/// one reproducible turns every re-run into a refutation of work that was fine.
+/// Matched as substrings and case-insensitively, so `wall_time_ms` and
+/// `PeakRSS` are both caught.
+const TIME_LIKE: &[&str] = &[
+    "time",
+    "seconds",
+    "duration",
+    "elapsed",
+    "latency",
+    "throughput",
+    "memory",
+    "rss",
+    "flops",
+    "timestamp",
+    "date",
+];
+
+fn machine_dependent(field: &str) -> bool {
+    let lowered = field.to_ascii_lowercase();
+    TIME_LIKE.iter().any(|token| lowered.contains(token))
+}
+
+/// Re-run a pinned computation and compare its declared fields.
+///
+/// The third kind this crate could not check, and the third to answer
+/// `Unavailable` for every claim while the audit reported full coverage. That
+/// composition is now loud rather than silent, but the coverage still has to
+/// exist.
+///
+/// **No jail here, deliberately.** The primary confines this command --
+/// bubblewrap or seatbelt, read-only `cwd`, a wall-clock bound -- because it
+/// runs objective-authored code on a node that verifies strangers' work. This
+/// crate is an independent opinion on the *rules*, not a hardened node, and
+/// `verifiers.rs` says so at the top. Do not point it at an objective you have
+/// not read.
+///
+/// What it does keep is every rule that decides a *verdict*, because those are
+/// the format:
+///
+/// * A machine-dependent declared field is a spec defect, not a rejection.
+/// * `cwd` resolves against the objective root and may not escape it.
+/// * A command that cannot run, times out, exits non-zero, prints
+///   non-JSON, or omits a declared field is `Unavailable` -- an infrastructure
+///   fact is never evidence about an artifact.
+/// * Only a value that *differs* is a `Reject`.
+fn replay(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
+    let Some(parts) = spec.get("command").and_then(Value::as_array) else {
+        return Verdict::plain(Status::InvalidSpec, "command must be a list of strings");
+    };
+    let mut command_parts: Vec<&str> = Vec::with_capacity(parts.len());
+    for part in parts {
+        match part.as_str() {
+            Some(text) => command_parts.push(text),
+            None => {
+                return Verdict::plain(Status::InvalidSpec, "command must be a list of strings")
+            }
+        }
+    }
+    let Some(program) = command_parts.first().copied() else {
+        return Verdict::plain(
+            Status::InvalidSpec,
+            "command must be a non-empty list of strings",
+        );
+    };
+
+    let fields = match spec.get("reproducible_fields").and_then(Value::as_array) {
+        Some(fields) if !fields.is_empty() => fields,
+        _ => return Verdict::plain(Status::InvalidSpec, "reproducible_fields must be non-empty"),
+    };
+    let mut declared: Vec<&str> = Vec::with_capacity(fields.len());
+    let mut bad: Vec<String> = Vec::new();
+    for field in fields {
+        match field.as_str() {
+            Some(name) if !machine_dependent(name) => declared.push(name),
+            Some(name) => bad.push(format!("'{name}'")),
+            None => bad.push(field.canonical_string()),
+        }
+    }
+    if !bad.is_empty() {
+        return Verdict::plain(
+            Status::InvalidSpec,
+            format!(
+                "machine-dependent fields cannot be reproducible: [{}]. \
+                 Timings and memory measure the host, not the computation.",
+                bad.join(", ")
+            ),
+        );
+    }
+
+    // The same containment the pinned paths get: an objective naming
+    // `../../..` would otherwise read any directory the operator can.
+    let relative = spec.get("cwd").and_then(Value::as_str).unwrap_or(".");
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let cwd = normalize(&canonical_root.join(relative));
+    if !cwd.starts_with(&canonical_root) || !cwd.is_dir() {
+        return Verdict::plain(
+            Status::InvalidSpec,
+            format!("cwd escapes the objective root: {relative}"),
+        );
+    }
+
+    let output = match Command::new(program)
+        .args(command_parts.get(1..).unwrap_or(&[]))
+        .current_dir(&cwd)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => {
+            return Verdict::plain(
+                Status::Unavailable,
+                format!("cannot run replay command '{program}': {error}"),
+            )
+        }
+    };
+    if !output.status.success() {
+        return Verdict::plain(
+            Status::Unavailable,
+            "replay command exited non-zero; infrastructure failure is not evidence \
+             about the artifact",
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Ok(parsed) = Value::from_json(stdout.trim()) else {
+        return Verdict::plain(Status::Unavailable, "replay output is not JSON");
+    };
+    let Value::Object(observed) = parsed else {
+        return Verdict::plain(Status::Unavailable, "replay output is not a JSON object");
+    };
+    let Some(Value::Object(claimed)) = artifact.get("results") else {
+        return Verdict::plain(Status::Reject, "artifact has no 'results' object");
+    };
+
+    let mut mismatches = Vec::new();
+    let mut reproduced = Vec::new();
+    for name in &declared {
+        let Some(seen) = observed.get(*name) else {
+            // The objective declared a field its own command does not print.
+            // Nothing was compared, so nothing is settled.
+            return Verdict::plain(
+                Status::Unavailable,
+                format!("replay output is missing declared field '{name}'"),
+            );
+        };
+        let claim = claimed.get(*name).cloned().unwrap_or(Value::Null);
+        if &claim == seen {
+            reproduced.push(((*name).to_string(), seen.clone()));
+        } else {
+            mismatches.push((
+                (*name).to_string(),
+                Value::object([("claimed", claim), ("observed", seen.clone())]),
+            ));
+        }
+    }
+
+    if !mismatches.is_empty() {
+        let mut map = std::collections::BTreeMap::new();
+        for (k, v) in mismatches {
+            map.insert(k, v);
+        }
+        return Verdict::new(
+            Status::Reject,
+            "replay disagrees with the claim",
+            Value::object([("mismatches", Value::Object(map))]),
+        );
+    }
+    let mut map = std::collections::BTreeMap::new();
+    for (k, v) in reproduced {
+        map.insert(k, v);
+    }
+    Verdict::new(
+        Status::Accept,
+        format!("replay reproduced {} declared field(s)", declared.len()),
+        Value::object([("reproduced", Value::Object(map))]),
+    )
 }
 
 /// A pinned, seeded test statistic clearing a threshold.
@@ -429,5 +610,188 @@ fn evaluator(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
         Verdict::new(Status::Accept, detail, evidence)
     } else {
         Verdict::new(Status::Reject, detail, evidence)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A replay spec whose command prints `json` and declares `fields`.
+    fn spec(json: &str, fields: &[&str], cwd: Option<&str>) -> Value {
+        let mut pairs = vec![
+            ("kind", Value::string("replay")),
+            (
+                "command",
+                Value::Array(vec![
+                    Value::string("sh"),
+                    Value::string("-c"),
+                    Value::string(format!("printf '%s' '{json}'")),
+                ]),
+            ),
+            (
+                "reproducible_fields",
+                Value::Array(fields.iter().map(|f| Value::string(*f)).collect()),
+            ),
+        ];
+        if let Some(cwd) = cwd {
+            pairs.push(("cwd", Value::string(cwd)));
+        }
+        Value::object(pairs)
+    }
+
+    fn artifact(results: Value) -> Value {
+        Value::object([("results", results)])
+    }
+
+    /// An empty object. `Value::object([])` cannot infer its key type.
+    fn empty() -> Value {
+        Value::Object(std::collections::BTreeMap::new())
+    }
+
+    fn root() -> &'static Path {
+        Path::new(".")
+    }
+
+    #[test]
+    fn a_reproduced_field_accepts_and_a_differing_one_rejects() {
+        let s = spec(r#"{"n":42}"#, &["n"], None);
+        let good = run(
+            root(),
+            &s,
+            &artifact(Value::object([("n", Value::Int(42))])),
+        );
+        assert_eq!(good.status, Status::Accept, "{}", good.detail);
+
+        let bad = run(
+            root(),
+            &s,
+            &artifact(Value::object([("n", Value::Int(41))])),
+        );
+        assert_eq!(bad.status, Status::Reject, "{}", bad.detail);
+    }
+
+    #[test]
+    fn a_machine_dependent_field_is_a_spec_defect_not_a_rejection() {
+        // A timing measures the host, not the computation. Declaring one
+        // reproducible would make every honest re-run a refutation, so the
+        // objective is broken rather than the artifact.
+        for field in ["wall_time_ms", "PeakRSS", "elapsed", "flops", "timestamp"] {
+            let s = spec(r#"{"x":1}"#, &[field], None);
+            let verdict = run(root(), &s, &artifact(empty()));
+            assert_eq!(
+                verdict.status,
+                Status::InvalidSpec,
+                "{field} was accepted as reproducible"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_declared_field_settles_nothing() {
+        // The command did not print what the objective said it would. Nothing
+        // was compared, so nothing can be concluded about the artifact.
+        let s = spec(r#"{"other":1}"#, &["n"], None);
+        let verdict = run(root(), &s, &artifact(Value::object([("n", Value::Int(1))])));
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+    }
+
+    #[test]
+    fn output_that_is_not_a_json_object_settles_nothing() {
+        for output in ["not json at all", "[1,2,3]", "\"a string\"", ""] {
+            let s = spec(output, &["n"], None);
+            let verdict = run(root(), &s, &artifact(empty()));
+            assert_eq!(
+                verdict.status,
+                Status::Unavailable,
+                "output {output:?} was treated as evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cwd_that_escapes_the_root_is_refused() {
+        // Unconfined, a record naming `../..` reads any directory the operator
+        // can -- and any declared field the command prints lands in public
+        // verdict evidence, which is exfiltration with no network needed.
+        for escape in ["..", "../..", "/etc"] {
+            let s = spec(r#"{"n":1}"#, &["n"], Some(escape));
+            let verdict = run(root(), &s, &artifact(empty()));
+            assert_eq!(
+                verdict.status,
+                Status::InvalidSpec,
+                "cwd {escape:?} was allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_or_malformed_command_is_a_spec_defect() {
+        let no_command = Value::object([
+            ("kind", Value::string("replay")),
+            ("command", Value::Array(Vec::new())),
+            (
+                "reproducible_fields",
+                Value::Array(vec![Value::string("n")]),
+            ),
+        ]);
+        assert_eq!(
+            run(root(), &no_command, &artifact(empty())).status,
+            Status::InvalidSpec
+        );
+
+        let not_strings = Value::object([
+            ("kind", Value::string("replay")),
+            ("command", Value::Array(vec![Value::Int(7)])),
+            (
+                "reproducible_fields",
+                Value::Array(vec![Value::string("n")]),
+            ),
+        ]);
+        assert_eq!(
+            run(root(), &not_strings, &artifact(empty())).status,
+            Status::InvalidSpec
+        );
+    }
+
+    #[test]
+    fn a_command_that_does_not_exist_settles_nothing() {
+        let s = Value::object([
+            ("kind", Value::string("replay")),
+            (
+                "command",
+                Value::Array(vec![Value::string("proofwork-no-such-program-anywhere")]),
+            ),
+            (
+                "reproducible_fields",
+                Value::Array(vec![Value::string("n")]),
+            ),
+        ]);
+        let verdict = run(root(), &s, &artifact(empty()));
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+    }
+
+    #[test]
+    fn every_kind_the_primary_settles_is_implemented_here() {
+        // The gap this crate kept having: a kind it does not implement answers
+        // `Unavailable` for every claim, which is correct and settles nothing,
+        // and the audit used to skip it silently. `lean` is the one that
+        // remains -- it needs a proof-assistant toolchain -- and it is named
+        // here so the list cannot quietly grow.
+        let unimplemented = ["lean"];
+        for kind in ["certificate", "evaluator", "statistical", "replay"] {
+            let spec = Value::object([("kind", Value::string(kind))]);
+            let verdict = run(Path::new("."), &spec, &empty());
+            assert_ne!(
+                verdict.detail,
+                format!("no verifier registered for kind {kind:?}"),
+                "{kind} is no longer dispatched"
+            );
+        }
+        for kind in unimplemented {
+            let spec = Value::object([("kind", Value::string(kind))]);
+            let verdict = run(Path::new("."), &spec, &empty());
+            assert_eq!(verdict.status, Status::Unavailable);
+        }
     }
 }
