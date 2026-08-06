@@ -394,6 +394,104 @@ impl Channel {
     pub fn frames_sent(&self) -> u64 {
         self.send_counter
     }
+
+    /// Split into the two halves, so sending and receiving can happen on
+    /// different threads.
+    ///
+    /// Safe because the two directions share nothing. A session derives *four*
+    /// values — a key and a counter each way — and [`Channel::seal`] touches
+    /// only the send pair while [`Channel::open`] touches only the receive pair.
+    /// There is no state to race over, so the split needs no lock, and a lock
+    /// would be actively wrong: a reader blocked in `recv` holding it would
+    /// starve the writer forever.
+    ///
+    /// That is not a general property of AEAD sessions and is worth stating.
+    /// A construction with one counter for both directions, or one key, could
+    /// not do this — the halves would have to agree on every increment. The
+    /// separation is what [`SessionKeys`]'s two labels buy.
+    pub fn split(self) -> (Sealer, Opener) {
+        (
+            Sealer {
+                key: self.send_key,
+                counter: self.send_counter,
+            },
+            Opener {
+                key: self.recv_key,
+                high: self.recv_high,
+            },
+        )
+    }
+}
+
+/// The sending half of a split [`Channel`].
+pub struct Sealer {
+    key: [u8; 32],
+    counter: u64,
+}
+
+impl fmt::Debug for Sealer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sealer")
+            .field("sent", &self.counter)
+            .finish()
+    }
+}
+
+impl Sealer {
+    /// As [`Channel::seal`].
+    pub fn seal(
+        &mut self,
+        plaintext: &[u8],
+        context: &[u8],
+    ) -> Result<(u64, Vec<u8>), HandshakeError> {
+        let mut channel = Channel {
+            send_key: self.key,
+            recv_key: [0u8; 32],
+            send_counter: self.counter,
+            recv_high: None,
+        };
+        let sealed = channel.seal(plaintext, context)?;
+        self.counter = channel.send_counter;
+        Ok(sealed)
+    }
+
+    pub fn frames_sent(&self) -> u64 {
+        self.counter
+    }
+}
+
+/// The receiving half of a split [`Channel`].
+pub struct Opener {
+    key: [u8; 32],
+    high: Option<u64>,
+}
+
+impl fmt::Debug for Opener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Opener")
+            .field("recv_high", &self.high)
+            .finish()
+    }
+}
+
+impl Opener {
+    /// As [`Channel::open`], including the replay and reordering refusal.
+    pub fn open(
+        &mut self,
+        counter: u64,
+        ciphertext: &[u8],
+        context: &[u8],
+    ) -> Result<Vec<u8>, HandshakeError> {
+        let mut channel = Channel {
+            send_key: [0u8; 32],
+            recv_key: self.key,
+            send_counter: 0,
+            recv_high: self.high,
+        };
+        let plaintext = channel.open(counter, ciphertext, context)?;
+        self.high = channel.recv_high;
+        Ok(plaintext)
+    }
 }
 
 /// The counter as a 12-byte little-endian nonce, zero-padded.
@@ -636,5 +734,122 @@ mod tests {
         let rendered = format!("{:?} {:?}", alice, alice.to_public());
         assert!(rendered.len() < 100, "debug is far too large: {rendered}");
         assert!(!rendered.contains("["), "looks like raw bytes: {rendered}");
+    }
+
+    // -- splitting a channel ----------------------------------------------
+
+    fn paired() -> (Channel, Channel) {
+        let responder = PeerIdentity::generate();
+        let initiator = PeerIdentity::generate();
+        let (ciphertext, initiator_channel) = responder.to_public().initiate(initiator.id());
+        let responder_channel = responder
+            .accept(initiator.id(), &ciphertext)
+            .expect("the responder decapsulates");
+        (initiator_channel, responder_channel)
+    }
+
+    #[test]
+    fn a_split_channel_still_talks_to_an_unsplit_one() {
+        // The split must be invisible on the wire, or a node that splits could
+        // not talk to a node that does not.
+        let (initiator, mut responder) = paired();
+        let (mut sealer, _opener) = initiator.split();
+        let (counter, ciphertext) = sealer.seal(b"hello", b"ctx").expect("seals");
+        assert_eq!(
+            responder.open(counter, &ciphertext, b"ctx").expect("opens"),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn both_halves_of_a_split_work_in_both_directions() {
+        let (initiator, responder) = paired();
+        let (mut i_send, mut i_recv) = initiator.split();
+        let (mut r_send, mut r_recv) = responder.split();
+
+        let (counter, ct) = i_send.seal(b"ping", b"ctx").expect("seals");
+        assert_eq!(r_recv.open(counter, &ct, b"ctx").expect("opens"), b"ping");
+        let (counter, ct) = r_send.seal(b"pong", b"ctx").expect("seals");
+        assert_eq!(i_recv.open(counter, &ct, b"ctx").expect("opens"), b"pong");
+    }
+
+    #[test]
+    fn a_split_opener_still_refuses_replays_and_reordering() {
+        // The property that makes the counter worth having. Losing it in the
+        // split would be a silent downgrade -- everything would still work,
+        // and a recorded frame would replay.
+        let (initiator, responder) = paired();
+        let (mut sealer, _) = initiator.split();
+        let (_, mut opener) = responder.split();
+
+        let (c0, f0) = sealer.seal(b"first", b"ctx").expect("seals");
+        let (c1, f1) = sealer.seal(b"second", b"ctx").expect("seals");
+        assert_eq!(opener.open(c1, &f1, b"ctx").expect("opens"), b"second");
+        // The earlier frame is now in the past: refused, not accepted late.
+        assert!(
+            matches!(
+                opener.open(c0, &f0, b"ctx"),
+                Err(HandshakeError::Replay { .. })
+            ),
+            "a split opener accepted a reordered frame"
+        );
+        // And the one it did accept cannot be replayed either.
+        assert!(matches!(
+            opener.open(c1, &f1, b"ctx"),
+            Err(HandshakeError::Replay { .. })
+        ));
+    }
+
+    #[test]
+    fn a_split_sealer_does_not_reuse_a_counter() {
+        // Nonce reuse is the one thing this construction cannot survive, and
+        // the counter is the nonce. A split that reset it would be fatal.
+        let (initiator, _) = paired();
+        let sent_before = initiator.frames_sent();
+        let (mut sealer, _) = initiator.split();
+        assert_eq!(sealer.frames_sent(), sent_before);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..16 {
+            let (counter, _) = sealer.seal(b"x", b"ctx").expect("seals");
+            assert!(seen.insert(counter), "counter {counter} was reused");
+        }
+    }
+
+    #[test]
+    fn a_split_preserves_a_counter_already_advanced() {
+        // Splitting mid-session must not rewind either side. A sealer that
+        // restarted at zero would reuse nonces against a peer that had already
+        // seen them, and an opener that forgot its high-water mark would accept
+        // every frame it had already accepted.
+        let (mut initiator, mut responder) = paired();
+        let (c, f) = initiator.seal(b"before", b"ctx").expect("seals");
+        assert_eq!(responder.open(c, &f, b"ctx").expect("opens"), b"before");
+        let (r_c, r_f) = responder.seal(b"reply", b"ctx").expect("seals");
+        assert_eq!(initiator.open(r_c, &r_f, b"ctx").expect("opens"), b"reply");
+
+        let (mut sealer, mut opener) = initiator.split();
+        let (next, _) = sealer.seal(b"after", b"ctx").expect("seals");
+        assert!(next > c, "the split rewound the send counter");
+        assert!(
+            matches!(
+                opener.open(r_c, &r_f, b"ctx"),
+                Err(HandshakeError::Replay { .. })
+            ),
+            "the split forgot what it had already received"
+        );
+    }
+
+    #[test]
+    fn a_split_half_still_binds_its_context() {
+        // Frames sealed for one subsystem must not open as another's; that is
+        // what the context string is for and the split must not lose it.
+        let (initiator, responder) = paired();
+        let (mut sealer, _) = initiator.split();
+        let (_, mut opener) = responder.split();
+        let (counter, frame) = sealer.seal(b"payload", b"proofwork/a").expect("seals");
+        assert!(matches!(
+            opener.open(counter, &frame, b"proofwork/b"),
+            Err(HandshakeError::NotAuthentic)
+        ));
     }
 }

@@ -1,6 +1,6 @@
 //! TCP transport and the wire framing around an encrypted channel.
 
-use super::handshake::{Channel, HandshakeError, PeerId, PeerIdentity, PeerPublic};
+use super::handshake::{Channel, HandshakeError, Opener, PeerId, PeerIdentity, PeerPublic, Sealer};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -101,6 +101,98 @@ impl Connection {
         counter_bytes.copy_from_slice(&frame[..8]);
         let counter = u64::from_be_bytes(counter_bytes);
         Ok(self.channel.open(counter, &frame[8..], context)?)
+    }
+
+    /// Split into halves that can live on different threads.
+    ///
+    /// The reason this exists is [`crate::swarm`]: a blob transfer needs a
+    /// writer thread, so a peer that stops reading blocks its own socket rather
+    /// than the state machine every other peer is waiting on. `&mut self` on
+    /// both `send` and `receive` makes that impossible on one `Connection`, and
+    /// wrapping it in a mutex would be worse than impossible — a reader blocked
+    /// in `receive` holding the lock would starve the writer forever.
+    ///
+    /// Sound because the session's two directions share no state; see
+    /// [`Channel::split`]. The socket is `try_clone`d, which duplicates the
+    /// descriptor rather than the connection, so both halves drive the same TCP
+    /// stream and dropping either leaves the other working.
+    pub fn split(self) -> Result<(Sender, Receiver), TransportError> {
+        let writer = self.stream.try_clone()?;
+        let (sealer, opener) = self.channel.split();
+        Ok((
+            Sender {
+                stream: writer,
+                sealer,
+            },
+            Receiver {
+                stream: self.stream,
+                opener,
+                remote: self.remote,
+            },
+        ))
+    }
+}
+
+/// The sending half of a split [`Connection`].
+#[derive(Debug)]
+pub struct Sender {
+    stream: TcpStream,
+    sealer: Sealer,
+}
+
+impl Sender {
+    /// As [`Connection::send`].
+    pub fn send(&mut self, plaintext: &[u8], context: &[u8]) -> Result<(), TransportError> {
+        let (counter, ciphertext) = self.sealer.seal(plaintext, context)?;
+        let size = u32::try_from(8usize + ciphertext.len())
+            .map_err(|_| TransportError::FrameTooLarge { size: u32::MAX })?;
+        self.stream.write_all(&size.to_be_bytes())?;
+        self.stream.write_all(&counter.to_be_bytes())?;
+        self.stream.write_all(&ciphertext)?;
+        self.stream.flush()?;
+        Ok(())
+    }
+}
+
+/// The receiving half of a split [`Connection`].
+#[derive(Debug)]
+pub struct Receiver {
+    stream: TcpStream,
+    opener: Opener,
+    remote: PeerId,
+}
+
+impl Receiver {
+    pub fn remote(&self) -> PeerId {
+        self.remote
+    }
+
+    /// As [`Connection::receive`].
+    pub fn receive(&mut self, context: &[u8]) -> Result<Vec<u8>, TransportError> {
+        let mut size_bytes = [0u8; 4];
+        self.stream.read_exact(&mut size_bytes).map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                TransportError::FrameTruncated
+            } else {
+                TransportError::Io(e)
+            }
+        })?;
+        let size = u32::from_be_bytes(size_bytes);
+        if !(8..=MAX_FRAME).contains(&size) {
+            return Err(TransportError::FrameTooLarge { size });
+        }
+        let mut frame = vec![0u8; size as usize];
+        self.stream.read_exact(&mut frame).map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                TransportError::FrameTruncated
+            } else {
+                TransportError::Io(e)
+            }
+        })?;
+        let mut counter_bytes = [0u8; 8];
+        counter_bytes.copy_from_slice(&frame[..8]);
+        let counter = u64::from_be_bytes(counter_bytes);
+        Ok(self.opener.open(counter, &frame[8..], context)?)
     }
 }
 

@@ -139,6 +139,24 @@ behaviour ships and is tested, not that TLC has checked it.
       identity. `swarm::tcp` has no handshake and no AEAD; it is behind the
       off-by-default `insecure-swarm-tcp` feature so it cannot ship by accident,
       which contains the risk without removing it.
+      **Both blockers are now cleared, and what is left is the port itself.**
+      The identity mismatch — ed25519 peer records against a 261,120-byte
+      McEliece key — is what `PeerRecord` resolved: an ed25519 key vouches for
+      the 32-byte hash of a transport key, fetched on demand. The second blocker
+      was structural rather than cryptographic and was easy to miss: `swarm`
+      runs a **writer thread**, so a peer that stops reading blocks its own
+      socket instead of the state machine every other peer waits on, and
+      `Connection`'s `&mut self` on both `send` and `receive` made that
+      impossible. A mutex would have been worse than impossible — a reader
+      blocked in `receive` holding it starves the writer forever.
+      `Connection::split` and `Channel::split` fix that, and are sound because a
+      session's two directions share no state: a key and a counter each way,
+      which is what the handshake's two labels buy. Tested to preserve the part
+      that would otherwise be a silent downgrade — a split opener still refuses
+      replays and reordering, and a split sealer never rewinds its counter.
+      Remaining: point `serve`/`fetch` at `transport::connect`/`accept`, give
+      the subsystem its own AEAD context string, take the endpoints rather than
+      bare addresses, and delete the feature gate.
 - [x] **Decided: at-rest encryption covers the log and stops there.** The
       threat is a copy of the data directory reaching somewhere the operator did
       not intend, and what sealing buys is that the copy is inert. The log is
