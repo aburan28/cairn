@@ -13,6 +13,7 @@
 //! byte; everything else is local behaviour that can differ without anybody
 //! disagreeing about what was settled.
 
+pub mod attribution;
 pub mod canonical;
 pub mod frontier;
 pub mod ledger;

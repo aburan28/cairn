@@ -19,6 +19,7 @@
 
 use std::process::ExitCode;
 
+use proofwork_reference::attribution::{flow, FlowParams};
 use proofwork_reference::canonical::{merkle_root, Value};
 use proofwork_reference::frontier::Ratchet;
 use proofwork_reference::ledger::Ledger;
@@ -144,6 +145,82 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
             f.0.push(format!("canonical: {want_utf8} did not re-parse"));
         }
         checked += 1;
+    }
+
+    // -- attribution: who gets paid what ------------------------------------
+    //
+    // The section nothing checked until now. A canonical-encoding divergence is
+    // loud -- two nodes compute different ids and nothing settles. A payout
+    // divergence is silent, and both nodes carry on having paid different
+    // people different amounts.
+    {
+        let section = vectors
+            .get("attribution")
+            .ok_or("vectors need an attribution section")?;
+        let root = str_of(section, "root")?;
+        let mut claims: std::collections::BTreeMap<String, Claim> =
+            std::collections::BTreeMap::new();
+        for value in section
+            .get("claims")
+            .and_then(Value::as_array)
+            .ok_or("attribution needs claims")?
+        {
+            let claim = Claim::from_value(value).map_err(|e| format!("attribution claim: {e}"))?;
+            claims.insert(claim.id(), claim);
+        }
+        for case in array(section, "cases")? {
+            let amount = case
+                .get("amount")
+                .and_then(Value::as_u64)
+                .ok_or("case needs an amount")?;
+            let params = FlowParams {
+                delta_num: case
+                    .get("delta_num")
+                    .and_then(Value::as_u64)
+                    .ok_or("case needs delta_num")?,
+                delta_den: case
+                    .get("delta_den")
+                    .and_then(Value::as_u64)
+                    .ok_or("case needs delta_den")?,
+                max_depth: case
+                    .get("max_depth")
+                    .and_then(Value::as_u64)
+                    .ok_or("case needs max_depth")? as u32,
+            };
+            let got = flow(root, amount, &claims, &params);
+            let mut want: std::collections::BTreeMap<String, u64> =
+                std::collections::BTreeMap::new();
+            if let Some(Value::Object(map)) = case.get("payouts") {
+                for (who, units) in map {
+                    want.insert(
+                        who.clone(),
+                        units.as_u64().ok_or("a payout must be an integer")?,
+                    );
+                }
+            }
+            f.check(
+                "attribution",
+                &format!(
+                    "amount {amount} delta {}/{} depth {}",
+                    params.delta_num, params.delta_den, params.max_depth
+                ),
+                &got,
+                &want,
+            );
+            // Conservation, checked independently of the vector: the values
+            // must sum to exactly the amount settled. A vector and an
+            // implementation that agreed on a wrong split would both pass the
+            // check above.
+            let total: u64 = got.values().sum();
+            if total != amount {
+                f.0.push(format!(
+                    "attribution: amount {amount} split into {total}, which \
+                     invents or destroys {} unit(s)",
+                    total.abs_diff(amount)
+                ));
+            }
+            checked += 1;
+        }
     }
 
     // -- merkle: the odd node is promoted, not duplicated -------------------

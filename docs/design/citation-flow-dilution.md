@@ -7,11 +7,16 @@ an exotic attack. This note records a design exploration — what was measured,
 which half of the attack a reward-weighted rule closes, and precisely why the
 other half survives.
 
-**The rule is the default**, in both implementations. `payouts_over` and the
-Python `ledger_payouts` weight by settled reward; `tests/citation_flow.rs`,
-which used to pin the theft, now pins its absence. The conformance vectors did
-not move — they fix record *encoding*, and this changes how settled money is
-divided, not what a record's bytes are.
+**The rule is the default** in the primary: `payouts_over` weights by settled
+reward, and `tests/citation_flow.rs`, which used to pin the theft, now pins its
+absence. The conformance vectors did not move — they fix record *encoding* and
+the per-hop `flow` split, and this changes how settled money is divided rather
+than what a record's bytes are.
+
+The reference implements `flow`, the per-hop rule the vectors pin, and not the
+weighted one: it has no settlement path to apply it on. So the vectors give
+`flow` an independent check and the weighted rule has none, which is worth
+knowing when changing it.
 
 ## The attack
 
