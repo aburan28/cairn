@@ -274,6 +274,25 @@ fn main() {
         Some(text) => text.parse::<usize>().unwrap_or_else(|_| usage(2)),
         None => DEFAULT_FANOUT,
     };
+    // The ledger first, and the ordering is deliberate.
+    //
+    // It is the cheapest check and the likeliest failure -- another daemon
+    // already holds the log, which is what an operator hits when a restart
+    // overlaps the old process. Doing it last meant ~243 ms of Classic McEliece
+    // keygen, an identity file written for a node that cannot start, and a
+    // bound listener, all before the refusal. The bound port is the part that
+    // bites: during that window the address is taken and then released again,
+    // so a restart flaps a port the operator is watching.
+    //
+    // The cost, stated rather than discovered later: opening creates the file,
+    // so a start that fails *after* this — a missing bootstrap file, an
+    // unbindable address — now leaves an empty log where it used to leave
+    // nothing. That file is byte-for-byte the one a successful start would have
+    // created, so the next run simply uses it. Worth an empty file.
+    let ledger = Ledger::open_exclusive(log).unwrap_or_else(|e| {
+        eprintln!("ledger: {e}");
+        std::process::exit(2)
+    });
     let identity = Arc::new(
         load_identity(Path::new(&identity_path)).unwrap_or_else(|e| {
             eprintln!("identity: {e}");
@@ -312,15 +331,9 @@ fn main() {
         eprintln!("listen: {e}");
         std::process::exit(2)
     });
-    // Exclusive: the daemon appends every record it imports from a peer, so
-    // it is a writer and must not share a log with another one.
-    let node = Node::new(
-        Ledger::open_exclusive(log).unwrap_or_else(|e| {
-            eprintln!("ledger: {e}");
-            std::process::exit(2)
-        }),
-        root,
-    );
+    // Exclusive, opened above: the daemon appends every record it imports from
+    // a peer, so it is a writer and must not share a log with another one.
+    let node = Node::new(ledger, root);
     // `Spool::at` only names a directory; the server creates it when it first
     // queues something, and an absent one simply drains nothing.
     let spool = queue_path.as_ref().map(serve::Spool::at);

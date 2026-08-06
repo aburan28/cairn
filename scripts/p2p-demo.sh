@@ -219,6 +219,23 @@ echo "$REF_VIEW" | sed 's/^/  /'
 echo "$REF_VIEW" | grep -q "log verified" \
   || fail "the reference cannot audit a node that got its verifier over the wire"
 
+rule "a second daemon on the same log is refused, before it costs anything"
+# One writer, by enforcement. Checked here as well as by the CLI because the
+# daemon reaches the ledger by a different path, and because the *ordering*
+# matters: this used to be the last check, after ~243 ms of Classic McEliece
+# keygen, an identity file written for a node that could not start, and a bound
+# listener. The bound port is the part that bites -- during that window the
+# address is taken and released again, so a restart flaps a port somebody is
+# watching. It is the cheapest check and the likeliest failure, so it runs first.
+SECOND=$("$DAEMON" --identity "$WORK/second-id.json" --root-key "$A/rootkey.json" \
+  --checkpoint "$WORK/second-cp.json" --listen "127.0.0.1:0" \
+  --log "$A/log.jsonl" --root "$A" 2>&1 || true)
+echo "$SECOND" | sed 's/^/  /'
+echo "$SECOND" | grep -q "already writing" \
+  || fail "a second daemon was allowed onto a log another one holds"
+[ ! -f "$WORK/second-id.json" ] \
+  || fail "a daemon that could not start still wrote an identity file"
+
 rule "the whole documented topology, on one log"
 # `proofwork-serve` beside the daemon, both on A's log. This is the deployment
 # `docs/serving.md` describes and nothing ran until now: the server is a reader
