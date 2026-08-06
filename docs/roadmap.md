@@ -154,9 +154,16 @@ behaviour ships and is tested, not that TLC has checked it.
       which is what the handshake's two labels buy. Tested to preserve the part
       that would otherwise be a silent downgrade — a split opener still refuses
       replays and reordering, and a split sealer never rewinds its counter.
-      Remaining: point `serve`/`fetch` at `transport::connect`/`accept`, give
-      the subsystem its own AEAD context string, take the endpoints rather than
-      bare addresses, and delete the feature gate.
+      The record half is now done too: `swarm::discovery::PeerRecord` carries an
+      optional `transport` id, the same 32-byte hash of a McEliece key that
+      `records::PeerRecord` carries, so a relayed record is finally enough to
+      *dial* rather than only to locate. Optional because an address hint
+      another source can complete is still useful, and absent rather than null
+      because the signature covers the body.
+      Remaining is the socket work itself: point `serve`/`fetch` at
+      `transport::connect`/`accept`, give the subsystem its own AEAD context
+      string, take endpoints rather than bare addresses, and delete the feature
+      gate.
 - [x] **Decided: at-rest encryption covers the log and stops there.** The
       threat is a copy of the data directory reaching somewhere the operator did
       not intend, and what sealing buys is that the copy is inert. The log is
