@@ -33,7 +33,9 @@ proofwork incentives --settled 500000          # what breaks at bootstrap
 Two of the three are easy for the same reason: the protocol already knows the
 correct answer, so a node that fails a challenge has proved something about
 itself, unconditionally and without anyone's cooperation. Verification has no
-such oracle.
+such oracle: the whole point of re-verifying is that nobody yet knows whether
+the artifact is good, so a node that says "accept" without running anything is
+indistinguishable from a node that ran everything — and it is cheaper.
 
 "Sample it" is a sentence, and for a while it was only a sentence: the log had
 a Merkle root and no way to prove anything against it, so a challenge had no
@@ -59,13 +61,40 @@ some other entry; a path that does not reach the root means the entry is not in
 that log — or, far more often, that the checkpoint is older than the proof.
 That last case is common enough to name its own remedy, and `check` prints it.
 
-What is still missing is the payment. Nothing in the log obliges a node to
-answer a sample, and nothing pays it for answering — see
-[roadmap.md](roadmap.md) on why the undertaking and the settlement have to
-arrive together. This is the challenge half, built first because the payment
-half is unenforceable without it. The whole point of re-verifying is that nobody yet knows whether
-the artifact is good, so a node that says "accept" without running anything is
-indistinguishable from a node that ran everything — and it is cheaper.
+The payment is in the log too, because a challenge nobody is paid to answer is
+a challenge nobody answers:
+
+```
+proofwork availability fund --funder treasury --per-epoch 7 \
+    --from-epoch 0 --to-epoch 4000
+proofwork availability undertake --identity node.json   # the promise
+proofwork availability answer    --identity node.json   # this epoch's sample
+proofwork availability settle                           # pay it, name the silent
+```
+
+The sample is drawn `assign(identity, undertaking, beacon(epoch, anchor),
+height)` — a pure function of the log, so nobody issues the challenge and
+nobody can decline to issue it. Identity is in the draw so a coalition cannot
+pool one stored entry; the undertaking id is in it so a node that promised
+twice answers two questions; the beacon is in it so the answer is not knowable
+in advance.
+
+Settlement divides the epoch's pot equally by floor division, records the
+remainder it could not divide, and names every promise that was samplable and
+said nothing. The silence is the half a slash would attach to. Writing it down
+before a bond exists is what makes the record worth having: the accusation is
+permanent and checkable, even while the penalty is not yet money.
+
+**Two bounds, stated plainly.** The answer proves a node *produced* the
+challenged entry, not that it *stored* it — fetching it from a peer the moment
+the epoch opens is not ruled out, and ruling it out needs a time bound or
+sequential work this stage does not have. So it excludes a node that stored
+nothing and has no source, which is the population the payment exists to
+exclude, and it does not catch a cache. And a fixed pot bounds a funder's cost
+however many nodes appear, but it does not price identity: ten identities
+behind one disk answer ten samples from one copy and take ten shares. That is
+what `stake` above is for, and why the roadmap lists availability sampling as
+*bonded* at Stage 2.
 
 ## The verifier's dilemma is structural, not quantitative
 

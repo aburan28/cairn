@@ -763,3 +763,292 @@ mod tests {
         assert_eq!(claim.signing_payload(), signed.signing_payload());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Availability: a promise, an answer to a sample, and the pot that pays for it
+// ---------------------------------------------------------------------------
+
+/// Tallest log an undertaking may name. See the primary implementation: the
+/// sample is drawn with a `u32` partition count, so a taller promise could
+/// never be sampled and is refused by the format rather than at settlement.
+pub const MAX_UNDERTAKING_HEIGHT: u64 = u32::MAX as u64;
+
+/// Longest inclusion path an answer may carry -- `ceil(log2(2^32))`.
+pub const MAX_AVAILABILITY_PATH: usize = 32;
+
+fn hex64(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn digest_shaped(text: &str) -> bool {
+    matches!(text.strip_prefix("sha256:"), Some(rest) if hex64(rest))
+}
+
+fn count(value: &Value, name: &str) -> Result<u64, RecordError> {
+    match field(value, name)? {
+        Value::Int(n) if *n >= 0 && *n <= MAX_UNITS => Ok(*n as u64),
+        _ => Err(RecordError(format!(
+            "{name} must be an integer in [0, 2^64)"
+        ))),
+    }
+}
+
+/// A past promise: identity `K` undertook to hold the log at root `R`, height
+/// `H`. About the past on purpose -- an append-only log cannot say "no longer
+/// true", and a claim about what somebody once promised never needs retracting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Undertaking {
+    pub identity: String,
+    pub root: String,
+    pub height: u64,
+    pub created_at: String,
+    pub signature: Option<String>,
+}
+
+impl Undertaking {
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("undertaking")),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("height", Value::Int(i128::from(self.height))),
+            ("identity", Value::string(self.identity.clone())),
+            ("root", Value::string(self.root.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Always required. A promise nobody signed is a promise by nobody, and
+    /// this record exists to be held against one identity in particular.
+    pub fn verify_signature(&self) -> Result<(), RecordError> {
+        if signed_submitter(&self.identity).is_none() {
+            return Err(RecordError(format!(
+                "undertaking identity {:?} is not a public key",
+                self.identity
+            )));
+        }
+        verify_record_signature(
+            "undertaking",
+            &self.identity,
+            &self.signing_payload(),
+            self.signature.as_deref(),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        if !hex64(&self.identity) {
+            return Err(RecordError(
+                "undertaking identity must be 64 lowercase hex".into(),
+            ));
+        }
+        if !digest_shaped(&self.root) {
+            return Err(RecordError(
+                "undertaking root must be sha256: and 64 lowercase hex".into(),
+            ));
+        }
+        // Zero contradicts the root beside it -- an empty log has no root at
+        // all -- and there would be nothing in it to sample.
+        if self.height == 0 || self.height > MAX_UNDERTAKING_HEIGHT {
+            return Err(RecordError(
+                "undertaking height must be between 1 and 2^32 - 1".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Undertaking, RecordError> {
+        let record = Undertaking {
+            identity: text(value, "identity")?,
+            root: text(value, "root")?,
+            height: count(value, "height")?,
+            created_at: text(value, "created_at")?,
+            signature: optional_text(value, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// An answer to one availability sample: the path, and nothing else.
+///
+/// The entry being proved is already in the log at the sampled index, so it is
+/// not repeated here. The signature is the load-bearing part: anyone holding
+/// the log can compute this path, so an unsigned one is evidence of nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Availability {
+    pub identity: String,
+    pub undertaking: String,
+    pub epoch: u64,
+    pub path: Vec<String>,
+    pub created_at: String,
+    pub signature: Option<String>,
+}
+
+impl Availability {
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("availability")),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("epoch", Value::Int(i128::from(self.epoch))),
+            ("identity", Value::string(self.identity.clone())),
+            (
+                "path",
+                Value::Array(self.path.iter().cloned().map(Value::String).collect()),
+            ),
+            ("undertaking", Value::string(self.undertaking.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn verify_signature(&self) -> Result<(), RecordError> {
+        if signed_submitter(&self.identity).is_none() {
+            return Err(RecordError(format!(
+                "availability identity {:?} is not a public key",
+                self.identity
+            )));
+        }
+        verify_record_signature(
+            "availability",
+            &self.identity,
+            &self.signing_payload(),
+            self.signature.as_deref(),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        if !hex64(&self.identity) {
+            return Err(RecordError(
+                "availability identity must be 64 lowercase hex".into(),
+            ));
+        }
+        if !digest_shaped(&self.undertaking) {
+            return Err(RecordError(
+                "availability undertaking must be sha256: and 64 lowercase hex".into(),
+            ));
+        }
+        // An empty path is legal: a one-entry log's only leaf is its root, so
+        // the honest answer to it carries no hashes.
+        if self.path.len() > MAX_AVAILABILITY_PATH
+            || !self.path.iter().all(|hash| digest_shaped(hash))
+        {
+            return Err(RecordError(
+                "availability path must be at most 32 sha256: digests".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Availability, RecordError> {
+        let path = match field(value, "path")? {
+            Value::Array(items) => items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| RecordError("availability path must be strings".into()))
+                })
+                .collect::<Result<Vec<String>, RecordError>>()?,
+            _ => return Err(RecordError("availability path must be an array".into())),
+        };
+        let record = Availability {
+            identity: text(value, "identity")?,
+            undertaking: text(value, "undertaking")?,
+            epoch: count(value, "epoch")?,
+            path,
+            created_at: text(value, "created_at")?,
+            signature: optional_text(value, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// Money put up to pay for availability over a stated run of epochs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailabilityPool {
+    pub funder: String,
+    pub per_epoch: u64,
+    pub from_epoch: u64,
+    pub to_epoch: u64,
+    pub created_at: String,
+}
+
+impl AvailabilityPool {
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("type", Value::string("availability_pool")),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("from_epoch", Value::Int(i128::from(self.from_epoch))),
+            ("funder", Value::string(self.funder.clone())),
+            ("per_epoch", Value::Int(i128::from(self.per_epoch))),
+            ("to_epoch", Value::Int(i128::from(self.to_epoch))),
+        ])
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// `per_epoch x epochs`, in `u128`. Both factors are `u64` and their
+    /// product is not: a `u64` ceiling would wrap a large pool into a small one
+    /// and let an overspend certify as fine.
+    pub fn ceiling(&self) -> u128 {
+        let epochs = u128::from(self.to_epoch.saturating_sub(self.from_epoch)) + 1;
+        u128::from(self.per_epoch) * epochs
+    }
+
+    pub fn covers(&self, epoch: u64) -> bool {
+        self.from_epoch <= epoch && epoch <= self.to_epoch
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        if self.funder.is_empty() {
+            return Err(RecordError("availability pool needs a funder".into()));
+        }
+        if self.per_epoch == 0 {
+            return Err(RecordError("availability pool must pay something".into()));
+        }
+        if self.from_epoch > self.to_epoch {
+            return Err(RecordError(
+                "availability pool to_epoch must not precede from_epoch".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<AvailabilityPool, RecordError> {
+        let record = AvailabilityPool {
+            funder: text(value, "funder")?,
+            per_epoch: count(value, "per_epoch")?,
+            from_epoch: count(value, "from_epoch")?,
+            to_epoch: count(value, "to_epoch")?,
+            created_at: text(value, "created_at")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}

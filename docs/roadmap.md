@@ -267,7 +267,7 @@ behaviour ships and is tested, not that TLC has checked it.
       mechanism — it is an accountability one, and it is worth nothing until
       something pays or slashes against it, so it belongs to the next line
       rather than before it.
-- [ ] Pay for seeding. Tit-for-tat covers the download phase and nothing covers
+- [x] **Pay for availability.** Tit-for-tat covers the download phase and nothing covers
       a node that has finished; a swarm of pure leeches transfers nothing. This
       is the availability service in [node-incentives.md](node-incentives.md).
       This is where the seeding *undertaking* from the line above lands: a
@@ -275,13 +275,26 @@ behaviour ships and is tested, not that TLC has checked it.
       sampling then challenges against a published checkpoint. Undertaking and
       settlement have to arrive together — a record nothing pays against is
       bookkeeping, and a payment with no record to challenge is unenforceable.
-      The *challenge* half is built: `proofwork prove <seq>` answers a sample
-      and `proofwork check` verifies the answer against a signed checkpoint
-      without holding the log, in `log2(n)` hashes. Both implementations agree
-      on every proof over the published log, checked in both directions by
-      `scripts/differential.sh`. What remains is the undertaking record and the
-      settlement that reads it — which is the whole of this line, since a
-      challenge nobody is paid to answer is a challenge nobody answers.
+      Both halves are built, in one change because the line says they have to
+      be. An `undertaking` is the signed permanent promise; the challenge is a
+      pure function of the log —
+      `assign(identity, undertaking, beacon(epoch, anchor), height)` — so
+      nobody issues it and nobody can decline to; an `availability` record
+      answers it with an inclusion path; and an `availability_pool` funds a
+      settlement that pays the answers in equal integer shares and names every
+      promise that stayed silent. `proofwork availability
+      [undertake|answer|fund|settle|status]`. Both implementations audit the
+      same log to the same root and refuse the same forged promise, checked by
+      `scripts/differential.sh`.
+
+      Two bounds are stated rather than papered over. The answer proves a node
+      **produced** the challenged entry, not that it **stored** it: fetching it
+      from a peer the moment the epoch opens is not ruled out, and ruling it
+      out needs a time bound or sequential work that Stage 0 does not have. And
+      a fixed pot bounds a funder's cost but does not price identity, so ten
+      identities behind one disk take ten shares — which is what the bond in
+      [node-incentives.md](node-incentives.md) is for, and why Stage 2 lists
+      availability sampling as *bonded*.
 - [x] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [x] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while

@@ -169,5 +169,91 @@ PY
   && fail "the reference accepted an edited entry"
 echo "  both refuse an entry edited under a path that still reaches the root"
 
+rule "availability"
+
+# A real availability log, built by the primary and audited by both. The kinds
+# involved -- undertaking, availability, availability_pool,
+# availability_settlement -- are the newest place the two can drift, and drift
+# here costs money: an auditor that skips a settlement certifies it.
+#
+# This exists because that is exactly what happened. The reference reported
+# `log verified` over a log full of availability settlements it never looked
+# at, which is worse than having no second implementation, because a green
+# result from one that is not looking gets quoted as agreement.
+AVAIL="$WORK/availability"
+mkdir -p "$AVAIL"
+export PROOFWORK_EPOCH_SECONDS=2
+"$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" identity --out "$AVAIL/alice.json" >/dev/null
+"$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" identity --out "$AVAIL/bob.json" >/dev/null
+"$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" post examples/collatz/objective.json >/dev/null
+"$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" availability fund \
+  --funder treasury --per-epoch 7 --from-epoch 0 --to-epoch 4000000000 >/dev/null
+for who in alice bob; do
+  "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" availability undertake \
+    --identity "$AVAIL/$who.json" >/dev/null
+done
+EPOCH=$("$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" availability status \
+  | head -1 | sed 's/epoch \([0-9]*\).*/\1/')
+# Alice answers, Bob does not: the settlement must pay one and name the other,
+# and both implementations must agree about which is which.
+"$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" availability answer \
+  --identity "$AVAIL/alice.json" --epoch "$EPOCH" >/dev/null
+sleep 3
+SETTLED=$("$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" availability settle --epoch "$EPOCH")
+echo "  $SETTLED" | head -1
+case "$SETTLED" in
+  *"1 answered, 1 silent"*) ;;
+  *) fail "the primary did not pay one answer and name one silence: $SETTLED" ;;
+esac
+unset PROOFWORK_EPOCH_SECONDS
+
+"$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit >/dev/null \
+  || fail "the primary does not audit its own availability log"
+"$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit >/dev/null \
+  || fail "the reference rejects an availability log the primary wrote"
+
+# Both must agree on the root, which is the value a checkpoint signs.
+PRIMARY_ROOT=$("$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit | awk '/merkle/{print $2}')
+REFERENCE_ROOT=$("$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit | awk '/merkle/{print $2}')
+[ -n "$PRIMARY_ROOT" ] || fail "the primary printed no root"
+[ "$PRIMARY_ROOT" = "$REFERENCE_ROOT" ] \
+  || fail "roots differ: $PRIMARY_ROOT vs $REFERENCE_ROOT"
+echo "  both audit it clean and agree on $PRIMARY_ROOT"
+
+# And the refuse path: a promise about a root this log never had must be
+# reported by both. Appended by hand-rolling the entry so it never meets
+# `post_undertaking`, which is how a concatenated log would carry one.
+python3 - "$AVAIL/log.jsonl" "$AVAIL/tampered.jsonl" <<'PY'
+import hashlib, json, sys
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+lines = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+# Reuse a real signed undertaking and move it to a root nothing matches. The
+# signature no longer covers the payload, so both implementations should refuse
+# it -- on the signature if they check that first, on the root if they do not.
+promise = next(e["payload"] for e in lines if e["kind"] == "undertaking")
+forged = dict(promise, root="sha256:" + "00" * 32)
+body = {
+    "seq": len(lines),
+    "prev": lines[-1]["hash"],
+    "kind": "undertaking",
+    "payload": forged,
+    "ts": lines[-1]["ts"],
+}
+digest = hashlib.sha256(canonical(body).encode("utf-8")).hexdigest()
+entry = dict(body, hash=f"sha256:{digest}")
+with open(sys.argv[2], "w", encoding="utf-8") as out:
+    for line in lines:
+        out.write(canonical(line) + "\n")
+    out.write(canonical(entry) + "\n")
+PY
+"$RUST" --log "$AVAIL/tampered.jsonl" --root "$AVAIL" audit >/dev/null 2>&1 \
+  && fail "the primary certified a forged undertaking"
+"$REF" --log "$AVAIL/tampered.jsonl" --root "$AVAIL" audit >/dev/null 2>&1 \
+  && fail "the reference certified a forged undertaking"
+echo "  both refuse a forged promise appended past the admission rules"
+
 printf '\n\033[32mDIFFERENTIAL OK: both implementations agree on every record in the corpus\033[0m\n'
 printf '\033[32m  and on every inclusion proof over the published log\033[0m\n'

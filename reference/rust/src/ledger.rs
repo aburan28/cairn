@@ -207,6 +207,26 @@ impl Ledger {
         crate::canonical::merkle_root(&self.leaf_hashes())
     }
 
+    /// The Merkle root over the first `height` entries, or `None` when the log
+    /// is shorter than that.
+    ///
+    /// Shorter is `None` rather than "the root of what there is": a promise
+    /// about a taller log than this one is a promise this copy cannot check,
+    /// and answering it with the root of a prefix would silently agree to the
+    /// wrong question.
+    pub fn root_at(&self, height: usize) -> Option<String> {
+        if self.entries.len() < height {
+            return None;
+        }
+        let leaves: Vec<String> = self
+            .entries
+            .iter()
+            .take(height)
+            .map(|e| e.hash.clone())
+            .collect();
+        crate::canonical::merkle_root(&leaves)
+    }
+
     fn leaf_hashes(&self) -> Vec<String> {
         self.entries.iter().map(|e| e.hash.clone()).collect()
     }

@@ -7,11 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::canonical::{short, Value};
+use crate::canonical::{short, Inclusion, Value};
 use crate::frontier::Ratchet;
 use crate::ledger::Ledger;
-use crate::partition::{epoch_of, epoch_seconds, settlement_rank};
-use crate::records::{signed_submitter, Claim, Commitment, Objective, PeerRecord};
+use crate::partition::{assign, beacon, epoch_of, epoch_seconds, settlement_rank};
+use crate::records::{
+    signed_submitter, Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord,
+    Undertaking, MAX_UNDERTAKING_HEIGHT,
+};
 use crate::time::{timestamp, unix_seconds};
 use crate::verifiers::{self, Status, Verdict};
 
@@ -23,6 +26,10 @@ pub const SETTLEMENT: &str = "settlement";
 pub const FRONTIER: &str = "frontier";
 pub const BATCH: &str = "batch";
 pub const PEER: &str = "peer";
+pub const UNDERTAKING: &str = "undertaking";
+pub const AVAILABILITY: &str = "availability";
+pub const AVAILABILITY_POOL: &str = "availability_pool";
+pub const AVAILABILITY_SETTLEMENT: &str = "availability_settlement";
 
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -195,6 +202,34 @@ impl Node {
             }
         }
         anchor
+    }
+
+    /// Which entry this undertaking must produce in `epoch`.
+    ///
+    /// A pure function of the log: nobody issues this challenge and nobody has
+    /// to receive it, so nobody can decline to. `assign` is reused rather than
+    /// reimplemented because `conformance/vectors.json` pins it, which is what
+    /// makes the two implementations agree about which entry was asked for.
+    ///
+    /// `None` when the height is outside what the format allows. This crate's
+    /// `assign` reduces modulo a `u64` where the primary's takes a `u32`, which
+    /// is a difference that must not become a disagreement: below
+    /// `MAX_UNDERTAKING_HEIGHT` both reduce the same eight MAC bytes modulo the
+    /// same number, and the bound is re-checked here rather than assumed from
+    /// the decoder so the two stay pinned together even if one is called with a
+    /// record the other would not have accepted.
+    fn sampled_index(&self, undertaking: &Undertaking, epoch: u64) -> Option<u64> {
+        if undertaking.height == 0 || undertaking.height > MAX_UNDERTAKING_HEIGHT {
+            return None;
+        }
+        let beacon = beacon(epoch, &self.anchor_of_epoch(epoch, None));
+        assign(
+            &undertaking.identity,
+            &undertaking.id(),
+            &beacon,
+            undertaking.height,
+        )
+        .ok()
     }
 
     fn accepted_claims_by_epoch(&self) -> Vec<(u64, Claim)> {
@@ -699,6 +734,185 @@ impl Node {
             }
         }
 
+        // Availability. Ported because an audit that skips a record kind
+        // certifies it: this crate reported "log verified" over a log full of
+        // availability settlements without checking one of them, which is the
+        // same drift that let `println!` survive here after the primary had
+        // fixed it -- an independent implementation stays honest only where
+        // something compares it.
+        let promises: BTreeMap<String, Undertaking> = self
+            .ledger
+            .entries_of_kind(UNDERTAKING)
+            .into_iter()
+            .filter_map(|entry| Undertaking::from_value(&entry.payload).ok())
+            .filter(|record| record.verify_signature().is_ok())
+            .filter(|record| {
+                usize::try_from(record.height)
+                    .ok()
+                    .and_then(|height| self.ledger.root_at(height))
+                    .as_deref()
+                    == Some(record.root.as_str())
+            })
+            .map(|record| (record.id(), record))
+            .collect();
+
+        for entry in self.ledger.entries_of_kind(UNDERTAKING) {
+            match Undertaking::from_value(&entry.payload) {
+                Err(error) => problems.push(format!("entry {}: {error}", entry.seq)),
+                Ok(record) => {
+                    if let Err(error) = record.verify_signature() {
+                        problems.push(format!("entry {}: {error}", entry.seq));
+                    } else if !promises.contains_key(&record.id()) {
+                        problems.push(format!(
+                            "entry {}: undertaking names {} entries rooted at {}, which no \
+                             prefix of this log is",
+                            entry.seq,
+                            record.height,
+                            short(&record.root)
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut answered: BTreeSet<(String, u64)> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(AVAILABILITY) {
+            let record = match Availability::from_value(&entry.payload) {
+                Ok(record) => record,
+                Err(error) => {
+                    problems.push(format!("entry {}: {error}", entry.seq));
+                    continue;
+                }
+            };
+            if let Err(error) = record.verify_signature() {
+                problems.push(format!("entry {}: {error}", entry.seq));
+                continue;
+            }
+            let Some(promise) = promises.get(&record.undertaking) else {
+                problems.push(format!(
+                    "entry {}: answers undertaking {}, which this log does not hold",
+                    entry.seq,
+                    short(&record.undertaking)
+                ));
+                continue;
+            };
+            // The draw keys on the promiser, so an impostor's path would be
+            // arithmetically right. The rule has to be stated, not derived.
+            if promise.identity != record.identity {
+                problems.push(format!(
+                    "entry {}: {} answered a promise made by {}",
+                    entry.seq,
+                    short(&record.identity),
+                    short(&promise.identity)
+                ));
+                continue;
+            }
+            match self.sampled_index(promise, record.epoch) {
+                None => problems.push(format!(
+                    "entry {}: undertaking {} cannot be sampled",
+                    entry.seq,
+                    short(&record.undertaking)
+                )),
+                Some(index) => {
+                    // The leaf is recomputed from the entry, never taken from
+                    // the answer: a prover who names the leaf can offer an
+                    // internal node instead of one.
+                    let leaf = usize::try_from(index)
+                        .ok()
+                        .and_then(|at| self.ledger.entries().get(at))
+                        .map(|entry| entry.recompute_hash());
+                    let inclusion = Inclusion {
+                        index: usize::try_from(index).unwrap_or(usize::MAX),
+                        leaves: usize::try_from(promise.height).unwrap_or(usize::MAX),
+                        siblings: record.path.clone(),
+                    };
+                    match leaf {
+                        Some(leaf) if inclusion.verify(&leaf, &promise.root) => {}
+                        _ => problems.push(format!(
+                            "entry {}: the path does not put entry {index} under the root \
+                             undertaken by {} (epoch {})",
+                            entry.seq,
+                            short(&record.undertaking),
+                            record.epoch
+                        )),
+                    }
+                }
+            }
+            if !answered.insert((record.undertaking.clone(), record.epoch)) {
+                problems.push(format!(
+                    "entry {}: undertaking {} was already answered for epoch {}",
+                    entry.seq,
+                    short(&record.undertaking),
+                    record.epoch
+                ));
+            }
+        }
+
+        // The money. Every settlement's own arithmetic re-derived, and the
+        // running total against what was funded -- in `u128`, because a wrapped
+        // sum turns an overspent pool into a small number.
+        let pools: Vec<AvailabilityPool> = self
+            .ledger
+            .entries_of_kind(AVAILABILITY_POOL)
+            .into_iter()
+            .filter_map(|entry| AvailabilityPool::from_value(&entry.payload).ok())
+            .collect();
+        let funded = pools
+            .iter()
+            .fold(0u128, |total, pool| total.saturating_add(pool.ceiling()));
+        let offered = |epoch: u64| -> u128 {
+            pools
+                .iter()
+                .filter(|pool| pool.covers(epoch))
+                .fold(0u128, |total, pool| {
+                    total.saturating_add(u128::from(pool.per_epoch))
+                })
+        };
+        let mut spent_total = 0u128;
+        for entry in self.ledger.entries_of_kind(AVAILABILITY_SETTLEMENT) {
+            let read = |name: &str| entry.payload.get(name).and_then(Value::as_i128);
+            let count = entry
+                .payload
+                .get("paid")
+                .and_then(Value::as_array)
+                .map(<[Value]>::len)
+                .unwrap_or(0) as u128;
+            let (Some(share), Some(unpaid), Some(epoch)) = (
+                read("share"),
+                read("unpaid"),
+                entry.payload.get("epoch").and_then(Value::as_u64),
+            ) else {
+                problems.push(format!(
+                    "entry {}: availability settlement is missing share, unpaid or epoch",
+                    entry.seq
+                ));
+                continue;
+            };
+            if share < 0 || unpaid < 0 {
+                problems.push(format!(
+                    "entry {}: availability settlement has a negative amount",
+                    entry.seq
+                ));
+                continue;
+            }
+            let spent = (share as u128).saturating_mul(count);
+            spent_total = spent_total.saturating_add(spent);
+            let accounted = spent.saturating_add(unpaid as u128);
+            if accounted != offered(epoch) {
+                problems.push(format!(
+                    "entry {}: epoch {epoch} offered {} but the settlement accounts for \
+                     {accounted}",
+                    entry.seq,
+                    offered(epoch)
+                ));
+            }
+        }
+        if spent_total > funded {
+            problems.push(format!(
+                "availability pool overspent: {spent_total} paid against {funded} funded"
+            ));
+        }
+
         // Every verdict record must be readable. This is structural, not a
         // re-run: a verdict naming no claim, or carrying a status no
         // implementation recognises, is a malformed log whether or not this
@@ -1199,4 +1413,108 @@ fn unsettled(claim_id: String, verdict: Verdict, note: &str) -> Outcome {
 /// Now, for callers that do not want to import the time module.
 pub fn now() -> String {
     timestamp()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::records::Undertaking;
+
+    const TS: &str = "2026-07-28T00:00:00+00:00";
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path =
+            std::env::temp_dir().join(format!("pw-ref-{tag}-{}-{nanos}-{n}", std::process::id()));
+        std::fs::create_dir_all(&path).expect("scratch");
+        path
+    }
+
+    /// The audit really checks these records, rather than reporting clean over
+    /// a kind it skips.
+    ///
+    /// This test exists because that is exactly what this crate did when the
+    /// records were first added on the primary side: it printed *log verified*
+    /// over a log full of availability settlements without checking one of
+    /// them. A green audit from an implementation that is not looking is worse
+    /// than no second implementation at all, because it is quoted as agreement.
+    #[test]
+    fn the_audit_is_not_vacuous_about_availability() {
+        let dir = scratch("availability");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        ledger
+            .append("note", Value::string("one"), TS)
+            .expect("append");
+        ledger
+            .append("note", Value::string("two"), TS)
+            .expect("append");
+        let root = ledger.root_at(2).expect("root");
+
+        // A *genuinely signed* undertaking, lifted from a log the primary
+        // implementation wrote, naming a root that is not a prefix root of
+        // this log. Signed matters: an unsigned record is reported for its
+        // signature and the loop moves on, so it would never reach the root
+        // check -- and this crate cannot sign, by design. Borrowing a real
+        // record from the other implementation is the honest way to exercise
+        // the branch, and it doubles as a decode test against its bytes.
+        const SIGNED: &str = r#"{"created_at":"2026-08-06T15:35:22+00:00","height":2,"identity":"bee6e7dca0b328454bcb7b23475cb080d220c5a416168b051a47d76700dec386","root":"sha256:8fc854636ab4a4b63fd04b95cd837202a39c81b71f4c29e4c563e59508ae513c","signature":"2de2e015e147e43428491baa40a8dbe5b906b6187ebb90e30e65af7997490679c2e43b3edd81f4ca88768622e6f1309d890c2a23fb662e0603524ccee36a7507","type":"undertaking"}"#;
+        let borrowed = Value::from_json(SIGNED).expect("the fixture is canonical JSON");
+        let decoded = Undertaking::from_value(&borrowed).expect("and it decodes here");
+        decoded
+            .verify_signature()
+            .expect("and its signature verifies in this implementation too");
+        ledger.append(UNDERTAKING, borrowed, TS).expect("append");
+
+        // A settlement whose arithmetic does not close, and which pays out of a
+        // pool nobody funded.
+        ledger
+            .append(
+                AVAILABILITY_SETTLEMENT,
+                Value::object([
+                    ("epoch", Value::Int(0)),
+                    ("anchor", Value::string("")),
+                    (
+                        "paid",
+                        Value::Array(vec![Value::object([
+                            ("identity", Value::string("cd".repeat(32))),
+                            ("reward", Value::Int(500)),
+                            ("undertaking", Value::string("x")),
+                        ])]),
+                    ),
+                    ("silent", Value::Array(Vec::new())),
+                    ("share", Value::Int(500)),
+                    ("unpaid", Value::Int(0)),
+                ]),
+                TS,
+            )
+            .expect("append");
+
+        let node = Node::new(ledger, ".");
+        let problems = node.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("no prefix of this log is")),
+            "a signed promise about a root this log never had went unreported: {problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("overspent")),
+            "the unfunded payout went unreported: {problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("accounts for")),
+            "the arithmetic mismatch went unreported: {problems:?}"
+        );
+        // And the check is not simply always-failing: this log's own root at
+        // that height is a value the same code path accepts.
+        assert_eq!(node.ledger.root_at(2).as_deref(), Some(root.as_str()));
+        assert_ne!(root, decoded.root, "the fixture must name a different root");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
