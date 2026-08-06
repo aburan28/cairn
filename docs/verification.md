@@ -214,10 +214,45 @@ interpreter directly, by design — it exists to be an independent second opinio
 on the *rules*, not a hardened node — and `reference/rust/src/verifiers.rs` says
 so in those words. Do not point it at an objective you have not read.
 
-It now implements `certificate`, `evaluator`, `statistical` and `replay`.
-`lean` is the one it does not, and the gap is named rather than silent: a kind
-an implementation lacks answers `Unavailable` for every claim, which is correct
-— `Unavailable` is never `Reject` — and used to be skipped by the audit without
-comment, so an entire kind could have no cross-implementation coverage while
-every run reported full coverage. Both audits now report a *settled* claim they
-cannot re-verify, so the hole is loud.
+It implements **every kind the primary settles**: `certificate`, `evaluator`,
+`statistical`, `replay` and `lean`. That list was shorter for a long time, and
+the way it stayed short is the point. A kind an implementation lacks answers
+`Unavailable` for every claim — which is *correct*, since `Unavailable` is never
+`Reject` — and the audit used to skip non-settling statuses without comment. So
+an entire kind could have no cross-implementation coverage at all while every
+run reported full coverage: two correct behaviours composing into a hole.
+
+Three things now keep it closed.
+
+**Both audits report any settled verdict they cannot re-derive.** Not only the
+paid ones. Reporting only payments was the first version and it left the same
+hole one rung down: a `reject` never pays, so a rejection no other node could
+reproduce passed every audit in silence. That is the worse direction of the
+two. A payment somebody will eventually contest; a rejected submitter has no
+money to point at and no way to show the rejection was not reproducible.
+Censorship that leaves no trace in any audit is precisely what re-derivation
+exists to prevent. An `unavailable` the log never settled is still skipped —
+nothing was claimed then and nothing is claimed now.
+
+**One list of kinds, not two.** `verifiers::KINDS` is what the reference
+consults when deciding whether it can post an objective. There used to be a
+second list inside `node.rs`, and it still named `certificate` and `evaluator`
+long after three more kinds were implemented — so the crate refused to post
+objectives it could verify perfectly well, and interop could only ever drive
+those kinds in one direction.
+
+**A test walks the list** and fails on a kind that is advertised but not
+dispatched, with the primary's kinds spelled out separately so that dropping
+one from both places at once still fails.
+
+And `scripts/interop.sh` drives a `lean` rejection through both implementations
+in both directions. It needs no Lean toolchain — a proof containing `sorry` is
+screened before the toolchain is ever looked for — so it runs on any host, and
+it fails if the `lean` arm is removed from either dispatcher.
+
+`lean` needs a Lean toolchain, which is not a build dependency of this crate: a
+node without one answers `Unavailable`, which is the honest answer. The verdict
+rules — a non-zero exit is a real `Reject` because the exit code *is* the
+kernel's answer, a signal kill is not, and a clean exit that warns about `sorry`
+is still a rejection — are tested against a stand-in binary, because what needs
+checking is how an exit code maps to a verdict, and that does not need a kernel.

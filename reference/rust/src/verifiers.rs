@@ -1,4 +1,11 @@
-//! Pinned verifiers: certificate and evaluator.
+//! Pinned verifiers: `certificate`, `evaluator`, `statistical`, `replay`, `lean`.
+//!
+//! Every kind the primary implementation settles, so that a claim it settled
+//! can be re-derived here rather than skipped. A kind missing from this list
+//! answers `Unavailable`, which settles nothing and is correct -- and is
+//! exactly how a kind can end up with no cross-implementation coverage while
+//! every audit reports success. `every_kind_the_primary_settles_is_implemented_here`
+//! is the test that stops the list going stale.
 //!
 //! A verifier is objective-authored code pinned by SHA-256. The hash is
 //! checked *before* the code runs, so editing a checker does not silently
@@ -245,12 +252,26 @@ print(json.dumps({"ok": func(artifact) if seed is None else func(artifact, seed)
         .ok_or_else(|| Verdict::plain(Status::Unavailable, "verifier returned nothing".to_string()))
 }
 
+/// Every kind this crate can verify.
+///
+/// One list, because two lists become two different lists. There used to be a
+/// second one in `node.rs` deciding which objectives could be *posted*, and it
+/// still named only `certificate` and `evaluator` long after three more kinds
+/// were implemented -- so this crate could verify a kind it refused to accept,
+/// and the interop script could only ever drive those kinds in one direction.
+pub const KINDS: &[&str] = &["certificate", "evaluator", "statistical", "replay", "lean"];
+
+pub fn implements(kind: &str) -> bool {
+    KINDS.contains(&kind)
+}
+
 pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
     match spec.get("kind").and_then(Value::as_str) {
         Some("certificate") => certificate(root, spec, artifact),
         Some("evaluator") => evaluator(root, spec, artifact),
         Some("statistical") => statistical(root, spec, artifact),
         Some("replay") => replay(root, spec, artifact),
+        Some("lean") => lean(root, spec, artifact),
         // An unknown kind says nothing about the artifact: another node may
         // well implement it.
         Some(other) => Verdict::plain(
@@ -292,6 +313,227 @@ fn certificate(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
             }
         }
         _ => Verdict::plain(Status::Unavailable, "checker returned a non-boolean"),
+    }
+}
+
+/// Tokens that disqualify a Lean proof before the kernel is ever asked.
+///
+/// Each is a hole or a trust escalation, and screening is cheap while running
+/// Lean is not. `(token, whole_word, why)`; `@[implemented_by` is matched as a
+/// bare substring because `[` is not a word character.
+const SCREENS: &[(&str, bool, &str)] = &[
+    (
+        "sorry",
+        true,
+        "contains `sorry`: an explicit hole, proves nothing",
+    ),
+    (
+        "admit",
+        true,
+        "contains `admit`: an explicit hole, proves nothing",
+    ),
+    (
+        "axiom",
+        true,
+        "declares an axiom: adds a trusted assumption",
+    ),
+    (
+        "@[implemented_by",
+        false,
+        "uses `@[implemented_by]`: replaces a definition with unverified code",
+    ),
+];
+
+/// Screened unless the objective explicitly opts in.
+const NATIVE_DECIDE: (&str, bool, &str) = (
+    "native_decide",
+    true,
+    "uses `native_decide`: trusts the compiler, not the kernel",
+);
+
+/// A per-process-unique suffix for a scratch directory.
+///
+/// Not a hash of the input: two verifications running at once with the same
+/// source would collide, and the loser's directory is deleted out from under it
+/// on the winner's cleanup. A counter cannot repeat within a process, and the
+/// pid separates processes.
+fn next_scratch() -> u64 {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Whole-word containment, by hand.
+///
+/// No regex crate here, and that is the right call twice over: this is a
+/// second opinion that should share as few dependencies as possible with the
+/// primary, and a regex engine pointed at submitter-controlled text is itself
+/// an attack surface.
+///
+/// A word byte is ASCII alphanumeric or `_`; anything above 0x7f counts as
+/// *non*-word. That can only make a screen fire more often, never less, which
+/// is the safe direction: an over-eager screen rejects a proof that can be
+/// rewritten, an under-eager one accepts a `sorry` and mints money.
+fn contains_word(text: &str, token: &str) -> bool {
+    let (bytes, needle) = (text.as_bytes(), token.as_bytes());
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut at = 0;
+    while let Some(found) = text[at..].find(token) {
+        let start = at + found;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !word(bytes[start - 1]);
+        let after_ok = end == bytes.len() || !word(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        at = start + 1;
+        if at >= text.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// A Lean kernel accepted the proof.
+///
+/// The last kind this crate could not check. Spawning a toolchain adds no
+/// dependency -- it already spawns `python3` -- so "needs Lean" was never a
+/// reason to leave the gap, only a reason a node without Lean answers
+/// `Unavailable`, which is correct and now visible rather than silent.
+///
+/// **No jail here**, as with `replay`, and the warning is the same: Lean
+/// elaboration runs arbitrary code through macros and `#eval`, half the input
+/// is submitter-controlled, and this crate is an opinion on the rules rather
+/// than a hardened node.
+///
+/// The verdict rules are the format and are all kept. The one that is easy to
+/// get backwards: a **non-zero exit is a real `Reject`**, uniquely here,
+/// because the exit code *is* the kernel's answer. Everywhere else in this
+/// crate a non-zero exit is infrastructure and settles nothing. And a *clean*
+/// exit is not sufficient -- Lean warns rather than errors when a declaration
+/// depends on `sorryAx`, so the output is searched for it.
+fn lean(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
+    let binary = std::env::var("PROOFWORK_LEAN").unwrap_or_else(|_| String::from("lean"));
+    lean_using(&binary, root, spec, artifact)
+}
+
+/// `lean`, with the toolchain named explicitly.
+///
+/// Split out so the tests can drive every verdict branch -- including "no
+/// toolchain" and "the kernel said no" -- without touching a process-global
+/// environment variable that a concurrently running test would race on.
+fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verdict {
+    let Some(statement) = spec
+        .get("statement")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return Verdict::plain(Status::InvalidSpec, "lean spec needs a 'statement'");
+    };
+    let Some(proof) = artifact
+        .get("proof")
+        .and_then(Value::as_str)
+        .filter(|p| !p.trim().is_empty())
+    else {
+        return Verdict::plain(Status::Reject, "artifact has no 'proof' text");
+    };
+
+    // Fails closed: only an explicit `true` opts in, so a malformed spec gets
+    // the *stricter* treatment rather than a looser one.
+    let allow_native_decide = matches!(spec.get("allow_native_decide"), Some(Value::Bool(true)));
+    let mut screens: Vec<&(&str, bool, &str)> = SCREENS.iter().collect();
+    if !allow_native_decide {
+        screens.push(&NATIVE_DECIDE);
+    }
+    for (token, whole_word, why) in screens {
+        let hit = if *whole_word {
+            contains_word(proof, token)
+        } else {
+            proof.contains(token)
+        };
+        if hit {
+            return Verdict::plain(Status::Reject, *why);
+        }
+    }
+
+    // Attacker-authored, and the primary hands it to the jail as a *writable*
+    // bind -- so unconfined, `"/"` would be a pass-through of the filesystem.
+    // Screened before the toolchain lookup: a malformed spec is malformed
+    // whether or not this node has Lean.
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let project_cwd = match spec.get("project_root").and_then(Value::as_str) {
+        Some(relative) if !relative.is_empty() => {
+            let joined = normalize(&canonical_root.join(relative));
+            if !joined.starts_with(&canonical_root) {
+                return Verdict::plain(
+                    Status::InvalidSpec,
+                    format!("project_root escapes the objective root: {relative}"),
+                );
+            }
+            Some(joined)
+        }
+        _ => None,
+    };
+
+    let preamble = spec.get("preamble").and_then(Value::as_str).unwrap_or("");
+    let source = format!("{preamble}\n{statement} {proof}\n");
+
+    let dir = std::env::temp_dir().join(format!(
+        "proofwork-reference-lean-{}-{}",
+        std::process::id(),
+        next_scratch()
+    ));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return Verdict::plain(Status::Unavailable, "cannot create a working directory");
+    }
+    let claim = dir.join("Claim.lean");
+    if std::fs::write(&claim, source.as_bytes()).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Verdict::plain(Status::Unavailable, "cannot write the Lean source");
+    }
+    let cwd = project_cwd.unwrap_or_else(|| dir.clone());
+
+    let output = Command::new(binary).arg(&claim).current_dir(&cwd).output();
+    let _ = std::fs::remove_dir_all(&dir);
+    let output = match output {
+        Ok(output) => output,
+        // No toolchain is a fact about this node, never about the proof.
+        Err(error) => {
+            return Verdict::plain(
+                Status::Unavailable,
+                format!("'{binary}' not on PATH ({error}); install a Lean toolchain to verify"),
+            )
+        }
+    };
+
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let evidence = Value::object([(
+        "returncode",
+        match output.status.code() {
+            Some(code) => Value::Int(i128::from(code)),
+            None => Value::Null,
+        },
+    )]);
+    match output.status.code() {
+        // The one place a non-zero exit is a verdict: it is the kernel's answer.
+        Some(code) if code != 0 => {
+            Verdict::new(Status::Reject, "lean rejected the proof", evidence)
+        }
+        // Killed by a signal -- OOM, or an operator. A fact about this node.
+        None => Verdict::new(
+            Status::Unavailable,
+            "lean was killed by a signal; that is a fact about this node, not the proof",
+            evidence,
+        ),
+        // Lean *warns* rather than errors on a declaration that depends on
+        // `sorryAx`, so a clean exit code is not sufficient on its own.
+        Some(_) if text.contains("declaration uses 'sorry'") => {
+            Verdict::new(Status::Reject, "proof depends on sorryAx", evidence)
+        }
+        Some(_) => Verdict::new(Status::Accept, "kernel accepted the proof", evidence),
     }
 }
 
@@ -775,23 +1017,245 @@ mod tests {
     fn every_kind_the_primary_settles_is_implemented_here() {
         // The gap this crate kept having: a kind it does not implement answers
         // `Unavailable` for every claim, which is correct and settles nothing,
-        // and the audit used to skip it silently. `lean` is the one that
-        // remains -- it needs a proof-assistant toolchain -- and it is named
-        // here so the list cannot quietly grow.
-        let unimplemented = ["lean"];
-        for kind in ["certificate", "evaluator", "statistical", "replay"] {
-            let spec = Value::object([("kind", Value::string(kind))]);
+        // and the audit used to skip it silently. The list is now empty, and
+        // this test is what stops it growing again: a kind added to the primary
+        // and not to this crate fails here rather than passing quietly.
+        // The control. Without it the loop below is a check that cannot fail:
+        // reword the not-registered message and every `assert_ne!` passes
+        // whether or not the kind is dispatched.
+        let unknown = Value::object([("kind", Value::string("no-such-kind"))]);
+        let missing = run(Path::new("."), &unknown, &empty());
+        assert_eq!(
+            missing.detail, "no verifier registered for kind \"no-such-kind\"",
+            "the not-registered message moved; the loop below no longer detects anything"
+        );
+        assert_eq!(missing.status, Status::Unavailable);
+
+        for kind in KINDS {
+            let spec = Value::object([("kind", Value::string(*kind))]);
             let verdict = run(Path::new("."), &spec, &empty());
             assert_ne!(
                 verdict.detail,
                 format!("no verifier registered for kind {kind:?}"),
-                "{kind} is no longer dispatched"
+                "{kind} is advertised in KINDS but not dispatched"
+            );
+            assert!(implements(kind));
+        }
+
+        // The primary's kinds, spelled out rather than read from `KINDS`.
+        // Reading them from the same constant would make the check circular:
+        // drop a kind from `KINDS` and from `run` together and it would still
+        // pass while the audit went quietly back to skipping that kind.
+        for kind in ["certificate", "evaluator", "statistical", "replay", "lean"] {
+            assert!(
+                implements(kind),
+                "the primary settles {kind} and this crate no longer claims to"
             );
         }
-        for kind in unimplemented {
-            let spec = Value::object([("kind", Value::string(kind))]);
-            let verdict = run(Path::new("."), &spec, &empty());
-            assert_eq!(verdict.status, Status::Unavailable);
+    }
+
+    // -- lean ---------------------------------------------------------------
+
+    /// A binary name no PATH lookup can satisfy.
+    ///
+    /// Every screen that must fire *before* the toolchain is consulted is
+    /// tested against this: if the check moved below the lookup, the verdict
+    /// would come back `Unavailable` instead, and the assertion fails.
+    const NO_LEAN: &str = "proofwork-no-such-lean-anywhere";
+
+    fn lean_spec(pairs: Vec<(&'static str, Value)>) -> Value {
+        let mut all = vec![
+            ("kind", Value::string("lean")),
+            ("statement", Value::string("theorem t : True")),
+        ];
+        for (key, value) in pairs {
+            all.retain(|(existing, _)| *existing != key);
+            all.push((key, value));
         }
+        Value::object(all)
+    }
+
+    fn proof(text: &str) -> Value {
+        Value::object([("proof", Value::string(text))])
+    }
+
+    #[test]
+    fn a_hole_or_an_escalation_is_rejected_before_lean_is_ever_run() {
+        // Each of these proves the theorem to a reader who is not looking. The
+        // screens are cheap and Lean is not, so they run first -- and because
+        // the toolchain here does not exist, an `Unavailable` would mean the
+        // screen had silently moved below the lookup.
+        for hole in [
+            ":= by sorry",
+            ":= by admit",
+            "axiom cheat : True",
+            ":= by decide\n@[implemented_by fastPath] def slow := 1",
+        ] {
+            let verdict = lean_using(NO_LEAN, root(), &lean_spec(vec![]), &proof(hole));
+            assert_eq!(
+                verdict.status,
+                Status::Reject,
+                "{hole:?}: {}",
+                verdict.detail
+            );
+        }
+    }
+
+    #[test]
+    fn native_decide_is_screened_unless_the_objective_explicitly_opts_in() {
+        let native = proof(":= by native_decide");
+
+        let closed = lean_using(NO_LEAN, root(), &lean_spec(vec![]), &native);
+        assert_eq!(closed.status, Status::Reject, "{}", closed.detail);
+
+        // Only a real boolean `true` opts in. A truthy-looking `1` or the
+        // string "true" must get the *stricter* treatment: a malformed spec is
+        // not consent to trust the compiler instead of the kernel.
+        for not_true in [Value::Int(1), Value::string("true"), Value::Bool(false)] {
+            let spec = lean_spec(vec![("allow_native_decide", not_true.clone())]);
+            let verdict = lean_using(NO_LEAN, root(), &spec, &native);
+            assert_eq!(
+                verdict.status,
+                Status::Reject,
+                "{} opted in to native_decide",
+                not_true.canonical_string()
+            );
+        }
+
+        // With the opt-in, the screen no longer fires -- so the run gets as far
+        // as looking for a toolchain, and stops there.
+        let opted_in = lean_using(
+            NO_LEAN,
+            root(),
+            &lean_spec(vec![("allow_native_decide", Value::Bool(true))]),
+            &native,
+        );
+        assert_eq!(opted_in.status, Status::Unavailable, "{}", opted_in.detail);
+    }
+
+    #[test]
+    fn a_screened_token_inside_a_longer_word_is_not_a_hit() {
+        // `sorry` and `admit` are screened as whole words. A lemma named
+        // `sorryFree` or a definition about `admittance` is not a hole, and an
+        // over-eager screen would make honest proofs unverifiable while
+        // teaching submitters to rename around it.
+        for innocent in [
+            ":= by exact sorryFree",
+            ":= by exact unsorry_lemma",
+            ":= by exact admittance",
+            ":= by exact Nat.axiomatic",
+        ] {
+            let verdict = lean_using(NO_LEAN, root(), &lean_spec(vec![]), &proof(innocent));
+            assert_eq!(
+                verdict.status,
+                Status::Unavailable,
+                "{innocent:?} was screened: {}",
+                verdict.detail
+            );
+        }
+    }
+
+    #[test]
+    fn a_project_root_that_escapes_the_objective_root_is_refused() {
+        // The primary hands `project_root` to the jail as a *writable* bind, so
+        // `"/"` unconfined is a pass-through of the filesystem. It is
+        // attacker-authored like every other spec field, and a malformed spec
+        // is malformed whether or not this node has Lean -- hence checked
+        // before the lookup.
+        for escape in ["..", "../..", "/etc"] {
+            let spec = lean_spec(vec![("project_root", Value::string(escape))]);
+            let verdict = lean_using(NO_LEAN, root(), &spec, &proof(":= trivial"));
+            assert_eq!(
+                verdict.status,
+                Status::InvalidSpec,
+                "project_root {escape:?} was allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_statement_is_a_spec_defect_and_a_missing_proof_is_a_rejection() {
+        // The asymmetry is the point. The statement belongs to the objective:
+        // without it there is nothing to prove and the objective is broken. The
+        // proof belongs to the submitter: an empty one is a claim that failed.
+        for bad in [Value::string("   "), Value::Int(7)] {
+            let spec = lean_spec(vec![("statement", bad)]);
+            let verdict = lean_using(NO_LEAN, root(), &spec, &proof(":= trivial"));
+            assert_eq!(verdict.status, Status::InvalidSpec, "{}", verdict.detail);
+        }
+        for bad in [empty(), proof(""), proof("  \n ")] {
+            let verdict = lean_using(NO_LEAN, root(), &lean_spec(vec![]), &bad);
+            assert_eq!(verdict.status, Status::Reject, "{}", verdict.detail);
+        }
+    }
+
+    #[test]
+    fn no_toolchain_settles_nothing() {
+        // A node without Lean has no opinion. Reporting `Reject` here would let
+        // anyone refute every proof on the network by uninstalling something.
+        let verdict = lean_using(NO_LEAN, root(), &lean_spec(vec![]), &proof(":= trivial"));
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+    }
+
+    /// A stand-in for `lean` that prints `says` and exits `code`.
+    ///
+    /// Real Lean is not a build dependency of this crate, and waiting on one
+    /// would leave the verdict branches -- the part that decides who gets paid
+    /// -- untested. What is under test is how an exit code and some output map
+    /// to a verdict, and that does not need a kernel.
+    #[cfg(unix)]
+    fn fake_lean(tag: &str, code: i32, says: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "proofwork-reference-fakelean-{}-{tag}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("lean");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s' \"{says}\"\nexit {code}\n"),
+        )
+        .expect("write the stand-in");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    #[cfg(unix)]
+    fn with_fake_lean(tag: &str, code: i32, says: &str) -> Verdict {
+        let binary = fake_lean(tag, code, says);
+        let verdict = lean_using(
+            binary.to_str().expect("utf-8 path"),
+            root(),
+            &lean_spec(vec![]),
+            &proof(":= trivial"),
+        );
+        let _ = std::fs::remove_dir_all(binary.parent().expect("parent"));
+        verdict
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_exit_code_is_the_kernels_answer() {
+        // Uniquely for this kind, a non-zero exit is a real `Reject` rather
+        // than an infrastructure fact: Lean's exit code *is* its answer about
+        // this proof. Everywhere else in this file a non-zero exit settles
+        // nothing.
+        let rejected = with_fake_lean("nonzero", 1, "error: unsolved goals");
+        assert_eq!(rejected.status, Status::Reject, "{}", rejected.detail);
+
+        let accepted = with_fake_lean("zero", 0, "");
+        assert_eq!(accepted.status, Status::Accept, "{}", accepted.detail);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_exit_that_warns_about_sorry_is_still_a_rejection() {
+        // Lean *warns* rather than errors when a declaration depends on
+        // `sorryAx` -- reached through an import or the preamble, where the
+        // text screens cannot see it. Trusting the exit code alone would accept
+        // a proof of nothing.
+        let verdict = with_fake_lean("warns", 0, "warning: declaration uses 'sorry'");
+        assert_eq!(verdict.status, Status::Reject, "{}", verdict.detail);
     }
 }

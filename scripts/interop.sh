@@ -37,7 +37,9 @@ tick() { sleep 1.1; }
 A=$(mktemp -u /tmp/pw-interop-rust-XXXXXX.jsonl)
 B=$(mktemp -u /tmp/pw-interop-ref-XXXXXX.jsonl)
 C=$(mktemp -u /tmp/pw-interop-min-XXXXXX.jsonl)
-trap 'rm -f "$A" "$B" "$C"' EXIT
+D=$(mktemp -u /tmp/pw-interop-lean-XXXXXX.jsonl)
+E=$(mktemp -u /tmp/pw-interop-lean2-XXXXXX.jsonl)
+trap 'rm -f "$A" "$B" "$C" "$D" "$E"' EXIT
 
 # --- the primary writes, the reference reads ------------------------------
 rule "Rust produces a log"
@@ -90,6 +92,43 @@ MIN_VIEW=$("$REF" --log "$C" --root . audit)
 echo "$MIN_VIEW"
 echo "$MIN_VIEW" | grep -q "log verified" \
   || fail "the reference could not verify a minimize objective the primary settled"
+
+# --- a lean rejection, which needs no Lean toolchain to reproduce ----------
+#
+# `lean` was the last kind the reference implementation did not implement, and
+# a kind an implementation lacks answers `Unavailable` for every claim -- which
+# is correct, settles nothing, and used to be skipped by the audit in silence.
+# So the kind with the least coverage was the one whose absence was hardest to
+# notice.
+#
+# This round closes it without either side needing a proof assistant. A proof
+# containing `sorry` is screened *before* the toolchain is ever looked for, so
+# both implementations must record and re-derive the same `reject` on any host.
+# It is a real cross-implementation check on the kind, not a stand-in: remove
+# the `lean` arm from either dispatcher and this fails.
+#
+# Nothing settles, deliberately. A rejection pays nobody, and an audit that
+# only re-checks what was *paid* would let a rejection nobody else can
+# reproduce pass in silence -- the same hole one rung down. Both audits now
+# report any settled verdict they cannot re-derive, paid or not, which is what
+# gives this round its teeth.
+rule "a lean rejection: reproduced by the implementation that did not record it"
+for pair in "$RUST|$REF|the reference|$D" "$REF|$RUST|the primary|$E"; do
+  IFS='|' read -r WRITER READER WHO LOG <<< "$pair"
+  LEAN_OID=$("$WRITER" --log "$LOG" --root . post examples/lean/objective.json \
+    | head -1 | awk '{print $2}')
+  "$WRITER" --log "$LOG" --root . commit "$LEAN_OID" --submitter mallory \
+      --artifact examples/lean/hole.json --nonce n4 >/dev/null
+  tick
+  VERDICT=$("$WRITER" --log "$LOG" --root . reveal "$LEAN_OID" --submitter mallory \
+      --artifact examples/lean/hole.json --nonce n4)
+  echo "$VERDICT" | grep -q "reject" \
+    || fail "a proof containing \`sorry\` was not rejected: $VERDICT"
+  LEAN_VIEW=$("$READER" --log "$LOG" --root . audit)
+  echo "$LEAN_VIEW"
+  echo "$LEAN_VIEW" | grep -q "log verified" \
+    || fail "$WHO could not re-derive a lean rejection"
+done
 
 rule "the primary implementation audits the reference log"
 RUST_VIEW=$($RUST --log "$B" --root . audit)

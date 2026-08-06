@@ -1399,17 +1399,40 @@ impl Node {
                 }
             };
             let fresh = self.registry.run(&objective.verifier, &claim.artifact);
+            let was = status_of(recorded_verdict).unwrap_or("(unreadable)");
             if !fresh.settles() {
+                // This node cannot re-derive the verdict. Whether that is worth
+                // reporting is decided by what the *log* recorded, not by what
+                // this node happens to be able to run:
+                //
+                // * The log recorded `unavailable` too -- nothing was ever
+                //   claimed about the artifact, and nothing is claimed now.
+                // * The log settled the claim. The audit's own summary line is
+                //   "every settled claim re-verified", and it is now false.
+                //
+                // The second case used to be reported only when the claim had
+                // also been *paid*, which left a real hole: a `reject` never
+                // pays, so a rejection nobody else could reproduce passed every
+                // audit in silence. That is the worse direction of the two. A
+                // payment somebody will contest; a rejected submitter has no
+                // money to point at and no way to show the rejection was not
+                // reproducible. Censorship that leaves no trace in any audit is
+                // exactly what re-derivation is supposed to prevent.
                 if paid.contains(claim_id.as_str()) {
                     problems.push(format!(
                         "claim {claim_id}: was settled but can no longer be re-verified \
                          ({}: {})",
                         fresh.status, fresh.detail
                     ));
+                } else if Status::from_wire(was).is_some_and(|status| status.settles()) {
+                    problems.push(format!(
+                        "claim {claim_id}: recorded {was} but can no longer be re-verified \
+                         ({}: {})",
+                        fresh.status, fresh.detail
+                    ));
                 }
                 continue;
             }
-            let was = status_of(recorded_verdict).unwrap_or("(unreadable)");
             if fresh.status.as_str() != was {
                 problems.push(format!(
                     "claim {claim_id}: recorded {was}, re-verification says {}",
@@ -3173,6 +3196,40 @@ mod tests {
             problems
                 .iter()
                 .any(|p| p.contains("no longer be re-verified")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn audit_reports_a_rejection_it_cannot_reproduce_even_though_nobody_was_paid() {
+        // A `reject` never pays, so gating this report on "was it settled?"
+        // left rejections entirely unaudited: a node could refuse a claim on a
+        // verdict no other node could reproduce, and every audit anywhere would
+        // still print "every settled claim re-verified". Censorship with no
+        // trace, which is the failure re-derivation exists to prevent -- and
+        // worse than the paid case, because a rejected submitter has no
+        // payment to point at.
+        let dir = TempDir::new("audit-unverifiable-reject");
+        let mut node = node(&dir);
+        let objective = lean_objective(10);
+        node.post_objective(&objective, TS).expect("post");
+        // Recorded REJECT and never settled. The proof has no hole, so no
+        // screen fires and re-verification needs a toolchain this node lacks.
+        plant(
+            &mut node,
+            &objective,
+            "alice",
+            proof(":= by trivial"),
+            "n1",
+            Status::Reject,
+            None,
+        );
+
+        let problems = node.audit(true);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("recorded reject but can no longer be re-verified")),
             "{problems:?}"
         );
     }

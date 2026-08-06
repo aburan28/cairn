@@ -263,9 +263,15 @@ impl Node {
         let kind = objective
             .verifier_kind()
             .ok_or("objective needs a verifier with a 'kind'")?;
-        if !["certificate", "evaluator"].contains(&kind) {
+        // Asked of the verifier module rather than answered from a list kept
+        // here. The list kept here went stale -- it still named two kinds after
+        // three more were implemented, so this crate refused to post
+        // objectives it could verify perfectly well, and every interop round
+        // for those kinds could only run in one direction.
+        if !verifiers::implements(kind) {
             return Err(format!(
-                "this reference implements certificate and evaluator; kind {kind:?} is not one"
+                "this reference implements {}; kind {kind:?} is not one",
+                verifiers::KINDS.join(", ")
             ));
         }
         let id = objective.id();
@@ -779,15 +785,31 @@ impl Node {
                 // run still reported "every settled claim re-verified". Correct
                 // behaviours composing into a false statement.
                 //
-                // So: skipped is fine for a claim that was never paid, and a
-                // problem for one that was. Money moved on a verdict this node
-                // cannot reproduce, and an audit that does not say so is
-                // claiming coverage it does not have.
+                // So: skipped is fine for a verdict the log did not settle
+                // either, and a problem for one it did. The summary line says
+                // "every settled claim re-verified"; if that cannot be done,
+                // the line is false and the audit has to say so.
+                //
+                // Gating this on *payment* was the first version and it left a
+                // hole one rung down: a `reject` never pays, so a rejection no
+                // other node could reproduce passed every audit in silence.
+                // That is the worse direction. A payment somebody will
+                // eventually contest; a rejected submitter has no money to
+                // point at and no way to show the rejection was not
+                // reproducible.
                 if !fresh.status.settles() {
                     if paid.contains(claim_id) {
                         problems.push(format!(
                             "claim {}: was settled but can no longer be re-verified ({}: {})",
                             short(claim_id),
+                            fresh.status.as_str(),
+                            fresh.detail
+                        ));
+                    } else {
+                        problems.push(format!(
+                            "claim {}: recorded {} but can no longer be re-verified ({}: {})",
+                            short(claim_id),
+                            recorded.status.as_str(),
                             fresh.status.as_str(),
                             fresh.detail
                         ));
