@@ -512,11 +512,27 @@ either side could reach, because the module had **no caller in any shipped
 binary** and so had only ever been checked against itself. See
 [storage.md](docs/storage.md#moving-one-between-peers).
 
-What remains duplicated is `swarm::discovery`: a second address book beside
-`p2p::discovery`, built before it landed. Both resolve blobs through
-`crate::blobs`, so there is exactly one blob store — but `swarm::discovery`'s
-signed peer records are exactly the peer-list exchange `p2p` is missing, and
-folding them is a public-API decision rather than a coding one. See
+The two address books look like a duplicate and are not, which took reading
+both to establish. `p2p::discovery::AddressBook` maps a transport id to an
+endpoint — an address *and* the 261 KiB McEliece key needed to dial it. It is a
+local key cache and nothing about it is relayable. `swarm::discovery` holds
+**signed** peer records — ed25519 identity, addresses, a monotonic sequence — and
+exists to be handed to strangers: `offer` and `share` are peer exchange, with
+bounds and persistence. One says *how to open a session*, the other says *who a
+peer is and where it claims to be*, verifiably. `swarm::tcp::KeySource` is the
+join between them, and it is what lets an address learned by asking become a
+dial.
+
+What *was* duplicated — two transports — is gone: `swarm::tcp` runs over
+`p2p::transport` like everything else here.
+
+The real remaining gap was narrower and is closed: `p2p` had the signed
+sequence available and was throwing it away. `seed_from_log` reads `peer`
+records out of the log, where `Node::peers` has already resolved
+highest-seq-wins and the audit reports one that fails to advance — and then
+handed the routing table a hardcoded zero. Since the table takes a contact when
+`seq >= held`, at zero a replayed record always won, so anyone who had once seen
+a peer record could steer traffic back to an address that peer had left. See
 [discovery.md](docs/discovery.md) for the design and the survey, including why
 encrypted DNS answers a different question than the one people ask it.
 

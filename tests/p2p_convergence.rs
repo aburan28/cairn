@@ -836,6 +836,66 @@ fn a_node_handed_a_log_is_handed_the_network_with_it() {
 }
 
 #[test]
+fn a_replayed_peer_record_cannot_steer_the_routing_table_back() {
+    // What `dht::Contact::seq` exists for, in its own words: without a
+    // freshness counter "a table has no way to tell a peer that *moved* from a
+    // peer being *impersonated* by a stale record".
+    //
+    // The counter was available and simply not passed. `seed_from_log` called
+    // the seq-less form, so every contact arrived at zero — and the table takes
+    // the new contact when `seq >= held`, which at zero is always. Anyone who
+    // once saw a peer record could re-offer the address that peer had left and
+    // go on steering traffic at it, while the log itself was fully protected:
+    // `Node::peers` resolves highest-seq-wins and the audit reports a record
+    // that does not advance. All of that stopped at the routing table's edge.
+    use proofwork::records::PeerRecord;
+
+    let moved = PeerIdentity::generate();
+    let old_addr: std::net::SocketAddr = "127.0.0.1:9501".parse().expect("loopback");
+    let new_addr: std::net::SocketAddr = "127.0.0.1:9502".parse().expect("loopback");
+    let announcer = proofwork::crypto::identity::Identity::from_secret_bytes([21u8; 32]);
+    let transport = proofwork::p2p::dht::NodeId::from_bytes(moved.id());
+
+    let mut writer = Node::new(
+        Ledger::open(scratch("peer-replay")).expect("open ledger"),
+        repo_root(),
+    );
+    for (seq, addr) in [(1u64, old_addr), (2, new_addr)] {
+        let record = PeerRecord::new(
+            announcer.submitter_id(),
+            transport.to_hex(),
+            addr.to_string(),
+            seq,
+            TS,
+        )
+        .signed_with(&announcer);
+        writer.post_peer(&record, TS).expect("admitted");
+    }
+
+    let alice = Service::new(Arc::new(PeerIdentity::generate()));
+    assert_eq!(alice.seed_from_log(&writer), 1);
+    let held = |service: &Service| -> Vec<std::net::SocketAddr> {
+        service.with_directory(|d| d.routing().contacts().map(|c| c.addr).collect())
+    };
+    assert_eq!(held(&alice), vec![new_addr], "the move was not followed");
+
+    // The replay: the old record, offered again, exactly as an attacker who
+    // kept a copy would. Its signature is perfectly good — that is the point,
+    // and why signature checking alone does not cover this.
+    alice.note_contact_at(moved.id(), old_addr, 1);
+    assert_eq!(
+        held(&alice),
+        vec![new_addr],
+        "a stale record steered the table back to an address the peer had left"
+    );
+
+    // And a genuine later move is still followed, so this is freshness rather
+    // than a table that has stopped listening.
+    alice.note_contact_at(moved.id(), old_addr, 3);
+    assert_eq!(held(&alice), vec![old_addr], "a newer record was ignored");
+}
+
+#[test]
 fn a_peer_record_a_node_cannot_parse_is_skipped_not_fatal() {
     // The consensus layer bounds an address and never parses one — two
     // implementations disagreeing about an IPv6 form would be a split. So the

@@ -34,10 +34,21 @@
 //! something must complete before it can be dialled**. Before this, the second
 //! fetch on a node needed no `--peer` at all; now it needs the key too.
 //!
-//! [`crate::p2p::dht`]'s `GetKey` already fetches keys on demand over an
-//! existing session. Wiring this module to it restores the property and is the
-//! remaining half of the fold `docs/roadmap.md` tracks — the half that ends with
-//! one discovery stack instead of two.
+//! [`tcp::KeySource`] is the seam that gives it back, and
+//! [`crate::p2p::service::Service`] implements it over the address book
+//! [`crate::p2p::dht`]'s `GetKey` fills. `tcp::complete` turns every hint the
+//! book holds into a dialable endpoint for each one a source can supply a key
+//! for, so a node with a running `p2p` stack needs an endpoint handed to it
+//! once and never again.
+//!
+//! This is the fold arriving as an interface rather than a deletion, and the
+//! shape is the point: the two address books here and in
+//! [`crate::p2p::discovery`] are **not** duplicates, which is worth saying
+//! because the two were described as duplicates for a long time. This one holds
+//! signed, relayable records — who a peer is and where it claims to be, with a
+//! monotonic sequence so a stale claim cannot supersede a fresh one. That one
+//! holds a 261 KiB McEliece key per peer, which can never be relayed and is
+//! only ever a local cache. Neither can do the other's job.
 //!
 //! Everything else here is a pure state machine with no socket: [`piece`],
 //! [`wire`], [`dht`] and [`discovery`] are always compiled, and

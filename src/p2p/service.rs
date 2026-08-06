@@ -127,20 +127,40 @@ impl Service {
         f(&mut guard)
     }
 
-    /// Note that a peer is reachable at an address.
+    /// Note that a peer is reachable at an address, with no freshness claim.
     ///
-    /// `seq` is the routing table's tiebreak between two records for one peer,
-    /// and this stack has no signed record to take one from. Zero is honest
-    /// about that: every contact is equally fresh, so "seen again" keeps what is
-    /// already held rather than pretending the newest arrival is the truest.
-    /// Wiring [`super::discovery`]'s signed records through would give it a real
-    /// value; see `docs/discovery.md`.
+    /// For the hint sources that genuinely have none: a bootstrap file, a
+    /// multicast beacon, the source address of an inbound connection. Zero is
+    /// honest about that.
+    ///
+    /// It is *not* honest for a hint that came from a signed record, and
+    /// [`Service::note_contact_at`] is what those use.
     pub fn note_contact(&self, peer: PeerId, addr: SocketAddr) {
+        self.note_contact_at(peer, addr, 0);
+    }
+
+    /// Note a peer, carrying the freshness its record claimed.
+    ///
+    /// # Why the sequence has to travel
+    ///
+    /// [`crate::dht::Contact::seq`] says it plainly: without a freshness
+    /// counter "a table has no way to tell a peer that *moved* from a peer
+    /// being *impersonated* by a stale record". The routing table takes the new
+    /// contact when `seq >= held`, so with everything pinned at zero **a
+    /// replayed old record always wins** — anyone who once saw a peer record can
+    /// re-offer the address that peer has left and go on steering traffic at it.
+    ///
+    /// The value was available and simply not passed. `peer` records in the log
+    /// carry a signed, monotonic `seq`; [`Node::peers`] already resolves them
+    /// highest-seq-wins, and the audit reports one that does not advance. All of
+    /// that protection stopped at the edge of the routing table, because
+    /// `seed_from_log` called the seq-less form.
+    pub fn note_contact_at(&self, peer: PeerId, addr: SocketAddr, seq: u64) {
         if peer == self.identity.id() {
             return;
         }
         self.with_directory(|directory| {
-            directory.saw(PeerContact::new(peer, addr, 0));
+            directory.saw(PeerContact::new(peer, addr, seq));
         });
     }
 
@@ -327,7 +347,11 @@ impl Service {
             let Ok(addr) = record.addr.parse::<SocketAddr>() else {
                 continue;
             };
-            self.note_contact(transport, addr);
+            // The record's own signed sequence, not zero. `Node::peers` has
+            // already resolved highest-seq-wins across every peer record in the
+            // log, so this is the freshest claim that identity has made and the
+            // signature is what makes it worth anything.
+            self.note_contact_at(transport, addr, record.seq);
             let node_id = NodeId::from_bytes(transport);
             if self.with_book(|book| book.for_peer(&transport).is_empty()) {
                 self.with_directory(|directory| directory.wants_key(node_id));
