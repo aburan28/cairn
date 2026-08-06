@@ -36,9 +36,10 @@ tick() { sleep 1.1; }
 
 A=$(mktemp -u /tmp/pw-interop-rust-XXXXXX.jsonl)
 B=$(mktemp -u /tmp/pw-interop-ref-XXXXXX.jsonl)
-trap 'rm -f "$A" "$B"' EXIT
+C=$(mktemp -u /tmp/pw-interop-min-XXXXXX.jsonl)
+trap 'rm -f "$A" "$B" "$C"' EXIT
 
-# --- Rust writes, Python reads -------------------------------------------
+# --- the primary writes, the reference reads ------------------------------
 rule "Rust produces a log"
 RUST_OID=$($RUST --log "$A" --root . post examples/collatz/objective.json | head -1 | awk '{print $2}')
 $RUST --log "$A" --root . commit "$RUST_OID" --submitter alice \
@@ -50,13 +51,13 @@ tick
 $RUST --log "$A" --root . settle
 
 rule "the reference implementation audits the primary log"
-# Includes the settlement batch: Python re-derives the anchor and the beacon
+# Includes the settlement batch: the reference re-derives the anchor and the beacon
 # order Rust recorded. A disagreement here is a disagreement about who got paid.
 REF_VIEW=$("$REF" --log "$A" --root . audit)
 echo "$REF_VIEW"
 echo "$REF_VIEW" | grep -q "log verified" || fail "the reference could not verify the primary log"
 
-# --- Python writes, Rust reads -------------------------------------------
+# --- the reference writes, the primary reads ------------------------------
 rule "the reference implementation produces a log"
 REF_OID=$("$REF" --log "$B" --root . post examples/capset/objective.json | head -1 | awk '{print $2}')
 "$REF" --log "$B" --root . commit "$REF_OID" --submitter bob \
@@ -66,6 +67,29 @@ tick
     --artifact examples/capset/artifact.json --nonce n2
 tick
 "$REF" --log "$B" --root . settle
+
+# --- a minimize objective, which neither had ever run against the other ----
+#
+# The first two rounds cover `certificate` and an `evaluator` that maximizes.
+# `direction` decides who clears a threshold and therefore who gets paid, and
+# until now the *minimize* branch of `Direction::clears` had never executed in
+# the reference at all: the ratchet vectors pin the arithmetic, but nothing
+# drove a real minimize objective end to end through both implementations.
+# `statistical` is likewise a verifier kind neither had run for the other.
+rule "a minimize objective, verified by the implementation that did not post it"
+MIN_OID=$($RUST --log "$C" --root . post examples/permutation/objective.json | head -1 | awk '{print $2}')
+$RUST --log "$C" --root . commit "$MIN_OID" --submitter carol \
+      --artifact examples/permutation/artifact.json --nonce n3 >/dev/null
+tick
+$RUST --log "$C" --root . reveal "$MIN_OID" --submitter carol \
+      --artifact examples/permutation/artifact.json --nonce n3
+tick
+$RUST --log "$C" --root . settle
+
+MIN_VIEW=$("$REF" --log "$C" --root . audit)
+echo "$MIN_VIEW"
+echo "$MIN_VIEW" | grep -q "log verified" \
+  || fail "the reference could not verify a minimize objective the primary settled"
 
 rule "the primary implementation audits the reference log"
 RUST_VIEW=$($RUST --log "$B" --root . audit)
@@ -77,7 +101,7 @@ rule "Both implementations agree a settled batch is correctly ordered"
 for LOG in "$A" "$B"; do
   grep -q '"kind": *"batch"' "$LOG" || fail "no settlement batch in $LOG"
   $RUST --log "$LOG" --root . audit | grep -q "log verified" || fail "Rust rejects the batch in $LOG"
-  "$REF"   --log "$LOG" --root . audit | grep -q "log verified" || fail "Python rejects the batch in $LOG"
+  "$REF"   --log "$LOG" --root . audit | grep -q "log verified" || fail "the reference rejects the batch in $LOG"
 done
 echo "  both implementations re-derived every batch's beacon order"
 

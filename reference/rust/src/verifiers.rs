@@ -174,16 +174,40 @@ fn required<'a>(spec: &'a Value, name: &str) -> Result<&'a str, Verdict> {
 /// same call, and this one is documented as the weaker of the two rather than
 /// pretending otherwise.
 fn run_pinned(path: &Path, entrypoint: &str, artifact: &Value) -> Result<Value, Verdict> {
+    run_pinned_seeded(path, entrypoint, artifact, None)
+}
+
+fn run_pinned_seeded(
+    path: &Path,
+    entrypoint: &str,
+    artifact: &Value,
+    seed: Option<i64>,
+) -> Result<Value, Verdict> {
     const DRIVER: &str = r#"
 import json, sys, importlib.util
 spec = importlib.util.spec_from_file_location("pinned", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 artifact = json.loads(sys.stdin.read())
-print(json.dumps({"ok": getattr(module, sys.argv[2])(artifact)}))
+func = getattr(module, sys.argv[2])
+# A third argument is the statistical kind's pinned seed, passed as a second
+# parameter. argv-carried rather than folded into the artifact, because the
+# seed belongs to the objective and the artifact belongs to the submitter --
+# merging them would let a submitter choose the seed.
+seed = int(sys.argv[3]) if len(sys.argv) > 3 else None
+print(json.dumps({"ok": func(artifact) if seed is None else func(artifact, seed)}))
 "#;
+    let mut args: Vec<String> = vec![
+        String::from("-c"),
+        String::from(DRIVER),
+        path.to_string_lossy().into_owned(),
+        entrypoint.to_string(),
+    ];
+    if let Some(seed) = seed {
+        args.push(seed.to_string());
+    }
     let mut child = Command::new("python3")
-        .args(["-c", DRIVER, &path.to_string_lossy(), entrypoint])
+        .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -225,6 +249,7 @@ pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
     match spec.get("kind").and_then(Value::as_str) {
         Some("certificate") => certificate(root, spec, artifact),
         Some("evaluator") => evaluator(root, spec, artifact),
+        Some("statistical") => statistical(root, spec, artifact),
         // An unknown kind says nothing about the artifact: another node may
         // well implement it.
         Some(other) => Verdict::plain(
@@ -266,6 +291,89 @@ fn certificate(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
             }
         }
         _ => Verdict::plain(Status::Unavailable, "checker returned a non-boolean"),
+    }
+}
+
+/// A pinned, seeded test statistic clearing a threshold.
+///
+/// The kind this crate silently could not check. `run` answered `Unavailable`
+/// for it, which is the *correct* answer for a kind an implementation does not
+/// implement -- `Unavailable` is never `Reject` -- and the audit skips
+/// non-settling statuses, so an objective of this kind settled by the primary
+/// passed every cross-implementation check without ever being re-derived.
+/// Correct behaviour composing into no coverage at all.
+///
+/// Two things differ from `evaluator` and both are load-bearing:
+///
+/// * The pinned file is named by `statistic.path` / `statistic.sha256` rather
+///   than a flat pair, because the seed belongs with it.
+/// * The seed is passed to the entrypoint as a second parameter and comes from
+///   the **objective**, never the artifact. Resampling until a statistic passes
+///   is the attack this forecloses, and a submitter who could choose the seed
+///   would choose a passing one.
+fn statistical(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
+    let Some(statistic) = spec.get("statistic") else {
+        return Verdict::plain(
+            Status::InvalidSpec,
+            "statistical spec needs a 'statistic' object with 'path' and 'sha256'",
+        );
+    };
+    let (path_text, declared, entrypoint) = match (
+        required(statistic, "path"),
+        required(statistic, "sha256"),
+        required(spec, "entrypoint"),
+    ) {
+        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+        (Err(v), _, _) | (_, Err(v), _) | (_, _, Err(v)) => return v,
+    };
+    let Some(threshold) = spec.get("threshold").and_then(Value::as_i64) else {
+        return Verdict::plain(
+            Status::InvalidSpec,
+            "threshold must be an integer (scale fractional scores)",
+        );
+    };
+    let direction_text = spec
+        .get("direction")
+        .and_then(Value::as_str)
+        .unwrap_or("maximize");
+    let Some(direction) = crate::frontier::Direction::parse(direction_text) else {
+        return Verdict::plain(
+            Status::InvalidSpec,
+            format!("unknown direction {direction_text:?}"),
+        );
+    };
+    // Absent means zero, and `"seed": 0` must mean the same thing -- two
+    // spellings of one objective would otherwise verify differently. The first
+    // version of this treated absent as "no seed" and called a two-parameter
+    // entrypoint with one argument, which raised, which became `Unavailable`,
+    // which the audit skips. Correct-looking and completely inert.
+    let seed = spec.get("seed").and_then(Value::as_i64).unwrap_or(0);
+    let path = match pinned(root, path_text, declared) {
+        Ok(path) => path,
+        Err(verdict) => return verdict,
+    };
+    let outcome = match run_pinned_seeded(&path, entrypoint, artifact, Some(seed)) {
+        Ok(outcome) => outcome,
+        Err(verdict) => return verdict,
+    };
+    let Some(score) = outcome.as_i64() else {
+        return Verdict::plain(
+            Status::Unavailable,
+            "statistic returned a non-integer score",
+        );
+    };
+    let evidence = Value::object([
+        ("direction", Value::string(direction_text)),
+        ("score", Value::Int(i128::from(score))),
+        ("seed", Value::Int(i128::from(seed))),
+        ("statistic_sha256", Value::string(declared)),
+        ("threshold", Value::Int(i128::from(threshold))),
+    ]);
+    let detail = format!("score {score} vs threshold {threshold} ({direction_text})");
+    if direction.clears(score, threshold) {
+        Verdict::new(Status::Accept, detail, evidence)
+    } else {
+        Verdict::new(Status::Reject, detail, evidence)
     }
 }
 
