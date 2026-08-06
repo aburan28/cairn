@@ -60,8 +60,8 @@ behaviour ships and is tested, not that TLC has checked it.
 - [x] **Piece-level blob transfer** (`src/swarm/`), in the BitTorrent shape:
       pieces, a manifest of piece hashes, bitfields, rarest-first, bounded
       pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver.
-      Library-only, and the driver sits behind the off-by-default
-      `insecure-swarm-tcp` feature because it has no handshake and no AEAD.
+      Library-only. The driver ran plaintext behind an off-by-default feature
+      until the transport was folded onto `p2p`'s; it is encrypted now.
       It reads and writes the same `src/blobs.rs` store `p2p::code` uses, and
       overlaps it: `p2p` already moves pinned code whole, which is adequate
       while `blobs::MAX_BLOB_BYTES` is 1 MiB — four pieces. The piece machinery
@@ -135,35 +135,26 @@ behaviour ships and is tested, not that TLC has checked it.
       answers only what the peer asked, and the asked set is the `code_want`
       already sent on that connection. Answers are attributed to the session,
       never to the message body, which is what makes an unsigned record safe.
-- [ ] Encrypt `swarm`'s transport, which today means folding it onto `p2p`'s
-      identity. `swarm::tcp` has no handshake and no AEAD; it is behind the
-      off-by-default `insecure-swarm-tcp` feature so it cannot ship by accident,
-      which contains the risk without removing it.
-      **Both blockers are now cleared, and what is left is the port itself.**
-      The identity mismatch — ed25519 peer records against a 261,120-byte
-      McEliece key — is what `PeerRecord` resolved: an ed25519 key vouches for
-      the 32-byte hash of a transport key, fetched on demand. The second blocker
-      was structural rather than cryptographic and was easy to miss: `swarm`
-      runs a **writer thread**, so a peer that stops reading blocks its own
-      socket instead of the state machine every other peer waits on, and
-      `Connection`'s `&mut self` on both `send` and `receive` made that
-      impossible. A mutex would have been worse than impossible — a reader
-      blocked in `receive` holding it starves the writer forever.
-      `Connection::split` and `Channel::split` fix that, and are sound because a
-      session's two directions share no state: a key and a counter each way,
-      which is what the handshake's two labels buy. Tested to preserve the part
-      that would otherwise be a silent downgrade — a split opener still refuses
-      replays and reordering, and a split sealer never rewinds its counter.
-      The record half is now done too: `swarm::discovery::PeerRecord` carries an
-      optional `transport` id, the same 32-byte hash of a McEliece key that
-      `records::PeerRecord` carries, so a relayed record is finally enough to
-      *dial* rather than only to locate. Optional because an address hint
-      another source can complete is still useful, and absent rather than null
-      because the signature covers the body.
-      Remaining is the socket work itself: point `serve`/`fetch` at
-      `transport::connect`/`accept`, give the subsystem its own AEAD context
-      string, take endpoints rather than bare addresses, and delete the feature
-      gate.
+- [x] **`swarm`'s transport is encrypted** — it runs over `p2p::transport`,
+      Classic McEliece to an AEAD channel, with its own context string so a
+      blob frame cannot be opened as a record sync. The `insecure-swarm-tcp`
+      gate is gone because the reason for it is.
+      Two things had to exist first and neither was socket work.
+      `discovery::PeerRecord` gained the 32-byte transport id, so the two
+      identity schemes agree without a 261,120-byte key ever being relayed. And
+      `Connection::split` made a session usable from two threads — the writer
+      thread is deliberate, a `Connection` is `&mut self` on both halves, and a
+      mutex would starve the writer whenever the reader blocked.
+      `a_transfer_puts_no_plaintext_on_the_wire` asserts it of the *bytes*: a
+      recording relay between leech and seed, and neither the blob nor its
+      digest in the capture.
+      **What it cost is stated rather than hidden.** An authenticated dial needs
+      the responder's key, so `fetch` takes endpoints; a relayed record carries
+      an id and not a key, so an address learned by peer exchange is now a hint
+      something must complete. The second fetch on a node used to need no
+      `--peer` and now needs the key too. `p2p::dht`'s `GetKey` already fetches
+      keys on demand, and wiring this module to it restores the property — that
+      is the remaining half of the fold, below.
 - [x] **Decided: at-rest encryption covers the log and stops there.** The
       threat is a copy of the data directory reaching somewhere the operator did
       not intend, and what sealing buys is that the copy is inert. The log is

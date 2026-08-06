@@ -32,8 +32,8 @@
 //! survivable, and it is why the timeout is not a tunable nicety.
 
 use std::collections::BTreeMap;
-use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::io;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -46,6 +46,17 @@ use super::piece::DEFAULT_PIECE_LEN;
 use super::wire::{check_frame_len, Handshake, Message, PEER_ID_LEN};
 use super::{Action, Dropped, Limits, PeerId, Swarm};
 use crate::blobs::{self, BlobStore};
+use crate::p2p::discovery::Endpoint;
+use crate::p2p::handshake::PeerIdentity;
+use crate::p2p::transport::{self, Connection, Receiver as SealedReceiver, Sender as SealedSender};
+
+/// The AEAD context every frame on a swarm session is sealed under.
+///
+/// Its own string, not `p2p::code`'s or `p2p::sync`'s, for the reason
+/// [`crate::p2p`] gives at length: a frame sealed for one subsystem cannot be
+/// opened as another's even by a peer that wants to. A blob transfer and a
+/// record sync run over the same transport and must not be confusable.
+pub const CONTEXT: &[u8] = b"proofwork/swarm/v1";
 
 /// How long a socket may be silent before it is considered gone.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -250,10 +261,11 @@ impl Drop for Listener {
 /// which matters for binding to port 0 and letting the OS choose.
 pub fn serve(
     addr: impl ToSocketAddrs,
+    identity: Arc<PeerIdentity>,
     blobs: BlobStore,
     limits: Limits,
 ) -> Result<Listener, TransferError> {
-    serve_with(addr, blobs, limits, new_book())
+    serve_with(addr, identity, blobs, limits, new_book())
 }
 
 /// Serve, against an address book the caller owns.
@@ -263,27 +275,37 @@ pub fn serve(
 /// has to be told an address twice.
 pub fn serve_with(
     addr: impl ToSocketAddrs,
+    identity: Arc<PeerIdentity>,
     blobs: BlobStore,
     limits: Limits,
     book: Book,
 ) -> Result<Listener, TransferError> {
-    serve_full(addr, blobs, limits, book, Dht::new(NodeId::default()))
+    serve_full(
+        addr,
+        identity,
+        blobs,
+        limits,
+        book,
+        Dht::new(NodeId::default()),
+    )
 }
 
 /// Serve, against an address book and a routing table the caller owns.
 pub fn serve_full(
     addr: impl ToSocketAddrs,
+    identity: Arc<PeerIdentity>,
     blobs: BlobStore,
     limits: Limits,
     book: Book,
     dht: Dht,
 ) -> Result<Listener, TransferError> {
-    let listener = TcpListener::bind(addr)?;
+    let listener = std::net::TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
     listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
 
     let stop_thread = Arc::clone(&stop);
+    let identity = Arc::clone(&identity);
     thread::spawn(move || {
         // One swarm per digest being served, shared across the connections that
         // want it -- choking has to allocate slots across peers, so a swarm per
@@ -305,8 +327,18 @@ pub fn serve_full(
                         book: Arc::clone(&book),
                         dht: dht.clone(),
                     };
+                    let identity = Arc::clone(&identity);
                     thread::spawn(move || {
-                        let _ = serve_one(stream, ctx);
+                        // The McEliece decapsulation happens here, on the
+                        // connection thread rather than the accept loop: it
+                        // costs ~12 ms, and a handshake that blocked the
+                        // listener would let one slow peer stop every other.
+                        // The amplification this exposes is named in
+                        // `p2p::handshake` and is the responder's to price.
+                        let Ok(connection) = transport::accept(stream, &identity) else {
+                            return;
+                        };
+                        let _ = serve_one(connection, ctx);
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -338,7 +370,7 @@ struct Serving {
     dht: Dht,
 }
 
-fn serve_one(mut stream: TcpStream, ctx: Serving) -> io::Result<()> {
+fn serve_one(mut connection: Connection, ctx: Serving) -> io::Result<()> {
     let Serving {
         blobs,
         swarms,
@@ -348,19 +380,25 @@ fn serve_one(mut stream: TcpStream, ctx: Serving) -> io::Result<()> {
         book,
         dht,
     } = ctx;
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-
-    let mut head = [0u8; Handshake::LEN];
-    stream.read_exact(&mut head)?;
+    // The transport handshake already ran, so the peer is authenticated before
+    // a swarm byte moves. What is exchanged here is only *which blob* the
+    // session is about.
+    let Ok(head) = connection.receive(CONTEXT) else {
+        return Ok(());
+    };
     let Ok(their) = Handshake::decode(&head) else {
         return Ok(());
     };
     let ours = Handshake {
         digest: their.digest.clone(),
+        // Self-asserted and never used: the transport derives the real peer id
+        // from the handshake, so this field survives only as wire compatibility
+        // and is deliberately left empty rather than filled with a claim.
         peer_id: [0u8; PEER_ID_LEN],
     };
-    stream.write_all(&ours.encode())?;
+    if connection.send(&ours.encode(), CONTEXT).is_err() {
+        return Ok(());
+    }
 
     // Do we even have it? A digest this store does not hold gets no error
     // message: there is nothing useful to say, and a node that enumerated what
@@ -380,7 +418,7 @@ fn serve_one(mut stream: TcpStream, ctx: Serving) -> io::Result<()> {
         .unwrap_or(&their.digest)
         .to_string();
     let Ok(bytes) = blobs.read(&wanted) else {
-        return serve_peers_only(stream, &book, &dht);
+        return serve_peers_only(connection, &book, &dht);
     };
 
     let swarm = {
@@ -425,7 +463,7 @@ fn serve_one(mut stream: TcpStream, ctx: Serving) -> io::Result<()> {
     });
 
     let peer = PeerId(next_peer.fetch_add(1, Ordering::SeqCst));
-    let result = run_peer(stream, peer, &swarm, &outbox, &book, &dht);
+    let result = run_peer(connection, peer, &swarm, &outbox, &book, &dht);
     ticking.store(false, Ordering::SeqCst);
     {
         let mut swarm = swarm.lock().unwrap_or_else(|e| e.into_inner());
@@ -443,23 +481,23 @@ fn serve_one(mut stream: TcpStream, ctx: Serving) -> io::Result<()> {
 /// Bounded by a message budget rather than by a timeout alone: a peer that keeps
 /// asking is a peer using this node as a free socket, and there is nothing here
 /// worth more than a handful of frames.
-fn serve_peers_only(mut stream: TcpStream, book: &Book, dht: &Dht) -> io::Result<()> {
+fn serve_peers_only(mut connection: Connection, book: &Book, dht: &Dht) -> io::Result<()> {
     const BUDGET: u32 = 4;
 
     // Ask as well as answer. A node reached by a stranger has just learned that
     // stranger exists, and the exchange is cheaper in one round trip than two.
-    stream.write_all(&Message::WantPeers.frame())?;
+    if connection
+        .send(&Message::WantPeers.encode(), CONTEXT)
+        .is_err()
+    {
+        return Ok(());
+    }
 
-    let mut header = [0u8; 4];
     for _ in 0..BUDGET {
-        if stream.read_exact(&mut header).is_err() {
-            break;
-        }
-        let Ok(len) = check_frame_len(u32::from_be_bytes(header)) else {
+        let Ok(body) = connection.receive(CONTEXT) else {
             break;
         };
-        let mut body = vec![0u8; len];
-        if stream.read_exact(&mut body).is_err() {
+        if check_frame_len(body.len() as u32).is_err() {
             break;
         }
         // No manifest on this path, so a bitfield cannot be sized and is
@@ -470,7 +508,10 @@ fn serve_peers_only(mut stream: TcpStream, book: &Book, dht: &Dht) -> io::Result
         match message {
             Message::WantPeers => {
                 let shared = book.lock().unwrap_or_else(|e| e.into_inner()).share("");
-                if !shared.is_empty() && stream.write_all(&Message::Peers(shared).frame()).is_err()
+                if !shared.is_empty()
+                    && connection
+                        .send(&Message::Peers(shared).encode(), CONTEXT)
+                        .is_err()
                 {
                     break;
                 }
@@ -486,7 +527,7 @@ fn serve_peers_only(mut stream: TcpStream, book: &Book, dht: &Dht) -> io::Result
             Message::FindNode { .. } => {
                 for action in on_dht(PeerId(0), &message, dht, unix_now()) {
                     if let Action::Send(_, reply) = action {
-                        if stream.write_all(&reply.frame()).is_err() {
+                        if connection.send(&reply.encode(), CONTEXT).is_err() {
                             return Ok(());
                         }
                     }
@@ -508,35 +549,42 @@ fn serve_peers_only(mut stream: TcpStream, book: &Book, dht: &Dht) -> io::Result
 /// them.
 pub fn fetch(
     digest: &str,
-    peers: &[SocketAddr],
+    peers: &[Endpoint],
+    local: Arc<PeerIdentity>,
     blobs: &BlobStore,
     limits: Limits,
     deadline: Duration,
 ) -> Result<Vec<u8>, TransferError> {
-    fetch_with(digest, peers, blobs, limits, deadline, new_book())
+    fetch_with(digest, peers, local, blobs, limits, deadline, new_book())
 }
 
 /// Fetch, against an address book the caller owns.
 ///
-/// Addresses already in the book are dialled alongside `peers`, and every peer
-/// reached adds what it knows. So the *second* fetch on a node needs no `--peer`
-/// at all, which is the entire point of peer exchange: bootstrap is a problem
-/// you have once.
+/// # What encryption cost peer exchange, stated plainly
+///
+/// Before the transport was sealed, a dial needed only an address, so every
+/// address the book accumulated was immediately usable and the *second* fetch
+/// on a node needed no `--peer` at all. An authenticated dial needs the
+/// responder's 261,120-byte McEliece key as well, and a relayed peer record
+/// carries only the 32-byte id of one — deliberately, because relaying a
+/// quarter-megabyte per peer would cost more than the transfers peer exchange
+/// exists to bootstrap.
+///
+/// So a book entry is now a *hint* rather than a dialable endpoint: it names a
+/// peer and where it was, and something has to supply the key before it can be
+/// used. `p2p::dht`'s `GetKey` already does exactly that over an existing
+/// session, and wiring this module to it is the fold `docs/roadmap.md` tracks.
+/// Until then this dials the endpoints it was given and lets the book
+/// accumulate for the caller that can complete them.
 pub fn fetch_with(
     digest: &str,
-    peers: &[SocketAddr],
+    peers: &[Endpoint],
+    local: Arc<PeerIdentity>,
     blobs: &BlobStore,
     limits: Limits,
     deadline: Duration,
     book: Book,
 ) -> Result<Vec<u8>, TransferError> {
-    let mut peers: Vec<SocketAddr> = peers.to_vec();
-    for known in book.lock().unwrap_or_else(|e| e.into_inner()).addrs() {
-        if !peers.contains(&known) {
-            peers.push(known);
-        }
-    }
-    let peers = &peers[..];
     if peers.is_empty() {
         return Err(TransferError::NoPeers);
     }
@@ -549,8 +597,8 @@ pub fn fetch_with(
     let (done_tx, done_rx): (Sender<()>, Receiver<()>) = mpsc::channel();
     let connected = Arc::new(AtomicU64::new(0));
 
-    for (index, addr) in peers.iter().enumerate() {
-        let addr = *addr;
+    for (index, endpoint) in peers.iter().enumerate() {
+        let endpoint = endpoint.clone();
         let digest = digest.to_string();
         let swarm = Arc::clone(&swarm);
         let outbox = Arc::clone(&outbox);
@@ -558,27 +606,25 @@ pub fn fetch_with(
         let connected = Arc::clone(&connected);
         let book = Arc::clone(&book);
         let dht = dht.clone();
+        let local = Arc::clone(&local);
         thread::spawn(move || {
-            let Ok(stream) = TcpStream::connect_timeout(&addr, IO_TIMEOUT) else {
+            // The endpoint carries the responder's McEliece key, so this dial
+            // is authenticated before a swarm byte moves: a peer at that
+            // address that cannot decapsulate gets no session at all.
+            let Ok(mut connection) = transport::connect(&endpoint.peer, endpoint.addr, &local)
+            else {
                 return;
             };
-            if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
-                || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
-            {
-                return;
-            }
-            let mut stream = stream;
             let hello = Handshake {
                 digest: digest.clone(),
                 peer_id: [0u8; PEER_ID_LEN],
             };
-            if stream.write_all(&hello.encode()).is_err() {
+            if connection.send(&hello.encode(), CONTEXT).is_err() {
                 return;
             }
-            let mut head = [0u8; Handshake::LEN];
-            if stream.read_exact(&mut head).is_err() {
+            let Ok(head) = connection.receive(CONTEXT) else {
                 return;
-            }
+            };
             match Handshake::decode(&head) {
                 // A peer answering about other content is answering a question
                 // nobody asked. Nothing to transfer, so hang up.
@@ -591,7 +637,7 @@ pub fn fetch_with(
             // we dialled. The claimed id in the handshake is never used, because
             // it is self-asserted and free to forge.
             let peer = PeerId(index as u64);
-            let _ = run_peer(stream, peer, &swarm, &outbox, &book, &dht);
+            let _ = run_peer(connection, peer, &swarm, &outbox, &book, &dht);
             {
                 let mut swarm = swarm.lock().unwrap_or_else(|e| e.into_inner());
                 swarm.remove_peer(peer);
@@ -656,7 +702,7 @@ pub fn fetch_with(
 
 /// Read frames from one peer until the socket or the state machine says stop.
 fn run_peer(
-    stream: TcpStream,
+    connection: Connection,
     peer: PeerId,
     swarm: &Arc<Mutex<Swarm>>,
     outbox: &Outbox,
@@ -670,15 +716,19 @@ fn run_peer(
         .insert(peer, tx);
 
     // A writer thread, so a slow peer blocks its own socket rather than the
-    // state machine every other peer is also waiting on.
-    let mut writer = stream.try_clone()?;
+    // state machine every other peer is also waiting on. This is the reason
+    // `Connection::split` exists: `&mut self` on both halves made one
+    // connection in two threads impossible, and a mutex around it would starve
+    // the writer whenever the reader blocked.
+    let (mut writer, receiver): (SealedSender, SealedReceiver) = connection
+        .split()
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let write_thread = thread::spawn(move || {
         while let Ok(message) = rx.recv() {
-            if writer.write_all(&message.frame()).is_err() {
+            if writer.send(&message.encode(), CONTEXT).is_err() {
                 break;
             }
         }
-        let _ = writer.flush();
     });
 
     let mut opening = {
@@ -703,28 +753,20 @@ fn run_peer(
     }
     dispatch(&opening, outbox);
 
-    let mut reader = stream;
-    let mut header = [0u8; 4];
-    loop {
-        if reader.read_exact(&mut header).is_err() {
-            break;
-        }
-        let declared = u32::from_be_bytes(header);
-        let len = match check_frame_len(declared) {
-            Ok(len) => len,
-            Err(error) => {
-                // Refused before a byte of it is allocated, which is the whole
-                // point of checking the header separately.
-                let actions = {
-                    let guard = swarm.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.on_protocol_error(peer, error.to_string())
-                };
-                dispatch(&actions, outbox);
-                break;
-            }
-        };
-        let mut body = vec![0u8; len];
-        if reader.read_exact(&mut body).is_err() {
+    let mut reader = receiver;
+    // The transport frames and authenticates; this layer sees a body or
+    // nothing.
+    while let Ok(body) = reader.receive(CONTEXT) {
+        // `check_frame_len` still runs, because the transport's ceiling is the
+        // *transport's* -- a 16 MiB frame is legal there and absurd here, and
+        // the swarm's own limit is what bounds an allocation this state machine
+        // will make.
+        if let Err(error) = check_frame_len(body.len() as u32) {
+            let actions = {
+                let guard = swarm.lock().unwrap_or_else(|e| e.into_inner());
+                guard.on_protocol_error(peer, error.to_string())
+            };
+            dispatch(&actions, outbox);
             break;
         }
 
@@ -874,6 +916,25 @@ mod tests {
             .ok()
     }
 
+    /// A seeder with its own transport identity, and the endpoint to dial it.
+    ///
+    /// An endpoint rather than an address, because the dial is authenticated
+    /// now: the caller needs the responder's McEliece key, and pairing the two
+    /// here keeps every test from restating it.
+    fn seeder_at(blobs: BlobStore) -> (Listener, Endpoint) {
+        let identity = Arc::new(PeerIdentity::generate());
+        let public = identity.to_public();
+        let listener = serve("127.0.0.1:0", identity, blobs, Limits::default()).expect("serves");
+        let endpoint = Endpoint::new(listener.addr(), public);
+        (listener, endpoint)
+    }
+
+    /// An identity for a leech. Generation costs ~243 ms, which is why tests
+    /// make one rather than one per dial.
+    fn leech_identity() -> Arc<PeerIdentity> {
+        Arc::new(PeerIdentity::generate())
+    }
+
     fn evaluator(size: usize) -> Vec<u8> {
         let mut source = b"def score(artifact):\n    return len(artifact)\n".to_vec();
         while source.len() < size {
@@ -892,10 +953,11 @@ mod tests {
         let digest = put(&seeder, &data);
         assert!(!holds(&leecher, &digest), "the leech starts with nothing");
 
-        let listener = serve("127.0.0.1:0", seeder, Limits::default()).expect("serves");
+        let (listener, endpoint) = seeder_at(seeder);
         let got = fetch(
             &digest,
-            &[listener.addr()],
+            &[endpoint],
+            leech_identity(),
             &leecher,
             Limits::default(),
             Duration::from_secs(20),
@@ -918,20 +980,21 @@ mod tests {
         let data = evaluator(120_000);
         let digest = digest_bytes(&data);
 
-        let mut addrs = Vec::new();
+        let mut endpoints = Vec::new();
         let mut listeners = Vec::new();
         for index in 0..3 {
             let seeder = store(&dir, &format!("seed{index}"));
             put(&seeder, &data);
-            let listener = serve("127.0.0.1:0", seeder, Limits::default()).expect("serves");
-            addrs.push(listener.addr());
+            let (listener, endpoint) = seeder_at(seeder);
+            endpoints.push(endpoint);
             listeners.push(listener);
         }
 
         let leecher = store(&dir, "leech");
         let got = fetch(
             &digest,
-            &addrs,
+            &endpoints,
+            leech_identity(),
             &leecher,
             Limits::default(),
             Duration::from_secs(20),
@@ -949,14 +1012,20 @@ mod tests {
         let data = evaluator(50_000);
         let seeder = store(&dir, "seed");
         let digest = put(&seeder, &data);
-        let listener = serve("127.0.0.1:0", seeder, Limits::default()).expect("serves");
+        let (_listener, endpoint) = seeder_at(seeder);
 
-        // A port nothing is listening on, first in the list.
-        let dead: SocketAddr = "127.0.0.1:1".parse().expect("an address");
+        // A port nothing is listening on, first in the list. It borrows the
+        // live peer's key, so what fails is the connection and not the
+        // handshake -- which is the case this test is about.
+        let dead = Endpoint::new(
+            "127.0.0.1:1".parse().expect("an address"),
+            endpoint.peer.clone(),
+        );
         let leecher = store(&dir, "leech");
         let got = fetch(
             &digest,
-            &[dead, listener.addr()],
+            &[dead, endpoint],
+            leech_identity(),
             &leecher,
             Limits::default(),
             Duration::from_secs(20),
@@ -971,12 +1040,13 @@ mod tests {
         let dir = scratch("absent");
         let seeder = store(&dir, "seed");
         put(&seeder, b"something else");
-        let listener = serve("127.0.0.1:0", seeder, Limits::default()).expect("serves");
+        let (listener, endpoint) = seeder_at(seeder);
 
         let leecher = store(&dir, "leech");
         let error = fetch(
             &digest_bytes(b"nobody has this"),
-            &[listener.addr()],
+            &[endpoint],
+            leech_identity(),
             &leecher,
             Limits::default(),
             Duration::from_secs(5),
@@ -991,15 +1061,26 @@ mod tests {
             ),
             "unexpected {error:?}"
         );
+        listener.shutdown();
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_node_learns_addresses_by_asking_and_needs_no_address_the_second_time() {
-        // The claim discovery is for, end to end and over real sockets. Node C
-        // is told about A. A knows about B. C ends up able to fetch a blob only
-        // B has, having never been given B's address by anyone -- which is what
-        // "no hardcoded IPs" means in practice: you are told one thing, once.
+    fn peer_exchange_still_spreads_addresses_but_a_dial_now_needs_a_key_too() {
+        // This test used to assert that C's *second* fetch needed no `--peer`
+        // at all: it heard about B from A and dialled straight away. Encrypting
+        // the transport took that away and the honest thing is to assert what
+        // is now true rather than to weaken the name.
+        //
+        // What survives: peer exchange works, records are verified, and C ends
+        // up knowing where B is having been told only about A.
+        //
+        // What it costs: an authenticated dial needs B's 261,120-byte McEliece
+        // key, and a relayed record carries only the 32-byte id of one. So a
+        // learned address is a *hint* that something must complete before it is
+        // dialable. `p2p::dht`'s `GetKey` already fetches keys on demand over an
+        // existing session; wiring this module to it is the fold the roadmap
+        // tracks, and it is what restores the old property.
         use crate::crypto::identity::Identity;
         use crate::swarm::discovery::PeerRecord;
 
@@ -1010,53 +1091,85 @@ mod tests {
         // B holds the blob and serves it.
         let b_store = store(&dir, "b");
         put(&b_store, &only_b);
-        let b = serve("127.0.0.1:0", b_store, Limits::default()).expect("serves");
+        let (b, b_endpoint) = seeder_at(b_store);
 
         // A holds nothing, but knows where B is -- and will say so when asked.
+        // The record names B's transport id, which is the field that makes a
+        // relayed record enough to *complete* rather than only to locate.
         let a_book = new_book();
-        let b_record = PeerRecord::sign(&Identity::from_secret_bytes([9u8; 32]), &[b.addr()], 1)
-            .expect("signs");
+        let b_transport = crate::p2p::handshake::peer_id_hex(&b_endpoint.peer.id());
+        let b_record = PeerRecord::sign_for(
+            &Identity::from_secret_bytes([9u8; 32]),
+            &[b.addr()],
+            1,
+            Some(&b_transport),
+        )
+        .expect("signs");
         assert!(a_book
             .lock()
             .expect("lock")
             .offer(&b_record)
             .expect("verifies"));
-        let a =
-            serve_with("127.0.0.1:0", store(&dir, "a"), Limits::default(), a_book).expect("serves");
+        let a_identity = Arc::new(PeerIdentity::generate());
+        let a_public = a_identity.to_public();
+        let a = serve_with(
+            "127.0.0.1:0",
+            a_identity,
+            store(&dir, "a"),
+            Limits::default(),
+            a_book,
+        )
+        .expect("serves");
+        let a_endpoint = Endpoint::new(a.addr(), a_public);
 
-        // C is told about A only. A does not have the blob.
+        // C is told about A only. A does not have the blob, so this fails --
+        // and on the way, C learns about B.
         let c_book = new_book();
         let c_store = store(&dir, "c");
-        let got = fetch_with(
+        let _ = fetch_with(
             &digest,
-            &[a.addr()],
+            &[a_endpoint],
+            leech_identity(),
             &c_store,
             Limits::default(),
-            Duration::from_secs(20),
+            Duration::from_secs(5),
             Arc::clone(&c_book),
         );
 
-        // Whether that first attempt completes is a race: C has to hear about B
-        // from A and dial it before the deadline. What must hold either way is
-        // that C now *knows* about B, learned from a signed record it verified.
         let learned = c_book.lock().expect("lock").addrs();
         assert!(
             learned.contains(&b.addr()),
             "C never learned B's address by asking A"
         );
 
-        // And with that, C fetches without being given any address at all.
+        // And the record C learned carries B's transport id, so the hint is
+        // completable rather than a dead end -- an address with no id could
+        // never become a dial no matter what fetched the key.
+        let records = c_book.lock().expect("lock").share("");
+        let for_b = records
+            .iter()
+            .filter_map(|signed| PeerRecord::open(signed).ok())
+            .find(|record| record.addrs.contains(&b.addr()))
+            .expect("C holds a record for B");
+        assert_eq!(
+            for_b.transport.as_deref(),
+            Some(b_transport.as_str()),
+            "the learned record cannot name the transport to dial"
+        );
+
+        // Given the key, that hint dials and transfers. This is the step the
+        // fold will make automatic.
         let second = fetch_with(
             &digest,
-            &[],
+            &[b_endpoint],
+            leech_identity(),
             &c_store,
             Limits::default(),
             Duration::from_secs(20),
             c_book,
         )
-        .expect("the second fetch needs no --peer");
+        .expect("a completed hint fetches");
         assert_eq!(second, only_b);
-        let _ = got;
 
         a.shutdown();
         b.shutdown();
@@ -1108,6 +1221,7 @@ mod tests {
             fetch(
                 &digest_bytes(b"x"),
                 &[],
+                leech_identity(),
                 &leecher,
                 Limits::default(),
                 Duration::from_secs(1)
@@ -1115,5 +1229,105 @@ mod tests {
             Err(TransferError::NoPeers)
         ));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_transfer_puts_no_plaintext_on_the_wire() {
+        // The claim the whole port exists to make, asserted rather than
+        // assumed. A recording relay sits between leech and seed; afterwards
+        // neither the blob's bytes nor its digest may appear in the capture.
+        //
+        // The same shape as `tests/wire_encryption.rs` does for `p2p`, and for
+        // the same reason: "we call the sealed API now" is a statement about
+        // the code, and this is a statement about the bytes.
+        use std::io::{Read as _, Write as _};
+        use std::net::{TcpListener, TcpStream};
+
+        let dir = scratch("sealed");
+        let seeder = store(&dir, "seed");
+        // A payload with a distinctive marker, so finding it in the capture is
+        // unambiguous rather than a coincidence of common bytes.
+        let mut data = b"MARKER-swarm-plaintext-canary-".to_vec();
+        data.extend_from_slice(&evaluator(20_000));
+        let digest = put(&seeder, &data);
+        let (listener, endpoint) = seeder_at(seeder);
+
+        // The relay: accept one connection, splice both ways, keep a copy.
+        let relay = TcpListener::bind("127.0.0.1:0").expect("binds");
+        let relay_addr = relay.local_addr().expect("addr");
+        let upstream = endpoint.addr;
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&captured);
+        thread::spawn(move || {
+            while let Ok((mut inbound, _)) = relay.accept() {
+                let Ok(mut outbound) = TcpStream::connect(upstream) else {
+                    continue;
+                };
+                let (Ok(mut in2), Ok(mut out2)) = (inbound.try_clone(), outbound.try_clone())
+                else {
+                    continue;
+                };
+                let seen = Arc::clone(&recorder);
+                thread::spawn(move || {
+                    let mut buffer = [0u8; 8192];
+                    while let Ok(read) = inbound.read(&mut buffer) {
+                        if read == 0 || outbound.write_all(&buffer[..read]).is_err() {
+                            break;
+                        }
+                        seen.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend_from_slice(&buffer[..read]);
+                    }
+                });
+                let seen = Arc::clone(&recorder);
+                thread::spawn(move || {
+                    let mut buffer = [0u8; 8192];
+                    while let Ok(read) = out2.read(&mut buffer) {
+                        if read == 0 || in2.write_all(&buffer[..read]).is_err() {
+                            break;
+                        }
+                        seen.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend_from_slice(&buffer[..read]);
+                    }
+                });
+            }
+        });
+
+        let leecher = store(&dir, "leech");
+        let through_relay = Endpoint::new(relay_addr, endpoint.peer.clone());
+        let got = fetch(
+            &digest,
+            &[through_relay],
+            leech_identity(),
+            &leecher,
+            Limits::default(),
+            Duration::from_secs(30),
+        )
+        .expect("transfers through the relay");
+        assert_eq!(got, data, "the relay broke the transfer");
+
+        let capture = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            !capture.is_empty(),
+            "the relay recorded nothing, so this test proves nothing"
+        );
+        assert!(
+            !contains(&capture, b"MARKER-swarm-plaintext-canary-"),
+            "the blob's bytes travelled in the clear"
+        );
+        let bare = digest.strip_prefix("sha256:").unwrap_or(&digest);
+        assert!(
+            !contains(&capture, bare.as_bytes()),
+            "the digest travelled in the clear, so an observer learns which \
+             objective this node is working on"
+        );
+        listener.shutdown();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Substring search over bytes. `Vec` has no `contains` for slices.
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
     }
 }

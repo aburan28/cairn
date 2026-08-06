@@ -491,15 +491,14 @@ full routing table holding one per contact would cost about 1.3 GB; the key
 comes from the address book at dial time, which is why a `p2p` routing answer is
 a hint checked by dialling rather than a proof.
 
-**`swarm::tcp` is not encrypted, and is now gated.** No handshake, no AEAD, no
-peer authentication — it predates `p2p::transport` and never grew one, because
-`swarm` peer records carry an ed25519 identity while the encrypted transport
-needs a 261,120-byte McEliece key. It sits behind the off-by-default
-`insecure-swarm-tcp` feature so it cannot reach a binary by accident; only the
-socket-facing part is gated, and the state machines are always compiled.
-Everything the daemon runs — records, code, DHT, populations — goes over the
-encrypted transport, and `tests/wire_encryption.rs` proves it by recording the
-bytes between two real nodes rather than by asserting it in a comment.
+**Everything that opens a socket goes over the encrypted transport.** Records,
+code, DHT, populations — and now `swarm::tcp`, which spent a while in plaintext
+behind an off-by-default feature because `swarm`'s peer records named an ed25519
+identity while the transport needs a 261,120-byte McEliece key. Giving the
+record the 32-byte *id* of one settled that, and the feature gate is gone.
+Neither claim is asserted in a comment: `tests/wire_encryption.rs` and
+`a_transfer_puts_no_plaintext_on_the_wire` each put a recording relay between
+two real nodes and check the captured bytes.
 
 What remains duplicated is `swarm::tcp` and `swarm::discovery`: a second
 transport and a second address book beside `p2p::transport` and

@@ -27,7 +27,6 @@ default = []
 # drives -- `swarm::piece`, `swarm::wire`, `swarm::dht`, `swarm::discovery` --
 # are pure and always available; only the socket-facing part is gated. CI builds
 # and tests with `--all-features`, so gating it does not stop it being checked.
-insecure-swarm-tcp = []
 
 [dependencies]
 # Parsing untrusted JSON only. Canonical *output* is written by this crate's own

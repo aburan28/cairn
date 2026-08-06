@@ -20,8 +20,8 @@ jobs:
       # dependency set nobody committed.
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
-      # `--all-features` too, because `insecure-swarm-tcp` is off by default and
-      # gated code that nothing builds is gated code that rots.
+      # `--all-features` too: gated code that nothing builds is gated code that
+      # rots, and the docs gate below only sees a feature if it is enabled.
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-targets --all-features
       # Broken doc links, denied rather than warned. This crate's comments are

@@ -263,14 +263,20 @@ handshake prefix is necessarily cleartext, because a responder must know which
 peer to expect before a key exists. Unlinkability is a transport-layer problem —
 onion routing, or rendezvous under a derived key — and is not solved here.
 
-**`swarm::tcp` is not encrypted.** No handshake, no AEAD, no peer
-authentication. It is behind the off-by-default `insecure-swarm-tcp` feature so
-it cannot reach a binary by accident, and only the socket-facing part is gated:
-`swarm::piece`, `swarm::wire`, `swarm::dht` and `swarm::discovery` are pure and
-always compiled. The reason it never grew a handshake is the identity mismatch
-this document keeps returning to — `swarm` records carry an ed25519 key, the
-encrypted transport needs a 261,120-byte McEliece key — so closing it is the
-fold-the-stacks work, not a missing call.
+**`swarm::tcp` runs over this transport too.** It did not for a long time — no
+handshake, no AEAD, no peer authentication, behind an off-by-default feature so
+it could not reach a binary by accident. The blocker was the identity mismatch
+this document keeps returning to: `swarm` records carry an ed25519 key and the
+transport needs a 261,120-byte McEliece key, which cannot be relayed. Giving the
+record the 32-byte *id* of one closed it, the same construction the log's own
+peer record uses.
+
+What it cost is worth naming. An authenticated dial needs the responder's key,
+so `swarm::tcp::fetch` takes endpoints rather than addresses, and an address
+learned by peer exchange is now a hint something must complete before it can be
+dialled. `p2p::dht`'s `GetKey` already fetches keys on demand over an existing
+session; wiring `swarm` to it restores the property and is the remaining half of
+folding the two stacks together.
 
 ## Provider lookup
 
