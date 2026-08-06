@@ -724,6 +724,24 @@ impl Node {
         }
 
         if rerun {
+            // Which claims actually got paid. A claim that settled and can no
+            // longer be re-verified is a different thing from one that never
+            // settled, and the difference is the whole point of the exercise:
+            // money moved on the strength of a verdict this node cannot now
+            // reproduce.
+            let paid: std::collections::BTreeSet<String> = self
+                .ledger
+                .entries_of_kind(SETTLEMENT)
+                .into_iter()
+                .filter_map(|entry| {
+                    entry
+                        .payload
+                        .get("claim_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect();
+
             // The claim the whole design makes: re-run the pinned verifier and
             // check the log's own verdict still holds.
             for entry in self.ledger.entries_of_kind(VERDICT) {
@@ -752,9 +770,28 @@ impl Node {
                     continue;
                 };
                 let fresh = verifiers::run(&self.root, &objective.verifier, &claim.artifact);
-                // A verifier this node cannot run says nothing: it is an
-                // infrastructure fact, not a disagreement about the artifact.
+                // A verifier this node cannot run says nothing *about the
+                // artifact* -- `Unavailable` is never `Reject`. But it says
+                // something about **this audit**, and staying silent was a
+                // divergence from the primary that hid a real gap: an entire
+                // verifier kind this crate did not implement produced
+                // `Unavailable` for every claim, every one was skipped, and the
+                // run still reported "every settled claim re-verified". Correct
+                // behaviours composing into a false statement.
+                //
+                // So: skipped is fine for a claim that was never paid, and a
+                // problem for one that was. Money moved on a verdict this node
+                // cannot reproduce, and an audit that does not say so is
+                // claiming coverage it does not have.
                 if !fresh.status.settles() {
+                    if paid.contains(claim_id) {
+                        problems.push(format!(
+                            "claim {}: was settled but can no longer be re-verified ({}: {})",
+                            short(claim_id),
+                            fresh.status.as_str(),
+                            fresh.detail
+                        ));
+                    }
                     continue;
                 }
                 if fresh.status != recorded.status {
