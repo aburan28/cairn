@@ -15,7 +15,10 @@ IDENTITY ?= $(abspath $(LOCAL_DIR)/node.identity.json)
 ROOT_KEY ?= $(abspath $(LOCAL_DIR)/root.key)
 CHECKPOINT ?= $(abspath $(LOCAL_DIR)/checkpoint.json)
 LISTEN ?= 127.0.0.1:9000
-BOOTSTRAP_ARGS ?=
+GEN_BOOTSTRAP := $(RELEASE_DIR)/proofwork-gen-bootstrap
+SEED_ADDR ?= 44.229.170.164:5000
+SEED_BOOTSTRAP ?= $(abspath $(LOCAL_DIR)/seed.json)
+BOOTSTRAP_ARGS ?= --bootstrap $(SEED_BOOTSTRAP)
 P2P_ARGS ?=
 
 .DEFAULT_GOAL := help
@@ -36,7 +39,11 @@ help:
 	  '' \
 	  'P2P overrides: LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS="--bootstrap peer.json"' \
 	  '             IDENTITY=.local/node.identity.json ROOT_KEY=.local/root.key' \
-	  '             CHECKPOINT=.local/checkpoint.json'
+	  '             CHECKPOINT=.local/checkpoint.json' \
+	  '             SEED_ADDR=44.229.170.164:5000  default bootstrap peer address;' \
+	  '                                     .local/seed.json is generated on first' \
+	  '                                     `make p2p` with a placeholder key -- see' \
+	  '                                     proofwork-gen-bootstrap and docs/p2p.md'
 
 build:
 	$(CARGO) build --release --bins
@@ -52,10 +59,18 @@ $(LOCAL_DIR):
 mcp: build | $(LOCAL_DIR)
 	exec "$(MCP)" --log "$(LOG)" --root "$(ROOT)"
 
+# A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
+# inside is freshly generated, not the real seed's. It authenticates nobody
+# until "public" is replaced with the seed's actual key -- see
+# proofwork-gen-bootstrap.rs. Regenerated only if missing, so a real key
+# dropped in by hand is never overwritten.
+$(SEED_BOOTSTRAP): build | $(LOCAL_DIR)
+	@test -f "$(SEED_BOOTSTRAP)" || "$(GEN_BOOTSTRAP)" --addr "$(SEED_ADDR)" --out "$(SEED_BOOTSTRAP)"
+
 # The daemon creates the identity, root key, and signed checkpoint files on the
 # first run. Keep them under .local by default; these files contain secrets and
 # must not be committed.
-p2p: build | $(LOCAL_DIR)
+p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
 	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
 	  --log "$(LOG)" --root "$(ROOT)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)

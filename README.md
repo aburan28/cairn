@@ -97,6 +97,21 @@ Then launch with:
 make p2p LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS='--bootstrap peer.json'
 ```
 
+Without an explicit `BOOTSTRAP_ARGS`, `make p2p` bootstraps against
+`SEED_ADDR` (default `44.229.170.164:5000`), generating
+`.local/seed.json` on first run via `proofwork-gen-bootstrap`. That file's
+`addr` is the real seed's; its `public` is a freshly generated placeholder key,
+because the address is only a hint and `p2p::handshake` authenticates the key,
+not the socket it answered on. Replace `"public"` in `.local/seed.json` with
+the seed's actual public key before relying on the connection, or point
+`SEED_ADDR`/`SEED_BOOTSTRAP` elsewhere:
+
+```sh
+make p2p SEED_ADDR=203.0.113.9:9001
+# or supply your own bootstrap file outright:
+make p2p BOOTSTRAP_ARGS='--bootstrap peer.json'
+```
+
 Use separate `LOCAL_DIR`, `LOG`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT`
 paths for each node. The root checkpoint key is ML-DSA-65 and is separate from
 the transport identity.

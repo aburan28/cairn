@@ -382,6 +382,16 @@ proofwork-p2p --identity node.json --listen 127.0.0.1:9000 \
   --population population.json --fanout 3
 ```
 
+`proofwork-gen-bootstrap --addr HOST:PORT --out FILE` writes a file in that
+shape for a given address, with a freshly generated McEliece keypair standing
+in for the seed's own key. It cannot make the address trustworthy -- only the
+key in the file does that, per `p2p::handshake` -- so `"public"` must be
+replaced with the real seed's public key (or the seed operator's own
+`proofwork-p2p --identity FILE` must be pointed at the generated file) before
+the connection means anything. `make p2p` calls it automatically to produce
+`.local/seed.json` for `SEED_ADDR` when no other `--bootstrap` is given; see
+the README.
+
 `--population` is optional and turns on the second half of each round. Given it,
 the daemon loads the file at startup, reconciles populations after records on
 every session, and writes the file back afterwards. Without it, no population
