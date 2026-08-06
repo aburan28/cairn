@@ -318,6 +318,55 @@ impl fmt::Debug for Channel {
     }
 }
 
+/// Seal one frame under `key` at `counter`.
+///
+/// A free function rather than a method so both [`Channel`] and [`Sealer`] can
+/// reach it **without copying the key to get there**. The first version of the
+/// split built a temporary `Channel` per call, which meant a fresh copy of the
+/// session key on the stack for every frame instead of one for the session --
+/// the same objection [`crate::store::atrest::Cipher`] makes about deriving
+/// `Clone`, and it applies to a session key at least as much.
+fn seal_frame(
+    key: &[u8; 32],
+    counter: u64,
+    plaintext: &[u8],
+    context: &[u8],
+) -> Result<Vec<u8>, HandshakeError> {
+    if counter == u64::MAX {
+        return Err(HandshakeError::CounterExhausted);
+    }
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    cipher
+        .encrypt(
+            &nonce_for(counter),
+            Payload {
+                msg: plaintext,
+                aad: &aad(counter, context),
+            },
+        )
+        .map_err(|_| HandshakeError::NotAuthentic)
+}
+
+/// Open one frame under `key` at `counter`. Replay is the caller's business:
+/// this is the cryptography, and the window lives with whoever owns it.
+fn open_frame(
+    key: &[u8; 32],
+    counter: u64,
+    ciphertext: &[u8],
+    context: &[u8],
+) -> Result<Vec<u8>, HandshakeError> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    cipher
+        .decrypt(
+            &nonce_for(counter),
+            Payload {
+                msg: ciphertext,
+                aad: &aad(counter, context),
+            },
+        )
+        .map_err(|_| HandshakeError::NotAuthentic)
+}
+
 impl Channel {
     fn new(keys: SessionKeys, role: Role) -> Channel {
         let (send_key, recv_key) = match role {
@@ -342,21 +391,9 @@ impl Channel {
         context: &[u8],
     ) -> Result<(u64, Vec<u8>), HandshakeError> {
         let counter = self.send_counter;
-        if counter == u64::MAX {
-            return Err(HandshakeError::CounterExhausted);
-        }
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&self.send_key));
-        let ct = cipher
-            .encrypt(
-                &nonce_for(counter),
-                Payload {
-                    msg: plaintext,
-                    aad: &aad(counter, context),
-                },
-            )
-            .map_err(|_| HandshakeError::NotAuthentic)?;
+        let ciphertext = seal_frame(&self.send_key, counter, plaintext, context)?;
         self.send_counter += 1;
-        Ok((counter, ct))
+        Ok((counter, ciphertext))
     }
 
     /// Decrypt a frame, refusing replays and reordering.
@@ -374,16 +411,7 @@ impl Channel {
                 });
             }
         }
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&self.recv_key));
-        let plaintext = cipher
-            .decrypt(
-                &nonce_for(counter),
-                Payload {
-                    msg: ciphertext,
-                    aad: &aad(counter, context),
-                },
-            )
-            .map_err(|_| HandshakeError::NotAuthentic)?;
+        let plaintext = open_frame(&self.recv_key, counter, ciphertext, context)?;
         // Only advance on success, so a forged frame cannot burn counter space
         // and lock out the honest peer.
         self.recv_high = Some(counter);
@@ -444,15 +472,10 @@ impl Sealer {
         plaintext: &[u8],
         context: &[u8],
     ) -> Result<(u64, Vec<u8>), HandshakeError> {
-        let mut channel = Channel {
-            send_key: self.key,
-            recv_key: [0u8; 32],
-            send_counter: self.counter,
-            recv_high: None,
-        };
-        let sealed = channel.seal(plaintext, context)?;
-        self.counter = channel.send_counter;
-        Ok(sealed)
+        let counter = self.counter;
+        let ciphertext = seal_frame(&self.key, counter, plaintext, context)?;
+        self.counter += 1;
+        Ok((counter, ciphertext))
     }
 
     pub fn frames_sent(&self) -> u64 {
@@ -482,14 +505,18 @@ impl Opener {
         ciphertext: &[u8],
         context: &[u8],
     ) -> Result<Vec<u8>, HandshakeError> {
-        let mut channel = Channel {
-            send_key: [0u8; 32],
-            recv_key: self.key,
-            send_counter: 0,
-            recv_high: self.high,
-        };
-        let plaintext = channel.open(counter, ciphertext, context)?;
-        self.high = channel.recv_high;
+        if let Some(high) = self.high {
+            if counter <= high {
+                return Err(HandshakeError::Replay {
+                    counter,
+                    expected_above: high,
+                });
+            }
+        }
+        let plaintext = open_frame(&self.key, counter, ciphertext, context)?;
+        // As `Channel::open`: only advance on success, so a forged frame cannot
+        // burn counter space and lock out the honest peer.
+        self.high = Some(counter);
         Ok(plaintext)
     }
 }
@@ -851,5 +878,23 @@ mod tests {
             opener.open(counter, &frame, b"proofwork/b"),
             Err(HandshakeError::NotAuthentic)
         ));
+    }
+
+    #[test]
+    fn a_split_sealer_refuses_to_wrap_its_counter() {
+        // The counter is the nonce, and nonce reuse is the one failure
+        // ChaCha20-Poly1305 does not survive -- it exposes the XOR of two
+        // messages and permits forgery. `Channel::seal` has always refused to
+        // wrap; the split half has to refuse too, and would not if it reached
+        // the cipher by a path that skipped the check.
+        let (initiator, _) = paired();
+        let (mut sealer, _) = initiator.split();
+        sealer.counter = u64::MAX;
+        assert_eq!(
+            sealer.seal(b"one frame too many", b"ctx"),
+            Err(HandshakeError::CounterExhausted)
+        );
+        // And it did not advance past the end while failing.
+        assert_eq!(sealer.frames_sent(), u64::MAX);
     }
 }
