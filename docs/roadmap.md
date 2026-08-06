@@ -195,11 +195,30 @@ behaviour ships and is tested, not that TLC has checked it.
       address does not mean you can reach it. Until then a node behind a home
       router can fetch and cannot seed, which makes the network more centralised
       than the protocol suggests.
-- [ ] A `blob` record kind announcing who holds what, which is the useful half —
-      that a blob exists is already implied by the objective.
+- [x] **Decided against as written: no `blob` record announcing who holds what.**
+      This line contradicted [discovery.md](discovery.md), and the contradiction
+      is the answer rather than something to resolve by building. "Who holds
+      digest `D`" is a statement about *right now*: holders churn, and an
+      append-only log has no way to say "no longer true", so a blob record would
+      advertise a dead node forever and get less accurate the longer it ran.
+      That is the same argument that keeps provider records out, and it does not
+      stop applying because the record is called something else. The useful half
+      is already built, in the structure that can express expiry: the DHT's
+      provider store (`dht::Providers`), reached through `p2p::dht`.
+      What the log *can* carry, because it is permanently true, is a **past
+      undertaking**: identity `K` committed to seed digest `D` from time `T`. A
+      claim about the past never needs retracting. That is not a discovery
+      mechanism — it is an accountability one, and it is worth nothing until
+      something pays or slashes against it, so it belongs to the next line
+      rather than before it.
 - [ ] Pay for seeding. Tit-for-tat covers the download phase and nothing covers
       a node that has finished; a swarm of pure leeches transfers nothing. This
       is the availability service in [node-incentives.md](node-incentives.md).
+      This is where the seeding *undertaking* from the line above lands: a
+      signed, permanent record of who committed to hold what, which availability
+      sampling then challenges against a published checkpoint. Undertaking and
+      settlement have to arrive together — a record nothing pays against is
+      bookkeeping, and a payment with no record to challenge is unenforceable.
 - [x] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [x] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while

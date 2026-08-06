@@ -122,6 +122,13 @@ want different structures:
 |---|---|---|
 | peer identity | permanent | the log |
 | who holds digest `D` right now | constant | the DHT |
+| who *undertook* to seed `D`, and when | permanent (a past promise) | the log — but only once something pays or slashes against it |
+
+The third row is the one that catches people out, this project's own roadmap
+included: it once carried a line proposing a `blob` record "announcing who holds
+what", which is row two wearing row one's clothes. The test is not whether the
+fact is useful, it is whether the fact can stop being true. Holdership can.
+A promise made at a point in time cannot.
 
 The bootstrap objection also dissolves: the DHT bootstraps from the address book,
 which is already there.
