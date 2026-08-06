@@ -10,6 +10,7 @@ use proofwork::ledger::Ledger;
 use proofwork::node::Node;
 use proofwork::p2p::discovery::Endpoint;
 use proofwork::p2p::handshake::{PeerIdentity, PeerPublic};
+use proofwork::p2p::multicast;
 use proofwork::p2p::pop::PopLimits;
 use proofwork::p2p::service::{Service, DEFAULT_FANOUT};
 use proofwork::records::Objective;
@@ -22,6 +23,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+/// Beacons folded in per tick.
+///
+/// Bounded because the beacon socket is reachable by anyone on the segment: an
+/// unbounded drain is a way for one host to hold the daemon's main loop. Any
+/// backlog is picked up next tick, and a node re-announces every
+/// `multicast::INTERVAL_SECONDS` regardless, so nothing is lost by deferring it.
+const BEACONS_PER_TICK: usize = 64;
 
 fn usage() -> ! {
     eprintln!("usage: proofwork-p2p --identity FILE --root-key FILE --checkpoint FILE --listen ADDR --log FILE --root DIR [--bootstrap FILE ...] [--population FILE] [--fanout N]");
@@ -276,6 +285,18 @@ fn main() {
             }
         }
     }
+    // Zero-configuration discovery on the local segment. Optional by design:
+    // a host with no multicast route is a node without LAN discovery, not a
+    // node that cannot start, so a failure here is reported and stepped over.
+    let beacon =
+        match multicast::Responder::bind(service.identity(), listen_addr.port(), multicast::PORT) {
+            Ok(responder) => Some(responder),
+            Err(error) => {
+                eprintln!("multicast: {error} -- continuing without LAN discovery");
+                None
+            }
+        };
+
     let listener = service.listen(listen_addr).unwrap_or_else(|e| {
         eprintln!("listen: {e}");
         std::process::exit(2)
@@ -374,6 +395,12 @@ fn main() {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             service.seed_from_log(&guard.node);
+            if let Some(responder) = &beacon {
+                // Announce first, then listen: a node that has just started
+                // becomes findable this tick rather than next.
+                let _ = responder.announce(multicast::PORT);
+                service.absorb_beacons(responder, BEACONS_PER_TICK);
+            }
             guard.node.missing_code()
         };
         for endpoint in service.peers_for(&needs, fanout) {

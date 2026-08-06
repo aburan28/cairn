@@ -146,8 +146,24 @@ stronger version and is not built.
 
 **Local multicast (mDNS-style).** Genuinely zero-configuration on a LAN: no DNS,
 no hardcoded address, no anchor at all. Limited to a broadcast domain, and often
-disabled in exactly the container environments a node runs in. Cheap to add and
-worth having as one hint source among several.
+disabled in exactly the container environments a node runs in. *Built —
+`p2p::multicast`, and it really was cheap, which is this document's thesis
+collecting on itself: a hint source nobody has to trust needs no new security
+argument, so the whole feature is a 39-byte frame and a socket.*
+
+Three omissions carry the design. The frame has **no address field** — the
+address comes from the datagram's source, because an address in the body is a
+claim by the sender, and a listener that believed it would let one host point an
+entire segment at a third party. It is **announce-only**: there is no query, so
+there is no spoofed query, so there is no reflector. And it carries **no
+inventory**, because `p2p::code` refuses to publish which blobs a node holds and
+a beacon listing them would broadcast exactly that to a whole office, without
+even a handshake. What a listener learns is that a proofwork node exists here.
+
+Unsigned, and deliberately: a false beacon names a transport id whose McEliece
+key the liar does not have, so the handshake fails and the cost is one dial. Same
+bound as a peer record, same bound as a DHT routing answer — which is the point
+of making every hint source equal.
 
 **Ethereum's discv5 / ENR.** The closest thing to state of the art for this exact
 problem, and the design the records here follow: a signed key-value record

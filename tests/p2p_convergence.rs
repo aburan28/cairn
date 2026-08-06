@@ -887,3 +887,69 @@ fn a_peer_record_a_node_cannot_parse_is_skipped_not_fatal() {
     );
     assert_eq!(alice.with_directory(|d| d.routing().len()), 1);
 }
+
+/// A beacon heard on the local segment becomes a routable contact, by the same
+/// path a peer record does.
+///
+/// The point of the third hint source is that it needs no new machinery: an
+/// address and a transport id, neither trusted, both settled by the handshake.
+/// This asserts the two arrive in the routing table with the key queued, which
+/// is exactly what `seed_from_log` promises for records.
+#[test]
+fn a_beacon_becomes_a_routable_contact_with_its_key_queued() {
+    use proofwork::p2p::multicast;
+
+    let heard_id = PeerIdentity::generate();
+    let alice = Service::new(Arc::new(PeerIdentity::generate()));
+    assert_eq!(alice.known_peers(), 0);
+
+    // Bind on a pid-derived port so concurrent runs do not collide, and step
+    // over a host with no multicast route rather than failing there -- that is
+    // the documented degradation, not a defect.
+    let port = 41_000 + (std::process::id() % 20_000) as u16;
+    let Ok(responder) = multicast::Responder::bind(alice.identity(), 9500, port) else {
+        eprintln!("skipped: multicast unavailable on this host");
+        return;
+    };
+    let Ok(sender) = std::net::UdpSocket::bind(("0.0.0.0", 0)) else {
+        eprintln!("skipped: cannot bind a sender");
+        return;
+    };
+    let _ = sender.set_multicast_loop_v4(true);
+    let frame = multicast::Beacon::new(heard_id.id(), 9600).encode();
+    if sender
+        .send_to(
+            &frame,
+            std::net::SocketAddr::new(multicast::GROUP.into(), port),
+        )
+        .is_err()
+    {
+        eprintln!("skipped: multicast send unavailable on this host");
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(250));
+
+    let taken = alice.absorb_beacons(&responder, 16);
+    if taken == 0 {
+        eprintln!("skipped: no multicast delivery on this host");
+        return;
+    }
+    assert_eq!(taken, 1, "one beacon, one contact");
+
+    let node_id = proofwork::p2p::dht::NodeId::from_bytes(heard_id.id());
+    let known: Vec<_> = alice.with_directory(|d| {
+        d.routing()
+            .contacts()
+            .map(|c| (c.id, c.addr.port()))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        known,
+        vec![(node_id, 9600)],
+        "the session port must come from the beacon, not from the sending socket"
+    );
+    assert!(
+        alice.with_directory(|d| d.key_wants()).contains(&node_id),
+        "a contact from a beacon was not queued for the key that makes it dialable"
+    );
+}

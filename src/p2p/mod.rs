@@ -8,6 +8,7 @@ pub mod code;
 pub mod dht;
 pub mod discovery;
 pub mod handshake;
+pub mod multicast;
 pub mod pop;
 pub mod service;
 pub mod session;

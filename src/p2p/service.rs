@@ -4,6 +4,7 @@ use super::code::{CodeLimits, CodeReport};
 use super::dht::{Directory, NodeId, PeerContact};
 use super::discovery::{AddressBook, Endpoint};
 use super::handshake::{PeerId, PeerIdentity, PeerPublic};
+use super::multicast;
 use super::pop::{PopLimits, PopReport};
 use super::session::{self, SessionError};
 use super::sync::{Peer, SyncError};
@@ -334,6 +335,39 @@ impl Service {
             seeded += 1;
         }
         seeded
+    }
+
+    /// Fold beacons heard on the local segment into the routing table.
+    ///
+    /// The third hint source, and interchangeable with the other two by
+    /// construction: a beacon is an address and a transport id, which is exactly
+    /// what a peer record carries and exactly what a DHT contact carries. None
+    /// of them is trusted, so none of them needs a different code path -- the
+    /// handshake decides, and a wrong hint costs one dial.
+    ///
+    /// Takes the [`multicast::Responder`] rather than owning it, because whether
+    /// a node has one at all depends on the host: `Responder::bind` fails on a
+    /// container with no multicast route, and that is a node without LAN
+    /// discovery rather than a node that cannot run.
+    ///
+    /// Returns how many contacts were taken.
+    pub fn absorb_beacons(&self, responder: &multicast::Responder, limit: usize) -> usize {
+        let mut taken = 0;
+        for (peer, addr) in responder.poll(limit) {
+            if peer == self.identity.id() {
+                continue;
+            }
+            self.note_contact(peer, addr);
+            // Same as `seed_from_log`: a beacon carries a transport *id*, not
+            // the 261 KiB key needed to dial it, so the key is queued and one
+            // round with any peer that has it turns the contact into an
+            // endpoint.
+            if self.with_book(|book| book.for_peer(&peer).is_empty()) {
+                self.with_directory(|directory| directory.wants_key(NodeId::from_bytes(peer)));
+            }
+            taken += 1;
+        }
+        taken
     }
 
     /// Report that a dial failed, so the lookups waiting on that peer move on.

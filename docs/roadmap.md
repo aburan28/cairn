@@ -189,8 +189,24 @@ behaviour ships and is tested, not that TLC has checked it.
       cannot produce a key hashing to a transport id they do not hold, so the
       handshake fails. `Service::seed_from_log` feeds the address book from the
       log at startup.
-- [ ] Local multicast as a second hint source: genuinely zero-configuration on a
-      LAN, and cheap now that every source is interchangeable.
+- [x] **Local multicast** (`p2p::multicast`), and it really was cheap — which
+      is the payoff for every hint source being untrusted. A beacon is a peer id
+      and a port on an administratively-scoped group at TTL 1, folded into the
+      routing table by the same path a peer record takes.
+      Three things it deliberately does not do. It carries **no IP address**:
+      the address comes from the datagram's source, because an address in the
+      body is a claim by the sender and would let one host point a whole segment
+      at a third party. It is **announce-only**, so there is no query to spoof
+      and therefore no reflector to rate-limit. And it carries **no inventory** —
+      `p2p::code` refuses to publish which blobs a node holds, and a beacon
+      listing them would undo that to a whole office, unauthenticated.
+      Unsigned, because a false beacon names a transport id its sender cannot
+      dial for: one wasted dial, never a wrong result.
+      No `SO_REUSEADDR`, which costs two nodes on *one host* both hearing
+      beacons — a development arrangement, not a deployment — and saves a
+      dependency or sixty lines of `sockaddr_in` FFI. A host with no multicast
+      route gets an error from `Responder::bind`, logs it, and runs from
+      bootstrap addresses as before.
 - [ ] NAT traversal. Not discovery, and routinely confused with it -- knowing an
       address does not mean you can reach it. Until then a node behind a home
       router can fetch and cannot seed, which makes the network more centralised
