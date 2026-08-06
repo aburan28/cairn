@@ -210,6 +210,14 @@ the same reason everything else here is: checking costs one evaluation. A scorer
 that *cannot* answer is a refusal, not an acceptance — the population layer's
 version of `UNAVAILABLE` is never `ACCEPT`.
 
+`scripts/p2p-demo.sh` runs this through two daemons rather than through the
+library: one node gossips an honest candidate and a lie about the *same*
+artifact, and the other must end up with the first and not the second. Only
+re-scoring can tell them apart, and a node that believed what it was told would
+let a liar own the frontier of every ratcheted objective on the network. The
+`--population` path had library coverage and no end-to-end coverage, which is
+the gap that mattered — the daemon is where the scorer is actually wired up.
+
 Two ordering facts that are easy to get wrong:
 
 - **Records reconcile first, populations second, on the same connection.**

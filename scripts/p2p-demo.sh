@@ -15,6 +15,8 @@
 #   * B fetches the pinned verifier code it does not have, so it can re-run the
 #     verdicts rather than take them on faith. A node that syncs records but not
 #     code can only replay somebody else's opinion.
+#   * B takes an honest gossiped candidate and refuses a lie about the same
+#     artifact, because a claimed score is re-derived and never imported.
 #   * Both logs audit, and the *independent* implementation audits B's.
 #
 # That last one is the point. Auditing the node that synced is the case that
@@ -93,6 +95,29 @@ OPEN_OID=$("$RUST" --log "$A/log.jsonl" --root "$A" post examples/capset/objecti
   | head -1 | awk '{print $2}')
 echo "  a second objective, still open: $OPEN_OID"
 
+# A third objective, ratcheted, so gossiped candidates have a score to check.
+SCORED_OID=$("$RUST" --log "$A/log.jsonl" --root "$A" post \
+  examples/capset_progressive/objective.json | head -1 | awk '{print $2}')
+echo "  a ratcheted objective, for the population round: $SCORED_OID"
+
+# A's population: one honest candidate and one lie about the *same* artifact.
+# The rule that makes gossip safe at all is that a peer's claimed score is
+# re-derived and never imported, so B must end up with the first and not the
+# second. Nothing exercised that through the daemon -- only through the library
+# -- and `serve_node_and_population` is on the path the accept-thread fix moved.
+python3 - <<PY
+import json
+artifact = json.load(open("examples/capset_progressive/artifact-12.json"))
+json.dump({"islands": 1, "capacity": 32, "candidates": [
+    {"objective_id": "$SCORED_OID", "artifact": artifact,
+     "score": 12, "origin": "honest"},
+    {"objective_id": "$SCORED_OID", "artifact": artifact,
+     "score": 9999, "origin": "liar"},
+]}, open("$A/population.json", "w"))
+json.dump({"islands": 1, "capacity": 32, "candidates": []},
+          open("$B/population.json", "w"))
+PY
+
 # The daemon generates a root key if the file is absent; the CLI's `checkpoint`
 # does not, so one is made here rather than relying on which ran first.
 python3 -c "
@@ -107,7 +132,8 @@ rule "A serves, with a submission queue"
 mkdir -p "$A/queue"
 "$DAEMON" --identity "$A/id.json" --root-key "$A/rootkey.json" \
   --checkpoint "$A/checkpoint.json" --listen "127.0.0.1:$A_PORT" \
-  --log "$A/log.jsonl" --root "$A" --queue "$A/queue" > "$A/daemon.log" 2>&1 &
+  --log "$A/log.jsonl" --root "$A" --queue "$A/queue" \
+  --population "$A/population.json" > "$A/daemon.log" 2>&1 &
 APID=$!
 # The identity file appears after ~243 ms of Classic McEliece keygen. Poll for
 # it rather than sleeping a guessed amount.
@@ -129,7 +155,7 @@ rule "B starts with an empty log and one address"
 "$DAEMON" --identity "$B/id.json" --root-key "$B/rootkey.json" \
   --checkpoint "$B/checkpoint.json" --listen "127.0.0.1:$B_PORT" \
   --log "$B/log.jsonl" --root "$B" --bootstrap "$WORK/a-endpoint.json" \
-  > "$B/daemon.log" 2>&1 &
+  --population "$B/population.json" > "$B/daemon.log" 2>&1 &
 BPID=$!
 
 # `grep -c` exits 1 on an empty file, and `|| echo 0` then appends a second
@@ -149,6 +175,32 @@ rule "B has the verifier code too, not just the records"
 "$RUST" --log "$B/log.jsonl" --root "$B" blob need | sed 's/^/  /'
 "$RUST" --log "$B/log.jsonl" --root "$B" blob need | grep -q "available locally" \
   || fail "B synced records but not the code they pin, so it can only replay A's opinion"
+
+rule "B took the honest candidate and refused the lie"
+# The rule that makes gossip safe: a peer's claimed score is re-derived against
+# the objective, never imported. Both candidates name the *same* artifact, so
+# only re-scoring can tell them apart -- a node that believed what it was told
+# would take the 9999 and let a liar own the frontier of every ratcheted
+# objective on the network.
+for _ in $(seq 1 60); do
+  [ "$(python3 -c "
+import json
+print(len(json.load(open('$B/population.json'))['candidates']))")" -gt 0 ] && break
+  sleep 0.5
+done
+python3 - <<PY
+import json, sys
+candidates = json.load(open("$B/population.json"))["candidates"]
+for candidate in candidates:
+    print(f"  {candidate['origin']}: score {candidate['score']}")
+scores = [c["score"] for c in candidates]
+if not scores:
+    print("  B learned no candidates at all", file=sys.stderr)
+    sys.exit(1)
+if 9999 in scores:
+    print("  B imported a claimed score instead of re-deriving it", file=sys.stderr)
+    sys.exit(1)
+PY
 
 rule "both logs audit, each on its own terms"
 "$RUST" --log "$A/log.jsonl" --root "$A" audit | sed 's/^/  A /'
