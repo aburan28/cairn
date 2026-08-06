@@ -671,7 +671,7 @@ impl Node {
     ///
     /// `None` also when the latest frontier entry cannot be decoded, which is
     /// safe *here* because this accessor is informational. The rules path uses
-    /// [`Node::latest_frontier`] instead, which refuses rather than reporting an
+    /// `Node::latest_frontier` instead, which refuses rather than reporting an
     /// empty frontier -- treating an unreadable entry as absent would waive the
     /// citation requirement and restart the payout curve at zero.
     pub fn frontier_of(&self, objective_id: &str) -> Option<FrontierEntry> {
@@ -766,7 +766,7 @@ impl Node {
     ///
     /// # Settlement is deferred to the close of the reveal epoch
     ///
-    /// An accepted claim comes back [`Outcome::pending`], not settled. That is
+    /// An accepted claim comes back `Outcome::pending`, not settled. That is
     /// not a caching decision -- it falls out of the ordering rule and cannot be
     /// avoided. Settlement order inside an epoch is
     /// `H(beacon(epoch, anchor) ‖ claim_id)`, which is a function of the *set*

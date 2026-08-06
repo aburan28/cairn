@@ -667,7 +667,7 @@ pub fn pinned_code(spec: &Value) -> Vec<PinnedCode> {
 /// Dispatches a verifier spec to the verifier it names.
 ///
 /// `root` is the objective bundle root. Pinned checker and evaluator paths are
-/// resolved against it and may not escape it; see [`VerifierRegistry::pinned`].
+/// resolved against it and may not escape it; see `VerifierRegistry::pinned`.
 ///
 /// `blobs` is the content-addressed fallback for code this node never had a
 /// bundle for — the mechanism that lets a peer holding only the log obtain the
@@ -1503,7 +1503,7 @@ impl VerifierRegistry {
 
     /// Whether this node can obtain the bytes behind a pin, and if not, why.
     ///
-    /// Split out from [`VerifierRegistry::pinned`] so the wire protocol can ask
+    /// Split out from `VerifierRegistry::pinned` so the wire protocol can ask
     /// "which blobs am I missing" using the *same* resolution the verifier will
     /// use. Two implementations of that question would eventually disagree, and
     /// the failure would be a node that fetches nothing while reporting

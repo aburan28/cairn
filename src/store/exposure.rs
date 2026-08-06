@@ -2,7 +2,7 @@
 //!
 //! # The decision
 //!
-//! **[`atrest`](super::atrest) seals the log and stops there, on purpose.**
+//! **[`super::atrest`] seals the log and stops there, on purpose.**
 //!
 //! The roadmap carried this as an open question — extend encryption past the
 //! log, or decide on the record that it should not — because the asymmetry was

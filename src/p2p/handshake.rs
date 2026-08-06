@@ -408,7 +408,7 @@ impl Channel {
     /// That is not a general property of AEAD sessions and is worth stating.
     /// A construction with one counter for both directions, or one key, could
     /// not do this — the halves would have to agree on every increment. The
-    /// separation is what [`SessionKeys`]'s two labels buy.
+    /// separation is what `SessionKeys`'s two labels buy.
     pub fn split(self) -> (Sealer, Opener) {
         (
             Sealer {

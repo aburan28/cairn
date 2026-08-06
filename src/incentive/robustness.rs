@@ -116,7 +116,7 @@ impl fmt::Display for Toward {
 enum Unit {
     /// Ledger units.
     Money,
-    /// A rate in `[0, 1]`, held as a numerator on [`GRID`].
+    /// A rate in `[0, 1]`, held as a numerator on `GRID`.
     Rate,
 }
 
@@ -260,7 +260,7 @@ fn knobs() -> Vec<Knob> {
 pub struct Margin {
     pub parameter: &'static str,
     /// The value in the parameter set being analysed. Ledger units for money,
-    /// a numerator on [`GRID`] for rates.
+    /// a numerator on `GRID` for rates.
     pub current: u64,
     /// The first rung of the ladder at which [`Report::passes`] is false.
     ///
@@ -428,7 +428,7 @@ fn scale(value: u64, num: i128, den: i128) -> u64 {
     u64::try_from(scaled).unwrap_or(u64::MAX)
 }
 
-/// A rate as a numerator on [`GRID`].
+/// A rate as a numerator on `GRID`.
 fn numerator(rate: Rat) -> u64 {
     let scaled = rate.numerator().saturating_mul(GRID) / rate.denominator().max(1);
     u64::try_from(scaled.clamp(0, GRID)).unwrap_or(0)

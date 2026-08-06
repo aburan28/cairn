@@ -72,7 +72,7 @@
 //! transcript) or delegated: `x25519-dalek` for the scalar multiplication,
 //! `chacha20poly1305` for the constant-time Poly1305 tag comparison, and
 //! [`super::shamir`] for the GF(2^8) arithmetic. The one data-dependent routine
-//! here, [`hex_encode`], is applied only to published bytes.
+//! here, `hex_encode`, is applied only to published bytes.
 
 use core::fmt;
 

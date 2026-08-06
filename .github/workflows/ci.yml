@@ -24,6 +24,11 @@ jobs:
       # gated code that nothing builds is gated code that rots.
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-targets --all-features
+      # Broken doc links, denied rather than warned. This crate's comments are
+      # load-bearing -- the arguments for why a rule exists live in them -- so a
+      # link that resolves to nothing is a defect in the primary artifact, not
+      # cosmetic. Twenty-two had accumulated before this gate existed.
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --all-features
       # The demos are part of the contract: if the documented walkthrough stops
       # working, the README is lying.
       - run: cargo build --release --locked

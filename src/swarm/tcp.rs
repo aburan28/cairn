@@ -1,6 +1,6 @@
 //! The part with sockets in it.
 //!
-//! [`super::Swarm`] is a pure state machine: messages in, [`Action`]s out, no
+//! [`crate::swarm::Swarm`] is a pure state machine: messages in, [`Action`]s out, no
 //! clock and no randomness. This is the driver that gives it a network -- one
 //! thread per connection, blocking reads, and a ticker for the choking rounds.
 //!
@@ -13,8 +13,8 @@
 //!
 //! Everything that can fail for reasons that are **nobody's fault** lives here:
 //! a refused connection, a timeout, a half-closed socket, a DNS answer that
-//! changed. None of it reaches [`super::Swarm`], and none of it produces a
-//! [`super::Dropped`] -- which is the same rule the verification ladder runs on.
+//! changed. None of it reaches [`crate::swarm::Swarm`], and none of it produces a
+//! [`crate::swarm::Dropped`] -- which is the same rule the verification ladder runs on.
 //! A peer that cannot be reached has not misbehaved, exactly as a verifier that
 //! cannot run has not refuted anything.
 //!
@@ -27,7 +27,7 @@
 //! A blocking read on a peer that has gone quiet is a thread that never returns
 //! and a piece that is never reassigned. Every socket gets a read and write
 //! timeout, and a peer that trips one is disconnected -- at which point
-//! [`super::Swarm::remove_peer`] returns its reservations to the pool and the
+//! [`crate::swarm::Swarm::remove_peer`] returns its reservations to the pool and the
 //! transfer continues without it. That is the only reason a stalled peer is
 //! survivable, and it is why the timeout is not a tunable nicety.
 

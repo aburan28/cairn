@@ -78,7 +78,7 @@ pub struct Service {
     /// and the rule that keeps an unsigned DHT from being an amplifier is that
     /// a relayed claim is never re-served. Kept here they are consulted by this
     /// node's own dialling and answered to nobody, and consumed on use, so a
-    /// wrong one costs exactly one dial. See [`Service::adopt`].
+    /// wrong one costs exactly one dial. See `Service::adopt`.
     hints: Mutex<std::collections::BTreeMap<String, Vec<super::dht::Holder>>>,
     /// Keys served that did not hash to the id asked for.
     bad_keys: std::sync::atomic::AtomicUsize,
@@ -100,7 +100,7 @@ impl Service {
         self.identity.id()
     }
 
-    /// Read the address book briefly. Held behind a lock; see [`Service::book`].
+    /// Read the address book briefly. Held behind a lock; see `Service::book`.
     pub fn with_book<T>(&self, f: impl FnOnce(&mut AddressBook) -> T) -> T {
         let mut guard = self.book.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
@@ -152,7 +152,7 @@ impl Service {
     ///    than anything routing can offer — asking a holder gets the bytes;
     ///    asking a router gets a pointer.
     /// 2. **Holders a previous lookup found.** Relayed claims, so they are
-    ///    consumed on use rather than stored — see [`Service::adopt`].
+    ///    consumed on use rather than stored — see `Service::adopt`.
     /// 3. **The next hop of a lookup**, for the addresses no holder is known
     ///    for. This is what makes a lookup *multi*-hop: `next_hops` names the
     ///    peers the iterative search wants to query, so the next session this
@@ -652,7 +652,7 @@ impl Service {
 
     /// Adopt a finished lookup's holders without a live connection.
     ///
-    /// The same path [`Service::adopt`] takes, reachable from a test that
+    /// The same path `Service::adopt` takes, reachable from a test that
     /// drives the directory directly. The alternative is a test that stands up
     /// three real McEliece sessions to assert a `BTreeMap` insert, which would
     /// take a minute to run and test the transport rather than the rule.

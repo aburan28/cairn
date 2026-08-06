@@ -21,7 +21,7 @@
 //! spool directory, and the operator's node drains it with `proofwork drain`.
 //! Two reasons, and the second is the load-bearing one:
 //!
-//! * **One writer.** [`Ledger`](crate::ledger::Ledger) is single-writer by
+//! * **One writer.** [`crate::ledger::Ledger`] is single-writer by
 //!   construction and now by lock. A server that appended would be a second
 //!   writer beside the operator's own CLI and daemon.
 //! * **Admission is a rules question, not a transport question.** Whether a

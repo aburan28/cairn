@@ -15,6 +15,26 @@
 //! means folding this module onto `p2p`'s identity, which `docs/roadmap.md`
 //! tracks.
 //!
+//! Two things that blocked the fold are now built, and neither is the fold:
+//!
+//! * [`crate::records::PeerRecord`] settles the identity mismatch — an ed25519
+//!   key vouches for the 32-byte *hash* of a McEliece key, and the key is
+//!   fetched on demand and checked against it.
+//! * [`crate::p2p::transport::Connection::split`] settles a structural blocker
+//!   that was easy to miss. The writer thread below is deliberate: a peer that
+//!   stops reading must block its own socket rather than the state machine
+//!   every other peer is waiting on. A `Connection` takes `&mut self` on both
+//!   `send` and `receive`, so it could not be in two threads at all, and a
+//!   mutex around it would starve the writer whenever the reader blocked.
+//!
+//! What remains is the port and it is not small: an encrypted dial needs the
+//! responder's key, so `fetch` must take endpoints rather than bare addresses —
+//! and once it does, [`Message::Peers`] is sharing addresses that nobody can
+//! dial without a key exchange this module has no round for. That is the fold
+//! rather than a transport swap, which is precisely why the roadmap keeps them
+//! together and why a rushed version would trade a contained duplication for an
+//! uncontained one.
+//!
 //! Everything else here is a pure state machine with no socket: [`piece`],
 //! [`wire`], [`dht`] and [`discovery`] are always compiled, and
 //! [`crate::p2p::dht`] already uses the shared Kademlia in [`crate::dht`] over

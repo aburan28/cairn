@@ -45,7 +45,7 @@
 //!
 //! # Timing
 //!
-//! Read [`gf`] before assuming anything. Summary: the multiply is branch-free
+//! Read `gf` before assuming anything. Summary: the multiply is branch-free
 //! and **table-free**, specifically so that no memory access is indexed by a
 //! secret byte — the standard log/exp-table implementation leaks the secret
 //! through the cache and is not used here. What is *not* claimed: that the

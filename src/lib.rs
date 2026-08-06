@@ -10,7 +10,7 @@
 //!
 //! 1. **A verifier that cannot run returns [`Status::Unavailable`], never
 //!    `Reject`.** A missing toolchain or a crash is an infrastructure fact, not
-//!    a fact about the artifact, and [`Verdict::settling`] is the only path by
+//!    a fact about the artifact, and [`Verdict::settles`](crate::verifiers::Verdict::settles) is the only path by
 //!    which a verdict can move value.
 //! 2. **Floats are unrepresentable**, not merely rejected: [`canonical::Value`]
 //!    has no float variant, so an object whose identity could differ between
