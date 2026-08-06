@@ -8,6 +8,8 @@
 //!   settle
 //!   audit
 //!   verify    --from checkpoint.json [--root-key HEX|FILE] [--audit]
+//!   prove     <seq> [--height N] [--out FILE]
+//!   check     proof.json --from checkpoint.json [--root-key HEX|FILE]
 //!   attribute
 //!   log
 //! ```
@@ -44,7 +46,7 @@
 //! | code | meaning |
 //! |------|---------|
 //! | 0    | success |
-//! | 1    | `audit` found problems, or `verify` found a checkpoint mismatch |
+//! | 1    | `audit` found problems, or `verify`/`check` found a mismatch |
 //! | 2    | the network refused the submission, or the input was bad |
 //! | 3    | `reveal` produced a verdict that settles nothing |
 //!
@@ -69,7 +71,7 @@ use proofwork::checkpoint::{RootKey, SignedCheckpoint};
 use proofwork::crypto::identity::Identity;
 use proofwork::incentive::design::Report as IncentiveReport;
 use proofwork::incentive::{NodeParams, ParamError, Rat};
-use proofwork::ledger::{Codec, Ledger, LedgerError};
+use proofwork::ledger::{Codec, Ledger, LedgerError, Proof};
 use proofwork::node::Node;
 use proofwork::records::{commitment_hash, Claim, Commitment, Objective, PeerRecord, RecordError};
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
@@ -495,6 +497,38 @@ enum Command {
         audit: bool,
         rerun: bool,
     },
+    /// Emit a Merkle inclusion proof for one entry.
+    ///
+    /// The half of [`Command::Checkpoint`] that was missing. A checkpoint says
+    /// "the log at height H has root R"; this says "and entry N is under R",
+    /// in fifteen hashes rather than 20,000 entries.
+    Prove {
+        seq: u64,
+        /// Prove against the log's first `height` entries rather than all of
+        /// them. A root is over a whole log, so a proof from a log that has
+        /// grown since the reader's checkpoint was signed will not check
+        /// against it -- this is how the prover meets the reader where they
+        /// are.
+        height: Option<u64>,
+        out: Option<String>,
+    },
+    /// Check an inclusion proof against a root.
+    ///
+    /// The only command that reads neither a log nor a bundle. That is the
+    /// point: whoever runs this has no copy of the log, which is why they were
+    /// sent a proof.
+    Check {
+        proof: String,
+        /// The root, as `sha256:` hex. Spelled `--merkle-root` rather than
+        /// `--root`, which is the global flag naming the *bundle directory*: two
+        /// meanings for one flag is how a caller silently checks against nothing.
+        root: Option<String>,
+        /// A signed checkpoint to take the root from, instead of `--root`.
+        checkpoint: Option<String>,
+        /// Verify the checkpoint's signature against this key first. Without
+        /// it the checkpoint authenticates nothing -- see [`cmd_check`].
+        root_key: Option<String>,
+    },
     Attribute {
         params: FlowParams,
     },
@@ -779,6 +813,8 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "drain" => parse_drain(&mut cursor)?,
         "audit" => parse_audit(&mut cursor)?,
         "verify" => parse_verify(&mut cursor)?,
+        "prove" => parse_prove(&mut cursor)?,
+        "check" => parse_check(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
@@ -1071,6 +1107,79 @@ fn parse_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
         root_key,
         audit,
         rerun,
+    })
+}
+
+fn parse_prove(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut seq: Option<String> = None;
+    let mut height: Option<String> = None;
+    let mut out: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        if token == "--height" {
+            height = Some(cursor.value("--height")?);
+        } else if token == "--out" {
+            out = Some(cursor.value("--out")?);
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!("prove: unknown option {token:?}")));
+        } else if seq.is_some() {
+            return Err(CliError::Usage(format!(
+                "prove: unexpected argument {token:?}"
+            )));
+        } else {
+            seq = Some(token);
+        }
+    }
+    let number = |what: &str, text: String| -> Result<u64, CliError> {
+        text.parse::<u64>()
+            .map_err(|_| CliError::Usage(format!("prove: {what} must be a number, got {text:?}")))
+    };
+    Ok(Command::Prove {
+        seq: number("seq", require(seq, "prove", "an entry sequence number")?)?,
+        height: height.map(|text| number("--height", text)).transpose()?,
+        out,
+    })
+}
+
+fn parse_check(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut proof: Option<String> = None;
+    let mut root: Option<String> = None;
+    let mut checkpoint: Option<String> = None;
+    let mut root_key: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        if token == "--merkle-root" {
+            root = Some(cursor.value("--merkle-root")?);
+        } else if token == "--from" {
+            checkpoint = Some(cursor.value("--from")?);
+        } else if token == "--root-key" {
+            root_key = Some(cursor.value("--root-key")?);
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!("check: unknown option {token:?}")));
+        } else if proof.is_some() {
+            return Err(CliError::Usage(format!(
+                "check: unexpected argument {token:?}"
+            )));
+        } else {
+            proof = Some(token);
+        }
+    }
+    // Refused rather than ranked. Given both, a precedence rule would silently
+    // ignore one of two roots the caller believed in -- and the case where they
+    // disagree is exactly the case that matters.
+    if root.is_some() && checkpoint.is_some() {
+        return Err(CliError::Usage(String::from(
+            "check: give --merkle-root or --from, not both",
+        )));
+    }
+    if root.is_none() && checkpoint.is_none() {
+        return Err(CliError::Usage(String::from(
+            "check: needs --merkle-root <sha256:...> or --from <checkpoint.json>",
+        )));
+    }
+    Ok(Command::Check {
+        proof: require(proof, "check", "a proof JSON file")?,
+        root,
+        checkpoint,
+        root_key,
     })
 }
 
@@ -1481,6 +1590,19 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      check a signed checkpoint against this log's prefix",
+    );
+    say(out, "  prove <seq> [--height N] [--out FILE]");
+    say(
+        out,
+        "      emit a Merkle proof that one entry is in this log",
+    );
+    say(
+        out,
+        "  check FILE (--merkle-root sha256:HEX | --from CHECKPOINT [--root-key HEX|FILE])",
+    );
+    say(
+        out,
+        "      check such a proof -- needs no log, which is the point",
     );
     say(
         out,
@@ -2114,6 +2236,14 @@ fn cmd_checkpoint(
     );
     say(
         out,
+        format!(
+            "  A reader who wants one entry rather than the log asks for \
+             `proofwork prove <seq> --height {}`.",
+            ledger.len()
+        ),
+    );
+    say(
+        out,
         "  Publish the public key somewhere they already trust: a key served",
     );
     say(
@@ -2383,6 +2513,205 @@ fn cmd_verify(
         return Ok(1);
     }
     say(out, "  signed prefix re-derives cleanly");
+    Ok(0)
+}
+
+/// Emit a Merkle inclusion proof for one entry.
+///
+/// `checkpoint` gives a reader a root; this gives them a reason to care about
+/// one. Without it a reader who wants to check a single settlement has two
+/// options, both bad: take the operator's word for it, or download the log.
+///
+/// The proof is against the root of the log *as it stands*, which is almost
+/// never the root a reader already holds -- theirs was signed at some earlier
+/// height. `--height` is the fix, and the summary prints the height used so
+/// that a proof and a checkpoint that will not meet are visibly not going to.
+fn cmd_prove(
+    out: &mut dyn Write,
+    options: &Options,
+    seq: u64,
+    height: Option<u64>,
+    destination: Option<&str>,
+) -> Result<i32, CliError> {
+    let node = open_node(options)?;
+    let full = ledger_of(&node);
+    let trimmed = match height {
+        None => None,
+        Some(height) => {
+            let height = usize::try_from(height)
+                .map_err(|_| CliError::Overflow(String::from("--height")))?;
+            Some(full.prefix(height).ok_or_else(|| {
+                CliError::Usage(format!(
+                    "--height {height} but the log has only {} entries",
+                    full.len()
+                ))
+            })?)
+        }
+    };
+    let ledger: &Ledger = trimmed.as_ref().unwrap_or(full);
+    let proof = ledger.prove(seq).ok_or_else(|| {
+        CliError::Usage(format!(
+            "no entry {seq}: the log covers seq 0..{}",
+            ledger.len().saturating_sub(1)
+        ))
+    })?;
+    // Belt and braces. A proof this binary emits that does not check is a bug
+    // here, and the person who would discover it is a stranger with no way to
+    // tell that from a lying operator.
+    let root = ledger
+        .root()
+        .ok_or_else(|| CliError::Usage(String::from("the log is empty")))?;
+    if let Err(why) = proof.check(&root) {
+        return Err(CliError::Checkpoint(format!(
+            "refusing to emit a proof that does not check: {why}"
+        )));
+    }
+
+    let text = proof.to_value().canonical_string();
+    match destination {
+        Some(path) => {
+            fs::write(path, format!("{text}\n")).map_err(|error| CliError::Io {
+                context: format!("writing {path}"),
+                source: error,
+            })?;
+            say(out, format!("wrote {path}"));
+        }
+        None => say(out, &text),
+    }
+    say(
+        out,
+        format!(
+            "  entry {seq} ({})  height {}  root {}  path {} hashes",
+            proof.entry.kind,
+            ledger.len(),
+            short(&root),
+            proof.inclusion.siblings.len()
+        ),
+    );
+    say(
+        out,
+        "  Readers check with `proofwork check <file> --from <checkpoint.json> --root-key <hex|file>`.",
+    );
+    if height.is_none() && full.len() > 1 {
+        say(
+            out,
+            "  This is against the log's current height. A reader holding an older",
+        );
+        say(out, "  checkpoint needs `--height <their height>` instead.");
+    }
+    Ok(0)
+}
+
+/// Check an inclusion proof against a root.
+///
+/// Runs with no log, no bundle, and no network -- everything it needs is the
+/// proof and one root. That is what makes it a light client rather than a
+/// second operator.
+///
+/// Exit codes follow `verify`: 1 is "checked, and the answer is no", 2 is
+/// "could not check", and the two must not be confused by anyone scripting
+/// against this.
+fn cmd_check(
+    out: &mut dyn Write,
+    proof_path: &str,
+    root: Option<&str>,
+    checkpoint_path: Option<&str>,
+    root_key: Option<&str>,
+) -> Result<i32, CliError> {
+    let proof = Proof::from_value(&read_json(proof_path)?)
+        .map_err(|source| CliError::Checkpoint(format!("{proof_path}: {source}")))?;
+
+    let mut unauthenticated = false;
+    let (root, height) = match (root, checkpoint_path) {
+        (Some(root), _) => (root.to_string(), None),
+        (None, Some(path)) => {
+            let signed = SignedCheckpoint::from_value(&read_json(path)?)
+                .map_err(|source| CliError::Checkpoint(source.to_string()))?;
+            // Same trap as `verify`, and the same answer: without a key from
+            // somewhere else this checks the file against itself, and an
+            // operator rewriting history signs the rewrite with a fresh key.
+            let expected = match root_key {
+                Some(source) => read_root_key(source)?,
+                None => {
+                    unauthenticated = true;
+                    signed.public_key.clone()
+                }
+            };
+            if let Err(error) = signed.verify(&expected) {
+                say(out, format!("checkpoint FAILED: {error}"));
+                return Ok(1);
+            }
+            match signed.checkpoint.root.clone() {
+                Some(root) => (root, Some(signed.checkpoint.height)),
+                None => {
+                    say(out, "checkpoint FAILED: it pins no root (empty log)");
+                    return Ok(1);
+                }
+            }
+        }
+        // Unreachable: the parser already refused neither-and-both.
+        (None, None) => {
+            return Err(CliError::Usage(String::from(
+                "check: needs --merkle-root or --from",
+            )))
+        }
+    };
+
+    // A proof is against a tree of one particular size, so a proof and a
+    // checkpoint that disagree on the height are about two different logs. The
+    // path check below would catch it, but as "does not reach the root", which
+    // reads as dishonesty when the honest cause is a stale checkpoint.
+    if let Some(height) = height {
+        if u64::try_from(proof.inclusion.leaves).ok() != Some(height) {
+            say(
+                out,
+                format!(
+                    "proof FAILED: it is against a log of {} entries, \
+                     but the checkpoint pins {height}",
+                    proof.inclusion.leaves
+                ),
+            );
+            say(
+                out,
+                format!(
+                    "  ask the holder for `proofwork prove {} --height {height}`",
+                    proof.entry.seq
+                ),
+            );
+            return Ok(1);
+        }
+    }
+
+    if let Err(why) = proof.check(&root) {
+        say(out, format!("proof FAILED: {why}"));
+        return Ok(1);
+    }
+
+    say(
+        out,
+        format!(
+            "proof ok: entry {} ({}) is in the log rooted at {}",
+            proof.entry.seq,
+            proof.entry.kind,
+            short(&root)
+        ),
+    );
+    say(
+        out,
+        format!(
+            "  {} entries, {} hashes checked, ts {}",
+            proof.inclusion.leaves,
+            proof.inclusion.siblings.len(),
+            proof.entry.ts
+        ),
+    );
+    if unauthenticated {
+        say(
+            out,
+            "  warning: no --root-key given, so the checkpoint was checked against \
+             itself; pin the operator's published key to make this mean anything",
+        );
+    }
     Ok(0)
 }
 
@@ -3839,6 +4168,23 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             *audit,
             *rerun,
         ),
+        Command::Prove {
+            seq,
+            height,
+            out: path,
+        } => cmd_prove(out, options, *seq, *height, path.as_deref()),
+        Command::Check {
+            proof,
+            root,
+            checkpoint,
+            root_key,
+        } => cmd_check(
+            out,
+            proof,
+            root.as_deref(),
+            checkpoint.as_deref(),
+            root_key.as_deref(),
+        ),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Blob { action } => cmd_blob(out, options, action),
         Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),
@@ -4626,6 +4972,281 @@ mod tests {
                 .command,
             Command::Audit { rerun: false }
         );
+    }
+
+    #[test]
+    fn prove_and_check_parse_their_own_arguments() {
+        assert_eq!(
+            parse(argv(&["prove", "7"])).expect("parses").command,
+            Command::Prove {
+                seq: 7,
+                height: None,
+                out: None
+            }
+        );
+        assert_eq!(
+            parse(argv(&[
+                "prove",
+                "7",
+                "--height",
+                "20",
+                "--out",
+                "/tmp/p.json"
+            ]))
+            .expect("parses")
+            .command,
+            Command::Prove {
+                seq: 7,
+                height: Some(20),
+                out: Some(String::from("/tmp/p.json"))
+            }
+        );
+        assert!(matches!(
+            parse(argv(&["prove", "seven"])).expect_err("not a number"),
+            CliError::Usage(_)
+        ));
+        assert!(matches!(
+            parse(argv(&["prove", "-1"])).expect_err("not a flag either"),
+            CliError::Usage(_)
+        ));
+        assert_eq!(
+            parse(argv(&["check", "p.json", "--merkle-root", "sha256:aa"]))
+                .expect("parses")
+                .command,
+            Command::Check {
+                proof: String::from("p.json"),
+                root: Some(String::from("sha256:aa")),
+                checkpoint: None,
+                root_key: None
+            }
+        );
+        // Neither is unanswerable and both is ambiguous. Ranking them would
+        // silently drop one of two roots the caller believed in.
+        assert!(matches!(
+            parse(argv(&["check", "p.json"])).expect_err("needs a root"),
+            CliError::Usage(_)
+        ));
+        assert!(matches!(
+            parse(argv(&[
+                "check",
+                "p.json",
+                "--merkle-root",
+                "sha256:aa",
+                "--from",
+                "c.json"
+            ]))
+            .expect_err("not both"),
+            CliError::Usage(_)
+        ));
+    }
+
+    /// The whole point, run end to end: a holder proves, a stranger checks.
+    ///
+    /// `cmd_check` gets no `Options` at all, which is the property under test
+    /// as much as the arithmetic is -- a light client has no log, and a check
+    /// that quietly needed one would be no lighter than `verify`.
+    #[test]
+    fn a_proof_emitted_by_the_cli_checks_against_the_checkpoint_the_cli_signed() {
+        use proofwork::canonical::digest_bytes;
+        let dir = scratch_dir("prove");
+        let options = Options {
+            log: dir.join("log.jsonl").display().to_string(),
+            root: dir.display().to_string(),
+            data: None,
+            key_file: None,
+            passphrase_file: None,
+            max_size: None,
+        };
+        {
+            let mut ledger = Ledger::open(&options.log).expect("open");
+            for i in 0..7 {
+                ledger
+                    .append("note", Value::Int(i128::from(i)), "t")
+                    .expect("append");
+            }
+        }
+
+        // A signing key in the shape `proofwork-p2p` writes.
+        let key = proofwork::checkpoint::RootKey::generate();
+        let key_path = dir.join("key.json");
+        std::fs::write(
+            &key_path,
+            Value::object([
+                ("public", Value::string(hex_of(&key.public_key()))),
+                ("secret", Value::string(hex_of(&key.to_secret_bytes()[..]))),
+            ])
+            .canonical_string(),
+        )
+        .expect("write key");
+        let checkpoint = dir.join("checkpoint.json");
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_checkpoint(
+                &mut sink,
+                &options,
+                &key_path.display().to_string(),
+                Some(&checkpoint.display().to_string()),
+            )
+            .expect("checkpoint"),
+            0
+        );
+        let published = dir.join("root-key.pub");
+        std::fs::write(&published, hex_of(&key.public_key())).expect("write pubkey");
+
+        let proof_path = dir.join("proof.json");
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_prove(
+                &mut sink,
+                &options,
+                4,
+                None,
+                Some(&proof_path.display().to_string()),
+            )
+            .expect("prove"),
+            0
+        );
+
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_check(
+                &mut sink,
+                &proof_path.display().to_string(),
+                None,
+                Some(&checkpoint.display().to_string()),
+                Some(&published.display().to_string()),
+            )
+            .expect("check"),
+            0
+        );
+        let report = String::from_utf8(sink).expect("utf-8");
+        assert!(report.starts_with("proof ok:"), "{report}");
+        assert!(!report.contains("warning"), "a key was pinned: {report}");
+
+        // Now the failure, and it must be exit 1 rather than an error: the
+        // reader checked, and the answer was no.
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_check(
+                &mut sink,
+                &proof_path.display().to_string(),
+                Some(&digest_bytes(b"not the root")),
+                None,
+                None,
+            )
+            .expect("check runs"),
+            1
+        );
+        assert!(
+            String::from_utf8(sink)
+                .expect("utf-8")
+                .contains("does not reach root"),
+            "the reader should be told which check failed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A proof against a taller log than the reader's checkpoint is the
+    /// everyday failure -- the log grew. It must not read as fraud.
+    #[test]
+    fn a_proof_from_a_grown_log_is_refused_with_the_remedy_named() {
+        let dir = scratch_dir("prove-stale");
+        let options = Options {
+            log: dir.join("log.jsonl").display().to_string(),
+            root: dir.display().to_string(),
+            data: None,
+            key_file: None,
+            passphrase_file: None,
+            max_size: None,
+        };
+        {
+            let mut ledger = Ledger::open(&options.log).expect("open");
+            for i in 0..5 {
+                ledger
+                    .append("note", Value::Int(i128::from(i)), "t")
+                    .expect("append");
+            }
+        }
+        let key = proofwork::checkpoint::RootKey::generate();
+        let key_path = dir.join("key.json");
+        std::fs::write(
+            &key_path,
+            Value::object([("secret", Value::string(hex_of(&key.to_secret_bytes()[..])))])
+                .canonical_string(),
+        )
+        .expect("write key");
+        let checkpoint = dir.join("checkpoint.json");
+        let mut sink: Vec<u8> = Vec::new();
+        cmd_checkpoint(
+            &mut sink,
+            &options,
+            &key_path.display().to_string(),
+            Some(&checkpoint.display().to_string()),
+        )
+        .expect("checkpoint");
+
+        // The log grows past what the reader has signed.
+        {
+            let mut ledger = Ledger::open(&options.log).expect("reopen");
+            for i in 5..9 {
+                ledger
+                    .append("note", Value::Int(i128::from(i)), "t")
+                    .expect("append");
+            }
+        }
+        let published = dir.join("root-key.pub");
+        std::fs::write(&published, hex_of(&key.public_key())).expect("write pubkey");
+
+        let tall = dir.join("tall.json");
+        let mut sink: Vec<u8> = Vec::new();
+        cmd_prove(
+            &mut sink,
+            &options,
+            2,
+            None,
+            Some(&tall.display().to_string()),
+        )
+        .expect("prove");
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_check(
+                &mut sink,
+                &tall.display().to_string(),
+                None,
+                Some(&checkpoint.display().to_string()),
+                Some(&published.display().to_string()),
+            )
+            .expect("check runs"),
+            1
+        );
+        let report = String::from_utf8(sink).expect("utf-8");
+        assert!(report.contains("the checkpoint pins 5"), "{report}");
+        assert!(report.contains("--height 5"), "name the fix: {report}");
+
+        // And running the remedy the message names actually works.
+        let short = dir.join("short.json");
+        let mut sink: Vec<u8> = Vec::new();
+        cmd_prove(
+            &mut sink,
+            &options,
+            2,
+            Some(5),
+            Some(&short.display().to_string()),
+        )
+        .expect("prove at height");
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_check(
+                &mut sink,
+                &short.display().to_string(),
+                None,
+                Some(&checkpoint.display().to_string()),
+                Some(&published.display().to_string()),
+            )
+            .expect("check runs"),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -401,3 +401,49 @@ still using `println!`, which panics when the reader closes the pipe —
 that before this crate existed and wrote a paragraph about it. It never crossed
 over, and it surfaced as a flaky script rather than as a bug, because the race
 is only lost under load.
+
+## Checking one entry without the log
+
+`audit` and `verify` both need a copy of the log. That is the right shape for
+somebody re-deriving the whole network's history, and the wrong one for
+somebody who wants to know whether a single settlement happened.
+
+```sh
+proofwork prove 12 --height 25 --out proof.json
+proofwork check proof.json --from checkpoint.json --root-key operator.pub
+```
+
+`check` opens no log, no bundle, and no socket. Its whole input is the proof
+and a root, and the root arrives inside a checkpoint somebody signed — which is
+why `--root-key` matters and why its absence prints a warning rather than
+passing quietly: a checkpoint checked against the key inside it is a checkpoint
+checked against itself, and an operator rewriting history signs the rewrite
+with a fresh key.
+
+The cost is `log2(n)` hashes: five for the twenty-five-entry log in `launch/`,
+fifteen for twenty thousand.
+
+Three ways to fail, kept apart because they accuse different people:
+
+| failure | what it means |
+|---|---|
+| the entry does not hash to the digest it carries | the holder's copy of that entry was edited |
+| the path is for leaf *i* but the entry's seq is *j* | a proof about some other entry |
+| the path does not reach the root | the entry is not in the log that root pins |
+
+The third has an innocent cause that is far more common than the guilty one:
+the log grew after the checkpoint was signed, so the proof is against a taller
+tree. `check` catches that before it walks the path — comparing the proof's
+leaf count against the checkpoint's height — and names the remedy
+(`prove <seq> --height <the checkpoint's height>`) rather than reporting a
+mismatch that reads as fraud.
+
+This is consensus-critical in the same way roots are: a challenger who rejects a
+proof an honest holder produced slashes a node that did its job, and one who
+accepts a proof the holder could not have produced pays a node that stored
+nothing. So it is not enough for each implementation to check its own proofs.
+`scripts/differential.sh` runs both against the published log and requires that
+each accept what the *other* emitted, byte for byte, in both directions, plus
+that both refuse an entry edited under a path that still reaches the root. An
+implementation wrong in a self-consistent way passes the first arrangement and
+fails this one.

@@ -275,6 +275,13 @@ behaviour ships and is tested, not that TLC has checked it.
       sampling then challenges against a published checkpoint. Undertaking and
       settlement have to arrive together — a record nothing pays against is
       bookkeeping, and a payment with no record to challenge is unenforceable.
+      The *challenge* half is built: `proofwork prove <seq>` answers a sample
+      and `proofwork check` verifies the answer against a signed checkpoint
+      without holding the log, in `log2(n)` hashes. Both implementations agree
+      on every proof over the published log, checked in both directions by
+      `scripts/differential.sh`. What remains is the undertaking record and the
+      settlement that reads it — which is the whole of this line, since a
+      challenge nobody is paid to answer is a challenge nobody answers.
 - [x] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [x] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while

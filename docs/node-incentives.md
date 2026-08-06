@@ -33,7 +33,37 @@ proofwork incentives --settled 500000          # what breaks at bootstrap
 Two of the three are easy for the same reason: the protocol already knows the
 correct answer, so a node that fails a challenge has proved something about
 itself, unconditionally and without anyone's cooperation. Verification has no
-such oracle. The whole point of re-verifying is that nobody yet knows whether
+such oracle.
+
+"Sample it" is a sentence, and for a while it was only a sentence: the log had
+a Merkle root and no way to prove anything against it, so a challenge had no
+answer shorter than the whole log. It has one now.
+
+```
+proofwork prove 12 --height 25 --out proof.json     # the holder answers
+proofwork check proof.json --from checkpoint.json \
+  --root-key operator.pub                           # the challenger checks
+```
+
+`check` reads no log — that is the property that makes it a challenge rather
+than a second audit. It needs the proof and a root, and a signed checkpoint is
+where the root comes from. The cost is `log2(n)` hashes: five for the
+twenty-five-entry log in `launch/`, fifteen for twenty thousand. A node that
+cannot produce one for an entry it was paid to hold has answered the sample, in
+the negative, and the answer is checkable by anyone.
+
+Three things can go wrong and they accuse different people, so they are
+reported separately: an entry that does not hash to the digest it carries is
+the *holder's* file being edited; a path for the wrong slot is a proof about
+some other entry; a path that does not reach the root means the entry is not in
+that log — or, far more often, that the checkpoint is older than the proof.
+That last case is common enough to name its own remedy, and `check` prints it.
+
+What is still missing is the payment. Nothing in the log obliges a node to
+answer a sample, and nothing pays it for answering — see
+[roadmap.md](roadmap.md) on why the undertaking and the settlement have to
+arrive together. This is the challenge half, built first because the payment
+half is unenforceable without it. The whole point of re-verifying is that nobody yet knows whether
 the artifact is good, so a node that says "accept" without running anything is
 indistinguishable from a node that ran everything — and it is cheaper.
 

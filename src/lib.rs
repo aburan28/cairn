@@ -42,7 +42,7 @@ pub mod verifiers;
 
 pub use attribution::{flow, FlowParams};
 pub use blobs::{BlobError, BlobStore};
-pub use canonical::{digest_bytes, merkle_root, CanonicalError, Value};
+pub use canonical::{digest_bytes, merkle_proof, merkle_root, CanonicalError, Inclusion, Value};
 pub use frontier::{FrontierEntry, Ratchet, RatchetError};
 pub use gossip::{ingest, Candidate, Population};
 pub use incentive::{design::Report as IncentiveReport, NodeParams};

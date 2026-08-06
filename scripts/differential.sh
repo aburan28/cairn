@@ -112,4 +112,62 @@ echo "  $ACCEPTED accepted, $((TOTAL - ACCEPTED)) refused -- both paths exercise
 
 [ "$DISAGREED" -eq 0 ] || fail "$DISAGREED case(s) classified differently"
 
+rule "inclusion proofs"
+
+# The other place a disagreement costs somebody money, and it is not a record
+# boundary: a challenger who rejects a proof an honest holder produced slashes
+# a node that did its job, and one who accepts a proof the holder could not
+# have produced pays a node that stored nothing. So each implementation checks
+# what the *other* emitted, in both directions, rather than each checking its
+# own -- an implementation that is wrong in a self-consistent way passes the
+# second arrangement and fails this one.
+#
+# `launch/proofwork.jsonl` is the corpus because it is a real settled log with
+# a published root: 25 entries covers both shapes of the promotion rule at
+# every level, and the root is one somebody else already signed.
+PROOF_LOG="${PROOF_LOG:-launch/proofwork.jsonl}"
+PROOF_ROOT=$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1]))["checkpoint"]["root"])
+' launch/checkpoint.json)
+HEIGHT=$(grep -c . "$PROOF_LOG")
+echo "  $HEIGHT entries, root $PROOF_ROOT"
+
+PROVED=0
+for seq in $(seq 0 $((HEIGHT - 1))); do
+  "$RUST" --log "$PROOF_LOG" prove "$seq" --out "$WORK/primary.json" >/dev/null \
+    || fail "the primary could not prove entry $seq"
+  "$REF" --log "$PROOF_LOG" prove "$seq" --out "$WORK/reference.json" >/dev/null \
+    || fail "the reference could not prove entry $seq"
+  # Byte equality is a stronger claim than mutual acceptance and worth making
+  # separately: two implementations could accept each other's proofs while
+  # emitting different encodings, and then a third reader agrees with only one.
+  cmp -s "$WORK/primary.json" "$WORK/reference.json" \
+    || fail "entry $seq: the two implementations emit different proof bytes"
+  "$RUST" check "$WORK/reference.json" --merkle-root "$PROOF_ROOT" >/dev/null \
+    || fail "entry $seq: the primary rejected the reference's proof"
+  "$REF" check "$WORK/primary.json" --merkle-root "$PROOF_ROOT" >/dev/null \
+    || fail "entry $seq: the reference rejected the primary's proof"
+  PROVED=$((PROVED + 1))
+done
+echo "  $PROVED proofs, byte-identical, each accepted by the other implementation"
+
+# And the refuse path, without which the loop above would pass against two
+# implementations that accept everything.
+python3 - "$WORK/primary.json" "$WORK/tampered.json" <<'PY'
+import json, sys
+proof = json.load(open(sys.argv[1]))
+# The leaf hash is left alone, so the *path* still reaches the root. Only the
+# contents a reader would go on to read are changed: an implementation that
+# checked the path and took the entry on trust would accept this.
+proof["entry"]["ts"] = "2020-01-01T00:00:00+00:00"
+json.dump(proof, open(sys.argv[2], "w"))
+PY
+"$RUST" check "$WORK/tampered.json" --merkle-root "$PROOF_ROOT" >/dev/null 2>&1 \
+  && fail "the primary accepted an edited entry"
+"$REF" check "$WORK/tampered.json" --merkle-root "$PROOF_ROOT" >/dev/null 2>&1 \
+  && fail "the reference accepted an edited entry"
+echo "  both refuse an entry edited under a path that still reaches the root"
+
 printf '\n\033[32mDIFFERENTIAL OK: both implementations agree on every record in the corpus\033[0m\n'
+printf '\033[32m  and on every inclusion proof over the published log\033[0m\n'

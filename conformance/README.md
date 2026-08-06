@@ -69,6 +69,26 @@ Key sorting agrees across languages for free: Python sorts `str` by code point,
 Rust's `BTreeMap<String, _>` sorts by UTF-8 byte order, and UTF-8 is constructed
 so those two orders coincide.
 
+## What is *not* pinned here, and where it is pinned instead
+
+Merkle **inclusion proofs** are consensus-critical for the same reason roots
+are -- a challenger and a holder who disagree about whether a proof is valid
+slash an honest node or pay a lying one -- but they have no section in
+`vectors.json`, and adding one would be a mistake. These vectors are evidence
+from an implementation that no longer exists; a section generated from either
+Rust implementation today would turn the contract into a description of one
+program's behaviour, which is precisely what the notice at the top of this file
+forbids.
+
+They are bound instead by `scripts/differential.sh`, which runs both
+implementations against the published log in `launch/` and requires that each
+**accept what the other emitted**, byte for byte, in both directions. That is a
+stronger arrangement than a shared vector file for this particular property: an
+implementation that is wrong in a self-consistent way reproduces its own
+vectors happily and fails a cross-check. The root those proofs are checked
+against is one of the `merkle` vectors' descendants, so the frozen file still
+anchors the bottom of it.
+
 ## Regenerating
 
 ```sh

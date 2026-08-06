@@ -101,6 +101,18 @@ proofwork --log launch/proofwork.jsonl --root . verify \
 Both print the same Merkle root. See [launch/README.md](launch/README.md) for
 what is in it and the two caveats that come with a sample artifact.
 
+Checking one entry does not need the log at all:
+
+```sh
+proofwork --log launch/proofwork.jsonl prove 12 --out proof.json
+proofwork check proof.json --from launch/checkpoint.json \
+    --root-key launch/root-key.pub
+```
+
+`check` opens no log — the proof and the signed root are the whole input, which
+is what makes it something a light client can run. Five hashes here; fifteen for
+a log of twenty thousand.
+
 ### Publish your log so others can check it
 
 ```sh
@@ -201,6 +213,8 @@ proofwork reveal <objective-id> --submitter bob --artifact solution.json --nonce
 proofwork audit
 proofwork attribute
 proofwork checkpoint --root-key key.json --out checkpoint.json   # sign it
+proofwork prove 12 --out proof.json                              # one entry, provably
+proofwork check proof.json --from checkpoint.json                # ... checked without the log
 proofwork drain --queue ./queue                                  # admit what arrived over HTTP
 ```
 

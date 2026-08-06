@@ -8,7 +8,7 @@ use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::canonical::{short, Value};
+use crate::canonical::{merkle_proof, short, Inclusion, Value};
 
 /// The first entry's `prev` is JSON **null**, not an empty string.
 ///
@@ -204,7 +204,73 @@ impl Ledger {
     }
 
     pub fn merkle_root(&self) -> Option<String> {
-        let leaves: Vec<String> = self.entries.iter().map(|e| e.hash.clone()).collect();
-        crate::canonical::merkle_root(&leaves)
+        crate::canonical::merkle_root(&self.leaf_hashes())
+    }
+
+    fn leaf_hashes(&self) -> Vec<String> {
+        self.entries.iter().map(|e| e.hash.clone()).collect()
+    }
+
+    /// The proof that entry `seq` is under [`Ledger::merkle_root`], with the
+    /// entry itself so the reader can check the leaf rather than be told it.
+    pub fn prove(&self, seq: u64) -> Option<Proof> {
+        let index = usize::try_from(seq).ok()?;
+        Some(Proof {
+            entry: self.entries.get(index)?.clone(),
+            inclusion: merkle_proof(&self.leaf_hashes(), index)?,
+        })
+    }
+}
+
+/// One entry, plus the path that puts it under a Merkle root.
+///
+/// A reader with a signed checkpoint and one of these can settle "is this
+/// entry in the log" in `log2(n)` hashes without holding the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proof {
+    pub entry: Entry,
+    pub inclusion: Inclusion,
+}
+
+impl Proof {
+    /// Check against a root. `Err` carries which of the three checks failed --
+    /// an edited entry, a path for the wrong slot, and a path that does not
+    /// reach the root accuse different people.
+    pub fn check(&self, root: &str) -> Result<(), String> {
+        let recomputed = self.entry.recompute_hash();
+        if recomputed != self.entry.hash {
+            return Err(format!(
+                "the entry does not hash to the digest it carries \
+                 (says {}, hashes to {})",
+                self.entry.hash, recomputed
+            ));
+        }
+        if u64::try_from(self.inclusion.index).ok() != Some(self.entry.seq) {
+            return Err(format!(
+                "the path is for leaf {} but the entry's seq is {}",
+                self.inclusion.index, self.entry.seq
+            ));
+        }
+        if !self.inclusion.verify(&recomputed, root) {
+            return Err(format!("the path does not reach root {root}"));
+        }
+        Ok(())
+    }
+
+    /// `{entry, index, leaves, siblings}` -- flat, and byte-identical to what
+    /// the primary implementation emits.
+    pub fn to_value(&self) -> Value {
+        let mut value = self.inclusion.to_value();
+        if let Value::Object(map) = &mut value {
+            map.insert("entry".into(), self.entry.to_value());
+        }
+        value
+    }
+
+    pub fn from_value(value: &Value) -> Result<Proof, String> {
+        Ok(Proof {
+            entry: Entry::from_value(value.get("entry").ok_or("a proof needs an entry")?)?,
+            inclusion: Inclusion::from_value(value)?,
+        })
     }
 }

@@ -248,6 +248,147 @@ pub fn merkle_root(leaves: &[String]) -> Option<String> {
     Some(level.remove(0))
 }
 
+/// The widths of every level of a tree with `leaves` leaves, bottom up.
+///
+/// The tree's shape is fully determined by its leaf count, and the shape is
+/// what decides which levels promote. Computing it up front makes both
+/// [`merkle_proof`] and [`Inclusion::verify`] straight walks over a list, and
+/// -- more to the point -- it is a *different* decomposition from the primary
+/// implementation, which recomputes the width as it folds. Two implementations
+/// that arrange the same rule differently are two chances to catch the rule
+/// being wrong.
+fn level_widths(leaves: usize) -> Vec<usize> {
+    let mut widths = Vec::new();
+    let mut width = leaves;
+    while width > 1 {
+        widths.push(width);
+        width = width.div_ceil(2);
+    }
+    widths
+}
+
+/// A path from one leaf to a [`merkle_root`].
+///
+/// See the primary implementation for the argument about why `leaves` is a
+/// shape parameter rather than a commitment. The two must agree exactly:
+/// `scripts/differential.sh` checks that each accepts what the other emits,
+/// because a challenger and a holder who disagree about a proof's validity
+/// slash an honest node or pay a lying one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inclusion {
+    pub index: usize,
+    pub leaves: usize,
+    pub siblings: Vec<String>,
+}
+
+/// The path proving `leaves[index]` is under `merkle_root(leaves)`.
+pub fn merkle_proof(leaves: &[String], index: usize) -> Option<Inclusion> {
+    if index >= leaves.len() {
+        return None;
+    }
+    let mut siblings = Vec::new();
+    let mut level: Vec<String> = leaves.to_vec();
+    let mut at = index;
+    for width in level_widths(leaves.len()) {
+        // The odd node at the end of a level has no partner: it rises unchanged
+        // and contributes nothing to the path.
+        if !(width % 2 == 1 && at == width - 1) {
+            let partner = if at.is_multiple_of(2) { at + 1 } else { at - 1 };
+            siblings.push(level[partner].clone());
+        }
+        let mut next = Vec::with_capacity(width.div_ceil(2));
+        let mut i = 0;
+        while i + 1 < width {
+            next.push(digest_bytes(
+                format!("{}{}", level[i], level[i + 1]).as_bytes(),
+            ));
+            i += 2;
+        }
+        if width % 2 == 1 {
+            next.push(level[width - 1].clone());
+        }
+        level = next;
+        at /= 2;
+    }
+    Some(Inclusion {
+        index,
+        leaves: leaves.len(),
+        siblings,
+    })
+}
+
+impl Inclusion {
+    /// Walk this path from `leaf` and report whether it arrives at `root`.
+    ///
+    /// The leaf is an argument rather than something the path carries: this
+    /// tree has no domain separation between leaves and internal nodes, so a
+    /// prover who could name the leaf could offer an internal node as one.
+    pub fn verify(&self, leaf: &str, root: &str) -> bool {
+        if self.index >= self.leaves {
+            return false;
+        }
+        let mut hash = leaf.to_string();
+        let mut at = self.index;
+        let mut supplied = self.siblings.iter();
+        for width in level_widths(self.leaves) {
+            if width % 2 == 1 && at == width - 1 {
+                at /= 2;
+                continue;
+            }
+            let Some(sibling) = supplied.next() else {
+                return false;
+            };
+            let joined = if at.is_multiple_of(2) {
+                format!("{hash}{sibling}")
+            } else {
+                format!("{sibling}{hash}")
+            };
+            hash = digest_bytes(joined.as_bytes());
+            at /= 2;
+        }
+        // Leftover siblings mean the two sides disagree about the tree's shape,
+        // and a proof that reads two ways is not a proof.
+        supplied.next().is_none() && hash == root
+    }
+
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("index", Value::Int(self.index as i128)),
+            ("leaves", Value::Int(self.leaves as i128)),
+            (
+                "siblings",
+                Value::Array(self.siblings.iter().cloned().map(Value::string).collect()),
+            ),
+        ])
+    }
+
+    pub fn from_value(value: &Value) -> Result<Inclusion, String> {
+        let count = |name: &str| -> Result<usize, String> {
+            value
+                .get(name)
+                .and_then(Value::as_i128)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| format!("inclusion needs a non-negative {name}"))
+        };
+        let siblings = match value.get("siblings") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| String::from("every sibling must be a string"))
+                })
+                .collect::<Result<Vec<String>, String>>()?,
+            _ => return Err(String::from("inclusion needs a siblings array")),
+        };
+        Ok(Inclusion {
+            index: count("index")?,
+            leaves: count("leaves")?,
+            siblings,
+        })
+    }
+}
+
 // -- decoding ---------------------------------------------------------------
 
 struct Parser<'a> {
@@ -646,6 +787,80 @@ mod tests {
         assert_ne!(three, four);
         assert_eq!(merkle_root(&[]), None);
         assert_eq!(merkle_root(std::slice::from_ref(&a)), Some(a));
+    }
+
+    #[test]
+    fn every_leaf_of_every_shape_proves_against_its_own_root() {
+        // Exhaustive over shapes: the promotion rule fires on a different set
+        // of levels for every odd width, so a proof that works for eight
+        // leaves says nothing about seven. This is also the property the two
+        // implementations must share exactly -- see scripts/differential.sh.
+        for count in 1..=40usize {
+            let leaves: Vec<String> = (0..count).map(|i| format!("leaf-{i}")).collect();
+            let root = merkle_root(&leaves).expect("non-empty");
+            for index in 0..count {
+                let proof = merkle_proof(&leaves, index).expect("in range");
+                assert!(
+                    proof.verify(&leaves[index], &root),
+                    "leaf {index} of {count} did not verify"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_proof_is_about_one_leaf_and_one_shape() {
+        let leaves: Vec<String> = (0..9).map(|i| format!("leaf-{i}")).collect();
+        let root = merkle_root(&leaves).expect("non-empty");
+        let proof = merkle_proof(&leaves, 3).expect("in range");
+        for (index, leaf) in leaves.iter().enumerate() {
+            assert_eq!(proof.verify(leaf, &root), index == 3, "leaf {index}");
+        }
+
+        // A path with the wrong number of hashes is refused rather than
+        // ignored: a proof that reads two ways is not a proof.
+        let mut short = proof.clone();
+        short.siblings.pop();
+        assert!(!short.verify(&leaves[3], &root));
+        let mut long = proof.clone();
+        long.siblings.push(digest_bytes(b"extra"));
+        assert!(!long.verify(&leaves[3], &root));
+
+        assert_eq!(merkle_proof(&leaves, 9), None);
+        assert_eq!(merkle_proof(&[], 0), None);
+    }
+
+    #[test]
+    fn a_promoted_node_carries_no_sibling_for_that_level() {
+        // [a,b,c] pairs a+b and promotes c, so c's path is one hash shorter.
+        let leaves: Vec<String> = (0..3).map(|i| format!("leaf-{i}")).collect();
+        let root = merkle_root(&leaves).expect("non-empty");
+        assert_eq!(
+            merkle_proof(&leaves, 0).expect("in range").siblings.len(),
+            2
+        );
+        assert_eq!(
+            merkle_proof(&leaves, 1).expect("in range").siblings.len(),
+            2
+        );
+        let promoted = merkle_proof(&leaves, 2).expect("in range");
+        assert_eq!(promoted.siblings.len(), 1);
+        assert!(promoted.verify(&leaves[2], &root));
+    }
+
+    #[test]
+    fn an_inclusion_survives_the_trip_through_json() {
+        let leaves: Vec<String> = (0..6).map(|i| format!("leaf-{i}")).collect();
+        let proof = merkle_proof(&leaves, 4).expect("in range");
+        let text = proof.to_value().canonical_string();
+        let decoded =
+            Inclusion::from_value(&Value::from_json(&text).expect("parse")).expect("decode");
+        assert_eq!(decoded, proof);
+        assert!(decoded.verify(&leaves[4], &merkle_root(&leaves).expect("non-empty")));
+        // A stranger controls this input, so a negative count is refused
+        // rather than wrapped into a plausible-looking one.
+        let bad = Value::from_json(r#"{"index":-1,"leaves":6,"siblings":[]}"#).expect("parse");
+        assert!(Inclusion::from_value(&bad).is_err());
     }
 
     #[test]

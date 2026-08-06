@@ -23,7 +23,7 @@ use std::process::ExitCode;
 use proofwork_reference::attribution::{flow, FlowParams};
 use proofwork_reference::canonical::{merkle_root, Value};
 use proofwork_reference::frontier::Ratchet;
-use proofwork_reference::ledger::Ledger;
+use proofwork_reference::ledger::{Ledger, Proof};
 use proofwork_reference::node::Node;
 use proofwork_reference::partition::{assign, beacon, settlement_rank};
 use proofwork_reference::records::{commitment_hash, Claim, Commitment, Objective, PeerRecord};
@@ -69,7 +69,9 @@ fn main() -> ExitCode {
         Some("signed-records") => signed_records(after(&args, "signed-records")),
         Some("signatures") => signatures(after(&args, "signatures")),
         Some("audit") | Some("post") | Some("commit") | Some("reveal") | Some("settle")
-        | Some("log") | Some("decode") | Some("canon") => cli(&args),
+        | Some("log") | Some("decode") | Some("canon") | Some("prove") | Some("check") => {
+            cli(&args)
+        }
         Some("--help") | Some("help") | None => {
             eprintln!(
                 "proofwork-reference — an independent check on the primary implementation\n\n\
@@ -81,7 +83,9 @@ fn main() -> ExitCode {
                  proofwork-reference [--log P] [--root D] commit <id> --submitter S --artifact F [--nonce N]\n    \
                  proofwork-reference [--log P] [--root D] reveal <id> --submitter S --artifact F --nonce N [--cites ID]\n    \
                  proofwork-reference [--log P] [--root D] settle\n    \
-                 proofwork-reference [--log P] [--root D] audit\n"
+                 proofwork-reference [--log P] [--root D] audit\n    \
+                 proofwork-reference [--log P] prove <seq> [--out FILE]\n    \
+                 proofwork-reference check <proof.json> --merkle-root <sha256:...>\n"
             );
             return ExitCode::SUCCESS;
         }
@@ -618,6 +622,34 @@ fn cli(args: &[String]) -> Result<(), String> {
     };
     let positional = rest.get(1).filter(|a| !a.starts_with("--")).cloned();
 
+    // Before the log is opened, because this command must not need one. A
+    // light client checking a proof holds a root and nothing else; a `check`
+    // that quietly read a log would be testing something easier than the thing
+    // the primary implementation claims to do.
+    if command == "check" {
+        let path = positional.ok_or("check needs a proof JSON file")?;
+        // `--merkle-root`, not `--root`: the latter is the global flag naming
+        // the bundle directory, and the argument parser above eats it wherever
+        // it appears. Same spelling as the primary implementation, for the
+        // same reason.
+        let want = flag("--merkle-root").ok_or("check needs --merkle-root <sha256:...>")?;
+        let value = Value::from_json(&read(Some(&path), "a proof")?).map_err(|e| e.to_string())?;
+        let proof = Proof::from_value(&value)?;
+        proof.check(&want)?;
+        say!(
+            "proof ok: entry {} ({}) is in the log rooted at {}",
+            proof.entry.seq,
+            proof.entry.kind,
+            proofwork_reference::canonical::short(&want)
+        );
+        say!(
+            "  {} entries, {} hashes checked",
+            proof.inclusion.leaves,
+            proof.inclusion.siblings.len()
+        );
+        return Ok(());
+    }
+
     let mut node = Node::new(Ledger::open(&log)?, &root);
     let ts = timestamp();
 
@@ -757,6 +789,34 @@ fn cli(args: &[String]) -> Result<(), String> {
                 }
                 return Err(format!("{} problem(s)", problems.len()));
             }
+        }
+        "prove" => {
+            let seq: u64 = positional
+                .ok_or("prove needs an entry sequence number")?
+                .parse()
+                .map_err(|_| String::from("prove: seq must be a number"))?;
+            let proof = node
+                .ledger
+                .prove(seq)
+                .ok_or_else(|| format!("no entry {seq}: the log has {}", node.ledger.len()))?;
+            let root = node.ledger.merkle_root().ok_or("the log is empty")?;
+            // Never emit a proof this implementation would itself reject.
+            proof.check(&root)?;
+            let text = proof.to_value().canonical_string();
+            match flag("--out") {
+                Some(path) => {
+                    std::fs::write(&path, format!("{text}\n")).map_err(|e| e.to_string())?;
+                    say!("wrote {path}");
+                }
+                None => say!("{text}"),
+            }
+            say!(
+                "  entry {seq} ({})  height {}  root {}  path {} hashes",
+                proof.entry.kind,
+                node.ledger.len(),
+                proofwork_reference::canonical::short(&root),
+                proof.inclusion.siblings.len()
+            );
         }
         other => return Err(format!("unknown command {other:?}")),
     }
