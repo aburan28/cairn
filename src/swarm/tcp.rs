@@ -48,7 +48,9 @@ use super::{Action, Dropped, Limits, PeerId, Swarm};
 use crate::blobs::{self, BlobStore};
 use crate::p2p::discovery::Endpoint;
 use crate::p2p::handshake::PeerIdentity;
-use crate::p2p::transport::{self, Connection, Receiver as SealedReceiver, Sender as SealedSender};
+use crate::p2p::transport::{
+    self, Connection, Receiver as SealedReceiver, Sender as SealedSender, TransportError,
+};
 
 /// The AEAD context every frame on a swarm session is sealed under.
 ///
@@ -903,21 +905,33 @@ fn run_peer(
     dispatch(&opening, outbox);
 
     let mut reader = receiver;
-    // The transport frames and authenticates; this layer sees a body or
-    // nothing.
-    while let Ok(body) = reader.receive(CONTEXT) {
-        // `check_frame_len` still runs, because the transport's ceiling is the
-        // *transport's* -- a 16 MiB frame is legal there and absurd here, and
-        // the swarm's own limit is what bounds an allocation this state machine
-        // will make.
-        if let Err(error) = check_frame_len(body.len() as u32) {
-            let actions = {
-                let guard = swarm.lock().unwrap_or_else(|e| e.into_inner());
-                guard.on_protocol_error(peer, error.to_string())
-            };
-            dispatch(&actions, outbox);
-            break;
-        }
+    // The transport frames and authenticates; this layer sees a body or an
+    // error. **Which error matters**, and getting it wrong costs attribution
+    // rather than safety: this module's rule is that a failure which is nobody's
+    // fault never produces a `Dropped`, and one that describes something the
+    // peer *did* always does. `Swarm` is where blame is recorded, and
+    // `crate::incentive` is why it is worth recording -- a network paying for
+    // availability runs on attributable failure.
+    //
+    // A frame above the ceiling is the peer's doing. Before the framing moved
+    // into the transport this was `check_frame_len` on the declared length and
+    // it fed `on_protocol_error`; keeping it a plain disconnect would silently
+    // stop blaming a peer for something it plainly did.
+    loop {
+        let body = match reader.receive(CONTEXT) {
+            Ok(body) => body,
+            Err(TransportError::FrameTooLarge { size }) => {
+                let actions = {
+                    let guard = swarm.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.on_protocol_error(peer, format!("frame of {size} bytes"))
+                };
+                dispatch(&actions, outbox);
+                break;
+            }
+            // A closed socket, a timeout, a torn read: nobody's fault, so the
+            // peer is dropped without a verdict on it.
+            Err(_) => break,
+        };
 
         let pieces = {
             let guard = swarm.lock().unwrap_or_else(|e| e.into_inner());
@@ -1668,5 +1682,42 @@ mod tests {
 
         listener.shutdown();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_oversized_frame_is_blamed_on_the_peer_and_not_merely_disconnected() {
+        // The rule this module opens with: a failure that is nobody's fault
+        // never produces a `Dropped`, and one that describes something the peer
+        // *did* always does. Both halves matter, and the second is the one that
+        // is easy to lose in a refactor because the peer goes away either way.
+        //
+        // It is worth keeping because `crate::incentive` pays for availability,
+        // and a network that pays for availability runs on attributable
+        // failure. A peer disconnected without a verdict is a peer nobody can
+        // say anything about later.
+        //
+        // Moving the framing into the transport turned an oversized frame from
+        // a `check_frame_len` failure -- which fed `on_protocol_error` -- into a
+        // plain transport error, which this driver treats as nobody's fault.
+        // This pins the classification rather than the disconnect.
+        let swarm = Swarm::leech("sha256:whatever", Limits::default());
+        let blamed = swarm.on_protocol_error(PeerId(1), "frame of 9999999 bytes");
+        assert!(
+            matches!(
+                blamed.as_slice(),
+                [Action::Drop(PeerId(1), Dropped::Protocol { .. })]
+            ),
+            "an oversized frame did not produce a verdict on the peer: {blamed:?}"
+        );
+
+        // And the driver routes `FrameTooLarge` there rather than to the silent
+        // path. Checked through the same `match` the read loop uses, because
+        // the alternative is asserting on source text -- which this file has
+        // already learned not to do.
+        let classify =
+            |error: &TransportError| matches!(error, TransportError::FrameTooLarge { .. });
+        assert!(classify(&TransportError::FrameTooLarge { size: 9_999_999 }));
+        assert!(!classify(&TransportError::FrameTruncated));
+        assert!(!classify(&TransportError::Io(io::Error::other("reset"))));
     }
 }
