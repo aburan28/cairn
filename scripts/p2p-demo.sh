@@ -145,7 +145,13 @@ done
 python3 -c "
 import json
 i = json.load(open('$A/id.json'))
-json.dump({'addr': '127.0.0.1:$A_PORT', 'public': i['public']},
+# `localhost`, not `127.0.0.1`, deliberately: this is the one place the
+# hostname path is exercised end to end. A bootstrap address that needs the
+# resolver used to be refused at parse -- `invalid socket address syntax` --
+# so an operator naming an EC2 instance by its public DNS name could not
+# start a node at all. Safe to accept because the peer id is the hash of the
+# key, so a hostile answer costs a failed handshake, never a wrong peer.
+json.dump({'addr': 'localhost:$A_PORT', 'public': i['public']},
           open('$WORK/a-endpoint.json', 'w'))"
 sed 's/^/  /' "$A/daemon.log"
 echo "  listening on 127.0.0.1:$A_PORT"

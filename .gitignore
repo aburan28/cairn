@@ -37,3 +37,13 @@ venv/
 # Written by .claude/skills/proofwork/scripts/setup.sh with absolute paths
 # for one machine. Generated, not shared.
 .mcp.json
+
+# Bootstrap addresses are local configuration, never repository content.
+# `proofwork-p2p`'s own module doc says it: "Identity files and bootstrap files
+# are local configuration. They are never placed in the append-only ledger."
+# A committed address is a fixed target that goes stale and reads as
+# authoritative, which is exactly what docs/discovery.md says no hint may be.
+# Copy bootstrap.json.example and fill in your own.
+bootstrap.json
+bootstrap.*.json
+!bootstrap.json.example

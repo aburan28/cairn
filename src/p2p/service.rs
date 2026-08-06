@@ -340,11 +340,17 @@ impl Service {
             if transport == self.identity.id() {
                 continue;
             }
-            // The address is a hint and this is the one place it is parsed.
+            // The address is a hint and this is the one place it is resolved.
             // The record format deliberately does not decide what a valid
             // address is -- see `records::MAX_PEER_ADDR` -- so a form this
             // build cannot dial is skipped here rather than refused there.
-            let Ok(addr) = record.addr.parse::<SocketAddr>() else {
+            //
+            // `dialable` accepts a hostname as well as a literal, which is what
+            // lets a peer record name a host whose address moves. It is safe to
+            // take from a stranger for the reason `discovery::dialable` gives:
+            // the peer id is the hash of the key, so a hostile answer costs a
+            // failed handshake and never a wrong peer.
+            let Some(addr) = crate::p2p::discovery::dialable(&record.addr) else {
                 continue;
             };
             // The record's own signed sequence, not zero. `Node::peers` has

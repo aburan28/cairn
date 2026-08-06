@@ -264,3 +264,37 @@ to whoever you happen to be talking to.
 - **A peer record proves identity, not honesty.** It says the key holder claims
   this address. Whether that node serves what it advertises is the bitfield
   problem in [threat-model.md](threat-model.md), and it is unattributed.
+
+## Using a hostname
+
+A bootstrap address and a signed peer record may both carry `host:port` as well
+as a literal `IP:port`. The name is resolved on the **dial path only**:
+
+```json
+{ "addr": "ec2-203-0-113-10.compute-1.amazonaws.com:9000", "public": "…" }
+```
+
+This is the useful shape for a cloud instance. An EC2 box without an Elastic IP
+gets a new address every time it restarts, and a literal address in a bootstrap
+file is stale the moment that happens; its public DNS name is not.
+
+**Resolution never reaches the rules.** `records::MAX_PEER_ADDR` already refuses
+to let the record format decide what a valid address is, because `SocketAddr`
+parsing differs between languages at the edges and two implementations
+disagreeing about admissibility is a consensus split. A DNS answer is that
+hazard several times over — it depends on the resolver, the network, the moment,
+and whoever runs the zone. So `audit` never consults it, and a name that does not
+resolve costs a dial, exactly as a wrong IP does. A literal address is parsed
+without touching the resolver at all, so a host with no DNS is unaffected.
+
+**A hostile answer buys nothing**, which is what makes a name safe to accept from
+a stranger. Whoever controls the zone can send your dial anywhere; the handshake
+then fails, because a peer id *is* `sha256(public key)` and no impostor can
+produce a key hashing to somebody else's id. That is the rule above, applied:
+DNS carries the hint, and the hash decides.
+
+Bootstrap files are local configuration and are gitignored. Copy
+`bootstrap.json.example`, fill in the address and the peer's public key — print
+yours with `proofwork blob serve --identity <file>` — and pass it with
+`--bootstrap`. A committed address would be a fixed target that goes stale and
+reads as authoritative, which is the one thing this document says no hint may be.

@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Copy to bootstrap.json (gitignored) and fill in. Pass with --bootstrap.",
+    "",
+    "addr: where to try. A literal IP:port, or a hostname:port -- an EC2",
+    "  instance named by its public DNS keeps working across a restart that",
+    "  moves its address, which a literal does not. Resolution happens on the",
+    "  dial path only and never in the rules: an address is a hint, and the",
+    "  peer id is what decides.",
+    "",
+    "public: the peer's Classic McEliece public key, hex. 261120 bytes, so",
+    "  522240 hex characters -- this file is large and that is expected. Print",
+    "  yours with `proofwork blob serve --identity <file>`, which reports the",
+    "  endpoint a fetcher needs.",
+    "",
+    "Getting this wrong costs a failed dial and nothing else. A peer id is",
+    "sha256(public key), so an impostor at that address cannot complete the",
+    "handshake -- see docs/discovery.md."
+  ],
+  "addr": "ec2-203-0-113-10.compute-1.amazonaws.com:9000",
+  "public": "<522240 hex characters>"
+}

@@ -4168,9 +4168,14 @@ fn load_endpoint(path: &str) -> Result<proofwork::p2p::discovery::Endpoint, CliE
     let addr = value
         .get("addr")
         .and_then(Value::as_str)
-        .ok_or_else(|| CliError::Usage(format!("{path}: addr missing")))?
-        .parse::<std::net::SocketAddr>()
-        .map_err(|e| CliError::Usage(format!("{path}: addr: {e}")))?;
+        .ok_or_else(|| CliError::Usage(format!("{path}: addr missing")))?;
+    // A hostname is accepted as well as a literal -- see
+    // `p2p::discovery::dialable` for why a name is safe to take on trust.
+    let addr = proofwork::p2p::discovery::dialable(addr).ok_or_else(|| {
+        CliError::Usage(format!(
+            "{path}: addr {addr:?} is neither an address nor a name that resolves"
+        ))
+    })?;
     let hex = value
         .get("public")
         .and_then(Value::as_str)

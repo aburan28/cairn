@@ -93,9 +93,14 @@ fn load_endpoint(path: &Path) -> Result<Endpoint, String> {
     let addr = value
         .get("addr")
         .and_then(Value::as_str)
-        .ok_or("bootstrap.addr missing")?
-        .parse::<SocketAddr>()
-        .map_err(|e| e.to_string())?;
+        .ok_or("bootstrap.addr missing")?;
+    // A bootstrap address may be a hostname. An EC2 instance reached by its
+    // public DNS name keeps working across a restart that moves its IP, and a
+    // name is safe to accept because the peer id decides -- see
+    // `p2p::discovery::dialable`.
+    let addr = proofwork::p2p::discovery::dialable(addr).ok_or_else(|| {
+        format!("bootstrap.addr {addr:?} is neither an address nor a name that resolves")
+    })?;
     let public = hex_decode(
         value
             .get("public")
