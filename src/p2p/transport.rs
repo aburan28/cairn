@@ -4,6 +4,7 @@ use super::handshake::{Channel, HandshakeError, Opener, PeerId, PeerIdentity, Pe
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::time::Duration;
 
 const CIPHERTEXT_BYTES: usize = 96;
 const HANDSHAKE_BYTES: usize = 32 + CIPHERTEXT_BYTES;
@@ -101,6 +102,19 @@ impl Connection {
         counter_bytes.copy_from_slice(&frame[..8]);
         let counter = u64::from_be_bytes(counter_bytes);
         Ok(self.channel.open(counter, &frame[8..], context)?)
+    }
+
+    /// Bound how long a read or a write may block.
+    ///
+    /// Off by default, which is right for the daemon: its sessions are short,
+    /// request-response, and driven by a loop that already decides when to give
+    /// up. It is *not* right for a long-lived transfer, where a peer that goes
+    /// quiet mid-piece would otherwise hold a thread forever and never return
+    /// its reservations — see [`crate::swarm::tcp`], whose liveness story this
+    /// is. Set before [`Connection::split`] so both halves inherit it.
+    pub fn set_timeouts(&self, read: Option<Duration>, write: Option<Duration>) -> io::Result<()> {
+        self.stream.set_read_timeout(read)?;
+        self.stream.set_write_timeout(write)
     }
 
     /// Split into halves that can live on different threads.

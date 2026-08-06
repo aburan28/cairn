@@ -380,6 +380,12 @@ fn serve_one(mut connection: Connection, ctx: Serving) -> io::Result<()> {
         book,
         dht,
     } = ctx;
+    // The timeouts this module's liveness depends on. `p2p::transport` leaves
+    // them off, which suits the daemon's short request-response sessions and
+    // emphatically does not suit a transfer: a peer that goes quiet mid-piece
+    // would hold this thread forever and never give its reservations back.
+    connection.set_timeouts(Some(IO_TIMEOUT), Some(IO_TIMEOUT))?;
+
     // The transport handshake already ran, so the peer is authenticated before
     // a swarm byte moves. What is exchanged here is only *which blob* the
     // session is about.
@@ -744,6 +750,14 @@ pub fn fetch_using(
             else {
                 return;
             };
+            // See `serve_one`: without these a silent peer is a leaked thread
+            // and a piece nobody ever reassigns.
+            if connection
+                .set_timeouts(Some(IO_TIMEOUT), Some(IO_TIMEOUT))
+                .is_err()
+            {
+                return;
+            }
             let hello = Handshake {
                 digest: digest.clone(),
                 peer_id: [0u8; PEER_ID_LEN],
@@ -1559,6 +1573,75 @@ mod tests {
         assert!(
             complete(&book, &source).is_empty(),
             "an id-less record was completed into something dialable"
+        );
+    }
+
+    #[test]
+    fn a_read_on_a_silent_peer_returns_instead_of_blocking_forever() {
+        // The module's liveness claim, checked rather than asserted in prose.
+        // `p2p::transport` sets no socket timeouts -- right for the daemon's
+        // short request-response sessions, wrong for a transfer -- so porting
+        // onto it silently dropped the one thing that makes a stalled peer
+        // survivable, and `IO_TIMEOUT` became a constant nobody read.
+        //
+        // Asserted on the transport rather than on a whole transfer: a
+        // wall-clock assertion over a real swarm is noisy enough to be a
+        // flake, and the property is exactly this one call returning.
+        let responder = Arc::new(PeerIdentity::generate());
+        let public = responder.to_public();
+        let mute = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let addr = mute.local_addr().expect("addr");
+
+        // A peer that completes the handshake and then says nothing. A live
+        // socket, not a refused connection -- which is the case a timeout
+        // exists for and the case a dead address does not cover.
+        thread::spawn(move || {
+            if let Ok((stream, _)) = mute.accept() {
+                let held = transport::accept(stream, &responder);
+                thread::sleep(Duration::from_secs(30));
+                drop(held);
+            }
+        });
+
+        let local = PeerIdentity::generate();
+        let mut connection = transport::connect(&public, addr, &local).expect("connects");
+        let short = Duration::from_millis(400);
+        connection
+            .set_timeouts(Some(short), Some(short))
+            .expect("sets timeouts");
+
+        let started = Instant::now();
+        assert!(
+            connection.receive(CONTEXT).is_err(),
+            "a silent peer produced a frame"
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_secs(5),
+            "the read blocked for {waited:?}; without a timeout this is forever \
+             and the piece it was waiting for is never reassigned"
+        );
+        assert!(
+            waited >= short,
+            "the read returned in {waited:?}, before the timeout could have \
+             fired -- this test is not exercising the timeout"
+        );
+    }
+
+    #[test]
+    fn a_transfer_sets_the_timeouts_its_liveness_depends_on() {
+        // The other half: the API above is only worth anything if the driver
+        // actually calls it. Both sides do -- `serve_one` on the responder and
+        // the dial thread on the initiator -- and a port that forgot either
+        // would leave one direction able to hang.
+        let source = std::fs::read_to_string("src/swarm/tcp.rs").expect("reads own source");
+        let calls = source
+            .matches("set_timeouts(Some(IO_TIMEOUT), Some(IO_TIMEOUT))")
+            .count();
+        assert!(
+            calls >= 2,
+            "found {calls} timeout call(s); the responder and the initiator \
+             each need one, or one direction can stall forever"
         );
     }
 }
