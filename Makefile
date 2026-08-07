@@ -7,6 +7,19 @@ PYTHON ?= python3
 ROOT := $(abspath .)
 LOCAL_DIR ?= .local
 LOG ?= $(abspath $(LOCAL_DIR)/proofwork.jsonl)
+# `make mcp` gets its own log, because it cannot share one with `make p2p`.
+# Both binaries append, so both take the ledger's exclusive lock
+# (Ledger::open_exclusive) -- two writers over one hash-linked file each compute
+# `prev` from their own view of the tail. Pointed at the same path, whichever
+# starts second dies at startup with "another process is already writing".
+#
+# Separate logs are also the arrangement docs/agents.md recommends on its own
+# merits: an agent's log and a node's log are different things, and the daemon
+# reconciles them by anti-entropy rather than by sharing a file descriptor. To
+# get that reconciliation, run a second daemon over this log:
+#
+#   make p2p LOG=$(MCP_LOG) LISTEN=127.0.0.1:9001 CHECKPOINT=... IDENTITY=...
+MCP_LOG ?= $(abspath $(LOCAL_DIR)/agent.jsonl)
 RELEASE_DIR ?= target/release
 CLI := $(RELEASE_DIR)/proofwork
 MCP := $(RELEASE_DIR)/proofwork-mcp
@@ -43,6 +56,11 @@ help:
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
 	  '' \
+	  'Logs: p2p, serve, and cli share LOG=.local/proofwork.jsonl; mcp has its' \
+	  '      own MCP_LOG=.local/agent.jsonl. p2p and mcp both append and both' \
+	  '      take an exclusive lock, so aiming them at one file makes whichever' \
+	  '      starts second refuse. See docs/agents.md.' \
+	  '' \
 	  'P2P overrides: LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS="--bootstrap peer.json"' \
 	  '             IDENTITY=.local/node.identity.json ROOT_KEY=.local/root.key' \
 	  '             CHECKPOINT=.local/checkpoint.json' \
@@ -63,7 +81,7 @@ $(LOCAL_DIR):
 # `exec` preserves the MCP process's stdin/stdout unchanged: stdout is protocol
 # data, so a wrapper must never add banners or diagnostics to it.
 mcp: build | $(LOCAL_DIR)
-	exec "$(MCP)" --log "$(LOG)" --root "$(ROOT)"
+	exec "$(MCP)" --log "$(MCP_LOG)" --root "$(ROOT)"
 
 # A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
 # inside is freshly generated, not the real seed's. It authenticates nobody
