@@ -424,6 +424,38 @@ the connection means anything. `make p2p` calls it automatically to produce
 `.local/seed.json` for `SEED_ADDR` when no other `--bootstrap` is given; see
 the README.
 
+### Running a seed on a public host
+
+Everything above is written for loopback, and a cloud instance breaks three of
+its assumptions at once. All three produce the same symptom — a seed that looks
+up and talks to nobody — so they are worth separating.
+
+**Bind the wildcard, publish the public address.** An instance's public address
+is NAT'd to it and appears on no local interface, so `--listen <public ip>:9000`
+cannot bind at all. Bind `0.0.0.0:9000` and put the public address (or the
+public DNS name, which survives a restart that moves the IP) in the bootstrap
+file you hand out. That is safe because a bootstrap address is only a dial hint:
+the peer id is the hash of the key, so the key decides who answered and the
+address decides nothing.
+
+**Open the port inbound.** A security group that does not admit the p2p port
+does not refuse connections, it *drops* them. There is no RST, so nothing on
+either side reports an error until a timeout expires — which is why this looks
+like silence rather than like a firewall.
+
+**Unreachable peers are bounded, and were not always.** `transport::connect`
+uses `DIAL_TIMEOUT` rather than the kernel's SYN-retransmit schedule (~127 s on
+Linux), every session carries `IO_TIMEOUT` per read and write, and an accepted
+stream has `HANDSHAKE_TIMEOUT` to produce its 128-byte hello. The last one is
+not an optimisation: `proofwork-p2p` runs the handshake with the node mutex
+held, a public address is port-scanned within minutes of existing, and an
+unbounded read there is a seed that wedges on the first scanner and never dials,
+drains, or beacons again. On a LAN none of this shows, because a host that is
+down sends an RST in microseconds.
+
+Multicast discovery does not work on EC2 and is not supposed to; the daemon
+reports that and continues without LAN discovery.
+
 `--population` is optional and turns on the second half of each round. Given it,
 the daemon loads the file at startup, reconciles populations after records on
 every session, and writes the file back afterwards. Without it, no population
