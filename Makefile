@@ -7,8 +7,18 @@ PYTHON ?= python3
 ROOT := $(abspath .)
 LOCAL_DIR ?= .local
 LOG ?= $(abspath $(LOCAL_DIR)/proofwork.jsonl)
-# `LOG` remains the shared default for CLI/serve/diagnostic helpers. `mcp` and
-# `p2p` use distinct defaults so they can run together in one workspace.
+# `make mcp` and `make p2p` each get their own log so they can run together in
+# one workspace. Both binaries append and both take the ledger's exclusive lock
+# (Ledger::open_exclusive) -- two writers over one hash-linked file each compute
+# `prev` from their own view of the tail. Pointed at the same path, whichever
+# starts second dies at startup with "another process is already writing".
+#
+# Separate logs are also the arrangement docs/agents.md recommends on its own
+# merits: an agent's log and a node's log are different things, and the daemon
+# reconciles them by anti-entropy rather than by sharing a file descriptor. To
+# get that reconciliation, run a second daemon over this log:
+#
+#   make p2p LOG=$(MCP_LOG) LISTEN=127.0.0.1:9001 CHECKPOINT=... IDENTITY=...
 P2P_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-p2p.jsonl)
 MCP_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-mcp.jsonl)
 RELEASE_DIR ?= target/release
@@ -48,6 +58,12 @@ help:
 	  '  make demo                Run the end-to-end walkthrough.' \
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
+	  '' \
+	  'Logs: serve and cli share LOG=.local/proofwork.jsonl; mcp uses' \
+	  '      MCP_LOG=.local/proofwork-mcp.jsonl; p2p uses' \
+	  '      P2P_LOG=.local/proofwork-p2p.jsonl. mcp and p2p both append and' \
+	  '      take an exclusive lock, so aiming them at one file makes whichever' \
+	  '      starts second refuse. See docs/agents.md.' \
 	  '' \
 	  'P2P overrides: LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS="--bootstrap peer.json"' \
 	  '             IDENTITY=.local/node.identity.json ROOT_KEY=.local/root.key' \
