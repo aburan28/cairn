@@ -334,8 +334,25 @@ fn main() {
 
     let listener = service.listen(listen_addr).unwrap_or_else(|e| {
         eprintln!("listen: {e}");
+        // The one bind failure worth explaining, because the address that
+        // causes it is the address an operator has every reason to think is
+        // right. A cloud instance's public address is NAT'd to it and is on no
+        // local interface, so `--listen <public ip>:9000` cannot bind at all --
+        // and the fix is the counterintuitive one of binding the wildcard and
+        // publishing the public address in the bootstrap file instead.
+        if !listen_addr.ip().is_unspecified() {
+            eprintln!(
+                "listen: {} is not an address on this host. A cloud instance's public \
+                 address is NAT'd to it and never appears on an interface -- bind \
+                 0.0.0.0:{} and put the public address in the bootstrap file you hand \
+                 out, which is only ever a dial hint.",
+                listen_addr.ip(),
+                listen_addr.port()
+            );
+        }
         std::process::exit(2)
     });
+    eprintln!("listening on {listen_addr}");
     // Exclusive, opened above: the daemon appends every record it imports from
     // a peer, so it is a writer and must not share a log with another one.
     let node = Node::new(ledger, root);
