@@ -154,6 +154,26 @@ i = json.load(open('$A/id.json'))
 json.dump({'addr': 'localhost:$A_PORT', 'public': i['public']},
           open('$WORK/a-endpoint.json', 'w'))"
 sed 's/^/  /' "$A/daemon.log"
+
+# Wait for A to accept a connection, rather than assuming it binds the moment
+# its identity file appears. `free_port` picks a port by binding zero and
+# *closing* it, so between that close and A's bind the port is anyone's. When A
+# loses that race B spends the whole sync window on "Connection refused" and the
+# run ends at "B did not sync A's log", naming the symptom two hundred lines
+# from the cause -- which is exactly how long the v6-first bootstrap bug took to
+# find. Fail here instead, where the message is the diagnosis.
+for _ in $(seq 1 100); do
+  python3 -c "
+import socket, sys
+s = socket.socket(); s.settimeout(0.5)
+sys.exit(0 if s.connect_ex(('127.0.0.1', $A_PORT)) == 0 else 1)" && break
+  sleep 0.1
+done
+python3 -c "
+import socket, sys
+s = socket.socket(); s.settimeout(0.5)
+sys.exit(0 if s.connect_ex(('127.0.0.1', $A_PORT)) == 0 else 1)" \
+  || fail "A never listened on 127.0.0.1:$A_PORT (port taken between free_port and bind?)"
 echo "  listening on 127.0.0.1:$A_PORT"
 
 rule "B starts with an empty log and one address"
