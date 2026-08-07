@@ -25,9 +25,16 @@ fi
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 
-LOG=$(mktemp -u /tmp/pw-mcp-XXXXXX.jsonl)
-OUT=$(mktemp -u /tmp/pw-mcp-out-XXXXXX.jsonl)
-ERR=$(mktemp -u /tmp/pw-mcp-err-XXXXXX.log)
+# The suffix goes on *after* mktemp, not inside the template. BSD mktemp (macOS)
+# only expands `XXXXXX` at the very end of the template: given
+# `...-XXXXXX.jsonl` it returns the name literally, and `-u` still calls
+# `mkstemp` before unlinking, so the first run creates a real file called
+# `pw-mcp-err-XXXXXX.log` and every run after it dies with "File exists". GNU
+# mktemp expands a suffixed template happily, which is why CI never saw this and
+# only a second local run does.
+LOG="$(mktemp -u /tmp/pw-mcp-XXXXXX).jsonl"
+OUT="$(mktemp -u /tmp/pw-mcp-out-XXXXXX).jsonl"
+ERR="$(mktemp -u /tmp/pw-mcp-err-XXXXXX).log"
 trap 'rm -f "$LOG" "$OUT" "$ERR" "${LOG%.jsonl}.pending.json"' EXIT
 
 # stderr is the only channel for "cannot save pending commitments" -- a server
@@ -111,8 +118,9 @@ echo "  ledger still holds 1 entry (the objective)"
 # planted citation and write nothing.
 # --------------------------------------------------------------------------
 rule "an objective statement that tries to plant a citation"
-HOSTILE=$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX.json)
-HOSTILE_LOG=$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX.jsonl)
+# Suffixed after the call, for the reason the ones at the top of this file are.
+HOSTILE="$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX).json"
+HOSTILE_LOG="$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX).jsonl"
 # The MCP server keeps unrevealed nonces in a sidecar beside the log.
 trap 'rm -f "$LOG" "$OUT" "$HOSTILE" "$HOSTILE_LOG" "${LOG%.jsonl}.pending.json" "${HOSTILE_LOG%.jsonl}.pending.json"' EXIT
 
