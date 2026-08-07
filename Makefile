@@ -7,8 +7,8 @@ PYTHON ?= python3
 ROOT := $(abspath .)
 LOCAL_DIR ?= .local
 LOG ?= $(abspath $(LOCAL_DIR)/proofwork.jsonl)
-# `make mcp` gets its own log, because it cannot share one with `make p2p`.
-# Both binaries append, so both take the ledger's exclusive lock
+# `make mcp` and `make p2p` each get their own log so they can run together in
+# one workspace. Both binaries append and both take the ledger's exclusive lock
 # (Ledger::open_exclusive) -- two writers over one hash-linked file each compute
 # `prev` from their own view of the tail. Pointed at the same path, whichever
 # starts second dies at startup with "another process is already writing".
@@ -19,7 +19,8 @@ LOG ?= $(abspath $(LOCAL_DIR)/proofwork.jsonl)
 # get that reconciliation, run a second daemon over this log:
 #
 #   make p2p LOG=$(MCP_LOG) LISTEN=127.0.0.1:9001 CHECKPOINT=... IDENTITY=...
-MCP_LOG ?= $(abspath $(LOCAL_DIR)/agent.jsonl)
+P2P_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-p2p.jsonl)
+MCP_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-mcp.jsonl)
 RELEASE_DIR ?= target/release
 CLI := $(RELEASE_DIR)/proofwork
 MCP := $(RELEASE_DIR)/proofwork-mcp
@@ -49,6 +50,8 @@ help:
 	  'proofwork local commands:' \
 	  '  make mcp                 Build and run the local MCP server (stdio).' \
 	  '  make p2p                 Build and run a local p2p node.' \
+	  '  make mcp MCP_LOG=my-path  Use a custom MCP ledger path.' \
+	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
@@ -56,8 +59,9 @@ help:
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
 	  '' \
-	  'Logs: p2p, serve, and cli share LOG=.local/proofwork.jsonl; mcp has its' \
-	  '      own MCP_LOG=.local/agent.jsonl. p2p and mcp both append and both' \
+	  'Logs: serve and cli share LOG=.local/proofwork.jsonl; mcp uses' \
+	  '      MCP_LOG=.local/proofwork-mcp.jsonl; p2p uses' \
+	  '      P2P_LOG=.local/proofwork-p2p.jsonl. mcp and p2p both append and' \
 	  '      take an exclusive lock, so aiming them at one file makes whichever' \
 	  '      starts second refuse. See docs/agents.md.' \
 	  '' \
@@ -97,7 +101,7 @@ $(SEED_BOOTSTRAP): build | $(LOCAL_DIR)
 p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
 	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
-	  --log "$(LOG)" --root "$(ROOT)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
+	  --log "$(P2P_LOG)" --root "$(ROOT)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
 
 cli: build | $(LOCAL_DIR)
 	"$(CLI)" --log "$(LOG)" --root "$(ROOT)" $(ARGS)
