@@ -48,10 +48,11 @@ P2P_ARGS ?=
 help:
 	@printf '%s\n' \
 	  'proofwork local commands:' \
-	  '  make mcp                 Build and run the local MCP server (stdio).' \
+	  '  make mcp                 Build, write opencode.json, and run the MCP server (stdio).' \
 	  '  make p2p                 Build and run a local p2p node.' \
 	  '  make mcp MCP_LOG=my-path  Use a custom MCP ledger path.' \
 	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
+	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
@@ -82,9 +83,29 @@ debug:
 $(LOCAL_DIR):
 	mkdir -p "$@"
 
+# opencode.json tells OpenCode how to launch the MCP server. Generated once;
+# rebuilds when Makefile changes (the only time the paths inside could differ).
+# Uses absolute paths throughout: OpenCode spawns the server from a directory
+# it chooses, not the repo root, and a relative --log silently creates a second
+# empty ledger instead of failing.
+#
+# Identity is included only when the file already exists, so `make mcp` on a
+# fresh checkout does not block on key generation.
+opencode.json: Makefile | $(LOCAL_DIR)
+	@$(PYTHON) -c "\
+import json, os; \
+id_path = '$(abspath $(IDENTITY))'; \
+cmd = ['$(abspath $(MCP))', '--log', '$(MCP_LOG)', '--root', '$(ROOT)']; \
+os.path.exists(id_path) and cmd.extend(['--identity', id_path]); \
+cfg = {'\$$schema': 'https://opencode.ai/config.json', 'mcp': {'proofwork': {'type': 'local', 'command': cmd, 'enabled': True}}}; \
+open('opencode.json', 'w').write(json.dumps(cfg, indent=2) + '\n') \
+"
+	@printf '  opencode.json -> $(MCP_LOG)\n'
+	@printf '  restart OpenCode (or /mcp reconnect) to pick it up\n'
+
 # `exec` preserves the MCP process's stdin/stdout unchanged: stdout is protocol
 # data, so a wrapper must never add banners or diagnostics to it.
-mcp: build | $(LOCAL_DIR)
+mcp: build opencode.json | $(LOCAL_DIR)
 	exec "$(MCP)" --log "$(MCP_LOG)" --root "$(ROOT)"
 
 # A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
