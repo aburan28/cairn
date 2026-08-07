@@ -65,9 +65,18 @@ jobs:
             ./target/release/$BIN --help >/dev/null 2>&1 \
               || { echo "$BIN --help exited $?" >&2; exit 1; }
           done
+          # `|| status=$?` rather than a bare call then `$?`: GitHub runs this
+          # with `bash -e`, so a bare call that exits 2 -- which is the whole
+          # point of the check -- aborts the step before the comparison runs.
+          # The loop above survives only because `||` shields its call. This one
+          # could never pass, and nobody saw it: until the clippy step ahead of
+          # it went green this step was simply never reached, so the check meant
+          # to pin the misuse codes had not run once since it was written.
           for BIN in proofwork-serve proofwork-p2p; do
-            ./target/release/$BIN --definitely-not-a-flag >/dev/null 2>&1
-            [ $? -eq 2 ] || { echo "$BIN did not exit 2 on a bad argument" >&2; exit 1; }
+            status=0
+            ./target/release/$BIN --definitely-not-a-flag >/dev/null 2>&1 || status=$?
+            [ "$status" -eq 2 ] \
+              || { echo "$BIN exited $status on a bad argument, want 2" >&2; exit 1; }
           done
 
   reference:
