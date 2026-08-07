@@ -71,6 +71,37 @@ JSON
 say ".mcp.json -> $LOG"
 say "restart Claude Code (or /mcp reconnect) to pick it up"
 
+rule "wire OpenCode"
+# opencode.json uses a different shape: type/command-array rather than
+# command/args, and the $schema key must be escaped in the heredoc.
+# Identity is included only if the file already exists -- run
+# `proofwork identity --out .local/node.identity.json` first if you want
+# a signed submitter name nobody else can claim.
+IDENTITY_FRAGMENT=""
+if [ -f "$REPO/.local/node.identity.json" ]; then
+  IDENTITY_FRAGMENT=$(printf ',\n        "--identity", "%s"' "$REPO/.local/node.identity.json")
+fi
+cat > "$REPO/opencode.json" << OPENCODE_EOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "proofwork": {
+      "type": "local",
+      "command": [
+        "$REPO/target/release/proofwork-mcp",
+        "--log",
+        "$LOG",
+        "--root",
+        "$REPO"$IDENTITY_FRAGMENT
+      ],
+      "enabled": true
+    }
+  }
+}
+OPENCODE_EOF
+say "opencode.json -> $LOG"
+say "restart OpenCode (or /mcp reconnect) to pick it up"
+
 rule "post starter objectives"
 POSTED=0
 for objective in \

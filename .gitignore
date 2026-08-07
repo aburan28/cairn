@@ -34,9 +34,10 @@ venv/
 # repository, under a different path, that nothing checks against the first.
 .proofwork/
 
-# Written by .claude/skills/proofwork/scripts/setup.sh with absolute paths
-# for one machine. Generated, not shared.
+# Written by setup.sh / `make mcp` with absolute paths for one machine.
+# Generated, not shared.
 .mcp.json
+opencode.json
 
 # Bootstrap addresses are local configuration, never repository content.
 # `proofwork-p2p`'s own module doc says it: "Identity files and bootstrap files
