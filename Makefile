@@ -7,6 +7,10 @@ PYTHON ?= python3
 ROOT := $(abspath .)
 LOCAL_DIR ?= .local
 LOG ?= $(abspath $(LOCAL_DIR)/proofwork.jsonl)
+# `LOG` remains the shared default for CLI/serve/diagnostic helpers. `mcp` and
+# `p2p` use distinct defaults so they can run together in one workspace.
+P2P_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-p2p.jsonl)
+MCP_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-mcp.jsonl)
 RELEASE_DIR ?= target/release
 CLI := $(RELEASE_DIR)/proofwork
 MCP := $(RELEASE_DIR)/proofwork-mcp
@@ -36,6 +40,8 @@ help:
 	  'proofwork local commands:' \
 	  '  make mcp                 Build and run the local MCP server (stdio).' \
 	  '  make p2p                 Build and run a local p2p node.' \
+	  '  make mcp MCP_LOG=my-path  Use a custom MCP ledger path.' \
+	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
@@ -63,7 +69,7 @@ $(LOCAL_DIR):
 # `exec` preserves the MCP process's stdin/stdout unchanged: stdout is protocol
 # data, so a wrapper must never add banners or diagnostics to it.
 mcp: build | $(LOCAL_DIR)
-	exec "$(MCP)" --log "$(LOG)" --root "$(ROOT)"
+	exec "$(MCP)" --log "$(MCP_LOG)" --root "$(ROOT)"
 
 # A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
 # inside is freshly generated, not the real seed's. It authenticates nobody
@@ -79,7 +85,7 @@ $(SEED_BOOTSTRAP): build | $(LOCAL_DIR)
 p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
 	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
-	  --log "$(LOG)" --root "$(ROOT)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
+	  --log "$(P2P_LOG)" --root "$(ROOT)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
 
 cli: build | $(LOCAL_DIR)
 	"$(CLI)" --log "$(LOG)" --root "$(ROOT)" $(ARGS)

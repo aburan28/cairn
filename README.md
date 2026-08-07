@@ -139,11 +139,13 @@ The easiest local launch is:
 make p2p
 ```
 
-On first run this creates `.local/node.identity.json`, `.local/root.key`, and
-`.local/checkpoint.json`. The first two contain private key material; keep
-`.local/` out of version control. The node listens on `127.0.0.1:9000` by
-default, accepts inbound peers, periodically dials configured bootstrap files,
-and re-derives received records locally.
+By default, `make p2p` writes to `.local/proofwork-p2p.jsonl` and does not
+share the ledger with other services. On first run it creates
+`.local/node.identity.json`, `.local/root.key`, and `.local/checkpoint.json`. The
+first two contain private key material; keep `.local/` out of version control.
+The node listens on `127.0.0.1:9000` by default, accepts inbound peers,
+periodically dials configured bootstrap files, and re-derives received records
+locally.
 
 To connect to a peer, provide a bootstrap file containing its address and
 McEliece public key:
@@ -173,9 +175,14 @@ make p2p SEED_ADDR=203.0.113.9:9001
 make p2p BOOTSTRAP_ARGS='--bootstrap peer.json'
 ```
 
-Use separate `LOCAL_DIR`, `LOG`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT`
-paths for each node. The root checkpoint key is ML-DSA-65 and is separate from
-the transport identity.
+Use separate `LOCAL_DIR`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT` paths for each
+node. `make mcp` uses `.local/proofwork-mcp.jsonl` by default, and `make p2p`
+uses `.local/proofwork-p2p.jsonl`, so the two commands can run together without
+contention over a single hash-linked ledger. Use `P2P_LOG` and `MCP_LOG` to
+override these paths directly.
+
+The root checkpoint key is ML-DSA-65 and is separate from the transport
+identity.
 
 Rust 1.89+ (verified in CI, and asserted by `rust-version`). No network access
 needed at runtime.
