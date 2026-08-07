@@ -8,7 +8,7 @@ use proofwork::checkpoint::RootKey;
 use proofwork::gossip::{Candidate, Population};
 use proofwork::ledger::Ledger;
 use proofwork::node::Node;
-use proofwork::p2p::discovery::Endpoint;
+use proofwork::p2p::discovery::{peer_id_string, Endpoint};
 use proofwork::p2p::handshake::{PeerIdentity, PeerPublic};
 use proofwork::p2p::multicast;
 use proofwork::p2p::pop::PopLimits;
@@ -431,17 +431,27 @@ fn main() {
                         PopLimits::default(),
                         |node, candidate| scorer.score(node, candidate),
                     )
-                    .map(|_| ())
+                    .map(|(remote, _)| remote)
             }
-            None => accept_service.serve_node_once(stream, node).map(|_| ()),
+            None => accept_service.serve_node_once(stream, node),
         };
         match outcome {
-            Ok(()) => persist(
-                &guard,
-                &accept_checkpoint_path,
-                &accept_root_key,
-                accept_population_path.as_ref(),
-            ),
+            Ok(remote) => {
+                // The only positive signal this daemon ever gave was a growing
+                // log file, checked by hand across two terminals. Every other
+                // line here is a failure; a session that worked was silent.
+                eprintln!(
+                    "inbound session: {} ok, {} entries now",
+                    peer_id_string(&remote),
+                    node.ledger().len()
+                );
+                persist(
+                    &guard,
+                    &accept_checkpoint_path,
+                    &accept_root_key,
+                    accept_population_path.as_ref(),
+                );
+            }
             Err(error) => eprintln!("inbound session: {error}"),
         }
     });
@@ -540,12 +550,19 @@ fn main() {
                 None => service.dial_node_once(&endpoint, node),
             };
             match outcome {
-                Ok(()) => persist(
-                    &guard,
-                    &checkpoint_path,
-                    &root_key,
-                    population_path.as_ref(),
-                ),
+                Ok(()) => {
+                    eprintln!(
+                        "outbound session: {} ok, {} entries now",
+                        peer_id_string(&endpoint.peer.id()),
+                        node.ledger().len()
+                    );
+                    persist(
+                        &guard,
+                        &checkpoint_path,
+                        &root_key,
+                        population_path.as_ref(),
+                    );
+                }
                 Err(error) => {
                     eprintln!("outbound session: {error}");
                     // Tell the DHT, or every lookup that chose this peer waits
