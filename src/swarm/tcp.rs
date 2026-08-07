@@ -1065,6 +1065,40 @@ pub fn describe(dropped: &Dropped) -> String {
     dropped.to_string()
 }
 
+// A known-open flake in the real-socket tests below, so the next person to
+// hit it does not re-derive this from nothing.
+//
+// On at least one heavily-loaded macOS sandbox, several of the tests that
+// drive `serve`/`fetch` over real loopback sockets (`a_blob_moves_between_-
+// two_nodes_over_a_real_socket` and siblings) fail with `Incomplete { have:
+// 0, want: N }`: a peer's *fourth* real-socket `receive` -- the one that
+// blocks waiting for a message the other side has not sent yet -- returns
+// `WouldBlock` within a millisecond of the connection opening, not after the
+// configured `IO_TIMEOUT`. `run_peer` treats any read error as "nobody's
+// fault, drop the peer" (by design -- see its doc comment), so the seed hangs
+// up on a leech that is still very much alive, and the transfer never starts.
+//
+// Two things this is *not*, checked directly rather than assumed:
+// - Not a `p2p::transport` bug. A standalone repro that split a real
+//   `p2p::transport::Connection` the same way, with a writer thread sending
+//   on a delay and a reader blocked on a read nothing had answered yet,
+//   correctly blocked for the full configured timeout -- both over a bare
+//   `TcpStream` and over the actual encrypted `Connection` type this module
+//   uses. Concurrent writes on the `try_clone`d socket half do not wake a
+//   timed read early.
+// - Not the regression this file's `IO_TIMEOUT` was added to fix (`git log
+//   -1 -- src/p2p/transport.rs`): it reproduces identically on the commit
+//   before that one.
+//
+// What is still open is why *this* module's heavier orchestration --
+// multiple ticker threads per node, each taking the `Swarm` and outbox
+// mutexes on a 200ms tick, two such nodes in one test process -- produces the
+// early `WouldBlock` when two isolated `Connection`s under the same
+// read/write pattern do not. CI only runs `cargo test` on `ubuntu-latest`, so
+// whether this is Linux-portable or a macOS/BSD-scheduling artifact of a
+// contended sandbox is untested. The pure `Swarm` state machine (`swarm::mod`
+// tests) drives choking, rarest-first and endgame directly with no socket in
+// the loop and is not implicated.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1743,13 +1777,19 @@ mod tests {
         let mut connection =
             transport::connect(&endpoint.peer, endpoint.addr, &local).expect("connects");
         let oversized = vec![0u8; crate::swarm::wire::MAX_FRAME + 8192];
+        // Before the write, not after: once the server's refusal lands as a
+        // reset, `setsockopt` for a timeout fails outright with `EINVAL` on a
+        // BSD-family kernel (macOS included), and by then the write has
+        // already spent up to the transport's own default -- 30s, not this
+        // test's 5 -- finding that out. Set first and both the write and the
+        // read this test cares about are bounded by the timeout it chose.
+        connection
+            .set_timeouts(Some(Duration::from_secs(5)), Some(Duration::from_secs(5)))
+            .expect("sets timeouts");
         // The write may succeed into the socket buffer and the refusal arrive
         // as a reset on the next call; either is the server declining. What
         // must not happen is the server reading it as a frame and answering.
         let _ = connection.send(&oversized, CONTEXT);
-        connection
-            .set_timeouts(Some(Duration::from_secs(5)), Some(Duration::from_secs(5)))
-            .expect("sets timeouts");
         assert!(
             connection.receive(CONTEXT).is_err(),
             "the server answered a frame four times larger than this protocol \

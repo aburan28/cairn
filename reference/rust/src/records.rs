@@ -247,6 +247,11 @@ impl Objective {
                 "objective needs a verifier with a 'kind'".into(),
             ));
         }
+        if let Some(ratchet) = &self.ratchet {
+            if ratchet.as_object().is_none() {
+                return Err(RecordError("ratchet must be an object".into()));
+            }
+        }
         if let Some(schema) = &self.artifact_schema {
             if schema.as_object().is_none() {
                 return Err(RecordError("artifact_schema must be an object".into()));

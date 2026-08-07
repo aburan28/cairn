@@ -1548,17 +1548,14 @@ impl Node {
         let mut awards: BTreeMap<String, u64> = BTreeMap::new();
         let mut spent: u128 = 0;
         for (identity, w) in &weight {
-            let share = if total == 0 {
-                0
-            } else {
-                offered
-                    .checked_mul(u128::from(*w))
-                    .ok_or(RuleViolation::PayoutOverflow {
-                        paid_cumulative: u64::MAX,
-                        reward: 0,
-                    })?
-                    / total
-            };
+            let share = offered
+                .checked_mul(u128::from(*w))
+                .ok_or(RuleViolation::PayoutOverflow {
+                    paid_cumulative: u64::MAX,
+                    reward: 0,
+                })?
+                .checked_div(total)
+                .unwrap_or(0);
             let share = u64::try_from(share).map_err(|_| RuleViolation::PayoutOverflow {
                 paid_cumulative: u64::MAX,
                 reward: 0,

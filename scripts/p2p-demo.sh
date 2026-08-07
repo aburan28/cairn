@@ -145,9 +145,9 @@ done
 python3 -c "
 import json
 i = json.load(open('$A/id.json'))
-# `localhost`, not `127.0.0.1`, deliberately: this is the one place the
+# \`localhost\`, not \`127.0.0.1\`, deliberately: this is the one place the
 # hostname path is exercised end to end. A bootstrap address that needs the
-# resolver used to be refused at parse -- `invalid socket address syntax` --
+# resolver used to be refused at parse -- \`invalid socket address syntax\` --
 # so an operator naming an EC2 instance by its public DNS name could not
 # start a node at all. Safe to accept because the peer id is the hash of the
 # key, so a hostile answer costs a failed handshake, never a wrong peer.

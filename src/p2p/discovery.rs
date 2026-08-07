@@ -59,11 +59,31 @@ pub fn dialable(addr: &str) -> Option<SocketAddr> {
     // path, so this adds no new class of stall -- but it is why this is not
     // called from anywhere that holds a lock or answers a request.
     //
-    // The first answer, not all of them: a multi-homed name is a hint list and
-    // the caller retries by dialling again, which is the same recovery an
+    // One answer, not all of them: a multi-homed name is a hint list and the
+    // caller retries by dialling again, which is the same recovery an
     // unreachable literal address gets. Trying every record here would bury a
     // per-address timeout inside what callers treat as one attempt.
-    addr.to_socket_addrs().ok()?.next()
+    //
+    // Which one matters, though, and the resolver's own order is not a safe
+    // tiebreak. `--listen` binds one family, chosen by whoever wrote the
+    // address; a name that resolves to both is dual-stack and the *other*
+    // family is a dead end for the life of the process, because the callers
+    // that matter here (`load_endpoint`, `main.rs`'s `--bootstrap`) resolve
+    // once at startup and dial that one `SocketAddr` forever. Getting this
+    // wrong does not cost a wasted dial, as the module doc above promises --
+    // it costs every dial. `getaddrinfo`'s RFC 6724 policy table ranks `::1`
+    // above `127.0.0.1`, so glibc hands back v6 first for a name like
+    // `localhost` that Darwin's resolver orders the other way -- the same
+    // bootstrap file bootstraps on one OS and never connects on the other.
+    // IPv4 first when both are on offer is the safer default: it is the
+    // family a loopback or LAN address is overwhelmingly likely to mean, and
+    // a name that resolves to only one family is unaffected either way.
+    let mut answers = addr.to_socket_addrs().ok()?;
+    let first = answers.next()?;
+    if first.is_ipv4() {
+        return Some(first);
+    }
+    Some(answers.find(SocketAddr::is_ipv4).unwrap_or(first))
 }
 
 /// Errors while decoding peer ids or registering an endpoint.
@@ -238,6 +258,20 @@ mod tests {
         let resolved = dialable("localhost:9000").expect("localhost resolves");
         assert_eq!(resolved.port(), 9000);
         assert!(resolved.ip().is_loopback(), "got {resolved}");
+        // `localhost` is dual-stack on every host that ships both loopback
+        // families, and the two platforms this crate is developed and shipped
+        // on disagree about which comes back first from the resolver: Darwin
+        // orders v4 first, glibc's RFC 6724 table ranks `::1` above
+        // `127.0.0.1` and orders v6 first. A bootstrap file resolved once at
+        // startup keeps whichever answer it got for the life of the process,
+        // so picking the resolver's first answer made a log that never synced
+        // -- reliably, on Linux, every time -- indistinguishable from a
+        // genuinely unreachable peer. IPv4 is the tiebreak regardless of which
+        // OS runs this test.
+        assert!(
+            resolved.is_ipv4(),
+            "got {resolved}, wanted the v4 answer preferred over v6"
+        );
 
         // Refused, not guessed. A name with no port has no dialable form, and
         // inventing one would dial somewhere the operator never named.

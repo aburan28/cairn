@@ -16,6 +16,12 @@ venv/
 # Logs produced by demos
 *.jsonl
 !conformance/*.json
+# `*.json` above does not match `*.jsonl` -- this is the corpus
+# `scripts/differential.sh` requires and was silently uncommitted for exactly
+# that reason. Named explicitly rather than widened to `conformance/*.jsonl*`,
+# so a scratch `.jsonl` dropped in `conformance/` during debugging stays
+# ignored.
+!conformance/adversarial.jsonl
 # ...except the published one. A project whose whole claim is "anyone can
 # re-derive every settled result from the log" has to ship a log. See
 # launch/README.md and scripts/make-launch-log.sh.
