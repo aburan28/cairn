@@ -40,7 +40,7 @@ hmac = "0.12"
 # docs/censorship.md. Threshold secret sharing is implemented in-crate over
 # GF(2^8) rather than pulled in, so the reconstruction path is auditable here.
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
