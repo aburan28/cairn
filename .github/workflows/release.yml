@@ -33,6 +33,6 @@ jobs:
           tar -C "target/${{ matrix.target }}/release" -czf \
             "proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" \
             proofwork proofwork-mcp proofwork-p2p proofwork-serve
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
