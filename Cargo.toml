@@ -56,7 +56,7 @@ ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 
 [dev-dependencies]
-rand = "0.8"
+rand = "0.10"
 
 [lib]
 name = "proofwork"
