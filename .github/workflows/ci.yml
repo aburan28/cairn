@@ -65,7 +65,10 @@ jobs:
       # healthcheck asks whether a binary runs at all, so the wrong code here
       # fails a build for no reason. Cheap to pin, and it drifted once already.
       - run: |
-          for BIN in proofwork proofwork-serve proofwork-p2p; do
+          # Every shipped binary, not a subset. `proofwork-gen-bootstrap` was
+          # missing from this list and answered exit 2 to `--help` for its whole
+          # life; the release workflow's unpack check is what found it.
+          for BIN in proofwork proofwork-mcp proofwork-serve proofwork-p2p proofwork-gen-bootstrap; do
             ./target/release/$BIN --help >/dev/null 2>&1 \
               || { echo "$BIN --help exited $?" >&2; exit 1; }
           done
@@ -241,3 +244,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
       - run: ./scripts/check-examples.sh
+      # The First-Blood instances are derived, not authored: `Q` is hashed to
+      # the curve from a public seed so that nobody -- the funder included --
+      # knows its discrete log. A checker edited by hand would silently break
+      # that, and the resulting bounty would look identical. This re-runs the
+      # derivation and fails on any drift between it and the checked-in files.
+      - run: python3 scripts/derive-first-blood.py --check

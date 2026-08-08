@@ -346,7 +346,7 @@ impl fmt::Debug for CommitteeKey {
 impl CommitteeKey {
     pub fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> CommitteeKey {
         CommitteeKey {
-            secret: StaticSecret::random_from_rng(&mut RngBridge(rng)),
+            secret: StaticSecret::random_from_rng(&mut *rng),
         }
     }
 
@@ -810,42 +810,6 @@ impl SealedEnvelope {
 
 // -- internals -------------------------------------------------------------
 
-/// Lets an `x25519-dalek` 3 constructor draw from this crate's generator.
-///
-/// `x25519-dalek` 3 takes its RNG through `rand_core` 0.10, while
-/// `ed25519-dalek` 2 -- and therefore every `generate`/`seal` signature in this
-/// crate -- is still on `rand_core` 0.6. The two `CryptoRng` traits are
-/// unrelated types, so there is no coercion between them; this forwards the
-/// three methods and nothing else.
-///
-/// Deliberately *not* a public conversion. Callers keep passing one generator
-/// and the split stays an implementation detail of this module, so when the
-/// ecosystem finishes moving there is exactly one thing to delete. The `Error`
-/// is `Infallible`, which is what makes the borrowed generator satisfy 0.10's
-/// infallible `Rng` and `CryptoRng` at all.
-struct RngBridge<'a, R: ?Sized>(&'a mut R);
-
-impl<R: RngCore + CryptoRng + ?Sized> x25519_dalek::rand_core::TryRng for RngBridge<'_, R> {
-    type Error = core::convert::Infallible;
-
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        Ok(self.0.next_u32())
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        Ok(self.0.next_u64())
-    }
-
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        self.0.fill_bytes(dst);
-        Ok(())
-    }
-}
-
-/// Sound because the bridged generator is itself a `rand_core` 0.6
-/// `CryptoRng`: the bound on `R` is the whole of the claim being forwarded.
-impl<R: RngCore + CryptoRng + ?Sized> x25519_dalek::rand_core::TryCryptoRng for RngBridge<'_, R> {}
-
 /// Seal one Shamir share to one member.
 fn seal_share<R: RngCore + CryptoRng>(
     member: &CommitteeMember,
@@ -856,7 +820,7 @@ fn seal_share<R: RngCore + CryptoRng>(
     // Ephemeral, not static: a per-share keypair means a compromised sender key
     // cannot retroactively open past envelopes, and `EphemeralSecret` is
     // consumed by the exchange so it cannot be reused by mistake.
-    let ephemeral = EphemeralSecret::random_from_rng(&mut RngBridge(rng));
+    let ephemeral = EphemeralSecret::random_from_rng(&mut *rng);
     let ephemeral_public = PublicKey::from(&ephemeral).to_bytes();
     let recipient = PublicKey::from(member.public_key);
     let shared = ephemeral.diffie_hellman(&recipient);

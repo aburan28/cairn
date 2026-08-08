@@ -19,9 +19,16 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-fn usage() -> ! {
+/// Print the usage and exit with `code`.
+///
+/// `--help` exits 0 and a bad or missing argument exits 2, matching
+/// `proofwork-p2p`. This binary answered 2 to everything including `--help`,
+/// and nothing noticed because the packaging check in `.github/workflows/ci.yml`
+/// listed the other binaries and not this one. The release workflow now runs
+/// `--help` on every binary it ships, which is what caught it.
+fn usage(code: i32) -> ! {
     eprintln!("usage: proofwork-gen-bootstrap --addr HOST:PORT --out FILE [--identity-out FILE]");
-    std::process::exit(2);
+    std::process::exit(code);
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -45,16 +52,19 @@ fn main() {
     let mut identity_out = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            usage(0);
+        }
         let slot = match arg.as_str() {
             "--addr" => &mut addr,
             "--out" => &mut out,
             "--identity-out" => &mut identity_out,
-            _ => usage(),
+            _ => usage(2),
         };
-        *slot = Some(args.next().unwrap_or_else(|| usage()));
+        *slot = Some(args.next().unwrap_or_else(|| usage(2)));
     }
-    let addr = addr.unwrap_or_else(|| usage());
-    let out = out.unwrap_or_else(|| usage());
+    let addr = addr.unwrap_or_else(|| usage(2));
+    let out = out.unwrap_or_else(|| usage(2));
     // Shape only, and deliberately not `SocketAddr::parse`: this tool writes
     // config for a host that may be down, or not yet built, so resolving here
     // would refuse a perfectly good file for a peer that is merely offline.

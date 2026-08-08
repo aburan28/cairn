@@ -80,7 +80,12 @@ while IFS= read -r objective; do
 
   # A fresh log per objective: this checks that each objective posts cleanly
   # on its own, not that the set happens to coexist in one log.
-  LOG=$(mktemp -u "$TMP/log-XXXXXX.jsonl")
+# Suffix appended after the call, not inside the template: BSD mktemp (macOS)
+# only expands `XXXXXX` at the very end, so `-XXXXXX.jsonl` comes back literal
+# and `-u` still calls mkstemp -- the first run creates a real file with X's in
+# its name and every run after it dies on "File exists". GNU mktemp expands it,
+# which is why CI never sees this and a second local run does.
+  LOG="$(mktemp -u "$TMP/log-XXXXXX").jsonl"
   "$RUST" --log "$LOG" --root . post "$objective" \
     || fail "$objective was rejected by the schema / post rules"
   CHECKED=$((CHECKED + 1))
@@ -111,10 +116,10 @@ json.loads(blocks[0])
 sys.stdout.write(blocks[0].rstrip())
 PY
 
-README_LOG=$(mktemp -u "$TMP/readme-XXXXXX.jsonl")
+README_LOG="$(mktemp -u "$TMP/readme-XXXXXX").jsonl"
 README_ID=$("$RUST" --log "$README_LOG" --root . post "$TMP/readme-objective.json" 2>&1 | head -1 | awk '{print $2}') \
   || fail "the README objective snippet does not post; a reader copying it gets an error"
-REAL_LOG=$(mktemp -u "$TMP/real-XXXXXX.jsonl")
+REAL_LOG="$(mktemp -u "$TMP/real-XXXXXX").jsonl"
 REAL_ID=$("$RUST" --log "$REAL_LOG" --root . post examples/capset/objective.json | head -1 | awk '{print $2}')
 
 [ -n "$README_ID" ] \

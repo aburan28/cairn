@@ -57,7 +57,7 @@
 use std::fmt;
 
 use crate::hex;
-use hmac::{Hmac, KeyInit as _, Mac};
+use hmac::{Hmac, Mac};
 use sha2::{Digest as _, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;

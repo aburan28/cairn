@@ -869,7 +869,7 @@ fn field_str<'a>(value: &'a Value, field: &'static str) -> Result<&'a str, Ident
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hmac::{Hmac, KeyInit as _, Mac};
+    use hmac::{Hmac, Mac};
     use rand_core::OsRng;
 
     const OBJECTIVE_A: &str =

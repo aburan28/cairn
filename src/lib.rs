@@ -29,6 +29,7 @@ pub mod gossip;
 pub mod hex;
 pub mod incentive;
 pub mod ledger;
+pub mod logging;
 pub mod node;
 pub mod p2p;
 pub mod partition;

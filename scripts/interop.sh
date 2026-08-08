@@ -34,11 +34,16 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 export PROOFWORK_EPOCH_SECONDS=1
 tick() { sleep 1.1; }
 
-A=$(mktemp -u /tmp/pw-interop-rust-XXXXXX.jsonl)
-B=$(mktemp -u /tmp/pw-interop-ref-XXXXXX.jsonl)
-C=$(mktemp -u /tmp/pw-interop-min-XXXXXX.jsonl)
-D=$(mktemp -u /tmp/pw-interop-lean-XXXXXX.jsonl)
-E=$(mktemp -u /tmp/pw-interop-lean2-XXXXXX.jsonl)
+# Suffix appended after the call, not inside the template: BSD mktemp (macOS)
+# only expands `XXXXXX` at the very end, so `-XXXXXX.jsonl` comes back literal
+# and `-u` still calls mkstemp -- the first run creates a real file with X's in
+# its name and every run after it dies on "File exists". GNU mktemp expands it,
+# which is why CI never sees this and a second local run does.
+A="$(mktemp -u /tmp/pw-interop-rust-XXXXXX).jsonl"
+B="$(mktemp -u /tmp/pw-interop-ref-XXXXXX).jsonl"
+C="$(mktemp -u /tmp/pw-interop-min-XXXXXX).jsonl"
+D="$(mktemp -u /tmp/pw-interop-lean-XXXXXX).jsonl"
+E="$(mktemp -u /tmp/pw-interop-lean2-XXXXXX).jsonl"
 trap 'rm -f "$A" "$B" "$C" "$D" "$E"' EXIT
 
 # --- the primary writes, the reference reads ------------------------------
@@ -159,7 +164,7 @@ rule "Objective ids agree across implementations"
 # The same objective posted by each implementation must land on the same id.
 # This is the narrowest form of the whole claim: identity is a function of the
 # bytes, not of who computed them.
-PRIMARY_LOG=$(mktemp -u /tmp/pw-interop-id-XXXXXX.jsonl)
+PRIMARY_LOG="$(mktemp -u /tmp/pw-interop-id-XXXXXX).jsonl"
 PRIMARY_ID=$($RUST --log "$PRIMARY_LOG" --root . post examples/capset/objective.json \
   | head -1 | awk '{print $2}')
 rm -f "$PRIMARY_LOG"
