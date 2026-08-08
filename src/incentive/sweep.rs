@@ -1,6 +1,6 @@
 //! A grid of parameter points, and one row of results per point.
 //!
-//! [`design::Report`](super::design::Report) answers "does the mechanism hold
+//! [`Report`] answers "does the mechanism hold
 //! *here*". Tuning asks a different question -- "where does it stop holding" --
 //! and the only way to answer it with a single-point evaluator was to invoke
 //! the CLI by hand and compare printed reports by eye. This module runs the
@@ -8,7 +8,7 @@
 //!
 //! Three things are deliberate:
 //!
-//! **No new evaluation.** A row is [`design::Report`] with the fields flattened
+//! **No new evaluation.** A row is [`Report`] with the fields flattened
 //! out; nothing here re-derives a payoff. If the sweep and the single-point
 //! report ever disagree about a point, the sweep is wrong by construction, and
 //! that is the property worth having in a tool people tune parameters against.

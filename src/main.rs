@@ -571,6 +571,26 @@ enum Command {
         out: Option<String>,
         format: TableFormat,
     },
+    /// One bounty round end to end: post if needed, commit, wait, reveal.
+    ///
+    /// A convenience wrapper over the existing primitives and nothing more --
+    /// no new record kind, no change to what `commit` and `reveal` accept, no
+    /// change to how settlement orders. It exists because trying one artifact
+    /// against one objective was five invocations with a manual sleep across
+    /// the epoch boundary in the middle, which is what `scripts/demo.sh` and
+    /// `scripts/ratchet-demo.sh` hand-roll in bash.
+    Try {
+        /// An objective id, or a file to post first.
+        objective: String,
+        submitter: String,
+        artifact: String,
+        nonce: Option<String>,
+        identity: Option<String>,
+        cites: Vec<String>,
+        /// Also wait out the reveal epoch and settle, so the round ends with a
+        /// payout rather than a "settles when epoch N closes".
+        settle: bool,
+    },
     /// Write the files a new objective starts from, and post nothing.
     ///
     /// The posting stays a separate, reviewed step: an objective's statement
@@ -896,6 +916,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
         "scaffold" => parse_scaffold(&mut cursor)?,
+        "try" => parse_try(&mut cursor)?,
         "canon" => {
             let mut input: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1327,6 +1348,71 @@ fn parse_check(cursor: &mut Cursor) -> Result<Command, CliError> {
         root,
         checkpoint,
         root_key,
+    })
+}
+
+/// `try <objective-id|objective.json> --submitter S --artifact FILE [--nonce N]`
+///
+/// Takes the same flags `commit` and `reveal` take, because it is those two
+/// commands with the wait in between. A flag that meant something different
+/// here than it does there would be the whole cost of the convenience.
+fn parse_try(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut objective: Option<String> = None;
+    let mut submitter: Option<String> = None;
+    let mut artifact: Option<String> = None;
+    let mut nonce: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut cites: Vec<String> = Vec::new();
+    let mut settle = false;
+
+    while let Some(token) = cursor.take() {
+        if token == "--submitter" {
+            submitter = Some(cursor.value("--submitter")?);
+        } else if token == "--artifact" {
+            artifact = Some(cursor.value("--artifact")?);
+        } else if token == "--nonce" {
+            nonce = Some(cursor.value("--nonce")?);
+        } else if token == "--identity" {
+            identity = Some(cursor.value("--identity")?);
+        } else if token == "--settle" {
+            settle = true;
+        } else if token == "--cites" {
+            // Same `nargs="*"` shape as `reveal`: claim ids are `sha256:`
+            // digests, so none can be mistaken for a flag.
+            while let Some(next) = cursor.peek_owned() {
+                if is_flag(&next) {
+                    break;
+                }
+                cursor.take();
+                cites.push(next);
+            }
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!("try: unknown option {token:?}")));
+        } else if objective.is_some() {
+            return Err(CliError::Usage(format!(
+                "try: unexpected argument {token:?}"
+            )));
+        } else {
+            objective = Some(token);
+        }
+    }
+
+    Ok(Command::Try {
+        objective: require(objective, "try", "an objective id or a JSON file")?,
+        submitter: match (submitter, &identity) {
+            (Some(submitter), _) => submitter,
+            (None, Some(_)) => String::new(),
+            (None, None) => {
+                return Err(CliError::Usage(
+                    "try: --submitter or --identity is required".into(),
+                ))
+            }
+        },
+        artifact: require(artifact, "try", "--artifact")?,
+        nonce: nonce.filter(|value| !value.is_empty()),
+        identity,
+        cites,
+        settle,
     })
 }
 
@@ -1936,6 +2022,22 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "  try <objective-id|objective.json> --submitter <who> --artifact <file> [--settle]",
+    );
+    say(
+        out,
+        "      one round end to end: post if needed, commit, wait out the epoch, reveal.",
+    );
+    say(
+        out,
+        "      A real round takes a real epoch (600s); $PROOFWORK_EPOCH_SECONDS shortens it",
+    );
+    say(
+        out,
+        "      for a local trial, against a log used for nothing else",
+    );
+    say(
+        out,
         "  scaffold <name> --kind <certificate|evaluator|statistical|replay|lean>",
     );
     say(
@@ -2075,6 +2177,21 @@ fn read_json(path: &str) -> Result<Value, CliError> {
 }
 
 fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
+    post_objective_file(out, options, path)?;
+    Ok(0)
+}
+
+/// Post the objective in `path` and return its id.
+///
+/// Split out of [`cmd_post`] so [`cmd_try`] posts by exactly the same route
+/// rather than by a second copy of it. The copy is what would eventually drift
+/// -- specifically past the unresolved-pin warning below, which is the one
+/// output here that tells a funder they have minted a bounty nobody can settle.
+fn post_objective_file(
+    out: &mut dyn Write,
+    options: &Options,
+    path: &str,
+) -> Result<String, CliError> {
     let mut node = open_node_for_writing(options)?;
     let data = read_json(path)?;
     // The published schema runs *before* the constructor. `Objective::from_value`
@@ -2128,7 +2245,7 @@ fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, C
              the id covers it, this is now a different objective that can never settle.",
         );
     }
-    Ok(0)
+    Ok(id)
 }
 
 /// Read a submitter identity from disk, if one was asked for.
@@ -3057,10 +3174,20 @@ fn cmd_availability(
 
 /// The epoch containing this moment, by the same rule every record uses.
 fn current_epoch() -> Result<u64, CliError> {
-    let ts = timestamp();
-    let seconds = proofwork::time::parse_rfc3339(&ts)
+    epoch_of_stamp(&timestamp())
+}
+
+/// The epoch a record stamped `ts` belongs to.
+///
+/// The epoch of a record is derived from the record, never from a clock -- see
+/// the module docs on [`proofwork::partition`]. Anything that reads a clock
+/// again to decide a record's epoch is reading a different number.
+fn epoch_of_stamp(ts: &str) -> Result<u64, CliError> {
+    let seconds = proofwork::time::parse_rfc3339(ts)
         .and_then(|seconds| u64::try_from(seconds).ok())
-        .ok_or_else(|| CliError::Usage(format!("cannot read the current time {ts:?}")))?;
+        .ok_or_else(|| {
+            CliError::Usage(format!("cannot read the timestamp {ts:?} as an instant"))
+        })?;
     Ok(proofwork::partition::epoch_of(
         seconds,
         proofwork::partition::epoch_seconds(),
@@ -3374,6 +3501,245 @@ fn cmd_incentives(
     Ok(if report.passes() { 0 } else { 1 })
 }
 
+/// `try <objective-id|objective.json> --submitter S --artifact FILE ...`
+///
+/// Post if needed, commit, wait for the epoch to turn, reveal, print the
+/// verdict. A wrapper over the existing primitives -- it appends nothing the
+/// five commands it calls would not have appended, in the same order.
+///
+/// Two things it is careful about.
+///
+/// **It waits by polling the epoch, not by sleeping a duration.** The rule is
+/// that a reveal must land in a *strictly later epoch* than its commitment, and
+/// an epoch comes from the record rather than from a clock. `sleep 610` is a
+/// guess at that rule; re-reading the epoch until it changes is the rule.
+///
+/// **It never shortens the epoch itself.** A real round takes a real epoch --
+/// 600 seconds by default -- and `PROOFWORK_EPOCH_SECONDS` exists for exactly
+/// this kind of local trial. Setting it here, silently, for a command that
+/// writes to whatever log it was pointed at, is the documented footgun in
+/// `docs/launch-review.md`: a log written under a short epoch and read back
+/// under a long one puts every commitment and its claim in the same epoch, so
+/// every replayed reveal is refused and record sync stops importing work
+/// without erroring. So the wait is announced up front, in seconds, with the
+/// variable named -- and the operator decides.
+/// One round's inputs, grouped because they travel together and because most
+/// of them are strings -- passed positionally, swapping two would compile
+/// cleanly and write the wrong record.
+struct Round<'a> {
+    /// An objective id, or a file to post first.
+    objective: &'a str,
+    who: Submitter<'a>,
+    artifact_path: &'a str,
+    nonce: Option<&'a str>,
+    cites: &'a [String],
+    settle: bool,
+}
+
+fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i32, CliError> {
+    let Round {
+        objective,
+        who,
+        artifact_path,
+        nonce,
+        cites,
+        settle,
+    } = round;
+    // A file, or an id already in the log. Deciding by prefix rather than by
+    // `Path::exists` keeps the two cases from swapping under a stray file
+    // named after a digest.
+    let objective_id = if objective.starts_with("sha256:") {
+        objective.to_string()
+    } else {
+        // Posting an objective already in the log is not an error *here*, even
+        // though `post` refuses it. An objective's id is the hash of its own
+        // content, so "already posted" means byte-identical -- there is nothing
+        // to reconcile and no rule being relaxed. Refusing would break the one
+        // thing this command exists for: pointing it at the same file again
+        // after editing an artifact is the local iteration loop.
+        let data = read_json(objective)?;
+        validate_objective(&data).map_err(CliError::Schema)?;
+        let id = Objective::from_value(&data).map_err(CliError::Record)?.id();
+        if open_node(options)?.objectives().contains_key(&id) {
+            say(out, format!("objective {id}"));
+            say(out, "  already posted; using it");
+            id
+        } else {
+            post_objective_file(out, options, objective)?
+        }
+    };
+
+    let nonce = match nonce {
+        Some(nonce) => nonce.to_string(),
+        None => random_nonce()?,
+    };
+    let (submitter, identity) = who.resolve()?;
+    let artifact = read_json(artifact_path)?;
+
+    let stamp = timestamp();
+    let hash = commitment_hash(&objective_id, &submitter, &artifact, &nonce);
+    let commitment = Commitment::new(&objective_id, &submitter, hash.as_str(), stamp.as_str());
+    let commitment = match &identity {
+        Some(identity) => commitment.signed_with(identity),
+        None => commitment,
+    };
+    {
+        let mut node = open_node_for_writing(options)?;
+        post_commitment(&mut node, &commitment, &stamp)?;
+    }
+    // From the commitment's own `created_at`, not from a second clock reading.
+    // The rule is that an epoch comes from the record, and a clock read a
+    // moment later can land on the far side of a boundary the record did not
+    // cross -- which would make this wait a whole extra epoch for nothing.
+    let committed_in = epoch_of_stamp(&stamp)?;
+    say(out, format!("commit {}", short(&hash)));
+    say(out, format!("  nonce {nonce}"));
+
+    // Announced before the wait, not after it: a command that goes quiet for
+    // ten minutes is indistinguishable from one that has hung, and the usual
+    // response to a hang is to kill it -- which leaves a commitment nobody
+    // ever opened.
+    let length = proofwork::partition::epoch_seconds();
+    say(
+        out,
+        format!(
+            "  waiting for epoch {} to start; epochs are {length}s here, so this takes up to \
+             {length}s",
+            committed_in.saturating_add(1)
+        ),
+    );
+    if length >= proofwork::partition::EPOCH_SECONDS {
+        say(
+            out,
+            format!(
+                "  (set ${}=10 for a local trial -- but only against a log used for nothing \
+                 else: epochs are derived from record timestamps, so two settings disagree \
+                 about which reveals were legal)",
+                proofwork::partition::EPOCH_SECONDS_ENV
+            ),
+        );
+    }
+    wait_for_epoch_after(committed_in)?;
+
+    // The frontier citation is mechanical, not a choice: once an objective has
+    // a frontier, *every* submission must cite the claim holding it, and a
+    // reveal without it is refused. Added here rather than left to the caller
+    // because a wrapper that reliably fails on every progressive objective is
+    // not a wrapper. Anything the caller passed is kept -- claims you actually
+    // built on are yours to name and nothing else may be added.
+    let mut cites = cites.to_vec();
+    {
+        let node = open_node(options)?;
+        if let Some(frontier) = node.frontier_of(&objective_id) {
+            if !cites.iter().any(|cited| cited == &frontier.claim_id) {
+                say(out, format!("  citing the frontier {}", frontier.claim_id));
+                cites.push(frontier.claim_id);
+            }
+        }
+    }
+
+    let stamp = timestamp();
+    let claim = Claim::new(
+        &objective_id,
+        &submitter,
+        artifact,
+        &nonce,
+        stamp.as_str(),
+        cites,
+    )
+    .map_err(CliError::Record)?;
+    let claim = match &identity {
+        Some(identity) => claim.signed_with(identity),
+        None => claim,
+    };
+    validate_claim(&claim.to_value()).map_err(CliError::Schema)?;
+
+    let mut node = open_node_for_writing(options)?;
+    let report = reveal_claim(&mut node, &claim, &stamp)?;
+    say(out, format!("claim {}", report.claim_id));
+    say(
+        out,
+        format!("  verdict  {}: {}", report.status, report.detail),
+    );
+
+    match report.pending_epoch {
+        Some(epoch) if settle => {
+            drop(node);
+            say(
+                out,
+                format!("  waiting for epoch {epoch} to close, then settling"),
+            );
+            wait_for_epoch_after(epoch)?;
+            let mut node = open_node_for_writing(options)?;
+            let settled = settle_now(&mut node, &timestamp())?;
+            match settled
+                .iter()
+                .find(|(claim_id, _, _, _)| claim_id == &report.claim_id)
+            {
+                Some((_, moved, reward, note)) => say(
+                    out,
+                    format!("  settled  {moved}  reward {reward}  ({note})"),
+                ),
+                // The batch closed without this claim in it. Reported rather
+                // than assumed: settlement order is not ours to predict, and a
+                // claim missing from its own batch is worth looking at.
+                None => say(
+                    out,
+                    "  settled  nothing moved for this claim in the batch that just closed",
+                ),
+            }
+        }
+        Some(epoch) => say(
+            out,
+            format!(
+                "  pending  settles when epoch {epoch} closes  (`proofwork try --settle`, or \
+                 `proofwork settle` later)"
+            ),
+        ),
+        None => say(
+            out,
+            format!(
+                "  settled  {}  reward {}  ({})",
+                report.settled, report.reward, report.note
+            ),
+        ),
+    }
+
+    // Same exit meaning as `reveal`: a rejection is a real answer and exits 0,
+    // a verdict that settles nothing exits 3.
+    Ok(if report.settles { 0 } else { 3 })
+}
+
+/// Block until the current epoch is strictly after `epoch`.
+///
+/// Polls rather than sleeping a computed duration. The seconds-remaining
+/// arithmetic is advisory -- it reads a clock, and the rule reads records --
+/// so it decides only how long to nap between checks, never when to stop.
+fn wait_for_epoch_after(epoch: u64) -> Result<(), CliError> {
+    // Progress to stderr, so `try ... > verdict.txt` still captures exactly the
+    // round. A minute of silence is what makes a caller reach for Ctrl-C, and a
+    // killed `try` leaves a commitment nobody ever opened.
+    const TICK: u64 = 1;
+    const REPORT_EVERY: u64 = 30;
+    let mut waited = 0u64;
+    loop {
+        if current_epoch()? > epoch {
+            if waited >= REPORT_EVERY {
+                eprintln!("  epoch turned after {waited}s");
+            }
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(TICK));
+        waited = waited.saturating_add(TICK);
+        if waited.is_multiple_of(REPORT_EVERY) {
+            eprintln!(
+                "  still waiting for epoch {} ({waited}s)",
+                epoch.saturating_add(1)
+            );
+        }
+    }
+}
+
 /// `scaffold <name> --kind <kind> [--out DIR] ...`
 ///
 /// Writes files and stops. The next step is a human reading them and running
@@ -3433,17 +3799,36 @@ fn cmd_scaffold(
     say(out, "");
     // Printed rather than run. The scaffolder writes files; funding one is a
     // human decision, and this is where it is handed back.
+    //
+    // The paths here are where the files actually landed, which is not the path
+    // inside the record: a pin resolves against `--root`, while `post` and
+    // `--artifact` read relative to the working directory. Printing the record's
+    // spelling would hand back a command that works only when the two coincide.
+    let root_flag = if options.root == "." {
+        String::new()
+    } else {
+        format!(" --root {}", options.root)
+    };
+    let on_disk = |path: &str| root.join(path).display().to_string();
+    let artifact = plan
+        .objective_path
+        .strip_suffix("objective.json")
+        .map(|dir| format!("{dir}artifact.json"))
+        .unwrap_or_else(|| String::from("artifact.json"));
     say(out, "then post it:");
-    say(out, format!("  proofwork post {}", plan.objective_path));
     say(
         out,
         format!(
-            "  proofwork try {} --submitter you --artifact {}",
-            plan.objective_path,
-            plan.objective_path
-                .strip_suffix("objective.json")
-                .map(|dir| format!("{dir}artifact.json"))
-                .unwrap_or_else(|| String::from("artifact.json"))
+            "  proofwork{root_flag} post {}",
+            on_disk(&plan.objective_path)
+        ),
+    );
+    say(
+        out,
+        format!(
+            "  proofwork{root_flag} try {} --submitter you --artifact {}",
+            on_disk(&plan.objective_path),
+            on_disk(&artifact)
         ),
     );
     Ok(0)
@@ -4931,6 +5316,29 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Availability { action } => cmd_availability(out, options, action),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Blob { action } => cmd_blob(out, options, action),
+        Command::Try {
+            objective,
+            submitter,
+            artifact,
+            nonce,
+            identity,
+            cites,
+            settle,
+        } => cmd_try(
+            out,
+            options,
+            Round {
+                objective,
+                who: Submitter {
+                    declared: submitter,
+                    identity: identity.as_deref(),
+                },
+                artifact_path: artifact,
+                nonce: nonce.as_deref(),
+                cites,
+                settle: *settle,
+            },
+        ),
         Command::Scaffold { request, force } => cmd_scaffold(out, options, request, *force),
         Command::Incentives {
             params,
@@ -6050,6 +6458,125 @@ mod tests {
                 format: TableFormat::Csv,
             }
         );
+    }
+
+    /// The flags are `commit`'s and `reveal`'s, deliberately: a flag that meant
+    /// something different here would cost more than the convenience is worth.
+    #[test]
+    fn try_takes_the_same_flags_as_the_two_commands_it_wraps() {
+        let parsed = parse(argv(&[
+            "try",
+            "examples/collatz/objective.json",
+            "--submitter",
+            "alice",
+            "--artifact",
+            "a.json",
+            "--nonce",
+            "abc",
+            "--cites",
+            "sha256:aa",
+            "sha256:bb",
+            "--settle",
+        ]))
+        .expect("parses");
+        match parsed.command {
+            Command::Try {
+                objective,
+                submitter,
+                artifact,
+                nonce,
+                cites,
+                settle,
+                ..
+            } => {
+                assert_eq!(objective, "examples/collatz/objective.json");
+                assert_eq!(submitter, "alice");
+                assert_eq!(artifact, "a.json");
+                assert_eq!(nonce.as_deref(), Some("abc"));
+                assert_eq!(cites, vec!["sha256:aa", "sha256:bb"]);
+                assert!(settle);
+            }
+            other => panic!("expected a try command, got {other:?}"),
+        }
+    }
+
+    /// An id and a file are different things and must not be confused: a file
+    /// named after a digest is a file, and an id is never posted.
+    #[test]
+    fn try_tells_an_objective_id_from_a_file_by_its_prefix() {
+        for objective in ["sha256:aabb", "examples/collatz/objective.json", "sha256"] {
+            let parsed = parse(argv(&[
+                "try",
+                objective,
+                "--submitter",
+                "alice",
+                "--artifact",
+                "a.json",
+            ]))
+            .expect("parses");
+            match parsed.command {
+                Command::Try { objective: got, .. } => assert_eq!(got, objective),
+                other => panic!("expected a try command, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn try_needs_an_objective_an_artifact_and_somebody_to_submit_as() {
+        assert!(parse(argv(&["try"])).is_err());
+        assert!(parse(argv(&["try", "obj.json"])).is_err());
+        assert!(parse(argv(&["try", "obj.json", "--artifact", "a.json"])).is_err());
+        assert!(parse(argv(&["try", "obj.json", "--submitter", "alice"])).is_err());
+        assert!(parse(argv(&[
+            "try",
+            "obj.json",
+            "--submitter",
+            "alice",
+            "--artifact",
+            "a.json"
+        ]))
+        .is_ok());
+        // An identity file decides the submitter, so the name is optional --
+        // the same rule `commit` follows, for the same reason.
+        assert!(parse(argv(&[
+            "try",
+            "obj.json",
+            "--identity",
+            "k.json",
+            "--artifact",
+            "a.json"
+        ]))
+        .is_ok());
+    }
+
+    /// `--settle` is opt-in, and an empty `--nonce` generates one, exactly as
+    /// `commit` does.
+    #[test]
+    fn try_defaults_match_the_commands_it_wraps() {
+        let parsed = parse(argv(&[
+            "try",
+            "obj.json",
+            "--submitter",
+            "alice",
+            "--artifact",
+            "a.json",
+            "--nonce",
+            "",
+        ]))
+        .expect("parses");
+        match parsed.command {
+            Command::Try {
+                nonce,
+                settle,
+                cites,
+                ..
+            } => {
+                assert_eq!(nonce, None);
+                assert!(!settle);
+                assert!(cites.is_empty());
+            }
+            other => panic!("expected a try command, got {other:?}"),
+        }
     }
 
     #[test]
