@@ -3881,30 +3881,43 @@ fn cmd_incentives_sweep(
     .map_err(|error| CliError::Usage(error.to_string()))?;
 
     if robustness {
-        for (index, assignment) in points.iter().enumerate() {
+        // Zipped rather than indexed. `points` and `rows` line up because
+        // `sweep::run` enumerates the same pure `grid(axes)`; if that ever
+        // stops being true the column is simply absent rather than attached to
+        // the wrong point, and a margin reported against the wrong parameters
+        // is worse than no margin at all.
+        for (assignment, row) in points.iter().zip(rows.iter_mut()) {
             let mut point = params.clone();
             for (axis, value) in axes.iter().zip(assignment) {
                 axis.knob.apply(&mut point, *value);
             }
-            // A point `validate` refuses has no margins to report, and its row
-            // already carries the reason. Blank rather than absent, so every
-            // row has the same columns.
+            // Four outcomes, spelled differently, because collapsing them
+            // would make an empty cell mean "nothing binds here" and "we could
+            // not tell" at once -- and the whole use of this column is deciding
+            // which measurement to fund first.
             let binding = match point.validate() {
-                Ok(()) => proofwork::incentive::robustness::margins_reporting(&point, |_, _, _| {})
-                    .ok()
-                    .and_then(|margins| {
-                        margins
+                // A point `validate` refuses has no margins to report; its row
+                // already carries the reason in `error`. Blank rather than
+                // absent, so every row still has the same columns.
+                Err(_) => String::new(),
+                Ok(()) => {
+                    match proofwork::incentive::robustness::margins_reporting(&point, |_, _, _| {})
+                    {
+                        Ok(margins) => margins
                             .iter()
                             .find(|margin| margin.factor.is_some())
                             .map(|margin| margin.parameter.to_string())
-                    })
-                    .unwrap_or_default(),
-                Err(_) => String::new(),
+                            // The same sentence the single-point report gives:
+                            // either nothing breaks within the ladder, or the
+                            // point already fails and there is no margin to
+                            // measure from. `verdict` tells them apart.
+                            .unwrap_or_else(|| String::from("none")),
+                        Err(_) => String::from("unavailable"),
+                    }
+                }
             };
-            if let Some(row) = rows.get_mut(index) {
-                row.cells
-                    .push((String::from("binding_constraint"), binding));
-            }
+            row.cells
+                .push((String::from("binding_constraint"), binding));
         }
     }
 
