@@ -1087,9 +1087,6 @@ fn settlement_order(node: &Node) -> Vec<String> {
 /// Bob is given nothing but alice's *inputs* and re-derives the rest, which is
 /// the whole premise of the project.
 #[test]
-#[ignore = "PROVES A KNOWN DEFECT: settlement order does not converge across \
-            nodes. Run with --ignored to see it. The fix is a protocol change \
-            with a migration cost -- docs/design/settlement-convergence.md"]
 fn two_nodes_holding_the_same_records_settle_in_the_same_order() {
     let mut alice = node("order-alice");
     batch_of(&mut alice, 6);
@@ -1119,9 +1116,6 @@ fn two_nodes_holding_the_same_records_settle_in_the_same_order() {
 /// it did, and it is deterministic where a six-claim order comparison could
 /// coincide by luck.
 #[test]
-#[ignore = "PROVES A KNOWN DEFECT: settlement order does not converge across \
-            nodes. Run with --ignored to see it. The fix is a protocol change \
-            with a migration cost -- docs/design/settlement-convergence.md"]
 fn the_settlement_anchor_is_the_same_on_both_nodes() {
     let mut alice = node("anchor-alice");
     batch_of(&mut alice, 6);

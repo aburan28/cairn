@@ -190,13 +190,19 @@ languages the two are written in.
    backs. **Every surface a contributor sees still has to say the rewards are
    notional**, which `examples/README.md`, `examples/first-blood/README.md`,
    `launch/README.md` and `docs/serving.md` do.
-2. **Settlement order does not converge across peers.** Two nodes reconcile
-   records by anti-entropy and each re-derives its own verdicts, but each
-   orders a batch against its own head at the epoch boundary, so two operators
-   can disagree about who was paid first (`docs/p2p.md`). A single-operator
-   launch is unaffected — one log, one order — and *any* multi-operator story
-   is blocked on this. It is the real content of "Stage 3: decentralized
-   settlement".
+2. ~~**Settlement order does not converge across peers.**~~ **Fixed for the
+   deterministic case.** This was exactly right: each node ordered a batch
+   against its own log head, which covers `seq`, `prev` and the local write
+   time, so two operators disagreed about who was paid first. The anchor is now
+   the head of an **epoch chain** — each link commits to the previous link, the
+   epoch, and that batch's sorted claim ids — so it is content-only and equal
+   on every node holding the same batches. Both implementations derive it and
+   `tests/p2p_convergence.rs` fails without it.
+
+   Still open, and smaller: a node that drains an epoch **before sync has
+   delivered a claim belonging to it** writes a different link and diverges
+   permanently. That needs a finality delay or reorgs. See
+   [design/settlement-convergence.md](design/settlement-convergence.md).
 3. **The beacon is grindable by the sequencer.** Documented (threat model row
    38) and unchanged, but worth restating next to the item above: the same
    beacon that orders work assignment now orders *money*, so grinding the

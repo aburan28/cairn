@@ -1692,29 +1692,124 @@ impl Node {
     /// deriving a partition from the *live* head instead means every append
     /// reshuffles every node's slice mid-epoch, and "anyone can recompute a
     /// peer's region" stops being true.
+    /// The settlement anchor: the head of this log's **epoch chain**.
+    ///
+    /// # Why this is not the log head any more
+    ///
+    /// It used to be the hash of the last ledger entry before `epoch`, and that
+    /// broke the one invariant multi-operator settlement rests on: *two nodes
+    /// holding the same records pay the same claims in the same order.* A
+    /// ledger entry's hash covers `seq`, `prev` and the local write time, so
+    /// two nodes with byte-identical records still have different entry
+    /// hashes — different anchor, different beacon, different order, and both
+    /// logs audit clean because each is internally consistent. That is the
+    /// quietest possible fork, and `tests/p2p_convergence.rs` fails on it.
+    ///
+    /// The chain is built from **content only**: each link commits to the link
+    /// before it, the epoch, and the *sorted* set of claim ids that batch
+    /// settled. Sorted, so the link does not depend on the very ordering it is
+    /// used to produce.
+    ///
+    /// Convergence is by induction on the epoch. The empty chain is equal
+    /// everywhere; if every earlier batch agreed, the head agrees, so the
+    /// beacon agrees, so this batch sorts identically — and agrees in turn.
+    ///
+    /// Grinding resistance is unchanged. `AGENTS.md`'s rule is that the anchor
+    /// must be fixed before anyone can still choose part of the sort key, and a
+    /// link is fixed when its epoch drains, which is strictly before any reveal
+    /// in a later epoch.
+    ///
+    /// The `epoch` argument is retained for the caller's clarity and is
+    /// deliberately unused: the head already covers every batch written so far,
+    /// which is exactly "everything settled before this one".
+    /// Stops at `epoch`'s own batch, so the answer is the same before and after
+    /// that epoch settles. Without that the function would mean "the head right
+    /// now", which before a drain is the anchor and after it is the anchor plus
+    /// the batch it produced — a caller checking a settled batch's ordering
+    /// would get a different value than the batch used, and be right to be
+    /// confused. At settle time the batch does not exist yet, so this is
+    /// identical to folding the whole log and settlement is unaffected.
     pub fn anchor_of_epoch(&self, epoch: u64) -> String {
-        self.anchor_of_epoch_within(epoch, self.ledger.len())
+        self.epoch_chain_head_before(self.ledger.len(), Some(epoch))
     }
 
-    /// [`Node::anchor_of_epoch`] over the first `positions` entries only.
+    /// The epoch chain folded over every `batch` record before `positions`.
     ///
-    /// The bound is what makes a settled batch re-derivable forever. Records
-    /// arrive over `p2p::sync` stamped with their own `created_at` and land at
-    /// the *tail*, so a peer can append a record dated into an epoch that
-    /// already settled. Scanning the whole log would then produce a different
-    /// anchor than the one the batch actually used, and [`Node::audit`] would
-    /// report an honest node's correct batch as wrong — permanently, and at a
-    /// peer's choosing.
+    /// Bounded by position for the reason [`Node::accepted_in_epoch_within`] is:
+    /// a batch must stay auditable against the log *as it stood when it was
+    /// written*. Batches are appended in drain order, so the batches preceding
+    /// one in the file are exactly the ones that preceded it in time — and a
+    /// batch for an older epoch appended later lands after it, leaving earlier
+    /// links untouched instead of retroactively faulting them.
     ///
-    /// Bounding by log *position* rather than by timestamp is the point: a
-    /// position is not something a record's author can claim. Everything the
-    /// batch could have seen precedes it in the file; everything appended
-    /// afterwards could not have influenced it, whatever date it carries.
-    fn anchor_of_epoch_within(&self, epoch: u64, positions: usize) -> String {
-        self.anchor_at(epoch, positions, epoch_seconds())
+    /// Folding in **file order rather than epoch order** is the point. Sorting
+    /// by epoch would let a back-dated claim create an old epoch whose batch is
+    /// written last, changing a link that an already-written batch committed
+    /// to, which is the retroactive-fault bug the position bounds exist to
+    /// prevent.
+    fn epoch_chain_head_within(&self, positions: usize) -> String {
+        self.epoch_chain_head_before(positions, None)
     }
 
-    /// The anchor of `epoch`, measuring epochs with an explicit length.
+    /// [`Node::epoch_chain_head_within`], additionally stopping at the batch
+    /// for `stop_at` if one is present. See [`Node::anchor_of_epoch`].
+    fn epoch_chain_head_before(&self, positions: usize, stop_at: Option<u64>) -> String {
+        let mut head = String::new();
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != BATCH {
+                continue;
+            }
+            let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_i128) else {
+                // A batch naming no epoch cannot be placed in the chain. The
+                // audit reports it separately; skipping keeps one malformed
+                // record from making every later link unverifiable.
+                continue;
+            };
+            if stop_at.is_some_and(|target| i128::from(target) == epoch) {
+                break;
+            }
+            let mut claims: Vec<String> = match entry.payload.get("claims") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            claims.sort();
+            head = Value::object([
+                ("prev", Value::string(head)),
+                ("epoch", Value::Int(epoch)),
+                (
+                    "claims",
+                    Value::Array(claims.into_iter().map(Value::String).collect()),
+                ),
+            ])
+            .digest();
+        }
+        head
+    }
+
+    /// The last ledger entry before `epoch`, measuring epochs with an explicit
+    /// length. **Availability sampling only** — settlement uses
+    /// [`Node::anchor_of_epoch`]'s epoch chain instead.
+    ///
+    /// Kept on the entry hash deliberately rather than moved to the chain. The
+    /// two anchors answer different questions:
+    ///
+    /// - *Settlement* must agree across **nodes**, and an entry hash cannot,
+    ///   because it covers `seq`, `prev` and the local write time.
+    /// - *Availability sampling* must be unpredictable within **one log**, and
+    ///   both implementations auditing that same file see identical entry
+    ///   hashes. Moving it to the epoch chain would make the sampled index a
+    ///   constant on any log with no settlements in it, which is strictly
+    ///   worse — an unbiddable challenge is the whole point.
+    ///
+    /// What that leaves open is stated rather than hidden: two nodes with
+    /// *different* logs still sample different indices for the same
+    /// undertaking. Availability is already marked unfit to carry real money
+    /// until it is bonded (see `docs/node-incentives.md` and the threat model),
+    /// and this does not change that either way.
     ///
     /// The length is a parameter rather than a global read because the two
     /// callers need different ones, and finding that out cost a 60%-flaky
@@ -2585,11 +2680,11 @@ impl Node {
             // the whole log would let one turn an honest batch into a
             // permanent audit failure.
             let position = usize::try_from(entry.seq).unwrap_or(usize::MAX);
-            let derived_anchor = self.anchor_of_epoch_within(epoch, position);
+            let derived_anchor = self.epoch_chain_head_within(position);
             if recorded_anchor != derived_anchor {
                 problems.push(format!(
-                    "batch for epoch {epoch}: anchor {} is not the log head at the \
-                     epoch's start ({})",
+                    "batch for epoch {epoch}: anchor {} is not the epoch-chain head \
+                     this batch was written against ({})",
                     short(recorded_anchor),
                     short(&derived_anchor)
                 ));

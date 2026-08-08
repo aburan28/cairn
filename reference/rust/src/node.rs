@@ -185,8 +185,62 @@ impl Node {
     /// same value. `positions` bounds the scan to the log as it stood at a
     /// given length, which is what stops a later back-dated append changing
     /// the anchor of a batch that already settled.
-    fn anchor_of_epoch(&self, epoch: u64, positions: Option<usize>) -> String {
-        self.anchor_at(epoch, positions, epoch_seconds())
+    /// The settlement anchor: the head of this log's **epoch chain**.
+    ///
+    /// Independently derived from the same rule the primary implements, and
+    /// the rule is worth restating rather than referring to, since the point
+    /// of this crate is that it does not read the other one.
+    ///
+    /// It used to be the hash of the last ledger entry before `epoch`, which
+    /// broke the invariant multi-operator settlement depends on: two nodes
+    /// holding the same records must pay in the same order. An entry hash
+    /// covers `seq`, `prev` and the local write time, so two nodes with
+    /// byte-identical records get different anchors, different beacons, and
+    /// different orders -- while both logs audit clean, because each is
+    /// internally consistent.
+    ///
+    /// The chain is content only. Each link commits to the link before it, the
+    /// epoch, and the *sorted* claim ids of that batch -- sorted, so a link
+    /// cannot depend on the ordering it is used to produce. It folds in **file
+    /// order**, not epoch order, so a batch for an older epoch appended later
+    /// leaves earlier links untouched instead of retroactively faulting them.
+    ///
+    /// `epoch` is unused and kept for the caller's clarity: the head already
+    /// covers every batch written before this one.
+    fn anchor_of_epoch(&self, _epoch: u64, positions: Option<usize>) -> String {
+        let entries = self.ledger.entries();
+        let entries = match positions {
+            Some(limit) => &entries[..limit.min(entries.len())],
+            None => entries,
+        };
+        let mut head = String::new();
+        for entry in entries {
+            if entry.kind != BATCH {
+                continue;
+            }
+            let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_i128) else {
+                continue;
+            };
+            let mut claims: Vec<String> = match entry.payload.get("claims") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            claims.sort();
+            head = Value::object(vec![
+                ("prev", Value::string(head)),
+                ("epoch", Value::Int(epoch)),
+                (
+                    "claims",
+                    Value::Array(claims.into_iter().map(Value::String).collect()),
+                ),
+            ])
+            .digest();
+        }
+        head
     }
 
     /// The anchor of `epoch`, measuring epochs with an explicit length. The two

@@ -94,3 +94,23 @@ Re-running produces a *different* log with the same content — timestamps come
 from the wall clock and nonces from the OS, so the ids move. What must not
 change is that it audits, that both implementations agree on its root, and
 that the payouts follow the ratchet.
+
+## The root changed once, deliberately
+
+**If you pinned the root published before the epoch-chain change, re-pin it.**
+Older copies of this log will not audit against the current code, and that is
+correct rather than a corruption.
+
+Settlement order used to be anchored to each node's own log head, which covers
+`seq`, `prev` and the local write time — so two nodes holding byte-identical
+records paid the same claims in *different orders*, and both logs audited clean
+because each was internally consistent. The anchor is now the head of an epoch
+chain built from content alone, which two nodes with the same batches always
+agree on. Every `batch` record names the anchor it used and `audit` re-derives
+it, so a log written under the old rule fails the new one — including the copy
+that used to live here. It was regenerated and re-signed.
+
+Nothing about *identity* moved: `conformance/vectors.json` is untouched, no
+record id changed, and no claim was orphaned. Only the ordering rule, and with
+it this artifact. See
+[docs/design/settlement-convergence.md](../docs/design/settlement-convergence.md).
