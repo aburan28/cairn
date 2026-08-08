@@ -70,13 +70,14 @@ use proofwork::canonical::{short, CanonicalError, Value};
 use proofwork::checkpoint::{RootKey, SignedCheckpoint};
 use proofwork::crypto::identity::Identity;
 use proofwork::incentive::design::Report as IncentiveReport;
-use proofwork::incentive::{NodeParams, ParamError, Rat};
+use proofwork::incentive::{sweep, NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError, Proof};
 use proofwork::node::Node;
 use proofwork::records::{
     commitment_hash, Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord,
     RecordError, Undertaking,
 };
+use proofwork::scaffold;
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
 use proofwork::serve::Spool;
 use proofwork::store::atrest::{AtRestError, Cipher};
@@ -559,6 +560,29 @@ enum Command {
         /// Also report how far each parameter can move before the mechanism
         /// breaks. Opt-in because it is hundreds of full solver runs.
         robustness: bool,
+        /// Parameters to walk across a grid instead of evaluating one point.
+        ///
+        /// Empty is the ordinary single-point report. Non-empty replaces the
+        /// prose report with a table, because the two answer different
+        /// questions and interleaving them would give a reader a hundred
+        /// reports to compare by eye -- the thing the sweep exists to stop.
+        sweep: Vec<sweep::Axis>,
+        /// Where the table goes. `None` is standard output.
+        out: Option<String>,
+        format: TableFormat,
+    },
+    /// Write the files a new objective starts from, and post nothing.
+    ///
+    /// The posting stays a separate, reviewed step: an objective's statement
+    /// is untrusted text that a human decides to fund, and a tool that wrote
+    /// and funded one in the same breath would remove the place that decision
+    /// happens. See [`proofwork::scaffold`].
+    Scaffold {
+        request: Box<scaffold::Request>,
+        /// Overwrite files that are already there. Off by default, because the
+        /// obvious mistake is scaffolding over an objective already posted --
+        /// whose pin is in the log and whose id covers it.
+        force: bool,
     },
     /// Create an at-rest key.
     /// Canonicalize one JSON value and print its digest.
@@ -602,6 +626,17 @@ enum Command {
     },
     Log,
     Help,
+}
+
+/// How a sweep's table is written.
+///
+/// Both are line-oriented, which is the point: whatever an operator already
+/// plots with reads one of them, and neither needs this tool to grow a
+/// formatter with opinions about column widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableFormat {
+    Csv,
+    Jsonl,
 }
 
 /// What `proofwork blob` was asked to do.
@@ -860,6 +895,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "attribute" => parse_attribute(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
+        "scaffold" => parse_scaffold(&mut cursor)?,
         "canon" => {
             let mut input: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1294,6 +1330,93 @@ fn parse_check(cursor: &mut Cursor) -> Result<Command, CliError> {
     })
 }
 
+/// `scaffold <name> --kind <kind> [--out DIR] [--artifact-example FILE] ...`
+///
+/// Reads a worked artifact if one is offered and refuses everything it cannot
+/// turn into a postable objective, so that the failure is a command line error
+/// rather than a directory of files that `post` will reject.
+fn parse_scaffold(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let name = match cursor.peek() {
+        Some(token) if !is_flag(token) => cursor.take().unwrap_or_default(),
+        _ => {
+            return Err(CliError::Usage(String::from(
+                "scaffold needs a name: scaffold <name> --kind <certificate|evaluator|statistical|replay|lean>",
+            )))
+        }
+    };
+    let mut kind: Option<scaffold::Kind> = None;
+    let mut parent: Option<String> = None;
+    let mut goal: Option<String> = None;
+    let mut statement: Option<String> = None;
+    let mut funder: Option<String> = None;
+    let mut reward: Option<u64> = None;
+    let mut example: Option<String> = None;
+    let mut force = false;
+
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--kind" => {
+                let value = cursor.value("--kind")?;
+                kind = Some(scaffold::Kind::parse(&value).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "scaffold --kind: expected one of ({}), got {value:?}",
+                        scaffold::KINDS
+                            .iter()
+                            .map(|kind| kind.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                })?);
+            }
+            "--out" => parent = Some(cursor.value("--out")?),
+            "--goal" => goal = Some(cursor.value("--goal")?),
+            "--statement" => statement = Some(cursor.value("--statement")?),
+            "--funder" => funder = Some(cursor.value("--funder")?),
+            "--reward" => reward = Some(parse_u64(&cursor.value("--reward")?, "--reward")?),
+            "--artifact-example" => example = Some(cursor.value("--artifact-example")?),
+            "--force" => force = true,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "scaffold: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+
+    let kind = kind.ok_or_else(|| {
+        CliError::Usage(String::from(
+            "scaffold needs --kind: the verifier decides what a submission has to be,              and there is no sensible default for that",
+        ))
+    })?;
+    let mut request = scaffold::Request::new(name, kind);
+    if let Some(parent) = parent {
+        request.parent = parent;
+    }
+    if let Some(goal) = goal {
+        request.goal = goal;
+    }
+    if let Some(statement) = statement {
+        request.statement = statement;
+    }
+    if let Some(funder) = funder {
+        request.funder = funder;
+    }
+    if let Some(reward) = reward {
+        request.reward = reward;
+    }
+    if let Some(path) = example {
+        request.artifact_example = Some(read_json(&path)?);
+    }
+    // Planned here so a bad name or an escaping --out is a usage error before
+    // any directory is created.
+    scaffold::plan(&request).map_err(|error| CliError::Usage(error.to_string()))?;
+
+    Ok(Command::Scaffold {
+        request: Box::new(request),
+        force,
+    })
+}
+
 /// `incentives [--nodes N] [--settled N] [--stake N] [--fee N/D] ...`
 ///
 /// Every flag overrides one field of [`NodeParams::reference`], so an analyst
@@ -1309,10 +1432,42 @@ fn parse_check(cursor: &mut Cursor) -> Result<Command, CliError> {
 fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut params = NodeParams::reference();
     let mut robustness = false;
+    let mut sweep_axes: Vec<sweep::Axis> = Vec::new();
+    let mut out: Option<String> = None;
+    let mut format = TableFormat::Csv;
 
     while let Some(token) = cursor.take() {
         match token.as_str() {
             "--robustness" => robustness = true,
+            "--sweep" => {
+                let spec = cursor.value("--sweep")?;
+                let axis = sweep::Axis::parse(&spec)
+                    .map_err(|error| CliError::Usage(error.to_string()))?;
+                // A parameter swept twice is a grid with the same column
+                // twice, where the second silently overwrites the first at
+                // every point. Refused rather than resolved, because either
+                // resolution surprises somebody.
+                if sweep_axes.iter().any(|existing| existing.knob == axis.knob) {
+                    return Err(CliError::Usage(format!(
+                        "--sweep {}: swept twice; one range per parameter",
+                        axis.knob.name()
+                    )));
+                }
+                sweep_axes.push(axis);
+            }
+            "--out" => out = Some(cursor.value("--out")?),
+            "--format" => {
+                let value = cursor.value("--format")?;
+                format = match value.as_str() {
+                    "csv" => TableFormat::Csv,
+                    "jsonl" => TableFormat::Jsonl,
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "incentives --format: expected csv or jsonl, got {other:?}"
+                        )))
+                    }
+                };
+            }
             "--nodes" => params.nodes = parse_u32(&cursor.value("--nodes")?, "--nodes")?,
             "--settled" => {
                 params.settled_value = parse_u64(&cursor.value("--settled")?, "--settled")?
@@ -1371,10 +1526,26 @@ fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
 
     // Validated here so a nonsense network is a command line error rather than
     // a surprise partway through a report.
-    params.validate().map_err(CliError::Params)?;
+    //
+    // The base point of a sweep is exempt: an axis overwrites the field it
+    // names at every point, so a base that is invalid only *because* of a
+    // field some axis replaces is not a network anyone was asked about. The
+    // per-point check in `sweep::run` is the one that decides, and it reports
+    // a refused point as a row rather than as a usage error.
+    if sweep_axes.is_empty() {
+        params.validate().map_err(CliError::Params)?;
+    }
+    if sweep_axes.is_empty() && (out.is_some() || format != TableFormat::Csv) {
+        return Err(CliError::Usage(String::from(
+            "incentives --out/--format describe a sweep's table: add --sweep NAME=LO..HI[:STEPS]",
+        )));
+    }
     Ok(Command::Incentives {
         params: Box::new(params),
         robustness,
+        sweep: sweep_axes,
+        out,
+        format,
     })
 }
 
@@ -1750,6 +1921,34 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      evaluate the node-operator game at a parameter set",
+    );
+    say(
+        out,
+        "  incentives --sweep NAME=LO..HI[:STEPS] [--sweep ...] [--out FILE] [--format csv|jsonl]",
+    );
+    say(
+        out,
+        "      evaluate the same game across a grid and emit one row per point,",
+    );
+    say(
+        out,
+        "      e.g. --sweep canary-rate=1/20..1/5:5 --sweep stake=1000..10000:4",
+    );
+    say(
+        out,
+        "  scaffold <name> --kind <certificate|evaluator|statistical|replay|lean>",
+    );
+    say(
+        out,
+        "           [--out DIR] [--artifact-example FILE] [--reward N] [--funder WHO]",
+    );
+    say(
+        out,
+        "      write the files a new objective starts from -- and post nothing, because",
+    );
+    say(
+        out,
+        "      funding a statement is a decision a person makes after reading it",
     );
     say(out, "  log");
     say(out, "      print the log");
@@ -3175,6 +3374,193 @@ fn cmd_incentives(
     Ok(if report.passes() { 0 } else { 1 })
 }
 
+/// `scaffold <name> --kind <kind> [--out DIR] ...`
+///
+/// Writes files and stops. The next step is a human reading them and running
+/// the `post` line this prints -- see [`proofwork::scaffold`] for why that
+/// boundary is where it is.
+fn cmd_scaffold(
+    out: &mut dyn Write,
+    options: &Options,
+    request: &scaffold::Request,
+    force: bool,
+) -> Result<i32, CliError> {
+    let plan = scaffold::plan(request).map_err(|error| CliError::Usage(error.to_string()))?;
+    let root = Path::new(&options.root);
+
+    // Every collision found before anything is written, so a refusal leaves the
+    // directory exactly as it was. Scaffolding over an objective already posted
+    // is the mistake worth being careful about: its pin is in the log and its
+    // id covers it, so the log would still name a file that no longer exists.
+    if !force {
+        let existing: Vec<&str> = plan
+            .files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .filter(|path| root.join(path).exists())
+            .collect();
+        if !existing.is_empty() {
+            return Err(CliError::Usage(format!(
+                "scaffold would overwrite {}: {}. Pass --force if that is what you meant \
+                 -- but if any of these is already posted, its pin is in the log and its \
+                 id covers it",
+                existing.len(),
+                existing.join(", ")
+            )));
+        }
+    }
+
+    for (path, contents) in &plan.files {
+        let target = root.join(path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|source| CliError::Io {
+                context: format!("creating {}", parent.display()),
+                source,
+            })?;
+        }
+        fs::write(&target, contents).map_err(|source| CliError::Io {
+            context: format!("writing {}", target.display()),
+            source,
+        })?;
+        say(out, format!("wrote {path}"));
+    }
+
+    say(out, "");
+    say(out, "before posting, decide:");
+    for item in &plan.todo {
+        say(out, format!("  - {item}"));
+    }
+    say(out, "");
+    // Printed rather than run. The scaffolder writes files; funding one is a
+    // human decision, and this is where it is handed back.
+    say(out, "then post it:");
+    say(out, format!("  proofwork post {}", plan.objective_path));
+    say(
+        out,
+        format!(
+            "  proofwork try {} --submitter you --artifact {}",
+            plan.objective_path,
+            plan.objective_path
+                .strip_suffix("objective.json")
+                .map(|dir| format!("{dir}artifact.json"))
+                .unwrap_or_else(|| String::from("artifact.json"))
+        ),
+    );
+    Ok(0)
+}
+
+/// `incentives --sweep NAME=LO..HI[:STEPS] ... [--out FILE] [--format csv|jsonl]`
+///
+/// The same evaluation `cmd_incentives` runs, once per grid point, as a table.
+/// Nothing is re-derived here: a disagreement between a swept row and the
+/// single-point report for the same parameters would be a bug in the sweep, and
+/// keeping that true is worth more than any per-point formatting.
+///
+/// The table goes to `--out` or to standard output, and progress goes to
+/// standard error, so `incentives --sweep .. > grid.csv` writes exactly the
+/// table -- the same split `--robustness` already makes.
+fn cmd_incentives_sweep(
+    out: &mut dyn Write,
+    params: &NodeParams,
+    axes: &[sweep::Axis],
+    robustness: bool,
+    destination: Option<&str>,
+    format: TableFormat,
+) -> Result<i32, CliError> {
+    // Sized before anything runs, so an operator who mistyped a step count
+    // finds out now rather than after the first minute of silence.
+    let points = sweep::grid(axes).map_err(|error| CliError::Usage(error.to_string()))?;
+    eprintln!(
+        "sweeping {} point(s) over {}",
+        points.len(),
+        axes.iter()
+            .map(|axis| format!("{} ({} value(s))", axis.knob.name(), axis.values.len()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if robustness {
+        // `--robustness` is hundreds of solver runs *per point*. Composing is
+        // what the flag means, so it is allowed; being quiet about the cost
+        // would not be.
+        eprintln!(
+            "  --robustness re-walks every parameter at every point: expect minutes per point"
+        );
+    }
+
+    let mut rows = sweep::run(params, axes, |done, total| {
+        // Every point, not every tenth: the grid is small enough that a line
+        // per point is a progress bar, and a sweep that prints nothing for a
+        // minute is indistinguishable from a hang.
+        eprintln!("  [{}/{total}]", done.saturating_add(1));
+    })
+    .map_err(|error| CliError::Usage(error.to_string()))?;
+
+    if robustness {
+        for (index, assignment) in points.iter().enumerate() {
+            let mut point = params.clone();
+            for (axis, value) in axes.iter().zip(assignment) {
+                axis.knob.apply(&mut point, *value);
+            }
+            // A point `validate` refuses has no margins to report, and its row
+            // already carries the reason. Blank rather than absent, so every
+            // row has the same columns.
+            let binding = match point.validate() {
+                Ok(()) => proofwork::incentive::robustness::margins_reporting(&point, |_, _, _| {})
+                    .ok()
+                    .and_then(|margins| {
+                        margins
+                            .iter()
+                            .find(|margin| margin.factor.is_some())
+                            .map(|margin| margin.parameter.to_string())
+                    })
+                    .unwrap_or_default(),
+                Err(_) => String::new(),
+            };
+            if let Some(row) = rows.get_mut(index) {
+                row.cells
+                    .push((String::from("binding_constraint"), binding));
+            }
+        }
+    }
+
+    let table = match format {
+        TableFormat::Csv => sweep::to_csv(&rows),
+        TableFormat::Jsonl => sweep::to_jsonl(&rows),
+    };
+    match destination {
+        Some(path) => {
+            fs::write(path, &table).map_err(|source| CliError::Io {
+                context: format!("writing {path}"),
+                source,
+            })?;
+            let passing = rows.iter().filter(|row| row.passes()).count();
+            say(
+                out,
+                format!(
+                    "{} row(s) written to {path}  ({passing} pass, {} do not)",
+                    rows.len(),
+                    rows.len().saturating_sub(passing)
+                ),
+            );
+        }
+        None => {
+            for line in table.lines() {
+                say(out, line);
+            }
+        }
+    }
+
+    // Exit 1 when no point holds, matching the single-point command's meaning
+    // of "the incentives do not hold". A sweep whose whole point is to find
+    // where the mechanism breaks would be useless if any failing row failed
+    // the command, so the bar is that *something* in the grid works.
+    Ok(if rows.iter().any(sweep::Row::passes) {
+        0
+    } else {
+        1
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The local store
 // ---------------------------------------------------------------------------
@@ -4545,7 +4931,27 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Availability { action } => cmd_availability(out, options, action),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Blob { action } => cmd_blob(out, options, action),
-        Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),
+        Command::Scaffold { request, force } => cmd_scaffold(out, options, request, *force),
+        Command::Incentives {
+            params,
+            robustness,
+            sweep,
+            out: destination,
+            format,
+        } => {
+            if sweep.is_empty() {
+                cmd_incentives(out, params, *robustness)
+            } else {
+                cmd_incentives_sweep(
+                    out,
+                    params,
+                    sweep,
+                    *robustness,
+                    destination.as_deref(),
+                    *format,
+                )
+            }
+        }
         Command::Canon { input } => cmd_canon(out, input),
         Command::Decode { kind, record } => cmd_decode(out, kind, record),
         Command::Identity { out: path } => cmd_identity(out, path),
@@ -5626,6 +6032,9 @@ mod tests {
             Command::Incentives {
                 params: Box::new(NodeParams::reference()),
                 robustness: false,
+                sweep: Vec::new(),
+                out: None,
+                format: TableFormat::Csv,
             }
         );
         // Opt-in, because a margin table is hundreds of full solver runs.
@@ -5636,8 +6045,133 @@ mod tests {
             Command::Incentives {
                 params: Box::new(NodeParams::reference()),
                 robustness: true,
+                sweep: Vec::new(),
+                out: None,
+                format: TableFormat::Csv,
             }
         );
+    }
+
+    #[test]
+    fn scaffold_needs_a_name_and_a_kind() {
+        assert!(parse(argv(&["scaffold"])).is_err());
+        assert!(parse(argv(&["scaffold", "widget"])).is_err());
+        assert!(parse(argv(&["scaffold", "widget", "--kind", "nonsense"])).is_err());
+        assert!(parse(argv(&["scaffold", "widget", "--kind", "certificate"])).is_ok());
+    }
+
+    /// A pin resolves against `--root`. An `--out` that leaves it makes an
+    /// objective that verifies on the author's machine and nowhere else, so it
+    /// is refused before any directory is created.
+    #[test]
+    fn scaffold_refuses_an_out_that_escapes_the_bundle_root() {
+        for out in ["/tmp", "../elsewhere"] {
+            assert!(
+                parse(argv(&[
+                    "scaffold", "widget", "--kind", "lean", "--out", out
+                ]))
+                .is_err(),
+                "{out} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn scaffold_carries_the_flags_it_was_given() {
+        let parsed = parse(argv(&[
+            "scaffold",
+            "widget",
+            "--kind",
+            "evaluator",
+            "--out",
+            "challenges",
+            "--reward",
+            "5000",
+            "--funder",
+            "treasury",
+        ]))
+        .expect("parses");
+        match parsed.command {
+            Command::Scaffold { request, force } => {
+                assert_eq!(request.name, "widget");
+                assert_eq!(request.kind, scaffold::Kind::Evaluator);
+                assert_eq!(request.parent, "challenges");
+                assert_eq!(request.reward, 5000);
+                assert_eq!(request.funder, "treasury");
+                // Overwriting is opt-in: the obvious mistake is scaffolding
+                // over an objective already in the log.
+                assert!(!force);
+            }
+            other => panic!("expected a scaffold command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sweep_axis_becomes_a_grid_and_leaves_the_base_alone() {
+        let parsed = parse(argv(&[
+            "incentives",
+            "--nodes",
+            "40",
+            "--sweep",
+            "canary-rate=1/20..1/5:5",
+        ]))
+        .expect("parses");
+        match parsed.command {
+            Command::Incentives { params, sweep, .. } => {
+                // The un-swept flags still describe the base point: a sweep
+                // narrows what varies, it does not discard the rest.
+                assert_eq!(params.nodes, 40);
+                assert_eq!(sweep.len(), 1);
+                assert_eq!(sweep[0].values.len(), 5);
+            }
+            other => panic!("expected an incentives command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sweeping_one_parameter_twice_is_refused_rather_than_resolved() {
+        let error = parse(argv(&[
+            "incentives",
+            "--sweep",
+            "stake=1000..2000:2",
+            "--sweep",
+            "stake=3000..4000:2",
+        ]))
+        .expect_err("two ranges for one column");
+        assert!(format!("{error}").contains("swept twice"), "{error}");
+    }
+
+    /// `--out` and `--format` describe a table. Without `--sweep` there is no
+    /// table, and silently ignoring them would leave an operator waiting for a
+    /// file that was never written.
+    #[test]
+    fn table_flags_without_a_sweep_are_refused() {
+        assert!(parse(argv(&["incentives", "--out", "grid.csv"])).is_err());
+        assert!(parse(argv(&["incentives", "--format", "jsonl"])).is_err());
+        assert!(parse(argv(&[
+            "incentives",
+            "--sweep",
+            "stake=1000..2000:2",
+            "--format",
+            "jsonl"
+        ]))
+        .is_ok());
+    }
+
+    /// A base point an axis is about to overwrite must not be rejected up
+    /// front: `--sweep threshold=1..3` over a base whose threshold exceeds its
+    /// committee is a perfectly ordinary request.
+    #[test]
+    fn a_sweep_defers_validation_to_the_points_it_actually_evaluates() {
+        assert!(parse(argv(&["incentives", "--threshold", "99"])).is_err());
+        assert!(parse(argv(&[
+            "incentives",
+            "--threshold",
+            "99",
+            "--sweep",
+            "threshold=1..3:3"
+        ]))
+        .is_ok());
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub mod node;
 pub mod p2p;
 pub mod partition;
 pub mod records;
+pub mod scaffold;
 pub mod schema;
 pub mod sealed;
 pub mod serve;
