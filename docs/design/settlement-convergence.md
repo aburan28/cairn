@@ -4,13 +4,25 @@ The ordering invariant this network needs is one sentence:
 
 > **Two nodes holding the same records pay the same claims in the same order.**
 
-It did not hold. It does now. This note records what was broken, how it was
-measured, the fix that shipped, and the one case the fix deliberately does not
-cover.
+It did not hold. It now holds for one of the two ways it can break, and this
+note records what was broken, how it was measured, what shipped, and the two
+cases still open.
 
-**Status: built.** The epoch chain is in both implementations, the two tests
-below are no longer `#[ignore]`d, and `launch/` was regenerated and re-signed
-because the change invalidates any log written under the old rule.
+**Status: partially built, and this note has been corrected once — read the
+caveat before relying on it.** The epoch chain is in both implementations, the
+two deterministic-case tests below are no longer `#[ignore]`d, and `launch/`
+was regenerated and re-signed because the change invalidates any log written
+under the old rule.
+
+> **Correction.** This document previously said the epoch chain made
+> settlement order converge, full stop. It does not. It removes the dependence
+> on the ledger *envelope*, which is real — two nodes that drain the same
+> epochs **in the same sequence** now agree, where before they never could —
+> but two nodes that drain the same epochs in a *different* sequence still
+> fork, with no records lost and both logs auditing clean. See
+> [Drain sequence](#the-second-open-case-drain-sequence) below. The claim was
+> caught by an adversarial review of the change, not by the tests that shipped
+> with it.
 
 ## It was measured, not argued
 
@@ -87,11 +99,16 @@ earlier links untouched.
 it against the anchor that batch recorded, so an auditor checks the chain rather
 than trusting it.
 
-**Why this converges, inductively.** Base case: the empty chain, identical
-everywhere. Inductive step: if every epoch before `E` settled identically on two
-nodes, then `link(E-1)` is equal on both, so `anchor(E)` is equal, so
-`beacon(E, anchor)` is equal, so the batch sorts identically — and `E` settles
-identically too.
+**The induction, and where it fails.** Base case: the empty chain, identical
+everywhere. Inductive step: if every epoch before `E` settled identically on
+two nodes, `link(E-1)` is equal, so `anchor(E)` is equal, so the batch sorts
+identically.
+
+That induction is on the **epoch index**. The fold is over **file position**,
+and the two are only the same thing if batches are always written in
+non-decreasing epoch order — which nothing enforces, and which the paragraph
+above deliberately allows to be violated. This was the error in the original
+version of this note.
 
 **Why it stays grind-resistant.** The property the current design protects —
 "the anchor is public by the time anyone reveals, so any part of the sort key a
@@ -109,6 +126,39 @@ would retroactively move a settled batch's anchor. That is exactly the bug
 `anchor_of_epoch_within`'s position bound was added to prevent, and a naive
 content-addressed anchor would reintroduce it.
 
+## The second open case: drain sequence
+
+Found by adversarially reviewing the fix, and pinned by
+`draining_epochs_in_a_different_sequence_forks_the_chain` in
+`tests/simulation.rs` (run with `--ignored`).
+
+Two nodes, byte-identical records, two epochs `E1 < E2`:
+
+- **A** learns the `E2` work first, drains `E2` (nothing else has settled, so
+  its anchor is the empty chain), then learns the `E1` work and drains `E1` —
+  anchored on `link(E2)`.
+- **B** learns in epoch order: drains `E1` on the empty chain, then `E2`
+  anchored on `link(E1)`.
+
+Both settle the same claim set. Both audit clean. Both pay **both epochs in
+the opposite order**:
+
+```
+epoch E1: A=[634c1cb1, 19206bee]  B=[19206bee, 634c1cb1]
+epoch E2: A=[e6360f42, 9a7f8fcb]  B=[9a7f8fcb, e6360f42]
+```
+
+Distinct from the partial-view case below — nothing is missing and nothing is
+refused — but the same root cause: the anchor must be fixed before anyone can
+grind it, so it can only depend on what had already settled when the batch was
+written, and *that* is what differs between nodes that learned in different
+orders.
+
+**Folding in epoch order does not fix it**, which is worth recording because it
+is the obvious next idea. At the moment A drained `E2`, no batch for `E1`
+existed on A at all, so any function of "batches for epochs before `E2`" is
+empty on A and non-empty on B regardless of how the fold is sorted.
+
 ## What the fix does *not* solve
 
 **A partial view at drain time.** The induction assumes both nodes settled the
@@ -117,6 +167,28 @@ delivered a claim belonging to `e` writes a different `link(e)`, and the two
 chains diverge permanently from there. Nothing above fixes that; it is the
 ordinary distributed-systems tradeoff between liveness and agreement, and the
 honest options are the usual two:
+
+> **Now reproducible on demand.** `tests/simulation.rs` — a deterministic
+> discrete-event simulator over real nodes — pins this case as
+> `a_partial_view_at_drain_time_forks_the_chain`, `#[ignore]`d because it
+> asserts the divergence *happens*.
+>
+> It established one thing prose had not: **a node holding nothing for an
+> epoch never drains it.** `Node::due_epochs` considers only epochs with
+> accepted claims, so there is no batch and no drained marker, and a later
+> arrival is admitted normally. That is why cold sync is safe, and why the
+> fork needs a genuinely *partial* view — some of an epoch's claims present at
+> drain time, one still in flight.
+>
+> The simulator also found a separate, fixable bug: `apply_records` replayed
+> claims in id order, and a later-epoch reveal replayed first drains an
+> earlier epoch as a side effect, refusing an epoch-N claim sitting in the
+> same session. Replay now sorts by `created_at`
+> (`p2p::service::replay_records`), and the simulator drives that exact
+> function rather than a copy of it. Worth recording *how* that was pinned:
+> the first test written for it passed with the sort removed — it used a cold
+> sync, which the paragraph above explains is immune — so the claim that it
+> was pinned was wrong until a test was built that fails without the fix.
 
 - **A finality delay** — refuse to drain an epoch until it is old enough that
   sync has converged, trading settlement latency for agreement. Cheap, partial,

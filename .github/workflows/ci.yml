@@ -232,6 +232,33 @@ jobs:
       - run: cargo install cargo-audit --locked
       - run: cargo audit
 
+  ui:
+    # The Next.js chain reader. Typechecked and built, not merely linted: it
+    # consumes `GET /chain`, and a change to that endpoint's shape should fail
+    # here rather than in somebody's browser.
+    #
+    # Deliberately not in the `rust` job. A Rust contributor should not need a
+    # Node toolchain, and `proofwork-serve` renders the chain itself at
+    # /chain.html with no build step -- ui/ is the richer client, not the only
+    # one. See ui/README.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      # `npm ci`, not `npm install`: it installs exactly the committed lockfile
+      # and fails if the two disagree, which is the same argument `--locked`
+      # makes for the Rust side.
+      - run: npm ci
+        working-directory: ui
+      - run: npx tsc --noEmit
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+
   examples:
     # Every example objective must pass schema validation and match its pinned
     # verifier hashes -- not only the ones the demo scripts happen to post.

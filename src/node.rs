@@ -490,6 +490,24 @@ pub struct AvailabilityOutcome {
 /// not be reached, a duplicate artifact, and an improvement that does not move
 /// the frontier all land here with `reward == 0` and a `note` naming the reason.
 /// The claim and its verdict are in the log either way.
+/// One link of the epoch chain. See [`Node::epoch_chain`].
+///
+/// `link` is `H({prev, epoch, claims})` with `claims` sorted, which is what
+/// makes it a pure function of content: two nodes that settled the same claims
+/// in the same epochs compute the same link, whatever order their logs are in
+/// and whenever they were written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpochLink {
+    pub epoch: u64,
+    /// Claim ids settled in this epoch, **sorted** — the order the link commits
+    /// to, deliberately not the beacon order the batch paid in. A link that
+    /// depended on the payout order could not be used to derive it.
+    pub claims: Vec<String>,
+    /// The link before this one; empty for the first.
+    pub prev: String,
+    pub link: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     /// Content address of the revealed claim, as recorded.
@@ -1710,9 +1728,26 @@ impl Node {
     /// settled. Sorted, so the link does not depend on the very ordering it is
     /// used to produce.
     ///
-    /// Convergence is by induction on the epoch. The empty chain is equal
-    /// everywhere; if every earlier batch agreed, the head agrees, so the
-    /// beacon agrees, so this batch sorts identically — and agrees in turn.
+    /// **What this does and does not buy, stated exactly.** It removes the
+    /// dependence on the ledger *envelope*: two nodes that drain the same
+    /// epochs in the same sequence now agree, where with an entry hash they
+    /// never could. It does **not** make settlement order converge in general.
+    ///
+    /// The induction that was originally written here — "if every earlier
+    /// batch agreed, the head agrees" — is an induction on the *epoch index*,
+    /// while the fold below is over *file position*, and
+    /// `epoch_links_before` deliberately keeps those apart. A node that
+    /// learns about later work first drains the later epoch first, so its batch
+    /// for the *earlier* epoch is anchored on the later epoch's link. Two nodes
+    /// then hold the same claims, settle the same claims, audit clean, and pay
+    /// them in a different order.
+    ///
+    /// That is pinned by `draining_epochs_in_a_different_sequence_forks_the_chain`
+    /// in `tests/simulation.rs`, and it is the same family as the partial-view
+    /// case in `docs/design/settlement-convergence.md`: the anchor can only
+    /// depend on what had already settled when the batch was written, and that
+    /// is exactly what differs between nodes that learned in different orders.
+    /// Closing it needs a finality delay or reorgs; neither is built.
     ///
     /// Grinding resistance is unchanged. `AGENTS.md`'s rule is that the anchor
     /// must be fixed before anyone can still choose part of the sort key, and a
@@ -1754,15 +1789,50 @@ impl Node {
     /// [`Node::epoch_chain_head_within`], additionally stopping at the batch
     /// for `stop_at` if one is present. See [`Node::anchor_of_epoch`].
     fn epoch_chain_head_before(&self, positions: usize, stop_at: Option<u64>) -> String {
+        self.epoch_links_before(positions, stop_at)
+            .last()
+            .map(|link| link.link.clone())
+            .unwrap_or_default()
+    }
+
+    /// Every link of this log's epoch chain, oldest first.
+    ///
+    /// The chain the settlement anchor is the head of, exposed whole so it can
+    /// be read rather than only trusted — `proofwork chain`, `GET /chain`, and
+    /// the page at `GET /chain.html` all render this. Comparing two nodes'
+    /// chains is how you find *where* they diverged rather than only that they
+    /// did, which is the question the head alone cannot answer.
+    pub fn epoch_chain(&self) -> Vec<EpochLink> {
+        self.epoch_links_before(self.ledger.len(), None)
+    }
+
+    /// The fold every other epoch-chain accessor is a view of.
+    fn epoch_links_before(&self, positions: usize, stop_at: Option<u64>) -> Vec<EpochLink> {
+        let mut links: Vec<EpochLink> = Vec::new();
         let mut head = String::new();
         for entry in self.ledger.entries().iter().take(positions) {
             if entry.kind != BATCH {
                 continue;
             }
-            let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_i128) else {
-                // A batch naming no epoch cannot be placed in the chain. The
-                // audit reports it separately; skipping keeps one malformed
-                // record from making every later link unverifiable.
+            // A batch whose epoch is missing, or is not a real epoch number,
+            // cannot be placed in the chain. The audit reports it separately;
+            // skipping keeps one malformed record from making every later
+            // link unverifiable.
+            //
+            // The `u64` range check is not pedantry. This used to fold on the
+            // raw `i128` and report `u64::try_from(epoch).unwrap_or(0)` in the
+            // link, so a batch naming a *negative* epoch produced a link whose
+            // published `epoch` was `0` while its hash committed to the real
+            // value — and anybody recomputing `H({prev, epoch, claims})` from
+            // `GET /chain` got a different digest and no way to tell why. A
+            // chain nobody can recompute is not a chain; it is a number the
+            // server asserts.
+            let Some(epoch) = entry
+                .payload
+                .get("epoch")
+                .and_then(Value::as_i128)
+                .filter(|value| u64::try_from(*value).is_ok())
+            else {
                 continue;
             };
             if stop_at.is_some_and(|target| i128::from(target) == epoch) {
@@ -1777,17 +1847,30 @@ impl Node {
                 _ => Vec::new(),
             };
             claims.sort();
+            let prev = head.clone();
             head = Value::object([
-                ("prev", Value::string(head)),
+                ("prev", Value::string(prev.clone())),
                 ("epoch", Value::Int(epoch)),
                 (
                     "claims",
-                    Value::Array(claims.into_iter().map(Value::String).collect()),
+                    Value::Array(claims.iter().cloned().map(Value::String).collect()),
                 ),
             ])
             .digest();
+            links.push(EpochLink {
+                // Infallible: the filter above admitted only `u64`-range
+                // epochs, precisely so this cannot silently report a value
+                // the link's hash did not commit to.
+                // Infallible: the filter above admitted only `u64`-range
+                // epochs, precisely so this cannot silently report a value
+                // the link's hash did not commit to.
+                epoch: u64::try_from(epoch).expect("filtered to u64 range above"),
+                claims,
+                prev,
+                link: head.clone(),
+            });
         }
-        head
+        links
     }
 
     /// The last ledger entry before `epoch`, measuring epochs with an explicit
@@ -2701,6 +2784,33 @@ impl Node {
                     continue;
                 }
             };
+
+            // An empty batch is always forged, and letting one through is a
+            // way to move money.
+            //
+            // `settle_due` writes a batch only for a *due* epoch, and
+            // `due_epochs` is derived from `accepted_claims_by_epoch`, so an
+            // honestly produced batch always names at least one claim. A batch
+            // naming none therefore cannot have come from settlement.
+            //
+            // Why it matters rather than being untidy: every batch is a link
+            // in the epoch chain, and the chain head is the anchor future
+            // batches sort against. An empty batch for an epoch nobody ever
+            // claimed in changes that head while matching the recorded claim
+            // list exactly (both sides empty), so before this check the audit
+            // passed it clean -- handing an operator a free, unlimited
+            // re-roll of the settlement order of every later epoch. That is
+            // exactly the lever `AGENTS.md` says the beacon ordering exists to
+            // remove. Found by an adversarial probe of the epoch chain, not by
+            // the tests that shipped with it.
+            if recorded.is_empty() {
+                problems.push(format!(
+                    "batch for epoch {epoch}: settles no claims, so it cannot have come \
+                     from a drain -- an empty batch still moves the epoch chain, and with \
+                     it the order every later batch is paid in"
+                ));
+                continue;
+            }
 
             // Recomputed against the *recorded* anchor: if that anchor is
             // wrong the line above already says so, and re-deriving the order
