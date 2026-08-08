@@ -195,14 +195,39 @@ seed that is simply down:
 **Is it actually connected?** Successful sessions are logged, not just failures:
 
 ```
-inbound session:  <peer id> ok, 12 entries now
-outbound session: <peer id> ok, 12 entries now
+2026-08-08T00:33:42+00:00 INFO  proofwork inbound session:  <peer id> ok, 12 entries now
+2026-08-08T00:33:42+00:00 INFO  proofwork outbound session: <peer id> ok, 12 entries now
 ```
 
 Silence with neither those nor an error means nothing has been dialled yet;
 `outbound session: transport I/O: ...` on repeat means the address, the
 firewall, or the key. Check them in that order — the key is the one with no
 network symptom.
+
+### Turning up the logs
+
+`PROOFWORK_LOG` sets the level — `error`, `warn`, `info` (default), `debug`,
+`trace`, or `off`. Everything goes to **stderr**, always, which is what makes it
+safe to raise on `proofwork-mcp`, whose *stdout* is the JSON-RPC protocol.
+
+`debug` adds every p2p protocol message, in both directions, with the peer it
+was exchanged with:
+
+```
+$ PROOFWORK_LOG=debug make p2p
+… DEBUG proofwork::p2p 59758322… -> Hello peer=083e078e… records=0
+… DEBUG proofwork::p2p 59758322… <- Inventory records=1
+… DEBUG proofwork::p2p 59758322… -> Want ids=1
+… DEBUG proofwork::p2p 59758322… <- Records n=1
+… DEBUG proofwork::p2p 59758322… -> code.Want addresses=1
+… DEBUG proofwork::p2p 59758322… -> dht.Ask addresses=1
+```
+
+That is a whole anti-entropy round: records, then verifier code, then the DHT,
+then populations — the order [p2p.md](docs/p2p.md) describes, now observable
+rather than inferred. Counts and sizes, never contents: a record round moves
+whole claims, and a population round would otherwise print other people's
+candidate artifacts into your terminal.
 
 Use separate `LOCAL_DIR`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT` paths for each
 node. `make mcp` uses `.local/proofwork-mcp.jsonl` by default, and `make p2p`
