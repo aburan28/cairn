@@ -27,6 +27,120 @@ use std::fmt;
 /// AEAD context for record frames.
 pub const RECORD_CONTEXT: &[u8] = b"proofwork/p2p/sync/v1";
 
+// -- protocol tracing --------------------------------------------------------
+//
+// Every p2p protocol message, both directions, at `debug`. This is the one
+// place all four families pass through, so it is the one place that can make
+// that claim -- and each `describe_*` below is an **exhaustive** match on
+// purpose: adding a message to any of the four enums stops compiling until
+// somebody says how it logs, so "all the messages" stays true rather than
+// being true on the day it was written.
+//
+// Counts and sizes, not contents. A record sync moves whole claims and a code
+// reply moves blobs; putting those in a log line would produce megabytes per
+// round and, for the population family, dump other people's candidate
+// artifacts into an operator's terminal. What a reader of these lines actually
+// needs is shape and direction -- which peer, which way, how much -- and the
+// ledger itself is where the contents already are.
+
+/// Which way a frame went, for one consistent arrow in the output.
+#[derive(Clone, Copy)]
+enum Dir {
+    Send,
+    Recv,
+}
+
+impl fmt::Display for Dir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Dir::Send => "->",
+            Dir::Recv => "<-",
+        })
+    }
+}
+
+fn describe_record(message: &Message) -> String {
+    match message {
+        Message::Hello { peer, records } => format!("Hello peer={peer} records={records}"),
+        // `total`, not a bucket count: the bucket count is the constant 256 on
+        // every inventory ever sent, so it distinguishes nothing.
+        Message::Inventory(inventory) => format!("Inventory records={}", inventory.total()),
+        Message::BucketIds { bucket, ids } => {
+            format!("BucketIds bucket={bucket} ids={}", ids.len())
+        }
+        Message::Want { ids } => format!("Want ids={}", ids.len()),
+        Message::Records { records } => format!("Records n={}", records.len()),
+        Message::Done => "Done".to_string(),
+    }
+}
+
+fn describe_code(message: &CodeMessage) -> String {
+    match message {
+        CodeMessage::Want { addresses } => format!("code.Want addresses={}", addresses.len()),
+        CodeMessage::Blobs { blobs } => format!(
+            "code.Blobs n={} bytes={}",
+            blobs.len(),
+            blobs.iter().map(Vec::len).sum::<usize>()
+        ),
+        CodeMessage::Done => "code.Done".to_string(),
+    }
+}
+
+fn describe_pop(message: &PopMessage) -> String {
+    match message {
+        PopMessage::Digest { digest, ids } => format!(
+            "pop.Digest digest={} ids={}",
+            crate::canonical::short(digest),
+            ids.len()
+        ),
+        PopMessage::Want { ids } => format!("pop.Want ids={}", ids.len()),
+        PopMessage::Records { candidates } => format!("pop.Records n={}", candidates.len()),
+        PopMessage::Done => "pop.Done".to_string(),
+    }
+}
+
+fn describe_dht(message: &DhtMessage) -> String {
+    match message {
+        // `NodeId`'s Display is already truncated to 16 hex characters.
+        DhtMessage::FindNode { target } => format!("dht.FindNode target={target}"),
+        DhtMessage::Nodes { contacts } => format!("dht.Nodes contacts={}", contacts.len()),
+        DhtMessage::GetProviders { addresses } => {
+            format!("dht.GetProviders addresses={}", addresses.len())
+        }
+        DhtMessage::Providers { answers } => format!("dht.Providers answers={}", answers.len()),
+        DhtMessage::GetKey { peers } => format!("dht.GetKey peers={}", peers.len()),
+        DhtMessage::Keys { keys } => format!("dht.Keys keys={}", keys.len()),
+        DhtMessage::Ask { addresses } => format!("dht.Ask addresses={}", addresses.len()),
+        DhtMessage::Tell { addresses } => format!("dht.Tell addresses={}", addresses.len()),
+    }
+}
+
+/// Send a DHT message, logging it. The DHT round sends inline rather than
+/// through one helper -- it is a fixed six-step handshake, not a loop -- so
+/// this exists to keep those six sites from each needing their own trace call.
+fn send_dht(connection: &mut Connection, message: DhtMessage) -> Result<(), SessionError> {
+    trace(connection, Dir::Send, describe_dht(&message));
+    connection
+        .send(&message.encode(), super::dht::CONTEXT)
+        .map_err(Into::into)
+}
+
+fn receive_dht(connection: &mut Connection) -> Result<DhtMessage, SessionError> {
+    let message = DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)?;
+    trace(connection, Dir::Recv, describe_dht(&message));
+    Ok(message)
+}
+
+/// One protocol line. `remote` is the authenticated peer id, so a line can be
+/// attributed to a peer rather than to a socket.
+fn trace(connection: &Connection, dir: Dir, described: String) {
+    log::debug!(
+        target: "proofwork::p2p",
+        "{} {dir} {described}",
+        crate::p2p::discovery::peer_id_string(&connection.remote())
+    );
+}
+
 #[derive(Debug)]
 pub enum SessionError {
     Transport(TransportError),
@@ -77,13 +191,16 @@ impl From<DhtError> for SessionError {
 }
 
 fn send(connection: &mut Connection, message: Message) -> Result<(), SessionError> {
+    trace(connection, Dir::Send, describe_record(&message));
     connection
         .send(&message.encode(), RECORD_CONTEXT)
         .map_err(Into::into)
 }
 
 fn receive(connection: &mut Connection) -> Result<Message, SessionError> {
-    Message::decode(&connection.receive(RECORD_CONTEXT)?).map_err(Into::into)
+    let message = Message::decode(&connection.receive(RECORD_CONTEXT)?)?;
+    trace(connection, Dir::Recv, describe_record(&message));
+    Ok(message)
 }
 
 fn expect<T>(
@@ -187,6 +304,7 @@ where
 }
 
 fn send_code(connection: &mut Connection, message: CodeMessage) -> Result<(), SessionError> {
+    trace(connection, Dir::Send, describe_code(&message));
     connection
         .send(&message.encode(), code::CONTEXT)
         .map_err(Into::into)
@@ -196,7 +314,9 @@ fn receive_code(
     connection: &mut Connection,
     limits: CodeLimits,
 ) -> Result<CodeMessage, SessionError> {
-    CodeMessage::decode(&connection.receive(code::CONTEXT)?, limits).map_err(Into::into)
+    let message = CodeMessage::decode(&connection.receive(code::CONTEXT)?, limits)?;
+    trace(connection, Dir::Recv, describe_code(&message));
+    Ok(message)
 }
 
 /// Run one complete, symmetric verifier-code exchange.
@@ -324,79 +444,73 @@ where
     let remote_id = NodeId::from_bytes(remote);
     let asked: BTreeSet<String> = needs.iter().take(MAX_ASK_ADDRESSES).cloned().collect();
 
-    connection.send(
-        &DhtMessage::Ask {
+    send_dht(
+        connection,
+        DhtMessage::Ask {
             addresses: asked.iter().cloned().collect(),
-        }
-        .encode(),
-        super::dht::CONTEXT,
+        },
     )?;
-    let their_ask = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+    let their_ask = match receive_dht(connection)? {
         DhtMessage::Ask { addresses } => addresses,
         _ => return Err(SessionError::Protocol("expected dht_ask".into())),
     };
-    connection.send(
-        &DhtMessage::Tell {
+    send_dht(
+        connection,
+        DhtMessage::Tell {
             addresses: Directory::answer_ask(&their_ask, held),
-        }
-        .encode(),
-        super::dht::CONTEXT,
+        },
     )?;
-    let their_tell = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+    let their_tell = match receive_dht(connection)? {
         DhtMessage::Tell { addresses } => addresses,
         _ => return Err(SessionError::Protocol("expected dht_tell".into())),
     };
 
     // -- one hop of every lookup this peer was chosen for -------------------
     let seeking = directory.ask_of(remote_id);
-    connection.send(
-        &DhtMessage::GetProviders {
+    send_dht(
+        connection,
+        DhtMessage::GetProviders {
             addresses: seeking.clone(),
-        }
-        .encode(),
-        super::dht::CONTEXT,
+        },
     )?;
-    let their_seek = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+    let their_seek = match receive_dht(connection)? {
         DhtMessage::GetProviders { addresses } => addresses,
         _ => return Err(SessionError::Protocol("expected dht_get_providers".into())),
     };
-    connection.send(
-        &DhtMessage::Providers {
+    send_dht(
+        connection,
+        DhtMessage::Providers {
             answers: directory.answer_get_providers(&their_seek, now),
-        }
-        .encode(),
-        super::dht::CONTEXT,
+        },
     )?;
-    let their_answers = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+    let their_answers = match receive_dht(connection)? {
         DhtMessage::Providers { answers } => answers,
         _ => return Err(SessionError::Protocol("expected dht_providers".into())),
     };
 
     // -- one public key, so a contact heard of can become one dialled -------
     let wanted_keys = directory.key_wants();
-    connection.send(
-        &DhtMessage::GetKey {
+    send_dht(
+        connection,
+        DhtMessage::GetKey {
             peers: wanted_keys.clone(),
-        }
-        .encode(),
-        super::dht::CONTEXT,
+        },
     )?;
-    let their_key_want = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+    let their_key_want = match receive_dht(connection)? {
         DhtMessage::GetKey { peers } => peers,
         _ => return Err(SessionError::Protocol("expected dht_get_key".into())),
     };
-    connection.send(
-        &DhtMessage::Keys {
+    send_dht(
+        connection,
+        DhtMessage::Keys {
             keys: their_key_want
                 .iter()
                 .filter_map(|peer| key_of(*peer).map(|bytes| super::dht::encode_key(&bytes)))
                 .take(MAX_KEYS_PER_MESSAGE)
                 .collect(),
-        }
-        .encode(),
-        super::dht::CONTEXT,
+        },
     )?;
-    let their_keys = match DhtMessage::decode(&connection.receive(super::dht::CONTEXT)?)? {
+    let their_keys = match receive_dht(connection)? {
         DhtMessage::Keys { keys } => keys,
         _ => return Err(SessionError::Protocol("expected dht_keys".into())),
     };
@@ -447,13 +561,16 @@ pub struct DhtRound {
 }
 
 fn send_pop(connection: &mut Connection, message: PopMessage) -> Result<(), SessionError> {
+    trace(connection, Dir::Send, describe_pop(&message));
     connection
         .send(&message.encode(), pop::CONTEXT)
         .map_err(Into::into)
 }
 
 fn receive_pop(connection: &mut Connection, limits: PopLimits) -> Result<PopMessage, SessionError> {
-    PopMessage::decode(&connection.receive(pop::CONTEXT)?, limits).map_err(Into::into)
+    let message = PopMessage::decode(&connection.receive(pop::CONTEXT)?, limits)?;
+    trace(connection, Dir::Recv, describe_pop(&message));
+    Ok(message)
 }
 
 /// Run one complete, symmetric population exchange.

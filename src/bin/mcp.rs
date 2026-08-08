@@ -96,6 +96,9 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const NONCE_BYTES: usize = 32;
 
 fn main() {
+    // Before anything that could log. Stderr only -- see `logging` -- which
+    // matters most here in the MCP server, where stdout is the protocol.
+    proofwork::logging::init();
     let mut log = PathBuf::from("proofwork.jsonl");
     let mut root = PathBuf::from(".");
     let mut identity_path: Option<PathBuf> = None;
