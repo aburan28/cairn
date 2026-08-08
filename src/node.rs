@@ -490,6 +490,24 @@ pub struct AvailabilityOutcome {
 /// not be reached, a duplicate artifact, and an improvement that does not move
 /// the frontier all land here with `reward == 0` and a `note` naming the reason.
 /// The claim and its verdict are in the log either way.
+/// One link of the epoch chain. See [`Node::epoch_chain`].
+///
+/// `link` is `H({prev, epoch, claims})` with `claims` sorted, which is what
+/// makes it a pure function of content: two nodes that settled the same claims
+/// in the same epochs compute the same link, whatever order their logs are in
+/// and whenever they were written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpochLink {
+    pub epoch: u64,
+    /// Claim ids settled in this epoch, **sorted** — the order the link commits
+    /// to, deliberately not the beacon order the batch paid in. A link that
+    /// depended on the payout order could not be used to derive it.
+    pub claims: Vec<String>,
+    /// The link before this one; empty for the first.
+    pub prev: String,
+    pub link: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     /// Content address of the revealed claim, as recorded.
@@ -1754,6 +1772,26 @@ impl Node {
     /// [`Node::epoch_chain_head_within`], additionally stopping at the batch
     /// for `stop_at` if one is present. See [`Node::anchor_of_epoch`].
     fn epoch_chain_head_before(&self, positions: usize, stop_at: Option<u64>) -> String {
+        self.epoch_links_before(positions, stop_at)
+            .last()
+            .map(|link| link.link.clone())
+            .unwrap_or_default()
+    }
+
+    /// Every link of this log's epoch chain, oldest first.
+    ///
+    /// The chain the settlement anchor is the head of, exposed whole so it can
+    /// be read rather than only trusted — `proofwork chain`, `GET /chain`, and
+    /// the page at `GET /chain.html` all render this. Comparing two nodes'
+    /// chains is how you find *where* they diverged rather than only that they
+    /// did, which is the question the head alone cannot answer.
+    pub fn epoch_chain(&self) -> Vec<EpochLink> {
+        self.epoch_links_before(self.ledger.len(), None)
+    }
+
+    /// The fold every other epoch-chain accessor is a view of.
+    fn epoch_links_before(&self, positions: usize, stop_at: Option<u64>) -> Vec<EpochLink> {
+        let mut links: Vec<EpochLink> = Vec::new();
         let mut head = String::new();
         for entry in self.ledger.entries().iter().take(positions) {
             if entry.kind != BATCH {
@@ -1777,17 +1815,24 @@ impl Node {
                 _ => Vec::new(),
             };
             claims.sort();
+            let prev = head.clone();
             head = Value::object([
-                ("prev", Value::string(head)),
+                ("prev", Value::string(prev.clone())),
                 ("epoch", Value::Int(epoch)),
                 (
                     "claims",
-                    Value::Array(claims.into_iter().map(Value::String).collect()),
+                    Value::Array(claims.iter().cloned().map(Value::String).collect()),
                 ),
             ])
             .digest();
+            links.push(EpochLink {
+                epoch: u64::try_from(epoch).unwrap_or(0),
+                claims,
+                prev,
+                link: head.clone(),
+            });
         }
-        head
+        links
     }
 
     /// The last ledger entry before `epoch`, measuring epochs with an explicit
