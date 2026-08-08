@@ -61,7 +61,10 @@ jobs:
       # healthcheck asks whether a binary runs at all, so the wrong code here
       # fails a build for no reason. Cheap to pin, and it drifted once already.
       - run: |
-          for BIN in proofwork proofwork-serve proofwork-p2p; do
+          # Every shipped binary, not a subset. `proofwork-gen-bootstrap` was
+          # missing from this list and answered exit 2 to `--help` for its whole
+          # life; the release workflow's unpack check is what found it.
+          for BIN in proofwork proofwork-mcp proofwork-serve proofwork-p2p proofwork-gen-bootstrap; do
             ./target/release/$BIN --help >/dev/null 2>&1 \
               || { echo "$BIN --help exited $?" >&2; exit 1; }
           done
