@@ -363,18 +363,6 @@ fn main() {
             }
         }
     }
-    // Zero-configuration discovery on the local segment. Optional by design:
-    // a host with no multicast route is a node without LAN discovery, not a
-    // node that cannot start, so a failure here is reported and stepped over.
-    let beacon =
-        match multicast::Responder::bind(service.identity(), listen_addr.port(), multicast::PORT) {
-            Ok(responder) => Some(responder),
-            Err(error) => {
-                eprintln!("multicast: {error} -- continuing without LAN discovery");
-                None
-            }
-        };
-
     let listener = service.listen(listen_addr).unwrap_or_else(|e| {
         eprintln!("listen: {e}");
         // The one bind failure worth explaining, because the address that
@@ -395,7 +383,33 @@ fn main() {
         }
         std::process::exit(2)
     });
-    eprintln!("listening on {listen_addr}");
+    // What the kernel gave, not what was asked for. The two differ whenever the
+    // port is 0, which is the only way to take a port without racing for it:
+    // asking the OS for a free one, closing it, and then binding what you were
+    // told leaves a window where anybody may take it -- and the failure lands
+    // much later, on a peer that cannot connect, naming nothing.
+    //
+    // So `--listen 127.0.0.1:0` is a supported way to run, and this line is
+    // what makes it usable: the port only exists once the listener does, and
+    // this is where a caller reads it back.
+    let bound = listener.local_addr().unwrap_or(listen_addr);
+
+    // Zero-configuration discovery on the local segment. Optional by design:
+    // a host with no multicast route is a node without LAN discovery, not a
+    // node that cannot start, so a failure here is reported and stepped over.
+    //
+    // After the listener rather than before it, because it advertises the port
+    // and under `:0` there is no port to advertise until the bind has happened.
+    let beacon = match multicast::Responder::bind(service.identity(), bound.port(), multicast::PORT)
+    {
+        Ok(responder) => Some(responder),
+        Err(error) => {
+            eprintln!("multicast: {error} -- continuing without LAN discovery");
+            None
+        }
+    };
+
+    eprintln!("listening on {bound}");
     // Exclusive, opened above: the daemon appends every record it imports from
     // a peer, so it is a writer and must not share a log with another one.
     let node = Node::new(ledger, root);
