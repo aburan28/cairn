@@ -118,6 +118,28 @@ chains diverge permanently from there. Nothing above fixes that; it is the
 ordinary distributed-systems tradeoff between liveness and agreement, and the
 honest options are the usual two:
 
+> **Now reproducible on demand.** `tests/simulation.rs` — a deterministic
+> discrete-event simulator over real nodes — pins this case as
+> `a_partial_view_at_drain_time_forks_the_chain`, `#[ignore]`d because it
+> asserts the divergence *happens*.
+>
+> It established one thing prose had not: **a node holding nothing for an
+> epoch never drains it.** `Node::due_epochs` considers only epochs with
+> accepted claims, so there is no batch and no drained marker, and a later
+> arrival is admitted normally. That is why cold sync is safe, and why the
+> fork needs a genuinely *partial* view — some of an epoch's claims present at
+> drain time, one still in flight.
+>
+> The simulator also found a separate, fixable bug: `apply_records` replayed
+> claims in id order, and a later-epoch reveal replayed first drains an
+> earlier epoch as a side effect, refusing an epoch-N claim sitting in the
+> same session. Replay now sorts by `created_at`
+> (`p2p::service::replay_records`), and the simulator drives that exact
+> function rather than a copy of it. Worth recording *how* that was pinned:
+> the first test written for it passed with the sort removed — it used a cold
+> sync, which the paragraph above explains is immune — so the claim that it
+> was pinned was wrong until a test was built that fails without the fix.
+
 - **A finality delay** — refuse to drain an epoch until it is old enough that
   sync has converged, trading settlement latency for agreement. Cheap, partial,
   and probably right for Stage 1.

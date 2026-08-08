@@ -218,7 +218,16 @@ impl Node {
             if entry.kind != BATCH {
                 continue;
             }
-            let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_i128) else {
+            // `u64`-range only, matching the primary. Folding a negative or
+            // oversized epoch would put a link in the chain that nobody
+            // recomputing `H({prev, epoch, claims})` from the published values
+            // could reproduce.
+            let Some(epoch) = entry
+                .payload
+                .get("epoch")
+                .and_then(Value::as_i128)
+                .filter(|value| u64::try_from(*value).is_ok())
+            else {
                 continue;
             };
             let mut claims: Vec<String> = match entry.payload.get("claims") {
@@ -1352,6 +1361,25 @@ impl Node {
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
+            // An empty batch is always forged, and it is not harmless.
+            //
+            // A drain writes a batch only for an epoch that has accepted
+            // claims, so an honest batch always names at least one. But every
+            // batch is a link in the epoch chain, and the chain head is the
+            // anchor later batches sort against -- so an empty batch for an
+            // epoch nobody claimed in moves that head while trivially matching
+            // its own (empty) claim list. Both implementations passed one
+            // clean, which handed an operator an unlimited re-roll of the
+            // order every later epoch is paid in.
+            if listed.is_empty() {
+                faulted.insert(epoch);
+                problems.push(format!(
+                    "entry {}: batch for epoch {epoch} settles no claims, so it cannot \
+                     have come from a drain -- an empty batch still moves the epoch chain",
+                    entry.seq
+                ));
+                continue;
+            }
             // Membership is derived from the log, not read back out of the
             // batch. Re-sorting the list the batch itself supplied is a check
             // that a batch which *omitted* a claim always passes -- and which

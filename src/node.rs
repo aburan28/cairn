@@ -1797,10 +1797,25 @@ impl Node {
             if entry.kind != BATCH {
                 continue;
             }
-            let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_i128) else {
-                // A batch naming no epoch cannot be placed in the chain. The
-                // audit reports it separately; skipping keeps one malformed
-                // record from making every later link unverifiable.
+            // A batch whose epoch is missing, or is not a real epoch number,
+            // cannot be placed in the chain. The audit reports it separately;
+            // skipping keeps one malformed record from making every later
+            // link unverifiable.
+            //
+            // The `u64` range check is not pedantry. This used to fold on the
+            // raw `i128` and report `u64::try_from(epoch).unwrap_or(0)` in the
+            // link, so a batch naming a *negative* epoch produced a link whose
+            // published `epoch` was `0` while its hash committed to the real
+            // value — and anybody recomputing `H({prev, epoch, claims})` from
+            // `GET /chain` got a different digest and no way to tell why. A
+            // chain nobody can recompute is not a chain; it is a number the
+            // server asserts.
+            let Some(epoch) = entry
+                .payload
+                .get("epoch")
+                .and_then(Value::as_i128)
+                .filter(|value| u64::try_from(*value).is_ok())
+            else {
                 continue;
             };
             if stop_at.is_some_and(|target| i128::from(target) == epoch) {
@@ -1826,7 +1841,13 @@ impl Node {
             ])
             .digest();
             links.push(EpochLink {
-                epoch: u64::try_from(epoch).unwrap_or(0),
+                // Infallible: the filter above admitted only `u64`-range
+                // epochs, precisely so this cannot silently report a value
+                // the link's hash did not commit to.
+                // Infallible: the filter above admitted only `u64`-range
+                // epochs, precisely so this cannot silently report a value
+                // the link's hash did not commit to.
+                epoch: u64::try_from(epoch).expect("filtered to u64 range above"),
                 claims,
                 prev,
                 link: head.clone(),
@@ -2746,6 +2767,33 @@ impl Node {
                     continue;
                 }
             };
+
+            // An empty batch is always forged, and letting one through is a
+            // way to move money.
+            //
+            // `settle_due` writes a batch only for a *due* epoch, and
+            // `due_epochs` is derived from `accepted_claims_by_epoch`, so an
+            // honestly produced batch always names at least one claim. A batch
+            // naming none therefore cannot have come from settlement.
+            //
+            // Why it matters rather than being untidy: every batch is a link
+            // in the epoch chain, and the chain head is the anchor future
+            // batches sort against. An empty batch for an epoch nobody ever
+            // claimed in changes that head while matching the recorded claim
+            // list exactly (both sides empty), so before this check the audit
+            // passed it clean -- handing an operator a free, unlimited
+            // re-roll of the settlement order of every later epoch. That is
+            // exactly the lever `AGENTS.md` says the beacon ordering exists to
+            // remove. Found by an adversarial probe of the epoch chain, not by
+            // the tests that shipped with it.
+            if recorded.is_empty() {
+                problems.push(format!(
+                    "batch for epoch {epoch}: settles no claims, so it cannot have come \
+                     from a drain -- an empty batch still moves the epoch chain, and with \
+                     it the order every later batch is paid in"
+                ));
+                continue;
+            }
 
             // Recomputed against the *recorded* anchor: if that anchor is
             // wrong the line above already says so, and re-deriving the order
