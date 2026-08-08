@@ -1,0 +1,198 @@
+/* System fonts only, no webfont. A node operator often reads this over an SSH
+   tunnel on a box with no route to the internet, and a page that fetched a font
+   would render wrong exactly then. Same reason the server-rendered
+   `/chain.html` is self-contained. */
+:root {
+  color-scheme: light dark;
+  --fg: #111;
+  --dim: #666;
+  --bg: #fff;
+  --panel: #fafafa;
+  --line: #d8d8d8;
+  --accent: #0b6;
+  --bad: #c33;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6e6e6;
+    --dim: #999;
+    --bg: #111;
+    --panel: #181818;
+    --line: #333;
+    --accent: #3d8;
+    --bad: #f66;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font:
+    14px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+}
+
+main {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+h1 {
+  font-size: 1.2rem;
+  margin: 0 0 0.35rem;
+}
+
+p.lede {
+  color: var(--dim);
+  margin: 0.35rem 0 1.5rem;
+  max-width: 52rem;
+}
+
+code {
+  overflow-wrap: anywhere;
+}
+
+a {
+  color: var(--accent);
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--panel);
+  padding: 0.8rem 0.95rem;
+  margin-bottom: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.panel.bad {
+  border-left-color: var(--bad);
+}
+
+.panel b {
+  display: block;
+  font-weight: 400;
+  font-size: 0.85em;
+  color: var(--dim);
+  margin-bottom: 0.2rem;
+}
+
+.row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+
+input {
+  flex: 1 1 22rem;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  font: inherit;
+}
+
+button {
+  padding: 0.45rem 0.9rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The chain itself. A vertical spine with a node per link, so "each link
+   commits to the one before it" is visible rather than only stated. */
+ol.chain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+li.link {
+  position: relative;
+  padding: 0 0 1.5rem 1.75rem;
+  border-left: 2px solid var(--line);
+}
+
+li.link:last-child {
+  border-left-color: transparent;
+  padding-bottom: 0;
+}
+
+li.link::before {
+  content: "";
+  position: absolute;
+  left: -0.4rem;
+  top: 0.35rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+li.link.genesis::before {
+  background: var(--bg);
+  border: 2px solid var(--accent);
+}
+
+.epoch {
+  font-weight: 700;
+}
+
+.meta {
+  color: var(--dim);
+  font-size: 0.9em;
+  margin-top: 0.2rem;
+}
+
+.claims {
+  margin-top: 0.45rem;
+  padding-left: 0;
+  list-style: none;
+}
+
+.claims li {
+  font-size: 0.9em;
+  padding: 0.1rem 0;
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.accent {
+  color: var(--accent);
+}
+
+.bad {
+  color: var(--bad);
+}
+
+.empty {
+  color: var(--dim);
+  padding: 2rem 0;
+}

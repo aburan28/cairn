@@ -52,3 +52,12 @@ opencode.json
 # catch a hand-written one beside it.
 bootstrap.json
 bootstrap.*.json
+
+# The Next.js chain reader in ui/. Lockfile is committed (a UI built from an
+# unpinned resolution is as unreproducible as a binary built from one); build
+# output and dependencies are not.
+ui/node_modules/
+ui/.next/
+ui/out/
+ui/next-env.d.ts
+ui/tsconfig.tsbuildinfo
