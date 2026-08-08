@@ -69,6 +69,26 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # The archive name needs a version slug, and `github.ref_name` cannot be
+      # used raw: on a `workflow_dispatch` from a branch it is the branch name,
+      # and a branch is allowed to contain `/`. That turned the tarball into a
+      # path — `proofwork-feat/multiarch-release-<target>.tar.gz` — and `tar`
+      # failed with "Cannot open: No such file or directory" on every Linux
+      # leg. Found by dispatching this workflow rather than by reading it.
+      #
+      # Tags contain no slash, so their naming is unchanged; this only makes
+      # the dispatch path work, which is the path that exists to be exercised.
+      #
+      # The ref goes through `env:` rather than being interpolated into the
+      # script. A `${{ }}` expansion is textual substitution into the shell
+      # before it runs, so a branch named with a backtick or `$(…)` would
+      # execute — and branch names are not something this repository controls.
+      - name: version slug
+        shell: bash
+        env:
+          REF: ${{ github.ref_name }}
+        run: echo "PKG=${REF//\//-}" >> "$GITHUB_ENV"
+
       # musl links statically, which is the point of shipping it: a node
       # operator on a distribution older than the runner's glibc gets a binary
       # that runs, instead of a symbol-version error.
@@ -98,7 +118,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NAME="proofwork-${{ github.ref_name }}-${{ matrix.target }}"
+          NAME="proofwork-$PKG-${{ matrix.target }}"
           DIR="target/${{ matrix.target }}/release"
           BINS="proofwork proofwork-mcp proofwork-p2p proofwork-serve proofwork-gen-bootstrap"
           for bin in $BINS; do
@@ -130,7 +150,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NAME="proofwork-${{ github.ref_name }}-${{ matrix.target }}"
+          NAME="proofwork-$PKG-${{ matrix.target }}"
           mkdir -p /tmp/unpacked && tar -C /tmp/unpacked -xzf "$NAME.tar.gz"
           for bin in proofwork proofwork-serve proofwork-p2p proofwork-gen-bootstrap; do
             "/tmp/unpacked/$bin" --help >/dev/null 2>&1 \
@@ -147,8 +167,8 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-            proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+            proofwork-${{ env.PKG }}-${{ matrix.target }}.tar.gz
+            proofwork-${{ env.PKG }}-${{ matrix.target }}.tar.gz.sha256
 
       # Publishing is tag-only. A manual dispatch builds, packages and proves
       # the tarball runs, then stops — so the path can be exercised without
@@ -157,8 +177,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-            proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+            proofwork-${{ env.PKG }}-${{ matrix.target }}.tar.gz
+            proofwork-${{ env.PKG }}-${{ matrix.target }}.tar.gz.sha256
           body: |
             Binaries for `${{ github.ref_name }}`. Five to a tarball: `proofwork`
             (CLI), `proofwork-mcp`, `proofwork-p2p`, `proofwork-serve`,
@@ -176,8 +196,8 @@ jobs:
             match.
 
             ```sh
-            tar -xzf proofwork-${{ github.ref_name }}-<target>.tar.gz
-            sha256sum -c proofwork-${{ github.ref_name }}-<target>.tar.gz.sha256
+            tar -xzf proofwork-${{ env.PKG }}-<target>.tar.gz
+            sha256sum -c proofwork-${{ env.PKG }}-<target>.tar.gz.sha256
             ./proofwork --help
             ```
 
