@@ -1,0 +1,32 @@
+name: release-please
+
+# Owns the *version* and the *changelog*. It owns no binaries: merging the PR
+# it opens creates a `v*` tag, and that tag triggers `release.yml`, which
+# builds and publishes the artifacts. Two workflows because deciding "what
+# version is this" and "what bytes ship" are different jobs — a tool that does
+# both tends to do one of them badly, and this repository already has strong
+# opinions about what goes into a release tarball.
+#
+# How it works, for anyone who has not used it: on every push to main it keeps
+# a single open "chore(main): release X.Y.Z" PR up to date, accumulating the
+# changelog from commit messages. Nothing is released until a human merges
+# that PR. So the release button is a code review, which is the right shape
+# for a repository whose central claim is that results are independently
+# checkable.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: .github/release-please-config.json
+          manifest-file: .release-please-manifest.json
