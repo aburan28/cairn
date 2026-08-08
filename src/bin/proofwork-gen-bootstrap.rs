@@ -70,9 +70,25 @@ fn main() {
     let identity = PeerIdentity::generate();
     let public_hex = hex_encode(identity.public_key());
 
+    // `placeholder_peer_id` is what lets the *daemon* say this file is not
+    // finished yet, rather than only this program saying it once at generation
+    // time and scrolling away in build output. A peer id is
+    // `sha256(public key)`, so `proofwork-p2p` recomputes it from whatever
+    // `public` currently holds and warns only while the two still match --
+    // which means the warning **clears itself** the moment somebody pastes the
+    // real key in, with nothing to remember to delete. Extra fields are
+    // ignored by every reader (`load_endpoint` takes `addr` and `public`), and
+    // a bootstrap file is local configuration that never enters the log, so
+    // this is not a record-format change.
     let bootstrap = Value::object([
         ("addr", Value::string(addr)),
         ("public", Value::string(public_hex.clone())),
+        (
+            "placeholder_peer_id",
+            Value::string(proofwork::p2p::discovery::peer_id_string(
+                &identity.to_public().id(),
+            )),
+        ),
     ]);
     fs::write(&out, bootstrap.canonical_string()).unwrap_or_else(|e| {
         eprintln!("{out}: {e}");

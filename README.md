@@ -133,47 +133,76 @@ holds the ledger's single write lock, so nothing else can — or
 
 ### Start a p2p node
 
-The easiest local launch is:
+There are two roles and they run different commands. Nearly everyone wants the
+first.
+
+**Joining — dial out, serve nobody.**
 
 ```sh
 make p2p
 ```
 
-By default, `make p2p` writes to `.local/proofwork-p2p.jsonl` and does not
-share the ledger with other services. On first run it creates
-`.local/node.identity.json`, `.local/root.key`, and `.local/checkpoint.json`. The
-first two contain private key material; keep `.local/` out of version control.
-The node listens on `127.0.0.1:9000` by default, accepts inbound peers,
-periodically dials configured bootstrap files, and re-derives received records
-locally.
+Binds `127.0.0.1:9000` (nothing needs to dial you), writes
+`.local/proofwork-p2p.jsonl`, and on first run creates
+`.local/node.identity.json`, `.local/root.key`, and `.local/checkpoint.json`.
+The first two are private keys; `.local/` is gitignored, keep it that way.
 
-To connect to a peer, provide a bootstrap file containing its address and
-McEliece public key:
+**One thing will stop this working, and it is not the network.** With no
+explicit `BOOTSTRAP_ARGS`, the first run generates `.local/seed.json` for
+`SEED_ADDR` with a **placeholder** public key — a real key, freshly minted, that
+belongs to nobody. The address is only ever a dial hint; `p2p::handshake`
+authenticates the *key*, so a placeholder authenticates nobody and every
+handshake fails. Until you paste the seed's real key into `"public"`, the daemon
+says so at startup:
 
-```json
-{"addr":"127.0.0.1:9001","public":"<peer public-key hex>"}
+```
+bootstrap .local/seed.json: still carries the PLACEHOLDER key ...
 ```
 
-Then launch with:
+That warning clears itself once the key is real — it is keyed on the peer id of
+the generated key, not on a flag anyone has to remember to delete. Point
+somewhere else instead if you prefer:
 
 ```sh
-make p2p LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS='--bootstrap peer.json'
+make p2p SEED_ADDR=203.0.113.9:9001      # regenerate the hint for another host
+make p2p BOOTSTRAP_ARGS='--bootstrap peer.json'   # or supply the file outright
 ```
 
-Without an explicit `BOOTSTRAP_ARGS`, `make p2p` bootstraps against
-`SEED_ADDR` (default `44.229.170.164:5000`), generating
-`.local/seed.json` on first run via `proofwork-gen-bootstrap`. That file's
-`addr` is the real seed's; its `public` is a freshly generated placeholder key,
-because the address is only a hint and `p2p::handshake` authenticates the key,
-not the socket it answered on. Replace `"public"` in `.local/seed.json` with
-the seed's actual public key before relying on the connection, or point
-`SEED_ADDR`/`SEED_BOOTSTRAP` elsewhere:
+A bootstrap file is just `{"addr":"host:port","public":"<peer public-key hex>"}`.
+`addr` may be a hostname, which survives a restart that moves an IP.
+
+**Seeding — accept strangers.**
 
 ```sh
-make p2p SEED_ADDR=203.0.113.9:9001
-# or supply your own bootstrap file outright:
-make p2p BOOTSTRAP_ARGS='--bootstrap peer.json'
+make seed
 ```
+
+Binds `0.0.0.0` on `SEED_ADDR`'s port (the port is derived from `SEED_ADDR`, so
+the two cannot disagree). Binding the wildcard is the counterintuitive part and
+the one that matters on a cloud host: an instance's public address is NAT'd to
+it and appears on no local interface, so `--listen <public ip>` cannot bind at
+all. Publish the public address in the bootstrap file you hand out.
+
+Two things `make seed` cannot do for you, both of which look identical to a
+seed that is simply down:
+
+- **Open the port inbound.** A security group that *drops* rather than refuses
+  produces no error on either end — just silence until a timeout.
+- **Distribute your real key.** Hand out the `"public"` field from your
+  `--identity` file (`.local/node.identity.json`), not your own `.local/seed.json`,
+  which holds a placeholder for somebody *else*.
+
+**Is it actually connected?** Successful sessions are logged, not just failures:
+
+```
+inbound session:  <peer id> ok, 12 entries now
+outbound session: <peer id> ok, 12 entries now
+```
+
+Silence with neither those nor an error means nothing has been dialled yet;
+`outbound session: transport I/O: ...` on repeat means the address, the
+firewall, or the key. Check them in that order — the key is the one with no
+network symptom.
 
 Use separate `LOCAL_DIR`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT` paths for each
 node. `make mcp` uses `.local/proofwork-mcp.jsonl` by default, and `make p2p`

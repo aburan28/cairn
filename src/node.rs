@@ -1128,6 +1128,31 @@ impl Node {
         None
     }
 
+    /// What one claim was paid, if it has settled.
+    ///
+    /// Keyed on the claim rather than the objective, which
+    /// [`Node::settlement_of`] cannot answer: a progressive objective settles
+    /// many times and that accessor deliberately returns only the first. A
+    /// contributor asking "was *my* claim paid, and how much" is asking this
+    /// question, and before this the only answer available was to diff an
+    /// objective's pool total across calls and hope nobody else was working.
+    ///
+    /// `None` distinguishes nothing: not settled yet, settled for zero, and no
+    /// such claim all read the same here. A caller that needs to tell them
+    /// apart has the claim itself — see [`Node::accepted_claims`].
+    pub fn settlement_for_claim(&self, claim_id: &str) -> Option<u64> {
+        for entry in self.ledger.entries_of_kind(SETTLEMENT) {
+            if payload_str(&entry.payload, "claim_id") == Some(claim_id) {
+                return entry
+                    .payload
+                    .get("reward")
+                    .and_then(Value::as_i128)
+                    .and_then(|reward| u64::try_from(reward).ok());
+            }
+        }
+        None
+    }
+
     /// The current best-known score for a progressive objective.
     ///
     /// `None` also when the latest frontier entry cannot be decoded, which is

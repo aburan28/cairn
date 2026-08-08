@@ -8,7 +8,7 @@ use proofwork::checkpoint::RootKey;
 use proofwork::gossip::{Candidate, Population};
 use proofwork::ledger::Ledger;
 use proofwork::node::Node;
-use proofwork::p2p::discovery::Endpoint;
+use proofwork::p2p::discovery::{peer_id_string, Endpoint};
 use proofwork::p2p::handshake::{PeerIdentity, PeerPublic};
 use proofwork::p2p::multicast;
 use proofwork::p2p::pop::PopLimits;
@@ -87,7 +87,28 @@ fn load_identity(path: &Path) -> Result<PeerIdentity, String> {
     PeerIdentity::from_bytes(&public, &secret).map_err(|e| e.to_string())
 }
 
-fn load_endpoint(path: &Path) -> Result<Endpoint, String> {
+/// A bootstrap file still carrying the placeholder key `gen-bootstrap` wrote.
+///
+/// Detected rather than remembered: the file records the peer id of the key it
+/// generated, a peer id *is* `sha256(public key)`, so this recomputes it from
+/// whatever `public` holds now and matches only while the two are the same
+/// key. Pasting the real key in clears it with nothing to delete.
+///
+/// Worth its own path because the failure it explains is otherwise mute. A
+/// placeholder key authenticates nobody, so the handshake fails and the daemon
+/// prints a transport error identical to the one a firewall produces -- and an
+/// operator with a correct address, an open port and a bogus key has no way to
+/// tell those apart from the log.
+fn is_placeholder(value: &Value, endpoint: &Endpoint) -> bool {
+    value
+        .get("placeholder_peer_id")
+        .and_then(Value::as_str)
+        .is_some_and(|recorded| {
+            recorded == proofwork::p2p::discovery::peer_id_string(&endpoint.peer.id())
+        })
+}
+
+fn load_endpoint(path: &Path) -> Result<(Endpoint, bool), String> {
     let value = Value::from_json(&fs::read_to_string(path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let addr = value
@@ -108,7 +129,9 @@ fn load_endpoint(path: &Path) -> Result<Endpoint, String> {
             .ok_or("bootstrap.public missing")?,
     )?;
     let peer = PeerPublic::from_bytes(&public).map_err(|e| e.to_string())?;
-    Ok(Endpoint::new(addr, peer))
+    let endpoint = Endpoint::new(addr, peer);
+    let placeholder = is_placeholder(&value, &endpoint);
+    Ok((endpoint, placeholder))
 }
 
 fn load_root_key(path: &Path) -> Result<RootKey, String> {
@@ -313,7 +336,27 @@ fn main() {
     let mut service = Service::new(Arc::clone(&identity));
     for path in bootstrap {
         match load_endpoint(Path::new(&path)) {
-            Ok(endpoint) => service.add_bootstrap(endpoint),
+            Ok((endpoint, placeholder)) => {
+                if placeholder {
+                    // Loud, and at startup rather than at the first failed
+                    // dial: a placeholder key fails the handshake with a
+                    // transport error indistinguishable from a closed port, so
+                    // an operator who has already checked the address and the
+                    // firewall has nothing left to suspect. Said once here,
+                    // the one remaining explanation is on screen before the
+                    // first dial rather than absent from all of them.
+                    eprintln!(
+                        "bootstrap {path}: still carries the PLACEHOLDER key \
+                         `proofwork-gen-bootstrap` generated, which authenticates nobody. \
+                         Dials to {} will fail their handshake and report a plain transport \
+                         error. Replace \"public\" in that file with the seed's real key -- \
+                         the seed operator can print theirs from the \"public\" field of \
+                         their --identity file.",
+                        endpoint.addr
+                    );
+                }
+                service.add_bootstrap(endpoint)
+            }
             Err(error) => {
                 eprintln!("bootstrap {path}: {error}");
                 std::process::exit(2);
@@ -431,17 +474,27 @@ fn main() {
                         PopLimits::default(),
                         |node, candidate| scorer.score(node, candidate),
                     )
-                    .map(|_| ())
+                    .map(|(remote, _)| remote)
             }
-            None => accept_service.serve_node_once(stream, node).map(|_| ()),
+            None => accept_service.serve_node_once(stream, node),
         };
         match outcome {
-            Ok(()) => persist(
-                &guard,
-                &accept_checkpoint_path,
-                &accept_root_key,
-                accept_population_path.as_ref(),
-            ),
+            Ok(remote) => {
+                // The only positive signal this daemon ever gave was a growing
+                // log file, checked by hand across two terminals. Every other
+                // line here is a failure; a session that worked was silent.
+                eprintln!(
+                    "inbound session: {} ok, {} entries now",
+                    peer_id_string(&remote),
+                    node.ledger().len()
+                );
+                persist(
+                    &guard,
+                    &accept_checkpoint_path,
+                    &accept_root_key,
+                    accept_population_path.as_ref(),
+                );
+            }
             Err(error) => eprintln!("inbound session: {error}"),
         }
     });
@@ -540,12 +593,19 @@ fn main() {
                 None => service.dial_node_once(&endpoint, node),
             };
             match outcome {
-                Ok(()) => persist(
-                    &guard,
-                    &checkpoint_path,
-                    &root_key,
-                    population_path.as_ref(),
-                ),
+                Ok(()) => {
+                    eprintln!(
+                        "outbound session: {} ok, {} entries now",
+                        peer_id_string(&endpoint.peer.id()),
+                        node.ledger().len()
+                    );
+                    persist(
+                        &guard,
+                        &checkpoint_path,
+                        &root_key,
+                        population_path.as_ref(),
+                    );
+                }
                 Err(error) => {
                     eprintln!("outbound session: {error}");
                     // Tell the DHT, or every lookup that chose this peer waits
