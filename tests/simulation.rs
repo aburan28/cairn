@@ -207,6 +207,21 @@ impl Sim {
         ((self.now / EPOCH) + 1) * EPOCH + 1
     }
 
+    /// Advance to the first instant at which the current epoch's work is
+    /// eligible to settle: past its own boundary, then past `FINALITY_EPOCHS`
+    /// further ones.
+    ///
+    /// Derived from `finality_epochs()` rather than written as a count of
+    /// boundaries. A test that hard-codes the delay does not fail when the
+    /// delay changes — it silently starts asserting that nothing settled,
+    /// which is the least useful way for a test to be wrong.
+    fn advance_to_eligibility(&mut self) {
+        for _ in 0..=proofwork::partition::finality_epochs() {
+            let boundary = self.next_boundary();
+            self.advance(boundary);
+        }
+    }
+
     /// The claims each node paid, in payment order.
     fn orders(&self) -> Vec<Vec<String>> {
         self.nodes
@@ -376,8 +391,7 @@ fn nodes_converge_when_sessions_land_inside_the_epoch() {
         // must be derived from the boundary, not from the epoch length.
         let headroom = (sim.next_boundary() - sim.now - 2).max(1) as u64;
         sim.gossip(0, headroom);
-        let boundary = sim.next_boundary();
-        sim.advance(boundary);
+        sim.advance_to_eligibility();
         sim.settle_all();
 
         let orders = sim.orders();
@@ -423,8 +437,7 @@ fn a_cold_sync_across_epochs_replays_whole_whatever_the_id_order() {
         // One session carrying the whole multi-epoch history, delivered
         // promptly; then the boundary passes and both settle.
         sim.gossip(0, 30);
-        let boundary = sim.next_boundary();
-        sim.advance(boundary);
+        sim.advance_to_eligibility();
         sim.settle_all();
 
         let orders = sim.orders();
@@ -576,22 +589,27 @@ fn replay_does_not_lose_a_claim_to_the_order_records_arrive_in() {
     );
 }
 
-/// **The open defect, reproduced on demand.** A session lands *after* the
-/// receiving node drained the epoch its claims belong to. The late claims are
-/// refused — correctly, per the current rules — and the chains diverge
-/// permanently: the partial-view case
-/// `docs/design/settlement-convergence.md` names as unsolved, pinned by a
-/// test instead of prose.
+/// **The partial-view defect, now closed.** A session lands after the epoch
+/// its claims belong to has closed. Under the old rules the receiving node had
+/// already drained that epoch at the boundary, refused the late claims, and
+/// forked permanently — the case `docs/design/settlement-convergence.md`
+/// carried as unsolved.
 ///
-/// `#[ignore]`d because it documents a defect rather than guards a fix: it
-/// asserts the divergence HAPPENS. The day a finality delay or reorg rule
-/// lands, this failing is the signal to move the scenario into the
-/// convergence suite above.
+/// This test asserted `assert_ne!` on the two chain heads and was `#[ignore]`d
+/// as a reproduction. The finality delay closes it: node 1 no longer drains at
+/// the boundary, so the straggler — 60 virtual seconds late, against a 600
+/// second window — is simply there by the time the epoch is eligible.
+///
+/// The scenario is unchanged from the reproduction; only the timing rule and
+/// the direction of the assertion moved. That is deliberate, so the diff shows
+/// the same inputs going from fork to agreement.
+///
+/// A straggler later than `FINALITY_EPOCHS` is a different scenario and still
+/// diverges — see
+/// `a_record_arriving_after_the_finality_window_is_refused_not_silently_paid`,
+/// which asserts that case is at least detectable.
 #[test]
-#[ignore = "reproduces the documented partial-view divergence; the finality \
-            delay that would fix it is designed, not built -- \
-            docs/design/settlement-convergence.md"]
-fn a_partial_view_at_drain_time_forks_the_chain() {
+fn a_partial_view_at_drain_time_converges_once_the_epoch_waits() {
     // The fork needs a *partial* view, literally: a node that holds nothing
     // never drains -- no claims means no batch, no batch means the epoch is
     // never marked settled, and late history is accepted whole. (That is why
@@ -640,24 +658,45 @@ fn a_partial_view_at_drain_time_forks_the_chain() {
         records,
     });
 
-    sim.advance(boundary);
-    sim.settle_all(); // node 1 drains with 3 of 4 claims...
-    sim.advance(boundary + 120); // ...the straggler arrives...
-    sim.settle_all(); // ...and cannot join the batch that already paid.
+    // Nothing drains at the boundary any more; the epoch has to wait out the
+    // finality delay, and the straggler lands during that wait.
+    let boundary_now = sim.next_boundary();
+    sim.advance(boundary_now);
+    // The daemon ticks at the boundary and tries to drain, exactly as it did
+    // when this scenario forked. The delay is what makes that tick a no-op --
+    // so this drain must happen, and must pay nothing. Deleting it would make
+    // the test pass by never draining early, which is not the property.
+    sim.settle_all();
+    let early = sim.orders();
+    assert!(
+        early.iter().all(Vec::is_empty),
+        "with the delay in force the boundary tick must pay nothing. If node 1 \
+         paid its 3-of-4 here, the straggler is about to be refused and the \
+         chains fork -- which is the defect this test used to reproduce. \
+         got: {early:?}"
+    );
+
+    sim.advance_to_eligibility();
+    sim.settle_all();
 
     let orders = sim.orders();
     assert_eq!(orders[0].len(), 4, "the author settled all four");
     assert_eq!(
         orders[1].len(),
-        3,
-        "node 1 should have settled exactly the three that arrived in time"
+        4,
+        "node 1 must settle all four as well: the straggler arrived 60s after \
+         the boundary, and the finality window is a whole epoch"
+    );
+    assert_eq!(
+        orders[1], orders[0],
+        "same claims in the same order, which is the invariant this file is \
+         about -- equal counts with a different sequence would still be a fork"
     );
     let heads = sim.heads();
-    assert_ne!(
-        heads[0], heads[1],
-        "the partial view CONVERGED: a fix for the partial-view case has \
-         landed -- move this scenario into the convergence suite and delete \
-         the #[ignore]. See docs/design/settlement-convergence.md."
+    assert_eq!(heads[0], heads[1], "the partial view must now converge");
+    assert!(
+        sim.nodes.iter().all(|n| n.late_epochs().is_empty()),
+        "nothing was outside the window, so nothing may be reported late"
     );
 }
 
@@ -818,26 +857,29 @@ fn every_published_link_recomputes_from_its_published_fields() {
 /// order, which is exactly the fork the chain was meant to remove, moved one
 /// level up.
 ///
-/// **Why no fix ships with this test.** The anchor has to be fixed before
-/// anyone can grind it, so it can only depend on what had already settled when
-/// the batch was written — and *whether an earlier epoch had settled by then*
-/// is precisely what differs between two nodes that learned in different
-/// orders. Folding in epoch order does not help: at the moment node A drained
-/// E2, no batch for E1 existed on A at all, so any function of "batches for
-/// epochs before E2" is still empty there and non-empty on B. The honest
-/// options are the two `docs/design/settlement-convergence.md` already names
-/// for the partial-view case — a finality delay, or reorgs — and rushing a
-/// third would repeat the mistake this test exists to record.
+/// **The fix, and what it is worth.** The anchor has to be fixed before anyone
+/// can grind it, so it can only depend on what had already settled when the
+/// batch was written — and *whether an earlier epoch had settled by then* is
+/// precisely what differs between two nodes that learned in different orders.
+/// Folding in epoch order does not help: at the moment node A drained E2, no
+/// batch for E1 existed on A at all, so any function of "batches for epochs
+/// before E2" is still empty there and non-empty on B.
 ///
-/// What the chain *did* buy is real and narrower than advertised: it removed
-/// the dependence on the ledger *envelope* (`seq`, `prev`, local write time),
-/// so two nodes that drain the same epochs in the same sequence now agree
-/// where before they never could.
+/// What does help is refusing to drain E2 that early. `FINALITY_EPOCHS` makes
+/// eligibility a function of the clock instead of a function of arrival: an
+/// epoch waits one further closed epoch before it may settle, so by the time
+/// A is allowed to drain E2 it is also holding E1, and `due_epochs` hands both
+/// back in epoch order. This test is that claim — it was `#[ignore]`d and
+/// asserted `assert_ne!` until the delay shipped.
+///
+/// **It converges under a synchrony bound, not unconditionally.** If E1's
+/// records reach A *after* A has already settled E2, no delay saves it, and no
+/// choice of constant would: agreeing on the settled set when messages can be
+/// arbitrarily late is consensus, which stage 0 does not have. What the delay
+/// buys there is a *detectable* failure instead of a silent one — see
+/// `a_record_arriving_after_the_finality_window_is_refused_not_silently_paid`.
 #[test]
-#[ignore = "records a real divergence: nodes that drain epochs in different \
-            sequences fork, with no lost records and both logs auditing clean \
-            -- docs/design/settlement-convergence.md"]
-fn draining_epochs_in_a_different_sequence_forks_the_chain() {
+fn draining_epochs_in_a_different_sequence_converges_under_the_finality_delay() {
     let (base, artifact) = shipped_objective_and_artifact();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let t0: i64 = 1_900_000_000;
@@ -898,10 +940,20 @@ fn draining_epochs_in_a_different_sequence_forks_the_chain() {
             .collect()
     };
 
-    // A learns the *later* group first and settles it, then learns the earlier.
+    // A learns the *later* group first and tries to settle it before it has
+    // heard of the earlier one. This is the drain that used to fork the chain.
     let mut a = Node::new(Ledger::open(scratch("forkseq", 0, 0)).expect("l"), &root);
     proofwork::p2p::service::replay_records(&mut a, &groups[1]);
-    a.settle_at(&format_iso8601_utc(t0 + 3 * EPOCH)).expect("s");
+    let early = a.settle_at(&format_iso8601_utc(t0 + 3 * EPOCH)).expect("s");
+    assert!(
+        early.is_empty(),
+        "the finality delay is the whole mechanism: group 1's epoch is not yet \
+         eligible at t0+3E, so this drain must pay nothing. If it pays, the \
+         convergence below is an accident of timing rather than a property. \
+         got: {early:?}"
+    );
+
+    // By the time it *is* eligible, A is holding the earlier group too.
     proofwork::p2p::service::replay_records(&mut a, &groups[0]);
     a.settle_at(&format_iso8601_utc(t0 + 4 * EPOCH)).expect("s");
 
@@ -927,11 +979,150 @@ fn draining_epochs_in_a_different_sequence_forks_the_chain() {
             .map(|l| l.link.clone())
             .unwrap_or_default()
     };
-    assert_ne!(
+    assert_eq!(
         head(&a),
         head(&b),
-        "if this now passes, the drain-sequence divergence is fixed -- delete \
-         the ignore and the caveats that cite it"
+        "same records and same epochs must give the same epoch-chain head, \
+         whatever order the two nodes learned the work in"
     );
-    assert_ne!(sa, sb, "the fork must show up as a different payment order");
+    assert_eq!(
+        sa, sb,
+        "convergence is about *who got paid in what order*, so the payment \
+         sequence is the assertion that matters -- equal heads with unequal \
+         payouts would mean the head had stopped covering the thing it exists \
+         to cover"
+    );
+    assert!(
+        a.late_epochs().is_empty() && b.late_epochs().is_empty(),
+        "nothing arrived late here; if this trips, the test is measuring the \
+         refusal path rather than the convergence path"
+    );
+}
+
+/// The bound on the claim above, asserted rather than described.
+///
+/// `FINALITY_EPOCHS` converges settlement *if* every record for an epoch
+/// reaches every honest node within the delay. This is what happens when it
+/// does not, and it is the reason the constant's documentation refuses to say
+/// "converges" without a qualifier.
+///
+/// A settles epoch E2 on time. E1's records then arrive — late, after a later
+/// epoch has already been paid. A refuses them: settling E1 now would anchor it
+/// on a chain head that already contains E2, re-ordering payouts an auditor has
+/// already seen. So A and B disagree about who got paid, and no delay fixes it;
+/// only consensus would.
+///
+/// What the delay changes is that the disagreement is **visible**. Before it,
+/// two nodes forked and both audits came back empty. Now the node that missed
+/// the records says so, in `late_epochs` and in `audit`. That is a smaller
+/// promise than convergence and it is one this code can actually keep.
+#[test]
+fn a_record_arriving_after_the_finality_window_is_refused_not_silently_paid() {
+    let (base, artifact) = shipped_objective_and_artifact();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let t0: i64 = 1_900_000_000;
+
+    let mut author = Node::new(
+        Ledger::open(scratch("latewin", 0, 9)).expect("ledger"),
+        &root,
+    );
+    let mut groups: Vec<Vec<(String, Value)>> = Vec::new();
+    for (g, (commit_off, reveal_off)) in [(0, EPOCH), (EPOCH, 2 * EPOCH)].into_iter().enumerate() {
+        let commit_ts = format_iso8601_utc(t0 + commit_off);
+        let reveal_ts = format_iso8601_utc(t0 + reveal_off);
+        let mut records = Vec::new();
+        for i in 0..2 {
+            let objective = Objective::new(
+                format!("GOAL-late-{g}-{i}"),
+                base.statement.clone(),
+                base.verifier.clone(),
+                base.reward,
+                base.funder.clone(),
+                &commit_ts,
+                None,
+                None,
+            )
+            .expect("objective");
+            let id = author.post_objective(&objective, &commit_ts).expect("post");
+            let sub = format!("s{g}{i}");
+            let nonce = format!("n{g}{i}");
+            let hash = commitment_hash(&id, &sub, &artifact, &nonce);
+            let commitment = Commitment::new(&id, &sub, hash, &commit_ts);
+            author.commit(&commitment, &commit_ts).expect("commit");
+            let claim =
+                Claim::new(&id, &sub, artifact.clone(), &nonce, &reveal_ts, vec![]).expect("claim");
+            let outcome = author.reveal(&claim, &reveal_ts).expect("reveal");
+            assert!(
+                outcome.verdict.accepted(),
+                "verifier could not run; this test says nothing about ordering: {:?}",
+                outcome.verdict
+            );
+            records.push(("objective".to_string(), objective.to_value()));
+            records.push(("commitment".to_string(), commitment.to_value()));
+            records.push(("claim".to_string(), claim.to_value()));
+        }
+        groups.push(records);
+    }
+
+    let paid = |node: &Node| -> Vec<String> {
+        node.ledger()
+            .entries_of_kind("settlement")
+            .into_iter()
+            .filter_map(|e| {
+                e.payload
+                    .get("claim_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    };
+
+    // A hears only the later group, and settles it once it is eligible.
+    let mut a = Node::new(Ledger::open(scratch("latewin", 0, 0)).expect("l"), &root);
+    proofwork::p2p::service::replay_records(&mut a, &groups[1]);
+    let on_time = a.settle_at(&format_iso8601_utc(t0 + 4 * EPOCH)).expect("s");
+    assert!(
+        !on_time.is_empty(),
+        "premise: the later epoch must actually settle here, or the refusal \
+         below is not testing what it claims"
+    );
+
+    // The earlier group turns up afterwards. Too late: a later epoch is paid.
+    proofwork::p2p::service::replay_records(&mut a, &groups[0]);
+    let refused = a.settle_at(&format_iso8601_utc(t0 + 5 * EPOCH)).expect("s");
+    assert!(
+        refused.is_empty(),
+        "an epoch older than one already settled must not be paid: {refused:?}"
+    );
+
+    // B heard everything in time.
+    let mut b = Node::new(Ledger::open(scratch("latewin", 0, 1)).expect("l"), &root);
+    proofwork::p2p::service::replay_records(&mut b, &groups[0]);
+    proofwork::p2p::service::replay_records(&mut b, &groups[1]);
+    b.settle_at(&format_iso8601_utc(t0 + 4 * EPOCH)).expect("s");
+
+    // The disagreement is real -- this is the honest half of the claim.
+    assert!(
+        paid(&a).len() < paid(&b).len(),
+        "A missed the window, so A must have paid strictly fewer claims: \
+         a={:?} b={:?}",
+        paid(&a),
+        paid(&b)
+    );
+
+    // And it is loud, which is the part that is actually new.
+    assert!(
+        !a.late_epochs().is_empty(),
+        "the node that missed records must report them rather than look healthy"
+    );
+    assert!(
+        b.late_epochs().is_empty(),
+        "the node that heard in time has nothing to report"
+    );
+    let complaints = a.audit(false);
+    assert!(
+        complaints.iter().any(|c| c.contains("can never settle")),
+        "audit must surface the unpayable epochs; a clean audit here would be \
+         the old silent fork with extra steps. got: {complaints:?}"
+    );
 }
