@@ -1268,14 +1268,38 @@ mod tests {
     #[cfg(unix)]
     fn with_fake_lean(tag: &str, code: i32, says: &str) -> Verdict {
         let binary = fake_lean(tag, code, says);
-        let verdict = lean_using(
-            binary.to_str().expect("utf-8 path"),
-            root(),
-            &lean_spec(vec![]),
-            &proof(":= trivial"),
-        );
+        // Retried, because writing a program and then running it races with
+        // every *other* test in this binary. `cargo test` runs them on threads
+        // of one process, and between a `fork` and its `exec` the child holds
+        // copies of every descriptor its parent had open -- including, for that
+        // instant, the one this thread is still writing the stand-in through.
+        // Linux refuses to exec a file any process holds open for writing, so
+        // the run comes back ETXTBSY: "Text file busy". Nothing is wrong with
+        // the file, and a moment later nothing is wrong at all.
+        //
+        // It is worth the loop rather than an `#[ignore]`. This is CI's most
+        // frequent false red -- three in one afternoon, each looking like a
+        // Lean verdict regression, each costing somebody the read.
+        let mut verdict = None;
+        for _ in 0..20 {
+            let attempt = lean_using(
+                binary.to_str().expect("utf-8 path"),
+                root(),
+                &lean_spec(vec![]),
+                &proof(":= trivial"),
+            );
+            // Only this one error is retried. Every other `Unavailable` is a
+            // real answer about the environment -- no toolchain, no sandbox --
+            // and looping on those would turn a clear message into a hang.
+            if attempt.detail.contains("Text file busy") {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            verdict = Some(attempt);
+            break;
+        }
         let _ = std::fs::remove_dir_all(binary.parent().expect("parent"));
-        verdict
+        verdict.expect("the stand-in stayed busy for a second; that is not the race")
     }
 
     #[cfg(unix)]
