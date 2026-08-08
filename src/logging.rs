@@ -18,8 +18,12 @@
 //! wrote a line there would not look untidy, it would corrupt the protocol
 //! mid-session and the client would blame itself — the exact failure
 //! `scripts/mcp-smoke.sh` exists to catch. Owning the writer is what turns
-//! "stderr, always" from a convention somebody has to remember into
-//! [`a test`](tests::every_level_writes_to_stderr_and_never_stdout).
+//! "stderr, always" from a convention somebody has to remember into a test —
+//! `every_level_writes_to_stderr_and_never_stdout` below, which re-execs this
+//! binary as a child so it checks what the *process* put on each stream.
+//!
+//! (Named rather than linked: it is `#[cfg(test)]`, so an intra-doc link to it
+//! does not resolve in a doc build and `cargo doc -D warnings` rejects it.)
 //!
 //! # Filtering
 //!
