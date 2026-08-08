@@ -22,13 +22,43 @@ primitive; the numbers are the unit of account the settlement rules operate
 on, not money anyone is holding. See *What this is not* in the top-level
 README.
 
-**The provenance caveat.** The checkers assert that `k` was discarded at
-instance generation — that the funder cannot already hold the answer and
-self-deal the bounty. That claim is the operator's, and nothing in this
-repository lets a contributor verify it. What the pinning machinery proves is
-narrower: the instance you solve is the instance that was funded, byte for
-byte. Whether anyone already knows its answer, it cannot prove. Treat the
-anti-self-dealing property as trust in the poster, not a verified fact.
+**Provenance: nobody knows `k`, and you can check that yourself.** These
+instances used to be `Q = k*G` for a random `k` the operator generated and said
+they discarded — a claim nothing in this repository could verify, so the
+anti-self-dealing property was trust in the poster.
+
+It is now a fact you can re-derive. `Q` is **hashed to the curve** from a fixed
+public seed rather than multiplied into existence:
+
+```
+x = sha256(SEED || bits || counter) mod p,   counter = 0, 1, 2, …
+until x^3 + ax + b is a square;  y = its canonical root
+```
+
+Because `Q` is never constructed as a multiple of `G`, recovering `log_G(Q)` *is*
+the ECDLP the bounty pays for — the funder has no more idea what `k` is than you
+do. `_derive_q()` runs inside every check, and the checker is pinned by hash
+inside the objective's id, so the derivation is part of what you are solving.
+Run `scripts/derive-first-blood.py --check` to confirm the shipped files match
+the derivation.
+
+This is the standard nothing-up-my-sleeve construction — the same technique used
+to derive the second generator `H` for Pedersen commitments on secp256k1.
+
+*Grinding the seed gains an attacker nothing*, which is worth stating because it
+is the obvious objection. To profit from trying many seeds you would have to
+recognise a `Q` whose logarithm you already know — and recognising one means
+solving the instance. A fixed published seed is therefore as good as an
+unpredictable one, and has the advantage of being re-derivable by anyone,
+forever.
+
+**What this still does not prove.** The curve itself — `p`, `a`, `b`, `G` — is
+the poster's choice. Each checker verifies that `N` is prime and that both `G`
+and `Q` have order `N`, which rules out a smooth-order curve and therefore
+Pohlig-Hellman; it does not rule out every weak-curve family (a low embedding
+degree would admit MOV). Deriving the curve from the seed as well is the
+stronger construction and is not done. That residue is trust in the poster; the
+`k`-provenance half no longer is.
 
 The instances cite the **ecdlp-cost-challenge** project as their source —
 `first_blood/instance_public_<bits>.json`, seed 1 for every size except the
