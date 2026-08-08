@@ -66,6 +66,37 @@ surface, add a row; if you implement a mitigation, move the row and say what
 remains. Overstating what is defended is the one thing this repository cannot
 afford.
 
+### Commit messages, and why the format is load-bearing now
+
+Releases are cut by [release-please](.github/workflows/release-please.yml),
+which reads **conventional commits** to decide the version and write the
+changelog. So the subject line is no longer only prose for humans:
+
+```
+feat: add a chain endpoint          -> minor bump, "Features"
+fix: reject an empty forged batch   -> patch bump, "Fixes"
+deps: put RustCrypto back in step   -> patch bump, "Dependencies"
+docs: correct the convergence claim -> patch bump, "Documentation"
+feat!: change the settlement anchor  -> MAJOR bump (the `!`)
+chore:, refactor:, test:            -> no release, hidden from the changelog
+```
+
+A subject with no recognised type is **not an error and not a release** — it
+simply does not appear in the changelog and does not move the version. That is
+the failure mode to know about: a real fix written as
+`The knowledge chain: settlement order now converges` ships to `main` and is
+invisible to the release. Most of this repository's history predates the
+convention, which is why the config carries a `bootstrap-sha` — the changelog
+starts from where the convention did, rather than pretending to describe what
+came before.
+
+Use `!` (or a `BREAKING CHANGE:` footer) for anything that moves a record id,
+a hash, an encoding, or the published root. Those are migrations, not edits —
+see [AGENTS.md](AGENTS.md).
+
+The body is unchanged and still matters more: explain *why*, and why the
+obvious alternative was not taken.
+
 ### Security issues
 
 Do not open a public issue. [SECURITY.md](SECURITY.md) has the process.
