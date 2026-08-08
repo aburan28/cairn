@@ -1728,9 +1728,26 @@ impl Node {
     /// settled. Sorted, so the link does not depend on the very ordering it is
     /// used to produce.
     ///
-    /// Convergence is by induction on the epoch. The empty chain is equal
-    /// everywhere; if every earlier batch agreed, the head agrees, so the
-    /// beacon agrees, so this batch sorts identically — and agrees in turn.
+    /// **What this does and does not buy, stated exactly.** It removes the
+    /// dependence on the ledger *envelope*: two nodes that drain the same
+    /// epochs in the same sequence now agree, where with an entry hash they
+    /// never could. It does **not** make settlement order converge in general.
+    ///
+    /// The induction that was originally written here — "if every earlier
+    /// batch agreed, the head agrees" — is an induction on the *epoch index*,
+    /// while the fold below is over *file position*, and
+    /// `epoch_links_before` deliberately keeps those apart. A node that
+    /// learns about later work first drains the later epoch first, so its batch
+    /// for the *earlier* epoch is anchored on the later epoch's link. Two nodes
+    /// then hold the same claims, settle the same claims, audit clean, and pay
+    /// them in a different order.
+    ///
+    /// That is pinned by `draining_epochs_in_a_different_sequence_forks_the_chain`
+    /// in `tests/simulation.rs`, and it is the same family as the partial-view
+    /// case in `docs/design/settlement-convergence.md`: the anchor can only
+    /// depend on what had already settled when the batch was written, and that
+    /// is exactly what differs between nodes that learned in different orders.
+    /// Closing it needs a finality delay or reorgs; neither is built.
     ///
     /// Grinding resistance is unchanged. `AGENTS.md`'s rule is that the anchor
     /// must be fixed before anyone can still choose part of the sort key, and a

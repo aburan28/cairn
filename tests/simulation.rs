@@ -797,3 +797,141 @@ fn every_published_link_recomputes_from_its_published_fields() {
         );
     }
 }
+
+/// **The epoch chain does not converge when two nodes drain in different
+/// epoch sequences.** `#[ignore]`d because it asserts the divergence happens.
+///
+/// This is a correction to a claim made in this repository, and the claim was
+/// mine. The epoch chain was introduced saying it made settlement order
+/// converge, with an induction: "if every epoch before E settled identically,
+/// then link(E-1) is equal on both, so anchor(E) is equal". That induction is
+/// on the **epoch index**. The fold is over **file position** — and
+/// `epoch_links_before` blesses the two coming apart on purpose, because
+/// folding in epoch order would let a late batch retroactively change a link
+/// an earlier batch already committed to.
+///
+/// They come apart whenever a node drains epochs out of order, which needs no
+/// adversary and no lost record: a node that learns about later work first
+/// settles the later epoch first, and its batch for the *earlier* epoch is
+/// then anchored on the later epoch's link. Both nodes hold the same claims,
+/// settle the same claims, and audit clean — and pay them in a different
+/// order, which is exactly the fork the chain was meant to remove, moved one
+/// level up.
+///
+/// **Why no fix ships with this test.** The anchor has to be fixed before
+/// anyone can grind it, so it can only depend on what had already settled when
+/// the batch was written — and *whether an earlier epoch had settled by then*
+/// is precisely what differs between two nodes that learned in different
+/// orders. Folding in epoch order does not help: at the moment node A drained
+/// E2, no batch for E1 existed on A at all, so any function of "batches for
+/// epochs before E2" is still empty there and non-empty on B. The honest
+/// options are the two `docs/design/settlement-convergence.md` already names
+/// for the partial-view case — a finality delay, or reorgs — and rushing a
+/// third would repeat the mistake this test exists to record.
+///
+/// What the chain *did* buy is real and narrower than advertised: it removed
+/// the dependence on the ledger *envelope* (`seq`, `prev`, local write time),
+/// so two nodes that drain the same epochs in the same sequence now agree
+/// where before they never could.
+#[test]
+#[ignore = "records a real divergence: nodes that drain epochs in different \
+            sequences fork, with no lost records and both logs auditing clean \
+            -- docs/design/settlement-convergence.md"]
+fn draining_epochs_in_a_different_sequence_forks_the_chain() {
+    let (base, artifact) = shipped_objective_and_artifact();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let t0: i64 = 1_900_000_000;
+
+    // Two groups, revealed one epoch apart.
+    let mut author = Node::new(
+        Ledger::open(scratch("forkseq", 0, 9)).expect("ledger"),
+        &root,
+    );
+    let mut groups: Vec<Vec<(String, Value)>> = Vec::new();
+    for (g, (commit_off, reveal_off)) in [(0, EPOCH), (EPOCH, 2 * EPOCH)].into_iter().enumerate() {
+        let commit_ts = format_iso8601_utc(t0 + commit_off);
+        let reveal_ts = format_iso8601_utc(t0 + reveal_off);
+        let mut records = Vec::new();
+        for i in 0..2 {
+            let objective = Objective::new(
+                format!("GOAL-fork-{g}-{i}"),
+                base.statement.clone(),
+                base.verifier.clone(),
+                base.reward,
+                base.funder.clone(),
+                &commit_ts,
+                None,
+                None,
+            )
+            .expect("objective");
+            let id = author.post_objective(&objective, &commit_ts).expect("post");
+            let sub = format!("s{g}{i}");
+            let nonce = format!("n{g}{i}");
+            let hash = commitment_hash(&id, &sub, &artifact, &nonce);
+            let commitment = Commitment::new(&id, &sub, hash, &commit_ts);
+            author.commit(&commitment, &commit_ts).expect("commit");
+            let claim =
+                Claim::new(&id, &sub, artifact.clone(), &nonce, &reveal_ts, vec![]).expect("claim");
+            let outcome = author.reveal(&claim, &reveal_ts).expect("reveal");
+            assert!(
+                outcome.verdict.accepted(),
+                "verifier could not run; this test says nothing about ordering: {:?}",
+                outcome.verdict
+            );
+            records.push(("objective".to_string(), objective.to_value()));
+            records.push(("commitment".to_string(), commitment.to_value()));
+            records.push(("claim".to_string(), claim.to_value()));
+        }
+        groups.push(records);
+    }
+
+    let order_of = |node: &Node| -> Vec<String> {
+        node.ledger()
+            .entries_of_kind("settlement")
+            .into_iter()
+            .filter_map(|e| {
+                e.payload
+                    .get("claim_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    };
+
+    // A learns the *later* group first and settles it, then learns the earlier.
+    let mut a = Node::new(Ledger::open(scratch("forkseq", 0, 0)).expect("l"), &root);
+    proofwork::p2p::service::replay_records(&mut a, &groups[1]);
+    a.settle_at(&format_iso8601_utc(t0 + 3 * EPOCH)).expect("s");
+    proofwork::p2p::service::replay_records(&mut a, &groups[0]);
+    a.settle_at(&format_iso8601_utc(t0 + 4 * EPOCH)).expect("s");
+
+    // B learns in epoch order.
+    let mut b = Node::new(Ledger::open(scratch("forkseq", 0, 1)).expect("l"), &root);
+    proofwork::p2p::service::replay_records(&mut b, &groups[0]);
+    proofwork::p2p::service::replay_records(&mut b, &groups[1]);
+    b.settle_at(&format_iso8601_utc(t0 + 4 * EPOCH)).expect("s");
+
+    // The premises that make this a fork rather than a loss.
+    let (sa, sb) = (order_of(&a), order_of(&b));
+    assert_eq!(
+        sa.iter().collect::<std::collections::BTreeSet<_>>(),
+        sb.iter().collect::<std::collections::BTreeSet<_>>(),
+        "premise: both nodes must settle the same claims"
+    );
+    assert!(a.audit(false).is_empty(), "premise: A audits clean");
+    assert!(b.audit(false).is_empty(), "premise: B audits clean");
+
+    let head = |n: &Node| {
+        n.epoch_chain()
+            .last()
+            .map(|l| l.link.clone())
+            .unwrap_or_default()
+    };
+    assert_ne!(
+        head(&a),
+        head(&b),
+        "if this now passes, the drain-sequence divergence is fixed -- delete \
+         the ignore and the caveats that cite it"
+    );
+    assert_ne!(sa, sb, "the fork must show up as a different payment order");
+}
