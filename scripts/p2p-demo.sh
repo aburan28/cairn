@@ -64,16 +64,29 @@ trap cleanup EXIT
 # auditor using a different length reports an honest batch as mis-ordered --
 # `proofwork audit` says so itself when every batch faults at once.
 export PROOFWORK_EPOCH_SECONDS=1
-# Two free ports, taken by binding and releasing rather than guessed: a fixed
-# port makes this script fail for whoever is already using it.
-free_port() {
-  python3 -c "
-import socket
-s = socket.socket(); s.bind(('127.0.0.1', 0))
-print(s.getsockname()[1]); s.close()"
+# Every process here binds `:0` and reports what it got, so nothing in this
+# script picks a port.
+#
+# The old way was to bind port zero in a throwaway socket, close it, and hand
+# the number to whoever was starting -- which is a guess dressed as a
+# measurement. Between that close and the real bind the port belongs to nobody
+# in particular, and losing the race does not fail where it happened: the
+# process starts, binds something else or nothing, and a peer reports a
+# connection refused much later against something that looks alive.
+#
+# Reading the port back removes the window rather than narrowing it, and the
+# line only exists after a successful bind, so this doubles as the readiness
+# check. There is no separate "is it up yet" poll because holding the port *is*
+# the proof.
+listening_port() {
+  local log=$1 name=$2 port=""
+  for _ in $(seq 1 150); do
+    port=$(sed -n 's/.*listening on 127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$log" 2>/dev/null | head -1)
+    [ -n "$port" ] && { echo "$port"; return 0; }
+    sleep 0.2
+  done
+  fail "$name never reported a listening port"
 }
-A_PORT=$(free_port)
-B_PORT=$(free_port)
 
 rule "A authors and settles, with the bundle it authored against"
 cp -r examples "$A/"
@@ -131,7 +144,7 @@ cp "$A/checkpoint.json" "$B/checkpoint.json"
 rule "A serves, with a submission queue"
 mkdir -p "$A/queue"
 "$DAEMON" --identity "$A/id.json" --root-key "$A/rootkey.json" \
-  --checkpoint "$A/checkpoint.json" --listen "127.0.0.1:$A_PORT" \
+  --checkpoint "$A/checkpoint.json" --listen "127.0.0.1:0" \
   --log "$A/log.jsonl" --root "$A" --queue "$A/queue" \
   --population "$A/population.json" > "$A/daemon.log" 2>&1 &
 APID=$!
@@ -142,6 +155,10 @@ for _ in $(seq 1 150); do
   sleep 0.2
 done
 [ -s "$A/id.json" ] || fail "A never wrote its transport identity"
+# `:0` above, and the answer read back here. A holds the port from the moment
+# the kernel picks it, so there is no interval in which anything else can take
+# it -- which is the whole difference from choosing a port in advance.
+A_PORT=$(listening_port "$A/daemon.log" "A")
 python3 -c "
 import json
 i = json.load(open('$A/id.json'))
@@ -155,31 +172,10 @@ json.dump({'addr': 'localhost:$A_PORT', 'public': i['public']},
           open('$WORK/a-endpoint.json', 'w'))"
 sed 's/^/  /' "$A/daemon.log"
 
-# Wait for A to accept a connection, rather than assuming it binds the moment
-# its identity file appears. `free_port` picks a port by binding zero and
-# *closing* it, so between that close and A's bind the port is anyone's. When A
-# loses that race B spends the whole sync window on "Connection refused" and the
-# run ends at "B did not sync A's log", naming the symptom two hundred lines
-# from the cause -- which is exactly how long the v6-first bootstrap bug took to
-# find. Fail here instead, where the message is the diagnosis.
-for _ in $(seq 1 100); do
-  python3 -c "
-import socket, sys
-s = socket.socket(); s.settimeout(0.5)
-sys.exit(0 if s.connect_ex(('127.0.0.1', $A_PORT)) == 0 else 1)" && break
-  sleep 0.1
-done
-python3 -c "
-import socket, sys
-s = socket.socket(); s.settimeout(0.5)
-sys.exit(0 if s.connect_ex(('127.0.0.1', $A_PORT)) == 0 else 1)" \
-  || fail "A never listened on 127.0.0.1:$A_PORT (port taken between free_port and bind?)"
-echo "  listening on 127.0.0.1:$A_PORT"
-
 rule "B starts with an empty log and one address"
 : > "$B/log.jsonl"
 "$DAEMON" --identity "$B/id.json" --root-key "$B/rootkey.json" \
-  --checkpoint "$B/checkpoint.json" --listen "127.0.0.1:$B_PORT" \
+  --checkpoint "$B/checkpoint.json" --listen "127.0.0.1:0" \
   --log "$B/log.jsonl" --root "$B" --bootstrap "$WORK/a-endpoint.json" \
   --population "$B/population.json" > "$B/daemon.log" 2>&1 &
 BPID=$!
@@ -271,14 +267,10 @@ rule "the whole documented topology, on one log"
 # It did not compose. `proofwork drain` wants the write lock the daemon holds,
 # so for as long as the daemon was the only thing that could run alongside the
 # server, an *online* node could not accept a submission at all.
-SERVE_PORT=$(free_port)
-"$SERVE" --log "$A/log.jsonl" --root "$A" --listen "127.0.0.1:$SERVE_PORT" \
+"$SERVE" --log "$A/log.jsonl" --root "$A" --listen "127.0.0.1:0" \
   --queue "$A/queue" > "$A/serve.log" 2>&1 &
 SERVE_PID=$!
-for _ in $(seq 1 100); do
-  grep -q "listening on" "$A/serve.log" 2>/dev/null && break
-  sleep 0.2
-done
+SERVE_PORT=$(listening_port "$A/serve.log" "proofwork-serve")
 grep -q "listening on" "$A/serve.log" || fail "proofwork-serve never bound"
 sed 's/^/  /' "$A/serve.log"
 
