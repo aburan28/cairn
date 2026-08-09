@@ -442,7 +442,14 @@ downstream is unbacked.
       root, which is the cheap half of node incentives and needs the signed
       checkpoints in Stage 0 first.
 - [ ] Bonded share custody, with the committee sized against the largest sealed
-      bounty rather than fixed.
+      bounty rather than fixed. The *mechanism* now exists and runs
+      (`records::CommitteeShare`, `Node::committee_for`, `Node::open_sealed`):
+      seats are drawn per epoch from the log's peer records, a share published
+      before the commitment's epoch closes is refused, and non-publication is
+      attributable because the draw names every seat. What is missing is the
+      money — nothing is staked, so nothing can be slashed — and the fixed
+      `COMMITTEE_SIZE` this ships with is the placeholder that sizing against
+      the sealed value would replace.
 - [ ] Claim assets typed by verification tier, non-fungible across tiers.
 - [ ] The **agent market sub-game** in `src/incentive/`, and only build the market
       if it survives: candidates circulate through gossip because nothing prices

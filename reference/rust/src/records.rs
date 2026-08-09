@@ -294,6 +294,22 @@ pub struct Commitment {
     pub submitter: String,
     pub hash: String,
     pub created_at: String,
+    /// The artifact sealed to the epoch's threshold committee, when this is a
+    /// sealed submission.
+    ///
+    /// **Carried opaquely, and that is the right thing for this
+    /// implementation to do.** The primary decodes it into a
+    /// `crypto::envelope::SealedEnvelope` because it has to open one; this
+    /// crate never opens anything, and re-deriving a KEM stack here would be
+    /// re-deriving the wrong thing. What must agree between the two is the
+    /// *encoding* — the field is inside the signing payload and therefore
+    /// inside every sealed commitment's id — and carrying the raw `Value`
+    /// through is exactly what makes that checkable: if the primary emitted
+    /// bytes this could not round-trip, the audit's re-encode pass says so.
+    ///
+    /// Omitted when absent, so a commitment written before the field existed
+    /// digests to what it always did.
+    pub envelope: Option<Value>,
     pub signature: Option<String>,
 }
 
@@ -302,13 +318,17 @@ impl Commitment {
     /// Excluded rather than zeroed -- a signature over the field holding it is
     /// not something anyone can produce.
     pub fn signing_payload(&self) -> Value {
-        Value::object([
+        let mut value = Value::object([
             ("type", Value::string("commitment")),
             ("objective_id", Value::string(self.objective_id.clone())),
             ("submitter", Value::string(self.submitter.clone())),
             ("hash", Value::string(self.hash.clone())),
             ("created_at", Value::string(self.created_at.clone())),
-        ])
+        ]);
+        if let (Value::Object(map), Some(envelope)) = (&mut value, &self.envelope) {
+            map.insert("envelope".into(), envelope.clone());
+        }
+        value
     }
 
     pub fn to_value(&self) -> Value {
@@ -338,6 +358,7 @@ impl Commitment {
             submitter: text(value, "submitter")?,
             hash: text(value, "hash")?,
             created_at: text(value, "created_at")?,
+            envelope: value.get("envelope").cloned(),
             signature: optional_text(value, "signature")?,
         })
     }
@@ -465,6 +486,135 @@ impl Claim {
         };
         claim.validate()?;
         Ok(claim)
+    }
+}
+
+// -- committee share ---------------------------------------------------------
+
+/// One committee member opening its share of a sealed submission's content key.
+///
+/// Re-derived here because the primary treats it as an admission rule, and a
+/// rule only one implementation applies is a rule two nodes can disagree about
+/// while both audit clean. What this crate checks is everything that does not
+/// require opening anything: the encoding, the structure, the signature, the
+/// epoch ordering against the commitment, and the committee draw itself.
+///
+/// What it does **not** check is whether the share is *correct*, and neither
+/// does the primary — a Shamir point cannot be verified alone without a
+/// verifiable-sharing scheme, and the ones that exist need a group where
+/// discrete log is hard, which a post-quantum network has declined to assume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitteeShare {
+    pub commitment: String,
+    pub seat: u8,
+    pub x: u8,
+    pub share: String,
+    pub created_at: String,
+    pub identity: String,
+    pub signature: Option<String>,
+}
+
+/// Longest share body a committee share may carry, in bytes before hex.
+pub const MAX_SHARE_BYTES: usize = 1024;
+
+impl CommitteeShare {
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("committee_share")),
+            ("commitment", Value::string(self.commitment.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("identity", Value::string(self.identity.clone())),
+            ("seat", Value::Int(i128::from(self.seat))),
+            ("share", Value::string(self.share.clone())),
+            ("x", Value::Int(i128::from(self.x))),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Always required. An unsigned share is an anonymous assertion that a seat
+    /// published, which anyone could write for any member.
+    pub fn verify_signature(&self) -> Result<(), RecordError> {
+        if signed_submitter(&self.identity).is_none() {
+            return Err(RecordError(format!(
+                "committee_share identity {:?} is not a public key",
+                self.identity
+            )));
+        }
+        verify_record_signature(
+            "committee_share",
+            &self.identity,
+            &self.signing_payload(),
+            self.signature.as_deref(),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        let lower_hex = |text: &str| {
+            text.len().is_multiple_of(2)
+                && text
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        let id = self.commitment.strip_prefix("sha256:").unwrap_or_default();
+        if id.len() != 64 || !lower_hex(id) {
+            return Err(RecordError(
+                "committee_share commitment must be a record id".into(),
+            ));
+        }
+        if self.identity.len() != 64 || !lower_hex(&self.identity) {
+            return Err(RecordError(
+                "committee_share identity must be 64 lowercase hex".into(),
+            ));
+        }
+        // `f(0)` is the secret itself, so no honest split ever issues x = 0.
+        if self.x == 0 {
+            return Err(RecordError(
+                "committee_share x must be a non-zero Shamir coordinate".into(),
+            ));
+        }
+        if self.share.is_empty() || !lower_hex(&self.share) {
+            return Err(RecordError(
+                "committee_share share must be non-empty lowercase hex".into(),
+            ));
+        }
+        if self.share.len() / 2 > MAX_SHARE_BYTES {
+            return Err(RecordError("committee_share share is too long".into()));
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<CommitteeShare, RecordError> {
+        let small = |name: &str| -> Result<u8, RecordError> {
+            value
+                .get(name)
+                .and_then(Value::as_i128)
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| {
+                    RecordError(format!(
+                        "committee_share {name} must be an integer in 0..=255"
+                    ))
+                })
+        };
+        Ok(CommitteeShare {
+            commitment: text(value, "commitment")?,
+            seat: small("seat")?,
+            x: small("x")?,
+            share: text(value, "share")?,
+            created_at: text(value, "created_at")?,
+            identity: text(value, "identity")?,
+            signature: optional_text(value, "signature")?,
+        })
     }
 }
 
