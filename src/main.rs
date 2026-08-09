@@ -74,8 +74,8 @@ use proofwork::incentive::{sweep, NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError, Proof};
 use proofwork::node::Node;
 use proofwork::records::{
-    commitment_hash, Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord,
-    RecordError, Undertaking,
+    commitment_hash, Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Objective,
+    PeerRecord, RecordError, Undertaking,
 };
 use proofwork::scaffold;
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
@@ -2349,6 +2349,19 @@ fn cmd_decode(out: &mut dyn Write, kind: &str, record_path: &str) -> Result<i32,
         "peer" => PeerRecord::from_value(&value)
             .map_err(|error| error.to_string())
             .and_then(|record| {
+                record.verify_signature().map_err(|e| e.to_string())?;
+                Ok(record.id())
+            }),
+        // `validate` as well as the signature, because a committee share's
+        // structural rules are admission rules: a share at x = 0 is the secret
+        // itself wearing a share's clothes, and one naming an id no commitment
+        // can have is a record that will be skipped forever without its author
+        // ever learning why. Both implementations must refuse the same shapes,
+        // which is what `scripts/differential.sh` is for.
+        "committee_share" => CommitteeShare::from_value(&value)
+            .map_err(|error| error.to_string())
+            .and_then(|record| {
+                record.validate().map_err(|e| e.to_string())?;
                 record.verify_signature().map_err(|e| e.to_string())?;
                 Ok(record.id())
             }),

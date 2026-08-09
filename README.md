@@ -669,9 +669,9 @@ So submissions are **sealed**, and opened *without* the submitter:
 
 ```
 commit    commitment = H(artifact ‖ submitter ‖ nonce)      (unchanged)
-          envelope   = ChaCha20-Poly1305(K, {artifact, nonce})
-          shares     = Shamir(K, t-of-n), each sealed via ephemeral X25519
-epoch end ≥t committee members publish shares → anyone reconstructs → opens
+          envelope   = ChaCha20-Poly1305(K, the whole signed claim)
+          shares     = Shamir(K, 3-of-5), each sealed by post-quantum KEM
+epoch end ≥3 seats publish `committee_share` records → anyone opens it
 ```
 
 You can be offline, jailed, or firewalled and still be paid. It also kills
@@ -681,6 +681,17 @@ indiscriminately. The commitment binds the plaintext, so a submitter who seals
 garbage is caught the moment the committee opens it.
 
 Sealing moves **when** an artifact becomes public, never **whether**.
+
+**And who opens it, and when, are consensus rules rather than promises.** The
+committee is a beacon draw over the log's own peer records — nobody issues an
+invitation, so nobody can decline to send one, and any reader recomputes any
+seat. A share published before the commitment's epoch closes is refused, and
+that check compares two timestamps already in the log rather than consulting a
+clock, so a member with a fast clock writes a record every node rejects. The
+threshold is pinned at commit time against the network's constant, because a
+submitter who could seal one-of-five would be handing any single member an
+early read. `tests/committee_reveal.rs` runs the whole thing with the submitter
+gone after commit.
 
 Two things are stated rather than papered over: **citation flow requires
 linkage** — the pseudonym graph is public by construction because paying people

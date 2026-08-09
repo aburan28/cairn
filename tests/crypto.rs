@@ -22,12 +22,13 @@ use std::collections::BTreeMap;
 
 use proofwork::canonical::Value;
 use proofwork::crypto::envelope::{
-    CommitteeKey, CommitteeMember, EnvelopeError, SealedEnvelope, SealedShare,
+    CommitteeKey, CommitteeMember, EnvelopeError, SealedEnvelope, SealedShare, Secret32,
 };
 use proofwork::crypto::identity::{
     verify_bytes, verify_value, Identity, IdentityError, MasterSeed, Signature, SignedRecord,
     VerifyingKeyBytes,
 };
+use proofwork::crypto::kem::{Bundle, PublicKey, Suite};
 use proofwork::crypto::shamir::{combine, split, ShamirError, Share};
 use rand_core::{CryptoRng, Error as RngError, OsRng, RngCore};
 
@@ -644,7 +645,7 @@ fn a_sealed_share_from_another_envelope_does_not_decrypt() {
         SealedEnvelope::seal(b"submission B", AAD_B, &committee.members, 2, &mut OsRng)
             .expect("seal b");
 
-    let victim = committee.members.first().copied().expect("a member");
+    let victim = committee.members.first().cloned().expect("a member");
     let key = committee.keys.first().expect("a key");
     let lifted = envelope_a
         .sealed_share(victim.index)
@@ -723,20 +724,20 @@ fn a_member_cannot_open_another_members_share() {
 }
 
 /// Attack: **tampering with a sealed share in transit** — corrupting the share
-/// ciphertext, its nonce, or the ephemeral public key it was sealed under. All of
-/// these must fail rather than yield a subtly wrong Shamir point, which would
-/// surface as an unattributable reveal failure.
+/// ciphertext, its nonce, or a KEM ciphertext it was sealed under. All of these
+/// must fail rather than yield a subtly wrong Shamir point, which would surface
+/// as an unattributable reveal failure.
 #[test]
 fn a_tampered_sealed_share_fails_to_open() {
     let committee = committee(3);
     let envelope =
         SealedEnvelope::seal(b"share integrity", AAD_A, &committee.members, 2, &mut OsRng)
             .expect("seal");
-    let victim = committee.members.first().copied().expect("a member");
+    let victim = committee.members.first().cloned().expect("a member");
     let key = committee.keys.first().expect("a key");
     let encoded = envelope.to_value();
 
-    for field in ["ciphertext", "nonce", "ephemeral_public"] {
+    for field in ["ciphertext", "nonce"] {
         let tampered = map_sealed_share(&encoded, victim.index, |share: &Value| {
             let text = field_str(share, field);
             with_field(share, field, Value::string(flip_bit_in_hex(&text, 0)))
@@ -744,12 +745,49 @@ fn a_tampered_sealed_share_fails_to_open() {
         let envelope = SealedEnvelope::from_value(&tampered).expect("decodes");
         let result = key.open_share(&envelope, victim.index);
         assert!(
-            matches!(
-                result,
-                Err(EnvelopeError::Authentication { .. })
-                    | Err(EnvelopeError::NonContributoryExchange { .. })
-            ),
+            matches!(result, Err(EnvelopeError::Authentication { .. })),
             "tampering with {field} produced {result:?}"
+        );
+    }
+
+    // Every KEM leg, one at a time. A flipped bit in *any* of them must fail:
+    // the combiner absorbs all of them, so tampering with the cheapest one is
+    // as fatal as tampering with McEliece. That is the property that makes
+    // adding a suite safe, and it would be quietly untrue if a leg were
+    // absorbed into the transcript but not into the shared secret.
+    let legs = encoded
+        .get("sealed_shares")
+        .and_then(Value::as_array)
+        .expect("shares")
+        .iter()
+        .find(|share| share.get("index").and_then(Value::as_i128) == Some(i128::from(victim.index)))
+        .and_then(|share| share.get("kem"))
+        .and_then(Value::as_array)
+        .expect("kem legs")
+        .len();
+    assert!(legs >= 1, "a share must carry at least the McEliece leg");
+
+    for leg in 0..legs {
+        let tampered = map_sealed_share(&encoded, victim.index, |share: &Value| {
+            let mut items = share
+                .get("kem")
+                .and_then(Value::as_array)
+                .expect("kem legs")
+                .to_vec();
+            let target = items.get(leg).cloned().expect("leg in range");
+            let text = field_str(&target, "ciphertext");
+            items[leg] = with_field(
+                &target,
+                "ciphertext",
+                Value::string(flip_bit_in_hex(&text, 0)),
+            );
+            with_field(share, "kem", Value::array(items))
+        });
+        let envelope = SealedEnvelope::from_value(&tampered).expect("decodes");
+        let result = key.open_share(&envelope, victim.index);
+        assert!(
+            matches!(result, Err(EnvelopeError::Authentication { .. })),
+            "tampering with KEM leg {leg} produced {result:?}"
         );
     }
 }
@@ -804,7 +842,7 @@ fn the_retained_content_key_is_a_fallback_and_only_the_right_one_works() {
     );
 
     // An unrelated 32-byte secret must not open it.
-    let wrong = CommitteeKey::generate(&mut OsRng).to_bytes();
+    let wrong = Secret32::new([0x5au8; 32]);
     assert_eq!(
         envelope.open_with_content_key(&wrong),
         Err(EnvelopeError::Authentication { context: "payload" })
@@ -853,11 +891,13 @@ fn dishonest_committee_shapes_are_refused_at_seal_time() {
         Err(EnvelopeError::DuplicateMemberKey { index: 2 })
     );
 
-    // More members than there are Shamir x-coordinates.
+    // More members than there are Shamir x-coordinates. One bundle cloned 256
+    // times rather than 256 keygens: the size check runs before any key is
+    // touched, so what this exercises is the ceiling and not the cryptography.
     let oversized: Vec<CommitteeMember> = (0..256usize)
         .map(|i| CommitteeMember {
             index: i as u8,
-            public_key: [i as u8; 32],
+            keys: key.public(),
         })
         .collect();
     assert_eq!(
@@ -866,22 +906,50 @@ fn dishonest_committee_shapes_are_refused_at_seal_time() {
     );
 }
 
-/// Attack: **a member who publishes a low-order X25519 key** so that the shared
-/// secret is the identity point — a constant every observer can compute, making
-/// their share world-readable and the real threshold one lower than advertised.
-/// Sealing must refuse rather than produce an envelope with a hole in it.
+/// Attack: **a member who publishes a key nobody holds the secret to.**
+///
+/// This test used to be `a_non_contributory_committee_key_is_refused`, and the
+/// change is in the threat model rather than in the code under test. Under
+/// X25519 a low-order public key forced the shared secret to the identity
+/// point, which every observer can compute — that member's share became
+/// world-readable and the real threshold was one lower than advertised, so
+/// sealing had to refuse.
+///
+/// A KEM has no low-order key. Every bit string of the right length is *a*
+/// public key, and encapsulating to a random one yields a secret nobody can
+/// recover — least of all whoever planted it. The planted member forfeits their
+/// own share and learns nothing, so there is nothing to refuse, and the
+/// mechanism that absorbs the loss is `n - t` rather than a validity check.
+///
+/// The assertion that matters is the second one: the *other* members still
+/// reach the threshold, so a planted key cannot stall a reveal.
 #[test]
-fn a_non_contributory_committee_key_is_refused() {
+fn a_committee_key_nobody_holds_costs_only_its_own_share() {
     let honest = CommitteeKey::generate(&mut OsRng);
-    let planted = CommitteeMember {
-        index: 2,
-        public_key: [0u8; 32],
-    };
-    let members = [honest.member(1), planted];
+    let second = CommitteeKey::generate(&mut OsRng);
 
+    let mut junk = vec![0u8; Suite::McEliece.public_key_len()];
+    OsRng.fill_bytes(&mut junk);
+    let planted = CommitteeMember {
+        index: 3,
+        keys: Bundle::mceliece_only(
+            PublicKey::from_bytes(Suite::McEliece, &junk).expect("right length"),
+        )
+        .expect("mandatory leg"),
+    };
+    let members = [honest.member(1), second.member(2), planted];
+
+    // Sealing succeeds: there is no longer anything to detect.
+    let envelope = SealedEnvelope::seal(b"payload", AAD_A, &members, 2, &mut OsRng).expect("seals");
+
+    // Two honest members still reach the threshold.
+    let shares = vec![
+        honest.open_share(&envelope, 1).expect("opens"),
+        second.open_share(&envelope, 2).expect("opens"),
+    ];
     assert_eq!(
-        SealedEnvelope::seal(b"payload", AAD_A, &members, 2, &mut OsRng),
-        Err(EnvelopeError::NonContributoryExchange { index: 2 })
+        envelope.open_with_shares(&shares).expect("opens"),
+        b"payload".to_vec()
     );
 }
 
@@ -1369,25 +1437,25 @@ fn debug_output_contains_no_secret_material() {
         "the public key is what a log line is for"
     );
 
-    // A committee member's X25519 key, and the Secret32 wrapper it exports to.
-    let mut key_bytes = [0u8; 32];
-    for (i, slot) in key_bytes.iter_mut().enumerate() {
-        *slot = (i as u8).wrapping_mul(13).wrapping_add(7);
-    }
-    let committee_key = CommitteeKey::from_bytes(key_bytes);
-    let exported = committee_key.to_bytes();
-    let stored_hex = hex(exported.expose());
-
+    // A committee member's KEM secrets, one per suite, and the Secret32
+    // wrapper. Every leg is checked, not just the first: a Debug impl that
+    // redacted McEliece and printed the ML-KEM seed would leak a whole leg.
+    let committee_key = CommitteeKey::generate(&mut OsRng);
     let rendered = format!("{committee_key:?}");
-    assert!(
-        !rendered.contains(&stored_hex),
-        "committee secret in Debug: {rendered}"
-    );
+    for secret in committee_key.secrets().keys() {
+        let stored_hex = hex(secret.expose());
+        assert!(
+            !rendered.contains(&stored_hex),
+            "committee {} secret in Debug: {rendered}",
+            secret.suite()
+        );
+    }
     assert!(rendered.contains("redacted"), "{rendered}");
 
+    let exported = Secret32::new([0x11u8; 32]);
     let rendered = format!("{exported:?}");
     assert!(
-        !rendered.contains(&stored_hex),
+        !rendered.contains(&hex(exported.expose())),
         "Secret32 leaked: {rendered}"
     );
     assert!(rendered.contains("redacted"), "{rendered}");

@@ -364,10 +364,7 @@ mod tests {
         let mut keys = Vec::new();
         for index in 1..=n {
             let key = CommitteeKey::generate(&mut OsRng);
-            members.push(CommitteeMember {
-                index,
-                public_key: key.public(),
-            });
+            members.push(key.member(index));
             keys.push(key);
         }
         (members, keys)

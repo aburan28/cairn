@@ -46,6 +46,18 @@ pub fn finality_epochs() -> u64 {
     }
 }
 
+/// How many peers hold a share of a sealed submission's content key, and how
+/// many must publish before it opens.
+///
+/// Consensus-critical: the committee is a beacon draw over the log's peer
+/// records, so two implementations using different sizes draw different
+/// committees and disagree about whether a published share answered a seat that
+/// exists. They are here, in the second implementation, for exactly that
+/// reason — a constant only one side holds is a constant only one side can be
+/// wrong about.
+pub const COMMITTEE_SIZE: u8 = 5;
+pub const COMMITTEE_THRESHOLD: u8 = 3;
+
 pub fn epoch_of(timestamp_seconds: u64, epoch_seconds: u64) -> u64 {
     timestamp_seconds / epoch_seconds
 }
