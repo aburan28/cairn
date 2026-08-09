@@ -30,11 +30,27 @@ FUZZ_CASES ?= 2000
 IDENTITY ?= $(abspath $(LOCAL_DIR)/node.identity.json)
 ROOT_KEY ?= $(abspath $(LOCAL_DIR)/root.key)
 CHECKPOINT ?= $(abspath $(LOCAL_DIR)/checkpoint.json)
+# Loopback, because the common case is a *client*: it dials out and nothing
+# needs to dial it. Serving strangers is `make seed`, which binds the wildcard
+# deliberately rather than by having everyone edit this.
 LISTEN ?= 127.0.0.1:9000
 GEN_BOOTSTRAP := $(RELEASE_DIR)/proofwork-gen-bootstrap
 SEED_ADDR ?= 44.229.170.164:5000
 SEED_BOOTSTRAP ?= $(abspath $(LOCAL_DIR)/seed.json)
 BOOTSTRAP_ARGS ?= --bootstrap $(SEED_BOOTSTRAP)
+# Derived from SEED_ADDR, never written twice. `LISTEN` and `SEED_ADDR` are two
+# independently-editable defaults that have to agree about a port, and they did
+# not: clients dialled :5000 while a seed operator running `make p2p` bound
+# :9000 on loopback -- reachable by nobody, on the wrong port, with no error
+# because binding loopback succeeds. Deriving the port removes the class of
+# mistake rather than re-syncing two numbers that will drift again.
+#
+# `subst` then `lastword` also survives an IPv6 SEED_ADDR: `[::1]:5000` becomes
+# `[  1] 5000`, whose last word is still the port.
+SEED_PORT = $(lastword $(subst :, ,$(SEED_ADDR)))
+SEED_LISTEN ?= 0.0.0.0:$(SEED_PORT)
+# A seed does not bootstrap against itself. Set it to peer with other seeds.
+SEED_BOOTSTRAP_ARGS ?=
 SERVE_LISTEN ?= 127.0.0.1:8080
 SERVE_ARGS ?=
 P2P_ARGS ?=
@@ -43,19 +59,21 @@ CLIENT ?= claude
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp mcp-setup p2p serve demo ratchet identity interop differential fuzz mcp-smoke serve-smoke \
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve demo ratchet identity interop differential fuzz mcp-smoke serve-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
 help:
 	@printf '%s\n' \
 	  'proofwork local commands:' \
-	  '  make mcp                 Build and run the local MCP server (stdio).' \
+	  '  make mcp                 Build, write opencode.json, and run the MCP server (stdio).' \
 	  '  make mcp-setup           Wire an MCP client to this checkout (default: Claude Code).' \
 	  '  make mcp-setup CLIENT=opencode   ...or opencode / codex.' \
-	  '  make p2p                 Build and run a local p2p node.' \
+	  '  make p2p                 Build and run a local p2p node (dials out; binds loopback).' \
+	  '  make seed                Run as a public seed: binds 0.0.0.0 on SEED_ADDR'"'"'s port.' \
 	  '  make mcp MCP_LOG=my-path  Use a custom MCP ledger path.' \
 	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
+	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
@@ -86,9 +104,21 @@ debug:
 $(LOCAL_DIR):
 	mkdir -p "$@"
 
+# opencode.json tells OpenCode how to launch the MCP server. Generated once;
+# rebuilds when Makefile changes (the only time the paths inside could differ).
+#
+# Delegates to scripts/mcp-config.sh rather than writing the file directly --
+# an earlier version of this target did `open('opencode.json', 'w').write(...)`
+# unconditionally, which is exactly the failure mode the script exists to
+# avoid: overwriting a config that might hold other MCP servers, wholesale,
+# because one stanza needed adding. One implementation instead of two also
+# means this and `make mcp-setup CLIENT=opencode` cannot drift apart.
+opencode.json: Makefile | $(LOCAL_DIR)
+	@./scripts/mcp-config.sh --client opencode --log "$(MCP_LOG)" --identity "$(IDENTITY)"
+
 # `exec` preserves the MCP process's stdin/stdout unchanged: stdout is protocol
 # data, so a wrapper must never add banners or diagnostics to it.
-mcp: build | $(LOCAL_DIR)
+mcp: build opencode.json | $(LOCAL_DIR)
 	exec "$(MCP)" --log "$(MCP_LOG)" --root "$(ROOT)"
 
 # Writes the client's config rather than running the server: the client spawns
@@ -96,7 +126,7 @@ mcp: build | $(LOCAL_DIR)
 # a stanza naming a binary that was never compiled fails inside the client,
 # where the error is a connection timeout rather than "no such file".
 mcp-setup: build | $(LOCAL_DIR)
-	./scripts/mcp-config.sh --client "$(CLIENT)" --log "$(MCP_LOG)"
+	./scripts/mcp-config.sh --client "$(CLIENT)" --log "$(MCP_LOG)" --identity "$(IDENTITY)"
 
 # A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
 # inside is freshly generated, not the real seed's. It authenticates nobody
@@ -113,6 +143,25 @@ p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
 	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
 	  --log "$(P2P_LOG)" --root "$(ROOT)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
+
+# Run *as* the seed everyone else's default bootstrap points at.
+#
+# Binds the wildcard, which is the counterintuitive part and the one that
+# matters on a cloud host: an instance's public address is NAT'd to it and is
+# on no local interface, so `--listen <public ip>` cannot bind at all. Bind
+# 0.0.0.0 and publish the public address in the bootstrap file you hand out --
+# an address is only ever a dial hint, because the peer id is the hash of the
+# key and the key is what decides who answered. See docs/p2p.md.
+#
+# Two things this cannot do for you: open the port inbound (a security group
+# that drops rather than refuses looks exactly like silence on both ends), and
+# put your real public key in the bootstrap files other people hold.
+seed: build | $(LOCAL_DIR)
+	@printf 'seeding on %s -- hand out this "public" key, not .local/seed.json:\n  %s\n' \
+	  "$(SEED_LISTEN)" "$(IDENTITY)"
+	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
+	  --checkpoint "$(CHECKPOINT)" --listen "$(SEED_LISTEN)" \
+	  --log "$(P2P_LOG)" --root "$(ROOT)" $(SEED_BOOTSTRAP_ARGS) $(P2P_ARGS)
 
 cli: build | $(LOCAL_DIR)
 	"$(CLI)" --log "$(LOG)" --root "$(ROOT)" $(ARGS)

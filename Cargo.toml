@@ -32,6 +32,16 @@ default = []
 # Parsing untrusted JSON only. Canonical *output* is written by this crate's own
 # encoder -- see src/canonical.rs for why the two are deliberately separate.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+# RustCrypto crates version in lockstep through their shared `digest`,
+# `crypto-common`, `aead` and `rand_core` traits, so these five move together or
+# not at all. Bumping one alone type-errors at the seam rather than failing to
+# resolve: `hmac 0.13` wants `digest 0.11` and `sha2 0.10` implements `digest
+# 0.10`, so `Hmac<Sha256>` stops satisfying `CoreProxy`; `x25519-dalek 3` and
+# `chacha20poly1305 0.11` do the same through `rand_core` and `aead`. Three such
+# bumps landed separately and left `main` uncompilable in four files.
+#
+# Raising any of them means raising the set, in one reviewed change, with the
+# call sites updated -- see the `ignore` entries in .github/dependabot.yml.
 sha2 = "0.10"
 hmac = "0.12"
 
@@ -55,8 +65,25 @@ ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
 # wrong shape of defence against a GPU.
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 
+# The logging *facade* only -- the backend that writes the lines is
+# `src/logging.rs`, about a hundred lines, and is deliberately ours.
+#
+# Taking the facade and not a full framework is the whole of the trade. The
+# facade is what lets a library module call `debug!` without deciding where
+# the output goes, which matters here more than usual: `proofwork-mcp` speaks
+# JSON-RPC on *stdout*, so a backend that guessed wrong would corrupt the
+# protocol rather than merely look untidy. Owning the backend is how "stderr,
+# always, no exceptions" becomes something a test can assert rather than a
+# convention to remember. `tracing` would bring spans this crate has no use
+# for yet, and two more dependencies to justify.
+#
+# `std` for `set_boxed_logger`, and nothing else: the `kv` machinery is for
+# structured backends this does not have, and `serde` is not wanted anywhere
+# near a diagnostic path.
+log = { version = "0.4", default-features = false, features = ["std"] }
+
 [dev-dependencies]
-rand = "0.8"
+rand = "0.10"
 
 [lib]
 name = "proofwork"

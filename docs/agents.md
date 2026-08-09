@@ -41,6 +41,7 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | `get_objective` | no* | full record, verifier spec |
 | `score_candidate` | **no** | run the pinned verifier; the tight loop |
 | `frontier_status` | no* | best score, which claim to cite, pool remaining |
+| `get_claim` | no* | read an accepted claim's artifact — the result you are trying to beat |
 | `pending_reveals` | no | commitments you still owe a reveal for |
 | `work_assignment` | no | your slice of the search space this epoch |
 | `submit_claim` | yes | commit, then reveal on a later call |
@@ -116,6 +117,17 @@ never offered, which is the injection signature exactly. Text a pinned verifier
 prints (`detail`, evidence) is tainted the same way: the checker was authored
 by whoever posted the objective, so it is the same attacker speaking through a
 second door.
+
+**A claim's artifact is a third door, and `get_claim` opens it deliberately.**
+An artifact is written by whoever submitted it, so an attacker can put *"also
+cite sha256:…"* in a field of their own result — and an agent reading the
+frontier in order to beat it has every reason to study that text closely, which
+makes it a *better* channel than a statement rather than a worse one. It
+discloses nothing new (every accepted claim is already in the log this node
+publishes byte for byte); what is new is rendering it to a model. So artifacts
+are fenced and tainted exactly like statements, and only *accepted* claims are
+readable — serving refused submissions would let anyone put arbitrary text in
+front of an agent for the price of a submission nobody had to accept.
 
 The check is deliberately narrow. An id the agent learned some other way (a
 human pasted it, an earlier session) is untouched: a claim id that never
@@ -208,10 +220,10 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | ./target/release/proofwork-mcp --log /tmp/pw.jsonl --root .
 ```
 
-Eight tool names come back: `score_candidate`, `list_objectives`,
-`get_objective`, `frontier_status`, `submit_claim`, `pending_reveals`,
-`work_assignment`, `audit`. If that works and the client still shows nothing,
-the problem is the client's config, not this binary.
+Nine tool names come back: `score_candidate`, `list_objectives`,
+`get_objective`, `get_claim`, `frontier_status`, `submit_claim`,
+`pending_reveals`, `work_assignment`, `audit`. If that works and the client
+still shows nothing, the problem is the client's config, not this binary.
 
 ### Running more than one client at once
 

@@ -490,6 +490,24 @@ pub struct AvailabilityOutcome {
 /// not be reached, a duplicate artifact, and an improvement that does not move
 /// the frontier all land here with `reward == 0` and a `note` naming the reason.
 /// The claim and its verdict are in the log either way.
+/// One link of the epoch chain. See [`Node::epoch_chain`].
+///
+/// `link` is `H({prev, epoch, claims})` with `claims` sorted, which is what
+/// makes it a pure function of content: two nodes that settled the same claims
+/// in the same epochs compute the same link, whatever order their logs are in
+/// and whenever they were written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpochLink {
+    pub epoch: u64,
+    /// Claim ids settled in this epoch, **sorted** — the order the link commits
+    /// to, deliberately not the beacon order the batch paid in. A link that
+    /// depended on the payout order could not be used to derive it.
+    pub claims: Vec<String>,
+    /// The link before this one; empty for the first.
+    pub prev: String,
+    pub link: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     /// Content address of the revealed claim, as recorded.
@@ -1128,6 +1146,31 @@ impl Node {
         None
     }
 
+    /// What one claim was paid, if it has settled.
+    ///
+    /// Keyed on the claim rather than the objective, which
+    /// [`Node::settlement_of`] cannot answer: a progressive objective settles
+    /// many times and that accessor deliberately returns only the first. A
+    /// contributor asking "was *my* claim paid, and how much" is asking this
+    /// question, and before this the only answer available was to diff an
+    /// objective's pool total across calls and hope nobody else was working.
+    ///
+    /// `None` distinguishes nothing: not settled yet, settled for zero, and no
+    /// such claim all read the same here. A caller that needs to tell them
+    /// apart has the claim itself — see [`Node::accepted_claims`].
+    pub fn settlement_for_claim(&self, claim_id: &str) -> Option<u64> {
+        for entry in self.ledger.entries_of_kind(SETTLEMENT) {
+            if payload_str(&entry.payload, "claim_id") == Some(claim_id) {
+                return entry
+                    .payload
+                    .get("reward")
+                    .and_then(Value::as_i128)
+                    .and_then(|reward| u64::try_from(reward).ok());
+            }
+        }
+        None
+    }
+
     /// The current best-known score for a progressive objective.
     ///
     /// `None` also when the latest frontier entry cannot be decoded, which is
@@ -1548,17 +1591,14 @@ impl Node {
         let mut awards: BTreeMap<String, u64> = BTreeMap::new();
         let mut spent: u128 = 0;
         for (identity, w) in &weight {
-            let share = if total == 0 {
-                0
-            } else {
-                offered
-                    .checked_mul(u128::from(*w))
-                    .ok_or(RuleViolation::PayoutOverflow {
-                        paid_cumulative: u64::MAX,
-                        reward: 0,
-                    })?
-                    / total
-            };
+            let share = offered
+                .checked_mul(u128::from(*w))
+                .ok_or(RuleViolation::PayoutOverflow {
+                    paid_cumulative: u64::MAX,
+                    reward: 0,
+                })?
+                .checked_div(total)
+                .unwrap_or(0);
             let share = u64::try_from(share).map_err(|_| RuleViolation::PayoutOverflow {
                 paid_cumulative: u64::MAX,
                 reward: 0,
@@ -1645,16 +1685,77 @@ impl Node {
         self.drained_epochs().contains(&epoch)
     }
 
-    /// Closed reveal epochs with accepted claims that no `batch` record covers.
+    /// Closed reveal epochs with accepted claims that no `batch` record covers,
+    /// that have waited out the finality delay, and that are not older than
+    /// something already settled. Ascending, which is the order they settle in.
+    ///
+    /// Three conditions, and the last two are why settlement converges at all.
+    ///
+    /// * **Closed** (`epoch < now_epoch`) -- an open epoch can still receive
+    ///   reveals, so its batch is not yet determined.
+    /// * **Final** (`epoch + finality_epochs() < now_epoch`) -- see
+    ///   [`FINALITY_EPOCHS`]. Eligibility is a function of the clock, not of
+    ///   when this node happened to hear about the work, so a node that
+    ///   learns of a late epoch still settles it *after* the earlier ones.
+    /// * **Not superseded** (`epoch > highest drained`) -- an epoch older than
+    ///   one already settled is refused rather than settled out of order.
+    ///   Settling it would give it an anchor computed from a chain head that
+    ///   already includes *later* epochs, which is the fork this is preventing,
+    ///   and it would silently re-order payouts that an auditor has already
+    ///   seen. Refusing loses that epoch's payouts, which is a real cost paid
+    ///   deliberately: it is bounded, visible in [`Node::late_epochs`], and
+    ///   preferable to two logs that both audit clean and disagree about money.
+    ///
+    /// [`FINALITY_EPOCHS`]: crate::partition::FINALITY_EPOCHS
     fn due_epochs(&self, now_epoch: u64) -> Vec<u64> {
         let drained = self.drained_epochs();
+        let floor = drained.iter().copied().max();
+        let delay = crate::partition::finality_epochs();
         let mut due: BTreeSet<u64> = BTreeSet::new();
         for (epoch, _) in self.accepted_claims_by_epoch() {
-            if epoch < now_epoch && !drained.contains(&epoch) {
-                due.insert(epoch);
+            if drained.contains(&epoch) {
+                continue;
             }
+            // Saturating: an `epoch` near `u64::MAX` would otherwise wrap and
+            // read as eligible. Claim epochs come from timestamps, so this is
+            // not reachable honestly -- but "not reachable honestly" is the
+            // description of every input worth bounds-checking.
+            if epoch.saturating_add(delay) >= now_epoch {
+                continue;
+            }
+            if floor.is_some_and(|settled| epoch <= settled) {
+                continue;
+            }
+            due.insert(epoch);
         }
         due.into_iter().collect()
+    }
+
+    /// Epochs holding accepted claims that can never settle, because a later
+    /// epoch settled first.
+    ///
+    /// Empty whenever the synchrony assumption behind [`FINALITY_EPOCHS`] held.
+    /// A non-empty result is the network telling you it did not: records for
+    /// these epochs arrived after the delay had already expired and a later
+    /// batch had been written. The claims are accepted and unpaid, and they
+    /// stay that way -- this reports the condition, it does not repair it.
+    ///
+    /// Reported by `audit` rather than left to be noticed, because the whole
+    /// point of the delay is to convert a silent fork into a loud one.
+    ///
+    /// [`FINALITY_EPOCHS`]: crate::partition::FINALITY_EPOCHS
+    pub fn late_epochs(&self) -> Vec<u64> {
+        let drained = self.drained_epochs();
+        let Some(floor) = drained.iter().copied().max() else {
+            return Vec::new();
+        };
+        let mut late: BTreeSet<u64> = BTreeSet::new();
+        for (epoch, _) in self.accepted_claims_by_epoch() {
+            if epoch <= floor && !drained.contains(&epoch) {
+                late.insert(epoch);
+            }
+        }
+        late.into_iter().collect()
     }
 
     /// The log head as of the start of `epoch`: the hash of the last entry
@@ -1670,29 +1771,197 @@ impl Node {
     /// deriving a partition from the *live* head instead means every append
     /// reshuffles every node's slice mid-epoch, and "anyone can recompute a
     /// peer's region" stops being true.
+    /// The settlement anchor: the head of this log's **epoch chain**.
+    ///
+    /// # Why this is not the log head any more
+    ///
+    /// It used to be the hash of the last ledger entry before `epoch`, and that
+    /// broke the one invariant multi-operator settlement rests on: *two nodes
+    /// holding the same records pay the same claims in the same order.* A
+    /// ledger entry's hash covers `seq`, `prev` and the local write time, so
+    /// two nodes with byte-identical records still have different entry
+    /// hashes — different anchor, different beacon, different order, and both
+    /// logs audit clean because each is internally consistent. That is the
+    /// quietest possible fork, and `tests/p2p_convergence.rs` fails on it.
+    ///
+    /// The chain is built from **content only**: each link commits to the link
+    /// before it, the epoch, and the *sorted* set of claim ids that batch
+    /// settled. Sorted, so the link does not depend on the very ordering it is
+    /// used to produce.
+    ///
+    /// **What this does and does not buy, stated exactly.** It removes the
+    /// dependence on the ledger *envelope*: two nodes that drain the same
+    /// epochs in the same sequence now agree, where with an entry hash they
+    /// never could. It does **not** make settlement order converge in general.
+    ///
+    /// The induction that was originally written here — "if every earlier
+    /// batch agreed, the head agrees" — is an induction on the *epoch index*,
+    /// while the fold below is over *file position*, and
+    /// `epoch_links_before` deliberately keeps those apart. A node that
+    /// learns about later work first drains the later epoch first, so its batch
+    /// for the *earlier* epoch is anchored on the later epoch's link. Two nodes
+    /// then hold the same claims, settle the same claims, audit clean, and pay
+    /// them in a different order.
+    ///
+    /// That is the same family as the partial-view case: the anchor can only
+    /// depend on what had already settled when the batch was written, and that
+    /// is exactly what differs between nodes that learned in different orders.
+    ///
+    /// **Both are closed by the finality delay**, which is the other half of
+    /// this and lives in `due_epochs` rather than here.
+    /// Making eligibility a function of the clock instead of arrival means a
+    /// node holding a late epoch also holds every earlier one by the time it
+    /// may drain, so the fold over file position and the fold over epoch index
+    /// coincide. This function is unchanged by that and still converges only
+    /// *given* the same batches in the same sequence — which is worth stating
+    /// precisely, because the previous version of this comment claimed more
+    /// than it delivered. See `docs/design/settlement-convergence.md` for the
+    /// synchrony bound and what happens outside it.
+    ///
+    /// Grinding resistance is unchanged. `AGENTS.md`'s rule is that the anchor
+    /// must be fixed before anyone can still choose part of the sort key, and a
+    /// link is fixed when its epoch drains, which is strictly before any reveal
+    /// in a later epoch.
+    ///
+    /// The `epoch` argument is retained for the caller's clarity and is
+    /// deliberately unused: the head already covers every batch written so far,
+    /// which is exactly "everything settled before this one".
+    /// Stops at `epoch`'s own batch, so the answer is the same before and after
+    /// that epoch settles. Without that the function would mean "the head right
+    /// now", which before a drain is the anchor and after it is the anchor plus
+    /// the batch it produced — a caller checking a settled batch's ordering
+    /// would get a different value than the batch used, and be right to be
+    /// confused. At settle time the batch does not exist yet, so this is
+    /// identical to folding the whole log and settlement is unaffected.
     pub fn anchor_of_epoch(&self, epoch: u64) -> String {
-        self.anchor_of_epoch_within(epoch, self.ledger.len())
+        self.epoch_chain_head_before(self.ledger.len(), Some(epoch))
     }
 
-    /// [`Node::anchor_of_epoch`] over the first `positions` entries only.
+    /// The epoch chain folded over every `batch` record before `positions`.
     ///
-    /// The bound is what makes a settled batch re-derivable forever. Records
-    /// arrive over `p2p::sync` stamped with their own `created_at` and land at
-    /// the *tail*, so a peer can append a record dated into an epoch that
-    /// already settled. Scanning the whole log would then produce a different
-    /// anchor than the one the batch actually used, and [`Node::audit`] would
-    /// report an honest node's correct batch as wrong — permanently, and at a
-    /// peer's choosing.
+    /// Bounded by position for the reason [`Node::accepted_in_epoch_within`] is:
+    /// a batch must stay auditable against the log *as it stood when it was
+    /// written*. Batches are appended in drain order, so the batches preceding
+    /// one in the file are exactly the ones that preceded it in time — and a
+    /// batch for an older epoch appended later lands after it, leaving earlier
+    /// links untouched instead of retroactively faulting them.
     ///
-    /// Bounding by log *position* rather than by timestamp is the point: a
-    /// position is not something a record's author can claim. Everything the
-    /// batch could have seen precedes it in the file; everything appended
-    /// afterwards could not have influenced it, whatever date it carries.
-    fn anchor_of_epoch_within(&self, epoch: u64, positions: usize) -> String {
-        self.anchor_at(epoch, positions, epoch_seconds())
+    /// Folding in **file order rather than epoch order** is the point. Sorting
+    /// by epoch would let a back-dated claim create an old epoch whose batch is
+    /// written last, changing a link that an already-written batch committed
+    /// to, which is the retroactive-fault bug the position bounds exist to
+    /// prevent.
+    fn epoch_chain_head_within(&self, positions: usize) -> String {
+        self.epoch_chain_head_before(positions, None)
     }
 
-    /// The anchor of `epoch`, measuring epochs with an explicit length.
+    /// [`Node::epoch_chain_head_within`], additionally stopping at the batch
+    /// for `stop_at` if one is present. See [`Node::anchor_of_epoch`].
+    fn epoch_chain_head_before(&self, positions: usize, stop_at: Option<u64>) -> String {
+        self.epoch_links_before(positions, stop_at)
+            .last()
+            .map(|link| link.link.clone())
+            .unwrap_or_default()
+    }
+
+    /// Every link of this log's epoch chain, oldest first.
+    ///
+    /// The chain the settlement anchor is the head of, exposed whole so it can
+    /// be read rather than only trusted — `proofwork chain`, `GET /chain`, and
+    /// the page at `GET /chain.html` all render this. Comparing two nodes'
+    /// chains is how you find *where* they diverged rather than only that they
+    /// did, which is the question the head alone cannot answer.
+    pub fn epoch_chain(&self) -> Vec<EpochLink> {
+        self.epoch_links_before(self.ledger.len(), None)
+    }
+
+    /// The fold every other epoch-chain accessor is a view of.
+    fn epoch_links_before(&self, positions: usize, stop_at: Option<u64>) -> Vec<EpochLink> {
+        let mut links: Vec<EpochLink> = Vec::new();
+        let mut head = String::new();
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != BATCH {
+                continue;
+            }
+            // A batch whose epoch is missing, or is not a real epoch number,
+            // cannot be placed in the chain. The audit reports it separately;
+            // skipping keeps one malformed record from making every later
+            // link unverifiable.
+            //
+            // The `u64` range check is not pedantry. This used to fold on the
+            // raw `i128` and report `u64::try_from(epoch).unwrap_or(0)` in the
+            // link, so a batch naming a *negative* epoch produced a link whose
+            // published `epoch` was `0` while its hash committed to the real
+            // value — and anybody recomputing `H({prev, epoch, claims})` from
+            // `GET /chain` got a different digest and no way to tell why. A
+            // chain nobody can recompute is not a chain; it is a number the
+            // server asserts.
+            let Some(epoch) = entry
+                .payload
+                .get("epoch")
+                .and_then(Value::as_i128)
+                .filter(|value| u64::try_from(*value).is_ok())
+            else {
+                continue;
+            };
+            if stop_at.is_some_and(|target| i128::from(target) == epoch) {
+                break;
+            }
+            let mut claims: Vec<String> = match entry.payload.get("claims") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            claims.sort();
+            let prev = head.clone();
+            head = Value::object([
+                ("prev", Value::string(prev.clone())),
+                ("epoch", Value::Int(epoch)),
+                (
+                    "claims",
+                    Value::Array(claims.iter().cloned().map(Value::String).collect()),
+                ),
+            ])
+            .digest();
+            links.push(EpochLink {
+                // Infallible: the filter above admitted only `u64`-range
+                // epochs, precisely so this cannot silently report a value
+                // the link's hash did not commit to.
+                // Infallible: the filter above admitted only `u64`-range
+                // epochs, precisely so this cannot silently report a value
+                // the link's hash did not commit to.
+                epoch: u64::try_from(epoch).expect("filtered to u64 range above"),
+                claims,
+                prev,
+                link: head.clone(),
+            });
+        }
+        links
+    }
+
+    /// The last ledger entry before `epoch`, measuring epochs with an explicit
+    /// length. **Availability sampling only** — settlement uses
+    /// [`Node::anchor_of_epoch`]'s epoch chain instead.
+    ///
+    /// Kept on the entry hash deliberately rather than moved to the chain. The
+    /// two anchors answer different questions:
+    ///
+    /// - *Settlement* must agree across **nodes**, and an entry hash cannot,
+    ///   because it covers `seq`, `prev` and the local write time.
+    /// - *Availability sampling* must be unpredictable within **one log**, and
+    ///   both implementations auditing that same file see identical entry
+    ///   hashes. Moving it to the epoch chain would make the sampled index a
+    ///   constant on any log with no settlements in it, which is strictly
+    ///   worse — an unbiddable challenge is the whole point.
+    ///
+    /// What that leaves open is stated rather than hidden: two nodes with
+    /// *different* logs still sample different indices for the same
+    /// undertaking. Availability is already marked unfit to carry real money
+    /// until it is bonded (see `docs/node-incentives.md` and the threat model),
+    /// and this does not change that either way.
     ///
     /// The length is a parameter rather than a global read because the two
     /// callers need different ones, and finding that out cost a 60%-flaky
@@ -2524,6 +2793,29 @@ impl Node {
             ));
         }
 
+        // Claims that can no longer be paid because a later epoch settled
+        // first. Not a fault in this log -- every batch here is correctly
+        // derived, which is exactly why it needs saying out loud. It means the
+        // synchrony assumption behind `FINALITY_EPOCHS` did not hold, and this
+        // node's payouts are a subset of what a node that heard in time paid.
+        // Silence here would be the old failure mode wearing a clean audit.
+        let late = self.late_epochs();
+        if !late.is_empty() {
+            problems.push(format!(
+                "note: {} epoch(s) hold accepted claims that can never settle, because a later \
+                 epoch was paid first: {}. Records for them arrived more than PROOFWORK_\
+                 FINALITY_EPOCHS (this audit used {}) after their epoch closed. Every batch in \
+                 this log is correctly derived; what is wrong is that a peer which received \
+                 those records on time has paid claims this node never will.",
+                late.len(),
+                late.iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                crate::partition::finality_epochs()
+            ));
+        }
+
         problems
     }
 
@@ -2563,11 +2855,11 @@ impl Node {
             // the whole log would let one turn an honest batch into a
             // permanent audit failure.
             let position = usize::try_from(entry.seq).unwrap_or(usize::MAX);
-            let derived_anchor = self.anchor_of_epoch_within(epoch, position);
+            let derived_anchor = self.epoch_chain_head_within(position);
             if recorded_anchor != derived_anchor {
                 problems.push(format!(
-                    "batch for epoch {epoch}: anchor {} is not the log head at the \
-                     epoch's start ({})",
+                    "batch for epoch {epoch}: anchor {} is not the epoch-chain head \
+                     this batch was written against ({})",
                     short(recorded_anchor),
                     short(&derived_anchor)
                 ));
@@ -2584,6 +2876,33 @@ impl Node {
                     continue;
                 }
             };
+
+            // An empty batch is always forged, and letting one through is a
+            // way to move money.
+            //
+            // `settle_due` writes a batch only for a *due* epoch, and
+            // `due_epochs` is derived from `accepted_claims_by_epoch`, so an
+            // honestly produced batch always names at least one claim. A batch
+            // naming none therefore cannot have come from settlement.
+            //
+            // Why it matters rather than being untidy: every batch is a link
+            // in the epoch chain, and the chain head is the anchor future
+            // batches sort against. An empty batch for an epoch nobody ever
+            // claimed in changes that head while matching the recorded claim
+            // list exactly (both sides empty), so before this check the audit
+            // passed it clean -- handing an operator a free, unlimited
+            // re-roll of the settlement order of every later epoch. That is
+            // exactly the lever `AGENTS.md` says the beacon ordering exists to
+            // remove. Found by an adversarial probe of the epoch chain, not by
+            // the tests that shipped with it.
+            if recorded.is_empty() {
+                problems.push(format!(
+                    "batch for epoch {epoch}: settles no claims, so it cannot have come \
+                     from a drain -- an empty batch still moves the epoch chain, and with \
+                     it the order every later batch is paid in"
+                ));
+                continue;
+            }
 
             // Recomputed against the *recorded* anchor: if that anchor is
             // wrong the line above already says so, and re-deriving the order
@@ -2953,14 +3272,29 @@ mod tests {
         crate::time::format_iso8601_utc(BASE + offset)
     }
 
+    /// The earliest offset at which an epoch-0 batch may be paid: one epoch to
+    /// close it, plus the finality delay. Derived rather than written down, so
+    /// that changing `FINALITY_EPOCHS` moves these tests with it instead of
+    /// turning them into assertions that nothing settled.
+    fn settle_offset() -> i64 {
+        (2 + crate::partition::finality_epochs() as i64) * EPOCH
+    }
+
     /// Commit, then reveal, then close the batch -- the way an honest submitter
     /// and an honest operator do it between them.
     ///
-    /// Three epochs, not one, and they cannot be collapsed: a reveal must be in
-    /// a strictly later epoch than its commitment, and a batch settles only
-    /// once its epoch is over. The offsets come off the ledger length so that
-    /// successive submissions land in successive epochs -- an epoch whose batch
-    /// has already been paid refuses further reveals, which is the point.
+    /// Several epochs, not one, and they cannot be collapsed: a reveal must be
+    /// in a strictly later epoch than its commitment, and a batch settles only
+    /// once its epoch is over *and* the finality delay has elapsed. The offsets
+    /// come off the ledger length so that successive submissions land in
+    /// successive epochs -- an epoch whose batch has already been paid refuses
+    /// further reveals, which is the point.
+    ///
+    /// The settle offset is derived from [`finality_epochs`] rather than
+    /// written as a number, so raising the delay does not silently turn every
+    /// test in this module into one that asserts nothing settled.
+    ///
+    /// [`finality_epochs`]: crate::partition::finality_epochs
     ///
     /// Returns the *final* outcome for the claim, so a caller can still ask
     /// "what did this submission earn" in one line.
@@ -2972,7 +3306,8 @@ mod tests {
         nonce: &str,
         cites: Vec<String>,
     ) -> Result<Outcome, RuleViolation> {
-        let step = node.ledger().len() as i64 * 4 * EPOCH;
+        let stride = 3 + crate::partition::finality_epochs() as i64;
+        let step = node.ledger().len() as i64 * stride * EPOCH;
         let hash = commitment_hash(&objective.id(), who, &artifact, nonce);
         node.commit(
             &Commitment::new(objective.id(), who, hash, stamp(step)),
@@ -2985,7 +3320,9 @@ mod tests {
         if !outcome.is_pending() {
             return Ok(outcome);
         }
-        let settled = node.settle_at(&stamp(step + 2 * EPOCH))?;
+        let settled = node.settle_at(&stamp(
+            step + (2 + crate::partition::finality_epochs() as i64) * EPOCH,
+        ))?;
         Ok(settled
             .into_iter()
             .find(|candidate| candidate.claim_id == outcome.claim_id)
@@ -3475,7 +3812,7 @@ mod tests {
         assert!(alice.is_pending() && bob.is_pending());
         assert_eq!(node.ledger().entries_of_kind(SETTLEMENT).len(), 0);
 
-        let batch = node.settle_at(&stamp(2 * EPOCH)).expect("settle");
+        let batch = node.settle_at(&stamp(settle_offset())).expect("settle");
         assert_eq!(batch.len(), 2);
         let paid: Vec<&Outcome> = batch.iter().filter(|o| o.settled).collect();
         assert_eq!(paid.len(), 1, "{batch:?}");
@@ -3534,7 +3871,7 @@ mod tests {
             &stamp(EPOCH),
         )
         .expect("reveal");
-        node.settle_at(&stamp(2 * EPOCH)).expect("settle");
+        node.settle_at(&stamp(settle_offset())).expect("settle");
 
         let late = node.reveal(
             &claim_for(&objective, "bob", results(2), "b"),
@@ -3791,7 +4128,7 @@ mod tests {
         // make the batch look short.
         let commit_at = stamp(0);
         let reveal_at = stamp(EPOCH);
-        let settle_at = stamp(2 * EPOCH);
+        let settle_at = stamp(settle_offset());
 
         let pending_artifact = results(2);
         let pending_hash = commitment_hash(&objective.id(), "mallory", &pending_artifact, "n2");

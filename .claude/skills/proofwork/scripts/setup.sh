@@ -63,6 +63,12 @@ rule "wire Claude Code"
 ./scripts/mcp-config.sh --client claude --log "$LOG"
 say "restart Claude Code (or /mcp reconnect) to pick it up"
 
+rule "wire OpenCode"
+# Same delegation as Claude Code above, same reason: one implementation that
+# merges instead of two that can drift, one of them clobbering.
+./scripts/mcp-config.sh --client opencode --log "$LOG"
+say "restart OpenCode (or /mcp reconnect) to pick it up"
+
 rule "post starter objectives"
 POSTED=0
 for objective in \

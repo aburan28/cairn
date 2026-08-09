@@ -6,6 +6,12 @@
 #   ./scripts/mcp-config.sh --client codex       # -> ~/.codex/config.toml
 #   ./scripts/mcp-config.sh --print              # show the stanza, write nothing
 #
+# --identity defaults to .local/node.identity.json and is included in the
+# stanza only when that file already exists, so a fresh checkout with no
+# signed identity yet still wires up cleanly -- run
+# `proofwork identity --out .local/node.identity.json` first if you want a
+# submitter name nobody else can claim.
+#
 # Three clients, three schemas, one set of flags. docs/agents.md carries the
 # stanzas as prose for anyone wiring this by hand; the point of doing it here
 # too is that a hand-copied stanza drifts from the flags the server actually
@@ -29,15 +35,22 @@ CLIENT=claude
 # path, starting the server one way and then the other would show two different
 # worlds, and neither would look broken.
 LOG="${MCP_LOG:-$REPO/.local/proofwork-mcp.jsonl}"
+# Same default the Makefile's IDENTITY variable uses. Included only when the
+# file exists, so a fresh checkout with no signed identity yet still wires up
+# -- an agent that submits unsigned is a worse outcome than one that submits
+# under a name someone else can also claim, but neither should be blocked on
+# a key-generation step this script has no business forcing.
+IDENTITY="${MCP_IDENTITY:-$REPO/.local/node.identity.json}"
 OUT=""
 PRINT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --client) CLIENT="$2"; shift 2 ;;
-    --log)    LOG="$2"; shift 2 ;;
-    --out)    OUT="$2"; shift 2 ;;
-    --print)  PRINT=1; shift ;;
+    --client)   CLIENT="$2"; shift 2 ;;
+    --log)      LOG="$2"; shift 2 ;;
+    --identity) IDENTITY="$2"; shift 2 ;;
+    --out)      OUT="$2"; shift 2 ;;
+    --print)    PRINT=1; shift ;;
     -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -63,15 +76,21 @@ if [ ! -x "$MCP_BIN" ]; then
 fi
 
 if [ "$PRINT" = "1" ]; then
-  MCP_BIN="$MCP_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" "$PYTHON" - <<'PY'
+  MCP_BIN="$MCP_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
 import json, os
-b, log, repo, client = (os.environ[k] for k in ("MCP_BIN", "LOG", "REPO", "CLIENT"))
+b, log, repo, client, identity = (
+    os.environ[k] for k in ("MCP_BIN", "LOG", "REPO", "CLIENT", "IDENTITY")
+)
+args = ["--log", log, "--root", repo]
+if os.path.exists(identity):
+    args += ["--identity", identity]
 if client == "claude":
-    print(json.dumps({"mcpServers": {"proofwork": {"command": b, "args": ["--log", log, "--root", repo]}}}, indent=2))
+    print(json.dumps({"mcpServers": {"proofwork": {"command": b, "args": args}}}, indent=2))
 elif client == "opencode":
-    print(json.dumps({"mcp": {"proofwork": {"type": "local", "command": [b, "--log", log, "--root", repo], "enabled": True}}}, indent=2))
+    print(json.dumps({"mcp": {"proofwork": {"type": "local", "command": [b, *args], "enabled": True}}}, indent=2))
 else:
-    print(f'[mcp_servers.proofwork]\ncommand = "{b}"\nargs = ["--log", "{log}", "--root", "{repo}"]')
+    quoted = ", ".join(f'"{a}"' for a in args)
+    print(f'[mcp_servers.proofwork]\ncommand = "{b}"\nargs = [{quoted}]')
 PY
   exit 0
 fi
@@ -90,19 +109,26 @@ if [ "$CLIENT" = "codex" ]; then
     exit 0
   fi
   [ -f "$OUT" ] && cp "$OUT" "$OUT.bak" && say "backed up -> $OUT.bak"
+  ARGS_TOML="\"--log\", \"$LOG\", \"--root\", \"$REPO\""
+  [ -f "$IDENTITY" ] && ARGS_TOML="$ARGS_TOML, \"--identity\", \"$IDENTITY\""
   {
     printf '\n# proofwork -- written by scripts/mcp-config.sh\n'
     printf '[mcp_servers.proofwork]\n'
     printf 'command = "%s"\n' "$MCP_BIN"
-    printf 'args = ["--log", "%s", "--root", "%s"]\n' "$LOG" "$REPO"
+    printf 'args = [%s]\n' "$ARGS_TOML"
   } >>"$OUT"
   say "appended [mcp_servers.proofwork] -> $OUT"
 else
   [ -f "$OUT" ] && cp "$OUT" "$OUT.bak" && say "backed up -> $OUT.bak"
-  MCP_BIN="$MCP_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" OUT="$OUT" "$PYTHON" - <<'PY'
+  MCP_BIN="$MCP_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" OUT="$OUT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
 import json, os, sys
 
-b, log, repo, client, out = (os.environ[k] for k in ("MCP_BIN", "LOG", "REPO", "CLIENT", "OUT"))
+b, log, repo, client, out, identity = (
+    os.environ[k] for k in ("MCP_BIN", "LOG", "REPO", "CLIENT", "OUT", "IDENTITY")
+)
+args = ["--log", log, "--root", repo]
+if os.path.exists(identity):
+    args += ["--identity", identity]
 
 config = {}
 if os.path.exists(out):
@@ -118,9 +144,9 @@ if os.path.exists(out):
         sys.exit(f"  {out} is not a JSON object; fix or move it, then rerun")
 
 if client == "claude":
-    section, entry = "mcpServers", {"command": b, "args": ["--log", log, "--root", repo]}
+    section, entry = "mcpServers", {"command": b, "args": args}
 else:
-    section, entry = "mcp", {"type": "local", "command": [b, "--log", log, "--root", repo], "enabled": True}
+    section, entry = "mcp", {"type": "local", "command": [b, *args], "enabled": True}
 
 servers = config.setdefault(section, {})
 if not isinstance(servers, dict):

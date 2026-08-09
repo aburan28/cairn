@@ -20,6 +20,10 @@ rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 export PROOFWORK_EPOCH_SECONDS=1
 tick() { sleep 1.1; }
 
+# Two waits, not one: an epoch must close *and* wait out the finality delay
+# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
+settle_tick() { tick; local i; for ((i = 0; i < ${PROOFWORK_FINALITY_EPOCHS:-1}; i++)); do tick; done; }
+
 # Commit, wait an epoch, reveal, wait another, settle. `reveal` prints the full
 # claim id on its first line, so capture it from the command that produced it
 # rather than re-deriving it from the log.
@@ -31,7 +35,7 @@ step() {
   out=$(pw reveal "$OID" --submitter "$who" --artifact "$artifact" --nonce "$nonce" "$@")
   echo "$out"
   echo "$out" | awk '/^claim /{print $2}' > /tmp/pw-last-claim
-  tick
+  settle_tick
   pw settle
 }
 last_claim() { cat /tmp/pw-last-claim; }

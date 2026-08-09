@@ -19,9 +19,16 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-fn usage() -> ! {
+/// Print the usage and exit with `code`.
+///
+/// `--help` exits 0 and a bad or missing argument exits 2, matching
+/// `proofwork-p2p`. This binary answered 2 to everything including `--help`,
+/// and nothing noticed because the packaging check in `.github/workflows/ci.yml`
+/// listed the other binaries and not this one. The release workflow now runs
+/// `--help` on every binary it ships, which is what caught it.
+fn usage(code: i32) -> ! {
     eprintln!("usage: proofwork-gen-bootstrap --addr HOST:PORT --out FILE [--identity-out FILE]");
-    std::process::exit(2);
+    std::process::exit(code);
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -45,16 +52,19 @@ fn main() {
     let mut identity_out = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            usage(0);
+        }
         let slot = match arg.as_str() {
             "--addr" => &mut addr,
             "--out" => &mut out,
             "--identity-out" => &mut identity_out,
-            _ => usage(),
+            _ => usage(2),
         };
-        *slot = Some(args.next().unwrap_or_else(|| usage()));
+        *slot = Some(args.next().unwrap_or_else(|| usage(2)));
     }
-    let addr = addr.unwrap_or_else(|| usage());
-    let out = out.unwrap_or_else(|| usage());
+    let addr = addr.unwrap_or_else(|| usage(2));
+    let out = out.unwrap_or_else(|| usage(2));
     // Shape only, and deliberately not `SocketAddr::parse`: this tool writes
     // config for a host that may be down, or not yet built, so resolving here
     // would refuse a perfectly good file for a peer that is merely offline.
@@ -70,9 +80,25 @@ fn main() {
     let identity = PeerIdentity::generate();
     let public_hex = hex_encode(identity.public_key());
 
+    // `placeholder_peer_id` is what lets the *daemon* say this file is not
+    // finished yet, rather than only this program saying it once at generation
+    // time and scrolling away in build output. A peer id is
+    // `sha256(public key)`, so `proofwork-p2p` recomputes it from whatever
+    // `public` currently holds and warns only while the two still match --
+    // which means the warning **clears itself** the moment somebody pastes the
+    // real key in, with nothing to remember to delete. Extra fields are
+    // ignored by every reader (`load_endpoint` takes `addr` and `public`), and
+    // a bootstrap file is local configuration that never enters the log, so
+    // this is not a record-format change.
     let bootstrap = Value::object([
         ("addr", Value::string(addr)),
         ("public", Value::string(public_hex.clone())),
+        (
+            "placeholder_peer_id",
+            Value::string(proofwork::p2p::discovery::peer_id_string(
+                &identity.to_public().id(),
+            )),
+        ),
     ]);
     fs::write(&out, bootstrap.canonical_string()).unwrap_or_else(|e| {
         eprintln!("{out}: {e}");

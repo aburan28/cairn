@@ -8,7 +8,7 @@ use proofwork::checkpoint::RootKey;
 use proofwork::gossip::{Candidate, Population};
 use proofwork::ledger::Ledger;
 use proofwork::node::Node;
-use proofwork::p2p::discovery::Endpoint;
+use proofwork::p2p::discovery::{peer_id_string, Endpoint};
 use proofwork::p2p::handshake::{PeerIdentity, PeerPublic};
 use proofwork::p2p::multicast;
 use proofwork::p2p::pop::PopLimits;
@@ -87,7 +87,28 @@ fn load_identity(path: &Path) -> Result<PeerIdentity, String> {
     PeerIdentity::from_bytes(&public, &secret).map_err(|e| e.to_string())
 }
 
-fn load_endpoint(path: &Path) -> Result<Endpoint, String> {
+/// A bootstrap file still carrying the placeholder key `gen-bootstrap` wrote.
+///
+/// Detected rather than remembered: the file records the peer id of the key it
+/// generated, a peer id *is* `sha256(public key)`, so this recomputes it from
+/// whatever `public` holds now and matches only while the two are the same
+/// key. Pasting the real key in clears it with nothing to delete.
+///
+/// Worth its own path because the failure it explains is otherwise mute. A
+/// placeholder key authenticates nobody, so the handshake fails and the daemon
+/// prints a transport error identical to the one a firewall produces -- and an
+/// operator with a correct address, an open port and a bogus key has no way to
+/// tell those apart from the log.
+fn is_placeholder(value: &Value, endpoint: &Endpoint) -> bool {
+    value
+        .get("placeholder_peer_id")
+        .and_then(Value::as_str)
+        .is_some_and(|recorded| {
+            recorded == proofwork::p2p::discovery::peer_id_string(&endpoint.peer.id())
+        })
+}
+
+fn load_endpoint(path: &Path) -> Result<(Endpoint, bool), String> {
     let value = Value::from_json(&fs::read_to_string(path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let addr = value
@@ -108,7 +129,9 @@ fn load_endpoint(path: &Path) -> Result<Endpoint, String> {
             .ok_or("bootstrap.public missing")?,
     )?;
     let peer = PeerPublic::from_bytes(&public).map_err(|e| e.to_string())?;
-    Ok(Endpoint::new(addr, peer))
+    let endpoint = Endpoint::new(addr, peer);
+    let placeholder = is_placeholder(&value, &endpoint);
+    Ok((endpoint, placeholder))
 }
 
 fn load_root_key(path: &Path) -> Result<RootKey, String> {
@@ -225,16 +248,19 @@ struct State {
 /// turn a full disk into a departure from the network.
 fn persist(state: &State, checkpoint: &str, key: &RootKey, population: Option<&String>) {
     if let Err(error) = write_checkpoint(Path::new(checkpoint), key, &state.node) {
-        eprintln!("checkpoint: {error}");
+        log::warn!("checkpoint: {error}");
     }
     if let Some(path) = population {
         if let Err(error) = save_population(Path::new(path), &state.population) {
-            eprintln!("population: {error}");
+            log::warn!("population: {error}");
         }
     }
 }
 
 fn main() {
+    // Before anything that could log. Stderr only -- see `logging` -- which
+    // matters most here in the MCP server, where stdout is the protocol.
+    proofwork::logging::init();
     let mut identity_path = None;
     let mut root_key_path = None;
     let mut checkpoint_path = None;
@@ -295,27 +321,47 @@ fn main() {
     // nothing. That file is byte-for-byte the one a successful start would have
     // created, so the next run simply uses it. Worth an empty file.
     let ledger = Ledger::open_exclusive(log).unwrap_or_else(|e| {
-        eprintln!("ledger: {e}");
+        log::error!("ledger: {e}");
         std::process::exit(2)
     });
     let identity = Arc::new(
         load_identity(Path::new(&identity_path)).unwrap_or_else(|e| {
-            eprintln!("identity: {e}");
+            log::error!("identity: {e}");
             std::process::exit(2)
         }),
     );
     let root_key = Arc::new(
         load_root_key(Path::new(&root_key_path)).unwrap_or_else(|e| {
-            eprintln!("root key: {e}");
+            log::error!("root key: {e}");
             std::process::exit(2)
         }),
     );
     let mut service = Service::new(Arc::clone(&identity));
     for path in bootstrap {
         match load_endpoint(Path::new(&path)) {
-            Ok(endpoint) => service.add_bootstrap(endpoint),
+            Ok((endpoint, placeholder)) => {
+                if placeholder {
+                    // Loud, and at startup rather than at the first failed
+                    // dial: a placeholder key fails the handshake with a
+                    // transport error indistinguishable from a closed port, so
+                    // an operator who has already checked the address and the
+                    // firewall has nothing left to suspect. Said once here,
+                    // the one remaining explanation is on screen before the
+                    // first dial rather than absent from all of them.
+                    log::warn!(
+                        "bootstrap {path}: still carries the PLACEHOLDER key \
+                         `proofwork-gen-bootstrap` generated, which authenticates nobody. \
+                         Dials to {} will fail their handshake and report a plain transport \
+                         error. Replace \"public\" in that file with the seed's real key -- \
+                         the seed operator can print theirs from the \"public\" field of \
+                         their --identity file.",
+                        endpoint.addr
+                    );
+                }
+                service.add_bootstrap(endpoint)
+            }
             Err(error) => {
-                eprintln!("bootstrap {path}: {error}");
+                log::error!("bootstrap {path}: {error}");
                 std::process::exit(2);
             }
         }
@@ -327,13 +373,13 @@ fn main() {
         match multicast::Responder::bind(service.identity(), listen_addr.port(), multicast::PORT) {
             Ok(responder) => Some(responder),
             Err(error) => {
-                eprintln!("multicast: {error} -- continuing without LAN discovery");
+                log::warn!("multicast: {error} -- continuing without LAN discovery");
                 None
             }
         };
 
     let listener = service.listen(listen_addr).unwrap_or_else(|e| {
-        eprintln!("listen: {e}");
+        log::error!("listen: {e}");
         // The one bind failure worth explaining, because the address that
         // causes it is the address an operator has every reason to think is
         // right. A cloud instance's public address is NAT'd to it and is on no
@@ -341,7 +387,7 @@ fn main() {
         // and the fix is the counterintuitive one of binding the wildcard and
         // publishing the public address in the bootstrap file instead.
         if !listen_addr.ip().is_unspecified() {
-            eprintln!(
+            log::error!(
                 "listen: {} is not an address on this host. A cloud instance's public \
                  address is NAT'd to it and never appears on an interface -- bind \
                  0.0.0.0:{} and put the public address in the bootstrap file you hand \
@@ -352,7 +398,7 @@ fn main() {
         }
         std::process::exit(2)
     });
-    eprintln!("listening on {listen_addr}");
+    log::info!("listening on {listen_addr}");
     // Exclusive, opened above: the daemon appends every record it imports from
     // a peer, so it is a writer and must not share a log with another one.
     let node = Node::new(ledger, root);
@@ -360,12 +406,12 @@ fn main() {
     // queues something, and an absent one simply drains nothing.
     let spool = queue_path.as_ref().map(serve::Spool::at);
     match &queue_path {
-        Some(path) => eprintln!("queue: draining {path} each round"),
-        None => eprintln!("queue: none -- submissions arrive only from peers"),
+        Some(path) => log::info!("queue: draining {path} each round"),
+        None => log::info!("queue: none -- submissions arrive only from peers"),
     }
     let population = match &population_path {
         Some(path) => load_population(Path::new(path)).unwrap_or_else(|e| {
-            eprintln!("population: {e}");
+            log::error!("population: {e}");
             std::process::exit(2)
         }),
         None => Population::default(),
@@ -377,7 +423,7 @@ fn main() {
     // Idempotent, and cheap: one stat per pin already held.
     let servable = node.publish_local_code();
     let missing = node.missing_code().len();
-    eprintln!("verifier code: {servable} servable, {missing} unmet");
+    log::info!("verifier code: {servable} servable, {missing} unmet");
 
     let registry = node.registry().clone();
     let state = Arc::new(Mutex::new(State { node, population }));
@@ -386,7 +432,7 @@ fn main() {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Err(error) = write_checkpoint(Path::new(&checkpoint_path), &root_key, &guard.node) {
-            eprintln!("checkpoint: {error}");
+            log::warn!("checkpoint: {error}");
             std::process::exit(2);
         }
     }
@@ -412,7 +458,7 @@ fn main() {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(error) => {
-                eprintln!("accept: {error}");
+                log::warn!("accept: {error}");
                 continue;
             }
         };
@@ -431,18 +477,28 @@ fn main() {
                         PopLimits::default(),
                         |node, candidate| scorer.score(node, candidate),
                     )
-                    .map(|_| ())
+                    .map(|(remote, _)| remote)
             }
-            None => accept_service.serve_node_once(stream, node).map(|_| ()),
+            None => accept_service.serve_node_once(stream, node),
         };
         match outcome {
-            Ok(()) => persist(
-                &guard,
-                &accept_checkpoint_path,
-                &accept_root_key,
-                accept_population_path.as_ref(),
-            ),
-            Err(error) => eprintln!("inbound session: {error}"),
+            Ok(remote) => {
+                // The only positive signal this daemon ever gave was a growing
+                // log file, checked by hand across two terminals. Every other
+                // line here is a failure; a session that worked was silent.
+                log::info!(
+                    "inbound session: {} ok, {} entries now",
+                    peer_id_string(&remote),
+                    node.ledger().len()
+                );
+                persist(
+                    &guard,
+                    &accept_checkpoint_path,
+                    &accept_root_key,
+                    accept_population_path.as_ref(),
+                );
+            }
+            Err(error) => log::warn!("inbound session: {error}"),
         }
     });
 
@@ -484,12 +540,12 @@ fn main() {
             let admissions = serve::drain_into(&mut guard.node, queue, &timestamp(), false);
             let drained = !admissions.is_empty();
             for (path, admission) in admissions {
-                eprintln!("drain: {}", admission.note);
+                log::info!("drain: {}", admission.note);
                 // Removed whether admitted or refused. Nearly every refusal is
                 // permanent -- a stale epoch, a citation that is not an
                 // accepted claim -- and a queue that retries one never empties.
                 if let Err(error) = queue.take(&path) {
-                    eprintln!("drain: cannot remove {}: {error}", path.display());
+                    log::warn!("drain: cannot remove {}: {error}", path.display());
                 }
             }
             if drained {
@@ -540,14 +596,21 @@ fn main() {
                 None => service.dial_node_once(&endpoint, node),
             };
             match outcome {
-                Ok(()) => persist(
-                    &guard,
-                    &checkpoint_path,
-                    &root_key,
-                    population_path.as_ref(),
-                ),
+                Ok(()) => {
+                    log::info!(
+                        "outbound session: {} ok, {} entries now",
+                        peer_id_string(&endpoint.peer.id()),
+                        node.ledger().len()
+                    );
+                    persist(
+                        &guard,
+                        &checkpoint_path,
+                        &root_key,
+                        population_path.as_ref(),
+                    );
+                }
                 Err(error) => {
-                    eprintln!("outbound session: {error}");
+                    log::warn!("outbound session: {error}");
                     // Tell the DHT, or every lookup that chose this peer waits
                     // on it forever. `peers_for` hands out the next hop of each
                     // lookup in flight and expects exactly one answer per

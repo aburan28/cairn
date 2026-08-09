@@ -7,6 +7,31 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # One PR for the whole RustCrypto set, because these crates share the
+      # `digest`, `crypto-common`, `aead` and `rand_core` traits and a major
+      # only makes sense alongside its peers. Split across PRs they merge
+      # individually and green -- each resolves fine on its own -- and break at
+      # the type level where two versions of a trait meet. That is what took
+      # `main` down in four files: `hmac 0.13` against `sha2 0.10`,
+      # `x25519-dalek 3` and `chacha20poly1305 0.11` against `rand_core 0.6`.
+      # Grouped, the incompatibility shows up in one PR's own CI, which is
+      # where it can be dealt with.
+      rustcrypto:
+        patterns:
+          - "sha2"
+          - "hmac"
+          - "digest"
+          - "crypto-common"
+          - "aead"
+          - "cipher"
+          - "chacha20poly1305"
+          - "poly1305"
+          - "universal-hash"
+          - "rand_core"
+          - "x25519-dalek"
+          - "ed25519-dalek"
+          - "curve25519-dalek"
 
   - package-ecosystem: github-actions
     directory: /

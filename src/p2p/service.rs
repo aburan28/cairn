@@ -858,76 +858,107 @@ fn decode_record(record: &super::sync::Record) -> Result<(), SyncError> {
     })
 }
 
-/// Replay a peer's inputs through this node's own rules engine.
+/// Replay a batch of exchangeable records through a node's own rules engine.
+///
+/// **This is the one replay implementation.** The daemon reaches it through
+/// `apply_records` after every sync session, and `tests/simulation.rs` calls
+/// it directly, so the simulator exercises the code the daemon runs rather
+/// than a copy that could drift.
 ///
 /// Each record is stamped with its **own** `created_at`, not with the local
 /// clock, and that is load-bearing rather than tidy. A reveal must land in a
 /// strictly later epoch than the commitment it opens; stamping both with
 /// `timestamp()` on the way in puts them in the same epoch, so every replayed
 /// claim would be refused and record sync would quietly stop importing work.
+/// The record's own instant is also what makes the replay deterministic: two
+/// nodes handed the same records assign every one to the same epoch. Epoch
+/// *membership* from the record, settlement *order* from the epoch chain —
+/// see `docs/design/settlement-convergence.md`.
 ///
-/// Using the record's own instant also makes the replay deterministic: two
-/// nodes handed the same records assign every one of them to the same epoch,
-/// which is what lets them agree on which reveals were legal. It is what
-/// `docs/design-stage0-completion.md` §5 means by epoch membership coming from
-/// the record rather than from a clock.
+/// Within a kind, records replay in `created_at` order rather than id order.
+/// For objectives and commitments that is cosmetic; for claims it is not.
+/// Replaying a reveal drains every epoch before the reveal's own —
+/// `Node::reveal` calls `settle_due` before admitting, deliberately — so a
+/// claim from epoch N+2 replayed *before* a claim from epoch N pays epoch N's
+/// batch without it, and the epoch-N claim is then refused a moment later with
+/// "epoch already settled", out of the very same session. Which claims a node
+/// kept depended on how a content hash happened to sort in `Peer::ids()`.
 ///
-/// What it does *not* buy is agreement on settlement *order*. That is derived
-/// from each node's own log head at the epoch boundary, which two independently
-/// ordered logs do not share. Stage 0 has one sequencer, so there is one order
-/// that matters; `docs/p2p.md` says what is still open here.
-fn apply_records(node: &mut Node, peer: &Peer) {
-    let held = |field: &str, payload: &crate::canonical::Value| -> String {
+/// **The precondition is narrow and worth stating exactly**, because a first
+/// attempt at describing this got it wrong. It bites only when the node
+/// *already holds* an accepted claim for the earlier epoch: `Node::due_epochs`
+/// considers only epochs that have accepted claims, so an epoch this node
+/// knows nothing about is never due, never drained, and a later arrival for it
+/// is admitted normally. A cold sync — empty node, whole history in one
+/// session — is therefore safe with or without this sort. A node that synced
+/// partway and then received more history is not.
+///
+/// Pinned by `replay_does_not_lose_a_claim_to_the_order_records_arrive_in` in
+/// `tests/simulation.rs`, which constructs the adverse order rather than
+/// hoping for it, and which was verified to fail when this sort is removed.
+pub fn replay_records(node: &mut Node, records: &[(String, crate::canonical::Value)]) {
+    let held = |payload: &crate::canonical::Value| -> String {
         payload
-            .get(field)
+            .get("created_at")
             .and_then(crate::canonical::Value::as_str)
             .map(str::to_string)
-            // A record with no readable instant still has to go somewhere, and
-            // the local clock is the only remaining answer. The rules engine
-            // refuses it a moment later if that instant does not work.
+            // A record with no readable instant still has to go somewhere,
+            // and the local clock is the only remaining answer. The rules
+            // engine refuses it a moment later if that instant does not work.
             .unwrap_or_else(timestamp)
     };
     for kind in ["objective", "commitment", "claim"] {
-        for id in peer.ids() {
-            let Some(record) = peer.get(&id) else {
-                continue;
-            };
-            if record.kind != kind
-                || node.ledger().entries().iter().any(|entry| {
-                    entry.kind == record.kind && entry.payload.digest() == record.payload.digest()
-                })
+        let mut batch: Vec<&(String, crate::canonical::Value)> =
+            records.iter().filter(|(k, _)| k == kind).collect();
+        batch.sort_by_key(|(_, payload)| held(payload));
+        for (_, payload) in batch {
+            if node
+                .ledger()
+                .entries()
+                .iter()
+                .any(|entry| entry.kind == *kind && entry.payload.digest() == payload.digest())
             {
                 continue;
             }
-            let stamp = held("created_at", &record.payload);
+            let stamp = held(payload);
             match kind {
                 "objective" => {
-                    if let Ok(value) = Objective::from_value(&record.payload) {
+                    if let Ok(value) = Objective::from_value(payload) {
                         let _ = node.post_objective(&value, &stamp);
                     }
                 }
                 "commitment" => {
-                    if let Ok(value) = Commitment::from_value(&record.payload) {
+                    if let Ok(value) = Commitment::from_value(payload) {
                         let _ = node.commit(&value, &stamp);
                     }
                 }
                 "claim" => {
-                    if let Ok(value) = Claim::from_value(&record.payload) {
+                    if let Ok(value) = Claim::from_value(payload) {
                         let _ = node.reveal(&value, &stamp);
-                    }
-                }
-                "peer" => {
-                    // Replayed through the rules like everything else, so a
-                    // stale or unsigned record is refused here exactly as it
-                    // would be if this node had been asked to post it.
-                    if let Ok(value) = PeerRecord::from_value(&record.payload) {
-                        let _ = node.post_peer(&value, &stamp);
                     }
                 }
                 _ => {}
             }
         }
     }
+}
+
+/// Replay a sync peer's records, then settle whatever came due.
+///
+/// A `"peer"`-kind match arm used to sit in the replay loop and was
+/// unreachable: the loop iterates `["objective", "commitment", "claim"]`, and
+/// `sync::EXCHANGEABLE` has never included `"peer"` — peer records travel by
+/// obtaining the log itself, not by anti-entropy. Whether they *should* be
+/// exchangeable is a real question (the roadmap's "obtaining the log is
+/// obtaining the address book" argues yes), but it is a sync-admission change,
+/// not something to smuggle in through dead code.
+fn apply_records(node: &mut Node, peer: &Peer) {
+    let records: Vec<(String, crate::canonical::Value)> = peer
+        .ids()
+        .into_iter()
+        .filter_map(|id| peer.get(&id).map(|r| (r.kind.clone(), r.payload.clone())))
+        .collect();
+    replay_records(node, &records);
     // Replaying the inputs is only half of re-deriving the state: settlement is
     // deferred to the close of the reveal epoch, so a node that never drains
     // holds a log full of accepted claims that nobody was ever paid for.

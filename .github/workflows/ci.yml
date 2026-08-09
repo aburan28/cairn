@@ -34,6 +34,10 @@ jobs:
       - run: cargo build --release --locked
       - run: ./scripts/demo.sh
       - run: ./scripts/ratchet-demo.sh
+      # `try` and `scaffold`: the one command that waits on a real epoch
+      # boundary, and the generated challenge that has to be postable. Neither
+      # can be checked from a fixture timestamp.
+      - run: ./scripts/try-demo.sh
       # Runs the MCP server as a real process. The unit tests call handle_line
       # directly and structurally cannot catch a stray write to stdout, which is
       # the failure that breaks every MCP client and looks like their bug.
@@ -61,13 +65,25 @@ jobs:
       # healthcheck asks whether a binary runs at all, so the wrong code here
       # fails a build for no reason. Cheap to pin, and it drifted once already.
       - run: |
-          for BIN in proofwork proofwork-serve proofwork-p2p; do
+          # Every shipped binary, not a subset. `proofwork-gen-bootstrap` was
+          # missing from this list and answered exit 2 to `--help` for its whole
+          # life; the release workflow's unpack check is what found it.
+          for BIN in proofwork proofwork-mcp proofwork-serve proofwork-p2p proofwork-gen-bootstrap; do
             ./target/release/$BIN --help >/dev/null 2>&1 \
               || { echo "$BIN --help exited $?" >&2; exit 1; }
           done
+          # `|| status=$?` rather than a bare call then `$?`: GitHub runs this
+          # with `bash -e`, so a bare call that exits 2 -- which is the whole
+          # point of the check -- aborts the step before the comparison runs.
+          # The loop above survives only because `||` shields its call. This one
+          # could never pass, and nobody saw it: until the clippy step ahead of
+          # it went green this step was simply never reached, so the check meant
+          # to pin the misuse codes had not run once since it was written.
           for BIN in proofwork-serve proofwork-p2p; do
-            ./target/release/$BIN --definitely-not-a-flag >/dev/null 2>&1
-            [ $? -eq 2 ] || { echo "$BIN did not exit 2 on a bad argument" >&2; exit 1; }
+            status=0
+            ./target/release/$BIN --definitely-not-a-flag >/dev/null 2>&1 || status=$?
+            [ "$status" -eq 2 ] \
+              || { echo "$BIN exited $status on a bad argument, want 2" >&2; exit 1; }
           done
 
   reference:
@@ -216,6 +232,33 @@ jobs:
       - run: cargo install cargo-audit --locked
       - run: cargo audit
 
+  ui:
+    # The Next.js chain reader. Typechecked and built, not merely linted: it
+    # consumes `GET /chain`, and a change to that endpoint's shape should fail
+    # here rather than in somebody's browser.
+    #
+    # Deliberately not in the `rust` job. A Rust contributor should not need a
+    # Node toolchain, and `proofwork-serve` renders the chain itself at
+    # /chain.html with no build step -- ui/ is the richer client, not the only
+    # one. See ui/README.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      # `npm ci`, not `npm install`: it installs exactly the committed lockfile
+      # and fails if the two disagree, which is the same argument `--locked`
+      # makes for the Rust side.
+      - run: npm ci
+        working-directory: ui
+      - run: npx tsc --noEmit
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+
   examples:
     # Every example objective must pass schema validation and match its pinned
     # verifier hashes -- not only the ones the demo scripts happen to post.
@@ -228,3 +271,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
       - run: ./scripts/check-examples.sh
+      # The First-Blood instances are derived, not authored: `Q` is hashed to
+      # the curve from a public seed so that nobody -- the funder included --
+      # knows its discrete log. A checker edited by hand would silently break
+      # that, and the resulting bounty would look identical. This re-runs the
+      # derivation and fails on any drift between it and the checked-in files.
+      - run: python3 scripts/derive-first-blood.py --check

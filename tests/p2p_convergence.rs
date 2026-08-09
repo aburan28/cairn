@@ -33,10 +33,17 @@ const TS: &str = "2026-07-29T00:00:00+00:00";
 /// receiver has only the record, so the record's own instant is the only stamp
 /// two nodes can agree to file it under.
 const TS_REVEAL: &str = "2026-07-29T00:10:00+00:00";
-/// One epoch after the reveal, so the reveal epoch has closed and its batch
-/// settles. Both nodes use the same three instants, which is what makes their
-/// settlements comparable at all: the batch order is derived from the epoch.
-const TS_SETTLE: &str = "2026-07-29T00:20:00+00:00";
+/// Two epochs after the reveal, not one: the reveal epoch must close *and*
+/// wait out `FINALITY_EPOCHS` before its batch may settle. Both nodes use the
+/// same three instants, which is what makes their settlements comparable at
+/// all: the batch order is derived from the epoch.
+///
+/// Written as a literal rather than derived from `finality_epochs()`, unlike
+/// the sweeps in `tests/simulation.rs`, because these tests are about two
+/// nodes agreeing on an order and a fixed instant is part of what they hold in
+/// common. If the constant is ever raised, this is the assertion that fails —
+/// "alice did not settle the whole batch" — and the fix is one more epoch here.
+const TS_SETTLE: &str = "2026-07-29T00:30:00+00:00";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1011,5 +1018,126 @@ fn a_beacon_becomes_a_routable_contact_with_its_key_queued() {
     assert!(
         alice.with_directory(|d| d.key_wants()).contains(&node_id),
         "a contact from a beacon was not queued for the key that makes it dialable"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Settlement ordering: the invariant, and where it currently breaks.
+// ---------------------------------------------------------------------------
+
+/// A batch of `n` claims that all settle together, authored by one node.
+///
+/// Distinct objectives rather than one: a non-progressive objective settles
+/// once, so several claims in a single batch need several objectives. They
+/// share a verifier and an artifact, and differ only in `goal`, which is enough
+/// to give each a distinct id.
+fn batch_of(node: &mut Node, n: usize) {
+    let base = collatz_objective();
+    let artifact = collatz_artifact();
+    for i in 0..n {
+        let objective = Objective::new(
+            format!("GOAL-batch-{i}"),
+            base.statement.clone(),
+            base.verifier.clone(),
+            base.reward,
+            base.funder.clone(),
+            TS,
+            None,
+            None,
+        )
+        .expect("valid objective");
+        let id = node.post_objective(&objective, TS).expect("post");
+        let submitter = format!("sub-{i}");
+        let nonce = format!("n-{i}");
+        let hash = commitment_hash(&id, &submitter, &artifact, &nonce);
+        node.commit(&Commitment::new(&id, &submitter, hash, TS), TS)
+            .expect("commit");
+        let claim = Claim::new(
+            &id,
+            &submitter,
+            artifact.clone(),
+            &nonce,
+            TS_REVEAL,
+            Vec::new(),
+        )
+        .expect("valid claim");
+        node.reveal(&claim, TS_REVEAL).expect("reveal");
+    }
+    let _ = node.settle_at(TS_SETTLE);
+}
+
+/// The claims a node paid, in the order it paid them.
+fn settlement_order(node: &Node) -> Vec<String> {
+    node.ledger()
+        .entries_of_kind("settlement")
+        .into_iter()
+        .filter_map(|entry| {
+            entry
+                .payload
+                .get("claim_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// **The ordering invariant.** Two nodes holding the same records must pay the
+/// same claims in the same order.
+///
+/// This is not a nicety. A batch settles in order of
+/// `H(beacon(epoch, anchor) ‖ commitment_hash)`, and that order decides who is
+/// paid first out of a pool that can run out — so two nodes that disagree about
+/// it disagree about who got money. Neither errors, and `audit` passes on both,
+/// because each is internally consistent. It is the quietest possible way for a
+/// network to fork.
+///
+/// Bob is given nothing but alice's *inputs* and re-derives the rest, which is
+/// the whole premise of the project.
+#[test]
+fn two_nodes_holding_the_same_records_settle_in_the_same_order() {
+    let mut alice = node("order-alice");
+    batch_of(&mut alice, 6);
+
+    let mut bob = node("order-bob");
+    apply(&mut bob, &records_of(&alice));
+
+    let theirs = settlement_order(&alice);
+    let ours = settlement_order(&bob);
+    assert_eq!(theirs.len(), 6, "alice did not settle the whole batch");
+    assert_eq!(ours.len(), 6, "bob did not settle the whole batch");
+    assert_eq!(
+        ours, theirs,
+        "two nodes with identical records paid the same claims in different \
+         orders. The pool is finite, so this is a disagreement about who got \
+         money -- and both logs audit clean, because each is internally \
+         consistent."
+    );
+}
+
+/// The mechanism behind the test above, isolated.
+///
+/// The batch order is keyed on `beacon(epoch, anchor)`, so the anchor is the
+/// only input that could differ between two nodes holding the same records --
+/// the epoch comes from each record's own `created_at` and already agrees.
+/// Asserting on it directly says *why* an order diverged rather than only that
+/// it did, and it is deterministic where a six-claim order comparison could
+/// coincide by luck.
+#[test]
+fn the_settlement_anchor_is_the_same_on_both_nodes() {
+    let mut alice = node("anchor-alice");
+    batch_of(&mut alice, 6);
+
+    let mut bob = node("anchor-bob");
+    apply(&mut bob, &records_of(&alice));
+
+    // The epoch the reveals landed in, whose close settles the batch.
+    let epoch = proofwork::time::parse_rfc3339(TS_REVEAL).expect("parse") as u64
+        / proofwork::partition::epoch_seconds();
+
+    assert_eq!(
+        bob.anchor_of_epoch(epoch),
+        alice.anchor_of_epoch(epoch),
+        "the settlement anchor differs between two nodes holding identical \
+         records, so their beacons differ and their batches sort differently"
     );
 }

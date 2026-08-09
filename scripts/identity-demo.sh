@@ -127,7 +127,9 @@ sed 's/^/  /' "$WORK/out"
 echo "  a signed identity is admitted"
 
 rule "the log audits, and both implementations agree"
-sleep 1.1
+# Two waits, not one: an epoch must close *and* wait out the finality delay
+# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
+sleep 2.2
 "$RUST" --log "$LOG" --root . settle >/dev/null 2>&1 || true
 "$RUST" --log "$LOG" --root . audit | tail -2 | sed 's/^/  /'
 "$RUST" --log "$LOG" --root . audit | grep -q "log verified" || fail "the log does not audit"
