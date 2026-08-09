@@ -146,10 +146,16 @@ fn the_cipher_and_the_kems_that_should_be_there_are() {
         // The one symmetric cipher.
         "chacha20poly1305",
         "chacha20",
-        // The mandatory KEM, and the two optional suites.
+        // The mandatory KEM, and the standard optional suites.
         "classic-mceliece-rust",
         "ml-kem",
         "hqc-kem",
+        // The rank-metric leg, and the bignum backing the vendored CSIDH one.
+        // `csidh` itself is *not* here: it is vendored into `src/crypto/csidh/`
+        // because its published API cannot serialise a key, so its absence from
+        // the lock file is correct and this list must not ask for it.
+        "gabidulin",
+        "crypto-bigint",
         // Signatures. Not key exchange -- see `crypto::kem`.
         "ed25519-dalek",
         "ml-dsa",

@@ -164,6 +164,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto-bigint"
+version = "0.6.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e43027691f1c055da3da4f7d96af09fcec420d435d5616e51f29afd0811c56a7"
+dependencies = [
+ "num-traits",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -292,6 +303,12 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "gabidulin"
+version = "0.1.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f183206a7b4918cd8797570bc8df16492a62e04535764ae16fac244c51e46a30"
 
 [[package]]
 name = "generic-array"
@@ -541,7 +558,9 @@ dependencies = [
  "argon2",
  "chacha20poly1305",
  "classic-mceliece-rust",
+ "crypto-bigint",
  "ed25519-dalek",
+ "gabidulin",
  "hmac",
  "hqc-kem",
  "log",

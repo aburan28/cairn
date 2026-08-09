@@ -10,9 +10,11 @@ shows something unbuilt it is drawn dashed and labelled.
 - [4. Objective lifecycle](#4-objective-lifecycle) — the state machine
 - [5. The verdict taxonomy](#5-the-verdict-taxonomy) — why four statuses and only two settle
 - [6. Sealed submission](#6-sealed-submission-and-threshold-reveal) — opening without the submitter
-- [7. Storage layering](#7-storage-layering) — codec, quota, mirror
-- [8. Money flow](#8-money-flow) — escrow, citation flow, the node fee
-- [9. Trust boundaries](#9-trust-boundaries-and-sybil-surfaces) — and where sybil bites
+- [7. Key exchange](#7-key-exchange-the-hybrid-bundle) — five suites, one combiner, and why adding a broken one is safe
+- [8. The committee](#8-the-committee-drawn-not-chosen) — drawn by beacon, and the epoch rule
+- [9. Storage layering](#9-storage-layering) — codec, quota, mirror
+- [10. Money flow](#10-money-flow) — escrow, citation flow, the node fee
+- [11. Trust boundaries](#11-trust-boundaries-and-sybil-surfaces) — and where sybil bites
 
 ---
 
@@ -296,7 +298,129 @@ flowchart LR
 
 ---
 
-## 7. Storage layering
+## 7. Key exchange: the hybrid bundle
+
+Five KEM suites, and the arrow that matters is the one from **every** leg into
+the hash. Recovering the derived key needs all of them, so a bundle is as
+strong as its *strongest* member — which is what makes it safe to carry a leg
+whose assumption is broken.
+
+Get this backwards and the design inverts: a *choice* of suite is as strong as
+the weakest one an attacker can force you down to. This never chooses.
+
+```mermaid
+flowchart LR
+    subgraph bundle["Bundle — one public key per suite"]
+        direction TB
+        mc["<b>mceliece348864</b><br/>binary Goppa · 261,120 B<br/><i>mandatory</i>"]
+        ml["ml-kem-768<br/>module-LWE · 1,184 B"]
+        hq["hqc-128<br/>quasi-cyclic · 2,241 B"]
+        cs["csidh-512<br/>isogeny · 64 B<br/><i>contested</i>"]
+        rq["rqc-illustrative<br/>rank metric · 64 B<br/><i>no security level</i>"]
+    end
+
+    mc -->|"ss₁"| kdf
+    ml -->|"ss₂"| kdf
+    hq -->|"ss₃"| kdf
+    cs -->|"ss₄"| kdf
+    rq -->|"ss₅"| kdf
+
+    kdf["<b>combiner</b><br/>SHA-256( domain ‖ bundle_id ‖<br/>(suite ‖ ct ‖ ss)* )"]
+    kdf --> key["one 32-byte shared secret"]
+
+    ct["Encapsulated<br/>one ciphertext per leg,<br/>in suite order"]
+    kdf -.->|"every ct absorbed too, so a<br/>leg cannot be lifted elsewhere"| ct
+```
+
+**Assurance decides what a suite is allowed to be**, in the type system rather
+than in a comment. Only `Standard` may carry a bundle; the other two are opt-in
+by name and can never be the mandatory leg.
+
+```mermaid
+flowchart TB
+    subgraph std["Assurance::Standard — in DEFAULT_SUITES"]
+        direction LR
+        s1["mceliece348864"]
+        s2["ml-kem-768"]
+        s3["hqc-128"]
+    end
+    subgraph con["Assurance::Contested — opt-in by name"]
+        c1["csidh-512<br/><i>disputed quantum level;<br/>implementation not constant-time;<br/>2.84 s to encapsulate</i>"]
+    end
+    subgraph ill["Assurance::Illustrative — opt-in by name"]
+        i1["rqc-illustrative<br/><i>u32 field caps degree at 31;<br/>NIST sets need far more, so no<br/>secure parameter set is expressible</i>"]
+    end
+
+    std -->|"may_be_mandatory() == true"| mand["can carry a bundle alone"]
+    con -->|"false"| never["Bundle::new refuses<br/>a bundle without a Standard leg"]
+    ill -->|"false"| never
+```
+
+The reason the bottom two are safe to ship at all, stated as the test that pins
+it (`breaking_every_contested_leg_still_opens_nothing`): hand an attacker the
+CSIDH **and** rank-metric secrets outright, and the bundle still does not open,
+because `ss₁` is in the hash and they do not have it.
+
+---
+
+## 8. The committee: drawn, not chosen
+
+Three questions had to stop being promises and start being functions of the
+log. Nobody issues an invitation, so nobody can decline to send one.
+
+```mermaid
+flowchart TB
+    peers[("peer records in the log<br/>identity + transport + addr")]
+    beacon["beacon(epoch, anchor)<br/><i>anchor = log head as the epoch opened</i>"]
+
+    peers --> rank
+    beacon --> rank
+    rank["rank each peer by<br/>H(beacon ‖ peer.transport)"]
+    rank --> take["take the lowest COMMITTEE_SIZE,<br/>seats numbered 1..=n in draw order"]
+    take --> seats["CommitteeSeat × 5"]
+
+    take -.->|"bounded at the commitment's own<br/>position, so a later peer record<br/>cannot join a committee already<br/>sealed to"| pos["positions"]
+    rank -.->|"ranked on the McEliece key id,<br/>not the ed25519 name: grinding a<br/>seat costs a keypair"| why["(a constant factor,<br/>not a defence)"]
+```
+
+**The epoch rule is the "time is consensus" half.** Nothing reads a clock — the
+comparison is between two timestamps that are both already in the log, so a
+member with a fast clock writes a record every node refuses.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor S as Submitter
+    participant L as Log
+    participant M as Drawn seat
+    actor A as Anyone
+
+    rect rgb(245, 235, 235)
+        Note over S,L: epoch N — the commitment's own epoch
+        S->>L: commitment { hash, envelope(3-of-5) }
+        M--xL: committee_share REFUSED<br/>ShareBeforeEpoch
+        Note right of M: publishing here would hand the<br/>sequencer an artifact it can still<br/>act on — the attack epoch<br/>batching exists to kill
+    end
+
+    Note over S: the submitter may now vanish
+
+    rect rgb(235, 243, 235)
+        Note over M,L: epoch N+1 or later
+        M->>L: committee_share × 3, each signed<br/>by the identity the draw named
+        A->>L: read envelope + shares
+        A->>A: reconstruct K, open, re-derive<br/>H(artifact ‖ submitter ‖ nonce)
+        A->>L: claim (the submitter's own signature,<br/>sealed with it at commit time)
+    end
+```
+
+Two refusals on that diagram are the whole point. A share for a seat drawn for
+somebody else is `SeatImpostor`, and a share published in epoch N is
+`ShareBeforeEpoch` — and because a Shamir point cannot be checked alone, without
+the first rule anyone could stall every reveal by filling seats with noise.
+
+---
+
+## 9. Storage layering
 
 Where at-rest encryption sits, and what it deliberately does not touch.
 
@@ -357,7 +481,7 @@ by **content rather than filename**.
 
 ---
 
-## 8. Money flow
+## 10. Money flow
 
 Everything downstream of one rule: *a claim mints only if a bounty was escrowed
 against that exact statement hash before any witness for it existed.*
@@ -400,7 +524,7 @@ Two consequences the diagram makes visible:
 
 ---
 
-## 9. Trust boundaries and sybil surfaces
+## 11. Trust boundaries and sybil surfaces
 
 ```mermaid
 flowchart TB

@@ -116,6 +116,8 @@ argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "ze
 # structured backends this does not have, and `serde` is not wanted anywhere
 # near a diagnostic path.
 log = { version = "0.4", default-features = false, features = ["std"] }
+gabidulin = "0.1.0-alpha.2"
+crypto-bigint = { version = "=0.6.0-rc.2", default-features = false, features = ["rand_core"] }
 
 [dev-dependencies]
 rand = "0.10"

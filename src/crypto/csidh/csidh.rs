@@ -1,0 +1,206 @@
+use crypto_bigint::{
+    modular::{BernsteinYangInverter, ConstMontyForm, ConstMontyParams},
+    rand_core::CryptoRngCore,
+    Odd, PrecomputeInverter, Random, Uint,
+};
+
+use super::{
+    csidh_params::CsidhParams, montgomery_curve::MontgomeryCurve, montgomery_point::MontgomeryPoint,
+};
+
+pub fn csidh<
+    const SAT_LIMBS: usize,
+    const N: usize,
+    MOD: ConstMontyParams<SAT_LIMBS>,
+    const UNSAT_LIMBS: usize,
+>(
+    params: CsidhParams<SAT_LIMBS, N, MOD>,
+    mut path: [u32; N],
+    start: ConstMontyForm<MOD, SAT_LIMBS>,
+    rng: &mut impl CryptoRngCore,
+) -> ConstMontyForm<MOD, SAT_LIMBS>
+where
+    Odd<Uint<SAT_LIMBS>>: PrecomputeInverter<
+        Inverter = BernsteinYangInverter<SAT_LIMBS, UNSAT_LIMBS>,
+        Output = Uint<SAT_LIMBS>,
+    >,
+{
+    let lis = params.lis();
+    let mut curve = MontgomeryCurve::new(params, start);
+
+    let mut dummies: [u32; N] = {
+        let mut temp = [0; N];
+        for i in 0..N {
+            temp[i] = 10 - path[i];
+        }
+        temp
+    };
+
+    let mut k = Uint::from(4u32);
+
+    while !path.into_iter().all(|x| x == 0) || !dummies.into_iter().all(|x| x == 0) {
+        let x = ConstMontyForm::new(&Uint::random(rng));
+
+        if let Some(mut point_p) = curve.lift(x) {
+            point_p = point_p * k;
+
+            let path_copy = path;
+            let dummies_copy: [u32; N] = dummies;
+
+            let s = lis
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| path_copy[*i] > 0 || dummies_copy[*i] > 0);
+
+            for (i, li) in s.clone() {
+                let m = {
+                    let mut temp = Uint::ONE;
+                    for (_, li) in s.clone().filter(|(j, _)| *j > i) {
+                        temp = temp * Uint::<SAT_LIMBS>::from(*li);
+                    }
+                    temp
+                };
+
+                let point_k = point_p * m;
+
+                if !point_k.is_infinity() {
+                    let mut tau = ConstMontyForm::ONE;
+                    let mut sigma = ConstMontyForm::ZERO;
+
+                    for multiple in point_k.multiples(Uint::from(*li - 1)) {
+                        let x = multiple.x();
+                        tau *= x;
+                        sigma = sigma + x - x.inv().unwrap();
+                    }
+
+                    let three = ConstMontyForm::new(&Uint::from(3u32));
+
+                    if path[i] > 0 {
+                        let b = tau * (curve.a2() - sigma * three);
+
+                        curve = MontgomeryCurve::new(params, b);
+                        point_p = {
+                            let x = point_p.X();
+                            let z = point_p.Z();
+                            let x_plus_z = x + z;
+                            let x_minus_z = x - z;
+
+                            let mut temp_x = ConstMontyForm::ONE;
+                            let mut temp_z = ConstMontyForm::ONE;
+                            for multiple in point_k.multiples(Uint::from(li / 2)) {
+                                let xi = multiple.X();
+                                let zi = multiple.Z();
+
+                                let a = x_minus_z * (xi + zi);
+                                let b = x_plus_z * (xi - zi);
+
+                                temp_x *= a + b;
+                                temp_z *= a - b;
+                            }
+
+                            let x_prime = x * temp_x.square();
+                            let z_prime = z * temp_z.square();
+
+                            MontgomeryPoint::new(curve, x_prime, z_prime)
+                        };
+                        path[i] -= 1;
+                    } else {
+                        let _ = tau * (curve.a2() - sigma * three);
+
+                        point_p = point_p * Uint::from(*li);
+                        dummies[i] -= 1;
+                    }
+
+                    if path[i] == 0 && dummies[i] == 0 {
+                        k = k * Uint::<SAT_LIMBS>::from(*li);
+                    }
+                }
+            }
+        }
+    }
+    curve.a2()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csidh_512_1() {
+        let params = CsidhParams::CSIDH_512;
+        let path = {
+            let mut temp = [0; 74];
+            temp[0] = 1;
+            temp
+        };
+        let start = ConstMontyForm::ZERO;
+        let public_key = csidh(params, path, start, &mut rand_core::OsRng);
+        assert_eq!(
+            public_key,
+            ConstMontyForm::new(&Uint::from_be_hex(
+                "53BAA451F759835A01933C76BC58C0C203A9B6B02F7F086B30C3469A8452750\
+                AAECA8A4F7C26BFF43876F4510F405F4D2A006635D89A42D327D9A2E8C00BF340"
+            ))
+        );
+    }
+
+    #[test]
+    fn csidh_512_2() {
+        let params = CsidhParams::CSIDH_512;
+        let path = {
+            let mut temp = [0; 74];
+            temp[0] = 1;
+            temp[1] = 1;
+            temp
+        };
+        let start = ConstMontyForm::ZERO;
+        let public_key = csidh(params, path, start, &mut rand_core::OsRng);
+        assert_eq!(
+            public_key,
+            ConstMontyForm::new(&Uint::from_be_hex(
+                "64BB503A4BCA4A4CEF79A054740B11D35C2D1C5778FC05F5AEA1C4FA0CFE4C9\
+                E36198514A67F220116C0F70C5511FB4163BECD5CF7347BC2DB66306AAFE6CEF0"
+            ))
+        );
+    }
+
+    #[test]
+    fn csidh_512_3() {
+        let params = CsidhParams::CSIDH_512;
+        let path = {
+            let mut temp = [0; 74];
+            temp[0] = 1;
+            temp[1] = 3;
+            temp[73] = 1;
+            temp
+        };
+        let start = ConstMontyForm::ZERO;
+        let public_key = csidh(params, path, start, &mut rand_core::OsRng);
+        assert_eq!(
+            public_key,
+            ConstMontyForm::new(&Uint::from_be_hex(
+                "3F0D6D05BDB550AF6459BBDBC08E40338AA2D22A4E8BD6EF1DF113688D3FD23\
+                EAB8C22365A23C4702A2AAC1835B7BED06B0C8E78E5F432D6296C244812CF25B3"
+            ))
+        );
+    }
+
+    #[test]
+    fn csidh_512_4() {
+        let params = CsidhParams::CSIDH_512;
+        let path = [
+            8, 2, 9, 3, 3, 0, 7, 2, 0, 8, 1, 9, 9, 4, 0, 10, 6, 3, 10, 7, 2, 3, 1, 4, 5, 3, 9, 10,
+            9, 3, 8, 5, 1, 10, 2, 4, 2, 10, 1, 1, 10, 8, 0, 9, 1, 8, 7, 6, 10, 9, 9, 4, 10, 6, 4,
+            4, 2, 3, 5, 5, 5, 3, 0, 9, 6, 9, 8, 5, 5, 9, 2, 0, 3, 6,
+        ];
+        let start = ConstMontyForm::ZERO;
+        let public_key = csidh(params, path, start, &mut rand_core::OsRng);
+        assert_eq!(
+            public_key,
+            ConstMontyForm::new(&Uint::from_be_hex(
+                "4ABA8DC557FA0A29A38A133253A99619A4EE708BD8A23284138CF6759C06B13\
+                B7CF623502EAFC1D1F847CF42A72C8807F6E9E79B56ED4318EAC92C7E93DCA1AC"
+            ))
+        );
+    }
+}

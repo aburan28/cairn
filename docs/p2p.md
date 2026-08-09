@@ -65,15 +65,57 @@ obvious alternative — negotiate a suite both ends support — is as strong as 
 weakest suite an attacker can force you down to, which is a downgrade attack
 with extra steps.
 
-| suite | family | public key | ciphertext |
-|---|---|---|---|
-| `mceliece348864` | code-based, binary Goppa | 261,120 B | 96 B |
-| `ml-kem-768` (FIPS 203) | module-LWE lattice | 1,184 B | 1,088 B |
-| `hqc-128` | code-based, quasi-cyclic | 2,241 B | 4,433 B |
+| suite | family | public key | ciphertext | assurance |
+|---|---|---|---|---|
+| `mceliece348864` | code-based, binary Goppa | 261,120 B | 96 B | standard, **mandatory** |
+| `ml-kem-768` (FIPS 203) | module-LWE lattice | 1,184 B | 1,088 B | standard |
+| `hqc-128` | code-based, quasi-cyclic | 2,241 B | 4,433 B | standard |
+| `csidh-512` | isogeny, class-group action | 64 B | 64 B | **contested** |
+| `rqc-illustrative` | rank metric | 64 B | 64 B | **no security level** |
 
-Two hardness assumptions, and the two code-based suites from different code
-families — a bundle of two lattice schemes would fall to one break, which is why
-the cheapest two are not the ones chosen.
+The three standard suites span two hardness assumptions, and the two code-based
+ones come from different code families — a bundle of two lattice schemes would
+fall to one break, which is why the cheapest two are not the ones chosen. Those
+three are `DEFAULT_SUITES`; the other two are opt-in by name.
+
+### The two below standard, and why they are safe to offer
+
+Both are wired in and working, and both are excluded from the defaults. They
+are safe to carry for exactly one reason — the combiner absorbs every leg, so a
+leg an attacker breaks outright is bytes and CPU rather than an opening. A test
+hands over both secrets and shows the bundle still holds.
+
+**`csidh-512`** has real CSIDH-512 parameters and two problems. Its *quantum*
+security level is disputed: the subexponential quantum attack on the group
+action puts it well below the original claim, and the parameters that would
+reach a stated level are an open question. And the implementation is **not
+constant-time**, so a local attacker who can time the group action recovers the
+private key — which is why it is vendored with that fact in the module header
+rather than behind a dependency line.
+
+Its cost decides where it can be used at all. Measured on the development
+machine, release build:
+
+| operation | `mceliece348864` | `csidh-512` |
+|---|---|---|
+| keygen | 163 ms | 1.28 s |
+| encapsulate | **117 µs** | **2.84 s** |
+| decapsulate | 13 ms | 1.44 s |
+
+Encapsulation is ~24,000× McEliece's. A five-seat committee sealing with a
+CSIDH leg pays about 14 s per submission, and every member pays 1.44 s again to
+open its share. That is a deployment fact, not a footnote.
+
+**`rqc-illustrative`** is named for what it is. Rank-metric schemes (RQC,
+ROLLO) were broken by algebraic attacks on rank syndrome decoding in 2020 and
+dropped by NIST; separately, the only Rust implementation holds field elements
+in a `u32`, capping the field degree at 31 where the NIST-track sets need far
+more — so it *cannot represent* a secure parameter set, and no configuration of
+this build makes it one. It is a working slot for a real rank-metric backend,
+and running code for the shape one would have to fit.
+
+SIDH/SIKE is not here at all: Castryck–Decru broke it outright in 2022, and
+unlike the two above that is not a question of parameters.
 
 **A node's identity stays the McEliece key alone.** `Bundle::id()` is
 `sha256(McEliece public key)`, deliberately not a hash over the whole bundle: a
@@ -83,10 +125,8 @@ leg changes what the cryptography rests on and changes no identity. The other
 legs are still bound — the combiner absorbs every suite and ciphertext, so a
 bundle whose optional keys were swapped derives a different secret.
 
-Rank-metric schemes (RQC, ROLLO) and CSIDH were considered and are not here:
-the rank ones were broken by algebraic attacks in 2020 and dropped by NIST, and
-CSIDH's quantum security is contested with no maintained Rust implementation.
-`src/crypto/kem.rs` carries the reasoning so it is not re-litigated.
+`src/crypto/kem.rs` carries the full reasoning for every suite so it is not
+re-litigated, and `src/crypto/csidh/` records what the vendoring changed.
 
 ## Transport security
 

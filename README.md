@@ -671,6 +671,7 @@ So submissions are **sealed**, and opened *without* the submitter:
 commit    commitment = H(artifact ‖ submitter ‖ nonce)      (unchanged)
           envelope   = ChaCha20-Poly1305(K, the whole signed claim)
           shares     = Shamir(K, 3-of-5), each sealed by post-quantum KEM
+                       (McEliece + ML-KEM + HQC, combined — see below)
 epoch end ≥3 seats publish `committee_share` records → anyone opens it
 ```
 
@@ -692,6 +693,22 @@ threshold is pinned at commit time against the network's constant, because a
 submitter who could seal one-of-five would be handing any single member an
 early read. `tests/committee_reveal.rs` runs the whole thing with the submitter
 gone after commit.
+
+**A key exchange is a combination, never a choice.** Encapsulating to a bundle
+runs *every* suite in it and hashes all their shared secrets together, so
+recovering the key needs all of them: a bundle is as strong as its **strongest**
+leg. Negotiating a suite both ends support would be the opposite — as strong as
+the weakest one an attacker can force you down to — which is why nothing here
+negotiates.
+
+That is what makes it safe to carry a scheme whose assumption is in doubt.
+Classic McEliece is mandatory and three standard suites are the default;
+`csidh-512` (disputed quantum level, not constant-time, 2.84 s per
+encapsulation) and `rqc-illustrative` (rank metric, at parameters that carry no
+security level) are available by name for anyone who wants an isogeny or
+rank-metric hedge. Neither can be a bundle's only leg — `Assurance` is in the
+type system, not in a comment — and a test hands an attacker both of their
+secrets to show the bundle still holds.
 
 Two things are stated rather than papered over: **citation flow requires
 linkage** — the pseudonym graph is public by construction because paying people

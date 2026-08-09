@@ -107,7 +107,7 @@ use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use super::kem::{Bundle, Encapsulated, KemError, Leg, SecretBundle, Suite, SUITES};
+use super::kem::{Bundle, Encapsulated, KemError, Leg, SecretBundle, Suite, DEFAULT_SUITES};
 use super::shamir::{self, Share};
 use crate::canonical::Value;
 
@@ -403,14 +403,21 @@ impl CommitteeKey {
         CommitteeKey { secrets }
     }
 
-    /// Generate a member key over every suite this build implements.
+    /// Generate a member key over [`DEFAULT_SUITES`].
     ///
-    /// The default because a bundle is only as strong as its *strongest* leg
-    /// (the combiner absorbs all of them), so there is no security reason for a
-    /// member to publish fewer — only a size reason, and a committee key is
-    /// published once per epoch.
+    /// Every suite at [`super::kem::Assurance::Standard`], and not the two
+    /// below it. A bundle is only as strong as its *strongest* leg, so on
+    /// security grounds a member may as well publish everything — but the two
+    /// contested suites cost more than they can repay here. CSIDH-512 alone
+    /// takes 2.84 s to encapsulate against McEliece's 117 µs, which a
+    /// five-seat committee pays five times per sealed submission and every
+    /// member pays again to open its share.
+    ///
+    /// A deployment that wants an isogeny or rank-metric hedge asks for it by
+    /// name through [`CommitteeKey::generate_over`], having read what those
+    /// legs are worth.
     pub fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> CommitteeKey {
-        CommitteeKey::generate_over(&SUITES, rng)
+        CommitteeKey::generate_over(&DEFAULT_SUITES, rng)
     }
 
     /// Adopt an already-assembled secret bundle, for a member whose keys are
@@ -1806,6 +1813,63 @@ mod tests {
             "Secret32 Debug leaked"
         );
         assert!(rendered.contains("<redacted>"));
+    }
+
+    /// A member may publish a bundle carrying a suite below
+    /// `Assurance::Standard`, and a share sealed to it opens exactly as any
+    /// other does.
+    ///
+    /// The rank-metric leg rather than the isogeny one, purely for wall-clock:
+    /// RQC is microseconds and CSIDH-512 is seconds per operation. What is
+    /// being checked is the *plumbing* — that an opted-in leg reaches the
+    /// envelope's KDF and back — and that is suite-independent.
+    ///
+    /// Note what the member does **not** get to do: drop McEliece.
+    /// `generate_over` adds it back, so the bundle a contested leg travels in
+    /// is still one that holds when the contested leg does not.
+    #[test]
+    fn a_member_may_opt_into_a_contested_suite_and_still_be_sealed_to() {
+        let opted_in = CommitteeKey::generate_over(&[Suite::Rqc], &mut OsRng);
+        assert!(
+            opted_in.public().key_for(Suite::Rqc).is_some(),
+            "the opted-in leg must be in the published bundle"
+        );
+        assert!(
+            opted_in.public().key_for(Suite::McEliece).is_some(),
+            "and the mandatory leg must be added back regardless"
+        );
+
+        let ordinary = CommitteeKey::generate(&mut OsRng);
+        let members = [opted_in.member(1), ordinary.member(2)];
+        let envelope =
+            SealedEnvelope::seal(b"mixed committee", AAD, &members, 2, &mut OsRng).expect("seals");
+
+        // Both members open their own share, and the two reconstruct.
+        let shares = vec![
+            opted_in.open_share(&envelope, 1).expect("opts-in opens"),
+            ordinary.open_share(&envelope, 2).expect("ordinary opens"),
+        ];
+        assert_eq!(
+            envelope.open_with_shares(&shares).expect("opens"),
+            b"mixed committee".to_vec()
+        );
+
+        // The two members' sealed shares carry different leg counts, which is
+        // the visible consequence of one of them opting in -- and is fine,
+        // because a share is addressed to one bundle and never moved.
+        let legs_of = |index: u8| {
+            envelope
+                .sealed_share(index)
+                .expect("share present")
+                .encapsulated()
+                .legs()
+                .len()
+        };
+        assert_ne!(
+            legs_of(1),
+            legs_of(2),
+            "the opted-in member's share should carry an extra KEM leg"
+        );
     }
 
     #[test]

@@ -23,39 +23,61 @@
 //! suites is as strong as the weakest one an attacker may force; a *combination*
 //! is as strong as the strongest. This module only ever combines.
 //!
-//! # The suites, and why these three
+//! # The suites
 //!
-//! | suite | family | public key | ciphertext | status |
+//! | suite | family | public key | ciphertext | [`Assurance`] |
 //! |---|---|---|---|---|
-//! | [`Suite::McEliece`] | code-based (binary Goppa) | 261,120 B | 96 B | mandatory in every bundle |
-//! | [`Suite::MlKem768`] | module-LWE lattice | 1,184 B | 1,088 B | FIPS 203, optional |
-//! | [`Suite::Hqc128`] | code-based (quasi-cyclic) | 2,241 B | 4,433 B | NIST-selected, optional, **on a release-candidate crate** |
+//! | [`Suite::McEliece`] | code-based (binary Goppa) | 261,120 B | 96 B | Standard — mandatory in every bundle |
+//! | [`Suite::MlKem768`] | module-LWE lattice | 1,184 B | 1,088 B | Standard — FIPS 203 |
+//! | [`Suite::Hqc128`] | code-based (quasi-cyclic) | 2,241 B | 4,433 B | Standard — NIST-selected, on a release-candidate crate |
+//! | [`Suite::Csidh512`] | isogeny (class-group action) | 64 B | 64 B | **Contested** |
+//! | [`Suite::Rqc`] | rank-metric | 64 B | 64 B | **Illustrative — no security level** |
 //!
-//! The three are deliberately from *two different* hardness assumptions, and
-//! the two code-based ones from different code families. A bundle of McEliece
-//! and ML-KEM survives a break of either lattices or Goppa codes; a bundle of
-//! two lattice schemes would not, which is the whole reason not to pick the
-//! cheapest two.
+//! The first three span *two* hardness assumptions, and the two code-based ones
+//! two different code families: a bundle of McEliece and ML-KEM survives a
+//! break of either lattices or Goppa codes, where a bundle of two lattice
+//! schemes would not. That is the whole reason not to pick the cheapest two.
 //!
-//! ## What was considered and is not here
+//! ## The two below Standard, and what they are actually for
 //!
-//! Written down because "why isn't X in the list" is otherwise re-litigated
-//! every time somebody reads a conference programme.
+//! Both are wired in, both are **opt-in by name**, and neither is in
+//! [`DEFAULT_SUITES`]. They are safe to offer for one reason, which is the
+//! combiner: recovering a bundle's key needs *every* leg, so a leg an attacker
+//! breaks outright is bytes and CPU rather than an opening. That is checked by
+//! `breaking_every_contested_leg_still_opens_nothing`, which hands the attacker
+//! both secrets and shows the bundle holds.
 //!
-//! - **Rank-metric schemes (RQC, ROLLO).** Algebraic attacks on rank syndrome
-//!   decoding in 2020 broke the submitted parameter sets, and NIST dropped them
-//!   from the process. Attractive key sizes; the assumption did not hold.
-//! - **CSIDH.** Isogeny-based, and the only one here with genuinely small keys.
-//!   Its *quantum* security is contested — the subexponential quantum attack
-//!   means CSIDH-512 is nowhere near the level originally claimed, and the
-//!   parameter sizes that would answer that are disputed and slow. It is also
-//!   not standardised and has no maintained Rust implementation. A scheme whose
-//!   parameters are an open research question does not belong on a path that
-//!   decides who gets paid.
+//! - **[`Suite::Csidh512`]** — real CSIDH-512 parameters, and two problems. The
+//!   quantum security level is *disputed*: the subexponential quantum attack on
+//!   the group action puts CSIDH-512 well below its original claim, and what
+//!   parameters would reach a given level is an open question. And the vendored
+//!   implementation is **not constant-time**, so a local attacker who can time
+//!   the group action recovers the private key. Measured cost, release build:
+//!   1.28 s keygen, **2.84 s encapsulate**, 1.44 s decapsulate — against 117 µs
+//!   for a McEliece encapsulation, a factor of about 24,000. That is a
+//!   deployment fact as much as a security one: a five-seat committee sealing
+//!   with a CSIDH leg pays ~14 s of encapsulation per submission.
+//! - **[`Suite::Rqc`]** — rank-metric, at parameters that carry **no security
+//!   level**. Algebraic attacks on rank syndrome decoding broke the submitted
+//!   RQC/ROLLO sets in 2020 and NIST dropped them; separately, the only Rust
+//!   implementation holds field elements in a `u32`, capping the field degree
+//!   at 31 where the NIST-track sets need far more — so it *cannot represent* a
+//!   secure parameter set, and no configuration of this build makes it one.
+//!   Present as a working slot for a real rank-metric backend, and as running
+//!   code for the shape one would have to fit.
+//!
+//! Neither may be a bundle's mandatory leg, and that is enforced by
+//! [`Suite::may_be_mandatory`] rather than by a comment — see [`Bundle::new`].
+//!
+//! ## What is not here
+//!
 //! - **X25519.** Not post-quantum at all. It sealed committee shares until this
 //!   module replaced it, and the swap is the point: a network whose transport is
 //!   quantum-resistant and whose *submissions* are not has moved the weakness
 //!   rather than removed it.
+//! - **SIDH/SIKE.** Broken outright by the Castryck–Decru key-recovery attack in
+//!   2022. Unlike the two above it is not a matter of parameters or of a
+//!   disputed level; there is nothing to wire in.
 //!
 //! # Randomness, and why every scheme is driven deterministically
 //!
@@ -133,6 +155,53 @@ use hqc_kem::Hqc128;
 
 /// Bytes in an HQC encapsulation salt. Fixed by the scheme at every level.
 const HQC_SALT: usize = 16;
+
+// -- CSIDH -----------------------------------------------------------------
+
+use super::csidh::{
+    csidh_params::csidh_512, CsidhParams, PrivateKey as CsidhPrivateKey,
+    PublicKey as CsidhPublicKey, SharedSecret as CsidhSharedSecret,
+};
+
+/// Bytes in a CSIDH-512 public key: the Montgomery coefficient `A` over a
+/// 512-bit prime field. Sixty-four on 32- and 64-bit targets alike, because
+/// `Uint::BYTES` is `LIMBS × Limb::BYTES` and the two vary inversely.
+const CSIDH_PK: usize = 64;
+/// Bytes in a CSIDH-512 private key: 74 exponents, each in `0..=10`, one per
+/// small prime in the class-group action.
+const CSIDH_SK: usize = csidh_512::N;
+/// A CSIDH ciphertext is an ephemeral public key. See [`Suite::Csidh512`].
+const CSIDH_CT: usize = CSIDH_PK;
+/// Largest value a CSIDH-512 private-key exponent may take. Upstream's
+/// `PrivateKey::new` *panics* above this, so sampling is rejection-based
+/// rather than a modulo -- and rejection rather than `% 11` because the bias a
+/// modulo introduces is a bias in a secret exponent.
+const CSIDH_EXPONENT_MAX: u8 = 10;
+
+// -- rank metric -----------------------------------------------------------
+
+use gabidulin::params::ILLUSTRATIVE_GF65536;
+use gabidulin::rqc::{Ciphertext as RqcCiphertext, Rng as RqcRng, Rqc};
+use gabidulin::serialize as rqc_bytes;
+
+/// Bytes in a rank-metric public key at [`ILLUSTRATIVE_GF65536`].
+///
+/// Every RQC size here is asserted against what the scheme actually emits by
+/// `declared_sizes_match_what_the_schemes_actually_produce`, because they are
+/// a function of a parameter set rather than of a standard.
+const RQC_PK: usize = 64;
+const RQC_SK: usize = 64;
+const RQC_CT: usize = 64;
+/// Field elements in an RQC plaintext at this parameter set: `k = 2`.
+const RQC_K: usize = 2;
+
+/// Domain separator for compressing a group-action or PKE output to 32 bytes.
+///
+/// Neither CSIDH nor RQC hands back a uniform 32-byte string the way a proper
+/// KEM does -- CSIDH returns a curve coefficient, which has structure, and RQC
+/// returns a plaintext. Hashing is what turns either into something the
+/// combiner can absorb like every other leg.
+const COMPRESS_DOMAIN: &[u8] = b"proofwork/kem/compress/v1";
 
 // -- domain separation -----------------------------------------------------
 
@@ -233,10 +302,82 @@ pub enum Suite {
     MlKem768,
     /// HQC-128. Quasi-cyclic codes.
     Hqc128,
+    /// CSIDH-512, as an ephemeral-static KEM over the class-group action.
+    ///
+    /// **Contested, and never a default.** Two separate problems, and both are
+    /// stated where a reader will hit them rather than in a footnote:
+    ///
+    /// 1. **The security level is disputed.** The subexponential quantum attack
+    ///    on the group action means CSIDH-512 is nowhere near the level
+    ///    originally claimed, and what parameters *would* reach a given level is
+    ///    an open question rather than a settled number.
+    /// 2. **The implementation is not constant-time.** The vendored group
+    ///    action branches on the private key, so a local attacker who can time
+    ///    it recovers that key. Upstream says so; see
+    ///    [`crate::crypto::csidh`].
+    ///
+    /// It is here because a bundle is as strong as its *strongest* leg, so an
+    /// isogeny leg beside a McEliece one is a hedge against a break of *codes*
+    /// that costs nothing if the isogeny assumption falls — which, given the
+    /// two problems above, it may. What it must never be is a bundle's only
+    /// leg, and [`Bundle::new`] makes that unrepresentable.
+    ///
+    /// Not a KEM natively: CSIDH is a Diffie–Hellman-shaped group action, so
+    /// this is the standard ephemeral-static construction — a ciphertext *is*
+    /// an ephemeral public key.
+    Csidh512,
+    /// Rank-metric RQC, at illustrative parameters.
+    ///
+    /// **This parameter set carries no security level, and that is not a
+    /// tunable.** Rank-metric schemes (RQC, ROLLO) were broken by algebraic
+    /// attacks on rank syndrome decoding in 2020 and dropped by NIST; the only
+    /// Rust implementation holds field elements in a `u32`, capping the field
+    /// degree at 31, while the NIST-track RQC sets need degrees far beyond
+    /// that — so it *cannot represent* a secure parameter set, and no
+    /// configuration of this build makes it one.
+    ///
+    /// It is wired in because a leg cannot weaken a bundle: the combiner
+    /// absorbs McEliece's secret too, so a rank-metric leg an attacker breaks
+    /// outright is bytes and CPU rather than an opening. Treat it as a slot
+    /// held for a real rank-metric backend, and as running code for the shape
+    /// such a backend would have to fit.
+    Rqc,
+}
+
+/// How much a suite's security is actually worth.
+///
+/// In the type system rather than only in prose, because a comment saying "do
+/// not rely on this" is a comment somebody skips. [`Bundle`] refuses to let
+/// anything below [`Assurance::Standard`] be a mandatory leg, and
+/// [`DEFAULT_SUITES`] excludes them, so relying on a contested scheme has to be
+/// something a caller does deliberately and by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Assurance {
+    /// Standardised, or long enough established to stake a bundle on.
+    Standard,
+    /// Real parameters, and a disputed security level or an implementation
+    /// caveat serious enough to name.
+    Contested,
+    /// The available implementation cannot express a parameter set with any
+    /// security level at all. Present as a slot, not as protection.
+    Illustrative,
 }
 
 /// Every suite this build implements, in bundle order.
-pub const SUITES: [Suite; 3] = [Suite::McEliece, Suite::MlKem768, Suite::Hqc128];
+pub const SUITES: [Suite; 5] = [
+    Suite::McEliece,
+    Suite::MlKem768,
+    Suite::Hqc128,
+    Suite::Csidh512,
+    Suite::Rqc,
+];
+
+/// The suites a key is generated over unless a caller names others.
+///
+/// Everything at [`Assurance::Standard`]. The contested and illustrative suites
+/// are opt-in by name through [`SecretBundle::generate`], because a default
+/// nobody chose is a default nobody weighed.
+pub const DEFAULT_SUITES: [Suite; 3] = [Suite::McEliece, Suite::MlKem768, Suite::Hqc128];
 
 impl Suite {
     /// The wire name. These strings reach records and are hashed into the
@@ -247,6 +388,19 @@ impl Suite {
             Suite::McEliece => "mceliece348864",
             Suite::MlKem768 => "ml-kem-768",
             Suite::Hqc128 => "hqc-128",
+            Suite::Csidh512 => "csidh-512",
+            // Named for what it is rather than "rqc-128", which would claim a
+            // security level this parameter set does not have.
+            Suite::Rqc => "rqc-illustrative",
+        }
+    }
+
+    /// How much this suite's security is actually worth. See [`Assurance`].
+    pub const fn assurance(self) -> Assurance {
+        match self {
+            Suite::McEliece | Suite::MlKem768 | Suite::Hqc128 => Assurance::Standard,
+            Suite::Csidh512 => Assurance::Contested,
+            Suite::Rqc => Assurance::Illustrative,
         }
     }
 
@@ -267,6 +421,8 @@ impl Suite {
             Suite::McEliece => MC_PK,
             Suite::MlKem768 => ML_PK,
             Suite::Hqc128 => HQC_PK,
+            Suite::Csidh512 => CSIDH_PK,
+            Suite::Rqc => RQC_PK,
         }
     }
 
@@ -277,6 +433,8 @@ impl Suite {
             Suite::McEliece => MC_SK,
             Suite::MlKem768 => ML_SK,
             Suite::Hqc128 => HQC_SK,
+            Suite::Csidh512 => CSIDH_SK,
+            Suite::Rqc => RQC_SK,
         }
     }
 
@@ -285,12 +443,24 @@ impl Suite {
             Suite::McEliece => MC_CT,
             Suite::MlKem768 => ML_CT,
             Suite::Hqc128 => HQC_CT,
+            Suite::Csidh512 => CSIDH_CT,
+            Suite::Rqc => RQC_CT,
         }
     }
 
     /// Is this the suite a bundle may not omit?
     pub const fn is_mandatory(self) -> bool {
         matches!(self, Suite::McEliece)
+    }
+
+    /// May a bundle rest on this suite alone?
+    ///
+    /// Only [`Assurance::Standard`], and the mandatory leg is checked against
+    /// this rather than against a hard-coded `McEliece` — so promoting a suite
+    /// out of the default set later cannot silently make a contested scheme
+    /// load-bearing.
+    pub const fn may_be_mandatory(self) -> bool {
+        matches!(self.assurance(), Assurance::Standard)
     }
 
     /// Generate a keypair, drawing every byte of randomness from `rng`.
@@ -323,8 +493,126 @@ impl Suite {
                 let (ek, dk) = Hqc128::generate_key_deterministic(&seed);
                 pair(self, ek.as_ref().to_vec(), dk.as_ref().to_vec())
             }
+            Suite::Csidh512 => {
+                let secret = Zeroizing::new(csidh_exponents(rng));
+                let private = csidh_private(&secret);
+                let public = CsidhPublicKey::from(private, &mut CsidhRng(rng));
+                pair(self, public.to_bytes(), secret.to_vec())
+            }
+            Suite::Rqc => {
+                let scheme = rqc();
+                let (public, secret) = scheme.keygen(&mut RqcAdapter(rng));
+                let field = ILLUSTRATIVE_GF65536
+                    .field()
+                    .expect("the illustrative parameter set names a valid field");
+                pair(
+                    self,
+                    rqc_bytes::serialize_public_key(&field, &public),
+                    rqc_bytes::serialize_secret_key(&field, &secret),
+                )
+            }
         }
     }
+}
+
+/// The RQC instance this build speaks. See [`Suite::Rqc`] on what it is worth.
+fn rqc() -> Rqc {
+    ILLUSTRATIVE_GF65536
+        .build()
+        .expect("the illustrative parameter set is valid by construction")
+}
+
+/// Draw 74 CSIDH exponents, each uniform in `0..=10`.
+///
+/// **Rejection, not `% 11`.** A modulo over a byte would make the low four
+/// values ~9% more likely than the high seven, and that is a bias in a secret
+/// exponent of the class-group action — the one place in this module where a
+/// sloppy sample is directly a key-recovery advantage rather than a nuisance.
+/// Upstream also *panics* above 10, so an unclamped value is a remote crash.
+fn csidh_exponents<R: RngCore + CryptoRng>(rng: &mut R) -> [u8; CSIDH_SK] {
+    let mut out = [0u8; CSIDH_SK];
+    for slot in out.iter_mut() {
+        loop {
+            let mut byte = [0u8; 1];
+            rng.fill_bytes(&mut byte);
+            // 253 = 11 × 23, so bytes below it are uniform over 0..=10 and the
+            // three above are discarded rather than folded.
+            if byte[0] < 253 {
+                *slot = byte[0] % (CSIDH_EXPONENT_MAX + 1);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Widen stored exponents into the array shape upstream wants.
+fn csidh_private(
+    secret: &[u8; CSIDH_SK],
+) -> CsidhPrivateKey<{ csidh_512::LIMBS }, CSIDH_SK, csidh_512::MOD> {
+    let mut widened = [0u32; CSIDH_SK];
+    for (slot, byte) in widened.iter_mut().zip(secret.iter()) {
+        // Clamped rather than trusted. `PrivateKey::new` panics above 10, and a
+        // secret read back off disk is input like any other -- a corrupted byte
+        // must not be a crash on the reveal path.
+        *slot = u32::from((*byte).min(CSIDH_EXPONENT_MAX));
+    }
+    CsidhPrivateKey::new(CsidhParams::CSIDH_512, widened)
+}
+
+/// Bridge this crate's `rand_core 0.6` RNG to the one `crypto-bigint` wants.
+///
+/// The same version gap `ml-kem` and `hqc-kem` are driven around by their
+/// deterministic entry points. CSIDH has none — the group action needs
+/// randomness internally, for the supersingularity test — so it gets an
+/// adapter instead of a seed.
+struct CsidhRng<'a, R>(&'a mut R);
+
+impl<R: RngCore + CryptoRng> rand_core::RngCore for CsidhRng<'_, R> {
+    fn next_u32(&mut self) -> u32 {
+        self.0.next_u32()
+    }
+    fn next_u64(&mut self) -> u64 {
+        self.0.next_u64()
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.0.fill_bytes(dest)
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.0.try_fill_bytes(dest)
+    }
+}
+
+impl<R: RngCore + CryptoRng> CryptoRng for CsidhRng<'_, R> {}
+
+/// Bridge to `gabidulin`'s dependency-free `Rng` trait.
+struct RqcAdapter<'a, R>(&'a mut R);
+
+impl<R: RngCore + CryptoRng> RqcRng for RqcAdapter<'_, R> {
+    fn next_u64(&mut self) -> u64 {
+        self.0.next_u64()
+    }
+}
+
+/// Hash a structured group-action or PKE output down to a 32-byte secret.
+///
+/// Neither CSIDH nor RQC produces a uniform string: CSIDH returns a curve
+/// coefficient and RQC a plaintext, both with algebraic structure an attacker
+/// knows. Feeding either to an AEAD directly would be using a key with known
+/// relations; hashing with a domain separator is what makes it a key at all.
+/// The context bytes go in too, so a secret is bound to the exchange that
+/// produced it rather than merely to the scheme.
+fn compress(suite: Suite, secret: &[u8], context: &[u8]) -> Secret32 {
+    let mut hasher = Sha256::new();
+    absorb(&mut hasher, COMPRESS_DOMAIN);
+    absorb(&mut hasher, suite.as_str().as_bytes());
+    absorb(&mut hasher, secret);
+    absorb(&mut hasher, context);
+    let mut out = hasher.finalize();
+    let mut key = [0u8; SHARED_SECRET_LEN];
+    key.copy_from_slice(&out[..]);
+    Zeroize::zeroize(&mut out[..]);
+    Secret32::new(key)
 }
 
 /// Assemble a keypair from raw halves a generator just produced.
@@ -451,6 +739,71 @@ impl PublicKey {
                 let mut out = [0u8; SHARED_SECRET_LEN];
                 out.copy_from_slice(shared.as_ref());
                 (ct.as_ref().to_vec(), Secret32::new(out))
+            }
+            Suite::Csidh512 => {
+                // Ephemeral-static, because CSIDH is a group action rather than
+                // a KEM: draw a throwaway private key, send its public key as
+                // the "ciphertext", and act with it on the recipient's key.
+                let ephemeral_secret = Zeroizing::new(csidh_exponents(rng));
+                let ephemeral = csidh_private(&ephemeral_secret);
+                let ciphertext =
+                    CsidhPublicKey::from(ephemeral, &mut CsidhRng(&mut *rng)).to_bytes();
+
+                // `from_bytes` and not a raw construction: it runs upstream's
+                // supersingularity test. Acting on an *ordinary* curve leaks
+                // the acting key, so an unvalidated recipient key is an
+                // invalid-curve attack on whoever encapsulates.
+                let shared = match CsidhPublicKey::from_bytes(
+                    CsidhParams::CSIDH_512,
+                    &self.bytes,
+                    &mut CsidhRng(&mut *rng),
+                ) {
+                    Some(recipient) => {
+                        CsidhSharedSecret::from(recipient, ephemeral, &mut CsidhRng(&mut *rng))
+                            .to_bytes()
+                    }
+                    // A key that is not a supersingular curve belongs to
+                    // nobody, so there is no secret to agree on. Encapsulating
+                    // to garbage instead of failing keeps the shape of the
+                    // call and costs the holder their own leg -- the same
+                    // bound `PublicKey::from_bytes` documents, and the reason
+                    // a bundle is never one leg.
+                    None => vec![0u8; CSIDH_PK],
+                };
+                let secret = compress(self.suite, &shared, &ciphertext);
+                (ciphertext, secret)
+            }
+            Suite::Rqc => {
+                let scheme = rqc();
+                let field = ILLUSTRATIVE_GF65536.field().expect("valid field");
+                let public =
+                    rqc_bytes::deserialize_public_key(&field, ILLUSTRATIVE_GF65536.n, &self.bytes)
+                        .expect("length checked on entry");
+
+                // A hashed-PKE KEM: encrypt a random plaintext and hash it with
+                // the ciphertext. **Not Fujisaki-Okamoto**, so this leg is
+                // IND-CPA and not IND-CCA -- which would matter a great deal if
+                // the parameter set carried a security level, and does not,
+                // because it does not. Stated rather than glossed: an FO
+                // transform here would dress up a scheme that is illustrative
+                // either way.
+                let mut message = Zeroizing::new(vec![0u32; RQC_K]);
+                for slot in message.iter_mut() {
+                    let mut two = [0u8; 2];
+                    rng.fill_bytes(&mut two);
+                    *slot = u32::from(u16::from_le_bytes(two));
+                }
+                // `encrypt` returns `None` only when the message is not `k`
+                // elements, which the draw above guarantees -- so this is an
+                // invariant rather than a case, and a `None` reaching here
+                // would mean the parameter set changed underneath the constant.
+                let ct = scheme
+                    .encrypt(&public, &message, &mut RqcAdapter(rng))
+                    .expect("the message is exactly RQC_K elements");
+                let ciphertext = rqc_bytes::serialize_ciphertext(&field, &ct);
+                let plain = rqc_bytes::serialize_vector(&field, &message);
+                let secret = compress(self.suite, &plain, &ciphertext);
+                (ciphertext, secret)
             }
         }
     }
@@ -581,6 +934,59 @@ impl SecretKey {
                 out.copy_from_slice(shared.as_ref());
                 Secret32::new(out)
             }
+            Suite::Csidh512 => {
+                let mut rng = rand_core::OsRng;
+                let private = csidh_private(
+                    self.bytes
+                        .as_slice()
+                        .try_into()
+                        .as_ref()
+                        .map(|b: &[u8; CSIDH_SK]| b)
+                        .expect("length checked above"),
+                );
+                // The incoming ephemeral key is validated for the same reason
+                // the recipient's is on the encapsulate side: acting on an
+                // ordinary curve leaks the key doing the acting, and here that
+                // is *our long-term secret*. A malformed ciphertext therefore
+                // yields a wrong secret rather than a used key.
+                let shared = match CsidhPublicKey::from_bytes(
+                    CsidhParams::CSIDH_512,
+                    ciphertext,
+                    &mut CsidhRng(&mut rng),
+                ) {
+                    Some(ephemeral) => {
+                        CsidhSharedSecret::from(ephemeral, private, &mut CsidhRng(&mut rng))
+                            .to_bytes()
+                    }
+                    None => vec![0u8; CSIDH_PK],
+                };
+                compress(self.suite, &shared, ciphertext)
+            }
+            Suite::Rqc => {
+                let scheme = rqc();
+                let field = ILLUSTRATIVE_GF65536.field().expect("valid field");
+                let secret_key =
+                    rqc_bytes::deserialize_secret_key(&field, ILLUSTRATIVE_GF65536.n, &self.bytes)
+                        .expect("length checked on entry");
+                let ct: RqcCiphertext = match rqc_bytes::deserialize_ciphertext(
+                    &field,
+                    ILLUSTRATIVE_GF65536.n,
+                    ciphertext,
+                ) {
+                    Some(ct) => ct,
+                    None => return Ok(compress(self.suite, &[], ciphertext)),
+                };
+                // A decryption failure is a *wrong secret*, never an error.
+                // Reporting it would make this leg a decryption oracle, and
+                // would also break the property every other suite here has:
+                // implicit rejection, so a caller cannot tell a tampered
+                // ciphertext from a foreign one until the AEAD tag says so.
+                let plain = match scheme.decrypt(&secret_key, &ct) {
+                    Ok(message) => rqc_bytes::serialize_vector(&field, &message),
+                    Err(_) => Vec::new(),
+                };
+                compress(self.suite, &plain, ciphertext)
+            }
         };
         Ok(secret)
     }
@@ -641,7 +1047,13 @@ impl Bundle {
                 });
             }
         }
-        if !keys.iter().any(|key| key.suite.is_mandatory()) {
+        // Checked through `may_be_mandatory` rather than by naming McEliece,
+        // so a contested suite can never become load-bearing by being promoted
+        // into the default set later. See `Suite::may_be_mandatory`.
+        if !keys
+            .iter()
+            .any(|key| key.suite.is_mandatory() && key.suite.may_be_mandatory())
+        {
             return Err(KemError::McElieceRequired);
         }
         Ok(Bundle { keys })
@@ -738,7 +1150,13 @@ impl SecretBundle {
                 });
             }
         }
-        if !keys.iter().any(|key| key.suite.is_mandatory()) {
+        // Checked through `may_be_mandatory` rather than by naming McEliece,
+        // so a contested suite can never become load-bearing by being promoted
+        // into the default set later. See `Suite::may_be_mandatory`.
+        if !keys
+            .iter()
+            .any(|key| key.suite.is_mandatory() && key.suite.may_be_mandatory())
+        {
             return Err(KemError::McElieceRequired);
         }
         Ok(SecretBundle { keys })
@@ -1112,9 +1530,9 @@ mod tests {
 
     #[test]
     fn a_bundle_needs_every_leg_to_open() {
-        let (public, secret) = SecretBundle::generate(&SUITES, &mut OsRng);
+        let (public, secret) = SecretBundle::generate(&DEFAULT_SUITES, &mut OsRng);
         let (sealed, sent) = public.encapsulate(&mut OsRng);
-        assert_eq!(sealed.legs().len(), 3);
+        assert_eq!(sealed.legs().len(), DEFAULT_SUITES.len());
 
         let received = secret.decapsulate(&sealed).expect("opens");
         assert_eq!(sent.expose(), received.expose());
@@ -1141,7 +1559,7 @@ mod tests {
     /// The security claim of the whole module, stated as a test.
     #[test]
     fn breaking_one_suite_does_not_open_a_bundle() {
-        let (public, secret) = SecretBundle::generate(&SUITES, &mut OsRng);
+        let (public, secret) = SecretBundle::generate(&DEFAULT_SUITES, &mut OsRng);
         let (sealed, real) = public.encapsulate(&mut OsRng);
 
         // Model a totally broken ML-KEM: the attacker holds that leg's secret
@@ -1172,6 +1590,106 @@ mod tests {
         assert_ne!(real.expose(), forged.expose());
     }
 
+    /// **The property that makes shipping a contested suite defensible.**
+    ///
+    /// CSIDH's quantum security is disputed and its implementation here is not
+    /// constant-time; the rank-metric parameter set carries no security level
+    /// at all. Neither can hurt a bundle, and this is why: the combiner absorbs
+    /// *every* leg's secret, so an attacker who fully breaks both — who holds
+    /// their secrets outright — still cannot derive the key without McEliece's,
+    /// which they do not have.
+    ///
+    /// Modelled by handing the attacker the real CSIDH and RQC secrets and
+    /// zeroes for the three they would still have to break.
+    #[test]
+    fn breaking_every_contested_leg_still_opens_nothing() {
+        let (public, secret) = SecretBundle::generate(&SUITES, &mut OsRng);
+        let (sealed, real) = public.encapsulate(&mut OsRng);
+
+        let leg_secret = |suite: Suite| {
+            let leg = sealed
+                .legs()
+                .iter()
+                .find(|leg| leg.suite == suite)
+                .expect("leg present");
+            secret
+                .key_for(suite)
+                .expect("bundle has one")
+                .decapsulate(&leg.ciphertext)
+                .expect("decapsulates")
+        };
+
+        // Everything the attacker has, in suite order, with zeroes standing in
+        // for the secrets they would still have to break.
+        let zero = || Secret32::new([0u8; 32]);
+        let forged = combine_legs(
+            public.id(),
+            sealed.legs(),
+            &[
+                zero(),                      // McEliece  — not broken
+                zero(),                      // ML-KEM    — not broken
+                zero(),                      // HQC       — not broken
+                leg_secret(Suite::Csidh512), // contested — handed over
+                leg_secret(Suite::Rqc),      // no security level — handed over
+            ],
+        );
+        assert_ne!(
+            real.expose(),
+            forged.expose(),
+            "a bundle must survive the loss of every leg below Assurance::Standard"
+        );
+    }
+
+    /// The assurance tier is a rule, not a comment.
+    #[test]
+    fn contested_suites_are_not_defaults_and_cannot_carry_a_bundle() {
+        for suite in DEFAULT_SUITES {
+            assert_eq!(
+                suite.assurance(),
+                Assurance::Standard,
+                "{suite} is a default, so it must be Standard"
+            );
+        }
+        for suite in [Suite::Csidh512, Suite::Rqc] {
+            assert!(
+                !DEFAULT_SUITES.contains(&suite),
+                "{suite} must be opt-in by name"
+            );
+            assert!(
+                !suite.may_be_mandatory(),
+                "{suite} must never be a bundle's mandatory leg"
+            );
+            assert!(
+                !suite.is_mandatory(),
+                "{suite} must not satisfy the mandatory requirement"
+            );
+        }
+        assert_eq!(Suite::Csidh512.assurance(), Assurance::Contested);
+        assert_eq!(Suite::Rqc.assurance(), Assurance::Illustrative);
+
+        // A bundle of nothing but contested legs is unrepresentable, which is
+        // the whole point of the tier reaching the constructor.
+        let csidh = Suite::Csidh512.generate(&mut OsRng);
+        let rqc = Suite::Rqc.generate(&mut OsRng);
+        assert_eq!(
+            Bundle::new([csidh.public().clone(), rqc.public().clone()]),
+            Err(KemError::McElieceRequired)
+        );
+    }
+
+    /// Generating over the contested suites must still produce a bundle that
+    /// carries the mandatory leg, so asking for CSIDH alone gets CSIDH *and*
+    /// McEliece rather than CSIDH by itself.
+    #[test]
+    fn asking_for_a_contested_suite_alone_still_adds_the_mandatory_leg() {
+        let (public, secret) = SecretBundle::generate(&[Suite::Csidh512], &mut OsRng);
+        assert_eq!(public.suites(), vec![Suite::McEliece, Suite::Csidh512]);
+
+        let (sealed, sent) = public.encapsulate(&mut OsRng);
+        let got = secret.decapsulate(&sealed).expect("opens");
+        assert_eq!(sent.expose(), got.expose());
+    }
+
     #[test]
     fn a_bundle_without_mceliece_is_refused() {
         let ml = Suite::MlKem768.generate(&mut OsRng);
@@ -1197,21 +1715,18 @@ mod tests {
 
     #[test]
     fn bundles_sort_their_keys_so_assembly_order_cannot_matter() {
-        let (bundle, _) = SecretBundle::generate(&SUITES, &mut OsRng);
+        let (bundle, _) = SecretBundle::generate(&DEFAULT_SUITES, &mut OsRng);
         let forwards = bundle.keys().to_vec();
         let mut backwards = forwards.clone();
         backwards.reverse();
         let rebuilt = Bundle::new(backwards).expect("same keys");
-        assert_eq!(
-            rebuilt.suites(),
-            vec![Suite::McEliece, Suite::MlKem768, Suite::Hqc128]
-        );
+        assert_eq!(rebuilt.suites(), DEFAULT_SUITES.to_vec());
         assert_eq!(rebuilt, bundle);
     }
 
     #[test]
     fn an_encapsulation_out_of_suite_order_is_refused_rather_than_sorted() {
-        let (bundle, _) = SecretBundle::generate(&SUITES, &mut OsRng);
+        let (bundle, _) = SecretBundle::generate(&DEFAULT_SUITES, &mut OsRng);
         let (sealed, _) = bundle.encapsulate(&mut OsRng);
         let mut reversed = sealed.legs().to_vec();
         reversed.reverse();
@@ -1252,6 +1767,10 @@ mod tests {
 
     #[test]
     fn wrong_lengths_are_refused_rather_than_padded() {
+        // The length rules are per-suite constants and need no keygen, so this
+        // covers all five. Only the last two assertions need a real key, and
+        // those run over `DEFAULT_SUITES` -- see the note on
+        // `a_foreign_ciphertext_...` for why CSIDH keygen is rationed.
         for suite in SUITES {
             assert!(matches!(
                 PublicKey::from_bytes(suite, &[0u8; 7]),
@@ -1261,6 +1780,8 @@ mod tests {
                 SecretKey::from_bytes(suite, &[0u8; 7], &[0u8; 7]),
                 Err(KemError::WrongLength { .. })
             ));
+        }
+        for suite in DEFAULT_SUITES {
             let pair = suite.generate(&mut OsRng);
             // A right-length secret with a wrong-length public half is refused
             // too: both are checked, not just the first.
@@ -1275,12 +1796,21 @@ mod tests {
         }
     }
 
+    /// Implicit rejection, and it is the property that makes these schemes
+    /// IND-CCA2. A caller that expected an error here would treat a tampered
+    /// ciphertext as a transport fault instead of an attack.
+    ///
+    /// **`DEFAULT_SUITES`, not `SUITES`, and the reason is wall-clock.** A
+    /// CSIDH-512 group action in the vendored implementation takes seconds, and
+    /// this test would pay four of them; run across every generic loop in the
+    /// module that is minutes per `cargo test`. CSIDH's own round trip and
+    /// rejection behaviour are covered once, deliberately, by
+    /// `the_contested_suites_behave_like_every_other_leg`. A test suite nobody
+    /// runs checks nothing, which is the same argument the dev-profile
+    /// `opt-level` carries in `Cargo.toml`.
     #[test]
     fn a_foreign_ciphertext_yields_a_wrong_secret_rather_than_an_error() {
-        // Implicit rejection, and it is the property that makes these schemes
-        // IND-CCA2. A caller that expected an error here would treat a
-        // tampered ciphertext as a transport fault instead of an attack.
-        for suite in SUITES {
+        for suite in DEFAULT_SUITES {
             let mine = suite.generate(&mut OsRng);
             let theirs = suite.generate(&mut OsRng);
             let (ciphertext, sent) = theirs.public().encapsulate(&mut OsRng);
@@ -1292,18 +1822,97 @@ mod tests {
         }
     }
 
+    /// The rank-metric leg, held to every property the generic loops assert.
+    ///
+    /// Cheap — 61 µs to generate, 45 µs to encapsulate — so it gets the full
+    /// set. Its problem is the parameter set, not the speed.
+    #[test]
+    fn the_rank_metric_leg_behaves_like_every_other() {
+        let suite = Suite::Rqc;
+        let mine = suite.generate(&mut OsRng);
+
+        let (ciphertext, sent) = mine.public().encapsulate(&mut OsRng);
+        assert_eq!(ciphertext.len(), suite.ciphertext_len());
+        let got = mine
+            .secret()
+            .decapsulate(&ciphertext)
+            .expect("decapsulates");
+        assert_eq!(sent.expose(), got.expose(), "round trip");
+
+        let restored =
+            SecretKey::from_bytes(suite, mine.secret().expose(), mine.public().as_bytes())
+                .expect("restores");
+        assert_eq!(
+            sent.expose(),
+            restored.decapsulate(&ciphertext).expect("ok").expose(),
+            "persisted"
+        );
+
+        // Implicit rejection: a decode failure is a *wrong secret*, never an
+        // error. Reporting it would make this leg a decryption oracle.
+        let theirs = suite.generate(&mut OsRng);
+        let (foreign, foreign_secret) = theirs.public().encapsulate(&mut OsRng);
+        let wrong = mine.secret().decapsulate(&foreign).expect("no error");
+        assert_ne!(foreign_secret.expose(), wrong.expose(), "foreign");
+
+        let garbage = vec![0xa5u8; suite.ciphertext_len()];
+        let from_garbage = mine.secret().decapsulate(&garbage).expect("no error");
+        assert_ne!(sent.expose(), from_garbage.expose(), "garbage");
+    }
+
+    /// The isogeny leg: one round trip and one rejection, and no more.
+    ///
+    /// **Deliberately minimal, and the measurement is the reason.** In a
+    /// release build CSIDH-512 costs 1.28 s to generate, **2.84 s to
+    /// encapsulate** and 1.44 s to decapsulate — against 117 µs for a McEliece
+    /// encapsulation, a factor of about 24,000. The vendored implementation is
+    /// also part of *this* crate rather than a dependency, so the
+    /// `[profile.dev.package."*"]` optimisation in `Cargo.toml` does not reach
+    /// it and a test build is slower still.
+    ///
+    /// Every generic property is therefore asserted elsewhere, over
+    /// `DEFAULT_SUITES`, and what is checked here is only what is specific to
+    /// this leg: that it round-trips at all, and that a ciphertext which is not
+    /// a supersingular curve yields a wrong secret instead of an error. A test
+    /// suite nobody runs checks nothing.
+    #[test]
+    fn the_isogeny_leg_round_trips_and_rejects_implicitly() {
+        let suite = Suite::Csidh512;
+        let mine = suite.generate(&mut OsRng);
+
+        let (ciphertext, sent) = mine.public().encapsulate(&mut OsRng);
+        assert_eq!(ciphertext.len(), suite.ciphertext_len());
+        let got = mine
+            .secret()
+            .decapsulate(&ciphertext)
+            .expect("decapsulates");
+        assert_eq!(sent.expose(), got.expose(), "round trip");
+
+        // `0xa5…` is overwhelmingly unlikely to be a supersingular curve, so
+        // this exercises the invalid-curve path -- which must produce a wrong
+        // secret rather than act with the long-term key on an ordinary curve,
+        // because that leaks the key doing the acting.
+        let garbage = vec![0xa5u8; suite.ciphertext_len()];
+        let from_garbage = mine.secret().decapsulate(&garbage).expect("no error");
+        assert_ne!(sent.expose(), from_garbage.expose(), "invalid curve");
+    }
+
     #[test]
     fn suite_names_round_trip_and_unknown_ones_are_refused() {
         for suite in SUITES {
             assert_eq!(Suite::parse(suite.as_str()), Ok(suite));
         }
         assert!(matches!(
-            Suite::parse("csidh-512"),
+            Suite::parse("sike-p434"),
             Err(KemError::UnknownSuite { .. })
         ));
         // Case matters, for the reason every hex decoder in this crate is
         // lowercase-only: two spellings of one name is two digests.
         assert!(Suite::parse("ML-KEM-768").is_err());
+        // `rqc-illustrative`, never `rqc-128`: the name must not claim a
+        // security level the parameter set does not have.
+        assert_eq!(Suite::Rqc.as_str(), "rqc-illustrative");
+        assert!(Suite::parse("rqc-128").is_err());
     }
 
     #[test]
