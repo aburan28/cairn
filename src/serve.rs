@@ -465,6 +465,7 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", "/") | ("GET", "/index") => index(stream, serving),
         ("GET", "/health") => respond(stream, 200, "text/plain", b"ok\n"),
         ("GET", "/objectives") => objectives(stream, serving),
+        ("GET", "/peers") => peers(stream, serving),
         ("GET", "/log") => log(stream, serving),
         ("GET", "/checkpoint") => checkpoint(stream, serving),
         ("GET", "/chain") => chain(stream, serving),
@@ -624,6 +625,63 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ),
     ]);
     json(stream, 200, &body)
+}
+
+/// The peers this node has been *told about*, which is not the same as the
+/// peers it is talking to.
+///
+/// # What this is not
+///
+/// It is not a connection list. Live sessions belong to `proofwork-p2p`, which
+/// has no HTTP surface at all, and this process only ever reads a log. A peer
+/// appears here because a `peer` record naming it reached this node, and it
+/// keeps appearing after that peer goes away forever -- the log is append-only,
+/// so nothing here can go stale in the direction a reader would want.
+///
+/// Serving it anyway, and saying so in the payload, because "who could this
+/// node dial" is a real question with a real answer, and the alternative to an
+/// honest address book is somebody reading `/log` and rebuilding this by hand
+/// with no note attached.
+///
+/// # Why the transport key is an id rather than a key
+///
+/// A `peer` record carries the ed25519 identity in full and the McEliece
+/// transport key as a 32-byte *id*, because the key itself is 261,120 bytes and
+/// a log every node replicates cannot carry that. See [`crate::records`].
+fn peers(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let items: Vec<Value> = node
+        .peers()
+        .into_iter()
+        .map(|(identity, record)| {
+            Value::object([
+                ("identity", Value::string(identity)),
+                ("transport", Value::string(record.transport.clone())),
+                ("addr", Value::string(record.addr.clone())),
+                ("seq", Value::Int(i128::from(record.seq))),
+                ("created_at", Value::string(record.created_at.clone())),
+            ])
+        })
+        .collect();
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("peers", Value::Array(items)),
+            (
+                "note",
+                Value::string(
+                    "Known peers, from `peer` records in this log -- not open connections. \
+                     A peer listed here may be long gone: the log is append-only and nothing \
+                     retracts a record. Live session state lives in proofwork-p2p, which \
+                     serves no HTTP.",
+                ),
+            ),
+        ]),
+    )
 }
 
 fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {

@@ -205,8 +205,15 @@ copy is inert.
 |---|---|---|
 | `log/` | **yes** | a stolen disk would otherwise yield the node's whole operating record in one readable file |
 | `.proofwork/blobs/` | no | every byte *and every name* is something this node hands to any peer that asks. `p2p::code` serves them on request; the name is the content address the objective itself declares |
+| `.proofwork/shards/` | no | erasure-coded pieces of a blob the network publishes, filed under that blob's digest. `k` of them *are* the blob, and the blob is public. See [shards.md](shards.md) |
 | the `--population` file | no | gossiped candidates were shared with peers on purpose |
 | `cache/`, `tmp/` | no | reclaimable by construction — a local copy of something fetchable, and scratch |
+
+Note the asymmetry between the last two and eviction. Blobs and shards are both
+plaintext, and only one of them is reclaimable: dropping a blob costs a
+re-download, dropping the `k`-th surviving shard costs the blob. Shards are not
+under `cache/`, so they are classified pinned and `store gc` refuses rather than
+deletes.
 
 **The residue, stated rather than waved away.** The set is not the contents. An
 adversary holding the disk learns *which objectives this node works on* without
@@ -229,11 +236,11 @@ sealed, plaintext for a stated reason, a key that should not be there, or
 *unaccounted for*. `store status` reports the last two and **exits 1**:
 
 ```
-at rest log sealed (1.7 KiB); 4.2 KiB plaintext by decision -- blobs, cache, tmp
+at rest log sealed (1.7 KiB); 4.2 KiB plaintext by decision -- blobs, shards, cache, tmp
 ```
 
 ```
-at rest log sealed (1.7 KiB); 0 B plaintext by decision -- blobs, cache, tmp; 88 B UNACCOUNTED FOR
+at rest log sealed (1.7 KiB); 0 B plaintext by decision -- blobs, shards, cache, tmp; 88 B UNACCOUNTED FOR
         KEY INSIDE THE STORE: /srv/pw/cache/notes.txt
         unaccounted plaintext: /srv/pw/inference-receipts.json
         Each is readable on any disk holding this directory.
@@ -295,6 +302,15 @@ There are two paths, against the same store, and they overlap:
 - [`src/swarm/`](../src/swarm/) moves one in the BitTorrent shape: pieces, a
   manifest of piece hashes, bitfields, rarest-first, choking, endgame. Sized for
   artifacts the 1 MiB cap does not currently allow.
+
+A third thing exists beside them and is not a transfer path:
+[`src/shards/`](../src/shards/) splits a blob so that **no holder needs all of
+it** — any `k` of `k + m` shards rebuild it, at `(k+m)/k` on disk against the
+`f+1` replication charges for the same tolerance. What makes that safe rather
+than merely cheap is a Merkle commitment per chunk, so a corrupt shard is caught
+and *named* before it enters the linear combination that would otherwise smear
+it across every output byte. See [shards.md](shards.md), including what is
+deliberately not built: nothing moves a shard between peers yet.
 
 What both get for free is the part BitTorrent cannot do: the digest an objective
 already commits to *is* the swarm id, so there is no tracker and nothing to sign.

@@ -644,6 +644,34 @@ blob at 1 MiB, which is four pieces. At that size rarest-first and choking buy
 nothing, and `p2p::code`'s whole-blob transfer is the right call. The swarm
 machinery is sized for a constraint this design does not currently have.
 
+### `src/shards/`: holding part of a blob, and proving you hold it
+
+Every path above moves a *whole* blob, so surviving `f` holders vanishing costs
+`f + 1` full copies. [`src/shards/`](src/shards/) splits it instead: `k` data
+shards plus `m` parity, any `k` of which rebuild it, at `(k+m)/k` on disk —
+1.5× at (4, 2) where replication wants 3× for the same two tolerated losses.
+
+The reason this is not just a compression trick is what coding *costs*.
+Replication has a property so cheap nobody names it: every copy is
+self-checking, so a liar implicates only itself. A shard does not hash to the
+blob's digest, and one corrupt shard makes every output byte wrong — the digest
+then says somebody lied and nothing about who, leaving `n choose k` full decodes
+to find them. So each shard is cut into chunks, each chunk is committed under a
+per-shard Merkle root, and the shard roots under one manifest root; nothing
+enters the linear combination until it has been checked, and a liar is dropped
+and **named**.
+
+Systematic Cauchy Reed–Solomon over GF(2^8) — now the crate's only GF(2^8),
+shared with Shamir, with the bulk lookup table *built from* the branch-free
+multiply rather than written beside it. Two multiplies disagreeing on one of
+65,536 products would produce shards that reconstruct to garbage on the node
+that used the other one.
+
+No record kind and no transfer path, both deliberately: a manifest is derived
+from bytes and is checked against the digest the log already pinned, and
+`proofwork shard` is the caller that keeps the module honest until `swarm` grows
+one. See [shards.md](docs/shards.md).
+
 
 ## Censorship resistance
 
@@ -669,9 +697,9 @@ So submissions are **sealed**, and opened *without* the submitter:
 
 ```
 commit    commitment = H(artifact ‖ submitter ‖ nonce)      (unchanged)
-          envelope   = ChaCha20-Poly1305(K, {artifact, nonce})
-          shares     = Shamir(K, t-of-n), each sealed via ephemeral X25519
-epoch end ≥t committee members publish shares → anyone reconstructs → opens
+          envelope   = ChaCha20-Poly1305(K, the whole signed claim)
+          shares     = Shamir(K, 3-of-5), each sealed by post-quantum KEM
+epoch end ≥3 seats publish `committee_share` records → anyone opens it
 ```
 
 You can be offline, jailed, or firewalled and still be paid. It also kills
@@ -681,6 +709,17 @@ indiscriminately. The commitment binds the plaintext, so a submitter who seals
 garbage is caught the moment the committee opens it.
 
 Sealing moves **when** an artifact becomes public, never **whether**.
+
+**And who opens it, and when, are consensus rules rather than promises.** The
+committee is a beacon draw over the log's own peer records — nobody issues an
+invitation, so nobody can decline to send one, and any reader recomputes any
+seat. A share published before the commitment's epoch closes is refused, and
+that check compares two timestamps already in the log rather than consulting a
+clock, so a member with a fast clock writes a record every node rejects. The
+threshold is pinned at commit time against the network's constant, because a
+submitter who could seal one-of-five would be handing any single member an
+early read. `tests/committee_reveal.rs` runs the whole thing with the submitter
+gone after commit.
 
 Two things are stated rather than papered over: **citation flow requires
 linkage** — the pseudonym graph is public by construction because paying people
@@ -721,6 +760,7 @@ src/                 Rust implementation (primary)
   sealed.rs          sealed submissions, openable without the submitter
   incentive/         the node-operator mechanism, and the harness that evaluates it
   store/             at-rest encryption, the data directory, the size cap, the mirror
+  shards/            erasure coding, with a Merkle commitment per chunk
   swarm/             piece-level transfer and a Kademlia DHT, alongside p2p/
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
@@ -741,6 +781,7 @@ examples/            worked objectives with real artifacts
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
+- [shards.md](docs/shards.md) — erasure coding, and why per-chunk commitments are what make it safe rather than merely cheap
 - [serving.md](docs/serving.md) — publishing a log over HTTP, and why submissions queue instead of appending
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [launch-review.md](docs/launch-review.md) — the pre-launch pass: what was fixed, and the gaps that remain, in priority order

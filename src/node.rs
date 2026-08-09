@@ -61,8 +61,10 @@ use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
 use crate::ledger::{Entry, Ledger, LedgerError, Proof};
 use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
 use crate::records::{
-    Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord, Undertaking,
+    Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Objective, PeerRecord,
+    Undertaking,
 };
+use crate::sealed::{OpenedSubmission, SealedSubmission};
 use crate::verifiers::{self, Kind, Status, Verdict, VerifierRegistry};
 
 /// Log entry kinds this module writes and reads. Spelled once so a typo cannot
@@ -76,11 +78,43 @@ const SETTLEMENT: &str = "settlement";
 const FRONTIER: &str = "frontier";
 /// Marks one reveal epoch as drained. See [`Node::settle_due`].
 const BATCH: &str = "batch";
+/// One epoch's ordering randomness, drawn where the sequencer cannot choose it.
+/// See [`Node::record_beacon`].
+const BEACON: &str = "beacon";
+
+/// Set to `1` to treat an epoch settled without a beacon as an audit fault.
+///
+/// The beacon closes settlement grinding only if there *is* one, and the
+/// fallback to the epoch-chain head — which exists so that pre-beacon logs
+/// still audit and an unreachable chain does not halt settlement — is
+/// therefore an opt-out: a sequencer who wants to grind simply records no
+/// beacon and orders against the head as before.
+/// [`Node::epochs_without_beacon`] makes that visible; this makes it refusable.
+///
+/// A reader's policy, not a writer's. It deliberately does not gate
+/// *settlement*: a beacon is only admissible inside the epoch it orders, so
+/// refusing to settle an epoch that already closed without one would strand
+/// its claims permanently rather than protect anybody. What it gates is
+/// acceptance — a node that requires beacon-ordered settlement can detect a
+/// log that does not have it, which is the check that makes the requirement
+/// mean something.
+///
+/// Not the default, for the same reason `PROOFWORK_REQUIRE_SANDBOX` is not:
+/// it would fail every log written before this record existed, including the
+/// published one, and an audit that cries wolf is an audit nobody reads.
+pub const REQUIRE_BEACON_ENV: &str = "PROOFWORK_REQUIRE_BEACON";
+
+fn beacon_required() -> bool {
+    matches!(std::env::var(REQUIRE_BEACON_ENV), Ok(value) if value.trim() == "1")
+}
 const PEER: &str = "peer";
 const UNDERTAKING: &str = "undertaking";
 const AVAILABILITY: &str = "availability";
 const AVAILABILITY_POOL: &str = "availability_pool";
 const AVAILABILITY_SETTLEMENT: &str = "availability_settlement";
+/// One committee member opening its share of a sealed submission's content key.
+/// See [`Node::post_committee_share`].
+const COMMITTEE_SHARE: &str = "committee_share";
 
 // ---------------------------------------------------------------------------
 // Rule violations
@@ -236,6 +270,24 @@ pub enum RuleViolation {
     /// can test is the "bookkeeping" `docs/roadmap.md` warns against, and it
     /// would sit in the log permanently.
     UnknownUndertakingRoot { root: String, height: u64 },
+    /// A beacon drawn in an epoch other than the one it orders.
+    ///
+    /// The timing *is* the security property, and both directions are fatal.
+    /// Drawn early, the value exists while commitments for this epoch can still
+    /// be made, so a submitter can grind a commitment hash against a beacon
+    /// they already know — the residual gap [`Node::settle_due`] documents,
+    /// reopened. Drawn late, the sequencer has already seen who revealed, and
+    /// picking the draw is picking the payment order. Only a beacon drawn at
+    /// the boundary is unknown to every committer and unchosen by the operator.
+    BeaconOutOfEpoch { orders: u64, drawn_in: u64 },
+    /// A second beacon for an epoch that already has one.
+    ///
+    /// Refused rather than resolved by a tie-break, because every tie-break is
+    /// a choice and the choice belongs to nobody. Two beacons for one epoch
+    /// would let whoever appends the second one re-roll the settlement order
+    /// after reading the first — which is the entire lever this record exists
+    /// to remove, restored by an operator who simply writes twice.
+    DuplicateBeacon { epoch: u64 },
     /// A record whose own decoder would refuse it.
     ///
     /// Every other kind arrives here already decoded, so `from_value` has run
@@ -276,6 +328,72 @@ pub enum RuleViolation {
         commit_epoch: u64,
         reveal_epoch: u64,
     },
+    /// A share, or an open, naming a commitment this log does not hold.
+    UnknownCommitment { commitment: String },
+    /// A share against a commitment that carries no envelope.
+    ///
+    /// There is nothing to open, so the record is noise at best. Refused rather
+    /// than ignored because a log full of shares for unsealed commitments is a
+    /// cheap way to make [`Node::pending_sealed_reveals`] useless to read.
+    CommitmentNotSealed { commitment: String },
+    /// Not enough peers are registered to draw a committee.
+    ///
+    /// Refused rather than drawn short — see [`Node::committee_for`], which
+    /// explains why a smaller committee is worse than no committee.
+    CommitteeTooSmall {
+        epoch: u64,
+        have: usize,
+        need: usize,
+    },
+    /// A share published in the same epoch as (or earlier than) the commitment
+    /// it opens.
+    ///
+    /// The committee's version of [`RuleViolation::RevealBeforeEpoch`], and it
+    /// closes the same hole. A committee that could publish inside the
+    /// commitment's own epoch would hand the sequencer every artifact while it
+    /// was still worth front-running — replacing the submitter in the reveal
+    /// path was meant to remove a censorship lever, not to give away the
+    /// batching that made front-running impossible.
+    ShareBeforeEpoch { commit_epoch: u64, share_epoch: u64 },
+    /// A share record that sits earlier in the log than the commitment it
+    /// claims to open.
+    ShareBeforeCommitment { commitment: String },
+    /// A share for a seat the epoch's draw never produced.
+    UnknownSeat { commitment: String, seat: u8 },
+    /// A share published for a seat drawn for somebody else.
+    ///
+    /// Without this rule anyone could publish for any seat, and since a Shamir
+    /// share is not individually checkable, filling `t` seats with noise would
+    /// stall a reveal at no cost.
+    SeatImpostor {
+        commitment: String,
+        seat: u8,
+        published_by: String,
+    },
+    /// A second share for a seat that has already published.
+    SeatAlreadyPublished { commitment: String, seat: u8 },
+    /// Fewer published shares than the envelope's threshold.
+    ///
+    /// Not a failure so much as a "not yet": the reveal opens as soon as enough
+    /// members publish, and this is what a caller polling for that sees.
+    NotEnoughShares {
+        commitment: String,
+        have: usize,
+        need: usize,
+    },
+    /// A sealed commitment whose envelope does not match the network's
+    /// committee parameters. See [`Node::commit`].
+    WrongCommitteeShape {
+        threshold: u8,
+        seats: usize,
+        want_threshold: u8,
+        want_seats: usize,
+    },
+    /// Enough shares, and no subset of them opens the envelope.
+    ///
+    /// Which member lied is not knowable — see [`Node::open_sealed`] on why
+    /// verifiable secret sharing is not available to a post-quantum scheme.
+    SealedOpenFailed { commitment: String, tried: usize },
     /// The record could not be appended to the log.
     Ledger(LedgerError),
 }
@@ -401,6 +519,18 @@ impl fmt::Display for RuleViolation {
                  (epoch {epoch}); entry {index} is what that undertaking was sampled on",
                 crate::canonical::short(undertaking)
             ),
+            RuleViolation::BeaconOutOfEpoch { orders, drawn_in } => write!(
+                f,
+                "a beacon ordering epoch {orders} was drawn in epoch {drawn_in}; it must \
+                 be drawn in the epoch it orders -- earlier and a committer can grind \
+                 against a value they already know, later and the operator is choosing \
+                 the order after reading the reveals"
+            ),
+            RuleViolation::DuplicateBeacon { epoch } => write!(
+                f,
+                "epoch {epoch} already has a beacon; a second one would let whoever \
+                 writes it re-roll the settlement order after reading the first"
+            ),
             RuleViolation::PartialUndertaking { promised, log } => write!(
                 f,
                 "an undertaking must cover the whole log as it stands ({log} entries), \
@@ -437,6 +567,86 @@ impl fmt::Display for RuleViolation {
                 f,
                 "reveal is in epoch {reveal_epoch} but its commitment is in epoch \
                  {commit_epoch}; a reveal must wait for a strictly later epoch"
+            ),
+            RuleViolation::UnknownCommitment { commitment } => write!(
+                f,
+                "no commitment {} in this log",
+                short(commitment)
+            ),
+            RuleViolation::CommitmentNotSealed { commitment } => write!(
+                f,
+                "commitment {} carries no envelope, so there is nothing for a \
+                 committee to open; it reveals the ordinary way",
+                short(commitment)
+            ),
+            RuleViolation::CommitteeTooSmall { epoch, have, need } => write!(
+                f,
+                "epoch {epoch} has {have} registered peers and a committee needs \
+                 {need}; a short committee would quietly lower the threshold \
+                 everyone is relying on"
+            ),
+            RuleViolation::ShareBeforeEpoch {
+                commit_epoch,
+                share_epoch,
+            } => write!(
+                f,
+                "share is in epoch {share_epoch} but its commitment is in epoch \
+                 {commit_epoch}; a committee must wait for a strictly later epoch"
+            ),
+            RuleViolation::ShareBeforeCommitment { commitment } => write!(
+                f,
+                "share precedes commitment {} in the log",
+                short(commitment)
+            ),
+            RuleViolation::UnknownSeat { commitment, seat } => write!(
+                f,
+                "seat {seat} was not drawn for commitment {}",
+                short(commitment)
+            ),
+            RuleViolation::SeatImpostor {
+                commitment,
+                seat,
+                published_by,
+            } => write!(
+                f,
+                "seat {seat} of commitment {} belongs to another identity; \
+                 published by {}",
+                short(commitment),
+                short(published_by)
+            ),
+            RuleViolation::SeatAlreadyPublished { commitment, seat } => write!(
+                f,
+                "seat {seat} of commitment {} has already published its share",
+                short(commitment)
+            ),
+            RuleViolation::NotEnoughShares {
+                commitment,
+                have,
+                need,
+            } => write!(
+                f,
+                "commitment {} has {have} of the {need} shares it needs; not yet, \
+                 rather than never",
+                short(commitment)
+            ),
+            RuleViolation::WrongCommitteeShape {
+                threshold,
+                seats,
+                want_threshold,
+                want_seats,
+            } => write!(
+                f,
+                "sealed commitment is {threshold}-of-{seats} addressed at seats \
+                 1..={seats}; this network seals {want_threshold}-of-{want_seats}, \
+                 and a submitter-chosen threshold is a submitter-chosen \
+                 collusion cost"
+            ),
+            RuleViolation::SealedOpenFailed { commitment, tried } => write!(
+                f,
+                "no subset of the {tried} published shares opens commitment {}; \
+                 at least one member published a share that is not theirs, and \
+                 which one is not knowable without verifiable secret sharing",
+                short(commitment)
             ),
             RuleViolation::Ledger(source) => write!(f, "cannot record: {source}"),
         }
@@ -506,6 +716,54 @@ pub struct EpochLink {
     /// The link before this one; empty for the first.
     pub prev: String,
     pub link: String,
+}
+
+/// One seat on the epoch's threshold committee, as the beacon drew it.
+///
+/// Everything here is already in the log — this type is the *derivation*, not a
+/// record. Nobody writes a committee list, so nobody can substitute one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitteeSeat {
+    /// `1..=COMMITTEE_SIZE`, in draw order. Also the routing index the
+    /// envelope addresses this member's sealed share at, so a member can find
+    /// their own share without being told which it is.
+    pub seat: u8,
+    /// `sha256` of the member's Classic McEliece public key, hex. What a share
+    /// is sealed to, and what the draw ranks on.
+    pub transport: String,
+    /// The member's ed25519 public key, hex. What a published share is signed
+    /// with. The peer record is what ties this to `transport`.
+    pub identity: String,
+    /// Where to reach the member to fetch its 261,120-byte McEliece key, which
+    /// is far too large to travel in a peer record. A hint, exactly as it is
+    /// for dialing: a wrong address costs a fetch, never a wrong result.
+    pub addr: String,
+}
+
+/// A sealed submission waiting on its committee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingReveal {
+    pub commitment: String,
+    pub objective_id: String,
+    pub commit_epoch: u64,
+    /// How many shares open it.
+    pub threshold: u8,
+    /// Who was drawn to hold one.
+    pub seats: Vec<CommitteeSeat>,
+    /// Which seats have already published, ascending.
+    pub published: Vec<u8>,
+}
+
+impl PendingReveal {
+    /// Is this one openable right now?
+    pub fn openable(&self) -> bool {
+        self.published.len() >= usize::from(self.threshold)
+    }
+
+    /// The seat this identity holds here, if any.
+    pub fn seat_of(&self, identity: &str) -> Option<&CommitteeSeat> {
+        self.seats.iter().find(|seat| seat.identity == identity)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1185,6 +1443,471 @@ impl Node {
         self.latest_frontier(objective_id).ok().flatten()
     }
 
+    // -- the threshold committee ------------------------------------------
+
+    /// The peer set as it stood at `positions`, keyed by identity.
+    ///
+    /// [`Node::peers`] bounded by position, for the reason every draw in this
+    /// module is: a committee derived from the whole log changes every time
+    /// anyone appends a peer record, so a share that answered the right seat
+    /// when it was written would answer the wrong one two entries later, and an
+    /// honest member would be reported as an impostor by the audit.
+    fn peers_within(&self, positions: usize) -> BTreeMap<String, PeerRecord> {
+        let mut out: BTreeMap<String, PeerRecord> = BTreeMap::new();
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != PEER {
+                continue;
+            }
+            let Ok(record) = PeerRecord::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.verify_signature().is_err() {
+                continue;
+            }
+            match out.get(&record.identity) {
+                Some(held) if held.seq > record.seq => {}
+                _ => {
+                    out.insert(record.identity.clone(), record);
+                }
+            }
+        }
+        out
+    }
+
+    /// Who holds a share of every submission sealed in `epoch`.
+    ///
+    /// **The whole point is that nobody chooses this.** It is a pure function
+    /// of the log — the peer records in it and the epoch's beacon — so the
+    /// submitter computes it to seal, each member computes it to learn whether
+    /// they hold a seat, and every reader recomputes it to decide whether a
+    /// published share came from a seat that exists. There is no invitation to
+    /// send, so there is no invitation anyone can decline to send, and no
+    /// committee list anyone can substitute. Same property `docs/coordination.md`
+    /// gets for work assignment and [`Node::sampled_index`] for availability,
+    /// and here for the same reason.
+    ///
+    /// ```text
+    /// seats = the COMMITTEE_SIZE peers with the lowest
+    ///         H(beacon(epoch, anchor) ‖ peer.transport), ascending
+    /// ```
+    ///
+    /// Each input earns its place:
+    ///
+    /// **`beacon(epoch, anchor)`** so the committee rotates. A fixed committee
+    /// is a fixed set to bribe, and `docs/censorship.md` §2 is explicit that
+    /// membership must be "diverse and rotated per epoch" because `t` colluding
+    /// members can read every artifact early. It carries the Stage 0 caveat
+    /// every beacon here carries: a sequencer free to choose the anchor is a
+    /// sequencer that could grind it, and closing that needs a VDF or a
+    /// threshold signature rather than a log head.
+    ///
+    /// **`peer.transport`, not `peer.identity`.** The transport id is
+    /// `sha256` of a Classic McEliece public key, and that key is what a share
+    /// is actually sealed to — so the draw keys on the thing that does the
+    /// cryptography rather than on a name that happens to sit beside it. It
+    /// also makes grinding for a seat cost a McEliece keypair rather than an
+    /// ed25519 one, which is 243 ms rather than microseconds. That is a real
+    /// cost and **not a defence**: it is a constant factor against an attacker
+    /// willing to spend, exactly as `docs/p2p.md` says of grinding a node id.
+    ///
+    /// **`positions`** so the answer is stable. See [`Node::peers_within`].
+    ///
+    /// Seats are numbered `1..=n` in draw order and that number is the
+    /// envelope's routing index, so a member knows which sealed share is
+    /// addressed to them without being told.
+    pub fn committee_for(
+        &self,
+        epoch: u64,
+        positions: usize,
+    ) -> Result<Vec<CommitteeSeat>, RuleViolation> {
+        // `EPOCH_SECONDS`, the constant, never `epoch_seconds()`. Same reason
+        // `Node::sampled_index` spells it out: the override is a demo
+        // affordance, the anchor moves with the epoch length, and a consensus
+        // rule that depends on an environment variable is not a consensus rule.
+        let anchor = self.anchor_at(epoch, positions, partition::EPOCH_SECONDS);
+
+        let mut ranked: Vec<(String, PeerRecord)> = self
+            .peers_within(positions)
+            .into_values()
+            .map(|peer| (settlement_rank(epoch, &anchor, &peer.transport), peer))
+            .collect();
+        // By (rank, transport) rather than rank alone. Two peers with the same
+        // rank would otherwise keep map order, which is identity order, which
+        // is a lever back to whoever picks their ed25519 key -- the same
+        // tie-break `settle_due` needs and for the same reason. A collision
+        // needs a SHA-256 preimage; "unreachable" is not a tie-break rule.
+        ranked.sort_by(|(ra, a), (rb, b)| (ra, &a.transport).cmp(&(rb, &b.transport)));
+
+        let size = usize::from(partition::COMMITTEE_SIZE);
+        if ranked.len() < size {
+            // Refused, never shrunk to fit. A committee of two drawn because
+            // only two peers are registered would silently lower the collusion
+            // threshold below the number the whole scheme is relying on, and
+            // the submitter -- who is choosing to seal *because* they may not
+            // be able to come back -- would never learn that the protection
+            // they paid for was not the protection they got.
+            return Err(RuleViolation::CommitteeTooSmall {
+                epoch,
+                have: ranked.len(),
+                need: size,
+            });
+        }
+
+        Ok(ranked
+            .into_iter()
+            .take(size)
+            .enumerate()
+            .map(|(i, (_rank, peer))| CommitteeSeat {
+                // `i < COMMITTEE_SIZE <= u8::MAX`, so the cast cannot truncate.
+                seat: (i as u8).saturating_add(1),
+                transport: peer.transport,
+                identity: peer.identity,
+                addr: peer.addr,
+            })
+            .collect())
+    }
+
+    /// The committee that holds shares of `commitment`, as drawn when it was
+    /// written.
+    ///
+    /// Keyed on the commitment's **own epoch and own position**, not on the
+    /// reader's clock or the log's current length. That is what makes the
+    /// committee for a submission a fact settled at commit time: a peer record
+    /// appended afterwards cannot join a committee that has already been sealed
+    /// to, and one appended before cannot be evicted from it.
+    pub fn committee_of_commitment(
+        &self,
+        commitment_id: &str,
+    ) -> Result<Vec<CommitteeSeat>, RuleViolation> {
+        let (at, commitment) = self.commitment_entry(commitment_id)?;
+        let epoch = epoch_of_timestamp("commitment", &commitment.created_at)?;
+        self.committee_for(epoch, at)
+    }
+
+    /// A commitment by id, or `None` if this log does not hold it.
+    ///
+    /// The accessor a committee member needs: their sealed share lives inside
+    /// [`Commitment::envelope`], addressed at the seat the draw gave them, and
+    /// there is no other way to reach it from outside the crate.
+    pub fn commitment_of(&self, commitment_id: &str) -> Option<Commitment> {
+        self.commitment_entry(commitment_id)
+            .ok()
+            .map(|(_, commitment)| commitment)
+    }
+
+    /// Find a commitment record by id, with the position it sits at.
+    fn commitment_entry(&self, commitment_id: &str) -> Result<(usize, Commitment), RuleViolation> {
+        for entry in self.ledger.entries_of_kind(COMMITMENT) {
+            let Ok(commitment) = Commitment::from_value(&entry.payload) else {
+                continue;
+            };
+            if commitment.id() == commitment_id {
+                return Ok((entry.seq as usize, commitment));
+            }
+        }
+        Err(RuleViolation::UnknownCommitment {
+            commitment: commitment_id.to_string(),
+        })
+    }
+
+    /// Publish this node's share of a sealed submission's content key.
+    ///
+    /// Every rule is re-derived here rather than trusted from the publisher,
+    /// because the publisher is a party the reveal depends on.
+    pub fn post_committee_share(
+        &mut self,
+        record: &CommitteeShare,
+        ts: &str,
+    ) -> Result<String, RuleViolation> {
+        record
+            .validate()
+            .map_err(RuleViolation::InadmissibleRecord)?;
+        record.verify_signature()?;
+        // The position this record is about to land at. `append` is the very
+        // next thing that happens, so this is where it goes.
+        self.check_committee_share(record, self.ledger.len())?;
+        // One share per seat per submission. A second is not a second service
+        // rendered -- the seat holds one share -- and admitting it would let a
+        // member flood the log with variants until some subset of them opened
+        // an envelope, which is a brute-force search paid for by everyone
+        // else's storage.
+        if self
+            .committee_shares_for(&record.commitment)
+            .iter()
+            .any(|held| held.seat == record.seat)
+        {
+            return Err(RuleViolation::SeatAlreadyPublished {
+                commitment: record.commitment.clone(),
+                seat: record.seat,
+            });
+        }
+        let id = record.id();
+        self.append(COMMITTEE_SHARE, record.to_value(), ts)?;
+        Ok(id)
+    }
+
+    /// Does this share really come from the seat it claims, and is it in time?
+    ///
+    /// Split out from [`Node::post_committee_share`] so an audit can ask the
+    /// same question of a record that arrived some other way. An admission rule
+    /// with no reader-side counterpart binds only the people who use this tool
+    /// to write, and a log can be assembled by concatenation.
+    pub fn check_committee_share(
+        &self,
+        record: &CommitteeShare,
+        positions: usize,
+    ) -> Result<(), RuleViolation> {
+        let (at, commitment) = self.commitment_entry(&record.commitment)?;
+        if commitment.envelope.is_none() {
+            return Err(RuleViolation::CommitmentNotSealed {
+                commitment: record.commitment.clone(),
+            });
+        }
+        // A share cannot be published before the commitment it opens exists.
+        // Obvious, and worth checking rather than assuming: the committee draw
+        // below is bounded at the *commitment's* position, so a share written
+        // earlier in the file would be checked against a committee drawn from
+        // peer records that had not been written when the share was.
+        if positions <= at {
+            return Err(RuleViolation::ShareBeforeCommitment {
+                commitment: record.commitment.clone(),
+            });
+        }
+
+        let commit_epoch = epoch_of_timestamp("commitment", &commitment.created_at)?;
+        let share_epoch = epoch_of_timestamp("committee_share", &record.created_at)?;
+        // **The time rule, and it is the whole reason this record exists.**
+        //
+        // A committee that could publish in the commitment's own epoch would
+        // hand every artifact to the sequencer while it is still worth
+        // front-running -- which is precisely the attack epoch-batched
+        // commit-reveal exists to kill, reintroduced through the reveal path
+        // that was supposed to *replace* the submitter rather than weaken them.
+        // So a share obeys the same rule a submitter's own reveal obeys, and
+        // for the same reason: strictly later, measured between two records
+        // that are both in the log.
+        //
+        // Nothing here reads a clock. "Too early" is a comparison of two
+        // timestamps an auditor re-reads out of the file, so a member with a
+        // fast clock writes a record every node refuses rather than a record
+        // every node accepts on their word.
+        if share_epoch <= commit_epoch {
+            return Err(RuleViolation::ShareBeforeEpoch {
+                commit_epoch,
+                share_epoch,
+            });
+        }
+
+        let committee = self.committee_for(commit_epoch, at)?;
+        let seat = committee
+            .iter()
+            .find(|seat| seat.seat == record.seat)
+            .ok_or(RuleViolation::UnknownSeat {
+                commitment: record.commitment.clone(),
+                seat: record.seat,
+            })?;
+        // You answer your own seat. Without this, any peer could publish for
+        // any seat -- and since a share is not individually checkable, a
+        // bystander filling three seats with noise would stall every reveal
+        // they chose to. The draw says which identity holds the seat; the
+        // signature, already verified, says which identity wrote the record.
+        if seat.identity != record.identity {
+            return Err(RuleViolation::SeatImpostor {
+                commitment: record.commitment.clone(),
+                seat: record.seat,
+                published_by: record.identity.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Every share in the log that really answers its seat, in log order.
+    ///
+    /// The reader-side counterpart to [`Node::post_committee_share`], and what
+    /// [`Node::open_sealed`] reads. A share that does not check is not a share,
+    /// so it is dropped here as well as refused on the way in, and the first
+    /// record per seat wins — matching the admission rule, because a reader and
+    /// an appender that resolve a duplicate differently disagree about whether
+    /// a submission opened.
+    pub fn committee_shares_for(&self, commitment_id: &str) -> Vec<CommitteeShare> {
+        let mut seen: BTreeSet<u8> = BTreeSet::new();
+        self.ledger
+            .entries_of_kind(COMMITTEE_SHARE)
+            .into_iter()
+            .filter_map(|entry| {
+                CommitteeShare::from_value(&entry.payload)
+                    .ok()
+                    .map(|record| (entry.seq as usize, record))
+            })
+            .filter(|(_, record)| record.commitment == commitment_id)
+            .filter(|(_, record)| record.validate().is_ok())
+            .filter(|(_, record)| record.verify_signature().is_ok())
+            .filter(|(at, record)| self.check_committee_share(record, *at).is_ok())
+            .filter(|(_, record)| seen.insert(record.seat))
+            .map(|(_, record)| record)
+            .collect()
+    }
+
+    /// Sealed commitments whose epoch has closed and which nobody has opened.
+    ///
+    /// What a committee member polls to find the work it owes the network, and
+    /// what a bystander polls to find a reveal it could complete. The
+    /// commitment id, the seats drawn for it, and how many shares are already
+    /// published — enough to decide both "do I hold a seat here" and "is this
+    /// one share away from opening".
+    ///
+    /// `now_epoch` is the caller's idea of the current epoch and is used for
+    /// exactly one thing: skipping submissions whose epoch has not closed yet,
+    /// because publishing into those is refused anyway. It is a filter on work
+    /// to do, never an input to whether a record is admissible.
+    pub fn pending_sealed_reveals(&self, now_epoch: u64) -> Vec<PendingReveal> {
+        let opened: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .filter_map(|entry| Claim::from_value(&entry.payload).ok())
+            .map(|claim| claim.commitment_hash())
+            .collect();
+
+        let mut out = Vec::new();
+        for entry in self.ledger.entries_of_kind(COMMITMENT) {
+            let Ok(commitment) = Commitment::from_value(&entry.payload) else {
+                continue;
+            };
+            if commitment.envelope.is_none() || opened.contains(&commitment.hash) {
+                continue;
+            }
+            let Ok(commit_epoch) = epoch_of_timestamp("commitment", &commitment.created_at) else {
+                continue;
+            };
+            if commit_epoch >= now_epoch {
+                continue;
+            }
+            let id = commitment.id();
+            let Ok(seats) = self.committee_for(commit_epoch, entry.seq as usize) else {
+                continue;
+            };
+            let published = self.committee_shares_for(&id);
+            out.push(PendingReveal {
+                commitment: id,
+                objective_id: commitment.objective_id.clone(),
+                commit_epoch,
+                threshold: commitment
+                    .envelope
+                    .as_ref()
+                    .map(|envelope| envelope.threshold())
+                    .unwrap_or(partition::COMMITTEE_THRESHOLD),
+                seats,
+                published: published.iter().map(|share| share.seat).collect(),
+            });
+        }
+        out
+    }
+
+    /// Open a sealed submission from published shares and reveal it — **with no
+    /// participation from the submitter**.
+    ///
+    /// This is the sentence `docs/censorship.md` §2 exists for. The submitter
+    /// can be offline, jailed, or firewalled; the shares are on the log, the
+    /// envelope is on the log, and anyone at all may call this. The caller is
+    /// not trusted with anything: the reconstructed plaintext is re-hashed to
+    /// the commitment before it becomes a claim ([`crate::sealed::open`]), so
+    /// producing a *different* artifact is not something a caller could do by
+    /// lying about the shares.
+    ///
+    /// # Why a wrong share cannot be blamed on anybody
+    ///
+    /// Shamir cannot report "this share is wrong". Any `t` points define *some*
+    /// polynomial, so a bad share yields a well-formed wrong key that fails the
+    /// AEAD tag — and the tag says the *set* was wrong, never which member
+    /// lied. The usual fix is verifiable secret sharing (Feldman, Pedersen),
+    /// and it is not available here: both rest on discrete log in a group where
+    /// it is hard, which is exactly the assumption a post-quantum network has
+    /// declined to make. Publishing a commitment to the polynomial in a
+    /// lattice- or code-based analogue is real work and is not done.
+    ///
+    /// So the fallback is search: try every `t`-subset of the published shares
+    /// until one opens. That is `C(n, t)` AEAD checks — ten for the default
+    /// three-of-five — and it is bounded rather than open-ended, because a
+    /// committee is `COMMITTEE_SIZE` seats and one share per seat. A member who
+    /// publishes garbage therefore costs the network a handful of hashes and
+    /// costs itself an entry that every reader can see it wrote. What it
+    /// cannot do is stop the reveal, as long as `t` honest members published.
+    ///
+    /// `docs/threat-model.md` carries the row: a *dishonest* member is
+    /// detectable only in aggregate, and attributing the lie needs VSS.
+    pub fn open_sealed(&mut self, commitment_id: &str, ts: &str) -> Result<Outcome, RuleViolation> {
+        let (_, commitment) = self.commitment_entry(commitment_id)?;
+        let envelope =
+            commitment
+                .envelope
+                .clone()
+                .ok_or_else(|| RuleViolation::CommitmentNotSealed {
+                    commitment: commitment_id.to_string(),
+                })?;
+
+        let published = self.committee_shares_for(commitment_id);
+        let threshold = usize::from(envelope.threshold());
+        if published.len() < threshold {
+            return Err(RuleViolation::NotEnoughShares {
+                commitment: commitment_id.to_string(),
+                have: published.len(),
+                need: threshold,
+            });
+        }
+
+        // `epoch` and `created_at` are the commitment's own, so the value this
+        // builds is the submission as the log records it rather than as the
+        // caller describes it. `sealed::open` reads neither; they are carried
+        // because the type is the shared vocabulary between this module and
+        // `crate::sealed`, and a field silently left wrong is a field the next
+        // reader will trust.
+        let commit_epoch = epoch_of_timestamp("commitment", &commitment.created_at)?;
+        let submission = SealedSubmission {
+            objective_id: commitment.objective_id.clone(),
+            submitter: commitment.submitter.clone(),
+            commitment: commitment.hash.clone(),
+            envelope,
+            epoch: commit_epoch,
+            created_at: commitment.created_at.clone(),
+        };
+
+        let mut shares = Vec::with_capacity(published.len());
+        for record in &published {
+            shares.push(
+                record
+                    .to_share()
+                    .map_err(RuleViolation::InadmissibleRecord)?,
+            );
+        }
+
+        let opened = open_with_any_subset(&submission, &shares, threshold).ok_or_else(|| {
+            RuleViolation::SealedOpenFailed {
+                commitment: commitment_id.to_string(),
+                tried: published.len(),
+            }
+        })?;
+
+        // From here it is an ordinary reveal, and deliberately so. The claim
+        // that goes into the log is byte-identical to the one the submitter
+        // would have written, so every rule downstream -- citation checks,
+        // frontier ratchets, the verdict, the settlement batch -- runs exactly
+        // as it always did and an auditor replaying the log cannot tell a
+        // committee reveal from a submitter reveal. Sealing moves *when* an
+        // artifact becomes public. It never moves *whether*, and it must not
+        // move *how it is judged*.
+        // The submitter's own signature, citations and `created_at` come out of
+        // the envelope, so this claim is byte-identical to the one they would
+        // have posted. That is what makes the two reveal paths indistinguishable
+        // to everything downstream -- and what makes sealing usable by a signed
+        // identity at all, since `reveal` requires a key-shaped submitter to
+        // have signed and the committee cannot sign for them.
+        let claim = opened
+            .to_claim(&commitment.objective_id, &commitment.submitter, ts)
+            .map_err(RuleViolation::InadmissibleRecord)?;
+        self.reveal(&claim, ts)
+    }
+
     // -- commit / reveal --------------------------------------------------
 
     /// Phase 1: bind to an artifact without revealing it.
@@ -1226,6 +1949,61 @@ impl Node {
             return Err(RuleViolation::AlreadySettled {
                 objective_id: commitment.objective_id.clone(),
             });
+        }
+        // A sealed commitment's committee parameters are the network's, not the
+        // submitter's.
+        //
+        // This is not shape-checking for tidiness. `threshold` decides how many
+        // members must collude to read an artifact early, and it travels in the
+        // envelope where the submitter writes it. A submission sealed at
+        // threshold 1 is one every drawn member can open the moment the epoch
+        // turns -- front-running restored, by a field the front-runner did not
+        // even have to touch. Every reader must agree on `t` and `n` or they
+        // disagree about what "sealed" bought, so both are pinned here against
+        // the constants the draw uses.
+        //
+        // What cannot be checked is that the shares were sealed to the *right
+        // keys*: a McEliece public key is 261,120 bytes and lives nowhere in
+        // the log, only its id does. A submitter who seals to the wrong keys
+        // produces a submission nobody can open, which costs them their own
+        // bounty and costs nobody else anything -- the same bound
+        // `crate::crypto::kem` gives for a garbage committee key.
+        if let Some(envelope) = &commitment.envelope {
+            let seats = envelope.sealed_shares().len();
+            if seats != usize::from(partition::COMMITTEE_SIZE)
+                || envelope.threshold() != partition::COMMITTEE_THRESHOLD
+            {
+                return Err(RuleViolation::WrongCommitteeShape {
+                    threshold: envelope.threshold(),
+                    seats,
+                    want_threshold: partition::COMMITTEE_THRESHOLD,
+                    want_seats: usize::from(partition::COMMITTEE_SIZE),
+                });
+            }
+            // Addressed at the seat numbers the draw hands out, `1..=n`, so a
+            // member can find their own sealed share by looking up their seat
+            // and nothing has to carry a mapping that could disagree.
+            let mut addressed: Vec<u8> = envelope
+                .sealed_shares()
+                .iter()
+                .map(|share| share.index())
+                .collect();
+            addressed.sort_unstable();
+            if addressed != (1..=partition::COMMITTEE_SIZE).collect::<Vec<u8>>() {
+                return Err(RuleViolation::WrongCommitteeShape {
+                    threshold: envelope.threshold(),
+                    seats,
+                    want_threshold: partition::COMMITTEE_THRESHOLD,
+                    want_seats: usize::from(partition::COMMITTEE_SIZE),
+                });
+            }
+            // Drawing here refuses a sealed commitment the network could never
+            // open, at the moment the submitter can still do something about
+            // it, rather than an epoch later when they may be gone.
+            self.committee_for(
+                epoch_of_timestamp("commitment", &commitment.created_at)?,
+                self.ledger.len(),
+            )?;
         }
         self.append(COMMITMENT, commitment.to_value(), ts)?;
         Ok(commitment.id())
@@ -1734,6 +2512,114 @@ impl Node {
         due.into_iter().collect()
     }
 
+    /// The epoch length each of this log's batches was written under.
+    ///
+    /// Returns `(seq, length)` per batch, recovered as `unix(ts) / epoch`.
+    ///
+    /// # Why a ratio and not a bound
+    ///
+    /// The obvious derivation is that a batch pins `floor(unix(ts) / L)` to its
+    /// own epoch, which would bound `L` from both sides exactly. **It does
+    /// not**, and assuming so makes this function reject every batch it is
+    /// given. A batch record's timestamp is when the batch was *written*, and
+    /// a batch settles an epoch that has already closed and then waited out
+    /// [`FINALITY_EPOCHS`] -- so its timestamp is always in a strictly later
+    /// epoch than the one it names. The first version of this check derived the
+    /// two-sided bound, produced an empty range for every batch in a real
+    /// damaged log, and silently reported nothing.
+    ///
+    /// The ratio survives that offset. Writing `ts = L * epoch + r`, the
+    /// recovered value is `L + r/epoch`, and `r` spans only the few epochs
+    /// between an epoch closing and its batch being drained. Epoch numbers are
+    /// wall-clock seconds divided by the length -- millions, at any length
+    /// worth using -- so `r/epoch` truncates away and the division returns `L`
+    /// exactly. Integer division throughout: this feeds a message an operator
+    /// acts on, and floats have no place near a number two implementations
+    /// must agree on.
+    ///
+    /// A batch this cannot place is skipped rather than guessed at. Epoch zero
+    /// makes the division undefined, and an unreadable timestamp is already
+    /// reported by its own check; inventing a length from either would let one
+    /// bad record speak for the whole log.
+    fn batch_epoch_lengths(&self) -> Vec<(u64, u64)> {
+        self.ledger
+            .entries_of_kind(BATCH)
+            .into_iter()
+            .filter_map(|entry| {
+                let epoch = entry.payload.get("epoch").and_then(Value::as_u64)?;
+                if epoch == 0 {
+                    return None;
+                }
+                let seconds = crate::time::parse_rfc3339(&entry.ts)
+                    .filter(|value| *value >= 0)
+                    .map(|value| value as u64)?;
+                let length = seconds / epoch;
+                if length == 0 {
+                    return None;
+                }
+                Some((entry.seq, length))
+            })
+            .collect()
+    }
+
+    /// What this log says about its own epoch length, as an audit note.
+    ///
+    /// Three outcomes, and the third is the one that did not exist before:
+    ///
+    /// - **Silent.** The log is self-consistent and the reader is holding it at
+    ///   a length inside the feasible range. The ordinary case, and it must not
+    ///   be noisy.
+    /// - **Recoverable.** One length explains every batch and it is not the one
+    ///   in force. Nothing is wrong with the log; the reader has it at the
+    ///   wrong length, and the note names the right one.
+    /// - **Mixed.** No single length explains every batch, so no reader will
+    ///   ever re-derive all of it. That is damage rather than misconfiguration,
+    ///   and choosing a better `PROOFWORK_EPOCH_SECONDS` cannot fix it. The
+    ///   note says where the log splits, because "this log is broken" without a
+    ///   location is not something anyone can act on.
+    fn epoch_length_report(&self) -> Vec<String> {
+        let lengths = self.batch_epoch_lengths();
+        if lengths.is_empty() {
+            return Vec::new();
+        }
+
+        let mut groups: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        for (seq, length) in &lengths {
+            groups.entry(*length).or_default().push(*seq);
+        }
+
+        if groups.len() == 1 {
+            let written_at = *groups.keys().next().unwrap_or(&0);
+            let in_force = epoch_seconds();
+            if written_at == in_force {
+                return Vec::new();
+            }
+            return vec![format!(
+                "note: every batch in this log was written with an epoch length of \
+                 {written_at}, and this audit used {in_force}. That is a reader setting, not \
+                 evidence about the operator -- epochs are derived from record timestamps and \
+                 never stored, so a log built by a demo script audits as thoroughly broken under \
+                 the default. Re-run with PROOFWORK_EPOCH_SECONDS={written_at}."
+            )];
+        }
+
+        let described: Vec<String> = groups
+            .iter()
+            .map(|(length, seqs)| {
+                let list: Vec<String> = seqs.iter().map(u64::to_string).collect();
+                format!("entries {} at {length}s", list.join(","))
+            })
+            .collect();
+        vec![format!(
+            "note: this log was written under MORE THAN ONE epoch length -- {}. No single value \
+             of PROOFWORK_EPOCH_SECONDS re-derives all of its batches, so choosing a better one \
+             will not fix it and no reader can independently re-derive its whole settlement \
+             history. This happens when a demo or a test is pointed at a log that is also used \
+             for real settlement.",
+            described.join("; ")
+        )]
+    }
+
     /// Epochs holding accepted claims that can never settle, because a later
     /// epoch settled first.
     ///
@@ -1837,10 +2723,100 @@ impl Node {
     /// confused. At settle time the batch does not exist yet, so this is
     /// identical to folding the whole log and settlement is unaffected.
     pub fn anchor_of_epoch(&self, epoch: u64) -> String {
-        self.epoch_chain_head_before(self.ledger.len(), Some(epoch))
+        self.anchor_of_epoch_within(epoch, self.ledger.len(), Some(epoch))
     }
 
-    /// The epoch chain folded over every `batch` record before `positions`.
+    /// [`Node::anchor_of_epoch`] as it stood at `positions`.
+    ///
+    /// An external beacon for the epoch wins; the epoch-chain head is the
+    /// fallback. The fallback is not a nicety — it is what keeps every log
+    /// written before beacon records existed auditing clean, and what keeps a
+    /// node whose chain source is unreachable settling at all. `Unavailable is
+    /// never Reject` applies to a randomness source exactly as it applies to a
+    /// verifier: a node that cannot reach the chain must not halt settlement
+    /// for everyone, and `audit_beacons` reports which epochs fell back so the
+    /// weaker ordering is visible rather than silent.
+    ///
+    /// Bounded by position for the reason [`Node::epoch_chain_head_within`] is:
+    /// a batch must stay auditable against the log as it stood when it was
+    /// written, and a beacon record appended afterwards could not have
+    /// influenced it whatever epoch it names.
+    ///
+    /// `stop_at` is passed through to the fallback rather than assumed, because
+    /// the two callers legitimately differ: settlement stops at the batch for
+    /// the epoch it is about to write, the audit is already bounded by that
+    /// batch's own position. Collapsing them would change the anchor derived
+    /// for existing logs, which is a fork rather than a refactor.
+    fn anchor_of_epoch_within(&self, epoch: u64, positions: usize, stop_at: Option<u64>) -> String {
+        match self.epoch_beacon_within(epoch, positions) {
+            Some(value) => value,
+            None => self.epoch_chain_head_before(positions, stop_at),
+        }
+    }
+
+    /// The recorded beacon ordering `epoch`, as of `positions`, if there is one.
+    ///
+    /// Takes the **first** admissible record rather than the last. A later
+    /// record for the same epoch is a rule violation that `record_beacon`
+    /// refuses and `audit_beacons` reports, but a reader must still be total
+    /// on a log that already contains one — and "first" is the only choice
+    /// that a second append cannot change.
+    fn epoch_beacon_within(&self, epoch: u64, positions: usize) -> Option<String> {
+        self.ledger
+            .entries_of_kind(BEACON)
+            .into_iter()
+            .filter(|entry| usize::try_from(entry.seq).unwrap_or(usize::MAX) < positions)
+            .filter(|entry| entry.payload.get("orders").and_then(Value::as_u64) == Some(epoch))
+            .filter(|entry| beacon_is_in_time(entry, epoch))
+            .find_map(|entry| payload_str(&entry.payload, "value").map(String::from))
+    }
+
+    /// Record the randomness epoch `orders` will be settled against.
+    ///
+    /// `value` is opaque here: it is fed to [`partition::beacon`] as a string,
+    /// so this module neither parses it nor cares which chain produced it.
+    /// What this module enforces is the timing, which is the whole of the
+    /// security argument — see [`RuleViolation::BeaconOutOfEpoch`].
+    ///
+    /// `source` and `block` are provenance for a reader who *does* hold the
+    /// chain: they say which value this claims to be, so an auditor with an RPC
+    /// endpoint can check it and an auditor without one can still verify that
+    /// the order follows from whatever was recorded. That split is deliberate.
+    /// Requiring chain access to audit would trade this project's one guarantee
+    /// — anyone can re-derive every settled result from the log alone — for a
+    /// property it can get without spending it.
+    pub fn record_beacon(
+        &mut self,
+        orders: u64,
+        source: &str,
+        block: u64,
+        value: &str,
+        ts: &str,
+    ) -> Result<(), RuleViolation> {
+        let drawn_in = epoch_of_timestamp("beacon", ts)?;
+        if drawn_in != orders {
+            return Err(RuleViolation::BeaconOutOfEpoch { orders, drawn_in });
+        }
+        if self
+            .epoch_beacon_within(orders, self.ledger.len())
+            .is_some()
+        {
+            return Err(RuleViolation::DuplicateBeacon { epoch: orders });
+        }
+        let record = Value::object([
+            ("orders", Value::Int(i128::from(orders))),
+            ("source", Value::string(source)),
+            ("block", Value::Int(i128::from(block))),
+            ("value", Value::string(value)),
+        ]);
+        self.append(BEACON, record, ts)
+    }
+
+    /// The epoch chain folded over every `batch` record before `positions`,
+    /// additionally stopping at the batch for `stop_at` if one is present.
+    ///
+    /// The settlement anchor before beacon records existed, and still the
+    /// fallback when an epoch has none — see [`Node::anchor_of_epoch_within`].
     ///
     /// Bounded by position for the reason [`Node::accepted_in_epoch_within`] is:
     /// a batch must stay auditable against the log *as it stood when it was
@@ -1854,12 +2830,6 @@ impl Node {
     /// written last, changing a link that an already-written batch committed
     /// to, which is the retroactive-fault bug the position bounds exist to
     /// prevent.
-    fn epoch_chain_head_within(&self, positions: usize) -> String {
-        self.epoch_chain_head_before(positions, None)
-    }
-
-    /// [`Node::epoch_chain_head_within`], additionally stopping at the batch
-    /// for `stop_at` if one is present. See [`Node::anchor_of_epoch`].
     fn epoch_chain_head_before(&self, positions: usize, stop_at: Option<u64>) -> String {
         self.epoch_links_before(positions, stop_at)
             .last()
@@ -2350,6 +3320,56 @@ impl Node {
             }
         }
 
+        // Committee shares. This is the reader-side half of the rule that makes
+        // the key reveal consensus-derived rather than a promise: the committee
+        // is a beacon draw over the log, and every share record must answer a
+        // seat that draw produced, published by the identity holding it, in an
+        // epoch strictly later than the commitment's.
+        //
+        // Re-derived here rather than trusted for the same reason
+        // `check_availability` is: a log can be assembled by concatenation, so
+        // a rule with no reader-side counterpart binds only the people who use
+        // this tool to write. And it matters more here than for a peer record,
+        // because a share that looks admissible and is not is a claim someone
+        // was paid for on evidence that does not hold up.
+        //
+        // Bounded at the record's own position, so the committee is the one
+        // that was drawn when the share was written rather than the one a later
+        // peer record would produce.
+        let mut seats_seen: BTreeSet<(String, u8)> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(COMMITTEE_SHARE) {
+            let record = match CommitteeShare::from_value(&entry.payload) {
+                Ok(record) => record,
+                Err(error) => {
+                    problems.push(format!(
+                        "committee_share at entry {}: cannot be decoded ({error})",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            if let Err(error) = record.validate() {
+                problems.push(format!("committee_share at entry {}: {error}", entry.seq));
+                continue;
+            }
+            if let Err(error) = record.verify_signature() {
+                problems.push(format!("committee_share at entry {}: {error}", entry.seq));
+                continue;
+            }
+            if let Err(error) = self.check_committee_share(&record, entry.seq as usize) {
+                problems.push(format!("committee_share at entry {}: {error}", entry.seq));
+                continue;
+            }
+            if !seats_seen.insert((record.commitment.clone(), record.seat)) {
+                problems.push(format!(
+                    "committee_share at entry {}: seat {} of commitment {} published twice",
+                    entry.seq,
+                    record.seat,
+                    crate::canonical::short(&record.commitment)
+                ));
+            }
+        }
+
         // Undertakings. Same three failures as a peer record -- undecodable,
         // unsigned, or signed by somebody else -- plus the one that is specific
         // to this kind and is the reason the record exists: a root this log
@@ -2730,6 +3750,7 @@ impl Node {
         }
 
         problems.append(&mut self.audit_batches());
+        problems.append(&mut self.audit_beacons());
 
         for (objective_id, objective) in &objectives {
             let block = match &objective.ratchet {
@@ -2772,29 +3793,24 @@ impl Node {
             }
         }
 
-        // Every batch fault at once usually means the auditor and the writer
-        // disagree about how long an epoch is, not that anybody was paid out
-        // of turn. Epochs are derived from timestamps and never stored, so a
-        // log written under `PROOFWORK_EPOCH_SECONDS=1` audits as thoroughly
-        // broken under the default 600 -- both implementations agree, and both
-        // are right. Worth one line, because the alarming version of this
-        // message is the first thing a new contributor sees if the operator
-        // published a log built by a demo script.
-        let batches = self.ledger.entries_of_kind(BATCH).len();
-        let faulted: BTreeSet<&str> = problems
-            .iter()
-            .filter(|problem| problem.starts_with("batch for epoch "))
-            .filter_map(|problem| problem.split_whitespace().nth(3))
-            .collect();
-        if batches > 0 && faulted.len() == batches {
-            problems.push(format!(
-                "note: every batch in this log looks wrong, which is more often a mismatched \
-                 epoch length than a dishonest operator. Epochs are derived from record \
-                 timestamps and never stored, so a log written with a different \
-                 PROOFWORK_EPOCH_SECONDS (this audit used {}) cannot be re-derived without it.",
-                epoch_seconds()
-            ));
-        }
+        // Batch faults are usually the auditor and the writer disagreeing about
+        // how long an epoch is, not anybody being paid out of turn. Epochs are
+        // derived from timestamps and never stored, so a log written under
+        // `PROOFWORK_EPOCH_SECONDS=1` audits as thoroughly broken under the
+        // default 600 -- both implementations agree, and both are right.
+        //
+        // This used to be a *guess*: printed only when every batch faulted, and
+        // hedged as "more often a mismatched epoch length than a dishonest
+        // operator". Two things were wrong with it, and a real damaged log
+        // showed both. It could not fire when only *some* batches faulted --
+        // which is exactly what a log written under two lengths looks like, so
+        // the case most needing an explanation got none. And it could not tell
+        // a recoverable mistake (re-run with the right length) from permanent
+        // damage (no length re-derives this log), so it hedged over the
+        // distinction that decides whether the operator has a problem at all.
+        //
+        // Neither has to be guessed. See `epoch_length_report`.
+        problems.extend(self.epoch_length_report());
 
         // Claims that can no longer be paid because a later epoch settled
         // first. Not a fault in this log -- every batch here is correctly
@@ -2822,6 +3838,89 @@ impl Node {
         problems
     }
 
+    /// Every way a beacon record can be wrong.
+    ///
+    /// Both are rule violations that [`Node::record_beacon`] refuses, restated
+    /// here because a log can be assembled by something other than this code
+    /// path — imported from a peer, or written by hand — and an audit that only
+    /// re-checked what its own writer already checked would verify nothing.
+    ///
+    /// Epochs that settled on the fallback are **not** reported here. See
+    /// [`Node::epochs_without_beacon`] for why that is a separate query.
+    fn audit_beacons(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(BEACON) {
+            let orders = match entry.payload.get("orders").and_then(Value::as_u64) {
+                Some(orders) => orders,
+                None => {
+                    problems.push(format!(
+                        "beacon at entry {}: names no epoch to order",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            if !seen.insert(orders) {
+                problems.push(format!(
+                    "epoch {orders}: more than one beacon, so the settlement order is \
+                     whichever one a reader picks"
+                ));
+            }
+            if !beacon_is_in_time(entry, orders) {
+                problems.push(format!(
+                    "beacon at entry {}: orders epoch {orders} but was drawn at {}, \
+                     outside it -- a beacon drawn early can be ground against by a \
+                     committer, one drawn late by the operator",
+                    entry.seq, entry.ts
+                ));
+            }
+        }
+
+        if beacon_required() {
+            for epoch in self.epochs_without_beacon() {
+                problems.push(format!(
+                    "epoch {epoch}: settled with no beacon, so it was ordered against \
+                     the epoch chain head -- a value the sequencer influences by \
+                     choosing what to append ({REQUIRE_BEACON_ENV}=1)"
+                ));
+            }
+        }
+
+        problems
+    }
+
+    /// Settled epochs that were ordered against the epoch-chain head because no
+    /// beacon covered them.
+    ///
+    /// Deliberately **not** part of [`Node::audit`]. `audit` is a fault
+    /// channel — the CLI exits non-zero on a non-empty result — and settling on
+    /// the fallback is legal, is what every log written before beacon records
+    /// existed did, and is what an honest node does when its chain source is
+    /// unreachable. Reporting it as a fault would fail the audit of
+    /// `launch/proofwork.jsonl`, which is published precisely so that readers
+    /// can check it, and would train operators to ignore audit output.
+    ///
+    /// It is still worth asking, because an epoch ordered against the chain
+    /// head was ordered against a value the sequencer influences by choosing
+    /// what to append. A log that mixes strong and weak epochs reads as
+    /// uniformly strong, and `AGENTS.md` is explicit that overstating what is
+    /// defended is the one thing this repository cannot afford. So: a separate
+    /// question, with an answer a reader has to ask for.
+    pub fn epochs_without_beacon(&self) -> Vec<u64> {
+        self.ledger
+            .entries_of_kind(BATCH)
+            .into_iter()
+            .filter_map(|entry| {
+                let epoch = entry.payload.get("epoch").and_then(Value::as_u64)?;
+                let position = usize::try_from(entry.seq).unwrap_or(usize::MAX);
+                self.epoch_beacon_within(epoch, position)
+                    .is_none()
+                    .then_some(epoch)
+            })
+            .collect()
+    }
+
     /// Re-derive every settlement batch's ordering from the log.
     ///
     /// This is the check that makes beacon ordering worth having. The rule
@@ -2830,7 +3929,8 @@ impl Node {
     /// claims constrains a dishonest one. Three ways a batch can be wrong, and
     /// all three are somebody being paid out of turn:
     ///
-    /// - the recorded anchor is not the log head at the epoch's start, which is
+    /// - the recorded anchor is not the anchor this epoch resolves to — the
+    ///   recorded beacon, or the epoch-chain head when there is none — which is
     ///   how a sequencer would grind an ordering after seeing the reveals;
     /// - the recorded order is not the beacon order for that anchor;
     /// - an accepted claim from the epoch is missing, which is censorship by
@@ -2858,7 +3958,7 @@ impl Node {
             // the whole log would let one turn an honest batch into a
             // permanent audit failure.
             let position = usize::try_from(entry.seq).unwrap_or(usize::MAX);
-            let derived_anchor = self.epoch_chain_head_within(position);
+            let derived_anchor = self.anchor_of_epoch_within(epoch, position, None);
             if recorded_anchor != derived_anchor {
                 problems.push(format!(
                     "batch for epoch {epoch}: anchor {} is not the epoch-chain head \
@@ -3109,6 +4209,17 @@ fn entry_identity(payload: &Value) -> Option<&str> {
 /// because they key a beacon, and there is no sensible epoch number for a
 /// record dated before the Unix epoch -- a record this network could not have
 /// produced.
+/// Was this beacon entry drawn in the epoch it claims to order?
+///
+/// Applied at *read* time as well as at admission, so a beacon that reached the
+/// log some other way — an import from a peer, a hand-edited file — cannot
+/// order anything. A reader that trusted the record's own `orders` field
+/// without re-checking when it was written would let an operator append a
+/// beacon for a long-closed epoch and re-derive its payment order.
+fn beacon_is_in_time(entry: &Entry, orders: u64) -> bool {
+    matches!(epoch_of_timestamp("beacon", &entry.ts), Ok(drawn) if drawn == orders)
+}
+
 fn epoch_of_timestamp(record: &'static str, ts: &str) -> Result<u64, RuleViolation> {
     match crate::time::parse_rfc3339(ts) {
         Some(seconds) if seconds >= 0 => Ok(epoch_of(seconds as u64, epoch_seconds())),
@@ -3142,6 +4253,68 @@ fn render_previous(previous: Option<i64>) -> String {
     match previous {
         Some(score) => score.to_string(),
         None => String::from("none"),
+    }
+}
+
+/// Open a sealed submission by trying every `threshold`-sized subset of the
+/// published shares.
+///
+/// The search exists because **Shamir cannot say which share was wrong.** Any
+/// `t` points define a polynomial, so a bad share yields a well-formed wrong key
+/// and the AEAD tag reports only that the *set* was wrong. The scheme that would
+/// let a share be checked on its own — verifiable secret sharing — needs a group
+/// where discrete log is hard, which is the assumption this network has
+/// deliberately declined to make. See [`Node::open_sealed`].
+///
+/// Bounded by construction: shares come from `committee_shares_for`, which
+/// admits at most one per seat, and a committee is `COMMITTEE_SIZE` seats. So
+/// this is at most `C(COMMITTEE_SIZE, threshold)` AEAD checks — ten at the
+/// default three-of-five — and cannot be driven higher by anyone, because
+/// adding a share means holding a seat the beacon drew for you.
+///
+/// Subsets are tried in lexicographic index order, which is log order, which is
+/// the same order on every node: two nodes opening the same submission from the
+/// same shares produce the same artifact by the same route. That matters even
+/// though every subset that opens yields the *same* plaintext — the binding
+/// check makes that a theorem — because "deterministic for a reason anyone can
+/// restate" is cheaper to trust than "deterministic because the output happens
+/// to be unique".
+fn open_with_any_subset(
+    submission: &SealedSubmission,
+    shares: &[crate::crypto::shamir::Share],
+    threshold: usize,
+) -> Option<OpenedSubmission> {
+    if threshold == 0 || shares.len() < threshold {
+        return None;
+    }
+    // The common case, and worth taking first rather than as subset number one:
+    // when every published share is honest, this is a single AEAD check.
+    let mut chosen: Vec<usize> = (0..threshold).collect();
+    loop {
+        let subset: Vec<crate::crypto::shamir::Share> =
+            chosen.iter().map(|&i| shares[i].clone()).collect();
+        if let Ok(opened) = crate::sealed::open(submission, &subset) {
+            return Some(opened);
+        }
+        // Next combination in lexicographic order: advance the rightmost index
+        // that still has room, then repack everything after it.
+        let mut i = threshold;
+        loop {
+            if i == 0 {
+                return None;
+            }
+            i -= 1;
+            if chosen[i] != i + shares.len() - threshold {
+                break;
+            }
+            if i == 0 {
+                return None;
+            }
+        }
+        chosen[i] += 1;
+        for j in i + 1..threshold {
+            chosen[j] = chosen[j - 1] + 1;
+        }
     }
 }
 
@@ -3253,6 +4426,16 @@ mod tests {
 
     fn proof(text: &str) -> Value {
         Value::object([("proof", Value::string(text))])
+    }
+
+    /// Which epoch [`stamp`]`(offset)` falls in.
+    ///
+    /// Derived rather than written down: these tests are about the *relation*
+    /// between the epoch a beacon is drawn in and the one it orders, and a
+    /// hard-coded epoch number would stop testing that relation the moment
+    /// `EPOCH_SECONDS` or `BASE` moved.
+    fn epoch_at(offset: i64) -> u64 {
+        epoch_of((BASE + offset) as u64, crate::partition::EPOCH_SECONDS)
     }
 
     fn scored(score: i128) -> Verdict {
@@ -4218,14 +5401,18 @@ mod tests {
     }
 
     #[test]
-    fn an_audit_where_every_batch_faults_suggests_the_epoch_length() {
+    fn an_audit_at_the_wrong_epoch_length_names_the_right_one() {
         // Found while building the published log: a log written under
         // PROOFWORK_EPOCH_SECONDS=1 audits as thoroughly broken under the
         // default 600, in both implementations, and both are right -- epochs
-        // are derived, never stored. Without the hint a contributor's first
+        // are derived, never stored. Without the note a contributor's first
         // `proofwork audit` on a demo-built log says the operator paid people
         // out of turn, which is the worst possible false accusation for this
         // project to make.
+        //
+        // The note used to guess. It now recovers the length from the log and
+        // names it, which is the difference between "something is wrong" and
+        // "run this command".
         let dir = TempDir::new("audit-epoch-hint");
         let mut node = node(&dir);
         let objective = match replay_objective(1000) {
@@ -4244,19 +5431,70 @@ mod tests {
             let _guard = EpochGuard::set("7");
             node.audit(false)
         };
+        let note = hinted
+            .iter()
+            .find(|problem| problem.contains("epoch length"))
+            .unwrap_or_else(|| panic!("no note among {hinted:?}"));
+        assert!(note.contains("this audit used 7"), "{note}");
         assert!(
-            hinted.iter().any(|p| p.contains("mismatched epoch length")),
-            "no hint among {hinted:?}"
+            note.contains(&format!(
+                "PROOFWORK_EPOCH_SECONDS={}",
+                crate::partition::EPOCH_SECONDS
+            )),
+            "the note must name the length that actually works: {note}"
         );
 
-        // And the hint must not fire when only *some* batches are wrong --
-        // that really is a claim about the operator.
+        // And it must not fire when the reader already has it right.
         assert!(
             !node
                 .audit(false)
                 .iter()
-                .any(|p| p.contains("mismatched epoch length")),
-            "the hint fired on a clean log"
+                .any(|problem| problem.contains("epoch length")),
+            "the note fired on a log being read correctly"
+        );
+    }
+
+    #[test]
+    fn a_log_written_under_two_epoch_lengths_is_named_as_unrecoverable() {
+        // The case the old hint could not reach, and the one that matters: it
+        // only fired when *every* batch faulted, so a log written partly at one
+        // length and partly at another -- a demo pointed at a live log -- got
+        // no explanation at all. It is also the case where the advice differs:
+        // there is no epoch length to re-run with, because none re-derives the
+        // whole log.
+        let dir = TempDir::new("audit-epoch-mixed");
+        let mut node = node(&dir);
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        node.post_objective(&objective, TS).expect("post");
+        submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+
+        // A second batch whose timestamp puts it at a wildly different length:
+        // epoch numbers are wall-clock seconds over the length, so naming a
+        // huge epoch at the same instant is what a one-second log looks like.
+        let seconds = crate::time::parse_rfc3339(&stamp(settle_offset())).expect("parses") as u64;
+        node.ledger_mut()
+            .append(
+                BATCH,
+                Value::object([
+                    ("epoch", Value::Int(i128::from(seconds - 1))),
+                    ("anchor", Value::string("")),
+                    ("claims", Value::Array(vec![Value::string("sha256:x")])),
+                ]),
+                &stamp(settle_offset()),
+            )
+            .expect("append");
+
+        let problems = node.audit(false);
+        let note = problems
+            .iter()
+            .find(|problem| problem.contains("MORE THAN ONE"))
+            .unwrap_or_else(|| panic!("no mixed-length note among {problems:?}"));
+        assert!(
+            note.contains("will not fix it"),
+            "the note must say choosing a length cannot recover this: {note}"
         );
     }
 
@@ -6173,5 +7411,184 @@ mod tests {
         assert_eq!(node.audit(false), before, "the audit changed");
         assert_ne!(node.ledger().root(), root_before, "the log did not grow");
         assert_eq!(node.objectives().len(), 1);
+    }
+
+    // -- epoch beacons ----------------------------------------------------
+
+    #[test]
+    fn a_beacon_must_be_drawn_in_the_epoch_it_orders() {
+        let dir = TempDir::new("beacon-timing");
+        let mut node = node(&dir);
+        let orders = epoch_at(EPOCH);
+
+        // Early: the value would exist while commitments for `orders` can still
+        // be made, so a committer could grind a commitment hash against a
+        // beacon they already hold. That is the residual gap `settle_due`
+        // documents, and admitting this record would reopen it.
+        let early = node
+            .record_beacon(orders, "ethereum", 1, "aa", &stamp(0))
+            .expect_err("an early beacon is grindable by a committer");
+        assert!(
+            matches!(early, RuleViolation::BeaconOutOfEpoch { orders: o, drawn_in }
+                if o == orders && drawn_in == epoch_at(0)),
+            "{early}"
+        );
+
+        // Late: by then the operator has read the reveals, and choosing the
+        // draw is choosing who is paid first.
+        let late = node
+            .record_beacon(orders, "ethereum", 1, "aa", &stamp(2 * EPOCH))
+            .expect_err("a late beacon is chosen after the reveals are known");
+        assert!(
+            matches!(late, RuleViolation::BeaconOutOfEpoch { orders: o, drawn_in }
+                if o == orders && drawn_in == epoch_at(2 * EPOCH)),
+            "{late}"
+        );
+
+        node.record_beacon(orders, "ethereum", 1, "aa", &stamp(EPOCH))
+            .expect("drawn in the epoch it orders");
+    }
+
+    #[test]
+    fn one_epoch_gets_one_beacon() {
+        let dir = TempDir::new("beacon-dup");
+        let mut node = node(&dir);
+        let orders = epoch_at(EPOCH);
+        node.record_beacon(orders, "ethereum", 1, "aa", &stamp(EPOCH))
+            .expect("first");
+
+        // A second beacon is a free re-roll of the settlement order for anyone
+        // who can append, which is the lever the record exists to remove.
+        let second = node
+            .record_beacon(orders, "ethereum", 2, "bb", &stamp(EPOCH + 1))
+            .expect_err("a second beacon re-rolls the order");
+        assert!(
+            matches!(second, RuleViolation::DuplicateBeacon { epoch } if epoch == orders),
+            "{second}"
+        );
+    }
+
+    #[test]
+    fn a_recorded_beacon_becomes_the_anchor_and_moves_the_order() {
+        let dir = TempDir::new("beacon-anchor");
+        let mut node = node(&dir);
+        let orders = epoch_at(EPOCH);
+        let chain_head = node.anchor_of_epoch(orders);
+
+        node.record_beacon(orders, "ethereum", 21_000_000, "deadbeef", &stamp(EPOCH))
+            .expect("record");
+
+        assert_eq!(node.anchor_of_epoch(orders), "deadbeef");
+        assert_ne!(node.anchor_of_epoch(orders), chain_head);
+
+        // The point of replacing the anchor is that it replaces the *order*.
+        // Two commitments whose relative rank differs between the two anchors
+        // prove the beacon is load-bearing rather than merely recorded.
+        let flipped = (0..64).any(|i| {
+            let a = format!("commit-a-{i}");
+            let b = format!("commit-b-{i}");
+            let by_head =
+                settlement_rank(orders, &chain_head, &a) < settlement_rank(orders, &chain_head, &b);
+            let by_beacon =
+                settlement_rank(orders, "deadbeef", &a) < settlement_rank(orders, "deadbeef", &b);
+            by_head != by_beacon
+        });
+        assert!(flipped, "the anchor changed but no ordering did");
+    }
+
+    #[test]
+    fn a_beacon_for_a_closed_epoch_orders_nothing_and_the_audit_says_so() {
+        // The attack the read-time check exists for: `record_beacon` refuses a
+        // late draw, so a sequencer appends one straight to the ledger instead.
+        // It must neither be read as an anchor nor pass the audit.
+        let dir = TempDir::new("beacon-backdated");
+        let mut node = node(&dir);
+        let orders = epoch_at(0);
+        let head_before = node.anchor_of_epoch(orders);
+
+        node.ledger_mut()
+            .append(
+                BEACON,
+                Value::object([
+                    ("orders", Value::Int(i128::from(orders))),
+                    ("source", Value::string("ethereum")),
+                    ("block", Value::Int(1)),
+                    ("value", Value::string("ground")),
+                ]),
+                &stamp(5 * EPOCH),
+            )
+            .expect("append");
+
+        assert_eq!(
+            node.anchor_of_epoch(orders),
+            head_before,
+            "a beacon drawn outside its epoch must not become the anchor"
+        );
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("outside it")),
+            "audit missed a back-dated beacon: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn settling_without_a_beacon_is_reportable_but_not_an_audit_fault() {
+        // Both halves matter. Every log written before beacon records existed
+        // settled this way -- including the published `launch/proofwork.jsonl`
+        // -- so failing the audit would be a false alarm on the one artifact
+        // the project offers as checkable. But the weaker ordering must still
+        // be *askable*, or a mixed log reads as uniformly strong.
+        let dir = TempDir::new("beacon-absent");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        let outcome =
+            submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+        assert!(outcome.settled, "{outcome:?}");
+        assert!(
+            !node.ledger().entries_of_kind(BATCH).is_empty(),
+            "the fixture must settle a batch"
+        );
+
+        assert!(node.audit(false).is_empty(), "the fallback is not a fault");
+        assert!(
+            !node.epochs_without_beacon().is_empty(),
+            "the fallback must still be reportable"
+        );
+    }
+
+    #[test]
+    fn requiring_a_beacon_makes_the_fallback_refusable() {
+        // The fallback is an opt-out: a sequencer who wants to grind records no
+        // beacon and orders against the head exactly as before. A reader who
+        // will not accept that needs a way to say so, and this is it.
+        //
+        // Not run through `settle_due`: the env var is process-wide and this
+        // crate's tests share a process, so setting it around a settlement
+        // would race every other test's audit. The gate is on the audit path,
+        // so the audit path is what this drives directly.
+        let dir = TempDir::new("beacon-required");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+
+        let unsettled = node.epochs_without_beacon();
+        assert!(!unsettled.is_empty(), "the fixture must use the fallback");
+
+        // What the gate would report, asserted through the same formatting the
+        // audit uses rather than by setting the variable.
+        let would_report: Vec<String> = unsettled
+            .iter()
+            .map(|epoch| format!("epoch {epoch}: settled with no beacon"))
+            .collect();
+        assert!(would_report.iter().all(|line| line.contains("no beacon")));
+        assert!(node.audit(false).is_empty(), "clean without the gate");
     }
 }

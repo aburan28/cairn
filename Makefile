@@ -54,10 +54,12 @@ SEED_BOOTSTRAP_ARGS ?=
 SERVE_LISTEN ?= 127.0.0.1:8080
 SERVE_ARGS ?=
 P2P_ARGS ?=
+# Which MCP client `make mcp-setup` writes a stanza for.
+CLIENT ?= claude
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp p2p seed serve demo ratchet identity interop differential fuzz mcp-smoke serve-smoke \
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
@@ -65,6 +67,8 @@ help:
 	@printf '%s\n' \
 	  'proofwork local commands:' \
 	  '  make mcp                 Build, write opencode.json, and run the MCP server (stdio).' \
+	  '  make mcp-setup           Wire an MCP client to this checkout (default: Claude Code).' \
+	  '  make mcp-setup CLIENT=opencode   ...or opencode / codex.' \
 	  '  make p2p                 Build and run a local p2p node (dials out; binds loopback).' \
 	  '  make seed                Run as a public seed: binds 0.0.0.0 on SEED_ADDR'"'"'s port.' \
 	  '  make mcp MCP_LOG=my-path  Use a custom MCP ledger path.' \
@@ -74,6 +78,7 @@ help:
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
+	  '  make shard-demo          Six holders, one shard each, one of them lying.' \
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
 	  '' \
@@ -102,28 +107,27 @@ $(LOCAL_DIR):
 
 # opencode.json tells OpenCode how to launch the MCP server. Generated once;
 # rebuilds when Makefile changes (the only time the paths inside could differ).
-# Uses absolute paths throughout: OpenCode spawns the server from a directory
-# it chooses, not the repo root, and a relative --log silently creates a second
-# empty ledger instead of failing.
 #
-# Identity is included only when the file already exists, so `make mcp` on a
-# fresh checkout does not block on key generation.
+# Delegates to scripts/mcp-config.sh rather than writing the file directly --
+# an earlier version of this target did `open('opencode.json', 'w').write(...)`
+# unconditionally, which is exactly the failure mode the script exists to
+# avoid: overwriting a config that might hold other MCP servers, wholesale,
+# because one stanza needed adding. One implementation instead of two also
+# means this and `make mcp-setup CLIENT=opencode` cannot drift apart.
 opencode.json: Makefile | $(LOCAL_DIR)
-	@$(PYTHON) -c "\
-import json, os; \
-id_path = '$(abspath $(IDENTITY))'; \
-cmd = ['$(abspath $(MCP))', '--log', '$(MCP_LOG)', '--root', '$(ROOT)']; \
-os.path.exists(id_path) and cmd.extend(['--identity', id_path]); \
-cfg = {'\$$schema': 'https://opencode.ai/config.json', 'mcp': {'proofwork': {'type': 'local', 'command': cmd, 'enabled': True}}}; \
-open('opencode.json', 'w').write(json.dumps(cfg, indent=2) + '\n') \
-"
-	@printf '  opencode.json -> $(MCP_LOG)\n'
-	@printf '  restart OpenCode (or /mcp reconnect) to pick it up\n'
+	@./scripts/mcp-config.sh --client opencode --log "$(MCP_LOG)" --identity "$(IDENTITY)"
 
 # `exec` preserves the MCP process's stdin/stdout unchanged: stdout is protocol
 # data, so a wrapper must never add banners or diagnostics to it.
 mcp: build opencode.json | $(LOCAL_DIR)
 	exec "$(MCP)" --log "$(MCP_LOG)" --root "$(ROOT)"
+
+# Writes the client's config rather than running the server: the client spawns
+# its own copy. Depends on `build` so the path written is one that exists --
+# a stanza naming a binary that was never compiled fails inside the client,
+# where the error is a connection timeout rather than "no such file".
+mcp-setup: build | $(LOCAL_DIR)
+	./scripts/mcp-config.sh --client "$(CLIENT)" --log "$(MCP_LOG)" --identity "$(IDENTITY)"
 
 # A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
 # inside is freshly generated, not the real seed's. It authenticates nobody
@@ -172,6 +176,9 @@ demo: build
 ratchet: build
 	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/ratchet-demo.sh
 
+shard-demo: build
+	RUST_BIN="$(abspath $(CLI))" ./scripts/shard-demo.sh
+
 differential: build
 	./scripts/differential.sh
 
@@ -219,4 +226,4 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy demo ratchet identity interop differential fuzz mcp-smoke serve-smoke tla
+check: test fmt clippy demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke tla

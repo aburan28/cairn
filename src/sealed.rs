@@ -67,6 +67,7 @@
 
 use core::fmt;
 use core::str;
+use std::collections::BTreeMap;
 
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
@@ -74,7 +75,6 @@ use zeroize::Zeroizing;
 use crate::canonical::{CanonicalError, Value};
 use crate::crypto::envelope::{CommitteeMember, EnvelopeError, SealedEnvelope};
 use crate::crypto::shamir::Share;
-use crate::obj;
 use crate::records::commitment_hash;
 
 /// Wire type tag, so a decoder cannot mistake some other object with the same
@@ -84,11 +84,38 @@ const RECORD_TYPE: &str = "sealed_submission";
 /// Wire version. Bumped only when the *interpretation* of the bytes changes —
 /// including any change to the sealed payload's shape, which is not
 /// self-describing and cannot be sniffed. An unknown version is refused.
-const VERSION: i128 = 1;
+///
+/// `2` because the payload grew the three optional claim fields below, and
+/// because the envelope inside it moved from X25519 to key encapsulation. Both
+/// change what the bytes mean rather than only what they contain, which is the
+/// bar this constant is documented to hold to.
+const VERSION: i128 = 2;
 
-/// The two, and only two, keys of the sealed payload.
+/// The keys of the sealed payload. The first two are required; the rest are the
+/// **claim** the submitter would have posted, and are what let a committee
+/// reveal on behalf of a *signed* identity.
+///
+/// Sealing only `{artifact, nonce}` looked sufficient and was not, for a reason
+/// that only shows up once the committee is wired to the log. A claim whose
+/// `submitter` is an ed25519 key must carry that key's signature
+/// ([`crate::records::signed_submitter`]) — and a committee cannot produce one,
+/// because the whole premise is that they do not hold the submitter's key. So
+/// the reveal path that was supposed to work *without* the submitter worked
+/// only for unsigned nicknames, which are exactly the identities that earn no
+/// citation flow and therefore have the least to protect.
+///
+/// The submitter signs the claim at commit time and seals the signature with
+/// it. Two things fall out. The committee publishes a claim byte-identical to
+/// the one the submitter would have posted themselves, so nothing downstream
+/// can tell the two paths apart. And `cites` survives, which means a sealed
+/// submission can cite the frontier — without it, sealing would have been
+/// unusable on exactly the ratcheted objectives where being censored costs the
+/// most.
 const PAYLOAD_ARTIFACT: &str = "artifact";
 const PAYLOAD_NONCE: &str = "nonce";
+const PAYLOAD_CREATED_AT: &str = "created_at";
+const PAYLOAD_CITES: &str = "cites";
+const PAYLOAD_SIGNATURE: &str = "signature";
 
 // -- errors ----------------------------------------------------------------
 
@@ -313,7 +340,7 @@ impl SealedSubmission {
         // committed to.
         let commitment = commitment_hash(objective_id, submitter, artifact, nonce);
 
-        let payload = payload_bytes(artifact, nonce);
+        let payload = payload_bytes(artifact, nonce, None, &[], None);
         // `commitment` as associated data binds this ciphertext, and every
         // sealed share's key derivation, to this submission.
         let envelope =
@@ -322,6 +349,64 @@ impl SealedSubmission {
         Ok(SealedSubmission {
             objective_id: objective_id.to_string(),
             submitter: submitter.to_string(),
+            commitment,
+            envelope,
+            epoch,
+            created_at: created_at.to_string(),
+        })
+    }
+
+    /// Seal a whole claim, so the committee can post it **exactly as the
+    /// submitter wrote it** — signature, citations and all.
+    ///
+    /// This, not [`SealedSubmission::seal`], is what a submitter with an
+    /// ed25519 identity must use, and the reason is the one in the
+    /// `PAYLOAD_*` docs: a claim naming a key must be signed by that key, the
+    /// committee does not hold it, and a committee reveal that could not carry
+    /// a signature would work only for the anonymous nicknames that have the
+    /// least to lose. Sealing the signature costs 64 bytes and closes it.
+    ///
+    /// `claim` must already be signed if its submitter is key-shaped — call
+    /// [`crate::records::Claim::signed_with`] first. Nothing here checks that,
+    /// for the same reason [`open`] does not: the rule belongs to
+    /// [`crate::node::Node::reveal`], which applies it to every claim it
+    /// admits, and a second copy here would be a second place for it to drift.
+    ///
+    /// The claim's `created_at` is sealed too, so the claim that lands is the
+    /// claim that was signed. It is **not** what decides the reveal epoch —
+    /// that comes from the timestamp the record is appended with, so a claim
+    /// stamped at commit time still reveals into a later epoch exactly as the
+    /// rules require.
+    pub fn seal_claim<R: RngCore + CryptoRng>(
+        claim: &crate::records::Claim,
+        epoch: u64,
+        created_at: &str,
+        committee: &[CommitteeMember],
+        threshold: u8,
+        rng: &mut R,
+    ) -> Result<SealedSubmission, SealedError> {
+        if claim.artifact.as_object().is_none() {
+            return Err(SealedError::ArtifactNotAnObject);
+        }
+        let commitment = commitment_hash(
+            &claim.objective_id,
+            &claim.submitter,
+            &claim.artifact,
+            &claim.nonce,
+        );
+        let payload = payload_bytes(
+            &claim.artifact,
+            &claim.nonce,
+            Some(&claim.created_at),
+            &claim.cites,
+            claim.signature.as_deref(),
+        );
+        let envelope =
+            SealedEnvelope::seal(payload.as_slice(), &commitment, committee, threshold, rng)?;
+
+        Ok(SealedSubmission {
+            objective_id: claim.objective_id.clone(),
+            submitter: claim.submitter.clone(),
             commitment,
             envelope,
             epoch,
@@ -427,13 +512,50 @@ impl SealedSubmission {
 
 /// What came out of a sealed submission, after the binding was checked.
 ///
-/// Both fields are public from this moment on — the nonce appears in the
+/// Every field is public from this moment on — the nonce appears in the
 /// revealed claim, and the artifact is what anyone re-runs the verifier over.
 /// There is nothing here to zeroize; that is the point of a reveal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenedSubmission {
     pub artifact: Value,
     pub nonce: String,
+    /// The `created_at` the submitter stamped their claim with, if they sealed
+    /// a whole claim rather than only an artifact.
+    pub created_at: Option<String>,
+    /// The claims the submitter meant to cite. Empty when none were sealed.
+    pub cites: Vec<String>,
+    /// The submitter's signature over the claim they sealed.
+    pub signature: Option<String>,
+}
+
+impl OpenedSubmission {
+    /// Rebuild the claim the submitter sealed.
+    ///
+    /// `fallback_created_at` is used only when the payload carried none, which
+    /// is the artifact-only shape: an unsigned nickname submission, where no
+    /// signature covers `created_at` and so nothing depends on its value.
+    ///
+    /// The result is **not** checked here. [`crate::node::Node::reveal`] runs
+    /// `verify_signature` on every claim it admits, sealed or not, and running
+    /// it here as well would put the rule in two places where only one of them
+    /// is on the path a hand-built claim takes.
+    pub fn to_claim(
+        &self,
+        objective_id: &str,
+        submitter: &str,
+        fallback_created_at: &str,
+    ) -> Result<crate::records::Claim, crate::records::RecordError> {
+        let mut claim = crate::records::Claim::new(
+            objective_id,
+            submitter,
+            self.artifact.clone(),
+            self.nonce.clone(),
+            self.created_at.as_deref().unwrap_or(fallback_created_at),
+            self.cites.clone(),
+        )?;
+        claim.signature = self.signature.clone();
+        Ok(claim)
+    }
 }
 
 /// Open a sealed submission from committee shares and **check the binding**.
@@ -485,7 +607,19 @@ pub fn open(
 
     let fields = parsed.as_object().ok_or(SealedError::PayloadNotAnObject)?;
     for key in fields.keys() {
-        if key != PAYLOAD_ARTIFACT && key != PAYLOAD_NONCE {
+        // Still a closed set, and still refused rather than ignored. The set is
+        // larger than it was, but an unknown key is exactly as dangerous as it
+        // ever was: content arriving with the authority of a sealed submission
+        // while being covered by no commitment at all.
+        if ![
+            PAYLOAD_ARTIFACT,
+            PAYLOAD_NONCE,
+            PAYLOAD_CREATED_AT,
+            PAYLOAD_CITES,
+            PAYLOAD_SIGNATURE,
+        ]
+        .contains(&key.as_str())
+        {
             return Err(SealedError::UnexpectedPayloadField { field: key.clone() });
         }
     }
@@ -507,6 +641,47 @@ pub fn open(
             return Err(SealedError::InvalidPayloadField {
                 field: PAYLOAD_NONCE,
                 expected: "a string",
+            })
+        }
+    };
+    let optional_string = |field: &'static str| -> Result<Option<String>, SealedError> {
+        match fields.get(field) {
+            None => Ok(None),
+            Some(Value::String(text)) => Ok(Some(text.clone())),
+            Some(_) => Err(SealedError::InvalidPayloadField {
+                field,
+                expected: "a string",
+            }),
+        }
+    };
+    let created_at = optional_string(PAYLOAD_CREATED_AT)?;
+    let signature = optional_string(PAYLOAD_SIGNATURE)?;
+    let cites = match fields.get(PAYLOAD_CITES) {
+        None => Vec::new(),
+        Some(Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::String(id) => out.push(id.clone()),
+                    // A non-string citation is refused rather than skipped. The
+                    // reference implementation's dynamic typing once turned
+                    // `"cites": "abc"` into three phantom citations, which is
+                    // why every decoder in this crate refuses a shape it does
+                    // not expect instead of doing its best with it.
+                    _ => {
+                        return Err(SealedError::InvalidPayloadField {
+                            field: PAYLOAD_CITES,
+                            expected: "an array of claim id strings",
+                        })
+                    }
+                }
+            }
+            out
+        }
+        Some(_) => {
+            return Err(SealedError::InvalidPayloadField {
+                field: PAYLOAD_CITES,
+                expected: "an array of claim id strings",
             })
         }
     };
@@ -536,25 +711,53 @@ pub fn open(
         return Err(SealedError::ArtifactNotAnObject);
     }
 
-    Ok(OpenedSubmission { artifact, nonce })
+    Ok(OpenedSubmission {
+        artifact,
+        nonce,
+        created_at,
+        cites,
+        signature,
+    })
 }
 
 // -- internals -------------------------------------------------------------
 
-/// The sealed payload: the artifact and the nonce that binds it.
+/// The sealed payload: the artifact, the nonce that binds it, and — when the
+/// submitter sealed a whole claim — the three fields a committee cannot invent.
 ///
 /// Self-wiping because before the reveal the nonce is a secret — it is what
 /// stops a guessable artifact being brute-forced out of the public commitment.
 /// Honest limits: the caller's `nonce: &str` and the intermediate [`Value`] are
 /// not wiped by this function and cannot be, since neither is owned here.
-fn payload_bytes(artifact: &Value, nonce: &str) -> Zeroizing<Vec<u8>> {
-    Zeroizing::new(
-        obj! {
-            PAYLOAD_ARTIFACT => artifact.clone(),
-            PAYLOAD_NONCE => Value::string(nonce),
-        }
-        .canonical_bytes(),
-    )
+///
+/// The optional fields are **omitted when absent**, never emitted as `null`.
+/// Same rule as every record in this crate: absent and `null` are different
+/// bytes, and the payload is compared byte-for-byte against its own canonical
+/// form on the way out, so two spellings of one payload would be a submission
+/// that seals and refuses to open.
+fn payload_bytes(
+    artifact: &Value,
+    nonce: &str,
+    created_at: Option<&str>,
+    cites: &[String],
+    signature: Option<&str>,
+) -> Zeroizing<Vec<u8>> {
+    let mut fields: BTreeMap<String, Value> = BTreeMap::new();
+    fields.insert(PAYLOAD_ARTIFACT.to_string(), artifact.clone());
+    fields.insert(PAYLOAD_NONCE.to_string(), Value::string(nonce));
+    if let Some(created_at) = created_at {
+        fields.insert(PAYLOAD_CREATED_AT.to_string(), Value::string(created_at));
+    }
+    if !cites.is_empty() {
+        fields.insert(
+            PAYLOAD_CITES.to_string(),
+            Value::array(cites.iter().map(Value::string)),
+        );
+    }
+    if let Some(signature) = signature {
+        fields.insert(PAYLOAD_SIGNATURE.to_string(), Value::string(signature));
+    }
+    Zeroizing::new(Value::Object(fields).canonical_bytes())
 }
 
 fn field_string(value: &Value, field: &'static str) -> Result<String, SealedError> {
@@ -576,6 +779,7 @@ mod tests {
     use crate::canonical::digest_bytes;
     use crate::crypto::envelope::CommitteeKey;
     use crate::crypto::identity::Identity;
+    use crate::obj;
     use rand_core::OsRng;
 
     const OBJECTIVE: &str =
@@ -909,7 +1113,7 @@ mod tests {
         let smuggled = obj! { "n" => Value::Int(43) };
 
         let commitment = commitment_hash(OBJECTIVE, SUBMITTER, &committed, NONCE);
-        let payload = payload_bytes(&smuggled, NONCE);
+        let payload = payload_bytes(&smuggled, NONCE, None, &[], None);
         let envelope =
             SealedEnvelope::seal(payload.as_slice(), &commitment, &members, 3, &mut OsRng)
                 .expect("seal succeeds");
@@ -936,7 +1140,7 @@ mod tests {
     fn sealing_a_different_nonce_is_detected() {
         let (keys, members) = committee(5);
         let commitment = commitment_hash(OBJECTIVE, SUBMITTER, &artifact(), NONCE);
-        let payload = payload_bytes(&artifact(), "a-different-nonce");
+        let payload = payload_bytes(&artifact(), "a-different-nonce", None, &[], None);
         let envelope =
             SealedEnvelope::seal(payload.as_slice(), &commitment, &members, 3, &mut OsRng)
                 .expect("seal succeeds");
@@ -1088,7 +1292,7 @@ mod tests {
 
         // Hand-built to reach the open path: the commitment is honest, the
         // artifact is simply not a shape a verifier can read.
-        let payload = payload_bytes(&scalar, NONCE);
+        let payload = payload_bytes(&scalar, NONCE, None, &[], None);
         let submission = submission_with_payload(&members, (&scalar, NONCE), payload.as_slice());
         let shares = open_all(&keys, &submission.envelope);
         match open(&submission, &shares) {

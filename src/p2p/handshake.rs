@@ -537,11 +537,17 @@ fn aad(counter: u64, context: &[u8]) -> Vec<u8> {
     out
 }
 
-fn peer_id_of(public: &[u8; CRYPTO_PUBLICKEYBYTES]) -> PeerId {
-    let mut h = Sha256::new();
-    h.update(b"proofwork/p2p/peer-id/v1");
-    h.update(public);
-    h.finalize().into()
+/// A peer's id from its public key.
+///
+/// Delegated to [`crate::crypto::kem::key_id`] rather than hashed here, because
+/// [`crate::crypto::kem::Bundle::id`] must produce the identical 32 bytes: a
+/// node's transport id, its Kademlia node id, its `PeerRecord::transport` and
+/// the committee identity its shares are sealed under are all the same value,
+/// and two copies of the derivation are two chances for that to stop being
+/// true. Public so the committee layer can name a member without importing the
+/// transport.
+pub fn peer_id_of(public: &[u8; CRYPTO_PUBLICKEYBYTES]) -> PeerId {
+    crate::crypto::kem::key_id(public)
 }
 
 fn boxed_array<const N: usize>(bytes: &[u8]) -> Option<Box<[u8; N]>> {

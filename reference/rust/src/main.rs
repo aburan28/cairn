@@ -26,7 +26,9 @@ use proofwork_reference::frontier::Ratchet;
 use proofwork_reference::ledger::{Ledger, Proof};
 use proofwork_reference::node::Node;
 use proofwork_reference::partition::{assign, beacon, settlement_rank};
-use proofwork_reference::records::{commitment_hash, Claim, Commitment, Objective, PeerRecord};
+use proofwork_reference::records::{
+    commitment_hash, Claim, Commitment, CommitteeShare, Objective, PeerRecord,
+};
 use proofwork_reference::time::timestamp;
 
 /// Write one line, treating a closed pipe as the end of output.
@@ -682,6 +684,12 @@ fn cli(args: &[String]) -> Result<(), String> {
                 submitter,
                 hash: hash.clone(),
                 created_at: ts.clone(),
+                // This CLI writes plain commit-reveal. Sealing needs a McEliece
+                // key per committee member, which this crate deliberately does
+                // not implement -- it audits envelopes rather than building
+                // them, and carries the field opaquely so the encoding still
+                // agrees.
+                envelope: None,
                 signature: None,
             };
             node.commit(&commitment, &ts)?;
@@ -861,6 +869,17 @@ fn decode_record(kind: &str, value: &Value) -> Result<String, String> {
             .map_err(|e| e.to_string()),
         "peer" => PeerRecord::from_value(value)
             .and_then(|record| {
+                record.verify_signature()?;
+                Ok(record.id())
+            })
+            .map_err(|e| e.to_string()),
+        // Structure as well as signature: a share at x = 0 is the secret itself
+        // wearing a share's clothes, and a commitment id of the wrong shape can
+        // never name a record. Both are admission rules, so both implementations
+        // must refuse the same shapes.
+        "committee_share" => CommitteeShare::from_value(value)
+            .and_then(|record| {
+                record.validate()?;
                 record.verify_signature()?;
                 Ok(record.id())
             })

@@ -252,17 +252,18 @@ sequenceDiagram
     participant M as Committee (t of n)
     actor A as Anyone
 
-    S->>SEAL: seal(artifact, nonce, committee, t)
+    S->>L: committee_for(epoch) — a beacon draw, nobody is asked
+    S->>SEAL: seal_claim(signed claim, committee, t)
     SEAL->>SEAL: commitment = H(artifact ‖ submitter ‖ nonce)
     SEAL->>C: ChaCha20-Poly1305(K, payload), aad = commitment
     C->>C: Shamir split K into t-of-n
-    C->>C: seal share_i to member_i via ephemeral X25519
-    SEAL->>L: append commitment + envelope + sealed shares
+    C->>C: seal share_i to member_i by KEM (McEliece + optional legs)
+    SEAL->>L: append one commitment record carrying the envelope
 
     Note over S: the submitter may now vanish —<br/>jailed, firewalled, offline
 
-    Note over M,L: epoch boundary
-    M->>L: ≥ t members publish their shares
+    Note over M,L: epoch boundary — a share in the<br/>commitment's own epoch is refused
+    M->>L: ≥ t seats append `committee_share` records
     A->>C: reconstruct K from any t shares
     A->>SEAL: open(envelope, K)
     SEAL->>SEAL: re-derive H(artifact ‖ submitter ‖ nonce)

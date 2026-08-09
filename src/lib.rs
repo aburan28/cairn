@@ -39,6 +39,7 @@ pub mod scaffold;
 pub mod schema;
 pub mod sealed;
 pub mod serve;
+pub mod shards;
 pub mod store;
 pub mod swarm;
 pub mod time;
@@ -55,6 +56,7 @@ pub use node::{Node, Outcome, RuleViolation};
 pub use partition::{assign, assignment_for, beacon, Assignment};
 pub use records::{commitment_hash, Claim, Commitment, Objective, RecordError};
 pub use schema::{validate_claim, validate_objective, SchemaError};
+pub use shards::{ChunkProof, Coding, Manifest as ShardManifest, Shard, ShardError};
 pub use verifiers::{Status, Verdict, VerifierRegistry};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

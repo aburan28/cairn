@@ -1,0 +1,36 @@
+{
+  "artifact_schema": {
+    "description": "An 11-mark Golomb ruler: integer mark positions whose pairwise differences are all distinct. Order does not matter and the ruler may start anywhere; the score is the span, so translating it changes nothing.",
+    "example": {
+      "marks": [0, 1, 4, 13, 28, 33, 47, 54, 64, 70, 72]
+    },
+    "properties": {
+      "marks": {
+        "description": "Exactly 11 distinct integers in [0, 10000].",
+        "type": "array"
+      }
+    },
+    "required": ["marks"],
+    "type": "object"
+  },
+  "created_at": "2026-08-09T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-golomb-ruler-11",
+  "ratchet": {
+    "baseline": 100,
+    "direction": "minimize",
+    "min_improvement": 3,
+    "reward": 900000,
+    "target": 72
+  },
+  "reward": 900000,
+  "statement": "Find a short 11-mark Golomb ruler: no two pairs of marks the same distance apart. Score is the ruler's span, minimised. A ruler that repeats any distance scores worse than any valid one rather than better. Baseline 100 (a greedy construction reaches 96), target 72, which is the proved optimum -- so the pool is exhausted exactly when the known optimum is reached and not before. Payment is proportional to the distance the frontier moves, and every submission must cite the frontier it beat.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/golomb-ruler/evaluators/golomb_ruler.py",
+    "evaluator_sha256": "c55a713f473db14f3dae2563c7299d2fa9302f7898da917e74ad5f48a124d915",
+    "kind": "evaluator",
+    "threshold": 100
+  }
+}

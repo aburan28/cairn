@@ -112,6 +112,39 @@ pub const FINALITY_EPOCHS: u64 = 1;
 /// is precisely the fork the constant exists to prevent.
 pub const FINALITY_EPOCHS_ENV: &str = "PROOFWORK_FINALITY_EPOCHS";
 
+/// How many peers hold a share of a sealed submission's content key.
+///
+/// Consensus-critical in the strongest sense: the committee is drawn by
+/// [`beacon`] from the log's peer records, so two nodes using different sizes
+/// draw different committees and disagree about whether a published share came
+/// from a seat that exists. Changing it is a hard fork.
+///
+/// Five, and the number is a trade between two failure modes that pull in
+/// opposite directions. A larger committee makes collusion (which reads
+/// artifacts early) more expensive and makes absentees (which stall a reveal)
+/// more likely to be tolerated; it also means more shares on the log per
+/// submission and more peers who must actually be running. Five with a
+/// threshold of three tolerates two absentees and needs three colluders, which
+/// is the smallest committee where both numbers are greater than one.
+///
+/// **This is a Stage 0 number.** It is safe only while the peer set is an
+/// operator configuration decision. Once anyone can add a peer record, an
+/// attacker who registers enough peers owns a majority of every drawn
+/// committee, and no choice of size fixes that -- it needs identities that cost
+/// something, which is the same Stage 2 problem `docs/p2p.md` names for peer
+/// sampling. `docs/threat-model.md` carries the row.
+pub const COMMITTEE_SIZE: u8 = 5;
+
+/// How many of [`COMMITTEE_SIZE`] must publish before a sealed submission opens.
+///
+/// Three of five. Below the threshold the content key is
+/// information-theoretically hidden -- `t-1` shares reconstruct a well-formed
+/// *wrong* key and nothing distinguishes it from the right one -- so this is
+/// the number of members who must collude to read an artifact early, and
+/// `COMMITTEE_SIZE - COMMITTEE_THRESHOLD` is the number who can be offline
+/// before a reveal stalls.
+pub const COMMITTEE_THRESHOLD: u8 = 3;
+
 /// [`FINALITY_EPOCHS`], unless the environment overrides it.
 ///
 /// A malformed or absent value means the default rather than an error: this is

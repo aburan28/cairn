@@ -74,8 +74,8 @@ use proofwork::incentive::{sweep, NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError, Proof};
 use proofwork::node::Node;
 use proofwork::records::{
-    commitment_hash, Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord,
-    RecordError, Undertaking,
+    commitment_hash, Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Objective,
+    PeerRecord, RecordError, Undertaking,
 };
 use proofwork::scaffold;
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
@@ -471,6 +471,25 @@ enum Command {
         identity: Option<String>,
     },
     Settle,
+    /// Record the randomness one epoch's settlement is ordered against.
+    ///
+    /// Separate from `settle` on purpose. The value has to be drawn *in the
+    /// epoch it orders* -- before that a committer can grind against a value
+    /// they already hold, after it the operator has read the reveals -- and
+    /// settlement runs an epoch or more later. One command that did both would
+    /// be one that could only ever draw too late.
+    ///
+    /// `--value` is taken rather than fetched. Fetching belongs outside the
+    /// rules engine: this command records what it is told, `record_beacon`
+    /// enforces the timing, and whoever supplies the value is responsible for
+    /// it being the one the epoch boundary selects. See
+    /// `docs/design/chain-beacon.md`.
+    Beacon {
+        orders: u64,
+        source: String,
+        block: u64,
+        value: String,
+    },
     /// Sign the log's current state so a reader can pin what this operator
     /// claimed at a point in time.
     ///
@@ -549,6 +568,15 @@ enum Command {
     },
     Blob {
         action: BlobAction,
+    },
+    /// Erasure coding: cut a file into shards, prove a chunk, put it back
+    /// together.
+    ///
+    /// Grouped under one command for the reason `availability` is: the six
+    /// actions are one mechanism, and a reader meeting `encode` needs to find
+    /// `reconstruct` beside it.
+    Shard {
+        action: ShardAction,
     },
     /// Evaluate the node-operator incentives at a parameter set.
     ///
@@ -689,6 +717,73 @@ enum BlobAction {
         peers: Vec<String>,
         seconds: u64,
     },
+}
+
+/// What `proofwork shard` was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShardAction {
+    /// How a file *would* be cut, and what it would cost on disk. Writes
+    /// nothing.
+    ///
+    /// A separate action rather than a `--dry-run`, because the question it
+    /// answers is asked before the decision rather than instead of it: a coding
+    /// is not something you change your mind about cheaply once shards are
+    /// spread across machines.
+    Plan { file: String, coding: CodingChoice },
+    /// Cut a file into shards and store them.
+    Encode {
+        file: String,
+        coding: CodingChoice,
+        /// Which shard indices this node keeps. Empty means all of them.
+        ///
+        /// The realistic operator action is *not* keeping all of them — a node
+        /// that holds every shard has bought the coding's overhead and none of
+        /// its point. This is how a holder says which slice is theirs.
+        keep: Vec<u8>,
+    },
+    /// What this node holds: every coded blob, or the shards of one.
+    List { address: Option<String> },
+    /// Emit a proof that one chunk of one held shard is under the manifest root.
+    Prove {
+        address: String,
+        shard: u8,
+        chunk: u32,
+        out: Option<String>,
+    },
+    /// Check such a proof against a root. Needs no store and no log.
+    Check { proof: String, root: String },
+    /// Rebuild the blob from whatever shards are held.
+    Reconstruct { address: String, out: String },
+    /// Drop every shard of one blob, and its manifest.
+    Remove { address: String },
+}
+
+/// The coding parameters a `shard` action was given.
+///
+/// `chunk` is optional and the others have defaults, so the common invocation
+/// is `shard encode <file>`. A chunk length that was not chosen is derived from
+/// the file's size by [`proofwork::shards::suggest_chunk_len`] rather than
+/// fixed, because a good chunk length for a 4 KiB checker and for a 400 MiB
+/// artifact are three orders of magnitude apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodingChoice {
+    data: u8,
+    parity: u8,
+    chunk: Option<u32>,
+}
+
+impl Default for CodingChoice {
+    fn default() -> CodingChoice {
+        // (4, 2): 1.5x on disk for two tolerated losses, against 3x for the
+        // replication that buys the same. Nothing here depends on the default
+        // -- the manifest records what was actually used -- so it is a starting
+        // point rather than a parameter of the format.
+        CodingChoice {
+            data: 4,
+            parity: 2,
+            chunk: None,
+        }
+    }
 }
 
 /// The four steps of the availability mechanism.
@@ -905,6 +1000,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             expect_end(&mut cursor, "settle")?;
             Command::Settle
         }
+        "beacon" => parse_beacon(&mut cursor)?,
         "checkpoint" => parse_checkpoint(&mut cursor)?,
         "drain" => parse_drain(&mut cursor)?,
         "audit" => parse_audit(&mut cursor)?,
@@ -914,6 +1010,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "availability" => parse_availability(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
+        "shard" => parse_shard(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
         "scaffold" => parse_scaffold(&mut cursor)?,
         "try" => parse_try(&mut cursor)?,
@@ -1170,6 +1267,46 @@ fn parse_drain(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Drain {
         queue: require(queue, "drain", "a queue directory")?,
         dry_run,
+    })
+}
+
+/// `beacon --orders N --value HEX [--source NAME] [--block N]`
+///
+/// `--orders` is required rather than defaulted to the current epoch. The
+/// default would be right almost always and catastrophically wrong at a
+/// boundary -- a command run a second late would name the next epoch, be
+/// refused as out of time, and leave the epoch it meant to cover on the
+/// fallback. An operator scripting this knows which epoch they mean.
+fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut orders: Option<u64> = None;
+    let mut source: Option<String> = None;
+    let mut block: Option<u64> = None;
+    let mut value: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        if token == "--orders" {
+            orders = Some(parse_u64(&cursor.value("--orders")?, "--orders")?);
+        } else if token == "--source" {
+            source = Some(cursor.value("--source")?);
+        } else if token == "--block" {
+            block = Some(parse_u64(&cursor.value("--block")?, "--block")?);
+        } else if token == "--value" {
+            value = Some(cursor.value("--value")?);
+        } else {
+            return Err(CliError::Usage(format!("beacon: unexpected {token:?}")));
+        }
+    }
+    Ok(Command::Beacon {
+        orders: match orders {
+            Some(orders) => orders,
+            None => return Err(CliError::Usage("beacon: --orders is required".into())),
+        },
+        // Defaulted, because a beacon with no stated origin is still a beacon
+        // the sequencer did not choose if it came from somewhere -- but an
+        // unnamed one is unverifiable by anyone holding a chain, so the name
+        // it gets says exactly that rather than pretending to a provenance.
+        source: source.unwrap_or_else(|| "unattributed".into()),
+        block: block.unwrap_or(0),
+        value: require(value, "beacon", "--value")?,
     })
 }
 
@@ -1883,6 +2020,183 @@ fn parse_blob_fetch(cursor: &mut Cursor) -> Result<BlobAction, CliError> {
     })
 }
 
+fn parse_shard(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = match cursor.take() {
+        // Bare `shard` lists, because "what do I hold" is the question an
+        // operator asks first -- the same choice `blob` makes.
+        None => ShardAction::List { address: None },
+        Some(word) => match word.as_str() {
+            "ls" | "list" => ShardAction::List {
+                address: cursor.take(),
+            },
+            "plan" => {
+                let file = require(cursor.take(), "shard plan", "a file")?;
+                ShardAction::Plan {
+                    file,
+                    coding: parse_coding(cursor, "shard plan")?,
+                }
+            }
+            "encode" => {
+                let file = require(cursor.take(), "shard encode", "a file")?;
+                let mut keep: Vec<u8> = Vec::new();
+                let coding =
+                    parse_coding_with(cursor, "shard encode", |token, cursor| match token {
+                        "--keep" => {
+                            let raw = cursor.value("--keep")?;
+                            for part in raw.split(',').filter(|part| !part.is_empty()) {
+                                keep.push(part.trim().parse::<u8>().map_err(|_| {
+                                    CliError::Usage(format!(
+                                        "--keep expects shard indices 0..=254, got {part:?}"
+                                    ))
+                                })?);
+                            }
+                            Ok(true)
+                        }
+                        _ => Ok(false),
+                    })?;
+                keep.sort_unstable();
+                keep.dedup();
+                ShardAction::Encode { file, coding, keep }
+            }
+            "prove" => {
+                let address = require(cursor.take(), "shard prove", "an address")?;
+                let mut shard: Option<u8> = None;
+                let mut chunk: Option<u32> = None;
+                let mut out: Option<String> = None;
+                while let Some(token) = cursor.take() {
+                    match token.as_str() {
+                        "--shard" => {
+                            let raw = cursor.value("--shard")?;
+                            shard = Some(raw.parse::<u8>().map_err(|_| {
+                                CliError::Usage(format!(
+                                    "--shard expects an index 0..=254, got {raw:?}"
+                                ))
+                            })?);
+                        }
+                        "--chunk" => chunk = Some(parse_u32(&cursor.value("--chunk")?, "--chunk")?),
+                        "--out" => out = Some(cursor.value("--out")?),
+                        other => {
+                            return Err(CliError::Usage(format!(
+                                "shard prove: unknown option {other:?}"
+                            )))
+                        }
+                    }
+                }
+                ShardAction::Prove {
+                    address,
+                    shard: shard.ok_or_else(|| {
+                        CliError::Usage(String::from("shard prove: --shard <index> is required"))
+                    })?,
+                    // Chunk 0 exists in every shard, including the empty
+                    // blob's, so it is the one index that is always safe to
+                    // default to.
+                    chunk: chunk.unwrap_or(0),
+                    out,
+                }
+            }
+            "check" => {
+                let proof = require(cursor.take(), "shard check", "a proof file")?;
+                let mut root: Option<String> = None;
+                while let Some(token) = cursor.take() {
+                    match token.as_str() {
+                        // `--merkle-root`, not `--root`: the global `--root`
+                        // names the bundle directory, and two meanings for one
+                        // flag is how a caller silently checks against nothing.
+                        // Same reasoning as `proofwork check`.
+                        "--merkle-root" => root = Some(cursor.value("--merkle-root")?),
+                        other => {
+                            return Err(CliError::Usage(format!(
+                                "shard check: unknown option {other:?}"
+                            )))
+                        }
+                    }
+                }
+                ShardAction::Check {
+                    proof,
+                    root: require(root, "shard check", "--merkle-root sha256:HEX")?,
+                }
+            }
+            "reconstruct" => {
+                let address = require(cursor.take(), "shard reconstruct", "an address")?;
+                let mut out: Option<String> = None;
+                while let Some(token) = cursor.take() {
+                    match token.as_str() {
+                        "--out" => out = Some(cursor.value("--out")?),
+                        other => {
+                            return Err(CliError::Usage(format!(
+                                "shard reconstruct: unknown option {other:?}"
+                            )))
+                        }
+                    }
+                }
+                ShardAction::Reconstruct {
+                    address,
+                    // No standard-output default. A reconstructed blob is
+                    // arbitrary bytes, and this binary's stdout is a report
+                    // people read and scripts parse.
+                    out: require(out, "shard reconstruct", "--out <file>")?,
+                }
+            }
+            "rm" | "remove" => ShardAction::Remove {
+                address: require(cursor.take(), "shard rm", "an address")?,
+            },
+            other => {
+                return Err(CliError::Usage(format!(
+                    "shard: unknown action {other:?}; expected plan, encode, ls, prove, \
+                     check, reconstruct, or rm"
+                )))
+            }
+        },
+    };
+    expect_end(cursor, "shard")?;
+    Ok(Command::Shard { action })
+}
+
+fn parse_coding(cursor: &mut Cursor, command: &'static str) -> Result<CodingChoice, CliError> {
+    parse_coding_with(cursor, command, |_, _| Ok(false))
+}
+
+/// The `--data` / `--parity` / `--chunk` trio, with a hook for one caller's
+/// extra flag.
+///
+/// Written once rather than twice: `plan` and `encode` must agree about what a
+/// coding *is*, and a plan that described a different cut from the one `encode`
+/// would make would be worse than no plan at all.
+fn parse_coding_with(
+    cursor: &mut Cursor,
+    command: &'static str,
+    mut extra: impl FnMut(&str, &mut Cursor) -> Result<bool, CliError>,
+) -> Result<CodingChoice, CliError> {
+    let mut choice = CodingChoice::default();
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--data" => {
+                let raw = cursor.value("--data")?;
+                choice.data = raw
+                    .parse::<u8>()
+                    .map_err(|_| CliError::Usage(format!("--data expects 1..=254, got {raw:?}")))?;
+            }
+            "--parity" => {
+                let raw = cursor.value("--parity")?;
+                choice.parity = raw.parse::<u8>().map_err(|_| {
+                    CliError::Usage(format!("--parity expects 1..=254, got {raw:?}"))
+                })?;
+            }
+            "--chunk" => {
+                choice.chunk = Some(parse_u32(&cursor.value("--chunk")?, "--chunk")?);
+            }
+            other => {
+                if !extra(other, cursor)? {
+                    return Err(CliError::Usage(format!(
+                        "{command}: unknown option {other:?}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(choice)
+}
+
 /// Negative numbers are rejected by the type, not by a range check: `-1` does
 /// not parse as `u64` and never reaches [`FlowParams`].
 fn parse_u64(text: &str, flag: &str) -> Result<u64, CliError> {
@@ -1939,6 +2253,22 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  settle");
     say(out, "      pay out every reveal epoch that has closed");
+    say(
+        out,
+        "  beacon --orders EPOCH --value HEX [--source NAME] [--block N]",
+    );
+    say(
+        out,
+        "      record the randomness that epoch's settlement is ordered against.",
+    );
+    say(
+        out,
+        "      Must be drawn in the epoch it orders: earlier and a committer can",
+    );
+    say(
+        out,
+        "      grind against it, later and you are picking who gets paid first",
+    );
     say(out, "  checkpoint --root-key FILE [--out FILE]");
     say(
         out,
@@ -2000,6 +2330,45 @@ fn print_help(out: &mut dyn Write) {
         "      fetch every pin this log names and this node lacks; --peer takes the",
     );
     say(out, "      {addr, public} file `blob serve` printed");
+    say(
+        out,
+        "  shard plan <file> [--data K] [--parity M] [--chunk N]",
+    );
+    say(
+        out,
+        "      how a file would be erasure-coded, and what it would cost on disk",
+    );
+    say(
+        out,
+        "  shard encode <file> [--data K] [--parity M] [--chunk N] [--keep 1,4]",
+    );
+    say(
+        out,
+        "      cut it into shards and keep the ones this node is holding; any K",
+    );
+    say(out, "      of the K+M rebuild the file");
+    say(out, "  shard ls [<address>]");
+    say(out, "      which shards are here, and which are elsewhere");
+    say(
+        out,
+        "  shard prove <address> --shard I [--chunk C] [--out FILE]",
+    );
+    say(
+        out,
+        "      prove one chunk of one held shard is under the manifest root",
+    );
+    say(out, "  shard check FILE --merkle-root sha256:HEX");
+    say(
+        out,
+        "      check such a proof -- needs no store and no log, which is the point",
+    );
+    say(out, "  shard reconstruct <address> --out FILE");
+    say(
+        out,
+        "      rebuild the blob from whatever is held; a corrupt shard is named, not used",
+    );
+    say(out, "  shard rm <address>");
+    say(out, "      drop every shard of one blob, and its manifest");
     say(
         out,
         "  incentives [--nodes N] [--settled N] [--canary-rate N/D] ...",
@@ -2352,6 +2721,19 @@ fn cmd_decode(out: &mut dyn Write, kind: &str, record_path: &str) -> Result<i32,
                 record.verify_signature().map_err(|e| e.to_string())?;
                 Ok(record.id())
             }),
+        // `validate` as well as the signature, because a committee share's
+        // structural rules are admission rules: a share at x = 0 is the secret
+        // itself wearing a share's clothes, and one naming an id no commitment
+        // can have is a record that will be skipped forever without its author
+        // ever learning why. Both implementations must refuse the same shapes,
+        // which is what `scripts/differential.sh` is for.
+        "committee_share" => CommitteeShare::from_value(&value)
+            .map_err(|error| error.to_string())
+            .and_then(|record| {
+                record.validate().map_err(|e| e.to_string())?;
+                record.verify_signature().map_err(|e| e.to_string())?;
+                Ok(record.id())
+            }),
         other => return Err(CliError::Usage(format!("unknown record kind {other:?}"))),
     };
     match decoded {
@@ -2634,6 +3016,31 @@ fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
             format!("  settled  {moved}  reward {reward}  ({note})"),
         );
     }
+    Ok(0)
+}
+
+/// Record one epoch's ordering randomness.
+///
+/// Prints the epoch it covers and how the settlement order changed, because
+/// "recorded" is not the useful confirmation -- an operator wants to know the
+/// anchor actually moved off the epoch-chain head, which is the whole point.
+fn cmd_beacon(
+    out: &mut dyn Write,
+    options: &Options,
+    orders: u64,
+    source: &str,
+    block: u64,
+    value: &str,
+) -> Result<i32, CliError> {
+    let mut node = open_node_for_writing(options)?;
+    let before = node.anchor_of_epoch(orders);
+    refused(node.record_beacon(orders, source, block, value, &timestamp()))?;
+    say(out, format!("beacon for epoch {orders}"));
+    say(out, format!("  source   {source} block {block}"));
+    say(
+        out,
+        format!("  anchor   {} -> {}", short(&before), short(value)),
+    );
     Ok(0)
 }
 
@@ -4954,6 +5361,405 @@ fn cmd_blob_fetch(
     Ok(i32::from(!failed.is_empty()))
 }
 
+/// Erasure coding, from the command line.
+///
+/// This is the caller that keeps [`proofwork::shards`] honest. The module could
+/// be complete, tested and unreachable — which is precisely the state
+/// `src/swarm/` was in for a long time, and `docs/storage.md` records the two
+/// bugs that were sitting in the seam nobody crossed. Every action here goes
+/// through the same public API a network path would.
+///
+/// Only `check` runs without a store, and deliberately: whoever runs it holds a
+/// root and a proof and nothing else, which is the case the outer Merkle hop
+/// exists for.
+fn cmd_shard(
+    out: &mut dyn Write,
+    options: &Options,
+    action: &ShardAction,
+) -> Result<i32, CliError> {
+    use proofwork::shards;
+    let store = shards::ShardStore::under(&options.root);
+    match action {
+        ShardAction::Plan { file, coding } => {
+            let (bytes, address) = read_blob(file)?;
+            let (coding, chunk) = resolve_coding(*coding, bytes.len() as u64)?;
+            let layout = shards::Layout::new(bytes.len() as u64, coding, chunk)
+                .map_err(|error| CliError::Usage(format!("shard plan: {error}")))?;
+            report_plan(out, &address, &layout);
+            say(
+                out,
+                format!(
+                    "  `proofwork shard encode {file} --data {} --parity {} --chunk {chunk}`",
+                    coding.data(),
+                    coding.parity()
+                ),
+            );
+        }
+        ShardAction::Encode { file, coding, keep } => {
+            let (bytes, address) = read_blob(file)?;
+            let (coding, chunk) = resolve_coding(*coding, bytes.len() as u64)?;
+            let encoded = shards::encode(&bytes, coding, chunk)
+                .map_err(|error| CliError::Usage(format!("shard encode: {error}")))?;
+            // Every index named by --keep has to exist, and saying so is worth
+            // more than quietly storing a subset: an operator who typoed the
+            // shard they were assigned would otherwise hold nothing and be told
+            // it worked.
+            for index in keep {
+                if *index >= coding.shards() {
+                    return Err(CliError::Usage(format!(
+                        "shard encode: --keep names shard {index}, and this coding has \
+                         {} (0..={})",
+                        coding.shards(),
+                        coding.shards().saturating_sub(1)
+                    )));
+                }
+            }
+            let kept: Vec<shards::Shard> = encoded
+                .shards
+                .iter()
+                .filter(|shard| keep.is_empty() || keep.contains(&shard.index))
+                .cloned()
+                .collect();
+            store
+                .put_all(&address, &encoded.manifest, &kept)
+                .map_err(|error| CliError::Usage(format!("shard encode: {error}")))?;
+
+            report_plan(out, &address, &encoded.manifest.layout());
+            say(
+                out,
+                format!(
+                    "  root {}  manifest {}",
+                    short(&encoded.manifest.root()),
+                    short(&encoded.manifest.id())
+                ),
+            );
+            say(
+                out,
+                format!(
+                    "  stored {} of {} shard(s) in {}",
+                    kept.len(),
+                    encoded.shards.len(),
+                    store.dir().display()
+                ),
+            );
+            if kept.len() < usize::from(coding.data()) {
+                say(
+                    out,
+                    format!(
+                        "  note: this node holds fewer than the {} shards a reconstruction \
+                         needs, which is the normal state for one holder",
+                        coding.data()
+                    ),
+                );
+            }
+        }
+        ShardAction::List { address: None } => {
+            let held = store.addresses();
+            say(
+                out,
+                format!("{} coded blob(s) in {}", held.len(), store.dir().display()),
+            );
+            for address in held {
+                let shards_held = store.held(&address);
+                let line = match store.manifest(&address) {
+                    Ok(manifest) => format!(
+                        "  {} {} of {} shard(s), coding {}",
+                        short_address(&address),
+                        shards_held.len(),
+                        manifest.coding().shards(),
+                        manifest.coding()
+                    ),
+                    // A manifest that will not read is worth naming rather than
+                    // hiding: the shards beside it cannot be checked against
+                    // anything, so they are unusable and the operator has to
+                    // know.
+                    Err(error) => format!("  {} UNUSABLE: {error}", short_address(&address)),
+                };
+                say(out, line);
+            }
+        }
+        ShardAction::List {
+            address: Some(address),
+        } => {
+            let manifest = store
+                .manifest(address)
+                .map_err(|error| CliError::Usage(format!("shard ls: {error}")))?;
+            let layout = manifest.layout();
+            report_plan(out, address, &layout);
+            say(
+                out,
+                format!(
+                    "  root {}  manifest {}",
+                    short(&manifest.root()),
+                    short(&manifest.id())
+                ),
+            );
+            let held = store.held(address);
+            for index in 0..manifest.coding().shards() {
+                let kind = if manifest.coding().is_data(index) {
+                    "data"
+                } else {
+                    "parity"
+                };
+                let mark = if held.contains(&index) {
+                    "held"
+                } else {
+                    "elsewhere"
+                };
+                say(out, format!("  {index:>3} {kind:<6} {mark}"));
+            }
+            let short_by = usize::from(manifest.coding().data()).saturating_sub(held.len());
+            say(
+                out,
+                if short_by == 0 {
+                    String::from("  enough held to rebuild the blob here")
+                } else {
+                    format!("  {short_by} more shard(s) needed to rebuild the blob here")
+                },
+            );
+        }
+        ShardAction::Prove {
+            address,
+            shard,
+            chunk,
+            out: destination,
+        } => {
+            let manifest = store
+                .manifest(address)
+                .map_err(|error| CliError::Usage(format!("shard prove: {error}")))?;
+            let held = store
+                .shard(address, *shard)
+                .map_err(|error| CliError::Usage(format!("shard prove: {error}")))?;
+            let proof = manifest.prove_chunk(&held, *chunk).ok_or_else(|| {
+                CliError::Usage(format!(
+                    "shard prove: chunk {chunk} of a shard that has {}",
+                    manifest.layout().chunks()
+                ))
+            })?;
+            // Belt and braces, exactly as `prove` does for a log entry: a proof
+            // this binary emits that does not check is a bug here, and the
+            // person who would discover it is a stranger with no way to tell
+            // that from a lying holder.
+            if !manifest.verify_chunk(&proof) {
+                return Err(CliError::Checkpoint(String::from(
+                    "refusing to emit a chunk proof that does not check",
+                )));
+            }
+            let text = proof.to_value().canonical_string();
+            match destination {
+                Some(path) => {
+                    fs::write(path, format!("{text}\n")).map_err(|error| CliError::Io {
+                        context: format!("writing {path}"),
+                        source: error,
+                    })?;
+                    say(out, format!("wrote {path}"));
+                }
+                None => say(out, &text),
+            }
+            say(
+                out,
+                format!(
+                    "  shard {shard} chunk {chunk} ({} bytes)  root {}  path {}+{} hashes",
+                    proof.bytes.len(),
+                    short(&manifest.root()),
+                    proof.within_shard.siblings.len(),
+                    proof.across_shards.siblings.len()
+                ),
+            );
+            // The full root, not the abbreviated one every other line uses. A
+            // reader needs to paste this, and a `sha256:19720f81` they cannot
+            // complete is a line that looks like help and is not.
+            say(
+                out,
+                format!(
+                    "  Readers check with `proofwork shard check <file> --merkle-root {}`.",
+                    manifest.root()
+                ),
+            );
+        }
+        ShardAction::Check { proof, root } => {
+            let decoded = shards::ChunkProof::from_value(&read_json(proof)?)
+                .map_err(|error| CliError::Usage(format!("{proof}: {error}")))?;
+            if !decoded.verify(root) {
+                say(out, "chunk proof FAILED: it does not reach that root");
+                return Ok(1);
+            }
+            say(
+                out,
+                format!(
+                    "chunk proof ok: {} bytes are chunk {} of shard {} under {}",
+                    decoded.bytes.len(),
+                    decoded.chunk,
+                    decoded.shard,
+                    short(root)
+                ),
+            );
+            // Said every time, because it is the difference between what was
+            // checked and what a reader will assume was checked.
+            say(
+                out,
+                "  Membership only: a root says nothing about how many chunks the shard",
+            );
+            say(
+                out,
+                "  has or how long each one is. Hold the manifest to check that too.",
+            );
+        }
+        ShardAction::Reconstruct {
+            address,
+            out: destination,
+        } => {
+            // Refused rather than overwritten, for the reason `identity --out`
+            // and `store export` refuse: the destination is somewhere the
+            // operator is about to rely on, and a silent overwrite is how a
+            // typo costs a file.
+            if std::path::Path::new(destination).exists() {
+                return Err(CliError::Usage(format!(
+                    "{destination} already exists; reconstructing over it would be a way \
+                     to lose a file to a typo"
+                )));
+            }
+            let rebuilt = match store.reconstruct(address) {
+                Ok(rebuilt) => rebuilt,
+                // "Not enough shards here" is an *outcome*, not a mistake by
+                // whoever typed the command, and the two get different exit
+                // codes for the reason `verify` and `check` give: 1 is
+                // "checked, and the answer is no", 2 is "could not check". A
+                // script fetching shards until a rebuild succeeds needs to tell
+                // those apart, and `try proofwork help` is no use to it.
+                Err(shards::ShardStoreError::Shards(shards::ShardError::NotEnoughShards {
+                    have,
+                    need,
+                    rejected,
+                })) => {
+                    say(
+                        out,
+                        format!("cannot rebuild yet: {have} verified shard(s) here, {need} needed"),
+                    );
+                    if !rejected.is_empty() {
+                        say(
+                            out,
+                            format!(
+                                "  shard(s) {} did not rebuild their committed root and \
+                                 were dropped",
+                                join_indices(&rejected)
+                            ),
+                        );
+                    }
+                    say(
+                        out,
+                        format!("  `proofwork shard ls {address}` names the ones held elsewhere"),
+                    );
+                    return Ok(1);
+                }
+                Err(error) => return Err(CliError::Usage(format!("shard reconstruct: {error}"))),
+            };
+            fs::write(destination, &rebuilt.data).map_err(|error| CliError::Io {
+                context: format!("writing {destination}"),
+                source: error,
+            })?;
+            say(
+                out,
+                format!(
+                    "wrote {destination}: {} bytes from shard(s) {}",
+                    rebuilt.data.len(),
+                    join_indices(&rebuilt.used)
+                ),
+            );
+            if !rebuilt.rejected.is_empty() {
+                say(
+                    out,
+                    format!(
+                        "  rejected shard(s) {}: they do not rebuild their committed root",
+                        join_indices(&rebuilt.rejected)
+                    ),
+                );
+            }
+        }
+        ShardAction::Remove { address } => {
+            let held = store.held(address).len();
+            store
+                .remove(address)
+                .map_err(|error| CliError::Usage(format!("shard rm: {error}")))?;
+            say(
+                out,
+                format!("dropped {held} shard(s) of {}", short_address(address)),
+            );
+            say(
+                out,
+                "note: a dropped shard can no longer answer a chunk challenge.",
+            );
+        }
+    }
+    Ok(0)
+}
+
+/// Read a file and name it the way an objective's verifier block would.
+fn read_blob(path: &str) -> Result<(Vec<u8>, String), CliError> {
+    let bytes = fs::read(path).map_err(|source| CliError::Io {
+        context: format!("reading {path}"),
+        source,
+    })?;
+    let address = proofwork::blobs::address(&bytes);
+    Ok((bytes, address))
+}
+
+/// Turn the flags into a validated coding and a chunk length.
+fn resolve_coding(
+    choice: CodingChoice,
+    total: u64,
+) -> Result<(proofwork::shards::Coding, u32), CliError> {
+    let coding = proofwork::shards::Coding::new(choice.data, choice.parity)
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    let chunk = choice
+        .chunk
+        .unwrap_or_else(|| proofwork::shards::suggest_chunk_len(total, coding));
+    Ok((coding, chunk))
+}
+
+/// The same four lines for `plan`, `encode` and `ls`, so the three cannot
+/// disagree about what a cut looks like.
+fn report_plan(out: &mut dyn Write, address: &str, layout: &proofwork::shards::Layout) {
+    let coding = layout.coding();
+    say(
+        out,
+        format!(
+            "{} -- {} bytes, coding {} (any {} of {} rebuild it)",
+            short_address(address),
+            layout.total(),
+            coding,
+            coding.data(),
+            coding.shards()
+        ),
+    );
+    say(
+        out,
+        format!(
+            "  {} shard(s) of {} bytes, {} chunk(s) of up to {} bytes each",
+            coding.shards(),
+            layout.shard_len(),
+            layout.chunks(),
+            layout.chunk_len()
+        ),
+    );
+    say(
+        out,
+        format!(
+            "  {} bytes across all holders, tolerating {} loss(es)",
+            layout.stored_bytes(),
+            coding.tolerates()
+        ),
+    );
+}
+
+fn join_indices(indices: &[u8]) -> String {
+    indices
+        .iter()
+        .map(|index| index.to_string())
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
 /// Load a transport identity, creating one if the file does not exist.
 ///
 /// Same `{public, secret}` shape `proofwork-p2p` reads, so one file serves
@@ -5336,6 +6142,12 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             cites,
         ),
         Command::Settle => cmd_settle(out, options),
+        Command::Beacon {
+            orders,
+            source,
+            block,
+            value,
+        } => cmd_beacon(out, options, *orders, source, *block, value),
         Command::Checkpoint {
             root_key,
             out: path,
@@ -5375,6 +6187,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Availability { action } => cmd_availability(out, options, action),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Blob { action } => cmd_blob(out, options, action),
+        Command::Shard { action } => cmd_shard(out, options, action),
         Command::Try {
             objective,
             submitter,
@@ -5529,6 +6342,266 @@ mod tests {
             std::fs::read_to_string(&path).expect("still there"),
             transport
         );
+    }
+
+    #[test]
+    fn shard_parses_its_actions_and_defaults() {
+        let command = |items: &[&str]| {
+            parse(argv(items))
+                .unwrap_or_else(|error| panic!("{items:?} did not parse: {error}"))
+                .command
+        };
+
+        // Bare `shard` lists, like bare `blob` does: "what do I hold" is the
+        // first question.
+        assert_eq!(
+            command(&["shard"]),
+            Command::Shard {
+                action: ShardAction::List { address: None }
+            }
+        );
+        assert_eq!(
+            command(&["shard", "encode", "big.bin"]),
+            Command::Shard {
+                action: ShardAction::Encode {
+                    file: String::from("big.bin"),
+                    coding: CodingChoice::default(),
+                    keep: Vec::new(),
+                }
+            }
+        );
+        // --keep is sorted and de-duplicated, so `4,1,1` and `1,4` name one set.
+        assert_eq!(
+            command(&["shard", "encode", "big.bin", "--keep", "4,1,1", "--data", "6"]),
+            Command::Shard {
+                action: ShardAction::Encode {
+                    file: String::from("big.bin"),
+                    coding: CodingChoice {
+                        data: 6,
+                        parity: 2,
+                        chunk: None
+                    },
+                    keep: vec![1, 4],
+                }
+            }
+        );
+        assert_eq!(
+            command(&["shard", "prove", "ab", "--shard", "3"]),
+            Command::Shard {
+                action: ShardAction::Prove {
+                    address: String::from("ab"),
+                    shard: 3,
+                    // Chunk 0 exists in every shard, including the empty blob's.
+                    chunk: 0,
+                    out: None,
+                }
+            }
+        );
+
+        for bad in [
+            vec!["shard", "encode"],
+            vec!["shard", "encode", "f", "--data", "300"],
+            vec!["shard", "encode", "f", "--keep", "x"],
+            vec!["shard", "prove", "ab"],
+            vec!["shard", "check", "p.json"],
+            vec!["shard", "reconstruct", "ab"],
+            vec!["shard", "rm"],
+            vec!["shard", "wat"],
+            // `--root` is the bundle directory; the Merkle root is spelled
+            // differently on purpose, and the wrong spelling must not be
+            // silently accepted here either.
+            vec!["shard", "check", "p.json", "--root", "sha256:ab"],
+        ] {
+            assert!(parse(argv(&bad)).is_err(), "{bad:?} should not have parsed");
+        }
+    }
+
+    #[test]
+    fn shard_encode_refuses_a_keep_index_the_coding_does_not_have() {
+        // Storing a subset silently would leave an operator who typoed the
+        // shard they were assigned holding nothing and being told it worked.
+        let dir = scratch_dir("shard-keep");
+        let file = dir.join("artifact.bin");
+        std::fs::write(&file, vec![7u8; 9_000]).expect("writes");
+        let options = Options {
+            root: dir.display().to_string(),
+            ..Options::from_env()
+        };
+        let mut out = Vec::new();
+        let error = cmd_shard(
+            &mut out,
+            &options,
+            &ShardAction::Encode {
+                file: file.display().to_string(),
+                coding: CodingChoice::default(),
+                keep: vec![0, 9],
+            },
+        )
+        .expect_err("shard 9 is not in a (4, 2) coding");
+        assert!(format!("{error}").contains("--keep names shard 9"));
+        assert!(
+            proofwork::shards::ShardStore::under(&options.root).is_empty(),
+            "a refused encode wrote shards anyway"
+        );
+    }
+
+    #[test]
+    fn shard_round_trips_through_the_cli_and_names_a_liar() {
+        // The whole feature from the outside: encode, hold a subset, prove one
+        // chunk, check it with nothing but a root, corrupt a shard, and still
+        // get the file back with the liar named.
+        let dir = scratch_dir("shard-cli");
+        let file = dir.join("artifact.bin");
+        let data: Vec<u8> = (0..30_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&file, &data).expect("writes");
+        let options = Options {
+            root: dir.display().to_string(),
+            ..Options::from_env()
+        };
+        let address = proofwork::blobs::address(&data);
+
+        let mut out = Vec::new();
+        cmd_shard(
+            &mut out,
+            &options,
+            &ShardAction::Encode {
+                file: file.display().to_string(),
+                coding: CodingChoice::default(),
+                keep: Vec::new(),
+            },
+        )
+        .expect("encodes");
+
+        // A proof, and a check that needs no store at all.
+        let proof_path = dir.join("proof.json");
+        let mut proving = Vec::new();
+        cmd_shard(
+            &mut proving,
+            &options,
+            &ShardAction::Prove {
+                address: address.clone(),
+                shard: 5,
+                chunk: 1,
+                out: Some(proof_path.display().to_string()),
+            },
+        )
+        .expect("proves");
+        let root = proofwork::shards::ShardStore::under(&options.root)
+            .manifest(&address)
+            .expect("manifest")
+            .root();
+        let mut checking = Vec::new();
+        assert_eq!(
+            cmd_shard(
+                &mut checking,
+                &options,
+                &ShardAction::Check {
+                    proof: proof_path.display().to_string(),
+                    root: root.clone(),
+                }
+            )
+            .expect("checks"),
+            0
+        );
+        assert!(String::from_utf8_lossy(&checking).contains("chunk proof ok"));
+
+        // The same proof against a root it does not reach is exit 1 -- an
+        // answer, not a failure to answer.
+        let mut wrong = Vec::new();
+        assert_eq!(
+            cmd_shard(
+                &mut wrong,
+                &options,
+                &ShardAction::Check {
+                    proof: proof_path.display().to_string(),
+                    root: proofwork::canonical::digest_bytes(b"not the root"),
+                }
+            )
+            .expect("checks"),
+            1
+        );
+        assert!(String::from_utf8_lossy(&wrong).contains("FAILED"));
+
+        // Rot one shard on disk and rebuild anyway.
+        let rotted = dir.join(".proofwork/shards").join(&address).join("002");
+        let mut bytes = std::fs::read(&rotted).expect("reads");
+        if let Some(byte) = bytes.get_mut(3) {
+            *byte ^= 0x80;
+        }
+        std::fs::write(&rotted, &bytes).expect("tampers");
+
+        let rebuilt = dir.join("rebuilt.bin");
+        let mut rebuilding = Vec::new();
+        assert_eq!(
+            cmd_shard(
+                &mut rebuilding,
+                &options,
+                &ShardAction::Reconstruct {
+                    address: address.clone(),
+                    out: rebuilt.display().to_string(),
+                }
+            )
+            .expect("rebuilds"),
+            0
+        );
+        assert_eq!(std::fs::read(&rebuilt).expect("reads"), data);
+        let report = String::from_utf8_lossy(&rebuilding);
+        assert!(report.contains("rejected shard(s) 2"), "{report}");
+
+        // And it refuses to write over what it just produced.
+        let mut again = Vec::new();
+        assert!(cmd_shard(
+            &mut again,
+            &options,
+            &ShardAction::Reconstruct {
+                address,
+                out: rebuilt.display().to_string(),
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn shard_reconstruct_short_of_the_threshold_is_an_outcome_not_an_error() {
+        // Exit 1 is "checked, and the answer is no"; exit 2 is "could not
+        // check". A script fetching shards until a rebuild succeeds has to be
+        // able to tell those apart.
+        let dir = scratch_dir("shard-short");
+        let file = dir.join("artifact.bin");
+        std::fs::write(&file, vec![3u8; 20_000]).expect("writes");
+        let options = Options {
+            root: dir.display().to_string(),
+            ..Options::from_env()
+        };
+        let address = proofwork::blobs::address(&vec![3u8; 20_000]);
+
+        let mut out = Vec::new();
+        cmd_shard(
+            &mut out,
+            &options,
+            &ShardAction::Encode {
+                file: file.display().to_string(),
+                coding: CodingChoice::default(),
+                keep: vec![1, 3],
+            },
+        )
+        .expect("encodes");
+
+        let mut short = Vec::new();
+        assert_eq!(
+            cmd_shard(
+                &mut short,
+                &options,
+                &ShardAction::Reconstruct {
+                    address,
+                    out: dir.join("nope.bin").display().to_string(),
+                }
+            )
+            .expect("reports rather than failing"),
+            1
+        );
+        assert!(String::from_utf8_lossy(&short).contains("cannot rebuild yet"));
+        assert!(!dir.join("nope.bin").exists());
     }
 
     fn payouts(pairs: &[(&str, u64)]) -> BTreeMap<String, u64> {
