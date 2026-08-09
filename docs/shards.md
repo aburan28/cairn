@@ -328,6 +328,10 @@ re-download, dropping the `k`-th surviving shard costs the blob.
   cheap to produce and free to check, and nothing yet issues one on a schedule
   or pays for the answer. Until that exists, the `rejected` list is evidence
   with nowhere to be spent.
+  [design/shard-assignment.md](design/shard-assignment.md) works out what
+  paying for it would price — including the part that looks like sybil
+  resistance and is only a constant-factor tax — and why none of it should be
+  built before the bond it depends on.
 - **It does not prove a holder *stored* a shard.** Same bound the availability
   answer has: a holder that fetched the chunk from somebody else the moment it
   was asked produces an identical proof. Ruling that out needs a time bound or
