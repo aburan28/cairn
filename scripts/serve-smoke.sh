@@ -228,7 +228,9 @@ PY
 grep -q '"kind": *"claim"' "$LOG" || fail "the claim never reached the log"
 
 rule "the log a stranger produced audits, and the frontier moved"
-sleep 1.2
+# Two waits, not one: an epoch must close *and* wait out the finality delay
+# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
+sleep 2.4
 "$RUST" --log "$LOG" --root . settle | sed 's/^/  /'
 "$RUST" --log "$LOG" --root . audit --no-rerun | grep -q "log verified" \
   || fail "the log does not audit"

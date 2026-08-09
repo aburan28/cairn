@@ -32,7 +32,30 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 # is a policy parameter every participant must share -- which is exactly why the
 # production default is not configurable per node in any other way.
 export PROOFWORK_EPOCH_SECONDS=1
+
+# Likewise exported rather than left to the default, and for the same reason:
+# both implementations must agree on when an epoch becomes eligible, not just
+# on how long one is.
+export PROOFWORK_FINALITY_EPOCHS=1
+
 tick() { sleep 1.1; }
+
+# A reveal's epoch has to *close* and then wait out the finality delay before
+# anything settles, so a drain needs `FINALITY_EPOCHS + 1` boundaries behind
+# it, not one.
+#
+# This is derived from the exported value rather than written as `tick; tick`.
+# The first version of this fix hard-coded two sleeps, which is correct today
+# and silently wrong the day the delay changes -- and the symptom would be
+# `no settlement batch`, a message that points at the log rather than at the
+# clock. That symptom is exactly how this surfaced: the script passed locally
+# on a slower machine, where enough wall-clock elapsed between reveal and
+# settle by accident, and failed on CI. It was timing-dependent before the
+# delay existed; the delay only made the window wide enough to notice.
+settle_tick() {
+  local i
+  for ((i = 0; i <= PROOFWORK_FINALITY_EPOCHS; i++)); do tick; done
+}
 
 # Suffix appended after the call, not inside the template: BSD mktemp (macOS)
 # only expands `XXXXXX` at the very end, so `-XXXXXX.jsonl` comes back literal
@@ -54,7 +77,7 @@ $RUST --log "$A" --root . commit "$RUST_OID" --submitter alice \
 tick
 $RUST --log "$A" --root . reveal "$RUST_OID" --submitter alice \
       --artifact examples/collatz/artifact.json --nonce n1
-tick
+settle_tick
 $RUST --log "$A" --root . settle
 
 rule "the reference implementation audits the primary log"
@@ -72,7 +95,7 @@ REF_OID=$("$REF" --log "$B" --root . post examples/capset/objective.json | head 
 tick
 "$REF" --log "$B" --root . reveal "$REF_OID" --submitter bob \
     --artifact examples/capset/artifact.json --nonce n2
-tick
+settle_tick
 "$REF" --log "$B" --root . settle
 
 # --- a minimize objective, which neither had ever run against the other ----
@@ -90,7 +113,7 @@ $RUST --log "$C" --root . commit "$MIN_OID" --submitter carol \
 tick
 $RUST --log "$C" --root . reveal "$MIN_OID" --submitter carol \
       --artifact examples/permutation/artifact.json --nonce n3
-tick
+settle_tick
 $RUST --log "$C" --root . settle
 
 MIN_VIEW=$("$REF" --log "$C" --root . audit)

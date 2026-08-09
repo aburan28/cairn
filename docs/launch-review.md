@@ -190,8 +190,7 @@ languages the two are written in.
    backs. **Every surface a contributor sees still has to say the rewards are
    notional**, which `examples/README.md`, `examples/first-blood/README.md`,
    `launch/README.md` and `docs/serving.md` do.
-2. ~~**Settlement order does not converge across peers.**~~ **Fixed for the
-   deterministic case.** This was exactly right: each node ordered a batch
+2. ~~**Settlement order does not converge across peers.**~~ **Fixed.** This was exactly right: each node ordered a batch
    against its own log head, which covers `seq`, `prev` and the local write
    time, so two operators disagreed about who was paid first. The anchor is now
    the head of an **epoch chain** — each link commits to the previous link, the
@@ -199,9 +198,15 @@ languages the two are written in.
    on every node holding the same batches. Both implementations derive it and
    `tests/p2p_convergence.rs` fails without it.
 
-   Still open, and smaller: a node that drains an epoch **before sync has
-   delivered a claim belonging to it** writes a different link and diverges
-   permanently. That needs a finality delay or reorgs. See
+   The smaller case this originally left open — a node draining an epoch
+   **before sync has delivered a claim belonging to it** — is now closed too,
+   along with a third found later (two nodes draining the same epochs in a
+   different sequence). Both are fixed by a **finality delay**: an epoch waits
+   `FINALITY_EPOCHS` past its close before it may settle, so eligibility
+   depends on the clock rather than on when a node happened to hear. What
+   remains is the synchrony bound that implies — a record later than the
+   window is refused rather than paid out of order, and reported by
+   `Node::late_epochs` and by `audit` instead of forking two clean logs. See
    [design/settlement-convergence.md](design/settlement-convergence.md).
 3. **The beacon is grindable by the sequencer.** Documented (threat model row
    38) and unchanged, but worth restating next to the item above: the same

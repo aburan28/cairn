@@ -22,6 +22,10 @@ pw() { "$PW" --log "$LOG" --root . "$@"; }
 export PROOFWORK_EPOCH_SECONDS=1
 tick() { sleep 1.1; }
 
+# Two waits, not one: an epoch must close *and* wait out the finality delay
+# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
+settle_tick() { tick; local i; for ((i = 0; i < ${PROOFWORK_FINALITY_EPOCHS:-1}; i++)); do tick; done; }
+
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 
 rule "fund an objective (certificate: a long Collatz trajectory)"
@@ -37,7 +41,7 @@ echo "$REVEAL"
 FIRST_CLAIM=$(echo "$REVEAL" | awk '/^claim /{print $2}')
 
 rule "close the epoch: the batch settles in beacon order, not arrival order"
-tick
+settle_tick
 pw settle
 
 rule "fund a second objective (evaluator: a maximal cap set in F_3^4)"
@@ -48,7 +52,7 @@ pw commit "$CAPSET" --submitter bob --artifact examples/capset/artifact.json --n
 tick
 pw reveal "$CAPSET" --submitter bob --artifact examples/capset/artifact.json --nonce n-bob \
     --cites "$FIRST_CLAIM"
-tick
+settle_tick
 pw settle
 
 rule "a wrong answer is rejected, and settles nothing"

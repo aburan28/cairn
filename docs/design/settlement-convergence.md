@@ -4,25 +4,36 @@ The ordering invariant this network needs is one sentence:
 
 > **Two nodes holding the same records pay the same claims in the same order.**
 
-It did not hold. It now holds for one of the two ways it can break, and this
-note records what was broken, how it was measured, what shipped, and the two
-cases still open.
+It did not hold, in three distinct ways. All three are now closed, and the
+sentence needs one qualifier that is not decoration:
 
-**Status: partially built, and this note has been corrected once — read the
-caveat before relying on it.** The epoch chain is in both implementations, the
-two deterministic-case tests below are no longer `#[ignore]`d, and `launch/`
-was regenerated and re-signed because the change invalidates any log written
-under the old rule.
+> **…provided every record for an epoch reaches every honest node within
+> `FINALITY_EPOCHS` of that epoch closing.**
 
-> **Correction.** This document previously said the epoch chain made
-> settlement order converge, full stop. It does not. It removes the dependence
-> on the ledger *envelope*, which is real — two nodes that drain the same
-> epochs **in the same sequence** now agree, where before they never could —
-> but two nodes that drain the same epochs in a *different* sequence still
-> fork, with no records lost and both logs auditing clean. See
-> [Drain sequence](#the-second-open-case-drain-sequence) below. The claim was
-> caught by an adversarial review of the change, not by the tests that shipped
-> with it.
+Outside that window it does not converge, and no constant makes it: agreeing
+on the settled set when messages can be arbitrarily late is consensus, which
+Stage 0 does not have. What the delay changes there is the *failure mode* — a
+late record is refused and reported, instead of two logs auditing clean and
+disagreeing about who got paid.
+
+**Status: built, in both implementations.** Two mechanisms, landed separately:
+the **epoch chain** (removes the ledger envelope from the anchor) and the
+**finality delay** (removes arrival order from eligibility). Every
+`#[ignore]`d divergence test in `tests/simulation.rs` is now a passing
+convergence test; the file has no ignored tests left. `launch/` was
+regenerated and re-signed for the epoch chain, and audits clean under the
+delay without further change.
+
+> **Correction, kept deliberately.** This document once said the epoch chain
+> made settlement order converge, full stop. It did not — the induction was on
+> *epoch index* while the fold ran over *file position* — and the error was
+> caught by an adversarial review of the change rather than by the tests that
+> shipped with it. The claim was wrong for about one commit. It is left on the
+> record because the failure was not the bug, it was asserting convergence
+> without a test that fails when convergence is removed. Every claim below is
+> now tied to a named test, and each of those tests has been run with its
+> mechanism disabled to confirm it fails. See [How each claim was
+> checked](#how-each-claim-was-checked).
 
 ## It was measured, not argued
 
@@ -126,11 +137,13 @@ would retroactively move a settled batch's anchor. That is exactly the bug
 `anchor_of_epoch_within`'s position bound was added to prevent, and a naive
 content-addressed anchor would reintroduce it.
 
-## The second open case: drain sequence
+## The second case, now closed: drain sequence
 
-Found by adversarially reviewing the fix, and pinned by
-`draining_epochs_in_a_different_sequence_forks_the_chain` in
-`tests/simulation.rs` (run with `--ignored`).
+Found by adversarially reviewing the epoch-chain fix, and now pinned in the
+other direction by
+`draining_epochs_in_a_different_sequence_converges_under_the_finality_delay`
+in `tests/simulation.rs`. The scenario below is unchanged from the
+reproduction; only the timing rule and the direction of the assertion moved.
 
 Two nodes, byte-identical records, two epochs `E1 < E2`:
 
@@ -159,47 +172,71 @@ is the obvious next idea. At the moment A drained `E2`, no batch for `E1`
 existed on A at all, so any function of "batches for epochs before `E2`" is
 empty on A and non-empty on B regardless of how the fold is sorted.
 
-## What the fix does *not* solve
+## The finality delay
 
-**A partial view at drain time.** The induction assumes both nodes settled the
-same set in every earlier epoch. A node that drains epoch `e` before sync has
-delivered a claim belonging to `e` writes a different `link(e)`, and the two
-chains diverge permanently from there. Nothing above fixes that; it is the
-ordinary distributed-systems tradeoff between liveness and agreement, and the
-honest options are the usual two:
+Both remaining cases — a partial view at drain time, and two nodes draining in
+different sequences — have the same shape. The anchor must be fixed before
+anyone can grind it, so it can only depend on what had already settled when the
+batch was written; and *what had already settled* is exactly what differs
+between two nodes that heard about the work at different times.
 
-> **Now reproducible on demand.** `tests/simulation.rs` — a deterministic
-> discrete-event simulator over real nodes — pins this case as
-> `a_partial_view_at_drain_time_forks_the_chain`, `#[ignore]`d because it
-> asserts the divergence *happens*.
->
-> It established one thing prose had not: **a node holding nothing for an
-> epoch never drains it.** `Node::due_epochs` considers only epochs with
-> accepted claims, so there is no batch and no drained marker, and a later
-> arrival is admitted normally. That is why cold sync is safe, and why the
-> fork needs a genuinely *partial* view — some of an epoch's claims present at
-> drain time, one still in flight.
->
-> The simulator also found a separate, fixable bug: `apply_records` replayed
-> claims in id order, and a later-epoch reveal replayed first drains an
-> earlier epoch as a side effect, refusing an epoch-N claim sitting in the
-> same session. Replay now sorts by `created_at`
-> (`p2p::service::replay_records`), and the simulator drives that exact
-> function rather than a copy of it. Worth recording *how* that was pinned:
-> the first test written for it passed with the sort removed — it used a cold
-> sync, which the paragraph above explains is immune — so the claim that it
-> was pinned was wrong until a test was built that fails without the fix.
+Folding in epoch order does not fix it, which is worth recording because it is
+the obvious next idea. At the moment node A drained `E2`, no batch for `E1`
+existed on A at all, so any function of "batches for epochs before `E2`" is
+empty on A and non-empty on B however the fold is sorted.
 
-- **A finality delay** — refuse to drain an epoch until it is old enough that
-  sync has converged, trading settlement latency for agreement. Cheap, partial,
-  and probably right for Stage 1.
-- **Reorgs** — let a node that learns of an earlier claim re-derive from the
-  divergence point, which is what a chain with a fork-choice rule does, and
-  which is a much larger change.
+What does fix it is refusing to drain that early. `partition::FINALITY_EPOCHS`
+makes eligibility a function of **the clock** instead of a function of
+**arrival**:
 
-This note proposes neither. It fixes the case where **the record sets already
-agree and the order still does not**, which is the deterministic half and the
-one a test can pin.
+```
+epoch E may settle when   E + FINALITY_EPOCHS < now_epoch
+```
+
+One epoch, so ten minutes of slack against a network moving records of a few
+kilobytes. By the time A may drain `E2`, it is holding `E1` too, and
+`due_epochs` returns both in epoch order — the same order B uses. The partial
+view closes for the same reason: the straggler that used to miss the boundary
+drain now has a whole further epoch to arrive in.
+
+### The bound, stated plainly
+
+A record later than the window is a different situation and the delay does not
+rescue it. Settlement is **monotonic**: an epoch older than one already paid is
+refused, not settled out of order. Paying it would anchor it on a chain head
+that already contains later epochs, silently re-ordering payouts an auditor has
+already read.
+
+So a node that misses the window pays a strict subset of what its peers paid.
+That is a real cost and it is not hidden:
+
+- `Node::late_epochs()` lists the stranded epochs.
+- `audit` prints them, phrased so the reader is not left hunting for a fault in
+  a log where every batch is correctly derived. The problem is not this log; it
+  is that a peer paid claims this node never will.
+
+This is the trade the delay actually makes: **liveness for that epoch, in
+exchange for never forking silently.** Reorgs — re-deriving from the divergence
+point, with a fork-choice rule — remain the larger change that would buy back
+the liveness, and are still not proposed here.
+
+## How each claim was checked
+
+Every claim above names a test in `tests/simulation.rs`, and every one of those
+tests was run with its mechanism disabled to confirm it fails. That procedure
+exists because of the correction at the top of this note.
+
+| claim | test | disabled how | result |
+|---|---|---|---|
+| drain sequence converges | `draining_epochs_in_a_different_sequence_converges_under_the_finality_delay` | `PROOFWORK_FINALITY_EPOCHS=0` | fails |
+| partial view converges | `a_partial_view_at_drain_time_converges_once_the_epoch_waits` | `PROOFWORK_FINALITY_EPOCHS=0` | fails |
+| late records are refused and reported | `a_record_arriving_after_the_finality_window_is_refused_not_silently_paid` | monotonicity filter removed from `due_epochs` | fails |
+
+The middle row is the one that nearly shipped wrong twice. The first rewrite of
+that test passed with the delay disabled — not because the delay was
+unnecessary, but because the rewrite had quietly dropped the boundary drain
+that made the scenario a partial view at all. It asserts the drain *happens*
+and pays nothing, rather than asserting nothing was drained.
 
 ## What it cost
 
@@ -230,8 +267,17 @@ changed and no live claim was orphaned. (1) is the real cost, paid once.
 
 ## Next
 
-The **finality delay** from *What the fix does not solve* is the natural
-follow-up and is deliberately not bundled here: refusing to drain an epoch until
-it is old enough that sync has converged is a separate rule with its own
-failure mode, and it deserves its own test for the partial-view case rather than
-riding along with a change that is already protocol-breaking.
+The convergence work is done for Stage 0. What remains is the case the delay
+deliberately does not cover:
+
+- **Reorgs.** A node that learns of an earlier epoch after paying a later one
+  currently refuses it and says so. Re-deriving from the divergence point
+  instead would recover those payouts, at the cost of a fork-choice rule and
+  settlements that are not final when written. That is a Stage 1 change and a
+  much larger one.
+- **Choosing `FINALITY_EPOCHS` from evidence.** One epoch is a judgement, not a
+  measurement. The number that belongs here is a function of observed sync
+  latency across the real network, and there is not enough of a real network
+  yet to measure. `tests/simulation.rs` can already sweep it — the tests derive
+  their timing from `finality_epochs()` rather than hard-coding it, so raising
+  the constant moves them with it.

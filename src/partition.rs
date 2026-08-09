@@ -71,6 +71,58 @@ type HmacSha256 = Hmac<Sha256>;
 /// parameter a consensus split hides in.
 pub const EPOCH_SECONDS: u64 = 600;
 
+/// How many closed epochs must pass before an epoch may settle.
+///
+/// A batch's ordering anchor is the epoch chain head *as it stood when the
+/// batch was written*, which makes settlement order depend on the order a node
+/// happened to drain epochs in -- and two nodes that learn about work in
+/// different orders drain in different orders. See
+/// `docs/design/settlement-convergence.md`; the fork is real, both logs audit
+/// clean, and it is a disagreement about who got paid.
+///
+/// The delay closes it by making eligibility a function of the clock instead
+/// of a function of arrival. An epoch may not settle until it has been closed
+/// for `FINALITY_EPOCHS` further epochs, so a node that hears about epoch `E`
+/// late still has every earlier epoch in hand by the time `E` becomes
+/// eligible, and drains them in epoch order -- the same order as every other
+/// node.
+///
+/// **What this does and does not buy.** Convergence holds *under a synchrony
+/// bound*: if every record for epoch `E` reaches every honest node within
+/// `FINALITY_EPOCHS` epochs of `E` closing, every node settles the same
+/// batches in the same order. Outside that bound it does not converge, and no
+/// choice of delay makes it -- agreeing on the settled set when messages can
+/// be arbitrarily late is consensus, which stage 0 does not have. What the
+/// delay changes is the *failure mode*: a record that misses the window is
+/// refused as late and shows up in `audit`, instead of silently producing two
+/// clean logs that paid different people. See [`Node::late_epochs`].
+///
+/// One epoch, not zero and not ten. Zero is the old behaviour. Ten minutes of
+/// slack is generous for a gossip network whose records are a few kilobytes,
+/// and every additional epoch is settlement latency paid by every honest
+/// participant to tolerate a straggler.
+///
+/// [`Node::late_epochs`]: crate::node::Node::late_epochs
+pub const FINALITY_EPOCHS: u64 = 1;
+
+/// Overrides [`FINALITY_EPOCHS`] for a local demo. Never set this in
+/// production, and never set it to a *different* value than a peer: two nodes
+/// disagreeing about the delay disagree about which epochs are eligible, which
+/// is precisely the fork the constant exists to prevent.
+pub const FINALITY_EPOCHS_ENV: &str = "PROOFWORK_FINALITY_EPOCHS";
+
+/// [`FINALITY_EPOCHS`], unless the environment overrides it.
+///
+/// A malformed or absent value means the default rather than an error: this is
+/// read on the settlement path, and refusing to settle because an environment
+/// variable is misspelled would turn a typo into a halt.
+pub fn finality_epochs() -> u64 {
+    match std::env::var(FINALITY_EPOCHS_ENV) {
+        Ok(raw) => raw.trim().parse().unwrap_or(FINALITY_EPOCHS),
+        Err(_) => FINALITY_EPOCHS,
+    }
+}
+
 /// Size of the assignment space: the unit interval scaled to `2^32`.
 ///
 /// Item positions are the first four bytes of an item's SHA-256, so the space
