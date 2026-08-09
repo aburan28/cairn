@@ -3,11 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   type Objective,
+  type ObjectiveDetail,
   NODE_URL,
   amount,
+  fetchObjectiveDetail,
   fetchObjectives,
   overspent,
   poolFraction,
+  ratchetProgress,
   short,
 } from "@/lib/objectives";
 
@@ -24,6 +27,7 @@ import {
 export default function Page() {
   const [base, setBase] = useState(NODE_URL);
   const [objectives, setObjectives] = useState<Objective[] | null>(null);
+  const [details, setDetails] = useState<Record<string, ObjectiveDetail>>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -31,9 +35,23 @@ export default function Page() {
     setLoading(true);
     setError(null);
     try {
-      setObjectives(await fetchObjectives(url));
+      const list = await fetchObjectives(url);
+      setObjectives(list);
+      // Detail is an enhancement, so it is fetched after the list is already on
+      // screen and a failure leaves the summary standing rather than blanking
+      // the page.
+      const fetched = await Promise.all(
+        list.map(async (objective) => {
+          const detail = await fetchObjectiveDetail(url, objective.id);
+          return [objective.id, detail] as const;
+        }),
+      );
+      const next: Record<string, ObjectiveDetail> = {};
+      for (const [id, detail] of fetched) if (detail) next[id] = detail;
+      setDetails(next);
     } catch (cause) {
       setObjectives(null);
+      setDetails({});
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
@@ -93,7 +111,11 @@ export default function Page() {
           <h2>open — {open.length}</h2>
           <ul className="cards">
             {open.map((objective) => (
-              <ObjectiveCard key={objective.id} objective={objective} />
+              <ObjectiveCard
+                key={objective.id}
+                objective={objective}
+                detail={details[objective.id]}
+              />
             ))}
           </ul>
         </>
@@ -104,7 +126,11 @@ export default function Page() {
           <h2>settled — {settled.length}</h2>
           <ul className="cards">
             {settled.map((objective) => (
-              <ObjectiveCard key={objective.id} objective={objective} />
+              <ObjectiveCard
+                key={objective.id}
+                objective={objective}
+                detail={details[objective.id]}
+              />
             ))}
           </ul>
         </>
@@ -113,7 +139,13 @@ export default function Page() {
   );
 }
 
-function ObjectiveCard({ objective }: { objective: Objective }) {
+function ObjectiveCard({
+  objective,
+  detail,
+}: {
+  objective: Objective;
+  detail?: ObjectiveDetail;
+}) {
   const fraction = poolFraction(objective);
   const suspect = overspent(objective);
 
@@ -150,10 +182,84 @@ function ObjectiveCard({ objective }: { objective: Objective }) {
             </code>
           </dd>
         </div>
+        {detail?.created_at && (
+          <div>
+            <dt>posted</dt>
+            <dd title={detail.created_at}>{detail.created_at.slice(0, 10)}</dd>
+          </div>
+        )}
       </dl>
+
+      {/* The pinned checker, by hash. This is the whole reason an objective can
+          be worked on before anyone trusts anybody: the code that decides
+          payment is fixed at posting time and its hash is inside the
+          objective's id, so swapping it means posting a different objective. */}
+      {detail?.verifier && (
+        <div className="meta dim verifier">
+          pins{" "}
+          <code>
+            {detail.verifier.checker ?? detail.verifier.evaluator ?? "?"}
+          </code>
+          {(detail.verifier.checker_sha256 ??
+            detail.verifier.evaluator_sha256) && (
+            <>
+              {" @ "}
+              <code
+                title={
+                  detail.verifier.checker_sha256 ??
+                  detail.verifier.evaluator_sha256
+                }
+              >
+                {short(
+                  detail.verifier.checker_sha256 ??
+                    detail.verifier.evaluator_sha256 ??
+                    "",
+                )}
+              </code>
+            </>
+          )}
+        </div>
+      )}
 
       {objective.frontier ? (
         <div className="frontier">
+          {/* Baseline -> current -> target, because a bare score is unreadable
+              without knowing which direction counts as better. `minimize`
+              objectives count *down*, so a bar keyed to raw score would show a
+              submitter improving things as though they were losing ground. */}
+          {detail?.ratchet && (
+            <div className="ratchet">
+              <div className="meta">
+                <span className="dim">{detail.ratchet.direction}</span>{" "}
+                {detail.ratchet.baseline}
+                <span className="dim"> baseline </span>→{" "}
+                <b className="accent">{objective.frontier.score}</b>{" "}
+                <span className="dim">now</span> →{" "}
+                {detail.ratchet.target}
+                <span className="dim"> target</span>
+              </div>
+              {(() => {
+                const moved = ratchetProgress(
+                  detail.ratchet,
+                  objective.frontier.score,
+                );
+                return moved === null ? null : (
+                  <div
+                    className="bar"
+                    role="img"
+                    aria-label={`${Math.round(moved * 100)}% of the way from baseline to target`}
+                  >
+                    <span style={{ width: `${moved * 100}%` }} />
+                  </div>
+                );
+              })()}
+              <div className="meta dim">
+                an improvement must move the score by at least{" "}
+                {detail.ratchet.min_improvement}
+              </div>
+            </div>
+          )}
+
           <div className="meta">
             frontier score <b className="accent">{objective.frontier.score}</b>{" "}
             held by{" "}
