@@ -1,0 +1,36 @@
+{
+  "artifact_schema": {
+    "description": "A sorting network on 8 wires, as an ordered list of compare-exchange pairs. Each pair [i, j] swaps wires i and j if wire i holds the larger value. Order matters; the list is applied left to right.",
+    "example": {
+      "comparators": [[0, 1], [2, 3], [0, 2], [1, 3], [1, 2]]
+    },
+    "properties": {
+      "comparators": {
+        "description": "Ordered compare-exchange pairs. Each is [i, j] with 0 <= i, j < 8 and i != j. At most 512 of them.",
+        "type": "array"
+      }
+    },
+    "required": ["comparators"],
+    "type": "object"
+  },
+  "created_at": "2026-08-09T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-sorting-network-8",
+  "ratchet": {
+    "baseline": 60,
+    "direction": "minimize",
+    "min_improvement": 2,
+    "reward": 800000,
+    "target": 19
+  },
+  "reward": 800000,
+  "statement": "Sort 8 wires with as few compare-exchange comparators as possible. Score is the comparator count, minimised. A network is checked against all 256 binary inputs -- by the zero-one principle that is a complete proof, not a sample -- and one that fails to sort any of them scores worse than any valid network rather than better. Baseline 60 (bubble sort needs 56), target 19 (proved optimal by exhaustive search). Payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move, and every submission must cite the frontier it beat.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/sorting-network/evaluators/sorting_network.py",
+    "evaluator_sha256": "bf0d6d357b4851daf72257eb5127055a4b597646aec1ad2910b079a06ad2b6db",
+    "kind": "evaluator",
+    "threshold": 60
+  }
+}
