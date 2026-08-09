@@ -29,6 +29,11 @@
 //!   pinned checker code; the name is the content address the objective itself
 //!   declares; [`crate::p2p::code`] serves them on request. A stolen disk yields
 //!   nothing there the network does not already give away for free.
+//! * **The shard store is not, for the same reason one level down.** A shard is
+//!   a linear combination of a blob the network publishes, filed under that
+//!   blob's digest; holding `k` of them is holding the blob, and the blob is
+//!   public. It discloses no more than the blob store beside it, and the residue
+//!   below is the same residue.
 //! * **The population file is not, for the same reason.** Gossiped candidates
 //!   were shared with peers on purpose.
 //! * **`cache/` and `tmp/` are not.** Reclaimable by construction: a local copy
@@ -69,6 +74,7 @@ use std::path::Path;
 use super::atrest;
 use super::{format_size, walk, Store, StoreError, CACHE_DIR, LOG_DIR, TMP_DIR};
 use crate::blobs::STORE_DIR as BLOB_DIR;
+use crate::shards::store::STORE_DIR as SHARD_DIR;
 
 /// Bytes read from the head of a file to classify it.
 ///
@@ -152,7 +158,7 @@ impl Survey {
             return String::from("not encrypted (no key in use) -- run `proofwork store encrypt`");
         }
         let mut line = format!(
-            "log sealed ({}); {} plaintext by decision -- blobs, cache, tmp",
+            "log sealed ({}); {} plaintext by decision -- blobs, shards, cache, tmp",
             format_size(self.sealed_bytes),
             format_size(self.plaintext_bytes)
         );
@@ -218,6 +224,12 @@ pub fn exposure(store: &Store, path: &Path, sealed_log: bool) -> Exposure {
         return Exposure::Plaintext {
             reason: "pinned checker code, named by the content address the \
                      objective declares and served to any peer that asks",
+        };
+    }
+    if relative.starts_with(SHARD_DIR) {
+        return Exposure::Plaintext {
+            reason: "erasure-coded shards of a blob the network publishes, filed \
+                     under that blob's digest; k of them are the blob",
         };
     }
 
@@ -333,8 +345,8 @@ mod tests {
         path
     }
 
-    /// A store shaped like a working node's: a sealed log, a blob, a cached
-    /// file, and scratch.
+    /// A store shaped like a working node's: a sealed log, a blob, a coded
+    /// blob's manifest and one of its shards, a cached file, and scratch.
     fn populated(tag: &str) -> (PathBuf, Store) {
         let dir = scratch(tag);
         let store = Store::new(&dir);
@@ -345,6 +357,10 @@ mod tests {
         let blobs = dir.join(BLOB_DIR);
         fs::create_dir_all(&blobs).expect("blobs");
         fs::write(blobs.join("ab".repeat(32)), b"def check(a): pass\n").expect("blob");
+        let shards = dir.join(SHARD_DIR).join("cd".repeat(32));
+        fs::create_dir_all(&shards).expect("shards");
+        fs::write(shards.join("manifest"), b"{\"total\":4}\n").expect("manifest");
+        fs::write(shards.join("001"), b"\x00\x01\x02\x03").expect("shard");
         (dir, store)
     }
 
@@ -360,7 +376,7 @@ mod tests {
             Vec::new(),
             "an unaccounted file in a store this crate itself produced"
         );
-        assert_eq!(report.files, 4);
+        assert_eq!(report.files, 6);
         assert!(report.sealed_bytes > 0 && report.plaintext_bytes > 0);
         fs::remove_dir_all(&dir).ok();
     }
@@ -416,6 +432,8 @@ mod tests {
         assert!(reason_for(store.cache_dir().join("peer-list.json")).contains("fetchable"));
         assert!(reason_for(store.tmp_dir().join("partial")).contains("scratch"));
         assert!(reason_for(dir.join(BLOB_DIR).join("ab".repeat(32))).contains("any peer that asks"));
+        let shard = dir.join(SHARD_DIR).join("cd".repeat(32)).join("001");
+        assert!(reason_for(shard).contains("k of them are the blob"));
         fs::remove_dir_all(&dir).ok();
     }
 

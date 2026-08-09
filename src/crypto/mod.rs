@@ -55,6 +55,9 @@
 //!
 //! # Layout
 //!
+//! - [`gf`] — GF(2^8), the one copy. A branch-free table-free multiply for
+//!   secrets, and a per-coefficient table *built from it* for bulk public data.
+//!   Two implementations of a field would be two fields.
 //! - [`shamir`] — `t`-of-`n` secret sharing over GF(2^8). The reconstruction path
 //!   for the content key. Note its central caveat: `combine` **cannot** report
 //!   "too few shares", and that is the security property, not a defect.
@@ -97,6 +100,7 @@
 //!   decentralized inclusion does (§7).
 
 pub mod envelope;
+pub mod gf;
 pub mod identity;
 pub mod shamir;
 

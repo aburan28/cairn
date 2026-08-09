@@ -68,6 +68,41 @@ behaviour ships and is tested, not that TLC has checked it.
       is sized for artifacts that cap does not yet allow, so it is groundwork
       rather than a current need. The objective's digest *is* the swarm id, so
       the ledger does the tracker's job and there is nothing to sign.
+- [x] **Erasure-coded shards, with a Merkle commitment per chunk**
+      (`src/shards/`). A blob split into `k` data and `m` parity shards, any `k`
+      of which rebuild it: `(k+m)/k` on disk against the `f+1` full copies
+      replication charges for the same tolerance -- 1.5× at (4, 2) where
+      replication wants 3×.
+      **The commitments are not an optimisation on top of the coding, they are
+      what makes the coding safe to use.** Replication has a property nobody
+      names because it is free: every copy is self-checking. Coding destroys it
+      — a shard does not hash to the blob's digest, and one corrupt shard makes
+      *every* output byte wrong, with the digest reporting only that somebody
+      lied. So nothing enters the linear combination until its chunks rebuild
+      the root the manifest commits to; a liar is dropped and **named**, which
+      is the `rejected` list a peer scorer or a slashing rule would consume.
+      Two levels of tree, because the outer hop is what lets a chunk proof
+      verify against a bare 32-byte root — the size of something a record could
+      one day commit to — rather than against the whole manifest.
+      Systematic Cauchy Reed–Solomon over GF(2^8), chosen over Vandermonde
+      because Vandermonde has a mistake available that Cauchy does not:
+      *replacing* rows with identity rows rather than transforming the matrix
+      loses the MDS property for some erasure patterns only, so it passes the
+      tests somebody wrote and loses data later. MDS is checked over every
+      subset rather than a sample.
+      One field, not two: `crypto::gf` is now the crate's only GF(2^8), shared
+      with `crypto::shamir`, with the bulk table *built from* the branch-free
+      multiply rather than beside it — two multiplies disagreeing on one of
+      65,536 products would produce shards that reconstruct to garbage on the
+      node that used the other one.
+      Deliberately **no record kind**: a manifest is derived from bytes, so
+      signing one would sign an arithmetic fact, and it is connected to the
+      network the way a piece manifest is — by describing a digest the log
+      already pinned. Deliberately **no transfer**: `proofwork shard` is the
+      caller that keeps the module honest until `swarm` grows one, because a
+      subsystem with no entry point is how the two `swarm`/`blobs` seam bugs
+      survived, and `scripts/shard-demo.sh` drives six stores that share nothing
+      in CI. See [shards.md](shards.md).
 - [x] **Signed peer records** (`src/swarm/discovery.rs`) in the ENR shape --
       identity is an ed25519 key, location is a hint signed by it, `seq`
       supersedes -- plus peer exchange, so one address given once accumulates the

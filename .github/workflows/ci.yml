@@ -57,6 +57,15 @@ jobs:
       # not import a file whose name is a hash. Both were invisible to unit
       # tests of either side.
       - run: ./scripts/blob-demo.sh
+      # Six stores that share nothing, one shard each, one of them corrupt: the
+      # file comes back byte for byte and the liar is named.
+      #
+      # Here for the same reason the line above is. `src/shards/` has no network
+      # caller yet, so the only thing standing between it and the state
+      # `swarm::tcp` was in -- complete, tested, and agreeing with nobody but
+      # itself -- is a script that drives it the way an operator would, across
+      # separate invocations and separate directories.
+      - run: ./scripts/shard-demo.sh
       # Every binary answers `--help` with 0 and misuse with 2.
       #
       # Two of them exited 2 for `--help`, which tells somebody who asked a
