@@ -2418,6 +2418,32 @@ fn cmd_peer(
 
 fn cmd_identity(out: &mut dyn Write, path: &str) -> Result<i32, CliError> {
     use rand_core::{OsRng, RngCore};
+
+    // Refused rather than overwritten, and this is the one command in the CLI
+    // where that matters most: four lines below, its own output says losing the
+    // file loses the name and there is no recovery. A command that says that
+    // while silently truncating whatever was already there is not warning
+    // anybody, it is describing the damage it just did.
+    //
+    // The file also does not have to be an identity of *this* kind to be
+    // destroyed. `--identity` names an ed25519 signing key here and a
+    // 261,120-byte Classic McEliece transport key in `proofwork-p2p`, so a path
+    // that looks free to one binary is a live key to the other -- which is how
+    // a node identity got replaced by a submitter identity, leaving the daemon
+    // refusing to start with "public key must be 261120 bytes, got 32".
+    //
+    // No `--force`. Rotation is rare, deliberate, and one `mv` away, and a flag
+    // that turns this off is a flag somebody will reach for while debugging the
+    // very confusion this exists to prevent.
+    if std::path::Path::new(path).exists() {
+        return Err(CliError::Usage(format!(
+            "{path} already exists, and this would replace it with a new identity. \
+             An identity file cannot be regenerated -- the id IS the public key, so \
+             whatever name that file holds would be gone, along with anything \
+             submitted under it. Move it aside first if you really are rotating."
+        )));
+    }
+
     let mut secret = [0u8; 32];
     OsRng.fill_bytes(&mut secret);
     let identity = Identity::from_secret_bytes(secret);
@@ -5432,6 +5458,57 @@ mod tests {
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn identity_refuses_to_overwrite_a_file_that_is_already_there() {
+        let dir = scratch_dir("identity-clobber");
+        let path = dir.join("id.json");
+        let mut out = Vec::new();
+
+        cmd_identity(&mut out, path.to_str().expect("utf-8")).expect("writes the first time");
+        let first = std::fs::read_to_string(&path).expect("written");
+
+        // The second call is the whole point. Losing an identity loses the name
+        // it submitted under, so the refusal has to happen before the write --
+        // and the file has to be exactly as it was afterwards.
+        let again = cmd_identity(&mut out, path.to_str().expect("utf-8"));
+        assert!(again.is_err(), "a second identity overwrote the first");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still there"),
+            first,
+            "the refusal still changed the file"
+        );
+
+        // And the neighbouring temporary must not be left behind either: a
+        // half-written key beside a real one is its own kind of confusion.
+        assert!(
+            !dir.join("id.json.tmp").exists(),
+            "the refused write left its temporary behind"
+        );
+    }
+
+    /// A transport identity is not a signing identity, and this is the path
+    /// that conflated them: `--identity` names a 32-byte ed25519 key here and a
+    /// 261,120-byte Classic McEliece key in `proofwork-p2p`. Pointed at a live
+    /// node identity, this command used to replace it, and the daemon then
+    /// refused to start with "public key must be 261120 bytes, got 32".
+    #[test]
+    fn identity_does_not_replace_a_key_of_a_different_kind() {
+        let dir = scratch_dir("identity-kind");
+        let path = dir.join("node.identity.json");
+        let transport = r#"{"public":"aa","secret":"bb"}"#;
+        std::fs::write(&path, transport).expect("a pre-existing key of another kind");
+
+        let mut out = Vec::new();
+        assert!(
+            cmd_identity(&mut out, path.to_str().expect("utf-8")).is_err(),
+            "overwrote a key belonging to another binary"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still there"),
+            transport
+        );
     }
 
     fn payouts(pairs: &[(&str, u64)]) -> BTreeMap<String, u64> {
