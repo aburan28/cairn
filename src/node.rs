@@ -550,7 +550,10 @@ impl Outcome {
             settled: false,
             reward: 0,
             pending_epoch: Some(epoch),
-            note: format!("accepted; settles when epoch {epoch} closes"),
+            note: format!(
+                "accepted; settles once epoch {epoch} closes and clears the {}-epoch finality delay",
+                crate::partition::finality_epochs()
+            ),
         }
     }
 

@@ -588,7 +588,10 @@ impl Node {
                 verdict,
                 settled: false,
                 reward: 0,
-                note: format!("accepted; settles when epoch {reveal_epoch} closes"),
+                note: format!(
+                    "accepted; settles once epoch {reveal_epoch} closes and clears the {}-epoch finality delay",
+                    crate::partition::finality_epochs()
+                ),
                 pending_epoch: Some(reveal_epoch),
             });
         };
