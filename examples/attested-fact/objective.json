@@ -1,0 +1,68 @@
+{
+  "artifact_schema": {
+    "description": "An assertion and the pinned documents that support it. The checker verifies provenance, never truth.",
+    "example": {
+      "assertion": "...",
+      "sources": [
+        {
+          "document": "sha256:...",
+          "locator": "paragraph 1",
+          "quote": "...",
+          "text": "..."
+        }
+      ]
+    },
+    "properties": {
+      "assertion": {
+        "description": "The claim being sourced.",
+        "type": "string"
+      },
+      "sources": {
+        "description": "One entry per citation. At least two distinct documents.",
+        "items": {
+          "properties": {
+            "document": {
+              "description": "sha256 of the source, which must be one the objective pins.",
+              "type": "string"
+            },
+            "locator": {
+              "description": "Where in the document, for a human reader.",
+              "type": "string"
+            },
+            "quote": {
+              "description": "The passage relied on. Must appear verbatim.",
+              "type": "string"
+            },
+            "text": {
+              "description": "The source document in full. Re-hashed by the checker.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "document",
+            "text",
+            "quote"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "assertion",
+      "sources"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-09T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-attested-provenance",
+  "reward": 100000,
+  "statement": "Attest an assertion to its sources. Submit {\"assertion\", \"sources\":[{\"document\",\"text\",\"quote\"}]} citing at least two of the documents this objective pins. The checker re-hashes each supplied text against the cited id and requires every quote to appear verbatim after whitespace folding. IT VERIFIES PROVENANCE, NOT TRUTH: accepting a claim here means the quotations are faithful and the sources are the pinned ones, and says nothing about whether the assertion is correct. No verifier can settle a historical fact, because truth about the world is not a function of an artifact -- see examples/attested-fact/README.md.",
+  "verifier": {
+    "checker": "examples/attested-fact/checkers/provenance.py",
+    "checker_sha256": "0cac643d8c46741d9894890b30484e348d7e4d3974ddfd45c9220cb1606e4c48",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}
