@@ -343,7 +343,10 @@ impl Coding {
     }
 
     /// How many losses this tolerates: exactly `parity`, by the MDS property of
-    /// the Cauchy construction. See [`generator_row`].
+    /// the Cauchy construction.
+    ///
+    /// Not a link, because `generator_row` — where that property is argued — is
+    /// private, and rustdoc refuses a public page that points at one.
     pub fn tolerates(&self) -> u8 {
         self.parity
     }
@@ -480,7 +483,11 @@ impl Layout {
 }
 
 /// A chunk length for a blob of this size: the smallest legal power of two that
-/// keeps a shard under [`TARGET_CHUNKS_PER_SHARD`] chunks.
+/// keeps a shard under 1024 chunks.
+///
+/// The target is `TARGET_CHUNKS_PER_SHARD`, which is private, so the number is
+/// written out here rather than linked — a public page cannot point at it, and
+/// a reader of this signature wants the number anyway.
 ///
 /// A convenience for `proofwork shard plan`, never a rule. Two nodes choosing
 /// differently produce different manifests for one blob, which is fine — a

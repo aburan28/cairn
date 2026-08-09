@@ -75,6 +75,11 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `cargo test --manifest-path reference/rust/Cargo.toml` and
   `proofwork-reference conformance conformance/vectors.json`
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --all-features`.
+  CI has always run this and this list did not say so, which is a good way to
+  push a branch that builds, tests and lints clean and still goes red. The two
+  it catches are both invisible to `clippy`: a public item linking to a private
+  one, and a redundant explicit link target
 - `./scripts/interop.sh` — each implementation audits a log the other produced
 - `./scripts/fuzz-differential.sh` — the same agreement on *random* input,
   which is the only way to find a disagreement nobody has already thought of.
