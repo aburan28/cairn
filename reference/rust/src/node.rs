@@ -179,6 +179,29 @@ impl Node {
             .collect()
     }
 
+    /// Epochs holding accepted claims that can never be paid, because a later
+    /// epoch settled first.
+    ///
+    /// Empty when the synchrony assumption behind
+    /// [`FINALITY_EPOCHS`](crate::partition::FINALITY_EPOCHS) held. Non-empty
+    /// means it did not: those records turned up after a later batch was
+    /// written, and this node's payouts are a strict subset of what a peer
+    /// that received them in time paid. Reported by `audit`, because a fork
+    /// nobody is told about is the failure the delay exists to replace.
+    pub fn late_epochs(&self) -> Vec<u64> {
+        let drained = self.drained_epochs();
+        let Some(floor) = drained.iter().copied().max() else {
+            return Vec::new();
+        };
+        self.accepted_claims_by_epoch()
+            .iter()
+            .map(|(epoch, _)| *epoch)
+            .filter(|epoch| *epoch <= floor && !drained.contains(epoch))
+            .collect::<BTreeSet<u64>>()
+            .into_iter()
+            .collect()
+    }
+
     /// The log head as of the epoch's *start*.
     ///
     /// Derived from the log rather than a clock, so an auditor reaches the
@@ -579,14 +602,27 @@ impl Node {
         })
     }
 
-    /// Settle every reveal epoch that has closed, in beacon order.
+    /// Settle every reveal epoch that has closed and waited out the finality
+    /// delay, in beacon order, oldest first.
+    ///
+    /// Three filters. Closed (`epoch < now_epoch`), because an open epoch can
+    /// still take reveals. Final (`epoch + finality_epochs() < now_epoch`), so
+    /// eligibility depends on the clock rather than on when this node happened
+    /// to hear about the work. And newer than anything already paid, because
+    /// an epoch settling after a later one would be anchored on a chain head
+    /// that already contains that later epoch -- reordering payouts an auditor
+    /// has already read. Those are refused and surface in [`Self::late_epochs`].
     pub fn settle_due(&mut self, now_epoch: u64, ts: &str) -> Result<Vec<Outcome>, String> {
         let drained = self.drained_epochs();
+        let floor = drained.iter().copied().max();
+        let delay = crate::partition::finality_epochs();
         let pending = self.accepted_claims_by_epoch();
         let due: BTreeSet<u64> = pending
             .iter()
             .map(|(epoch, _)| *epoch)
-            .filter(|epoch| *epoch < now_epoch && !drained.contains(epoch))
+            .filter(|epoch| !drained.contains(epoch))
+            .filter(|epoch| epoch.saturating_add(delay) < now_epoch)
+            .filter(|epoch| floor.is_none_or(|settled| *epoch > settled))
             .collect();
 
         let mut outcomes = Vec::new();
@@ -1439,6 +1475,27 @@ impl Node {
                  timestamps and never stored, so a log written with a different \
                  PROOFWORK_EPOCH_SECONDS (this audit used {}) cannot be re-derived without it.",
                 crate::partition::epoch_seconds()
+            ));
+        }
+
+        // Accepted claims stranded behind a later batch. Nothing in this log is
+        // wrong -- which is why it has to be said. It means records arrived
+        // outside the finality window, and a peer that got them in time paid
+        // claims this node never will.
+        let late = self.late_epochs();
+        if !late.is_empty() {
+            problems.push(format!(
+                "note: {} epoch(s) hold accepted claims that can never settle, because a later \
+                 epoch was paid first: {}. Records for them arrived more than PROOFWORK_\
+                 FINALITY_EPOCHS (this audit used {}) after their epoch closed. Every batch in \
+                 this log is correctly derived; what is wrong is that a peer which received \
+                 those records on time has paid claims this node never will.",
+                late.len(),
+                late.iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                crate::partition::finality_epochs()
             ));
         }
 

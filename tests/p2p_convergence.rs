@@ -33,10 +33,17 @@ const TS: &str = "2026-07-29T00:00:00+00:00";
 /// receiver has only the record, so the record's own instant is the only stamp
 /// two nodes can agree to file it under.
 const TS_REVEAL: &str = "2026-07-29T00:10:00+00:00";
-/// One epoch after the reveal, so the reveal epoch has closed and its batch
-/// settles. Both nodes use the same three instants, which is what makes their
-/// settlements comparable at all: the batch order is derived from the epoch.
-const TS_SETTLE: &str = "2026-07-29T00:20:00+00:00";
+/// Two epochs after the reveal, not one: the reveal epoch must close *and*
+/// wait out `FINALITY_EPOCHS` before its batch may settle. Both nodes use the
+/// same three instants, which is what makes their settlements comparable at
+/// all: the batch order is derived from the epoch.
+///
+/// Written as a literal rather than derived from `finality_epochs()`, unlike
+/// the sweeps in `tests/simulation.rs`, because these tests are about two
+/// nodes agreeing on an order and a fixed instant is part of what they hold in
+/// common. If the constant is ever raised, this is the assertion that fails —
+/// "alice did not settle the whole batch" — and the fix is one more epoch here.
+const TS_SETTLE: &str = "2026-07-29T00:30:00+00:00";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
