@@ -1,0 +1,41 @@
+{
+  "artifact_schema": {
+    "description": "Setup randomness claimed to reproduce the pinned instance's public matrices.",
+    "example": {
+      "L": "[[[<64 hex chars> x4] x17] x8]",
+      "R": "[[[<64 hex chars> x17] x4] x8]",
+      "xi": "[[<64 hex chars> x8] x8]"
+    },
+    "properties": {
+      "L": {
+        "description": "Left masks, one per gate: 8 entries, each 17 rows of 4 field elements.",
+        "type": "array"
+      },
+      "R": {
+        "description": "Right masks, one per gate: 8 entries, each 4 rows of 17 field elements.",
+        "type": "array"
+      },
+      "xi": {
+        "description": "Secret linear forms, one per gate: 8 entries, each 8 field elements.",
+        "type": "array"
+      }
+    },
+    "required": [
+      "L",
+      "R",
+      "xi"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-09T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-aadp-m8-randomness-recovery",
+  "reward": 300000,
+  "statement": "Recover setup randomness for alloc-init's published m=8 AADP instance (arithmetic affine determinant programs; eprint 2026/175). The instance is pinned inside the checker: 8 public matrices of 17x17 over the BN254 scalar field, with a quadratic non-residue target so no witness exists and the problem cannot be shortcut by finding one. Submit {\"L\", \"R\", \"xi\"}: for each of the 8 gates, L_i as 17 rows of 4, R_i as 4 rows of 17, and xi_i as 8 entries. Every field element is exactly 64 lowercase hex characters -- a BN254 element does not fit a canonical integer, so it travels as a string, in one spelling only. A submission settles when sum_i L_i . U_i(X) . R_i reproduces every published matrix coefficient-wise; the checker rebuilds the constraint system from the public target itself, so nothing secret is needed to decide it. Any valid tuple qualifies -- the construction has a symmetry group and the setup's own randomness is not privileged. The encrypted message falls out of the bottom-right entry of M^(0) and is reported, so a qualifying submission has also decrypted the ciphertext. THIS VERIFIER DECIDES ONE ARITHMETIC IDENTITY OVER ONE INSTANCE. It does not decide that AADP is broken in general, that an approach is novel, or that a structural observation is interesting -- alloc-init's own bounty routes those to a human committee, and no verifier can settle them. This objective is NOT alloc-init's bounty and pays none of their money; claiming their prize means emailing them under their rules. See examples/aadp-witness-encryption/README.md.",
+  "verifier": {
+    "checker": "examples/aadp-witness-encryption/checkers/full_recovery.py",
+    "checker_sha256": "a9a1ba88858664cfee9927ac79907f31a8c8578e4e241513964f79c7e2e77a2f",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}
