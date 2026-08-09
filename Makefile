@@ -59,7 +59,7 @@ CLIENT ?= claude
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp mcp-setup p2p seed serve demo ratchet identity interop differential fuzz mcp-smoke serve-smoke \
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
@@ -78,6 +78,7 @@ help:
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
+	  '  make shard-demo          Six holders, one shard each, one of them lying.' \
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
 	  '' \
@@ -175,6 +176,9 @@ demo: build
 ratchet: build
 	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/ratchet-demo.sh
 
+shard-demo: build
+	RUST_BIN="$(abspath $(CLI))" ./scripts/shard-demo.sh
+
 differential: build
 	./scripts/differential.sh
 
@@ -222,4 +226,4 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy demo ratchet identity interop differential fuzz mcp-smoke serve-smoke tla
+check: test fmt clippy demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke tla
