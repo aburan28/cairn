@@ -163,6 +163,13 @@ because each buys a weaker guarantee than those above:
   hardware vendor* rather than a proof. Record it as one.
 - **zkML.** Cryptographic, and in 2026 running 30 seconds to several minutes per
   inference. Fine for high-stakes settlement, too slow for the hot path.
+- **A proof-carrying tier** — a verdict that arrives with a succinct proof the
+  checker accepted, so a node verifies in milliseconds instead of re-running.
+  The break-even is arithmetic rather than taste: the proving overhead *is* the
+  number of independently verifying nodes it takes to pay for itself, and this
+  network has one. [design/zk-verification.md](design/zk-verification.md) works
+  it out, including the reason a new tier of any kind is a coordinated upgrade
+  rather than an additive change.
 
 ## Sandboxing
 

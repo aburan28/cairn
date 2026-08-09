@@ -256,6 +256,10 @@ no longer implies a published result.
 
 `sealed` is honest about its cost: without revealing the artifact, the only way
 to pay for it is a zero-knowledge proof that the pinned verifier accepts it.
+[design/zk-verification.md](design/zk-verification.md) §3 carries the rest of
+the price, including one consequence that is not obvious: nobody can build on an
+artifact they cannot see, so a sealed claim is a permanent leaf in the citation
+graph and earns direct reward only, never citation income.
 That is feasible for simple arithmetic certificate checkers and infeasible today
 for a Lean kernel or an arbitrary evaluator. The class exists in the schema so
 the limitation is explicit rather than discovered later.
