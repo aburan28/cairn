@@ -176,6 +176,59 @@ resistance. Grinding for a seat does cost a McEliece keypair — the draw ranks 
 the transport id, which is the hash of one — and a constant factor is not a
 defence.
 
+### What a sealed commitment costs the log, and why it stays inline
+
+Measured rather than estimated, and written down because the number is
+surprising and the decision behind it was deliberate.
+
+A sealed commitment record, with the three default KEM suites and five seats:
+
+| part | bytes | share of the record |
+|---|---|---|
+| payload ciphertext | 272 | 0.5% |
+| **five sealed shares** | **57,600** | **99.5%** |
+| **record total** | **57,872** | |
+
+**The hybrid caused this.** A share carries one KEM ciphertext per suite, and
+`ml-kem-768` plus `hqc-128` are 1,088 and 4,433 bytes against Classic
+McEliece's 96 — so a share went from 403 bytes to 11,520, and the record from
+2,287 to 57,872. Twenty-five times, for the property in `p2p.md` that a bundle
+is as strong as its *strongest* leg. That is the trade, and it is worth it, but
+it is not free and it is not visible from the code.
+
+**And the shares are single-use.** After the reveal, nothing reads them again:
+`open_sealed` and `pending_sealed_reveals` use the envelope before the reveal,
+and `audit` only checks that one *exists*, never its contents. So the log
+carries 57,600 bytes forever, replicated to every node, for bytes that five
+parties read once each in one epoch.
+
+At one sealed submission per ten-minute epoch that is **~3 GB per node per
+year**; at one per minute, ~30 GB.
+
+Three shapes were considered:
+
+| | record | reveal needs |
+|---|---|---|
+| **shares inline** (built) | 57,872 B | the log, and nothing else |
+| shares behind a Merkle root | 352 B | the log **and** the blob store |
+| McEliece leg inline, the rest behind a root | 2,367 B | the log, degraded to the mandatory leg |
+
+**Inline was chosen, and the reason is §1.** The whole feature exists so that a
+submitter who is seized, blocked or detained after commit is still paid — which
+requires that opening their submission need nothing they, or anyone, has to
+still be serving. Moving shares off-log puts that behind content addressing,
+and `p2p.md` is explicit that content addressing makes withholding *detectable,
+not hard*: a submission whose shares nobody replicated before the submitter
+vanished is a submission that stalls. That is the exact failure sealing was
+built to remove, reintroduced one layer down to save disk.
+
+What would change the answer is **adoption**, not size. At Stage 0 volumes 3 GB
+a year is unremarkable. If sealing becomes the default rather than the
+exception, the third row above is the one to build: it keeps the reveal
+possible from the log alone — losing the blob store costs *strength*, dropping
+the bundle to its McEliece leg, rather than costing *liveness* — and it takes
+96% of the saving.
+
 ## 3. Unlinkability, and why it fights attribution
 
 Encryption hides *what*. Against a state that wants to know **who is working on
