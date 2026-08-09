@@ -1,0 +1,29 @@
+{
+  "artifact_schema": {
+    "description": "The discrete logarithm, as 64 lowercase hex characters.",
+    "example": {
+      "k": "000000000000000000000000000000000000000000000000001a2b3c4d5e6f1234"
+    },
+    "properties": {
+      "k": {
+        "description": "k with k*G = Q, in [1, n), zero-padded to exactly 64 lowercase hex characters.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "k"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-09T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-ecdlp-nums-60",
+  "reward": 400000,
+  "statement": "Find the discrete logarithm on the 60-bit prime-order curve pinned in the checker: k with k*G = Q. Pollard rho costs about 2^30 group operations -- minutes to hours, depending on your implementation. The instance is nothing-up-my-sleeve: the prime, the curve, G and Q are all derived from a public seed string by SHA-256, and `tools/nums.py verify` re-derives them. No scalar was chosen at any step, so the answer is as unknown to whoever posted this as to anyone else -- unlike an instance whose poster picked k, which would be self-dealing. n is prime, so the group is cyclic and Q is guaranteed to have a logarithm. Submit {\"k\"} as 64 lowercase hex characters; k must lie in [1, n), because the logarithm is only unique modulo n and k+n would otherwise be a second settling answer to one problem.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/nums_60.py",
+    "checker_sha256": "dfe95493a79173e1371b5c9887129aa6f590a0ae0e53fe52cfefafd37811075a",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}
