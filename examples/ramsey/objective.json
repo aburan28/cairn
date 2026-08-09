@@ -1,0 +1,27 @@
+{
+  "artifact_schema": {
+    "description": "A 2-colouring of the complete graph on 17 vertices, as a symmetric 17x17 matrix of 0/1 colour bits with a zero diagonal. edges[i][j] is the colour of the edge between i and j.",
+    "example": {
+      "edges": "a 17x17 array of 0/1, symmetric, zero on the diagonal"
+    },
+    "properties": {
+      "edges": {
+        "description": "17 rows of 17 integers, each 0 or 1. Must be symmetric with edges[i][i] = 0.",
+        "type": "array"
+      }
+    },
+    "required": ["edges"],
+    "type": "object"
+  },
+  "created_at": "2026-08-09T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-ramsey-r44-witness",
+  "reward": 250000,
+  "statement": "Exhibit a 2-colouring of the edges of K_17 containing no monochromatic K_4 in either colour. R(4,4) = 18, so 17 is the largest complete graph where this is possible and such a colouring exists -- this is a witness to a known bound, not an open question. All 2380 four-subsets are checked, so acceptance is a complete proof rather than a sample. Pass or fail: there is no score to push, which is the honest shape for a question answered by a witness instead of a frontier.",
+  "verifier": {
+    "checker": "examples/ramsey/checkers/no_mono_k4.py",
+    "checker_sha256": "2527f967caa9af1a0d3e376c695352e63ff405f34c42d74a9393b5cc79a336eb",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}
