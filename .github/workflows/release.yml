@@ -50,7 +50,13 @@ jobs:
           # --- macOS ----------------------------------------------------------
           - os: macos-latest        # Apple Silicon
             target: aarch64-apple-darwin
-          - os: macos-13            # the last Intel image
+          # `macos-15-intel`, not `macos-13`: the macos-13 image is retired, and
+          # a matrix leg pinned to a retired label does not fail -- it queues
+          # forever. On the dispatch that validated this matrix it sat 48
+          # minutes while the other five finished and went green, which is the
+          # one failure a `fail-fast: false` matrix is least able to tell you
+          # about: five successes and a spinner reads like a slow build.
+          - os: macos-15-intel      # Intel
             target: x86_64-apple-darwin
           #
           # No Windows target, and that is a decision rather than an oversight.
