@@ -2509,6 +2509,114 @@ impl Node {
         due.into_iter().collect()
     }
 
+    /// The epoch length each of this log's batches was written under.
+    ///
+    /// Returns `(seq, length)` per batch, recovered as `unix(ts) / epoch`.
+    ///
+    /// # Why a ratio and not a bound
+    ///
+    /// The obvious derivation is that a batch pins `floor(unix(ts) / L)` to its
+    /// own epoch, which would bound `L` from both sides exactly. **It does
+    /// not**, and assuming so makes this function reject every batch it is
+    /// given. A batch record's timestamp is when the batch was *written*, and
+    /// a batch settles an epoch that has already closed and then waited out
+    /// [`FINALITY_EPOCHS`] -- so its timestamp is always in a strictly later
+    /// epoch than the one it names. The first version of this check derived the
+    /// two-sided bound, produced an empty range for every batch in a real
+    /// damaged log, and silently reported nothing.
+    ///
+    /// The ratio survives that offset. Writing `ts = L * epoch + r`, the
+    /// recovered value is `L + r/epoch`, and `r` spans only the few epochs
+    /// between an epoch closing and its batch being drained. Epoch numbers are
+    /// wall-clock seconds divided by the length -- millions, at any length
+    /// worth using -- so `r/epoch` truncates away and the division returns `L`
+    /// exactly. Integer division throughout: this feeds a message an operator
+    /// acts on, and floats have no place near a number two implementations
+    /// must agree on.
+    ///
+    /// A batch this cannot place is skipped rather than guessed at. Epoch zero
+    /// makes the division undefined, and an unreadable timestamp is already
+    /// reported by its own check; inventing a length from either would let one
+    /// bad record speak for the whole log.
+    fn batch_epoch_lengths(&self) -> Vec<(u64, u64)> {
+        self.ledger
+            .entries_of_kind(BATCH)
+            .into_iter()
+            .filter_map(|entry| {
+                let epoch = entry.payload.get("epoch").and_then(Value::as_u64)?;
+                if epoch == 0 {
+                    return None;
+                }
+                let seconds = crate::time::parse_rfc3339(&entry.ts)
+                    .filter(|value| *value >= 0)
+                    .map(|value| value as u64)?;
+                let length = seconds / epoch;
+                if length == 0 {
+                    return None;
+                }
+                Some((entry.seq, length))
+            })
+            .collect()
+    }
+
+    /// What this log says about its own epoch length, as an audit note.
+    ///
+    /// Three outcomes, and the third is the one that did not exist before:
+    ///
+    /// - **Silent.** The log is self-consistent and the reader is holding it at
+    ///   a length inside the feasible range. The ordinary case, and it must not
+    ///   be noisy.
+    /// - **Recoverable.** One length explains every batch and it is not the one
+    ///   in force. Nothing is wrong with the log; the reader has it at the
+    ///   wrong length, and the note names the right one.
+    /// - **Mixed.** No single length explains every batch, so no reader will
+    ///   ever re-derive all of it. That is damage rather than misconfiguration,
+    ///   and choosing a better `PROOFWORK_EPOCH_SECONDS` cannot fix it. The
+    ///   note says where the log splits, because "this log is broken" without a
+    ///   location is not something anyone can act on.
+    fn epoch_length_report(&self) -> Vec<String> {
+        let lengths = self.batch_epoch_lengths();
+        if lengths.is_empty() {
+            return Vec::new();
+        }
+
+        let mut groups: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        for (seq, length) in &lengths {
+            groups.entry(*length).or_default().push(*seq);
+        }
+
+        if groups.len() == 1 {
+            let written_at = *groups.keys().next().unwrap_or(&0);
+            let in_force = epoch_seconds();
+            if written_at == in_force {
+                return Vec::new();
+            }
+            return vec![format!(
+                "note: every batch in this log was written with an epoch length of \
+                 {written_at}, and this audit used {in_force}. That is a reader setting, not \
+                 evidence about the operator -- epochs are derived from record timestamps and \
+                 never stored, so a log built by a demo script audits as thoroughly broken under \
+                 the default. Re-run with PROOFWORK_EPOCH_SECONDS={written_at}."
+            )];
+        }
+
+        let described: Vec<String> = groups
+            .iter()
+            .map(|(length, seqs)| {
+                let list: Vec<String> = seqs.iter().map(u64::to_string).collect();
+                format!("entries {} at {length}s", list.join(","))
+            })
+            .collect();
+        vec![format!(
+            "note: this log was written under MORE THAN ONE epoch length -- {}. No single value \
+             of PROOFWORK_EPOCH_SECONDS re-derives all of its batches, so choosing a better one \
+             will not fix it and no reader can independently re-derive its whole settlement \
+             history. This happens when a demo or a test is pointed at a log that is also used \
+             for real settlement.",
+            described.join("; ")
+        )]
+    }
+
     /// Epochs holding accepted claims that can never settle, because a later
     /// epoch settled first.
     ///
@@ -3682,29 +3790,24 @@ impl Node {
             }
         }
 
-        // Every batch fault at once usually means the auditor and the writer
-        // disagree about how long an epoch is, not that anybody was paid out
-        // of turn. Epochs are derived from timestamps and never stored, so a
-        // log written under `PROOFWORK_EPOCH_SECONDS=1` audits as thoroughly
-        // broken under the default 600 -- both implementations agree, and both
-        // are right. Worth one line, because the alarming version of this
-        // message is the first thing a new contributor sees if the operator
-        // published a log built by a demo script.
-        let batches = self.ledger.entries_of_kind(BATCH).len();
-        let faulted: BTreeSet<&str> = problems
-            .iter()
-            .filter(|problem| problem.starts_with("batch for epoch "))
-            .filter_map(|problem| problem.split_whitespace().nth(3))
-            .collect();
-        if batches > 0 && faulted.len() == batches {
-            problems.push(format!(
-                "note: every batch in this log looks wrong, which is more often a mismatched \
-                 epoch length than a dishonest operator. Epochs are derived from record \
-                 timestamps and never stored, so a log written with a different \
-                 PROOFWORK_EPOCH_SECONDS (this audit used {}) cannot be re-derived without it.",
-                epoch_seconds()
-            ));
-        }
+        // Batch faults are usually the auditor and the writer disagreeing about
+        // how long an epoch is, not anybody being paid out of turn. Epochs are
+        // derived from timestamps and never stored, so a log written under
+        // `PROOFWORK_EPOCH_SECONDS=1` audits as thoroughly broken under the
+        // default 600 -- both implementations agree, and both are right.
+        //
+        // This used to be a *guess*: printed only when every batch faulted, and
+        // hedged as "more often a mismatched epoch length than a dishonest
+        // operator". Two things were wrong with it, and a real damaged log
+        // showed both. It could not fire when only *some* batches faulted --
+        // which is exactly what a log written under two lengths looks like, so
+        // the case most needing an explanation got none. And it could not tell
+        // a recoverable mistake (re-run with the right length) from permanent
+        // damage (no length re-derives this log), so it hedged over the
+        // distinction that decides whether the operator has a problem at all.
+        //
+        // Neither has to be guessed. See `epoch_length_report`.
+        problems.extend(self.epoch_length_report());
 
         // Claims that can no longer be paid because a later epoch settled
         // first. Not a fault in this log -- every batch here is correctly
@@ -5295,14 +5398,18 @@ mod tests {
     }
 
     #[test]
-    fn an_audit_where_every_batch_faults_suggests_the_epoch_length() {
+    fn an_audit_at_the_wrong_epoch_length_names_the_right_one() {
         // Found while building the published log: a log written under
         // PROOFWORK_EPOCH_SECONDS=1 audits as thoroughly broken under the
         // default 600, in both implementations, and both are right -- epochs
-        // are derived, never stored. Without the hint a contributor's first
+        // are derived, never stored. Without the note a contributor's first
         // `proofwork audit` on a demo-built log says the operator paid people
         // out of turn, which is the worst possible false accusation for this
         // project to make.
+        //
+        // The note used to guess. It now recovers the length from the log and
+        // names it, which is the difference between "something is wrong" and
+        // "run this command".
         let dir = TempDir::new("audit-epoch-hint");
         let mut node = node(&dir);
         let objective = match replay_objective(1000) {
@@ -5321,19 +5428,70 @@ mod tests {
             let _guard = EpochGuard::set("7");
             node.audit(false)
         };
+        let note = hinted
+            .iter()
+            .find(|problem| problem.contains("epoch length"))
+            .unwrap_or_else(|| panic!("no note among {hinted:?}"));
+        assert!(note.contains("this audit used 7"), "{note}");
         assert!(
-            hinted.iter().any(|p| p.contains("mismatched epoch length")),
-            "no hint among {hinted:?}"
+            note.contains(&format!(
+                "PROOFWORK_EPOCH_SECONDS={}",
+                crate::partition::EPOCH_SECONDS
+            )),
+            "the note must name the length that actually works: {note}"
         );
 
-        // And the hint must not fire when only *some* batches are wrong --
-        // that really is a claim about the operator.
+        // And it must not fire when the reader already has it right.
         assert!(
             !node
                 .audit(false)
                 .iter()
-                .any(|p| p.contains("mismatched epoch length")),
-            "the hint fired on a clean log"
+                .any(|problem| problem.contains("epoch length")),
+            "the note fired on a log being read correctly"
+        );
+    }
+
+    #[test]
+    fn a_log_written_under_two_epoch_lengths_is_named_as_unrecoverable() {
+        // The case the old hint could not reach, and the one that matters: it
+        // only fired when *every* batch faulted, so a log written partly at one
+        // length and partly at another -- a demo pointed at a live log -- got
+        // no explanation at all. It is also the case where the advice differs:
+        // there is no epoch length to re-run with, because none re-derives the
+        // whole log.
+        let dir = TempDir::new("audit-epoch-mixed");
+        let mut node = node(&dir);
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        node.post_objective(&objective, TS).expect("post");
+        submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+
+        // A second batch whose timestamp puts it at a wildly different length:
+        // epoch numbers are wall-clock seconds over the length, so naming a
+        // huge epoch at the same instant is what a one-second log looks like.
+        let seconds = crate::time::parse_rfc3339(&stamp(settle_offset())).expect("parses") as u64;
+        node.ledger_mut()
+            .append(
+                BATCH,
+                Value::object([
+                    ("epoch", Value::Int(i128::from(seconds - 1))),
+                    ("anchor", Value::string("")),
+                    ("claims", Value::Array(vec![Value::string("sha256:x")])),
+                ]),
+                &stamp(settle_offset()),
+            )
+            .expect("append");
+
+        let problems = node.audit(false);
+        let note = problems
+            .iter()
+            .find(|problem| problem.contains("MORE THAN ONE"))
+            .unwrap_or_else(|| panic!("no mixed-length note among {problems:?}"));
+        assert!(
+            note.contains("will not fix it"),
+            "the note must say choosing a length cannot recover this: {note}"
         );
     }
 
