@@ -32,6 +32,16 @@ default = []
 # Parsing untrusted JSON only. Canonical *output* is written by this crate's own
 # encoder -- see src/canonical.rs for why the two are deliberately separate.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+# RustCrypto crates version in lockstep through their shared `digest`,
+# `crypto-common`, `aead` and `rand_core` traits, so these five move together or
+# not at all. Bumping one alone type-errors at the seam rather than failing to
+# resolve: `hmac 0.13` wants `digest 0.11` and `sha2 0.10` implements `digest
+# 0.10`, so `Hmac<Sha256>` stops satisfying `CoreProxy`; `x25519-dalek 3` and
+# `chacha20poly1305 0.11` do the same through `rand_core` and `aead`. Three such
+# bumps landed separately and left `main` uncompilable in four files.
+#
+# Raising any of them means raising the set, in one reviewed change, with the
+# call sites updated -- see the `ignore` entries in .github/dependabot.yml.
 sha2 = "0.10"
 hmac = "0.12"
 

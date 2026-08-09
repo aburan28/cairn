@@ -1,0 +1,114 @@
+/**
+ * A reader for one node's objectives.
+ *
+ * Mirrors the shape `GET /objectives` returns (see `src/serve.rs::objectives`).
+ * Like `chain.ts`, nothing here re-derives anything: the node decided what is
+ * settled and where each frontier stands, and a second opinion computed in
+ * TypeScript would be a third place for the rule to drift.
+ *
+ * The one thing this file *does* compute is how far a ratchet has travelled,
+ * and that is arithmetic on two numbers the node already published rather than
+ * a judgement about them.
+ */
+
+/** Where a ratcheted objective currently stands. Absent until the first claim. */
+export type Frontier = {
+  claim_id: string;
+  /** The submitter's public key, hex. */
+  holder: string;
+  /** The claim any improvement must cite. Equal to `claim_id` today. */
+  must_cite: string;
+  paid_cumulative: number;
+  pool_remaining: number;
+  score: number;
+};
+
+export type Objective = {
+  id: string;
+  goal: string;
+  funder: string;
+  reward: number;
+  statement: string;
+  settled: boolean;
+  /** "certificate" for pass/fail, "evaluator" for a scored ratchet. */
+  verifier_kind: string;
+  frontier?: Frontier;
+};
+
+export type Objectives = { objectives: Objective[] };
+
+export const NODE_URL =
+  process.env.NEXT_PUBLIC_PROOFWORK_NODE ?? "http://127.0.0.1:8080";
+
+export class NodeUnreachable extends Error {}
+
+/**
+ * Fetch the objectives.
+ *
+ * `cache: "no-store"` for the reason `chain.ts` gives: a node that just settled
+ * has moved a frontier, and a cached answer would show a pool that is no longer
+ * there — which is the number somebody is deciding whether to work against.
+ */
+export async function fetchObjectives(
+  base: string = NODE_URL,
+): Promise<Objective[]> {
+  let response: Response;
+  try {
+    response = await fetch(`${base}/objectives`, { cache: "no-store" });
+  } catch (cause) {
+    throw new NodeUnreachable(
+      `No node answered at ${base}. Start one with \`make serve\`, or set ` +
+        `NEXT_PUBLIC_PROOFWORK_NODE to where yours is listening.`,
+      { cause },
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`${base}/objectives answered ${response.status}.`);
+  }
+  const body = (await response.json()) as Objectives;
+  return body.objectives ?? [];
+}
+
+/**
+ * How much of the funded pool is still payable, as a fraction in [0, 1].
+ *
+ * `pool_remaining` against `reward` rather than against `paid_cumulative +
+ * pool_remaining`: the reward is what was funded, and if those two ever
+ * disagree the objective has paid out something the funding did not cover,
+ * which is worth seeing rather than normalising away.
+ */
+export function poolFraction(objective: Objective): number | null {
+  if (!objective.frontier || objective.reward <= 0) return null;
+  const fraction = objective.frontier.pool_remaining / objective.reward;
+  return Math.max(0, Math.min(1, fraction));
+}
+
+/**
+ * Whether the node published a pool that its own reward cannot account for.
+ *
+ * Rendered rather than hidden. Everything else on the page is the node's word
+ * taken at face value; this is the one arithmetic check the page can do for
+ * itself, and the same instinct as `firstBrokenLink` in `chain.ts`.
+ */
+export function overspent(objective: Objective): boolean {
+  if (!objective.frontier) return false;
+  const { paid_cumulative, pool_remaining } = objective.frontier;
+  return paid_cumulative + pool_remaining > objective.reward;
+}
+
+/** A hash or key, short enough to scan a column of them. */
+export function short(value: string): string {
+  const bare = value.startsWith("sha256:") ? value.slice(7) : value;
+  return bare.length <= 12 ? bare : `${bare.slice(0, 8)}…${bare.slice(-4)}`;
+}
+
+/**
+ * Integer amounts, grouped.
+ *
+ * No currency symbol and no decimal point: these are integer units, and money
+ * in this system is `u64` with checked arithmetic precisely so that nothing
+ * renders a fraction of one.
+ */
+export function amount(value: number): string {
+  return value.toLocaleString("en-US");
+}
