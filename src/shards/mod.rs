@@ -343,7 +343,7 @@ impl Coding {
     }
 
     /// How many losses this tolerates: exactly `parity`, by the MDS property of
-    /// the Cauchy construction. See [`generator_row`].
+    /// the Cauchy construction (see the generator-row construction below).
     pub fn tolerates(&self) -> u8 {
         self.parity
     }
@@ -480,7 +480,7 @@ impl Layout {
 }
 
 /// A chunk length for a blob of this size: the smallest legal power of two that
-/// keeps a shard under [`TARGET_CHUNKS_PER_SHARD`] chunks.
+/// keeps a shard under `TARGET_CHUNKS_PER_SHARD` chunks.
 ///
 /// A convenience for `proofwork shard plan`, never a rule. Two nodes choosing
 /// differently produce different manifests for one blob, which is fine — a

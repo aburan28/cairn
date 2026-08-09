@@ -149,9 +149,9 @@ const MAX_COMMITTEE: usize = 255;
 
 /// A 32-byte secret that wipes itself on drop and never prints itself.
 ///
-/// Used for the content key, for derived share keys, and as the return type of
-/// [`CommitteeKey::to_bytes`]. Handing callers a bare `[u8; 32]` would silently
-/// move the wiping obligation onto code that has no reason to remember it.
+/// Used for the content key and for derived share keys. Handing callers a
+/// bare `[u8; 32]` would silently move the wiping obligation onto code that
+/// has no reason to remember it.
 pub struct Secret32([u8; KEY_LEN]);
 
 impl Secret32 {

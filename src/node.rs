@@ -1510,7 +1510,7 @@ impl Node {
     /// cost and **not a defence**: it is a constant factor against an attacker
     /// willing to spend, exactly as `docs/p2p.md` says of grinding a node id.
     ///
-    /// **`positions`** so the answer is stable. See [`Node::peers_within`].
+    /// **`positions`** so the answer is stable. See `Node::peers_within`.
     ///
     /// Seats are numbered `1..=n` in draw order and that number is the
     /// envelope's routing index, so a member knows which sealed share is
