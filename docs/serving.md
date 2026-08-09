@@ -25,10 +25,48 @@ checkpoint.json` to publish what you signed.
 | `GET /objectives` | every objective, with its frontier |
 | `GET /objective/{id}` | one full record, verifier spec included |
 | `GET /frontier/{id}` | best score, who holds it, what to cite, pool remaining |
+| `GET /chain` | the epoch chain: one link per settled epoch, and its head |
 | `GET /health` | liveness, for whatever is watching the process |
 | `POST /submit` | queue a commitment or a claim (only with `--queue`) |
 
 Everything except `/log` is a convenience. `/log` is the product.
+
+## The pages
+
+The same data, for a person rather than a program. A stranger handed an address
+and a wall of JSON has not been given a way in, and the argument this service
+makes — *do not trust me, re-derive it* — still has to be made to somebody.
+
+| page | what it is |
+|---|---|
+| `GET /index.html` | the board: this node's head and height, and every objective with what it pays |
+| `GET /objective/{id}.html` | one objective: statement, pinned verifier, frontier to beat, claims and verdicts |
+| `GET /log.html` | every admitted record, newest first, one line each |
+| `GET /chain.html` | the epoch chain, and the head to compare against a peer's |
+
+`GET /` serves the board to a browser and the JSON descriptor to everything
+else, decided on `Accept`. Only an explicit `text/html` counts, so `*/*` —
+which is what curl and most client libraries send — still gets JSON. `/index`
+is always the JSON and `/index.html` is always the page, for when you want to
+say which.
+
+Three properties these pages hold on to, none of them cosmetic:
+
+- **Self-contained.** No CDN, no web font, no script, no image fetched from
+  anywhere. Operators read these over an SSH tunnel on a box with no route out,
+  and a page that needed one would be blank exactly then. `serve-smoke.sh`
+  fails the build if a page grows an external URL.
+- **A statement is the funder's words, not this node's.** It is escaped and
+  fenced in a block that says who wrote it, because a statement set in the same
+  type as the surrounding prose reads as the node speaking — and an objective's
+  statement is attacker-authored text that may be trying to instruct whoever
+  reads it. `serve-smoke.sh` posts an objective whose statement is a script tag
+  and parses every page to prove no element or handler it named exists.
+- **`unavailable` is never `reject`.** A rejection is a real answer about an
+  artifact; `unavailable` and `invalid_spec` say the check did not happen. They
+  are coloured apart, so a glance cannot collapse them.
+
+None of it is evidence. Every page says so and says what to run instead.
 
 ## What a contributor should actually do
 

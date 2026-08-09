@@ -382,6 +382,22 @@ struct Request {
     path: String,
     query: BTreeMap<String, String>,
     length: u64,
+    /// Verbatim `Accept`, used only to decide whether `/` answers with the
+    /// board or with the JSON descriptor. Never used to pick *content* —
+    /// every path serves one representation of one thing.
+    accept: String,
+}
+
+/// Whether this request came from something that would rather read a page.
+///
+/// Deliberately strict: an explicit `text/html` in `Accept`, and nothing else.
+/// `*/*` — which is what curl and most client libraries send — keeps getting
+/// JSON, so no existing caller changes behaviour on the day this shipped.
+fn wants_html(accept: &str) -> bool {
+    accept
+        .split(',')
+        .filter_map(|part| part.split(';').next())
+        .any(|kind| kind.trim().eq_ignore_ascii_case("text/html"))
 }
 
 /// Serve until the process is killed.
@@ -462,13 +478,36 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     };
 
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") | ("GET", "/index") => index(stream, serving),
+        // A browser asking for `/` gets the board; everything else gets the
+        // JSON service descriptor it has always got. Negotiated rather than
+        // moved, because `/` is an API contract some client is already
+        // parsing, and a stranger typing an address into a browser should not
+        // have to know that the human view lives somewhere else.
+        ("GET", "/") => {
+            if wants_html(&request.accept) {
+                board(stream, serving)
+            } else {
+                index(stream, serving)
+            }
+        }
+        // The two explicit names always mean what they say, whatever the
+        // browser asked for. Without them the page has no honest link *to* the
+        // JSON -- a nav pointing at `/` would negotiate straight back to HTML
+        // and read as a broken link.
+        ("GET", "/index") => index(stream, serving),
+        ("GET", "/index.html") => board(stream, serving),
         ("GET", "/health") => respond(stream, 200, "text/plain", b"ok\n"),
         ("GET", "/objectives") => objectives(stream, serving),
         ("GET", "/log") => log(stream, serving),
+        ("GET", "/log.html") => log_page(stream, serving),
         ("GET", "/checkpoint") => checkpoint(stream, serving),
         ("GET", "/chain") => chain(stream, serving),
         ("GET", "/chain.html") => chain_page(stream, serving),
+        // `.html` before the bare id, so an id is never mistaken for a suffix.
+        ("GET", path) if path.starts_with("/objective/") && path.ends_with(".html") => {
+            let rest = &path["/objective/".len()..];
+            objective_page(stream, serving, &rest[..rest.len() - ".html".len()])
+        }
         ("GET", path) if path.starts_with("/objective/") => {
             one_objective(stream, serving, &path["/objective/".len()..])
         }
@@ -523,6 +562,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     }
 
     let mut length = 0u64;
+    let mut accept = String::new();
     loop {
         let mut header = String::new();
         let read = reader
@@ -534,6 +574,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         if let Some((name, value)) = header.split_once(':') {
             let name = name.trim().to_ascii_lowercase();
             let value = value.trim();
+            if name == "accept" {
+                accept = value.to_string();
+            }
             if name == "content-length" {
                 length = value
                     .parse::<u64>()
@@ -553,6 +596,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         path,
         query,
         length,
+        accept,
     })
 }
 
@@ -605,6 +649,9 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /checkpoint"),
                 Value::string("GET /chain"),
                 Value::string("GET /chain.html"),
+                Value::string("GET /index.html  (the board; `/` serves it to browsers)"),
+                Value::string("GET /log.html"),
+                Value::string("GET /objective/{id}.html"),
                 Value::string("GET /health"),
                 Value::string(if writable {
                     "POST /submit"
@@ -813,11 +860,636 @@ fn chain(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     )
 }
 
-/// The same chain, as a page a human can read.
+// ---------------------------------------------------------------------------
+// The human view
+// ---------------------------------------------------------------------------
+//
+// Four pages: the board, one objective, the log, the chain. They exist because
+// the argument this service makes -- "do not trust me, re-derive it" -- still
+// has to be made *to somebody*, and a stranger handed an address and a wall of
+// JSON has not been given a way in. Everything here is derived from the same
+// log `GET /log` hands over verbatim; nothing is stored, and no page is
+// evidence of anything. Every page says so, and says what to run instead.
+//
+// Three rules these pages keep, all of them load-bearing rather than cosmetic:
+//
+// * **Self-contained.** No CDN, no web font, no script, no image fetched from
+//   anywhere. An operator reads this over an SSH tunnel on a box with no route
+//   out, and a page that needed one would be blank exactly then.
+// * **A statement is untrusted text.** It was written by whoever funded the
+//   objective and it may be trying to instruct whoever reads it. It is escaped,
+//   and it is rendered in a block that says who wrote it -- because a statement
+//   set in the same type as this node's own prose reads as this node's words.
+// * **`unavailable` is never `reject`.** A rejection is a real answer about an
+//   artifact; `unavailable` and `invalid_spec` say the check did not happen.
+//   They are coloured apart, so a glance cannot collapse them.
+
+/// Which page is being served, so the nav can mark it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Nav {
+    Board,
+    Log,
+    Chain,
+    /// A page reached from the board rather than from the nav.
+    Detail,
+}
+
+/// The shared chrome: one stylesheet, one nav, one footer, four pages.
 ///
-/// Self-contained: no CDN, no fonts, no scripts fetched from anywhere. A node
-/// operator is often looking at this over an SSH tunnel on a box with no route
-/// to the internet, and a page that needs one would be blank exactly then.
+/// Built as one function rather than a template per page so the four cannot
+/// drift into four different-looking things. `heading` and `prose` are the
+/// only per-page chrome; `body` is already-escaped markup.
+fn page(here: Nav, heading: &str, prose: &str, body: &str) -> String {
+    let tab = |target: &str, label: &str, is: Nav| {
+        if is == here {
+            format!("<b>{label}</b>")
+        } else {
+            format!("<a href=\"{target}\">{label}</a>")
+        }
+    };
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>proofwork — {heading}</title>
+<style>
+:root {{ color-scheme: light dark; --fg:#111; --dim:#666; --bg:#fff; --line:#d8d8d8;
+  --accent:#0b6; --warn:#a60; --panel:#00000006; }}
+@media (prefers-color-scheme: dark) {{
+  :root {{ --fg:#e6e6e6; --dim:#999; --bg:#111; --line:#333;
+    --accent:#3d8; --warn:#db2; --panel:#ffffff08; }}
+}}
+body {{ background:var(--bg); color:var(--fg); margin:0 auto; padding:2rem 1.25rem; max-width:60rem;
+  font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; }}
+h1 {{ font-size:1.15rem; margin:0 0 .35rem; }}
+h2 {{ font-size:.95rem; margin:2rem 0 .6rem; font-weight:600; }}
+p {{ color:var(--dim); margin:.35rem 0 1.25rem; max-width:48rem; }}
+nav {{ margin:0 0 1.5rem; padding-bottom:.6rem; border-bottom:1px solid var(--line);
+  display:flex; gap:1.25rem; flex-wrap:wrap; }}
+nav a {{ color:var(--dim); text-decoration:none; }}
+nav a:hover {{ color:var(--fg); }}
+nav b {{ color:var(--accent); font-weight:600; }}
+.head {{ border:1px solid var(--line); border-left:3px solid var(--accent);
+  padding:.75rem .9rem; margin-bottom:1.5rem; overflow-wrap:anywhere; }}
+.head b {{ color:var(--dim); font-weight:400; display:block; font-size:.85em; }}
+.wrap {{ overflow-x:auto; }}
+table {{ border-collapse:collapse; width:100%; }}
+th,td {{ text-align:left; padding:.5rem .6rem; border-bottom:1px solid var(--line);
+  vertical-align:top; overflow-wrap:anywhere; }}
+th {{ color:var(--dim); font-weight:400; font-size:.85em; white-space:nowrap; }}
+td.num {{ text-align:right; white-space:nowrap; }}
+/* Hashes need `overflow-wrap:anywhere` above; short words do not, and inherit it
+   as "certifica / te". Opt those columns back out rather than dropping it. */
+td.tight {{ overflow-wrap:normal; word-break:keep-all; }}
+.epoch {{ white-space:nowrap; }}
+.link {{ color:var(--accent); }}
+.dim {{ color:var(--dim); }}
+.warn {{ color:var(--warn); }}
+.claim {{ font-size:.9em; }}
+.empty {{ color:var(--dim); text-align:center; padding:2rem; }}
+a {{ color:inherit; }}
+/* An objective's statement was written by whoever funded it. Fenced and
+   labelled, so it cannot be mistaken for this node speaking. */
+.untrusted {{ border:1px solid var(--line); border-left:3px solid var(--warn);
+  background:var(--panel); padding:.75rem .9rem; margin:.5rem 0 1.25rem; }}
+.untrusted b {{ color:var(--warn); font-weight:400; display:block; font-size:.85em;
+  margin-bottom:.4rem; }}
+.untrusted div {{ white-space:pre-wrap; overflow-wrap:anywhere; }}
+.tag {{ font-size:.8em; border:1px solid var(--line); border-radius:2px;
+  padding:.05rem .35rem; color:var(--dim); white-space:nowrap; }}
+.tag.open {{ color:var(--accent); border-color:currentColor; }}
+pre {{ background:var(--panel); border:1px solid var(--line); padding:.75rem .9rem;
+  overflow-x:auto; white-space:pre-wrap; overflow-wrap:anywhere; margin:.5rem 0 1.25rem; }}
+dl {{ display:grid; grid-template-columns:max-content 1fr; gap:.35rem .9rem; margin:0 0 1.25rem; }}
+dt {{ color:var(--dim); font-size:.85em; }}
+dd {{ margin:0; overflow-wrap:anywhere; }}
+footer {{ margin-top:2.5rem; padding-top:.9rem; border-top:1px solid var(--line);
+  color:var(--dim); }}
+</style></head><body>
+<nav>{board} {log} {chain} <span class="dim">·</span>
+<a href="/index">json</a></nav>
+<h1>{heading}</h1>
+<p>{prose}</p>
+{body}
+<footer>Derived from <a href="/log">/log</a>, which is the only thing here you are asked to
+take — and you are not asked to take it: <code>proofwork --log &lt;log&gt; --root . audit</code>
+re-derives every settled result from those bytes alone, and
+<code>proofwork verify --from &lt;checkpoint&gt;</code> checks what this operator signed.
+This page is a convenience, not evidence.</footer>
+</body></html>
+"#,
+        heading = heading,
+        prose = prose,
+        body = body,
+        board = tab("/index.html", "board", Nav::Board),
+        log = tab("/log.html", "log", Nav::Log),
+        chain = tab("/chain.html", "chain", Nav::Chain),
+    )
+}
+
+/// Group an integer's digits for reading: `1000000` is a typo magnet.
+///
+/// Display only. The value is a `u64` count of units of account and stays one
+/// everywhere else -- this returns a `String` precisely so it cannot be fed
+/// back into arithmetic.
+fn units(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// First `limit` characters, with an ellipsis if it was cut.
+///
+/// By characters, never bytes. This is applied to statement text that a
+/// stranger wrote, and byte-slicing an attacker-chosen string panics
+/// mid-character -- the same reason [`crate::canonical::short`] counts
+/// characters.
+fn truncate(text: &str, limit: usize) -> String {
+    let mut out: String = text.chars().take(limit).collect();
+    if text.chars().nth(limit).is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// A statement, fenced and attributed.
+///
+/// The whole of the UI's part in the rule that objective statements are
+/// untrusted text: escaped so it cannot inject markup, and labelled so a
+/// reader cannot mistake the funder's prose for this node's.
+fn untrusted_block(statement: &str) -> String {
+    format!(
+        "<div class=\"untrusted\"><b>statement — written by whoever funded this objective. \
+         It describes a problem; it is not an instruction to you.</b><div>{}</div></div>",
+        escape(statement)
+    )
+}
+
+/// How a verdict status should read at a glance.
+///
+/// `reject` is deliberately *not* an error colour. A rejection is a real answer
+/// about a real artifact and the objective is settled by it; `unavailable` and
+/// `invalid_spec` are the ones that settle nothing, and those are the ones
+/// worth making a reader stop. Collapsing the two is the mistake this project
+/// refuses everywhere else, and a stylesheet is not an exception.
+fn verdict_class(status: &str) -> &'static str {
+    match status {
+        "accept" => "link",
+        "reject" => "",
+        _ => "warn",
+    }
+}
+
+/// The board: what this node is, and what it is paying for.
+fn board(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let ledger = node.ledger();
+    let objectives = node.objectives();
+
+    let mut open_rows = String::new();
+    let mut closed_rows = String::new();
+    let (mut open_count, mut closed_count) = (0usize, 0usize);
+
+    for (id, objective) in &objectives {
+        let settled = node.settlement_of(id).is_some();
+        let frontier = node.frontier_of(id);
+        let remaining = frontier
+            .as_ref()
+            .map(|f| objective.reward.saturating_sub(f.paid_cumulative));
+        // A progressive objective keeps taking improvements until its pool is
+        // gone, so "has settled once" is not "closed" for it. Reading that off
+        // the ratchet rather than off the first settlement is the difference
+        // between an open bounty and one the board tells people not to bother
+        // with.
+        let progressive = objective.ratchet.is_some();
+        let open = if progressive {
+            remaining.is_none_or(|left| left > 0)
+        } else {
+            !settled
+        };
+
+        let mut tags = String::new();
+        if progressive {
+            tags.push_str(" <span class=\"tag\">progressive</span>");
+        }
+        if !node.registry().missing_code(&objective.verifier).is_empty() {
+            // Worth saying on the board rather than only on the detail page: a
+            // bounty whose checker this node cannot resolve cannot settle here,
+            // and somebody about to spend compute on it should know first.
+            tags.push_str(" <span class=\"tag warn\">pin unresolved</span>");
+        }
+
+        let progress = match (&frontier, remaining) {
+            (Some(f), Some(left)) => format!(
+                "<div class=\"claim dim\">best {} · {} of {} left</div>",
+                f.score,
+                units(left),
+                units(objective.reward)
+            ),
+            _ => String::new(),
+        };
+
+        let row = format!(
+            "<tr><td><a href=\"/objective/{id}.html\"><code class=\"link\">{short}</code></a>\
+             {tags}<div class=\"claim\">{statement}</div>{progress}</td>\
+             <td class=\"dim tight\">{kind}</td><td class=\"dim tight\">{funder}</td>\
+             <td class=\"num\">{reward}</td></tr>",
+            id = escape(id),
+            short = escape(&crate::canonical::short(id)),
+            tags = tags,
+            statement = escape(&truncate(&objective.statement, 150)),
+            progress = progress,
+            kind = escape(objective.verifier_kind().unwrap_or("?")),
+            funder = escape(&objective.funder),
+            reward = units(objective.reward),
+        );
+        if open {
+            open_count += 1;
+            open_rows.push_str(&row);
+        } else {
+            closed_count += 1;
+            closed_rows.push_str(&row);
+        }
+    }
+
+    if open_rows.is_empty() {
+        open_rows.push_str(
+            "<tr><td colspan=\"4\" class=\"empty\">Nothing open. \
+             <code>proofwork post &lt;objective.json&gt;</code> funds one.</td></tr>",
+        );
+    }
+
+    let table = |rows: &str| {
+        format!(
+            "<div class=\"wrap\"><table>\
+             <tr><th>objective</th><th>verifier</th><th>funder</th><th>reward</th></tr>\
+             {rows}</table></div>"
+        )
+    };
+
+    let closed_section = if closed_count == 0 {
+        String::new()
+    } else {
+        format!("<h2>closed — {closed_count}</h2>{}", table(&closed_rows))
+    };
+
+    let missing = node.missing_code();
+    let missing_note = if missing.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<div class=\"head\" style=\"border-left-color:var(--warn)\">\
+             <b>{} pinned file(s) do not resolve on this node</b>\
+             <span class=\"warn\">A claim against an objective whose checker is missing comes \
+             back <code>unavailable</code> here — which says nothing about the artifact. \
+             <code>proofwork blob need</code> lists them.</span></div>",
+            missing.len()
+        )
+    };
+
+    let body = format!(
+        "<div class=\"head\"><b>this node's log — height {height} · reading epochs as {epoch}s</b>\
+         <code class=\"link\">{head}</code>\
+         <div class=\"claim dim\">merkle root {root}</div>\
+         <div class=\"claim dim\">{checkpoint} · {writable}</div></div>\
+         {missing_note}\
+         <h2>open — {open_count}</h2>{open_table}{closed_section}",
+        height = ledger.len(),
+        epoch = crate::partition::epoch_seconds(),
+        head = escape(ledger.head().unwrap_or("— empty log")),
+        root = escape(&ledger.root().unwrap_or_else(|| "— empty log".to_string())),
+        checkpoint = if serving.checkpoint.is_some() {
+            "<a href=\"/checkpoint\">signed checkpoint published</a>"
+        } else {
+            "no checkpoint published — verify the chain directly"
+        },
+        writable = if serving.spool.is_some() {
+            "accepting submissions"
+        } else {
+            "read-only node"
+        },
+        missing_note = missing_note,
+        open_count = open_count,
+        open_table = table(&open_rows),
+        closed_section = closed_section,
+    );
+
+    let body = page(
+        Nav::Board,
+        "bounty board",
+        "Every objective this node has admitted, and what it pays. A reward is an integer \
+         unit of account in the settlement rules — Stage 0 has no token, no escrow and no \
+         transfer, so nobody is holding money against these numbers. \
+         Scores and rewards are integers everywhere: this network has no floats near \
+         anything that decides who was paid.",
+        &body,
+    );
+    respond(stream, 200, "text/html; charset=utf-8", body.as_bytes())
+}
+
+/// One objective, in enough detail to decide whether to work on it.
+fn objective_page(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let objectives = node.objectives();
+    let Some(objective) = objectives.get(id) else {
+        let body = page(
+            Nav::Detail,
+            "no such objective",
+            "This log holds no objective with that id. It may live on another node, or the id \
+             may be a typo — an objective's id is the hash of its own content, so a wrong \
+             character names a different objective rather than a missing one.",
+            "<p><a href=\"/index.html\">back to the board</a></p>",
+        );
+        return respond(stream, 404, "text/html; charset=utf-8", body.as_bytes());
+    };
+
+    // The verifier block as a table rather than as raw JSON: `kind` decides
+    // which fields mean anything, and the pins are the part a reader has to be
+    // able to check by eye against a file they hold.
+    let mut verifier_rows = String::new();
+    if let Some(map) = objective.verifier.as_object() {
+        for (key, value) in map {
+            let rendered = match value.as_str() {
+                Some(text) => escape(text),
+                None => escape(&value.canonical_string()),
+            };
+            verifier_rows.push_str(&format!(
+                "<tr><td class=\"dim\">{}</td><td>{}</td></tr>",
+                escape(key),
+                rendered
+            ));
+        }
+    }
+    let missing = node.registry().missing_code(&objective.verifier);
+    let pin_note = if missing.is_empty() {
+        "<div class=\"claim dim\">Every pinned file resolves on this node.</div>".to_string()
+    } else {
+        format!(
+            "<div class=\"claim warn\">{} pinned file(s) do not resolve here, so a claim \
+             against this objective comes back <code>unavailable</code> — which is not a \
+             rejection, and says nothing about any artifact.</div>",
+            missing.len()
+        )
+    };
+
+    let frontier_section = match node.frontier_of(id) {
+        Some(f) => format!(
+            "<h2>frontier</h2>\
+             <p>The claim to beat, and the one every submission must cite — improvement or \
+             not. Submitting without it is refused.</p>\
+             <dl><dt>best score</dt><dd>{score}</dd>\
+             <dt>held by</dt><dd>{holder}</dd>\
+             <dt>cite this</dt><dd><code class=\"link\">{claim}</code></dd>\
+             <dt>paid so far</dt><dd>{paid}</dd>\
+             <dt>pool left</dt><dd>{left}</dd></dl>",
+            score = f.score,
+            holder = escape(&f.holder),
+            claim = escape(&f.claim_id),
+            paid = units(f.paid_cumulative),
+            left = units(objective.reward.saturating_sub(f.paid_cumulative)),
+        ),
+        None => "<h2>frontier</h2><p>No frontier yet — nothing to cite, and the first \
+                 accepted claim sets it.</p>"
+            .to_string(),
+    };
+
+    // Claims against this objective, with the verdict the pinned verifier
+    // returned. Read out of the log rather than recomputed: this page is a
+    // view of what was recorded, and a second opinion here would be a second
+    // answer to a question the verifier already settled.
+    let mut claim_rows = String::new();
+    for entry in node.ledger().entries_of_kind("verdict") {
+        let payload = &entry.payload;
+        if payload.get("objective_id").and_then(Value::as_str) != Some(id) {
+            continue;
+        }
+        let claim_id = payload
+            .get("claim_id")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let verdict = payload.get("verdict");
+        let status = verdict
+            .and_then(|v| v.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let detail = verdict
+            .and_then(|v| v.get("detail"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let paid = node.settlement_for_claim(claim_id);
+        claim_rows.push_str(&format!(
+            "<tr><td><code>{claim}</code></td>\
+             <td class=\"{class}\">{status}<div class=\"claim dim\">{detail}</div></td>\
+             <td class=\"num\">{paid}</td></tr>",
+            claim = escape(claim_id),
+            class = verdict_class(status),
+            status = escape(status),
+            detail = escape(detail),
+            paid = match paid {
+                Some(amount) => units(amount),
+                None => "<span class=\"dim\">—</span>".to_string(),
+            },
+        ));
+    }
+    let claims_section = if claim_rows.is_empty() {
+        "<h2>claims</h2><p>None yet.</p>".to_string()
+    } else {
+        format!(
+            "<h2>claims</h2>\
+             <p>Every verdict recorded against this objective. A <code>reject</code> is a real \
+             answer from the pinned verifier; <code>unavailable</code> means the check could \
+             not run and settles nothing.</p>\
+             <div class=\"wrap\"><table>\
+             <tr><th>claim</th><th>verdict</th><th>paid</th></tr>{claim_rows}</table></div>"
+        )
+    };
+
+    let schema_section = match &objective.artifact_schema {
+        Some(schema) => format!(
+            "<h2>artifact shape</h2>\
+             <p>What the funder says an artifact should look like. Documentation, not a rule — \
+             the pinned verifier is the only thing that decides what passes.</p>\
+             <pre>{}</pre>",
+            escape(&schema.canonical_string())
+        ),
+        None => String::new(),
+    };
+
+    let body = format!(
+        "<div class=\"head\"><b>objective id — the hash of this whole record, verifier included</b>\
+         <code class=\"link\">{id}</code></div>\
+         {statement}\
+         <dl><dt>reward</dt><dd>{reward}</dd>\
+         <dt>funder</dt><dd>{funder}</dd>\
+         <dt>goal</dt><dd>{goal}</dd>\
+         <dt>posted</dt><dd>{created}</dd>{deadline}</dl>\
+         <h2>verifier — {kind}</h2>\
+         <p>Pinned by hash and covered by the id above, so editing it produces a different \
+         objective rather than changing the rules of this one.</p>\
+         <div class=\"wrap\"><table>{verifier_rows}</table></div>{pin_note}\
+         {schema}{frontier}{claims}\
+         <h2>work on it</h2>\
+         <pre>proofwork try {id} --submitter &lt;you&gt; --artifact &lt;artifact.json&gt;</pre>\
+         <p>One round: commit, wait out the epoch, reveal. A reveal must land in a strictly \
+         later epoch than its commitment, which is why this is not one call.</p>",
+        id = escape(id),
+        statement = untrusted_block(&objective.statement),
+        reward = units(objective.reward),
+        funder = escape(&objective.funder),
+        goal = escape(&objective.goal),
+        created = escape(&objective.created_at),
+        deadline = match &objective.deadline {
+            Some(deadline) => format!("<dt>deadline</dt><dd>{}</dd>", escape(deadline)),
+            None => String::new(),
+        },
+        kind = escape(objective.verifier_kind().unwrap_or("?")),
+        verifier_rows = verifier_rows,
+        pin_note = pin_note,
+        schema = schema_section,
+        frontier = frontier_section,
+        claims = claims_section,
+    );
+
+    let body = page(
+        Nav::Detail,
+        "objective",
+        "One funded, checkable question. Everything below is read out of this node's log.",
+        &body,
+    );
+    respond(stream, 200, "text/html; charset=utf-8", body.as_bytes())
+}
+
+/// The ledger, newest first.
+fn log_page(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let ledger = node.ledger();
+
+    let mut rows = String::new();
+    if ledger.is_empty() {
+        rows.push_str("<tr><td colspan=\"4\" class=\"empty\">The log is empty.</td></tr>");
+    }
+    for entry in ledger.entries().iter().rev() {
+        // A one-line gist per kind. Deliberately not the whole payload: the
+        // whole payload is `/log`, byte for byte, and duplicating it here in a
+        // prettier form would invite somebody to read this instead.
+        // Verdicts carry their status into the colour here too. The rule that
+        // `unavailable` is not a rejection is not one the log view gets to
+        // relax just because its rows are terser.
+        let gist_class = match entry.kind.as_str() {
+            "verdict" => verdict_class(
+                entry
+                    .payload
+                    .get("verdict")
+                    .and_then(|v| v.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("?"),
+            ),
+            _ => "dim",
+        };
+        let gist = match entry.kind.as_str() {
+            "objective" => entry
+                .payload
+                .get("statement")
+                .and_then(Value::as_str)
+                .map(|s| truncate(s, 110))
+                .unwrap_or_default(),
+            "verdict" => {
+                let verdict = entry.payload.get("verdict");
+                format!(
+                    "{} — {}",
+                    verdict
+                        .and_then(|v| v.get("status"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("?"),
+                    verdict
+                        .and_then(|v| v.get("detail"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                )
+            }
+            "settlement" => format!(
+                "{} paid {}",
+                entry
+                    .payload
+                    .get("submitter")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?"),
+                entry
+                    .payload
+                    .get("reward")
+                    .and_then(Value::as_u64)
+                    .map(units)
+                    .unwrap_or_default()
+            ),
+            "batch" => format!(
+                "epoch {} — {} claim(s)",
+                entry
+                    .payload
+                    .get("epoch")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                entry
+                    .payload
+                    .get("claims")
+                    .and_then(Value::as_array)
+                    .map(<[Value]>::len)
+                    .unwrap_or(0)
+            ),
+            _ => entry
+                .payload
+                .get("submitter")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_default(),
+        };
+        rows.push_str(&format!(
+            "<tr><td class=\"num dim\">{seq}</td><td class=\"epoch dim\">{ts}</td>\
+             <td>{kind}<div class=\"claim {gist_class}\">{gist}</div></td>\
+             <td><code class=\"dim\">{hash}</code></td></tr>",
+            seq = entry.seq,
+            ts = escape(&entry.ts),
+            kind = escape(&entry.kind),
+            gist_class = gist_class,
+            gist = escape(&gist),
+            hash = escape(&entry.hash),
+        ));
+    }
+
+    let body = format!(
+        "<div class=\"head\"><b>head — every entry hashes its predecessor, so this covers \
+         the whole log</b><code class=\"link\">{head}</code></div>\
+         <div class=\"wrap\"><table>\
+         <tr><th>seq</th><th>when</th><th>entry</th><th>hash</th></tr>{rows}</table></div>",
+        head = escape(ledger.head().unwrap_or("— empty log")),
+        rows = rows,
+    );
+
+    let body = page(
+        Nav::Log,
+        "the log",
+        "Every record this node has admitted, newest first, summarised. The bytes themselves \
+         are at /log — that file, not this table, is what an audit reads.",
+        &body,
+    );
+    respond(stream, 200, "text/html; charset=utf-8", body.as_bytes())
+}
+
+/// The same chain, as a page a human can read.
 fn chain_page(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let node = match serving.node() {
         Ok(node) => node,
@@ -862,50 +1534,12 @@ fn chain_page(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     }
 
     let body = format!(
-        r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>proofwork — knowledge chain</title>
-<style>
-:root {{ color-scheme: light dark; --fg:#111; --dim:#666; --bg:#fff; --line:#d8d8d8; --accent:#0b6; }}
-@media (prefers-color-scheme: dark) {{
-  :root {{ --fg:#e6e6e6; --dim:#999; --bg:#111; --line:#333; --accent:#3d8; }}
-}}
-body {{ background:var(--bg); color:var(--fg); margin:0 auto; padding:2rem 1.25rem; max-width:60rem;
-  font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; }}
-h1 {{ font-size:1.15rem; margin:0 0 .35rem; }}
-p {{ color:var(--dim); margin:.35rem 0 1.25rem; max-width:48rem; }}
-.head {{ border:1px solid var(--line); border-left:3px solid var(--accent);
-  padding:.75rem .9rem; margin-bottom:1.5rem; overflow-wrap:anywhere; }}
-.head b {{ color:var(--dim); font-weight:400; display:block; font-size:.85em; }}
-.wrap {{ overflow-x:auto; }}
-table {{ border-collapse:collapse; width:100%; }}
-th,td {{ text-align:left; padding:.5rem .6rem; border-bottom:1px solid var(--line);
-  vertical-align:top; overflow-wrap:anywhere; }}
-th {{ color:var(--dim); font-weight:400; font-size:.85em; white-space:nowrap; }}
-.epoch {{ white-space:nowrap; }}
-.link {{ color:var(--accent); }}
-.dim {{ color:var(--dim); }}
-.claim {{ font-size:.9em; }}
-.empty {{ color:var(--dim); text-align:center; padding:2rem; }}
-a {{ color:inherit; }}
-</style></head><body>
-<h1>knowledge chain</h1>
-<p>Each link is <code>H({{prev, epoch, sorted claim ids}})</code> — content only, so two nodes
-that settled the same claims in the same epochs compute the same head. The head is the anchor
-every later batch is ordered against. Nothing here is stored: it is derived from
-<a href="/log">/log</a>, and <a href="/chain">/chain</a> is the same data as JSON.</p>
-<div class="head"><b>head — compare this with a peer's; if they differ, you have forked</b>
-<code class="link">{head}</code></div>
-<div class="wrap"><table>
-<tr><th>epoch</th><th>link</th><th>prev</th><th>claims settled</th></tr>
-{rows}
-</table></div>
-<p style="margin-top:1.5rem">{count} link(s), newest first. Verify none of this on trust:
-<code>proofwork --log &lt;log&gt; --root . audit</code> re-derives the chain and checks every batch
-against the anchor it recorded.</p>
-</body></html>
-"#,
+        "<div class=\"head\"><b>head — compare this with a peer's; if they differ, you have \
+         forked</b><code class=\"link\">{head}</code></div>\
+         <div class=\"wrap\"><table>\
+         <tr><th>epoch</th><th>link</th><th>prev</th><th>claims settled</th></tr>\
+         {rows}</table></div>\
+         <p style=\"margin-top:1.5rem\">{count} link(s), newest first.</p>",
         head = if head.is_empty() {
             "— empty chain".to_string()
         } else {
@@ -913,6 +1547,16 @@ against the anchor it recorded.</p>
         },
         rows = rows,
         count = links.len(),
+    );
+
+    let body = page(
+        Nav::Chain,
+        "knowledge chain",
+        "Each link is H({prev, epoch, sorted claim ids}) — content only, so two nodes that \
+         settled the same claims in the same epochs compute the same head. The head is the \
+         anchor every later batch is ordered against. Nothing here is stored; \
+         /chain is the same data as JSON.",
+        &body,
     );
     respond(stream, 200, "text/html; charset=utf-8", body.as_bytes())
 }
@@ -1233,5 +1877,104 @@ mod tests {
         assert_eq!(spool.queued(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- the human view ----------------------------------------------------
+
+    /// `*/*` is what curl and most client libraries send. Every one of them was
+    /// getting JSON from `/` before these pages existed and must keep getting
+    /// it, so only an explicit `text/html` counts.
+    #[test]
+    fn only_an_explicit_html_accept_switches_the_root_to_a_page() {
+        assert!(wants_html("text/html"));
+        assert!(wants_html(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        ));
+        assert!(wants_html("application/json, text/html;q=0.9"));
+        assert!(wants_html("TEXT/HTML"));
+
+        assert!(!wants_html(""));
+        assert!(!wants_html("*/*"));
+        assert!(!wants_html("application/json"));
+        // Neither a prefix nor a suffix of the type is the type.
+        assert!(!wants_html("text/htmlx"));
+        assert!(!wants_html("application/xhtml+xml"));
+    }
+
+    /// The property the whole page rests on: a statement is written by whoever
+    /// funded the objective, and it reaches the page as text or not at all.
+    #[test]
+    fn a_hostile_statement_cannot_escape_its_block() {
+        let hostile = "</div><script>alert(1)</script><img src=x onerror=y> \"q\" & 'a'";
+        let block = untrusted_block(hostile);
+        // Exact rather than a list of things to look for: the wrapper emits
+        // six angle brackets of its own (`div`, `b`, `/b`, `div`, `/div`,
+        // `/div`), so any `<` the statement smuggled through would push the
+        // count above six. A test that only greps for `<script` passes on the
+        // next payload nobody thought of.
+        assert_eq!(block.matches('<').count(), 6, "markup leaked: {block}");
+        assert!(!block.contains("<script"));
+        assert!(!block.contains("<img"));
+        assert!(block.contains("&lt;script&gt;"));
+        assert!(block.contains("&quot;q&quot;"));
+        assert!(block.contains("&amp;"));
+        assert!(block.contains("&#39;a&#39;"));
+        // And it still says who wrote it, which is the other half of the job.
+        assert!(block.contains("not an instruction to you"));
+    }
+
+    /// `reject` is a real answer and must not read as an error; `unavailable`
+    /// and `invalid_spec` settle nothing and must not read as a rejection.
+    /// Collapsing the two is the mistake this project refuses everywhere else.
+    #[test]
+    fn a_verdict_that_settled_nothing_is_not_coloured_as_a_rejection() {
+        assert_eq!(verdict_class("accept"), "link");
+        assert_eq!(verdict_class("reject"), "");
+        assert_eq!(verdict_class("unavailable"), "warn");
+        assert_eq!(verdict_class("invalid_spec"), "warn");
+        assert_ne!(verdict_class("unavailable"), verdict_class("reject"));
+        // An unknown status is treated as "settled nothing" rather than as a
+        // verdict, because a status this build does not know is one it cannot
+        // claim decided anything.
+        assert_eq!(verdict_class("something-new"), "warn");
+    }
+
+    #[test]
+    fn digits_are_grouped_for_reading_and_nothing_else() {
+        assert_eq!(units(0), "0");
+        assert_eq!(units(999), "999");
+        assert_eq!(units(1_000), "1,000");
+        assert_eq!(units(1_100_000), "1,100,000");
+        assert_eq!(units(u64::MAX), "18,446,744,073,709,551,615");
+    }
+
+    /// Statements arrive from strangers, and byte-slicing an attacker-chosen
+    /// string panics mid-character. This counts characters for the same reason
+    /// `canonical::short` does.
+    #[test]
+    fn truncation_counts_characters_so_it_cannot_split_one() {
+        assert_eq!(truncate("abc", 10), "abc");
+        assert_eq!(truncate("abcdef", 3), "abc…");
+        // Multi-byte throughout, and a cut right where a naive byte slice
+        // would land inside a character.
+        let wide = "日本語のテキスト";
+        assert_eq!(truncate(wide, 3), "日本語…");
+        assert_eq!(truncate(wide, 100), wide);
+        // Combining marks and astral planes must not panic either.
+        assert_eq!(truncate("é🎉x", 2), "é🎉…");
+    }
+
+    /// Every page is read over an SSH tunnel on a box with no route out. One
+    /// external URL and it is blank exactly then.
+    #[test]
+    fn the_shared_shell_fetches_nothing_from_anywhere() {
+        let rendered = page(Nav::Board, "t", "p", "<p>body</p>");
+        assert!(!rendered.contains("http://"));
+        assert!(!rendered.contains("https://"));
+        assert!(!rendered.contains("//fonts."));
+        assert!(!rendered.contains("<script"));
+        // The nav marks where you are rather than linking to it.
+        assert!(rendered.contains("<b>board</b>"));
+        assert!(rendered.contains("href=\"/log.html\""));
     }
 }

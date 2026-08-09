@@ -72,8 +72,11 @@ import json, sys, urllib.request
 port, oid, logpath = sys.argv[1], sys.argv[2], sys.argv[3]
 base = f"http://127.0.0.1:{port}"
 
-def get(path):
-    with urllib.request.urlopen(base + path, timeout=10) as response:
+def get(path, accept=None):
+    request = urllib.request.Request(base + path)
+    if accept:
+        request.add_header("Accept", accept)
+    with urllib.request.urlopen(request, timeout=10) as response:
         return response.status, response.read()
 
 status, body = get("/objectives")
@@ -112,6 +115,36 @@ assert "https://" not in page, "the page fetches something external"
 if chain["head"]:
     assert chain["head"] in page, "the head is not shown on the page"
 print("  GET /chain.html -> self-contained page, head shown")
+
+# The human view. Four pages, and the same rule on every one: no external
+# fetch, because an operator reads these over an SSH tunnel on a box with no
+# route out and a page that needed one would be blank exactly then.
+for path in ("/index.html", "/log.html", "/chain.html"):
+    status, body = get(path)
+    assert status == 200, (path, status)
+    page = body.decode()
+    assert "http://" not in page.replace("http://www.w3.org", ""), f"{path} fetches something"
+    assert "https://" not in page, f"{path} fetches something external"
+    assert "<script" not in page, f"{path} carries a script"
+print("  GET /index.html,/log.html,/chain.html -> self-contained, script-free")
+
+status, body = get(f"/objective/{oid}.html")
+assert status == 200, status
+page = body.decode()
+assert "not an instruction to you" in page, "the statement is not labelled as untrusted"
+assert oid in page, "the objective id is not shown"
+print("  GET /objective/{id}.html -> statement labelled as the funder's words")
+
+# `/` is negotiated so a browser gets the board, and every client that was
+# parsing the JSON descriptor keeps getting it. `*/*` is what curl and most
+# libraries send, so it is the case that must not change.
+status, body = get("/", accept="text/html,application/xhtml+xml")
+assert status == 200 and body.decode().startswith("<!doctype html>"), "a browser did not get the board"
+status, body = get("/", accept="*/*")
+assert json.loads(body)["service"] == "proofwork", "a program did not get the JSON descriptor"
+status, body = get("/index", accept="text/html")
+assert json.loads(body)["service"] == "proofwork", "/index must always be the JSON descriptor"
+print("  GET / -> board for a browser, JSON for everything else")
 
 status, body = get(f"/objective/{oid}")
 assert status == 200, status
@@ -284,5 +317,67 @@ except urllib.error.HTTPError as e:
 print("  POST /submit -> 405 on a server started without --queue")
 PY
 kill "$RO_PID" 2>/dev/null || true
+
+rule "an objective statement is attacker-authored text, and the page treats it so"
+# The statement in an objective was written by whoever posted it. It reaches
+# the page as text or it does not reach it at all -- and "it cannot contain a
+# bracket" is a property of today's records, not a rule the format enforces.
+# Checked against a real server rather than in a unit test, because what
+# matters is the bytes a browser would actually be handed.
+cat > "$WORK/hostile.json" <<'JSON'
+{
+  "goal": "GOAL-hostile",
+  "statement": "</div></b><script>alert(1)</script><img src=x onerror=alert(2)><a href=\"javascript:alert(3)\">c</a> \"q\" & 'a'",
+  "verifier": {
+    "checker": "examples/collatz/checkers/long_trajectory.py",
+    "checker_sha256": "df78b43c279aa931b0ee481ca946cd5788eb7b28351d66f83e5a980a9cf91473",
+    "entrypoint": "check",
+    "kind": "certificate"
+  },
+  "reward": 1,
+  "funder": "<script>alert('funder')</script>",
+  "created_at": "2026-07-28T00:00:00+00:00"
+}
+JSON
+HOSTILE=$("$RUST" --log "$LOG" --root . post "$WORK/hostile.json" | head -1 | awk '{print $2}')
+python3 - "$PORT" "$HOSTILE" <<'HOSTILEPY'
+import sys, urllib.request
+port, hostile = sys.argv[1], sys.argv[2]
+base = f"http://127.0.0.1:{port}"
+
+from html.parser import HTMLParser
+
+def get(path):
+    with urllib.request.urlopen(base + path, timeout=10) as r:
+        return r.read().decode()
+
+# Parsed, not grepped. The payload appears in the page as *text* -- the string
+# "onerror" is right there inside "&lt;img src=x onerror=...&gt;" and is
+# perfectly safe -- so a substring search reports a false alarm and teaches
+# whoever hits it to loosen the check. A parser sees what a browser sees:
+# elements and attributes, or nothing.
+class Scan(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.bad = []
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "img", "iframe", "object", "embed", "form"):
+            self.bad.append(f"<{tag}>")
+        for name, value in attrs:
+            if name.startswith("on"):
+                self.bad.append(f"{tag}[{name}]")
+            if value and value.strip().lower().startswith("javascript:"):
+                self.bad.append(f"{tag}[{name}=javascript:]")
+
+for path in ("/index.html", f"/objective/{hostile}.html", "/log.html"):
+    page = get(path)
+    scan = Scan()
+    scan.feed(page)
+    assert not scan.bad, f"{path}: the record became markup: {scan.bad}"
+    # And it is still *there*, as text. A silently dropped statement would be a
+    # different bug, and not an honest one either.
+    assert "&lt;script&gt;" in page, f"{path}: the statement is missing, not escaped"
+print("  hostile statement -> text on every page; no element or handler it named exists")
+HOSTILEPY
 
 printf '\n\033[32mSERVE SMOKE OK\033[0m\n'

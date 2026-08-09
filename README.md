@@ -129,6 +129,12 @@ proofwork-serve --log proofwork.jsonl --root . --listen 0.0.0.0:8080
 re-derives everything themselves with `proofwork verify --from`, which is the
 whole point — they need not trust the server that served it.
 
+Open the same address in a browser and you get a read-only board instead: the
+node's head and height, every objective with what it pays, the frontier to beat
+on each, and the epoch chain. Four pages, no JavaScript, nothing fetched from
+anywhere — an operator reads them over an SSH tunnel on a box with no route out.
+See [docs/serving.md](docs/serving.md#the-pages).
+
 Add `--queue ./queue` to accept `POST /submit`. Submissions are *queued*, never
 appended: the operator's node admits them, re-checking every rule against the
 whole log. That is `proofwork-p2p --queue ./queue` if a daemon is running — it
