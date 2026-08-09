@@ -1,0 +1,13 @@
+{
+  "name": "nums-60",
+  "seed": "proofwork ecdlp nums v1 60",
+  "counter": 55,
+  "p": "0xfffffffffffffa3",
+  "a": "0xf3aab0a7813bd9a",
+  "b": "0x68580cc80f3d7bd",
+  "n": "0xfffffffc93017dd",
+  "Gx": "0x4da175bf47bbbda",
+  "Gy": "0xa02ed31d22395f2",
+  "Qx": "0xa5ffe25ceddf028",
+  "Qy": "0xa2860571718ddf8"
+}
