@@ -2249,7 +2249,7 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "      reveal a committed artifact and verify it (settles when the epoch closes)",
+        "      reveal a committed artifact and verify it (settles once the epoch closes\n       and clears the finality delay)",
     );
     say(out, "  settle");
     say(out, "      pay out every reveal epoch that has closed");
@@ -2975,7 +2975,10 @@ fn cmd_reveal(
     match report.pending_epoch {
         Some(epoch) => say(
             out,
-            format!("  pending  settles when epoch {epoch} closes  (`proofwork settle`)"),
+            format!(
+                "  pending  settles after epoch {epoch} closes + {} finality epoch(s)  (`proofwork settle`)",
+                proofwork::partition::finality_epochs()
+            ),
         ),
         None => say(
             out,
@@ -4100,9 +4103,13 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
             drop(node);
             say(
                 out,
-                format!("  waiting for epoch {epoch} to close, then settling"),
+                format!(
+                    "  waiting for epoch {epoch} to close and clear the {}-epoch finality \
+                     delay, then settling",
+                    proofwork::partition::finality_epochs()
+                ),
             );
-            wait_for_epoch_after(epoch)?;
+            wait_until_settleable(epoch)?;
             let mut node = open_node_for_writing(options)?;
             let settled = settle_now(&mut node, &timestamp())?;
             match settled
@@ -4125,8 +4132,9 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
         Some(epoch) => say(
             out,
             format!(
-                "  pending  settles when epoch {epoch} closes  (`proofwork try --settle`, or \
-                 `proofwork settle` later)"
+                "  pending  settles after epoch {epoch} closes + {} finality epoch(s)  \
+                 (`proofwork try --settle`, or `proofwork settle` later)",
+                proofwork::partition::finality_epochs()
             ),
         ),
         None => say(
@@ -4148,6 +4156,18 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
 /// Polls rather than sleeping a computed duration. The seconds-remaining
 /// arithmetic is advisory -- it reads a clock, and the rule reads records --
 /// so it decides only how long to nap between checks, never when to stop.
+/// Block until the epoch holding `epoch`'s reveal is eligible to *settle*.
+///
+/// Not the same as waiting for it to close, which is what the reveal path
+/// needs and what [`wait_for_epoch_after`] does. A batch also has to clear
+/// `FINALITY_EPOCHS` -- see `docs/design/settlement-convergence.md` -- and
+/// waiting only for the close is why `try --settle` reported "nothing moved
+/// for this claim in the batch that just closed": the batch had not closed at
+/// all, the drain had found nothing yet due.
+fn wait_until_settleable(epoch: u64) -> Result<(), CliError> {
+    wait_for_epoch_after(epoch.saturating_add(proofwork::partition::finality_epochs()))
+}
+
 fn wait_for_epoch_after(epoch: u64) -> Result<(), CliError> {
     // Progress to stderr, so `try ... > verdict.txt` still captures exactly the
     // round. A minute of silence is what makes a caller reach for Ctrl-C, and a

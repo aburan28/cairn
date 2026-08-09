@@ -49,7 +49,7 @@
 //! is branch-free and **table-free**, specifically so that no memory access is
 //! indexed by a secret byte — the standard log/exp-table implementation leaks
 //! the secret through the cache and is not used here. That module also exports
-//! a table, [`gf::Row`](crate::crypto::gf::Row), for bulk *public* data; this
+//! a table, [`gf::Row`], for bulk *public* data; this
 //! file must never reach for it, and does not. What is *not* claimed: that the
 //! compiler preserved the branch-free form, and that the length of the secret
 //! or the number and identity of the shares are hidden. They are public.

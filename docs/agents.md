@@ -66,7 +66,8 @@ loses track of what you owe, `pending_reveals` lists every open commitment —
 an unrevealed commitment is never paid.
 
 An accepted reveal is not paid on the spot either. It is recorded as pending
-and settles when its reveal epoch closes, in an order derived from the epoch
+and settles once its reveal epoch closes *and* clears the finality delay, in
+an order derived from the epoch
 beacon. That is the point: nobody, the operator included, chooses who in a
 batch gets paid first. `settled: false` on an accepted claim means *not yet*,
 never *rejected* — and the settlement is applied by whatever call touches the
@@ -302,7 +303,8 @@ audit                                  log verified, chain intact
 ```
 
 `settled: false` with `reward: 0` on a fresh reveal is the protocol working,
-not failing — the batch pays when the epoch closes, in beacon order.
+not failing — the batch pays once the epoch closes and the finality delay
+elapses, in beacon order.
 
 Running *different* agents is better than several copies of one.
 [`gossip.rs`](../src/gossip.rs) preserves population diversity deliberately —
