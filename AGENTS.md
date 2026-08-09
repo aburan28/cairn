@@ -75,6 +75,15 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `cargo test --manifest-path reference/rust/Cargo.toml` and
   `proofwork-reference conformance conformance/vectors.json`
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --all-features`.
+  CI has always run this and this list did not say so, which is a good way to
+  push a branch that builds, tests and lints clean and still goes red — it
+  happened twice in one week, on two branches, for the same two reasons.
+  Neither is visible to `clippy`: a **public** item linking to a **private**
+  one (rustdoc refuses a page pointing at something its reader cannot open),
+  and a redundant explicit link target where the label already resolves.
+  `--all-features` matters here too, since the gate only sees gated code if it
+  is built
 - `./scripts/interop.sh` — each implementation audits a log the other produced
 - `./scripts/fuzz-differential.sh` — the same agreement on *random* input,
   which is the only way to find a disagreement nobody has already thought of.
@@ -92,6 +101,14 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `./scripts/demo.sh`, `./scripts/ratchet-demo.sh` and `./scripts/try-demo.sh`
   if you touched the CLI or the rules; they are the only checks that exercise
   epoch boundaries against a real clock rather than a fixture timestamp
+- `git ls-files -s scripts/` if you **added** a script CI runs as
+  `./scripts/x.sh`. It must be `100755`; two landed as `100644` in one week and
+  CI died on `Permission denied`, because `core.filemode` is false in the
+  worktrees people develop in — so `chmod +x` changes the disk and git never
+  notices it. `git update-index --chmod=+x <path>` sets the bit in the index
+  regardless of that setting, and is the fix. `derive-first-blood.py` is
+  correctly `100644`: CI runs it as `python3 scripts/…`, and a file nothing
+  execs does not need the bit
 
 ## House style
 
