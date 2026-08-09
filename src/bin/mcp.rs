@@ -1281,11 +1281,15 @@ impl Server {
             );
             if outcome.is_pending() {
                 out.push_str(&format!(
-                    "Accepted and recorded. Payment happens when epoch {} closes (epochs are \
-                     {}s long here) and the batch settles in beacon order, which is what stops \
-                     the operator choosing who gets paid first. Any later call -- \
+                    "Accepted and recorded. Payment happens once epoch {} closes and clears a \
+                     {}-epoch finality delay (epochs are {}s long here), when the batch settles \
+                     in beacon order -- which is what stops the operator choosing who gets paid \
+                     first. The delay is why it is not simply \"when the epoch closes\": an epoch \
+                     that settled the moment it closed would be paid in an order that depends on \
+                     when each node happened to hear about the work. Any later call -- \
                      frontier_status included -- applies the settlement once it is due.\n",
                     now,
+                    proofwork::partition::finality_epochs(),
                     epoch_seconds(),
                 ));
             } else if outcome.reward == 0 && outcome.verdict.accepted() {

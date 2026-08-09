@@ -271,7 +271,7 @@ impl Suite {
     }
 
     /// Bytes this module persists for a secret key. For ML-KEM that is the
-    /// 64-byte seed rather than the expanded key; see [`ML_SK`].
+    /// 64-byte seed rather than the expanded key, not the expanded form.
     pub const fn secret_key_len(self) -> usize {
         match self {
             Suite::McEliece => MC_SK,
@@ -692,8 +692,7 @@ impl Bundle {
     /// Encapsulate to every leg and combine.
     ///
     /// The returned secret requires **all** legs to recover, which is the
-    /// property the whole module exists for: see the combiner in
-    /// [`combine_legs`].
+    /// property the whole module exists for: see the combiner below.
     pub fn encapsulate<R: RngCore + CryptoRng>(&self, rng: &mut R) -> (Encapsulated, Secret32) {
         let mut legs = Vec::with_capacity(self.keys.len());
         let mut secrets = Vec::with_capacity(self.keys.len());

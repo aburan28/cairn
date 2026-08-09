@@ -284,8 +284,16 @@ echo "$SECOND" | grep -q "verdict: accept" || fail "the revealed claim did not v
 echo "$SECOND" | grep -q "beacon order" || fail "the agent was not told why payment is deferred"
 echo "  the nonce survived a restart of the server and opened the commitment"
 
-rule "the epoch closes and the batch settles -- over MCP alone"
-sleep 4.2
+rule "the epoch closes, clears the finality delay, and the batch settles -- over MCP alone"
+# One epoch to close, plus PROOFWORK_FINALITY_EPOCHS more before it is
+# eligible. Sleeping a single epoch here is what this did before the delay
+# existed, and the symptom was "polling frontier_status did not settle the
+# closed epoch" -- which points at the polling rather than at the clock.
+python3 -c '
+import sys, time
+length, delay = float(sys.argv[1]), int(sys.argv[2])
+time.sleep(length * (1 + delay) + 0.4)
+' "$PROOFWORK_EPOCH_SECONDS" "${PROOFWORK_FINALITY_EPOCHS:-1}"
 # No CLI settle here, deliberately: an agent that reveals and then polls
 # frontier_status must get paid without the operator running anything. The
 # server drains due epochs on any read.

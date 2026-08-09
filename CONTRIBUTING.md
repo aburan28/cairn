@@ -97,6 +97,19 @@ see [AGENTS.md](AGENTS.md).
 The body is unchanged and still matters more: explain *why*, and why the
 obvious alternative was not taken.
 
+**If no release PR ever appears**, the workflow is almost certainly hitting the
+repository switch that forbids Actions from opening pull requests, which is off
+by default and is separate from the `permissions:` block in the workflow:
+
+> Settings → Actions → General → Workflow permissions →
+> **Allow GitHub Actions to create and approve pull requests**
+
+The run fails with *"GitHub Actions is not permitted to create or approve pull
+requests"* after it has already committed the version bump, so the branch
+`release-please--branches--main--components--proofwork` sits there looking
+correct while no PR exists. Nothing is lost: enable the setting and the next
+push to `main` opens the PR from the branch that is already there.
+
 ### Security issues
 
 Do not open a public issue. [SECURITY.md](SECURITY.md) has the process.
