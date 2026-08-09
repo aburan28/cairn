@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "proofwork — knowledge chain",
+  title: "proofwork — a node reader",
   description:
-    "The epoch chain a proofwork node settles against: each link commits to the one before it.",
+    "What a proofwork node will pay for, and the epoch chain it settles against.",
 };
 
 export default function RootLayout({
@@ -14,7 +15,15 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        {/* Plain links rather than an active-state nav: this is two pages, and
+            knowing which one you are on is what the <h1> under it is for. */}
+        <nav className="nav">
+          <Link href="/objectives">objectives</Link>
+          <Link href="/">chain</Link>
+        </nav>
+        {children}
+      </body>
     </html>
   );
 }
