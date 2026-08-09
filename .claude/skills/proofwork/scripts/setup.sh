@@ -55,20 +55,12 @@ else
 fi
 
 rule "wire Claude Code"
-# Absolute paths throughout: an agent launches this server from a working
-# directory nobody chose, and a relative --log silently creates a second,
-# empty ledger rather than failing.
-cat > .mcp.json <<JSON
-{
-  "mcpServers": {
-    "proofwork": {
-      "command": "$REPO/target/release/proofwork-mcp",
-      "args": ["--log", "$LOG", "--root", "$REPO"]
-    }
-  }
-}
-JSON
-say ".mcp.json -> $LOG"
+# Delegated to scripts/mcp-config.sh (also `make mcp-setup`) rather than
+# written here. This used to `cat > .mcp.json`, which silently unwired every
+# other MCP server the user had configured -- that file usually holds several.
+# The script merges instead, and keeping one implementation means the stanza
+# cannot drift between the two entry points.
+./scripts/mcp-config.sh --client claude --log "$LOG"
 say "restart Claude Code (or /mcp reconnect) to pick it up"
 
 rule "post starter objectives"

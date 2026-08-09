@@ -38,10 +38,12 @@ BOOTSTRAP_ARGS ?= --bootstrap $(SEED_BOOTSTRAP)
 SERVE_LISTEN ?= 127.0.0.1:8080
 SERVE_ARGS ?=
 P2P_ARGS ?=
+# Which MCP client `make mcp-setup` writes a stanza for.
+CLIENT ?= claude
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp p2p serve demo ratchet identity interop differential fuzz mcp-smoke serve-smoke \
+.PHONY: help build debug cli mcp mcp-setup p2p serve demo ratchet identity interop differential fuzz mcp-smoke serve-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
@@ -49,6 +51,8 @@ help:
 	@printf '%s\n' \
 	  'proofwork local commands:' \
 	  '  make mcp                 Build and run the local MCP server (stdio).' \
+	  '  make mcp-setup           Wire an MCP client to this checkout (default: Claude Code).' \
+	  '  make mcp-setup CLIENT=opencode   ...or opencode / codex.' \
 	  '  make p2p                 Build and run a local p2p node.' \
 	  '  make mcp MCP_LOG=my-path  Use a custom MCP ledger path.' \
 	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
@@ -86,6 +90,13 @@ $(LOCAL_DIR):
 # data, so a wrapper must never add banners or diagnostics to it.
 mcp: build | $(LOCAL_DIR)
 	exec "$(MCP)" --log "$(MCP_LOG)" --root "$(ROOT)"
+
+# Writes the client's config rather than running the server: the client spawns
+# its own copy. Depends on `build` so the path written is one that exists --
+# a stanza naming a binary that was never compiled fails inside the client,
+# where the error is a connection timeout rather than "no such file".
+mcp-setup: build | $(LOCAL_DIR)
+	./scripts/mcp-config.sh --client "$(CLIENT)" --log "$(MCP_LOG)"
 
 # A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
 # inside is freshly generated, not the real seed's. It authenticates nobody
