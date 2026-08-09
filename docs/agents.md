@@ -139,8 +139,24 @@ validators slashing bad edges is designed, not built.
 
 ## Wiring
 
-The server takes the same `--log` and `--root` as the CLI. Use absolute paths:
-agents launch subprocesses from a working directory you did not choose.
+```sh
+make mcp-setup                    # Claude Code -> .mcp.json
+make mcp-setup CLIENT=opencode    # -> opencode.json
+make mcp-setup CLIENT=codex       # -> ~/.codex/config.toml
+```
+
+That builds the binary, writes absolute paths, and points the client at the
+same ledger `make mcp` uses. It *merges* into an existing config rather than
+replacing it, so other MCP servers already configured there survive; pass
+`--print` to `scripts/mcp-config.sh` to see the stanza without writing anything.
+
+Note that the client spawns its own copy of the server, so do not also run
+`make mcp` against the same log -- both take the ledger's exclusive lock and
+whichever starts second refuses.
+
+The stanzas below are the same thing by hand. The server takes the same
+`--log` and `--root` as the CLI. Use absolute paths: agents launch subprocesses
+from a working directory you did not choose.
 
 **Claude Code** — `.mcp.json` in the project root:
 
