@@ -1,0 +1,11 @@
+{
+  "assertion": "James A. Garfield was assassinated: shot on 2 July 1881 and dead of his wounds on 19 September 1881.",
+  "sources": [
+    {
+      "document": "sha256:5fcf1032005aba0ab8358eafacf8e5074be9bd397fb5e66196acf59e2ed34a93",
+      "text": "EXAMPLE FIXTURE -- not a reproduction of any real archival document.\nWritten for examples/attested-fact/ to exercise the provenance checker.\n\nJames A. Garfield, twentieth President of the United States, was shot on\n2 July 1881 at the Baltimore and Potomac Railroad Station in Washington,\nD.C. He died of his wounds on 19 September 1881 at Elberon, New Jersey.\nCharles J. Guiteau was convicted of the killing and executed in 1882.\n",
+      "quote": "was shot on 2 July 1881 at the Baltimore and Potomac Railroad Station",
+      "locator": "paragraph 1"
+    }
+  ]
+}
