@@ -25,6 +25,7 @@ pub const VERDICT: &str = "verdict";
 pub const SETTLEMENT: &str = "settlement";
 pub const FRONTIER: &str = "frontier";
 pub const BATCH: &str = "batch";
+pub const BEACON: &str = "beacon";
 pub const PEER: &str = "peer";
 pub const UNDERTAKING: &str = "undertaking";
 pub const AVAILABILITY: &str = "availability";
@@ -228,9 +229,20 @@ impl Node {
     /// order**, not epoch order, so a batch for an older epoch appended later
     /// leaves earlier links untouched instead of retroactively faulting them.
     ///
-    /// `epoch` is unused and kept for the caller's clarity: the head already
-    /// covers every batch written before this one.
-    fn anchor_of_epoch(&self, _epoch: u64, positions: Option<usize>) -> String {
+    /// A recorded `beacon` for `epoch` displaces the chain head entirely. The
+    /// chain is what a sequencer can steer by choosing what to append, and
+    /// steering it steers the settlement order; a beacon drawn somewhere the
+    /// sequencer does not control is the point of the record. The chain
+    /// remains the fallback, so every log written before beacons existed --
+    /// including `launch/proofwork.jsonl` -- derives exactly what it always
+    /// did.
+    ///
+    /// `epoch` was unused when the head covered every batch written before
+    /// this one. It is used now, because a beacon names the epoch it orders.
+    fn anchor_of_epoch(&self, epoch: u64, positions: Option<usize>) -> String {
+        if let Some(value) = self.epoch_beacon(epoch, positions) {
+            return value;
+        }
         let entries = self.ledger.entries();
         let entries = match positions {
             Some(limit) => &entries[..limit.min(entries.len())],
@@ -273,6 +285,52 @@ impl Node {
             .digest();
         }
         head
+    }
+
+    /// The beacon ordering `epoch`, if the log holds an admissible one.
+    ///
+    /// Two conditions, both re-derived here rather than trusted from whoever
+    /// wrote the record, because this crate exists to check the other one
+    /// rather than agree with it:
+    ///
+    /// - it must have been **written in the epoch it orders**. Written
+    ///   earlier, the value exists while commitments for that epoch can still
+    ///   be made, so a submitter can grind a commitment hash against a beacon
+    ///   they already hold. Written later, whoever wrote it has already read
+    ///   the reveals, and choosing the draw is choosing who is paid first.
+    ///   Only a draw at the boundary is unknown to every committer and
+    ///   unchosen by the writer.
+    /// - there must be exactly **one**. Taking the first rather than the last
+    ///   is what makes that so: a second record cannot displace the first, so
+    ///   appending one buys no re-roll of the order. The audit reports the
+    ///   duplicate; the reader must still be total on a log that contains one.
+    ///
+    /// An entry this crate cannot place in time does not order anything, for
+    /// the same reason it does not move `anchor_at`: it is not evidence about
+    /// where a boundary was.
+    fn epoch_beacon(&self, epoch: u64, positions: Option<usize>) -> Option<String> {
+        let entries = self.ledger.entries();
+        let entries = match positions {
+            Some(limit) => &entries[..limit.min(entries.len())],
+            None => entries,
+        };
+        entries
+            .iter()
+            .filter(|entry| entry.kind == BEACON)
+            .filter(|entry| {
+                entry
+                    .payload
+                    .get("orders")
+                    .and_then(Value::as_i128)
+                    .and_then(|value| u64::try_from(value).ok())
+                    == Some(epoch)
+            })
+            .filter(|entry| {
+                unix_seconds(&entry.ts)
+                    .is_some_and(|seconds| epoch_of(seconds, epoch_seconds()) == epoch)
+            })
+            .find_map(|entry| entry.payload.get("value").and_then(Value::as_str))
+            .map(String::from)
     }
 
     /// The anchor of `epoch`, measuring epochs with an explicit length. The two
@@ -1335,6 +1393,40 @@ impl Node {
                     }
                 }
                 best = Some(score);
+            }
+        }
+
+        // A beacon that is not admissible orders nothing -- `epoch_beacon`
+        // already skips it, so the batch falls back to the epoch chain and the
+        // anchor check below still passes. That is the right settlement
+        // behaviour and the wrong silence: the record is in the log, it looks
+        // like it governs an epoch, and only an audit that says otherwise
+        // tells anyone it does not.
+        let mut beacon_epochs: BTreeSet<u64> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(BEACON) {
+            let Some(orders) = entry.payload.get("orders").and_then(Value::as_u64) else {
+                problems.push(format!("entry {}: beacon orders no epoch", entry.seq));
+                continue;
+            };
+            if !beacon_epochs.insert(orders) {
+                problems.push(format!(
+                    "entry {}: a second beacon for epoch {orders}; whoever writes it \
+                     would re-roll the settlement order after reading the first",
+                    entry.seq
+                ));
+            }
+            // The timing is the security property, so it is re-derived rather
+            // than taken from the record: drawn before the epoch, a committer
+            // grinds against a value they already hold; drawn after it opens,
+            // the writer has read the reveals.
+            let drawn = unix_seconds(&entry.ts).map(|seconds| epoch_of(seconds, epoch_seconds()));
+            if drawn != Some(orders) {
+                problems.push(format!(
+                    "entry {}: beacon orders epoch {orders} but was drawn in {}, \
+                     so it orders nothing",
+                    entry.seq,
+                    drawn.map_or_else(|| "an unreadable epoch".to_string(), |e| e.to_string())
+                ));
             }
         }
 

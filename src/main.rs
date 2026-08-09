@@ -471,6 +471,25 @@ enum Command {
         identity: Option<String>,
     },
     Settle,
+    /// Record the randomness one epoch's settlement is ordered against.
+    ///
+    /// Separate from `settle` on purpose. The value has to be drawn *in the
+    /// epoch it orders* -- before that a committer can grind against a value
+    /// they already hold, after it the operator has read the reveals -- and
+    /// settlement runs an epoch or more later. One command that did both would
+    /// be one that could only ever draw too late.
+    ///
+    /// `--value` is taken rather than fetched. Fetching belongs outside the
+    /// rules engine: this command records what it is told, `record_beacon`
+    /// enforces the timing, and whoever supplies the value is responsible for
+    /// it being the one the epoch boundary selects. See
+    /// `docs/design/chain-beacon.md`.
+    Beacon {
+        orders: u64,
+        source: String,
+        block: u64,
+        value: String,
+    },
     /// Sign the log's current state so a reader can pin what this operator
     /// claimed at a point in time.
     ///
@@ -981,6 +1000,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             expect_end(&mut cursor, "settle")?;
             Command::Settle
         }
+        "beacon" => parse_beacon(&mut cursor)?,
         "checkpoint" => parse_checkpoint(&mut cursor)?,
         "drain" => parse_drain(&mut cursor)?,
         "audit" => parse_audit(&mut cursor)?,
@@ -1247,6 +1267,46 @@ fn parse_drain(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Drain {
         queue: require(queue, "drain", "a queue directory")?,
         dry_run,
+    })
+}
+
+/// `beacon --orders N --value HEX [--source NAME] [--block N]`
+///
+/// `--orders` is required rather than defaulted to the current epoch. The
+/// default would be right almost always and catastrophically wrong at a
+/// boundary -- a command run a second late would name the next epoch, be
+/// refused as out of time, and leave the epoch it meant to cover on the
+/// fallback. An operator scripting this knows which epoch they mean.
+fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut orders: Option<u64> = None;
+    let mut source: Option<String> = None;
+    let mut block: Option<u64> = None;
+    let mut value: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        if token == "--orders" {
+            orders = Some(parse_u64(&cursor.value("--orders")?, "--orders")?);
+        } else if token == "--source" {
+            source = Some(cursor.value("--source")?);
+        } else if token == "--block" {
+            block = Some(parse_u64(&cursor.value("--block")?, "--block")?);
+        } else if token == "--value" {
+            value = Some(cursor.value("--value")?);
+        } else {
+            return Err(CliError::Usage(format!("beacon: unexpected {token:?}")));
+        }
+    }
+    Ok(Command::Beacon {
+        orders: match orders {
+            Some(orders) => orders,
+            None => return Err(CliError::Usage("beacon: --orders is required".into())),
+        },
+        // Defaulted, because a beacon with no stated origin is still a beacon
+        // the sequencer did not choose if it came from somewhere -- but an
+        // unnamed one is unverifiable by anyone holding a chain, so the name
+        // it gets says exactly that rather than pretending to a provenance.
+        source: source.unwrap_or_else(|| "unattributed".into()),
+        block: block.unwrap_or(0),
+        value: require(value, "beacon", "--value")?,
     })
 }
 
@@ -2193,6 +2253,22 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  settle");
     say(out, "      pay out every reveal epoch that has closed");
+    say(
+        out,
+        "  beacon --orders EPOCH --value HEX [--source NAME] [--block N]",
+    );
+    say(
+        out,
+        "      record the randomness that epoch's settlement is ordered against.",
+    );
+    say(
+        out,
+        "      Must be drawn in the epoch it orders: earlier and a committer can",
+    );
+    say(
+        out,
+        "      grind against it, later and you are picking who gets paid first",
+    );
     say(out, "  checkpoint --root-key FILE [--out FILE]");
     say(
         out,
@@ -2924,6 +3000,31 @@ fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
             format!("  settled  {moved}  reward {reward}  ({note})"),
         );
     }
+    Ok(0)
+}
+
+/// Record one epoch's ordering randomness.
+///
+/// Prints the epoch it covers and how the settlement order changed, because
+/// "recorded" is not the useful confirmation -- an operator wants to know the
+/// anchor actually moved off the epoch-chain head, which is the whole point.
+fn cmd_beacon(
+    out: &mut dyn Write,
+    options: &Options,
+    orders: u64,
+    source: &str,
+    block: u64,
+    value: &str,
+) -> Result<i32, CliError> {
+    let mut node = open_node_for_writing(options)?;
+    let before = node.anchor_of_epoch(orders);
+    refused(node.record_beacon(orders, source, block, value, &timestamp()))?;
+    say(out, format!("beacon for epoch {orders}"));
+    say(out, format!("  source   {source} block {block}"));
+    say(
+        out,
+        format!("  anchor   {} -> {}", short(&before), short(value)),
+    );
     Ok(0)
 }
 
@@ -6008,6 +6109,12 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             cites,
         ),
         Command::Settle => cmd_settle(out, options),
+        Command::Beacon {
+            orders,
+            source,
+            block,
+            value,
+        } => cmd_beacon(out, options, *orders, source, *block, value),
         Command::Checkpoint {
             root_key,
             out: path,

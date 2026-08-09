@@ -76,6 +76,35 @@ const SETTLEMENT: &str = "settlement";
 const FRONTIER: &str = "frontier";
 /// Marks one reveal epoch as drained. See [`Node::settle_due`].
 const BATCH: &str = "batch";
+/// One epoch's ordering randomness, drawn where the sequencer cannot choose it.
+/// See [`Node::record_beacon`].
+const BEACON: &str = "beacon";
+
+/// Set to `1` to treat an epoch settled without a beacon as an audit fault.
+///
+/// The beacon closes settlement grinding only if there *is* one, and the
+/// fallback to the epoch-chain head — which exists so that pre-beacon logs
+/// still audit and an unreachable chain does not halt settlement — is
+/// therefore an opt-out: a sequencer who wants to grind simply records no
+/// beacon and orders against the head as before.
+/// [`Node::epochs_without_beacon`] makes that visible; this makes it refusable.
+///
+/// A reader's policy, not a writer's. It deliberately does not gate
+/// *settlement*: a beacon is only admissible inside the epoch it orders, so
+/// refusing to settle an epoch that already closed without one would strand
+/// its claims permanently rather than protect anybody. What it gates is
+/// acceptance — a node that requires beacon-ordered settlement can detect a
+/// log that does not have it, which is the check that makes the requirement
+/// mean something.
+///
+/// Not the default, for the same reason `PROOFWORK_REQUIRE_SANDBOX` is not:
+/// it would fail every log written before this record existed, including the
+/// published one, and an audit that cries wolf is an audit nobody reads.
+pub const REQUIRE_BEACON_ENV: &str = "PROOFWORK_REQUIRE_BEACON";
+
+fn beacon_required() -> bool {
+    matches!(std::env::var(REQUIRE_BEACON_ENV), Ok(value) if value.trim() == "1")
+}
 const PEER: &str = "peer";
 const UNDERTAKING: &str = "undertaking";
 const AVAILABILITY: &str = "availability";
@@ -236,6 +265,24 @@ pub enum RuleViolation {
     /// can test is the "bookkeeping" `docs/roadmap.md` warns against, and it
     /// would sit in the log permanently.
     UnknownUndertakingRoot { root: String, height: u64 },
+    /// A beacon drawn in an epoch other than the one it orders.
+    ///
+    /// The timing *is* the security property, and both directions are fatal.
+    /// Drawn early, the value exists while commitments for this epoch can still
+    /// be made, so a submitter can grind a commitment hash against a beacon
+    /// they already know — the residual gap [`Node::settle_due`] documents,
+    /// reopened. Drawn late, the sequencer has already seen who revealed, and
+    /// picking the draw is picking the payment order. Only a beacon drawn at
+    /// the boundary is unknown to every committer and unchosen by the operator.
+    BeaconOutOfEpoch { orders: u64, drawn_in: u64 },
+    /// A second beacon for an epoch that already has one.
+    ///
+    /// Refused rather than resolved by a tie-break, because every tie-break is
+    /// a choice and the choice belongs to nobody. Two beacons for one epoch
+    /// would let whoever appends the second one re-roll the settlement order
+    /// after reading the first — which is the entire lever this record exists
+    /// to remove, restored by an operator who simply writes twice.
+    DuplicateBeacon { epoch: u64 },
     /// A record whose own decoder would refuse it.
     ///
     /// Every other kind arrives here already decoded, so `from_value` has run
@@ -400,6 +447,18 @@ impl fmt::Display for RuleViolation {
                 "the path does not put entry {index} under the root undertaken by {} \
                  (epoch {epoch}); entry {index} is what that undertaking was sampled on",
                 crate::canonical::short(undertaking)
+            ),
+            RuleViolation::BeaconOutOfEpoch { orders, drawn_in } => write!(
+                f,
+                "a beacon ordering epoch {orders} was drawn in epoch {drawn_in}; it must \
+                 be drawn in the epoch it orders -- earlier and a committer can grind \
+                 against a value they already know, later and the operator is choosing \
+                 the order after reading the reveals"
+            ),
+            RuleViolation::DuplicateBeacon { epoch } => write!(
+                f,
+                "epoch {epoch} already has a beacon; a second one would let whoever \
+                 writes it re-roll the settlement order after reading the first"
             ),
             RuleViolation::PartialUndertaking { promised, log } => write!(
                 f,
@@ -1834,10 +1893,100 @@ impl Node {
     /// confused. At settle time the batch does not exist yet, so this is
     /// identical to folding the whole log and settlement is unaffected.
     pub fn anchor_of_epoch(&self, epoch: u64) -> String {
-        self.epoch_chain_head_before(self.ledger.len(), Some(epoch))
+        self.anchor_of_epoch_within(epoch, self.ledger.len(), Some(epoch))
     }
 
-    /// The epoch chain folded over every `batch` record before `positions`.
+    /// [`Node::anchor_of_epoch`] as it stood at `positions`.
+    ///
+    /// An external beacon for the epoch wins; the epoch-chain head is the
+    /// fallback. The fallback is not a nicety — it is what keeps every log
+    /// written before beacon records existed auditing clean, and what keeps a
+    /// node whose chain source is unreachable settling at all. `Unavailable is
+    /// never Reject` applies to a randomness source exactly as it applies to a
+    /// verifier: a node that cannot reach the chain must not halt settlement
+    /// for everyone, and `audit_beacons` reports which epochs fell back so the
+    /// weaker ordering is visible rather than silent.
+    ///
+    /// Bounded by position for the reason [`Node::epoch_chain_head_within`] is:
+    /// a batch must stay auditable against the log as it stood when it was
+    /// written, and a beacon record appended afterwards could not have
+    /// influenced it whatever epoch it names.
+    ///
+    /// `stop_at` is passed through to the fallback rather than assumed, because
+    /// the two callers legitimately differ: settlement stops at the batch for
+    /// the epoch it is about to write, the audit is already bounded by that
+    /// batch's own position. Collapsing them would change the anchor derived
+    /// for existing logs, which is a fork rather than a refactor.
+    fn anchor_of_epoch_within(&self, epoch: u64, positions: usize, stop_at: Option<u64>) -> String {
+        match self.epoch_beacon_within(epoch, positions) {
+            Some(value) => value,
+            None => self.epoch_chain_head_before(positions, stop_at),
+        }
+    }
+
+    /// The recorded beacon ordering `epoch`, as of `positions`, if there is one.
+    ///
+    /// Takes the **first** admissible record rather than the last. A later
+    /// record for the same epoch is a rule violation that `record_beacon`
+    /// refuses and `audit_beacons` reports, but a reader must still be total
+    /// on a log that already contains one — and "first" is the only choice
+    /// that a second append cannot change.
+    fn epoch_beacon_within(&self, epoch: u64, positions: usize) -> Option<String> {
+        self.ledger
+            .entries_of_kind(BEACON)
+            .into_iter()
+            .filter(|entry| usize::try_from(entry.seq).unwrap_or(usize::MAX) < positions)
+            .filter(|entry| entry.payload.get("orders").and_then(Value::as_u64) == Some(epoch))
+            .filter(|entry| beacon_is_in_time(entry, epoch))
+            .find_map(|entry| payload_str(&entry.payload, "value").map(String::from))
+    }
+
+    /// Record the randomness epoch `orders` will be settled against.
+    ///
+    /// `value` is opaque here: it is fed to [`partition::beacon`] as a string,
+    /// so this module neither parses it nor cares which chain produced it.
+    /// What this module enforces is the timing, which is the whole of the
+    /// security argument — see [`RuleViolation::BeaconOutOfEpoch`].
+    ///
+    /// `source` and `block` are provenance for a reader who *does* hold the
+    /// chain: they say which value this claims to be, so an auditor with an RPC
+    /// endpoint can check it and an auditor without one can still verify that
+    /// the order follows from whatever was recorded. That split is deliberate.
+    /// Requiring chain access to audit would trade this project's one guarantee
+    /// — anyone can re-derive every settled result from the log alone — for a
+    /// property it can get without spending it.
+    pub fn record_beacon(
+        &mut self,
+        orders: u64,
+        source: &str,
+        block: u64,
+        value: &str,
+        ts: &str,
+    ) -> Result<(), RuleViolation> {
+        let drawn_in = epoch_of_timestamp("beacon", ts)?;
+        if drawn_in != orders {
+            return Err(RuleViolation::BeaconOutOfEpoch { orders, drawn_in });
+        }
+        if self
+            .epoch_beacon_within(orders, self.ledger.len())
+            .is_some()
+        {
+            return Err(RuleViolation::DuplicateBeacon { epoch: orders });
+        }
+        let record = Value::object([
+            ("orders", Value::Int(i128::from(orders))),
+            ("source", Value::string(source)),
+            ("block", Value::Int(i128::from(block))),
+            ("value", Value::string(value)),
+        ]);
+        self.append(BEACON, record, ts)
+    }
+
+    /// The epoch chain folded over every `batch` record before `positions`,
+    /// additionally stopping at the batch for `stop_at` if one is present.
+    ///
+    /// The settlement anchor before beacon records existed, and still the
+    /// fallback when an epoch has none — see [`Node::anchor_of_epoch_within`].
     ///
     /// Bounded by position for the reason [`Node::accepted_in_epoch_within`] is:
     /// a batch must stay auditable against the log *as it stood when it was
@@ -1851,12 +2000,6 @@ impl Node {
     /// written last, changing a link that an already-written batch committed
     /// to, which is the retroactive-fault bug the position bounds exist to
     /// prevent.
-    fn epoch_chain_head_within(&self, positions: usize) -> String {
-        self.epoch_chain_head_before(positions, None)
-    }
-
-    /// [`Node::epoch_chain_head_within`], additionally stopping at the batch
-    /// for `stop_at` if one is present. See [`Node::anchor_of_epoch`].
     fn epoch_chain_head_before(&self, positions: usize, stop_at: Option<u64>) -> String {
         self.epoch_links_before(positions, stop_at)
             .last()
@@ -2727,6 +2870,7 @@ impl Node {
         }
 
         problems.append(&mut self.audit_batches());
+        problems.append(&mut self.audit_beacons());
 
         for (objective_id, objective) in &objectives {
             let block = match &objective.ratchet {
@@ -2819,6 +2963,89 @@ impl Node {
         problems
     }
 
+    /// Every way a beacon record can be wrong.
+    ///
+    /// Both are rule violations that [`Node::record_beacon`] refuses, restated
+    /// here because a log can be assembled by something other than this code
+    /// path — imported from a peer, or written by hand — and an audit that only
+    /// re-checked what its own writer already checked would verify nothing.
+    ///
+    /// Epochs that settled on the fallback are **not** reported here. See
+    /// [`Node::epochs_without_beacon`] for why that is a separate query.
+    fn audit_beacons(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(BEACON) {
+            let orders = match entry.payload.get("orders").and_then(Value::as_u64) {
+                Some(orders) => orders,
+                None => {
+                    problems.push(format!(
+                        "beacon at entry {}: names no epoch to order",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            if !seen.insert(orders) {
+                problems.push(format!(
+                    "epoch {orders}: more than one beacon, so the settlement order is \
+                     whichever one a reader picks"
+                ));
+            }
+            if !beacon_is_in_time(entry, orders) {
+                problems.push(format!(
+                    "beacon at entry {}: orders epoch {orders} but was drawn at {}, \
+                     outside it -- a beacon drawn early can be ground against by a \
+                     committer, one drawn late by the operator",
+                    entry.seq, entry.ts
+                ));
+            }
+        }
+
+        if beacon_required() {
+            for epoch in self.epochs_without_beacon() {
+                problems.push(format!(
+                    "epoch {epoch}: settled with no beacon, so it was ordered against \
+                     the epoch chain head -- a value the sequencer influences by \
+                     choosing what to append ({REQUIRE_BEACON_ENV}=1)"
+                ));
+            }
+        }
+
+        problems
+    }
+
+    /// Settled epochs that were ordered against the epoch-chain head because no
+    /// beacon covered them.
+    ///
+    /// Deliberately **not** part of [`Node::audit`]. `audit` is a fault
+    /// channel — the CLI exits non-zero on a non-empty result — and settling on
+    /// the fallback is legal, is what every log written before beacon records
+    /// existed did, and is what an honest node does when its chain source is
+    /// unreachable. Reporting it as a fault would fail the audit of
+    /// `launch/proofwork.jsonl`, which is published precisely so that readers
+    /// can check it, and would train operators to ignore audit output.
+    ///
+    /// It is still worth asking, because an epoch ordered against the chain
+    /// head was ordered against a value the sequencer influences by choosing
+    /// what to append. A log that mixes strong and weak epochs reads as
+    /// uniformly strong, and `AGENTS.md` is explicit that overstating what is
+    /// defended is the one thing this repository cannot afford. So: a separate
+    /// question, with an answer a reader has to ask for.
+    pub fn epochs_without_beacon(&self) -> Vec<u64> {
+        self.ledger
+            .entries_of_kind(BATCH)
+            .into_iter()
+            .filter_map(|entry| {
+                let epoch = entry.payload.get("epoch").and_then(Value::as_u64)?;
+                let position = usize::try_from(entry.seq).unwrap_or(usize::MAX);
+                self.epoch_beacon_within(epoch, position)
+                    .is_none()
+                    .then_some(epoch)
+            })
+            .collect()
+    }
+
     /// Re-derive every settlement batch's ordering from the log.
     ///
     /// This is the check that makes beacon ordering worth having. The rule
@@ -2827,7 +3054,8 @@ impl Node {
     /// claims constrains a dishonest one. Three ways a batch can be wrong, and
     /// all three are somebody being paid out of turn:
     ///
-    /// - the recorded anchor is not the log head at the epoch's start, which is
+    /// - the recorded anchor is not the anchor this epoch resolves to — the
+    ///   recorded beacon, or the epoch-chain head when there is none — which is
     ///   how a sequencer would grind an ordering after seeing the reveals;
     /// - the recorded order is not the beacon order for that anchor;
     /// - an accepted claim from the epoch is missing, which is censorship by
@@ -2855,7 +3083,7 @@ impl Node {
             // the whole log would let one turn an honest batch into a
             // permanent audit failure.
             let position = usize::try_from(entry.seq).unwrap_or(usize::MAX);
-            let derived_anchor = self.epoch_chain_head_within(position);
+            let derived_anchor = self.anchor_of_epoch_within(epoch, position, None);
             if recorded_anchor != derived_anchor {
                 problems.push(format!(
                     "batch for epoch {epoch}: anchor {} is not the epoch-chain head \
@@ -3106,6 +3334,17 @@ fn entry_identity(payload: &Value) -> Option<&str> {
 /// because they key a beacon, and there is no sensible epoch number for a
 /// record dated before the Unix epoch -- a record this network could not have
 /// produced.
+/// Was this beacon entry drawn in the epoch it claims to order?
+///
+/// Applied at *read* time as well as at admission, so a beacon that reached the
+/// log some other way — an import from a peer, a hand-edited file — cannot
+/// order anything. A reader that trusted the record's own `orders` field
+/// without re-checking when it was written would let an operator append a
+/// beacon for a long-closed epoch and re-derive its payment order.
+fn beacon_is_in_time(entry: &Entry, orders: u64) -> bool {
+    matches!(epoch_of_timestamp("beacon", &entry.ts), Ok(drawn) if drawn == orders)
+}
+
 fn epoch_of_timestamp(record: &'static str, ts: &str) -> Result<u64, RuleViolation> {
     match crate::time::parse_rfc3339(ts) {
         Some(seconds) if seconds >= 0 => Ok(epoch_of(seconds as u64, epoch_seconds())),
@@ -3250,6 +3489,16 @@ mod tests {
 
     fn proof(text: &str) -> Value {
         Value::object([("proof", Value::string(text))])
+    }
+
+    /// Which epoch [`stamp`]`(offset)` falls in.
+    ///
+    /// Derived rather than written down: these tests are about the *relation*
+    /// between the epoch a beacon is drawn in and the one it orders, and a
+    /// hard-coded epoch number would stop testing that relation the moment
+    /// `EPOCH_SECONDS` or `BASE` moved.
+    fn epoch_at(offset: i64) -> u64 {
+        epoch_of((BASE + offset) as u64, crate::partition::EPOCH_SECONDS)
     }
 
     fn scored(score: i128) -> Verdict {
@@ -6170,5 +6419,184 @@ mod tests {
         assert_eq!(node.audit(false), before, "the audit changed");
         assert_ne!(node.ledger().root(), root_before, "the log did not grow");
         assert_eq!(node.objectives().len(), 1);
+    }
+
+    // -- epoch beacons ----------------------------------------------------
+
+    #[test]
+    fn a_beacon_must_be_drawn_in_the_epoch_it_orders() {
+        let dir = TempDir::new("beacon-timing");
+        let mut node = node(&dir);
+        let orders = epoch_at(EPOCH);
+
+        // Early: the value would exist while commitments for `orders` can still
+        // be made, so a committer could grind a commitment hash against a
+        // beacon they already hold. That is the residual gap `settle_due`
+        // documents, and admitting this record would reopen it.
+        let early = node
+            .record_beacon(orders, "ethereum", 1, "aa", &stamp(0))
+            .expect_err("an early beacon is grindable by a committer");
+        assert!(
+            matches!(early, RuleViolation::BeaconOutOfEpoch { orders: o, drawn_in }
+                if o == orders && drawn_in == epoch_at(0)),
+            "{early}"
+        );
+
+        // Late: by then the operator has read the reveals, and choosing the
+        // draw is choosing who is paid first.
+        let late = node
+            .record_beacon(orders, "ethereum", 1, "aa", &stamp(2 * EPOCH))
+            .expect_err("a late beacon is chosen after the reveals are known");
+        assert!(
+            matches!(late, RuleViolation::BeaconOutOfEpoch { orders: o, drawn_in }
+                if o == orders && drawn_in == epoch_at(2 * EPOCH)),
+            "{late}"
+        );
+
+        node.record_beacon(orders, "ethereum", 1, "aa", &stamp(EPOCH))
+            .expect("drawn in the epoch it orders");
+    }
+
+    #[test]
+    fn one_epoch_gets_one_beacon() {
+        let dir = TempDir::new("beacon-dup");
+        let mut node = node(&dir);
+        let orders = epoch_at(EPOCH);
+        node.record_beacon(orders, "ethereum", 1, "aa", &stamp(EPOCH))
+            .expect("first");
+
+        // A second beacon is a free re-roll of the settlement order for anyone
+        // who can append, which is the lever the record exists to remove.
+        let second = node
+            .record_beacon(orders, "ethereum", 2, "bb", &stamp(EPOCH + 1))
+            .expect_err("a second beacon re-rolls the order");
+        assert!(
+            matches!(second, RuleViolation::DuplicateBeacon { epoch } if epoch == orders),
+            "{second}"
+        );
+    }
+
+    #[test]
+    fn a_recorded_beacon_becomes_the_anchor_and_moves_the_order() {
+        let dir = TempDir::new("beacon-anchor");
+        let mut node = node(&dir);
+        let orders = epoch_at(EPOCH);
+        let chain_head = node.anchor_of_epoch(orders);
+
+        node.record_beacon(orders, "ethereum", 21_000_000, "deadbeef", &stamp(EPOCH))
+            .expect("record");
+
+        assert_eq!(node.anchor_of_epoch(orders), "deadbeef");
+        assert_ne!(node.anchor_of_epoch(orders), chain_head);
+
+        // The point of replacing the anchor is that it replaces the *order*.
+        // Two commitments whose relative rank differs between the two anchors
+        // prove the beacon is load-bearing rather than merely recorded.
+        let flipped = (0..64).any(|i| {
+            let a = format!("commit-a-{i}");
+            let b = format!("commit-b-{i}");
+            let by_head =
+                settlement_rank(orders, &chain_head, &a) < settlement_rank(orders, &chain_head, &b);
+            let by_beacon =
+                settlement_rank(orders, "deadbeef", &a) < settlement_rank(orders, "deadbeef", &b);
+            by_head != by_beacon
+        });
+        assert!(flipped, "the anchor changed but no ordering did");
+    }
+
+    #[test]
+    fn a_beacon_for_a_closed_epoch_orders_nothing_and_the_audit_says_so() {
+        // The attack the read-time check exists for: `record_beacon` refuses a
+        // late draw, so a sequencer appends one straight to the ledger instead.
+        // It must neither be read as an anchor nor pass the audit.
+        let dir = TempDir::new("beacon-backdated");
+        let mut node = node(&dir);
+        let orders = epoch_at(0);
+        let head_before = node.anchor_of_epoch(orders);
+
+        node.ledger_mut()
+            .append(
+                BEACON,
+                Value::object([
+                    ("orders", Value::Int(i128::from(orders))),
+                    ("source", Value::string("ethereum")),
+                    ("block", Value::Int(1)),
+                    ("value", Value::string("ground")),
+                ]),
+                &stamp(5 * EPOCH),
+            )
+            .expect("append");
+
+        assert_eq!(
+            node.anchor_of_epoch(orders),
+            head_before,
+            "a beacon drawn outside its epoch must not become the anchor"
+        );
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("outside it")),
+            "audit missed a back-dated beacon: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn settling_without_a_beacon_is_reportable_but_not_an_audit_fault() {
+        // Both halves matter. Every log written before beacon records existed
+        // settled this way -- including the published `launch/proofwork.jsonl`
+        // -- so failing the audit would be a false alarm on the one artifact
+        // the project offers as checkable. But the weaker ordering must still
+        // be *askable*, or a mixed log reads as uniformly strong.
+        let dir = TempDir::new("beacon-absent");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        let outcome =
+            submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+        assert!(outcome.settled, "{outcome:?}");
+        assert!(
+            !node.ledger().entries_of_kind(BATCH).is_empty(),
+            "the fixture must settle a batch"
+        );
+
+        assert!(node.audit(false).is_empty(), "the fallback is not a fault");
+        assert!(
+            !node.epochs_without_beacon().is_empty(),
+            "the fallback must still be reportable"
+        );
+    }
+
+    #[test]
+    fn requiring_a_beacon_makes_the_fallback_refusable() {
+        // The fallback is an opt-out: a sequencer who wants to grind records no
+        // beacon and orders against the head exactly as before. A reader who
+        // will not accept that needs a way to say so, and this is it.
+        //
+        // Not run through `settle_due`: the env var is process-wide and this
+        // crate's tests share a process, so setting it around a settlement
+        // would race every other test's audit. The gate is on the audit path,
+        // so the audit path is what this drives directly.
+        let dir = TempDir::new("beacon-required");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+
+        let unsettled = node.epochs_without_beacon();
+        assert!(!unsettled.is_empty(), "the fixture must use the fallback");
+
+        // What the gate would report, asserted through the same formatting the
+        // audit uses rather than by setting the variable.
+        let would_report: Vec<String> = unsettled
+            .iter()
+            .map(|epoch| format!("epoch {epoch}: settled with no beacon"))
+            .collect();
+        assert!(would_report.iter().all(|line| line.contains("no beacon")));
+        assert!(node.audit(false).is_empty(), "clean without the gate");
     }
 }
