@@ -146,6 +146,19 @@ impl fmt::Display for Referrer {
     }
 }
 
+/// What a log's existing batches say about its epoch length.
+///
+/// Derived rather than stored: see [`Node::established_epoch_length`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EstablishedLength {
+    /// No batches yet, so the next one is free to fix the answer.
+    Unset,
+    One(u64),
+    /// Already damaged. Kept as a list so the error can name what it found
+    /// rather than only that it found a problem.
+    Conflicting(Vec<u64>),
+}
+
 /// A submission the network refuses to record.
 ///
 /// A refusal writes **nothing** to the log. That matters: a rejected *verdict*
@@ -288,6 +301,29 @@ pub enum RuleViolation {
     /// after reading the first — which is the entire lever this record exists
     /// to remove, restored by an operator who simply writes twice.
     DuplicateBeacon { epoch: u64 },
+    /// Settling would add a batch under a different epoch length than the
+    /// batches already in this log.
+    ///
+    /// The failure this prevents is not hypothetical: a development node's
+    /// shared log was corrupted exactly this way, by a demo run with
+    /// `PROOFWORK_EPOCH_SECONDS=1` against a log also used for real
+    /// settlement. Epochs are derived from record timestamps and never stored,
+    /// so the result is a log no reader can re-derive at *any* single length —
+    /// permanent, and silent until somebody works out the ratios by hand.
+    ///
+    /// Refused rather than warned about, because there is no version of this
+    /// that is what the operator wanted. An epoch length is a policy parameter
+    /// every participant must share; changing it is not an edit to a log, it
+    /// is a different network. The right move is a different `--log`, which is
+    /// what `docs/design/` and the operating notes already say.
+    EpochLengthChanged { established: u64, in_force: u64 },
+    /// Settling would add to a log whose batches already disagree about the
+    /// epoch length.
+    ///
+    /// Distinct from [`RuleViolation::EpochLengthChanged`] because the remedy
+    /// is: there is no length to switch to. The log is already unre-derivable
+    /// and further settlement only buries the evidence deeper.
+    EpochLengthAlreadyMixed { lengths: Vec<u64> },
     /// A record whose own decoder would refuse it.
     ///
     /// Every other kind arrives here already decoded, so `from_value` has run
@@ -530,6 +566,29 @@ impl fmt::Display for RuleViolation {
                 f,
                 "epoch {epoch} already has a beacon; a second one would let whoever \
                  writes it re-roll the settlement order after reading the first"
+            ),
+            RuleViolation::EpochLengthChanged {
+                established,
+                in_force,
+            } => write!(
+                f,
+                "this log's batches were written with an epoch length of {established}, and \
+                 PROOFWORK_EPOCH_SECONDS is {in_force}. Settling now would leave a log no \
+                 reader can re-derive at any single length, because epochs come from record \
+                 timestamps and are never stored. Export PROOFWORK_EPOCH_SECONDS={established} \
+                 to continue this log, or give the shorter length its own --log"
+            ),
+            RuleViolation::EpochLengthAlreadyMixed { lengths } => write!(
+                f,
+                "this log's batches were already written under more than one epoch length ({}), \
+                 so there is no length that re-derives it and nothing to switch to. `audit` \
+                 names which entries need which. Settling further only adds to a history no \
+                 reader can check",
+                lengths
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             RuleViolation::PartialUndertaking { promised, log } => write!(
                 f,
@@ -2211,6 +2270,33 @@ impl Node {
     /// Only a failed *append* propagates, because at that point the log is not
     /// being written and nothing further can be trusted.
     pub fn settle_due(&mut self, now_epoch: u64, ts: &str) -> Result<Vec<Outcome>, RuleViolation> {
+        // Checked before any work, and before anything is appended. A batch
+        // written under a different epoch length than the batches already here
+        // produces a log nobody can re-derive at any single length -- see
+        // `RuleViolation::EpochLengthChanged`, which exists because a real
+        // shared log was destroyed this way by a demo script.
+        //
+        // The guard lives on settlement rather than on `Ledger::append`
+        // because a batch is the only record that carries an epoch alongside
+        // its timestamp, so it is the only one whose length can be read back.
+        // Claims and commitments have epochs too, but derived ones -- nothing
+        // in them contradicts anything.
+        match self.established_epoch_length() {
+            EstablishedLength::Unset => {}
+            EstablishedLength::One(established) => {
+                let in_force = epoch_seconds();
+                if established != in_force {
+                    return Err(RuleViolation::EpochLengthChanged {
+                        established,
+                        in_force,
+                    });
+                }
+            }
+            EstablishedLength::Conflicting(lengths) => {
+                return Err(RuleViolation::EpochLengthAlreadyMixed { lengths })
+            }
+        }
+
         let mut outcomes = Vec::new();
         for epoch in self.due_epochs(now_epoch) {
             let anchor = self.anchor_of_epoch(epoch);
@@ -2557,6 +2643,30 @@ impl Node {
                 Some((entry.seq, length))
             })
             .collect()
+    }
+
+    /// The epoch length this log has already committed to, if it has one.
+    ///
+    /// The length is never stored, so a log's only statement about it is the
+    /// batches it already holds — and that is enough, because one batch fixes
+    /// the answer for every batch after it. See [`Node::settle_due`], which
+    /// refuses to add a batch that would contradict it.
+    fn established_epoch_length(&self) -> EstablishedLength {
+        let lengths: BTreeSet<u64> = self
+            .batch_epoch_lengths()
+            .into_iter()
+            .map(|(_, length)| length)
+            .collect();
+        let mut found = lengths.into_iter();
+        match (found.next(), found.next()) {
+            (None, _) => EstablishedLength::Unset,
+            (Some(only), None) => EstablishedLength::One(only),
+            (Some(first), Some(second)) => {
+                let mut all = vec![first, second];
+                all.extend(found);
+                EstablishedLength::Conflicting(all)
+            }
+        }
     }
 
     /// What this log says about its own epoch length, as an audit note.
@@ -5448,6 +5558,89 @@ mod tests {
                 .iter()
                 .any(|problem| problem.contains("epoch length")),
             "the note fired on a log being read correctly"
+        );
+    }
+
+    #[test]
+    fn settling_under_a_changed_epoch_length_is_refused() {
+        // The corruption this prevents, reproduced: a log settled at the
+        // default, then settled again by a process with a shorter
+        // PROOFWORK_EPOCH_SECONDS -- a demo pointed at a live log. Before the
+        // guard that appended a second batch and left a log no reader could
+        // re-derive at any length. It has to be refused at the *write*, since
+        // by the time an audit sees it the damage is permanent.
+        let dir = TempDir::new("epoch-guard");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+        let batches_before = node.ledger().entries_of_kind(BATCH).len();
+        assert!(batches_before > 0, "the fixture must settle a batch");
+
+        let refused = {
+            let _guard = EpochGuard::set("1");
+            node.settle_at(&stamp(settle_offset() * 4))
+                .expect_err("a shorter epoch length must not settle into this log")
+        };
+        assert!(
+            matches!(
+                refused,
+                RuleViolation::EpochLengthChanged { established, in_force }
+                    if established == crate::partition::EPOCH_SECONDS && in_force == 1
+            ),
+            "{refused}"
+        );
+        // A refusal writes nothing. The whole point is that the log is left
+        // exactly as re-derivable as it was.
+        assert_eq!(
+            node.ledger().entries_of_kind(BATCH).len(),
+            batches_before,
+            "a refused settle still appended"
+        );
+        assert!(node.audit(false).is_empty(), "the log is still clean");
+    }
+
+    #[test]
+    fn an_already_mixed_log_is_refused_with_nothing_to_switch_to() {
+        // Distinct from the case above because the remedy is: there is no
+        // length to export. Reported separately so an operator is not sent
+        // looking for one.
+        let dir = TempDir::new("epoch-guard-mixed");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        submit(&mut node, &objective, "alice", results(1), "n1", vec![]).expect("submit");
+
+        // Plant the damage directly, the way a pre-guard process would have.
+        let seconds = crate::time::parse_rfc3339(&stamp(settle_offset())).expect("parses") as u64;
+        node.ledger_mut()
+            .append(
+                BATCH,
+                Value::object([
+                    ("epoch", Value::Int(i128::from(seconds - 1))),
+                    ("anchor", Value::string("")),
+                    ("claims", Value::Array(vec![Value::string("sha256:x")])),
+                ]),
+                &stamp(settle_offset()),
+            )
+            .expect("append");
+
+        let refused = node
+            .settle_at(&stamp(settle_offset() * 4))
+            .expect_err("a log with no single epoch length must not settle further");
+        assert!(
+            matches!(refused, RuleViolation::EpochLengthAlreadyMixed { .. }),
+            "{refused}"
+        );
+        assert!(
+            format!("{refused}").contains("nothing to switch to"),
+            "the message must not send the operator hunting for a length: {refused}"
         );
     }
 
