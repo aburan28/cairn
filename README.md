@@ -59,14 +59,6 @@ build, not a limitation to route around.
 
 ## Quick start
 
-No Rust toolchain, or would rather not wait out a first compile:
-`./scripts/download-release.sh` (or `make download`) fetches the five binaries
-[the release workflow](.github/workflows/release.yml) builds and publishes for
-your platform, checked against the sha256 it publishes beside them, and
-installs them into `target/release` — nothing here is served over a channel
-you have to trust. Requires a published release; run `make build` below until
-one exists.
-
 ```sh
 cargo build --release
 cargo install --path .        # puts `proofwork` and the other binaries on PATH
