@@ -20,11 +20,12 @@ Run `verify` and you get the same instance back, which is what makes that claim
 checkable rather than asserted.
 
 That matters because the alternative is the **self-dealing** row in
-`docs/threat-model.md`: an objective whose answer its poster already holds. The
-existing `examples/ecdlp/` instance has that shape — it pins a scalar in a
-one-bit window on a 256-bit curve, so whoever built it picked `k` and knows it.
-Nothing here can be gamed that way, because `Q` is a hash output and its
-discrete log is as unknown to the author as to anyone else.
+`docs/threat-model.md`: an objective whose answer its poster already holds.
+`examples/ecdlp/` used to have exactly that shape -- a scalar confined to a
+one-bit window on a 256-bit curve, so its author had chosen `k` -- and was
+rebuilt on this tooling for that reason. Nothing here can be gamed that way,
+because `Q` is a hash output and its discrete log is as unknown to the author as
+to anyone else.
 
 # The one thing a reader should check for themselves
 

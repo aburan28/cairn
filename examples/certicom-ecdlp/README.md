@@ -63,10 +63,12 @@ actually climb — about 2^25 and 2^30 group operations, minutes to hours.
 
 The design problem they solve is that **an ECDLP objective is trivially
 self-dealing.** Whoever picks `Q = kG` knows `k`. That is a row in
-[`threat-model.md`](../../docs/threat-model.md), and the existing
-[`examples/ecdlp/`](../ecdlp/) instance has exactly that shape — it pins a
-scalar in a one-bit window on a 256-bit curve, so its author chose and holds the
-answer.
+[`threat-model.md`](../../docs/threat-model.md), and
+[`examples/ecdlp/`](../ecdlp/) used to have exactly that shape — a scalar
+confined to a one-bit window on a 256-bit curve, so its author had chosen and
+held the answer. It has since been rebuilt on this tooling, as the ladder's
+introductory rung, and now ships its solution openly as a worked
+demonstration.
 
 Here nothing is chosen. The prime, the curve, `G` and `Q` are all SHA-256
 outputs of a public seed string:

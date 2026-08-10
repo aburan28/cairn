@@ -1,12 +1,28 @@
 {
-  "created_at": "2026-07-28T00:00:00+00:00",
+  "artifact_schema": {
+    "description": "The discrete logarithm, as 64 lowercase hex characters.",
+    "example": {
+      "k": "000000000000000000000000000000000000000000000000000012a352033319"
+    },
+    "properties": {
+      "k": {
+        "description": "k with k*G = Q, in [1, n), zero-padded to exactly 64 lowercase hex characters.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "k"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-09T00:00:00+00:00",
   "funder": "treasury",
-  "goal": "GOAL-ecdlp-bounded",
-  "reward": 250000,
-  "statement": "Recover k for the secp256k1 point P baked into the pinned checker, given that k lies in [2^39, 2^40). Submit {\"k\": <integer>}. Finding k takes on the order of 2^20 group operations with baby-step giant-step; checking a claimed k is one scalar multiplication.",
+  "goal": "GOAL-ecdlp-intro",
+  "reward": 5000,
+  "statement": "A worked ECDLP demonstration, and the smallest rung of the ladder: find k with k*G = Q on the 45-bit prime-order curve pinned in the checker. Baby-step giant-step needs about 2^22 group operations -- around twenty seconds of Python. THE ANSWER SHIPS WITH THIS EXAMPLE, in examples/ecdlp/artifact.json, so this is a demonstration rather than an open bounty: run `proofwork try` against it and watch a claim settle end to end. It mints nothing for a second submitter, because a duplicate verifies fine and earns zero. The instance is nothing-up-my-sleeve -- prime, curve, G and Q are all SHA-256 outputs of the public seed in the checker, re-derivable with `examples/certicom-ecdlp/tools/nums.py verify`. It replaced a secp256k1 instance whose scalar was confined to a one-bit window, which meant its author had chosen and therefore knew the answer while presenting it as an open bounty. For objectives nobody has solved, see examples/certicom-ecdlp/.",
   "verifier": {
-    "checker": "examples/ecdlp/checkers/secp256k1_dlog.py",
-    "checker_sha256": "a9087844e2594e51e4635774c38c09c4fd1dafc4542318173655f26d7cfeee92",
+    "checker": "examples/ecdlp/checkers/nums_dlog.py",
+    "checker_sha256": "94b52db0481b1df0706605b2a5420c550c9c0bc58c66ad08d2b68a65e3370ea7",
     "entrypoint": "check",
     "kind": "certificate"
   }
