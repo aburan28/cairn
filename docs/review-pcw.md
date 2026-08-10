@@ -344,10 +344,7 @@ and `U` in it.
   succinct proofs of verification — a SNARK over the checker's execution — would
   change §2 completely, since `N·V` collapses to `N` times a constant. That is a
   real research direction and the proposal does not invoke it; if it did, several
-  objections here would need re-running. Worked out since, in
-  [design/zk-verification.md](design/zk-verification.md): the collapse is real
-  and the break-even node count is the proving overhead itself, which puts it
-  well past where this network is.
+  objections here would need re-running.
 - **§4 assumes solve times are heavy-tailed and deterministic.** A challenge
   family with tightly concentrated solve times would recover much of the
   fair-share property. I do not know of one that is also useful, but I have not

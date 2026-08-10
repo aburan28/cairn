@@ -51,17 +51,16 @@ SEED_PORT = $(lastword $(subst :, ,$(SEED_ADDR)))
 SEED_LISTEN ?= 0.0.0.0:$(SEED_PORT)
 # A seed does not bootstrap against itself. Set it to peer with other seeds.
 SEED_BOOTSTRAP_ARGS ?=
-SERVE_LISTEN ?= 127.0.0.1:8080
+ SERVE_LISTEN ?= 127.0.0.1:8080
 SERVE_ARGS ?=
+UI_PORT ?= 3000
 P2P_ARGS ?=
 # Which MCP client `make mcp-setup` writes a stanza for.
 CLIENT ?= claude
-# What `make download` fetches: a released tag, or the latest one.
-VERSION ?= latest
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug download cli mcp mcp-setup p2p seed serve ui demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke \
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve ui demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
@@ -77,11 +76,9 @@ help:
 	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
 	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
-	  '  make ui                  Run the Next.js reader against it (needs make serve).' \
+	  '  make ui                  Run the Next.js UI (port UI_PORT, default 3000).' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
-	  '  make download            Install the release binaries from GitHub -- no compile.' \
-	  '  make download VERSION=v0.3.0   ...a specific tag, instead of the latest.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
 	  '  make shard-demo          Six holders, one shard each, one of them lying.' \
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
@@ -106,22 +103,6 @@ build:
 
 debug:
 	$(CARGO) build --bins
-
-# The alternative to `build` for a machine with no Rust toolchain, or one that
-# would rather not wait out a first compile: fetches the same five binaries
-# `.github/workflows/release.yml` builds and publishes, verified against the
-# checksum it publishes beside them, into $(RELEASE_DIR) -- the same directory
-# `build` populates.
-#
-# Deliberately NOT wired as an alternative to `build` inside `cli`/`mcp`/`p2p`/
-# etc.: those are phony and always recompile, which is the guarantee a
-# contributor editing `src/` relies on, and quietly serving a stale downloaded
-# binary instead the moment one happened to be sitting in $(RELEASE_DIR) would
-# break that guarantee silently. Run the installed binaries directly --
-# scripts/download-release.sh prints the paths -- or put $(RELEASE_DIR) on
-# PATH yourself.
-download:
-	./scripts/download-release.sh --version "$(VERSION)" --out "$(RELEASE_DIR)"
 
 $(LOCAL_DIR):
 	mkdir -p "$@"
@@ -220,13 +201,9 @@ serve-smoke: build
 serve: build
 	$(SERVE) --log "$(LOG)" --root "$(ROOT)" --listen "$(SERVE_LISTEN)" $(SERVE_ARGS)
 
-# The richer client over `serve` -- see ui/README.md. Needs a node to read:
-# run `make serve` in another terminal first, or point it at somebody else's
-# with NEXT_PUBLIC_PROOFWORK_NODE=http://host:port. `npm install` is cheap and
-# safe to repeat (npm skips what is already satisfied), so this stays one
-# command rather than a separate install step to remember.
+# Run the Next.js UI that reads from the serve endpoint.
 ui:
-	cd ui && npm install && npm run dev
+	cd "$(ROOT)/ui" && npx next dev -p $(UI_PORT)
 
 test-reference:
 	cargo test --manifest-path reference/rust/Cargo.toml
