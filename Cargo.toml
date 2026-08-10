@@ -42,8 +42,8 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 #
 # Raising any of them means raising the set, in one reviewed change, with the
 # call sites updated -- see the `ignore` entries in .github/dependabot.yml.
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 
 # The one symmetric cipher, everywhere: transport frames, sealed envelopes, the
 # at-rest store. **Not AES**, and that is a decision rather than an accident.
@@ -59,7 +59,7 @@ hmac = "0.12"
 # "nonce reuse is fatal" is one rule to enforce rather than one per site.
 # `tests/cipher_policy.rs` fails the build if an AES or TLS crate enters the
 # dependency tree, so the claim is checked and not merely written down.
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 
 # Confidentiality layer. Censorship resistance needs unlinkable, sealed
 # submissions that can be revealed WITHOUT the submitter being online -- see
@@ -72,7 +72,7 @@ chacha20poly1305 = "0.10"
 # whose transport is quantum-resistant and whose submissions were sealed with
 # X25519 had moved the weakness rather than removed it, and a dependency still
 # in the tree is one the next person can reach for. See `src/crypto/kem.rs`.
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "3", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
 ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
