@@ -37,18 +37,20 @@
 //!
 //! # Field
 //!
-//! GF(2^8) modulo the AES polynomial `x^8 + x^4 + x^3 + x + 1` (0x11b). Bytes
-//! are shared independently, so a share is exactly as long as the secret and
-//! there is no block padding or length hiding — the envelope layer, not this
-//! module, is where `docs/censorship.md` §4's fixed-size-bucket mitigation
-//! belongs.
+//! GF(2^8) modulo the AES polynomial `x^8 + x^4 + x^3 + x + 1` (0x11b), from
+//! [`crate::crypto::gf`]. Bytes are shared independently, so a share is exactly
+//! as long as the secret and there is no block padding or length hiding — the
+//! envelope layer, not this module, is where `docs/censorship.md` §4's
+//! fixed-size-bucket mitigation belongs.
 //!
 //! # Timing
 //!
-//! Read `gf` before assuming anything. Summary: the multiply is branch-free
-//! and **table-free**, specifically so that no memory access is indexed by a
-//! secret byte — the standard log/exp-table implementation leaks the secret
-//! through the cache and is not used here. What is *not* claimed: that the
+//! Read [`crate::crypto::gf`] before assuming anything. Summary: the multiply
+//! is branch-free and **table-free**, specifically so that no memory access is
+//! indexed by a secret byte — the standard log/exp-table implementation leaks
+//! the secret through the cache and is not used here. That module also exports
+//! a table, [`gf::Row`], for bulk *public* data; this
+//! file must never reach for it, and does not. What is *not* claimed: that the
 //! compiler preserved the branch-free form, and that the length of the secret
 //! or the number and identity of the shares are hidden. They are public.
 
@@ -58,6 +60,7 @@ use rand_core::{CryptoRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::canonical::Value;
+use crate::crypto::gf;
 
 // -- errors ----------------------------------------------------------------
 
@@ -151,95 +154,6 @@ impl fmt::Display for ShamirError {
 }
 
 impl std::error::Error for ShamirError {}
-
-// -- field -----------------------------------------------------------------
-
-/// GF(2^8) arithmetic, branch-free and table-free.
-///
-/// # What is and is not constant time
-///
-/// [`mul`](gf::mul) uses no lookup tables and no data-dependent branches. It is
-/// written as a masked Russian-peasant loop with a fixed trip count of 8, using
-/// only `^`, `&`, `<<`, `>>` and `wrapping_neg` — every one of which is
-/// single-cycle and operand-independent on every CPU this could plausibly run
-/// on. In particular there is no `if` on a secret bit and no array indexed by a
-/// secret byte, which rules out the cache-timing leak that the conventional
-/// log/exp-table implementation has: `EXP[LOG[a] + LOG[b]]` indexes memory with
-/// the secret and is observable by anything sharing the cache.
-///
-/// **What is not claimed:** that the emitted machine code is constant time.
-/// Rust and LLVM are permitted to turn a mask back into a branch, and nothing
-/// here verifies the assembly. If constant time is load-bearing for your threat
-/// model, check the disassembly; this comment is an argument about the source,
-/// not a measurement of the binary.
-///
-/// [`inv`](gf::inv) and [`pow`](gf::pow) branch on the bits of a *public*
-/// constant exponent, never on their input. `inv` also tests its argument
-/// against zero, which is fine because it is only ever called on Lagrange
-/// denominators derived from share indices, and share indices are public — they
-/// are published alongside the shares by construction.
-mod gf {
-    /// Low byte of `x^8 + x^4 + x^3 + x + 1` (0x11b) after the implicit `x^8`.
-    const REDUCTION: u8 = 0x1b;
-
-    /// Multiply in GF(2^8).
-    ///
-    /// Carry-less multiply with reduction folded into each step: shift `a` up
-    /// one degree per bit of `b`, and whenever that shift would have pushed a
-    /// term into `x^8`, subtract the modulus. Both conditionals are expressed
-    /// as `0x00`/`0xff` masks (`wrapping_neg` on a 0/1 value) rather than `if`.
-    pub const fn mul(a: u8, b: u8) -> u8 {
-        let mut a = a;
-        let mut b = b;
-        let mut acc: u8 = 0;
-        let mut step = 0;
-        while step < 8 {
-            // 0xff when the low bit of b is set, 0x00 otherwise.
-            let add = (b & 1).wrapping_neg();
-            acc ^= a & add;
-
-            // 0xff when a is about to overflow degree 7, 0x00 otherwise.
-            let overflow = ((a >> 7) & 1).wrapping_neg();
-            a <<= 1; // the escaping x^8 term is dropped by the u8 width
-            a ^= REDUCTION & overflow; // ...and subtracted back in here
-
-            b >>= 1;
-            step += 1;
-        }
-        acc
-    }
-
-    /// `base^exponent`, square-and-multiply over a *public* exponent.
-    ///
-    /// The branch is on the exponent, which is a compile-time constant at every
-    /// call site, so timing depends on the exponent and not on `base`.
-    pub const fn pow(base: u8, exponent: u32) -> u8 {
-        let mut result: u8 = 1;
-        let mut squared = base;
-        let mut e = exponent;
-        while e > 0 {
-            if e & 1 == 1 {
-                result = mul(result, squared);
-            }
-            squared = mul(squared, squared);
-            e >>= 1;
-        }
-        result
-    }
-
-    /// Multiplicative inverse, or `None` for zero.
-    ///
-    /// The group has order 255, so `a^254 = a^-1` by Fermat. This is slower
-    /// than a table and that is the trade being made deliberately; it runs at
-    /// most `n` times per reconstruction on public inputs, so its cost is
-    /// irrelevant next to the per-byte work.
-    pub fn inv(a: u8) -> Option<u8> {
-        if a == 0 {
-            return None;
-        }
-        Some(pow(a, 254))
-    }
-}
 
 // -- share -----------------------------------------------------------------
 
@@ -689,44 +603,9 @@ mod tests {
             .collect()
     }
 
-    // -- field laws --------------------------------------------------------
-
-    #[test]
-    fn field_known_answer_vectors() {
-        // The two products every AES description uses as its worked example.
-        assert_eq!(gf::mul(0x57, 0x83), 0xc1);
-        assert_eq!(gf::mul(0x57, 0x13), 0xfe);
-        assert_eq!(gf::mul(0x02, 0x87), 0x15); // xtime with reduction
-        assert_eq!(gf::mul(0x00, 0xff), 0x00);
-        assert_eq!(gf::mul(0x01, 0xff), 0xff);
-    }
-
-    #[test]
-    fn field_is_commutative_and_associative() {
-        for a in 0..=255u8 {
-            for b in 0..=255u8 {
-                assert_eq!(gf::mul(a, b), gf::mul(b, a), "commutativity at {a},{b}");
-            }
-        }
-        // Associativity and distributivity over a coarse but structured sample.
-        for a in (0..=255u8).step_by(7) {
-            for b in (0..=255u8).step_by(11) {
-                for c in (0..=255u8).step_by(13) {
-                    assert_eq!(gf::mul(gf::mul(a, b), c), gf::mul(a, gf::mul(b, c)));
-                    assert_eq!(gf::mul(a, b ^ c), gf::mul(a, b) ^ gf::mul(a, c));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn every_non_zero_element_has_an_inverse() {
-        assert_eq!(gf::inv(0), None);
-        for a in 1..=255u8 {
-            let inverse = gf::inv(a).expect("non-zero elements are invertible");
-            assert_eq!(gf::mul(a, inverse), 1, "inverse of {a}");
-        }
-    }
+    // The field's own laws are pinned in `crate::crypto::gf`, which is where
+    // the field now lives. Duplicating them here would be two copies of one
+    // contract, which is the thing that module exists to prevent.
 
     // -- round trips -------------------------------------------------------
 

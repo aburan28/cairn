@@ -25,9 +25,16 @@ fi
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 
-LOG=$(mktemp -u /tmp/pw-mcp-XXXXXX.jsonl)
-OUT=$(mktemp -u /tmp/pw-mcp-out-XXXXXX.jsonl)
-ERR=$(mktemp -u /tmp/pw-mcp-err-XXXXXX.log)
+# The suffix goes on *after* mktemp, not inside the template. BSD mktemp (macOS)
+# only expands `XXXXXX` at the very end of the template: given
+# `...-XXXXXX.jsonl` it returns the name literally, and `-u` still calls
+# `mkstemp` before unlinking, so the first run creates a real file called
+# `pw-mcp-err-XXXXXX.log` and every run after it dies with "File exists". GNU
+# mktemp expands a suffixed template happily, which is why CI never saw this and
+# only a second local run does.
+LOG="$(mktemp -u /tmp/pw-mcp-XXXXXX).jsonl"
+OUT="$(mktemp -u /tmp/pw-mcp-out-XXXXXX).jsonl"
+ERR="$(mktemp -u /tmp/pw-mcp-err-XXXXXX).log"
 trap 'rm -f "$LOG" "$OUT" "$ERR" "${LOG%.jsonl}.pending.json"' EXIT
 
 # stderr is the only channel for "cannot save pending commitments" -- a server
@@ -111,8 +118,9 @@ echo "  ledger still holds 1 entry (the objective)"
 # planted citation and write nothing.
 # --------------------------------------------------------------------------
 rule "an objective statement that tries to plant a citation"
-HOSTILE=$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX.json)
-HOSTILE_LOG=$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX.jsonl)
+# Suffixed after the call, for the reason the ones at the top of this file are.
+HOSTILE="$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX).json"
+HOSTILE_LOG="$(mktemp -u /tmp/pw-mcp-hostile-XXXXXX).jsonl"
 # The MCP server keeps unrevealed nonces in a sidecar beside the log.
 trap 'rm -f "$LOG" "$OUT" "$HOSTILE" "$HOSTILE_LOG" "${LOG%.jsonl}.pending.json" "${HOSTILE_LOG%.jsonl}.pending.json"' EXIT
 
@@ -276,8 +284,16 @@ echo "$SECOND" | grep -q "verdict: accept" || fail "the revealed claim did not v
 echo "$SECOND" | grep -q "beacon order" || fail "the agent was not told why payment is deferred"
 echo "  the nonce survived a restart of the server and opened the commitment"
 
-rule "the epoch closes and the batch settles -- over MCP alone"
-sleep 4.2
+rule "the epoch closes, clears the finality delay, and the batch settles -- over MCP alone"
+# One epoch to close, plus PROOFWORK_FINALITY_EPOCHS more before it is
+# eligible. Sleeping a single epoch here is what this did before the delay
+# existed, and the symptom was "polling frontier_status did not settle the
+# closed epoch" -- which points at the polling rather than at the clock.
+python3 -c '
+import sys, time
+length, delay = float(sys.argv[1]), int(sys.argv[2])
+time.sleep(length * (1 + delay) + 0.4)
+' "$PROOFWORK_EPOCH_SECONDS" "${PROOFWORK_FINALITY_EPOCHS:-1}"
 # No CLI settle here, deliberately: an agent that reveals and then polls
 # frontier_status must get paid without the operator running anything. The
 # server drains due epochs on any read.

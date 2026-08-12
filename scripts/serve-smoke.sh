@@ -86,6 +86,33 @@ assert oid in ids, f"{oid} not in {ids}"
 assert "untrusted" in json.dumps(listing).lower(), "no untrusted-statement warning"
 print(f"  GET /objectives -> {len(ids)} objective(s), statements labelled untrusted")
 
+# The epoch chain, both representations. It is *derived* rather than stored,
+# so a bug here is a bug in how a reader would reconstruct settlement order --
+# and the head is what two operators compare to find out whether they forked.
+status, body = get("/chain")
+assert status == 200, status
+chain = json.loads(body)
+assert chain["links"] == len(chain["chain"]), chain
+# Each link must name the one before it, or it is not a chain.
+prev = ""
+for entry in chain["chain"]:
+    assert entry["prev"] == prev, f"link for epoch {entry['epoch']} does not follow its parent"
+    prev = entry["link"]
+assert chain["head"] == prev, "head is not the last link"
+print(f"  GET /chain -> {chain['links']} link(s), each naming its parent")
+
+status, body = get("/chain.html")
+assert status == 200, status
+page = body.decode()
+assert "knowledge chain" in page, "the page is not the chain view"
+# Self-contained: a node operator reads this over an SSH tunnel on a box with
+# no route out, and a page that fetched a stylesheet would be blank exactly then.
+assert "http://" not in page.replace("http://www.w3.org", ""), "the page fetches something external"
+assert "https://" not in page, "the page fetches something external"
+if chain["head"]:
+    assert chain["head"] in page, "the head is not shown on the page"
+print("  GET /chain.html -> self-contained page, head shown")
+
 status, body = get(f"/objective/{oid}")
 assert status == 200, status
 record = json.loads(body)["record"]
@@ -201,7 +228,9 @@ PY
 grep -q '"kind": *"claim"' "$LOG" || fail "the claim never reached the log"
 
 rule "the log a stranger produced audits, and the frontier moved"
-sleep 1.2
+# Two waits, not one: an epoch must close *and* wait out the finality delay
+# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
+sleep 2.4
 "$RUST" --log "$LOG" --root . settle | sed 's/^/  /'
 "$RUST" --log "$LOG" --root . audit --no-rerun | grep -q "log verified" \
   || fail "the log does not audit"
@@ -218,6 +247,19 @@ assert frontier["holder"] == "stranger", frontier
 assert frontier["pool_remaining"] < 1_100_000, frontier
 print(f"  frontier: score {frontier['score']} held by {frontier['holder']}, "
       f"{frontier['pool_remaining']} of the pool left")
+
+# The chain, now that an epoch has actually settled. The check earlier in this
+# script runs against an empty chain and can only prove the endpoint's shape;
+# this one proves it grows a link when a batch is paid, which is what a reader
+# reconstructing settlement order depends on.
+with urllib.request.urlopen(f"http://127.0.0.1:{port}/chain", timeout=10) as r:
+    chain = json.loads(r.read())
+assert chain["links"] >= 1, f"an epoch settled and the chain is still empty: {chain}"
+assert chain["head"], "a non-empty chain has no head"
+settled = [c for c in chain["chain"] if c["claims"]]
+assert settled, f"no link names a settled claim: {chain['chain']}"
+print(f"  GET /chain -> {chain['links']} link(s) after settlement, "
+      f"head {chain['head'][:15]}...")
 PY
 
 rule "a read-only server refuses submissions"

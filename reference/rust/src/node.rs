@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use crate::canonical::{short, Value};
 use crate::frontier::Ratchet;
 use crate::ledger::{Ledger, Proof};
-use crate::partition::{assign, beacon, epoch_of, epoch_seconds, settlement_rank};
+use crate::partition::{assign, beacon, epoch_of, epoch_seconds, settlement_rank, COMMITTEE_SIZE};
 use crate::records::{
-    signed_submitter, Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord,
-    Undertaking, MAX_UNDERTAKING_HEIGHT,
+    signed_submitter, Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Objective,
+    PeerRecord, Undertaking, MAX_UNDERTAKING_HEIGHT,
 };
 use crate::time::{timestamp, unix_seconds};
 use crate::verifiers::{self, Status, Verdict};
@@ -25,11 +25,13 @@ pub const VERDICT: &str = "verdict";
 pub const SETTLEMENT: &str = "settlement";
 pub const FRONTIER: &str = "frontier";
 pub const BATCH: &str = "batch";
+pub const BEACON: &str = "beacon";
 pub const PEER: &str = "peer";
 pub const UNDERTAKING: &str = "undertaking";
 pub const AVAILABILITY: &str = "availability";
 pub const AVAILABILITY_POOL: &str = "availability_pool";
 pub const AVAILABILITY_SETTLEMENT: &str = "availability_settlement";
+pub const COMMITTEE_SHARE: &str = "committee_share";
 
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -179,14 +181,157 @@ impl Node {
             .collect()
     }
 
+    /// Epochs holding accepted claims that can never be paid, because a later
+    /// epoch settled first.
+    ///
+    /// Empty when the synchrony assumption behind
+    /// [`FINALITY_EPOCHS`](crate::partition::FINALITY_EPOCHS) held. Non-empty
+    /// means it did not: those records turned up after a later batch was
+    /// written, and this node's payouts are a strict subset of what a peer
+    /// that received them in time paid. Reported by `audit`, because a fork
+    /// nobody is told about is the failure the delay exists to replace.
+    pub fn late_epochs(&self) -> Vec<u64> {
+        let drained = self.drained_epochs();
+        let Some(floor) = drained.iter().copied().max() else {
+            return Vec::new();
+        };
+        self.accepted_claims_by_epoch()
+            .iter()
+            .map(|(epoch, _)| *epoch)
+            .filter(|epoch| *epoch <= floor && !drained.contains(epoch))
+            .collect::<BTreeSet<u64>>()
+            .into_iter()
+            .collect()
+    }
+
     /// The log head as of the epoch's *start*.
     ///
     /// Derived from the log rather than a clock, so an auditor reaches the
     /// same value. `positions` bounds the scan to the log as it stood at a
     /// given length, which is what stops a later back-dated append changing
     /// the anchor of a batch that already settled.
+    /// The settlement anchor: the head of this log's **epoch chain**.
+    ///
+    /// Independently derived from the same rule the primary implements, and
+    /// the rule is worth restating rather than referring to, since the point
+    /// of this crate is that it does not read the other one.
+    ///
+    /// It used to be the hash of the last ledger entry before `epoch`, which
+    /// broke the invariant multi-operator settlement depends on: two nodes
+    /// holding the same records must pay in the same order. An entry hash
+    /// covers `seq`, `prev` and the local write time, so two nodes with
+    /// byte-identical records get different anchors, different beacons, and
+    /// different orders -- while both logs audit clean, because each is
+    /// internally consistent.
+    ///
+    /// The chain is content only. Each link commits to the link before it, the
+    /// epoch, and the *sorted* claim ids of that batch -- sorted, so a link
+    /// cannot depend on the ordering it is used to produce. It folds in **file
+    /// order**, not epoch order, so a batch for an older epoch appended later
+    /// leaves earlier links untouched instead of retroactively faulting them.
+    ///
+    /// A recorded `beacon` for `epoch` displaces the chain head entirely. The
+    /// chain is what a sequencer can steer by choosing what to append, and
+    /// steering it steers the settlement order; a beacon drawn somewhere the
+    /// sequencer does not control is the point of the record. The chain
+    /// remains the fallback, so every log written before beacons existed --
+    /// including `launch/proofwork.jsonl` -- derives exactly what it always
+    /// did.
+    ///
+    /// `epoch` was unused when the head covered every batch written before
+    /// this one. It is used now, because a beacon names the epoch it orders.
     fn anchor_of_epoch(&self, epoch: u64, positions: Option<usize>) -> String {
-        self.anchor_at(epoch, positions, epoch_seconds())
+        if let Some(value) = self.epoch_beacon(epoch, positions) {
+            return value;
+        }
+        let entries = self.ledger.entries();
+        let entries = match positions {
+            Some(limit) => &entries[..limit.min(entries.len())],
+            None => entries,
+        };
+        let mut head = String::new();
+        for entry in entries {
+            if entry.kind != BATCH {
+                continue;
+            }
+            // `u64`-range only, matching the primary. Folding a negative or
+            // oversized epoch would put a link in the chain that nobody
+            // recomputing `H({prev, epoch, claims})` from the published values
+            // could reproduce.
+            let Some(epoch) = entry
+                .payload
+                .get("epoch")
+                .and_then(Value::as_i128)
+                .filter(|value| u64::try_from(*value).is_ok())
+            else {
+                continue;
+            };
+            let mut claims: Vec<String> = match entry.payload.get("claims") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            claims.sort();
+            head = Value::object(vec![
+                ("prev", Value::string(head)),
+                ("epoch", Value::Int(epoch)),
+                (
+                    "claims",
+                    Value::Array(claims.into_iter().map(Value::String).collect()),
+                ),
+            ])
+            .digest();
+        }
+        head
+    }
+
+    /// The beacon ordering `epoch`, if the log holds an admissible one.
+    ///
+    /// Two conditions, both re-derived here rather than trusted from whoever
+    /// wrote the record, because this crate exists to check the other one
+    /// rather than agree with it:
+    ///
+    /// - it must have been **written in the epoch it orders**. Written
+    ///   earlier, the value exists while commitments for that epoch can still
+    ///   be made, so a submitter can grind a commitment hash against a beacon
+    ///   they already hold. Written later, whoever wrote it has already read
+    ///   the reveals, and choosing the draw is choosing who is paid first.
+    ///   Only a draw at the boundary is unknown to every committer and
+    ///   unchosen by the writer.
+    /// - there must be exactly **one**. Taking the first rather than the last
+    ///   is what makes that so: a second record cannot displace the first, so
+    ///   appending one buys no re-roll of the order. The audit reports the
+    ///   duplicate; the reader must still be total on a log that contains one.
+    ///
+    /// An entry this crate cannot place in time does not order anything, for
+    /// the same reason it does not move `anchor_at`: it is not evidence about
+    /// where a boundary was.
+    fn epoch_beacon(&self, epoch: u64, positions: Option<usize>) -> Option<String> {
+        let entries = self.ledger.entries();
+        let entries = match positions {
+            Some(limit) => &entries[..limit.min(entries.len())],
+            None => entries,
+        };
+        entries
+            .iter()
+            .filter(|entry| entry.kind == BEACON)
+            .filter(|entry| {
+                entry
+                    .payload
+                    .get("orders")
+                    .and_then(Value::as_i128)
+                    .and_then(|value| u64::try_from(value).ok())
+                    == Some(epoch)
+            })
+            .filter(|entry| {
+                unix_seconds(&entry.ts)
+                    .is_some_and(|seconds| epoch_of(seconds, epoch_seconds()) == epoch)
+            })
+            .find_map(|entry| entry.payload.get("value").and_then(Value::as_str))
+            .map(String::from)
     }
 
     /// The anchor of `epoch`, measuring epochs with an explicit length. The two
@@ -208,6 +353,78 @@ impl Node {
             }
         }
         anchor
+    }
+
+    /// A commitment by record id, with the position it sits at.
+    fn commitment_at(&self, commitment_id: &str) -> Option<(usize, Commitment)> {
+        self.ledger
+            .entries_of_kind(COMMITMENT)
+            .into_iter()
+            .filter_map(|entry| {
+                Commitment::from_value(&entry.payload)
+                    .ok()
+                    .map(|record| (entry.seq as usize, record))
+            })
+            .find(|(_, record)| record.id() == commitment_id)
+    }
+
+    /// Who holds a share of every submission sealed in `epoch`: the
+    /// `COMMITTEE_SIZE` registered peers with the lowest
+    /// `H(beacon(epoch, anchor) ‖ transport)`, as `(seat, transport, identity)`.
+    ///
+    /// Bounded at `positions` so a peer record appended later cannot join a
+    /// committee that has already been sealed to, and one appended earlier
+    /// cannot be evicted from it. Ranked on the **transport** id rather than
+    /// the ed25519 identity because the transport id names the McEliece key a
+    /// share is actually sealed to, and because grinding for a seat then costs
+    /// a McEliece keypair rather than an ed25519 one.
+    ///
+    /// Tie-broken on the transport id as well as the rank: two peers with the
+    /// same rank would otherwise keep map order, which is a lever back to
+    /// whoever picks their key. A collision needs a SHA-256 preimage; that is
+    /// not a reason to leave the order undefined.
+    ///
+    /// Returns fewer than `COMMITTEE_SIZE` seats when fewer peers are
+    /// registered. The primary refuses to *draw* one that short — a smaller
+    /// committee silently lowers the collusion threshold — but an audit is
+    /// reading a log that already exists, and reporting "seat not drawn" for
+    /// every share is the same finding said more usefully.
+    fn committee_for(&self, epoch: u64, positions: usize) -> Vec<(u8, String, String)> {
+        // `EPOCH_SECONDS`, the constant, never `epoch_seconds()`: the override
+        // is a demo affordance, the anchor moves with the epoch length, and a
+        // consensus rule keyed on an environment variable is not one.
+        let anchor = self.anchor_at(epoch, Some(positions), crate::partition::EPOCH_SECONDS);
+
+        let mut current: BTreeMap<String, PeerRecord> = BTreeMap::new();
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != PEER {
+                continue;
+            }
+            let Ok(record) = PeerRecord::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.verify_signature().is_err() {
+                continue;
+            }
+            match current.get(&record.identity) {
+                Some(held) if held.seq > record.seq => {}
+                _ => {
+                    current.insert(record.identity.clone(), record);
+                }
+            }
+        }
+
+        let mut ranked: Vec<(String, PeerRecord)> = current
+            .into_values()
+            .map(|peer| (settlement_rank(epoch, &anchor, &peer.transport), peer))
+            .collect();
+        ranked.sort_by(|(ra, a), (rb, b)| (ra, &a.transport).cmp(&(rb, &b.transport)));
+        ranked
+            .into_iter()
+            .take(usize::from(COMMITTEE_SIZE))
+            .enumerate()
+            .map(|(i, (_, peer))| ((i as u8) + 1, peer.transport, peer.identity))
+            .collect()
     }
 
     /// Which entry this undertaking must produce in `epoch`.
@@ -502,7 +719,10 @@ impl Node {
                 verdict,
                 settled: false,
                 reward: 0,
-                note: format!("accepted; settles when epoch {reveal_epoch} closes"),
+                note: format!(
+                    "accepted; settles once epoch {reveal_epoch} closes and clears the {}-epoch finality delay",
+                    crate::partition::finality_epochs()
+                ),
                 pending_epoch: Some(reveal_epoch),
             });
         };
@@ -516,14 +736,27 @@ impl Node {
         })
     }
 
-    /// Settle every reveal epoch that has closed, in beacon order.
+    /// Settle every reveal epoch that has closed and waited out the finality
+    /// delay, in beacon order, oldest first.
+    ///
+    /// Three filters. Closed (`epoch < now_epoch`), because an open epoch can
+    /// still take reveals. Final (`epoch + finality_epochs() < now_epoch`), so
+    /// eligibility depends on the clock rather than on when this node happened
+    /// to hear about the work. And newer than anything already paid, because
+    /// an epoch settling after a later one would be anchored on a chain head
+    /// that already contains that later epoch -- reordering payouts an auditor
+    /// has already read. Those are refused and surface in [`Self::late_epochs`].
     pub fn settle_due(&mut self, now_epoch: u64, ts: &str) -> Result<Vec<Outcome>, String> {
         let drained = self.drained_epochs();
+        let floor = drained.iter().copied().max();
+        let delay = crate::partition::finality_epochs();
         let pending = self.accepted_claims_by_epoch();
         let due: BTreeSet<u64> = pending
             .iter()
             .map(|(epoch, _)| *epoch)
-            .filter(|epoch| *epoch < now_epoch && !drained.contains(epoch))
+            .filter(|epoch| !drained.contains(epoch))
+            .filter(|epoch| epoch.saturating_add(delay) < now_epoch)
+            .filter(|epoch| floor.is_none_or(|settled| *epoch > settled))
             .collect();
 
         let mut outcomes = Vec::new();
@@ -745,6 +978,17 @@ impl Node {
                         Ok(r.to_value())
                     })
                     .map_err(|e| e.to_string()),
+                // A committee share settles nothing directly -- the claim it
+                // opens is an ordinary claim and re-derives the same way -- but
+                // it is the evidence that a reveal happened without the
+                // submitter, and evidence nobody checks is decoration.
+                COMMITTEE_SHARE => CommitteeShare::from_value(&entry.payload)
+                    .and_then(|r| {
+                        r.validate()?;
+                        r.verify_signature()?;
+                        Ok(r.to_value())
+                    })
+                    .map_err(|e| e.to_string()),
                 _ => continue,
             };
             match re_encoded {
@@ -754,6 +998,102 @@ impl Node {
                     entry.seq, entry.kind
                 )),
                 Err(error) => problems.push(format!("entry {}: {error}", entry.seq)),
+            }
+        }
+
+        // Committee shares, beyond the structural pass above: the seat must be
+        // one the epoch's draw actually produced, held by the identity that
+        // signed, published in an epoch strictly later than the commitment's.
+        //
+        // Ported for the reason every rule here is ported -- an admission rule
+        // one implementation applies and the other does not is a rule two nodes
+        // disagree about while both report a clean log. This one guards the
+        // reveal path that runs *without the submitter*, so a share nobody
+        // checks is a claim somebody was paid for on evidence that does not
+        // hold up.
+        let mut committee_seats: BTreeSet<(String, u8)> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(COMMITTEE_SHARE) {
+            let record = match CommitteeShare::from_value(&entry.payload) {
+                Ok(record) => record,
+                // Already reported by the re-encode pass, with the decoder's
+                // own message.
+                Err(_) => continue,
+            };
+            if record.validate().is_err() || record.verify_signature().is_err() {
+                continue;
+            }
+            let at = entry.seq as usize;
+            let Some((commit_at, commitment)) = self.commitment_at(&record.commitment) else {
+                problems.push(format!(
+                    "entry {}: committee_share names commitment {} which is not in this log",
+                    entry.seq,
+                    short(&record.commitment)
+                ));
+                continue;
+            };
+            if commitment.envelope.is_none() {
+                problems.push(format!(
+                    "entry {}: committee_share opens commitment {}, which carries no envelope",
+                    entry.seq,
+                    short(&record.commitment)
+                ));
+                continue;
+            }
+            if at >= entry.seq as usize {
+                problems.push(format!(
+                    "entry {}: committee_share precedes the commitment it opens",
+                    entry.seq
+                ));
+                continue;
+            }
+            let (Some(commit_seconds), Some(share_seconds)) = (
+                unix_seconds(&commitment.created_at),
+                unix_seconds(&record.created_at),
+            ) else {
+                problems.push(format!(
+                    "entry {}: committee_share or its commitment carries an unreadable timestamp",
+                    entry.seq
+                ));
+                continue;
+            };
+            let commit_epoch = epoch_of(commit_seconds, epoch_seconds());
+            let share_epoch = epoch_of(share_seconds, epoch_seconds());
+            if share_epoch <= commit_epoch {
+                problems.push(format!(
+                    "entry {}: committee_share is in epoch {share_epoch} but its commitment is \
+                     in epoch {commit_epoch}; a committee must wait for a strictly later epoch",
+                    entry.seq
+                ));
+                continue;
+            }
+            match self
+                .committee_for(commit_epoch, commit_at)
+                .iter()
+                .find(|(seat, _, _)| *seat == record.seat)
+            {
+                None => problems.push(format!(
+                    "entry {}: seat {} was not drawn for commitment {}",
+                    entry.seq,
+                    record.seat,
+                    short(&record.commitment)
+                )),
+                Some((_, _, identity)) if *identity != record.identity => {
+                    problems.push(format!(
+                        "entry {}: seat {} of commitment {} belongs to another identity",
+                        entry.seq,
+                        record.seat,
+                        short(&record.commitment)
+                    ));
+                }
+                Some(_) => {}
+            }
+            if !committee_seats.insert((record.commitment.clone(), record.seat)) {
+                problems.push(format!(
+                    "entry {}: seat {} of commitment {} published twice",
+                    entry.seq,
+                    record.seat,
+                    short(&record.commitment)
+                ));
             }
         }
 
@@ -1239,6 +1579,40 @@ impl Node {
             }
         }
 
+        // A beacon that is not admissible orders nothing -- `epoch_beacon`
+        // already skips it, so the batch falls back to the epoch chain and the
+        // anchor check below still passes. That is the right settlement
+        // behaviour and the wrong silence: the record is in the log, it looks
+        // like it governs an epoch, and only an audit that says otherwise
+        // tells anyone it does not.
+        let mut beacon_epochs: BTreeSet<u64> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(BEACON) {
+            let Some(orders) = entry.payload.get("orders").and_then(Value::as_u64) else {
+                problems.push(format!("entry {}: beacon orders no epoch", entry.seq));
+                continue;
+            };
+            if !beacon_epochs.insert(orders) {
+                problems.push(format!(
+                    "entry {}: a second beacon for epoch {orders}; whoever writes it \
+                     would re-roll the settlement order after reading the first",
+                    entry.seq
+                ));
+            }
+            // The timing is the security property, so it is re-derived rather
+            // than taken from the record: drawn before the epoch, a committer
+            // grinds against a value they already hold; drawn after it opens,
+            // the writer has read the reveals.
+            let drawn = unix_seconds(&entry.ts).map(|seconds| epoch_of(seconds, epoch_seconds()));
+            if drawn != Some(orders) {
+                problems.push(format!(
+                    "entry {}: beacon orders epoch {orders} but was drawn in {}, \
+                     so it orders nothing",
+                    entry.seq,
+                    drawn.map_or_else(|| "an unreadable epoch".to_string(), |e| e.to_string())
+                ));
+            }
+        }
+
         // Every batch must name the anchor the log actually had at its epoch's
         // start, and the order the beacon produces.
         let mut batches = 0usize;
@@ -1298,6 +1672,25 @@ impl Node {
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
+            // An empty batch is always forged, and it is not harmless.
+            //
+            // A drain writes a batch only for an epoch that has accepted
+            // claims, so an honest batch always names at least one. But every
+            // batch is a link in the epoch chain, and the chain head is the
+            // anchor later batches sort against -- so an empty batch for an
+            // epoch nobody claimed in moves that head while trivially matching
+            // its own (empty) claim list. Both implementations passed one
+            // clean, which handed an operator an unlimited re-roll of the
+            // order every later epoch is paid in.
+            if listed.is_empty() {
+                faulted.insert(epoch);
+                problems.push(format!(
+                    "entry {}: batch for epoch {epoch} settles no claims, so it cannot \
+                     have come from a drain -- an empty batch still moves the epoch chain",
+                    entry.seq
+                ));
+                continue;
+            }
             // Membership is derived from the log, not read back out of the
             // batch. Re-sorting the list the batch itself supplied is a check
             // that a batch which *omitted* a claim always passes -- and which
@@ -1357,6 +1750,27 @@ impl Node {
                  timestamps and never stored, so a log written with a different \
                  PROOFWORK_EPOCH_SECONDS (this audit used {}) cannot be re-derived without it.",
                 crate::partition::epoch_seconds()
+            ));
+        }
+
+        // Accepted claims stranded behind a later batch. Nothing in this log is
+        // wrong -- which is why it has to be said. It means records arrived
+        // outside the finality window, and a peer that got them in time paid
+        // claims this node never will.
+        let late = self.late_epochs();
+        if !late.is_empty() {
+            problems.push(format!(
+                "note: {} epoch(s) hold accepted claims that can never settle, because a later \
+                 epoch was paid first: {}. Records for them arrived more than PROOFWORK_\
+                 FINALITY_EPOCHS (this audit used {}) after their epoch closed. Every batch in \
+                 this log is correctly derived; what is wrong is that a peer which received \
+                 those records on time has paid claims this node never will.",
+                late.len(),
+                late.iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                crate::partition::finality_epochs()
             ));
         }
 

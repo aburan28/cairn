@@ -1,0 +1,3 @@
+proofwork-serve: listening on 127.0.0.1:8787
+proofwork-serve: accepting submissions into /Volumes/SSD990/distributed-researcher/queue
+proofwork-serve:   admitted by `proofwork-p2p --queue /Volumes/SSD990/distributed-researcher/queue` if a daemon is running, or `proofwork drain --queue /Volumes/SSD990/distributed-researcher/queue` if not

@@ -65,11 +65,36 @@
 //!   content key fails the payload tag. It can never produce a different
 //!   plaintext.
 //!
+//! # How a share is sealed to a member
+//!
+//! By key encapsulation to the member's published [`Bundle`], never by a
+//! Diffie–Hellman exchange. Until recently this was ephemeral X25519, and the
+//! swap is the point rather than an implementation detail: a network whose
+//! *transport* is quantum-resistant and whose *submissions* are sealed with
+//! X25519 has not protected the submissions at all. An adversary who records
+//! traffic today and factors later reads every artifact that was ever sealed,
+//! and "later" is the only resource that attack needs.
+//!
+//! The bundle is McEliece plus whatever else the member published, combined so
+//! that opening a share needs every leg — see [`super::kem`]. There is no
+//! ephemeral key: a KEM ciphertext is itself the fresh half of the exchange,
+//! and each share carries its own, so two shares to one member derive different
+//! keys exactly as two ephemeral exchanges did.
+//!
+//! What was given up with X25519 is a *contributory* check. A low-order X25519
+//! key was a real attack — a member could plant one and make their own share
+//! world-readable — and the code refused it. A KEM has no equivalent: every
+//! bit string of the right length is *a* key, and a member who publishes
+//! garbage gets a share nobody can open, including themselves. That is a
+//! liveness cost to the member who did it and no confidentiality cost to
+//! anyone, so there is nothing left to refuse and no check here that pretends
+//! otherwise.
+//!
 //! # Timing
 //!
 //! No secret-dependent branch or index is taken in this module. Everything that
 //! touches a secret is either data-independent (`copy_from_slice`, the SHA-256
-//! transcript) or delegated: `x25519-dalek` for the scalar multiplication,
+//! transcript) or delegated: [`super::kem`] for encapsulation and decapsulation,
 //! `chacha20poly1305` for the constant-time Poly1305 tag comparison, and
 //! [`super::shamir`] for the GF(2^8) arithmetic. The one data-dependent routine
 //! here, `hex_encode`, is applied only to published bytes.
@@ -80,9 +105,9 @@ use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest as _, Sha256};
-use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use super::kem::{Bundle, Encapsulated, KemError, Leg, SecretBundle, Suite, SUITES};
 use super::shamir::{self, Share};
 use crate::canonical::Value;
 
@@ -92,14 +117,26 @@ const RECORD_TYPE: &str = "sealed_envelope";
 
 /// Wire version. Bumped only for a change that alters how bytes are interpreted;
 /// an unknown version is refused rather than guessed at.
-const VERSION: i128 = 1;
+///
+/// `2` because a share stopped carrying a 32-byte X25519 ephemeral public key
+/// and started carrying a list of KEM ciphertexts. A version-1 envelope is not
+/// upgradable — its shares are sealed to keys of a scheme this build no longer
+/// speaks — so it is refused rather than half-read. No envelope has ever been
+/// written to a log (`SealedSubmission` reached no record kind until the
+/// committee reveal did), so nothing in existence is orphaned by that.
+const VERSION: i128 = 2;
 
 /// Domain separator for the share key derivation.
 ///
 /// A hash used for two purposes in one protocol is a hash used wrongly. This
 /// string exists so that a share key can never collide with a digest computed
 /// anywhere else in the crate, whatever the inputs.
-const SHARE_KDF_DOMAIN: &[u8] = b"proofwork/censorship/envelope/share-key/v1";
+///
+/// `v2` alongside the version bump: the transcript now absorbs a bundle id and
+/// a KEM encapsulation where it used to absorb two X25519 points. Leaving the
+/// string at `v1` would have meant one domain covering two different
+/// transcripts, which is exactly the collision the separator exists to stop.
+const SHARE_KDF_DOMAIN: &[u8] = b"proofwork/censorship/envelope/share-key/v2";
 
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
@@ -112,9 +149,9 @@ const MAX_COMMITTEE: usize = 255;
 
 /// A 32-byte secret that wipes itself on drop and never prints itself.
 ///
-/// Used for the content key, for derived share keys, and as the return type of
-/// [`CommitteeKey::to_bytes`]. Handing callers a bare `[u8; 32]` would silently
-/// move the wiping obligation onto code that has no reason to remember it.
+/// Used for the content key and for derived share keys. Handing callers a
+/// bare `[u8; 32]` would silently move the wiping obligation onto code that
+/// has no reason to remember it.
 pub struct Secret32([u8; KEY_LEN]);
 
 impl Secret32 {
@@ -180,14 +217,17 @@ pub enum EnvelopeError {
     InvalidThreshold { threshold: u8, committee: usize },
     /// Two members share a routing index, so a share cannot be addressed.
     DuplicateMemberIndex { index: u8 },
-    /// Two members share a public key. Not a decoding problem: it means one
+    /// Two members share a key bundle. Not a decoding problem: it means one
     /// entity silently holds two shares and the effective threshold is lower
     /// than the stated one.
     DuplicateMemberKey { index: u8 },
-    /// The X25519 exchange produced the identity point, which every observer can
-    /// also compute. Almost always a low-order public key planted by a member
-    /// who wants their own share to be readable by anyone.
-    NonContributoryExchange { index: u8 },
+    /// The key encapsulation layer refused a key, a ciphertext or a bundle.
+    ///
+    /// Structural only — a wrong length, a suite this build does not speak, a
+    /// bundle missing its mandatory McEliece leg. A *wrong* ciphertext does not
+    /// arrive here, because all three schemes reject implicitly and surface as
+    /// [`EnvelopeError::Authentication`] instead.
+    Kem(KemError),
     /// The share splitter returned a different number of shares than there are
     /// members, so shares and members cannot be paired.
     ShareCountMismatch { shares: usize, committee: usize },
@@ -255,11 +295,7 @@ impl fmt::Display for EnvelopeError {
                 "committee member {index} reuses another member's public key; \
                  one entity would hold two shares"
             ),
-            EnvelopeError::NonContributoryExchange { index } => write!(
-                f,
-                "key exchange with committee member {index} was non-contributory \
-                 (low-order public key)"
-            ),
+            EnvelopeError::Kem(e) => write!(f, "key encapsulation: {e}"),
             EnvelopeError::ShareCountMismatch { shares, committee } => write!(
                 f,
                 "share splitter returned {shares} shares for {committee} members"
@@ -312,67 +348,109 @@ impl std::error::Error for EnvelopeError {}
 
 // -- committee -------------------------------------------------------------
 
-/// A committee member's public identity: a routing index and an X25519 key.
+/// A committee member's public identity: a routing index and a key bundle.
 ///
 /// `index` addresses the member within *this* envelope and has nothing to do
 /// with the Shamir x-coordinate of the share they hold; the x-coordinate travels
 /// sealed, inside the share ciphertext. Keeping them separate means this module
 /// never has to assume how the sibling splitter numbers its shares.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// No longer `Copy`, and the reason is worth stating rather than discovering at
+/// a call site: a member's bundle carries a 261,120-byte McEliece key, so an
+/// implicit copy per use would have been a quarter of a megabyte memcpy nobody
+/// wrote down. `Clone` is explicit for exactly that.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitteeMember {
     pub index: u8,
-    pub public_key: [u8; KEY_LEN],
+    pub keys: Bundle,
 }
 
-/// A committee member's private key.
+impl CommitteeMember {
+    /// This member's 32-byte identity, which is the id of the McEliece leg of
+    /// their bundle — the same value as their transport peer id and their
+    /// `PeerRecord::transport`. See [`Bundle::id`].
+    pub fn id(&self) -> [u8; 32] {
+        self.keys.id()
+    }
+}
+
+/// A committee member's private keys.
 ///
-/// `StaticSecret` rather than `EphemeralSecret` because a committee member must
-/// be reachable across an epoch's worth of submissions with one published key.
+/// Static rather than ephemeral because a committee member must be reachable
+/// across an epoch's worth of submissions with one published bundle. The cost
+/// is no forward secrecy, which [`super::kem`] states plainly.
 pub struct CommitteeKey {
-    secret: StaticSecret,
+    secrets: SecretBundle,
 }
 
-/// Redacted. `StaticSecret` itself has no `Debug`; this impl exists so that
-/// deriving `Debug` on a surrounding type cannot accidentally add one later.
+/// Redacted. This impl exists so that deriving `Debug` on a surrounding type
+/// cannot accidentally add one later.
 impl fmt::Debug for CommitteeKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommitteeKey")
-            .field("public", &hex_encode(self.public().as_slice()))
-            .field("secret", &"<redacted>")
+            .field("id", &hex_encode(&self.secrets.id()))
+            .field("suites", &self.secrets.suites())
+            .field("secrets", &"<redacted>")
             .finish()
     }
 }
 
 impl CommitteeKey {
+    /// Generate a member key over `suites`. Classic McEliece is added if it was
+    /// not asked for, because [`Bundle`] refuses a bundle without it.
+    pub fn generate_over<R: RngCore + CryptoRng>(suites: &[Suite], rng: &mut R) -> CommitteeKey {
+        let (_public, secrets) = SecretBundle::generate(suites, rng);
+        CommitteeKey { secrets }
+    }
+
+    /// Generate a member key over every suite this build implements.
+    ///
+    /// The default because a bundle is only as strong as its *strongest* leg
+    /// (the combiner absorbs all of them), so there is no security reason for a
+    /// member to publish fewer — only a size reason, and a committee key is
+    /// published once per epoch.
     pub fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> CommitteeKey {
-        CommitteeKey {
-            secret: StaticSecret::random_from_rng(&mut *rng),
-        }
+        CommitteeKey::generate_over(&SUITES, rng)
     }
 
-    /// Load a stored key. Bytes are used as-is; X25519 clamps at use time, so
-    /// every 32-byte string is a usable secret and there is nothing to reject.
-    pub fn from_bytes(bytes: [u8; KEY_LEN]) -> CommitteeKey {
-        CommitteeKey {
-            secret: StaticSecret::from(bytes),
-        }
+    /// Adopt an already-assembled secret bundle, for a member whose keys are
+    /// persisted elsewhere — a node reusing its transport identity, which is
+    /// what [`crate::node::Node`] does for a drawn committee.
+    pub fn from_secrets(secrets: SecretBundle) -> CommitteeKey {
+        CommitteeKey { secrets }
     }
 
-    /// Export for persistence. The returned value wipes itself on drop; that is
-    /// the whole reason it is not a plain `[u8; 32]`.
-    pub fn to_bytes(&self) -> Secret32 {
-        Secret32(self.secret.to_bytes())
+    pub fn secrets(&self) -> &SecretBundle {
+        &self.secrets
     }
 
-    pub fn public(&self) -> [u8; KEY_LEN] {
-        PublicKey::from(&self.secret).to_bytes()
+    /// Persist. **Carries key material** — see [`SecretBundle::to_value`].
+    pub fn to_value(&self) -> Value {
+        self.secrets.to_value()
+    }
+
+    /// Restore a persisted committee key.
+    pub fn from_value(value: &Value) -> Result<CommitteeKey, EnvelopeError> {
+        SecretBundle::from_value(value)
+            .map(CommitteeKey::from_secrets)
+            .map_err(EnvelopeError::Kem)
+    }
+
+    /// The public bundle other parties seal to.
+    pub fn public(&self) -> Bundle {
+        self.secrets.public_bundle()
+    }
+
+    /// This member's 32-byte identity. See [`CommitteeMember::id`].
+    pub fn id(&self) -> [u8; 32] {
+        self.secrets.id()
     }
 
     /// The public half of this key, addressed at `index`.
     pub fn member(&self, index: u8) -> CommitteeMember {
         CommitteeMember {
             index,
-            public_key: self.public(),
+            keys: self.public(),
         }
     }
 
@@ -388,16 +466,19 @@ impl CommitteeKey {
             .sealed_share(index)
             .ok_or(EnvelopeError::UnknownShare { index })?;
 
-        let ephemeral = PublicKey::from(sealed.ephemeral_public);
-        let shared = self.secret.diffie_hellman(&ephemeral);
-        if !shared.was_contributory() {
-            return Err(EnvelopeError::NonContributoryExchange { index });
-        }
+        // A leg set that does not match this member's suites is a structural
+        // error and says so; a leg set that matches but was sealed to somebody
+        // else decapsulates to a pseudorandom secret and fails at the tag
+        // below, which is where implicit rejection puts it.
+        let shared = self
+            .secrets
+            .decapsulate(&sealed.encapsulated)
+            .map_err(EnvelopeError::Kem)?;
 
         let key = derive_share_key(
             &shared,
-            &sealed.ephemeral_public,
-            &self.public(),
+            &sealed.encapsulated,
+            self.id(),
             index,
             &envelope.aad,
         );
@@ -425,11 +506,16 @@ impl CommitteeKey {
 
 // -- sealed share ----------------------------------------------------------
 
-/// One committee member's share, sealed to their public key.
+/// One committee member's share, sealed to their key bundle.
+///
+/// `encapsulated` replaces what was a single 32-byte X25519 ephemeral public
+/// key. It is larger — 96 bytes for McEliece alone, 5,617 for all three suites
+/// — and that is the price of the property in [`super::kem`]: every leg must be
+/// broken to open one share.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedShare {
     index: u8,
-    ephemeral_public: [u8; KEY_LEN],
+    encapsulated: Encapsulated,
     nonce: [u8; NONCE_LEN],
     ciphertext: Vec<u8>,
 }
@@ -439,8 +525,9 @@ impl SealedShare {
         self.index
     }
 
-    pub fn ephemeral_public(&self) -> &[u8; KEY_LEN] {
-        &self.ephemeral_public
+    /// The KEM ciphertexts this share's key was derived from, one per suite.
+    pub fn encapsulated(&self) -> &Encapsulated {
+        &self.encapsulated
     }
 
     pub fn nonce(&self) -> &[u8; NONCE_LEN] {
@@ -455,8 +542,13 @@ impl SealedShare {
         Value::object([
             ("index", Value::Int(i128::from(self.index))),
             (
-                "ephemeral_public",
-                Value::string(hex_encode(&self.ephemeral_public)),
+                "kem",
+                Value::array(self.encapsulated.legs().iter().map(|leg| {
+                    Value::object([
+                        ("suite", Value::string(leg.suite.as_str())),
+                        ("ciphertext", Value::string(hex_encode(&leg.ciphertext))),
+                    ])
+                })),
             ),
             ("nonce", Value::string(hex_encode(&self.nonce))),
             ("ciphertext", Value::string(hex_encode(&self.ciphertext))),
@@ -467,9 +559,33 @@ impl SealedShare {
         if value.as_object().is_none() {
             return Err(EnvelopeError::NotAnObject);
         }
+        let raw = value
+            .get("kem")
+            .ok_or(EnvelopeError::MissingField { field: "kem" })?
+            .as_array()
+            .ok_or(EnvelopeError::InvalidField {
+                field: "kem",
+                expected: "an array",
+            })?;
+        let mut legs = Vec::with_capacity(raw.len());
+        for item in raw {
+            if item.as_object().is_none() {
+                return Err(EnvelopeError::NotAnObject);
+            }
+            let suite = Suite::parse(field_str(item, "suite")?).map_err(EnvelopeError::Kem)?;
+            legs.push(Leg {
+                suite,
+                ciphertext: field_hex(item, "ciphertext")?,
+            });
+        }
+        // Suite order, uniqueness, per-suite ciphertext length and the
+        // mandatory McEliece leg are all `Encapsulated`'s rules, checked in one
+        // place so the decoder cannot admit a shape `seal` never produces.
+        let encapsulated = Encapsulated::new(legs).map_err(EnvelopeError::Kem)?;
+
         Ok(SealedShare {
             index: field_u8(value, "index")?,
-            ephemeral_public: field_hex_fixed::<KEY_LEN>(value, "ephemeral_public")?,
+            encapsulated,
             nonce: field_hex_fixed::<NONCE_LEN>(value, "nonce")?,
             ciphertext: field_hex(value, "ciphertext")?,
         })
@@ -558,7 +674,13 @@ impl SealedEnvelope {
                         index: member.index,
                     });
                 }
-                if member.public_key == other.public_key {
+                // By id, not by bundle. The id is `sha256` of the McEliece leg,
+                // so two members with the same mandatory key are the same
+                // entity however their optional legs differ -- and comparing
+                // whole bundles would let one entity dodge this rule by
+                // publishing a second bundle that reuses its McEliece key and
+                // adds an ML-KEM one. Cheaper too: 32 bytes rather than 261 KB.
+                if member.id() == other.id() {
                     return Err(EnvelopeError::DuplicateMemberKey { index: other.index });
                 }
             }
@@ -817,29 +939,19 @@ fn seal_share<R: RngCore + CryptoRng>(
     aad: &str,
     rng: &mut R,
 ) -> Result<SealedShare, EnvelopeError> {
-    // Ephemeral, not static: a per-share keypair means a compromised sender key
-    // cannot retroactively open past envelopes, and `EphemeralSecret` is
-    // consumed by the exchange so it cannot be reused by mistake.
-    let ephemeral = EphemeralSecret::random_from_rng(&mut *rng);
-    let ephemeral_public = PublicKey::from(&ephemeral).to_bytes();
-    let recipient = PublicKey::from(member.public_key);
-    let shared = ephemeral.diffie_hellman(&recipient);
-    if !shared.was_contributory() {
-        // The identity point means the shared secret is a constant every
-        // observer can compute, so this member's share would be world-readable
-        // and the effective threshold would be one lower than advertised.
-        return Err(EnvelopeError::NonContributoryExchange {
-            index: member.index,
-        });
-    }
+    // A fresh encapsulation per share, which is what the ephemeral X25519
+    // keypair used to buy: two shares sealed to one member derive two different
+    // keys, so a nonce cannot repeat under a key and one opened share says
+    // nothing about another.
+    //
+    // What it does *not* buy is forward secrecy. The member's bundle is
+    // long-lived, so a leaked committee secret opens every share ever sealed to
+    // it. That was equally true of the static X25519 side of the old exchange;
+    // it is stated here rather than implied by the word "ephemeral" no longer
+    // appearing.
+    let (encapsulated, shared) = member.keys.encapsulate(rng);
 
-    let key = derive_share_key(
-        &shared,
-        &ephemeral_public,
-        &member.public_key,
-        member.index,
-        aad,
-    );
+    let key = derive_share_key(&shared, &encapsulated, member.id(), member.index, aad);
 
     let mut plaintext = Zeroizing::new(Vec::with_capacity(share.data.len().saturating_add(1)));
     plaintext.push(share.index);
@@ -859,35 +971,47 @@ fn seal_share<R: RngCore + CryptoRng>(
 
     Ok(SealedShare {
         index: member.index,
-        ephemeral_public,
+        encapsulated,
         nonce,
         ciphertext,
     })
 }
 
-/// Derive a share-sealing key from a completed X25519 exchange.
+/// Derive a share-sealing key from a completed key encapsulation.
 ///
 /// Every value that decides *which* envelope and *which* recipient this share
 /// belongs to is absorbed, so a sealed share is cryptographically welded to its
 /// position: replay it into another envelope (different `aad`), re-address it to
-/// another member (different recipient key or index), or pair it with a
-/// different ephemeral key, and the derived key changes and the tag fails.
+/// another member (different recipient id or index), or pair it with a
+/// different encapsulation, and the derived key changes and the tag fails.
+///
+/// **The recipient's 32-byte id, not their key.** The id is `sha256` of the
+/// McEliece leg, so it commits to that key exactly as well as the key does,
+/// while a member's bundle is a quarter of a megabyte — absorbing it would put
+/// a 261 KB hash on every seal and every open for no additional binding. The
+/// optional legs are not absorbed here either and do not need to be: the
+/// combiner inside [`Bundle::encapsulate`] already hashes every leg's suite and
+/// ciphertext into `shared`, so a bundle whose ML-KEM key was swapped produces
+/// a different `shared` and therefore a different key.
 ///
 /// Fields are length-prefixed so the transcript is injective — without prefixes,
-/// a recipient key ending in some bytes and an `aad` starting with them could
+/// a recipient id ending in some bytes and an `aad` starting with them could
 /// concatenate to the same string as a different pair.
 fn derive_share_key(
-    shared: &SharedSecret,
-    ephemeral_public: &[u8; KEY_LEN],
-    recipient_public: &[u8; KEY_LEN],
+    shared: &Secret32,
+    encapsulated: &Encapsulated,
+    recipient_id: [u8; 32],
     member_index: u8,
     aad: &str,
 ) -> Secret32 {
     let mut hasher = Sha256::new();
     absorb(&mut hasher, SHARE_KDF_DOMAIN);
-    absorb(&mut hasher, shared.as_bytes());
-    absorb(&mut hasher, ephemeral_public);
-    absorb(&mut hasher, recipient_public);
+    absorb(&mut hasher, shared.expose());
+    for leg in encapsulated.legs() {
+        absorb(&mut hasher, leg.suite.as_str().as_bytes());
+        absorb(&mut hasher, &leg.ciphertext);
+    }
+    absorb(&mut hasher, &recipient_id);
     absorb(&mut hasher, &[member_index]);
     absorb(&mut hasher, aad.as_bytes());
 
@@ -931,22 +1055,9 @@ fn wipe_shares(shares: &mut [Share]) {
 /// which are published -- and it is why [`Secret32`] has no hex or `Display`
 /// impl. Do not reach for this to print key material.
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        out.push(hex_digit(byte >> 4));
-        out.push(hex_digit(byte & 0x0f));
-    }
-    out
-}
-
-fn hex_digit(value: u8) -> char {
-    match value {
-        0..=9 => char::from(b'0' + value),
-        10..=15 => char::from(b'a' + value - 10),
-        // Unreachable: callers pass a nibble. Total anyway, because a panic in a
-        // formatter is a worse outcome than an odd character.
-        _ => '?',
-    }
+    // One encoder for the whole crate, in `crate::hex`. A second copy here is a
+    // second thing that could disagree about how a published byte is spelled.
+    crate::hex::encode(bytes)
 }
 
 /// Strict decoder: lowercase only.
@@ -1427,9 +1538,9 @@ mod tests {
         );
 
         let mut duplicate_key = members.clone();
-        let first_key = members.first().expect("non-empty").public_key;
+        let first_key = members.first().expect("non-empty").keys.clone();
         if let Some(m) = duplicate_key.get_mut(2) {
-            m.public_key = first_key;
+            m.keys = first_key;
         }
         assert_eq!(
             SealedEnvelope::seal(b"x", AAD, &duplicate_key, 2, &mut OsRng),
@@ -1437,17 +1548,65 @@ mod tests {
         );
     }
 
-    /// A planted low-order public key would give one member a share that every
-    /// observer can decrypt, silently lowering the threshold.
+    /// The replacement for `low_order_member_key_is_rejected`, and the threat
+    /// model changed rather than the test.
+    ///
+    /// Under X25519 a member could plant a low-order public key and make *their
+    /// own* share readable by every observer, which lowered the effective
+    /// threshold and had to be refused. A KEM has no such key: every bit string
+    /// of the right length is *a* public key, and encapsulating to a random one
+    /// produces a secret nobody holds -- the planter least of all.
+    ///
+    /// So a garbage key costs the member their own share and costs the scheme
+    /// nothing, which is a liveness fault absorbed by `n - t` and not an attack.
+    /// This test pins both halves of that claim.
     #[test]
-    fn low_order_member_key_is_rejected() {
-        let (_keys, mut members) = committee(3);
-        if let Some(m) = members.get_mut(1) {
-            m.public_key = [0u8; 32];
-        }
+    fn a_garbage_member_key_costs_only_that_member_their_share() {
+        let (keys, mut members) = committee(3);
+        let honest = members.clone();
+
+        // The second member publishes a bundle whose *McEliece* leg is a blob
+        // of the right length corresponding to no secret at all, keeping their
+        // real ML-KEM and HQC legs. That is the sharpest version of the attack:
+        // the planter still holds two of the three secrets and still cannot
+        // derive the combined key, because the combiner absorbs all three.
+        let mut junk = vec![0u8; Suite::McEliece.public_key_len()];
+        OsRng.fill_bytes(&mut junk);
+        let junk = crate::crypto::kem::PublicKey::from_bytes(Suite::McEliece, &junk)
+            .expect("right length");
+        let mut planted: Vec<_> = members[1]
+            .keys
+            .keys()
+            .iter()
+            .filter(|key| key.suite() != Suite::McEliece)
+            .cloned()
+            .collect();
+        planted.push(junk);
+        members[1].keys = Bundle::new(planted).expect("mandatory leg replaced, not removed");
+
+        // Sealing still succeeds: there is nothing to refuse.
+        let envelope =
+            SealedEnvelope::seal(b"secret", AAD, &members, 2, &mut OsRng).expect("seals");
+
+        // The planter cannot open their own share.
+        let planted = keys[1].open_share(&envelope, members[1].index);
+        assert!(
+            matches!(planted, Err(EnvelopeError::Authentication { .. })),
+            "got {planted:?}"
+        );
+
+        // And the other two still reach the threshold, so the submission opens.
+        let shares: Vec<Share> = [0usize, 2]
+            .into_iter()
+            .map(|i| {
+                keys[i]
+                    .open_share(&envelope, honest[i].index)
+                    .expect("honest member opens")
+            })
+            .collect();
         assert_eq!(
-            SealedEnvelope::seal(b"x", AAD, &members, 2, &mut OsRng),
-            Err(EnvelopeError::NonContributoryExchange { index: 2 })
+            envelope.open_with_shares(&shares).expect("opens"),
+            b"secret".to_vec()
         );
     }
 
@@ -1523,12 +1682,19 @@ mod tests {
             }),
             Err(EnvelopeError::MissingField { field: "nonce" })
         );
-        assert_eq!(
-            rebuild(&|m| {
-                m.insert("version".into(), Value::Int(2));
-            }),
-            Err(EnvelopeError::UnsupportedVersion { version: 2 })
-        );
+        // Both directions. `3` is a version this build predates; `1` is the
+        // X25519 envelope, whose shares are sealed to a scheme this build no
+        // longer speaks -- refused outright rather than partially read, because
+        // half-decoding it would produce shares nothing can open and an error
+        // pointing at the wrong layer.
+        for version in [1, 3] {
+            assert_eq!(
+                rebuild(&|m| {
+                    m.insert("version".into(), Value::Int(version));
+                }),
+                Err(EnvelopeError::UnsupportedVersion { version })
+            );
+        }
         assert_eq!(
             rebuild(&|m| {
                 m.insert("type".into(), Value::string("commitment"));
@@ -1622,23 +1788,43 @@ mod tests {
     #[test]
     fn debug_never_prints_secret_material() {
         let key = CommitteeKey::generate(&mut OsRng);
-        let exported = key.to_bytes();
-        let secret_hex = hex_encode(exported.expose());
-
         let rendered = format!("{key:?}");
-        assert!(!rendered.contains(&secret_hex), "CommitteeKey Debug leaked");
+        for secret in key.secrets().keys() {
+            let secret_hex = hex_encode(secret.expose());
+            assert!(
+                !rendered.contains(&secret_hex),
+                "CommitteeKey Debug leaked a {} secret",
+                secret.suite()
+            );
+        }
         assert!(rendered.contains("<redacted>"));
 
+        let exported = Secret32::new([7u8; KEY_LEN]);
         let rendered = format!("{exported:?}");
-        assert!(!rendered.contains(&secret_hex), "Secret32 Debug leaked");
+        assert!(
+            !rendered.contains(&hex_encode(exported.expose())),
+            "Secret32 Debug leaked"
+        );
         assert!(rendered.contains("<redacted>"));
     }
 
     #[test]
     fn stored_key_round_trips() {
         let key = CommitteeKey::generate(&mut OsRng);
-        let restored = CommitteeKey::from_bytes(*key.to_bytes().expose());
+        let restored = CommitteeKey::from_value(&key.to_value()).expect("restores");
         assert_eq!(restored.public(), key.public());
+        assert_eq!(restored.id(), key.id());
+
+        // And the restored key still opens a share sealed to the original, which
+        // is the property a round trip of the *encoding* alone would not catch.
+        let members = [key.member(1)];
+        let envelope =
+            SealedEnvelope::seal(b"still mine", AAD, &members, 1, &mut OsRng).expect("seals");
+        let share = restored.open_share(&envelope, 1).expect("opens");
+        assert_eq!(
+            envelope.open_with_shares(&[share]).expect("opens"),
+            b"still mine".to_vec()
+        );
     }
 
     #[test]

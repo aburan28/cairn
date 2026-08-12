@@ -47,7 +47,9 @@ sleep 1.1
 "$RUST" --data-dir "$DATA" --key-file "$KEY" --root . reveal "$OID" \
   --submitter alice --artifact examples/reversible-adder/artifact-cuccaro.json \
   --nonce n1 | sed 's/^/  /'
-sleep 1.1
+# Two waits, not one: an epoch must close *and* wait out the finality delay
+# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
+sleep 2.2
 "$RUST" --data-dir "$DATA" --key-file "$KEY" --root . settle >/dev/null 2>&1 || true
 
 head -c 24 "$LOG" | grep -q '^pwenc1:' || fail "the log is not sealed"

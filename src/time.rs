@@ -16,10 +16,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// nothing but `std`, because this crate has no date library and will not grow
 /// one for a single format string.
 ///
-/// This value is **advisory**. Ordering in this system comes from the hash
-/// chain, never from the clock: an operator who lies about the time produces a
-/// log whose entries are still in exactly the order they were appended, which is
-/// why a wrong clock is a cosmetic problem here rather than a consensus one.
+/// This value is **advisory for the order of a log, and no longer advisory for
+/// what a batch pays**. The distinction is worth stating carefully, because
+/// this comment used to make only the first half of it and that was read as the
+/// whole story.
+///
+/// *Within* one log, ordering still comes from the hash chain and never from the
+/// clock: an operator who lies about the time produces a log whose entries are
+/// in exactly the order they were appended.
+///
+/// *Across* nodes, the clock now reaches settlement. `settle_at` derives "which
+/// epochs are due" from this value ([`crate::node::Node::settle_at`] →
+/// `due_epochs`, `epoch < now_epoch`), and `docs/design/settlement-convergence.md`
+/// established that the *sequence* in which epochs drain fixes the epoch-chain
+/// anchor, which is an input to the settlement sort key. Two nodes whose clocks
+/// disagree can therefore drain in different sequences and pay the same claims
+/// in different orders, with both logs auditing clean.
+///
+/// So a wrong clock is not cosmetic. It cannot corrupt a single log, and it can
+/// put two honest nodes into the fork that
+/// `draining_epochs_in_a_different_sequence_forks_the_chain` pins. The finality
+/// delay that note proposes is a rule about *time*, and this is the clock it
+/// would be measured against -- which is why an anchored, shared time source is
+/// the open question there rather than an embellishment.
 pub fn timestamp() -> String {
     let seconds = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),

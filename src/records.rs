@@ -60,6 +60,7 @@ pub enum RecordKind {
     Peer,
     Undertaking,
     Availability,
+    CommitteeShare,
 }
 
 impl RecordKind {
@@ -71,6 +72,7 @@ impl RecordKind {
             RecordKind::Peer => "peer",
             RecordKind::Undertaking => "undertaking",
             RecordKind::Availability => "availability",
+            RecordKind::CommitteeShare => "committee_share",
         }
     }
 }
@@ -126,6 +128,15 @@ pub enum RecordError {
     /// asked for "never revealed" and got "revealed later" would be misled
     /// about the one thing they cared about.
     SealedNotImplemented,
+    /// A commitment carries an `envelope` that is not a decodable sealed
+    /// envelope, or a share record carries a malformed share.
+    ///
+    /// Refused at the decoder rather than at open time. An envelope that cannot
+    /// be decoded can never be opened, so admitting one writes a submission
+    /// into the log that the committee will spend an epoch failing to reveal --
+    /// and the submitter, who is the only party who could have caught it,
+    /// learns about it an epoch too late.
+    MalformedEnvelope { reason: String },
 }
 
 impl fmt::Display for RecordError {
@@ -163,6 +174,9 @@ impl fmt::Display for RecordError {
                 "confidentiality \"sealed\" requires zero-knowledge verification, \
                  which is not implemented; use \"embargoed\" for delayed disclosure",
             ),
+            RecordError::MalformedEnvelope { reason } => {
+                write!(f, "sealed envelope cannot be decoded: {reason}")
+            }
         }
     }
 }
@@ -773,9 +787,29 @@ pub struct Commitment {
     pub objective_id: String,
     pub submitter: String,
     /// Output of [`commitment_hash`]. Opaque to the ledger until the matching
-    /// [`Claim`] reproduces it.
+    /// [`Claim`] reproduces it — or until the epoch's committee opens
+    /// [`Commitment::envelope`] without the submitter.
     pub hash: String,
     pub created_at: String,
+    /// The artifact and its nonce, sealed to the epoch's committee.
+    ///
+    /// **Present makes this a sealed submission**, which is the only kind that
+    /// can be revealed by anyone other than the submitter. Absent is plain
+    /// commit–reveal, unchanged, and the submitter must come back with the
+    /// artifact themselves — the failure `docs/censorship.md` §1 describes,
+    /// where stopping their second action takes their bounty.
+    ///
+    /// Omitted from the canonical form when absent, exactly like `signature`
+    /// and `Objective::confidentiality`, so adding this field moved no ids:
+    /// every commitment written before it existed digests to what it always
+    /// did, and no claim posted against a live bounty is orphaned.
+    ///
+    /// It is inside [`Commitment::signing_payload`] rather than beside it. The
+    /// envelope's own `aad` is the commitment hash, so the binding already runs
+    /// one way; covering it by the signature runs it the other, and means a
+    /// sequencer cannot strip a submitter's envelope to force them back onto
+    /// the path where censorship works.
+    pub envelope: Option<crate::crypto::envelope::SealedEnvelope>,
     /// Ed25519 signature over this record, hex, or `None`.
     ///
     /// Omitted from the canonical form when absent, so adding this field moved
@@ -796,8 +830,19 @@ impl Commitment {
             submitter: submitter.into(),
             hash: hash.into(),
             created_at: created_at.into(),
+            envelope: None,
             signature: None,
         }
+    }
+
+    /// Attach a sealed envelope, making this a submission the committee can
+    /// open without the submitter.
+    ///
+    /// Call before [`Commitment::signed_with`]: the signature covers the
+    /// envelope, so attaching one afterwards invalidates it.
+    pub fn sealed_with(mut self, envelope: crate::crypto::envelope::SealedEnvelope) -> Commitment {
+        self.envelope = Some(envelope);
+        self
     }
 
     pub fn to_value(&self) -> Value {
@@ -816,13 +861,20 @@ impl Commitment {
     /// are different records -- which is what stops a signature being stripped
     /// without changing the id anyone cited.
     pub fn signing_payload(&self) -> Value {
-        Value::object([
+        let mut value = Value::object([
             ("type", Value::string(RecordKind::Commitment.as_str())),
             ("objective_id", Value::string(self.objective_id.clone())),
             ("submitter", Value::string(self.submitter.clone())),
             ("hash", Value::string(self.hash.clone())),
             ("created_at", Value::string(self.created_at.clone())),
-        ])
+        ]);
+        // Inserted only when present. `envelope: null` and no `envelope` key
+        // are *not* interchangeable -- they are different bytes and therefore
+        // different ids -- so an unsealed commitment must emit neither.
+        if let (Value::Object(map), Some(envelope)) = (&mut value, &self.envelope) {
+            map.insert("envelope".to_string(), envelope.to_value());
+        }
+        value
     }
 
     pub fn id(&self) -> String {
@@ -857,15 +909,281 @@ impl Commitment {
     /// equivalent and keeps the field names in one place.
     pub fn from_value(value: &Value) -> Result<Commitment, RecordError> {
         const RECORD: &str = "commitment";
-        let value = expect_object(value, RECORD)?;
+        let object = expect_object(value, RECORD)?;
+        let envelope = match object.get("envelope") {
+            None => None,
+            Some(raw) => Some(
+                crate::crypto::envelope::SealedEnvelope::from_value(raw).map_err(|error| {
+                    RecordError::MalformedEnvelope {
+                        reason: error.to_string(),
+                    }
+                })?,
+            ),
+        };
         Ok(Commitment {
-            objective_id: required_string(value, RECORD, "objective_id")?,
-            submitter: required_string(value, RECORD, "submitter")?,
-            hash: required_string(value, RECORD, "hash")?,
-            created_at: required_string(value, RECORD, "created_at")?,
-            signature: optional_string(value, RECORD, "signature")?,
+            objective_id: required_string(object, RECORD, "objective_id")?,
+            submitter: required_string(object, RECORD, "submitter")?,
+            hash: required_string(object, RECORD, "hash")?,
+            created_at: required_string(object, RECORD, "created_at")?,
+            envelope,
+            signature: optional_string(object, RECORD, "signature")?,
         })
     }
+}
+
+// -- committee share -------------------------------------------------------
+
+/// One committee member opening its share of a sealed submission's content key.
+///
+/// # This is the record that makes the reveal consensus-derived
+///
+/// `docs/censorship.md` §2 said "at the epoch boundary `t` committee members
+/// publish their shares", and until this record existed there was nowhere for
+/// them to publish it. The committee lived entirely in
+/// [`crate::crypto::envelope`], the epoch boundary was whatever a member's
+/// local clock said, and *which* peers were on the committee was whatever the
+/// submitter chose to seal to. All three were unauditable: nothing in the log
+/// let a reader decide whether a reveal had happened on time, or at all, or by
+/// the right parties.
+///
+/// Putting the share on the log fixes each one with a rule a reader re-derives
+/// rather than trusts, and [`crate::node::Node::check_committee_share`] is
+/// where all three are enforced:
+///
+/// - **Who.** The committee is a beacon draw over the log's peer records
+///   ([`crate::node::Node::committee_for`]), so a share is admissible only from
+///   a seat the draw actually produced. Nobody issues an invitation and nobody
+///   can decline to send one.
+/// - **When.** A share's epoch comes from its own `created_at`, and must be
+///   strictly later than the epoch of the commitment it opens — the same rule a
+///   submitter-driven reveal obeys, applied to the committee. "Too early" is
+///   therefore a fact about two records rather than a claim about a clock.
+/// - **What.** The share is a plaintext Shamir point. It is not individually
+///   checkable, and that is a property of the scheme rather than an omission —
+///   see the note on verifiable secret sharing in
+///   [`crate::node::Node::open_sealed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitteeShare {
+    /// The id of the commitment record whose envelope this share opens.
+    pub commitment: String,
+    /// Which committee seat this share is for: the routing index the draw
+    /// assigned, and the index the envelope addressed the sealed share at.
+    ///
+    /// Derived by the checker as well as carried here, so a member cannot claim
+    /// a seat that was drawn for somebody else — the field says which seat is
+    /// being *answered*, and the draw says whether this identity holds it.
+    pub seat: u8,
+    /// The Shamir x-coordinate of the share.
+    ///
+    /// Not the same number as `seat`, and conflating them is the bug this
+    /// separation exists to prevent: `seat` addresses a member within the
+    /// envelope, `x` is the polynomial's abscissa. The envelope keeps the
+    /// x-coordinate *inside* the sealed share precisely so a relabelled share
+    /// is a tag failure rather than a wrong reconstruction, and republishing it
+    /// here is how the combiner gets it back.
+    pub x: u8,
+    /// The share body, hex.
+    pub share: String,
+    pub created_at: String,
+    /// Ed25519 public key of the publishing member, hex.
+    ///
+    /// The peer record's `identity`, not its `transport`: the transport id
+    /// names a McEliece key, which signs nothing. The draw is over transport
+    /// ids and the signature is over this, and the peer record is what ties the
+    /// two together — which is exactly the job it was already doing for dialing.
+    pub identity: String,
+    /// Ed25519 signature over [`CommitteeShare::signing_payload`], hex.
+    ///
+    /// **Required.** A share record's whole purpose is to be attributable: an
+    /// unsigned one is an anonymous assertion that a seat published, which
+    /// anyone could write for any member and which would let a bystander stall
+    /// a reveal by filling every seat with garbage.
+    pub signature: Option<String>,
+}
+
+/// Longest share body a committee share may carry, in bytes before hex.
+///
+/// The share of a 32-byte content key is 32 bytes; the ceiling is generous
+/// rather than exact so that a future envelope sealing a longer secret does not
+/// need a consensus change, and bounded rather than unbounded so that a record
+/// cannot be used to write a megabyte into every node's log for free.
+pub const MAX_SHARE_BYTES: usize = 1024;
+
+impl CommitteeShare {
+    pub fn new(
+        commitment: impl Into<String>,
+        seat: u8,
+        x: u8,
+        share: impl Into<String>,
+        created_at: impl Into<String>,
+    ) -> CommitteeShare {
+        CommitteeShare {
+            commitment: commitment.into(),
+            seat,
+            x,
+            share: share.into(),
+            created_at: created_at.into(),
+            identity: String::new(),
+            signature: None,
+        }
+    }
+
+    /// The bytes a signature covers: this record without its own signature.
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::CommitteeShare.as_str())),
+            ("commitment", Value::string(self.commitment.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("identity", Value::string(self.identity.clone())),
+            ("seat", Value::Int(i128::from(self.seat))),
+            ("share", Value::string(self.share.clone())),
+            ("x", Value::Int(i128::from(self.x))),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Sign with `identity`, which becomes the record's `identity` field.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> CommitteeShare {
+        self.identity = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    /// Check the signature. Always required — see the field's documentation.
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "committee_share";
+        if signed_submitter(&self.identity).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        }
+        let Some(signature) = self.signature.as_deref() else {
+            return Err(SignatureError::Missing {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        };
+        verify_record_signature(
+            RECORD,
+            &self.identity,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    /// The share as the secret-sharing layer wants it.
+    pub fn to_share(&self) -> Result<crate::crypto::shamir::Share, RecordError> {
+        Ok(crate::crypto::shamir::Share {
+            index: self.x,
+            data: decode_hex(&self.share).ok_or(RecordError::InvalidField {
+                record: "committee_share",
+                field: "share",
+                expected: "lowercase hex of even length",
+            })?,
+        })
+    }
+
+    /// Structural rules, checked before the signature is looked at.
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "committee_share";
+        let invalid = |field: &'static str, expected: &'static str| RecordError::InvalidField {
+            record: RECORD,
+            field,
+            expected,
+        };
+        // A record id, so `sha256:` followed by 64 lowercase hex — the shape
+        // `canonical::digest_bytes` produces. Checked rather than left free
+        // because a share naming an id no commitment can ever have is a record
+        // that will sit in the log forever being skipped, and the writer would
+        // never find out why.
+        let hex = self
+            .commitment
+            .strip_prefix(crate::canonical::DIGEST_PREFIX)
+            .unwrap_or_default();
+        if hex.len() != 64 || decode_hex(hex).is_none() {
+            return Err(invalid(
+                "commitment",
+                "a commitment record id: \"sha256:\" and 64 lowercase hex characters",
+            ));
+        }
+        if self.identity.len() != 64 || decode_hex(&self.identity).is_none() {
+            return Err(invalid(
+                "identity",
+                "64 lowercase hex characters of an ed25519 public key",
+            ));
+        }
+        // Zero is refused because it is the one x-coordinate that is not a
+        // share: `f(0)` *is* the secret, so a share claiming to sit there is
+        // either a mistake or an attempt to publish the content key itself
+        // under the cover of a share record. `shamir::split` never issues it.
+        if self.x == 0 {
+            return Err(invalid("x", "a non-zero Shamir x-coordinate"));
+        }
+        let share =
+            decode_hex(&self.share).ok_or(invalid("share", "lowercase hex of even length"))?;
+        if share.is_empty() || share.len() > MAX_SHARE_BYTES {
+            return Err(invalid(
+                "share",
+                "between 1 and MAX_SHARE_BYTES bytes of share body",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<CommitteeShare, RecordError> {
+        const RECORD: &str = "committee_share";
+        let object = expect_object(value, RECORD)?;
+        let small = |field: &'static str| -> Result<u8, RecordError> {
+            object
+                .get(field)
+                .and_then(Value::as_i128)
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or(RecordError::InvalidField {
+                    record: RECORD,
+                    field,
+                    expected: "an integer in 0..=255",
+                })
+        };
+        Ok(CommitteeShare {
+            commitment: required_string(object, RECORD, "commitment")?,
+            seat: small("seat")?,
+            x: small("x")?,
+            share: required_string(object, RECORD, "share")?,
+            created_at: required_string(object, RECORD, "created_at")?,
+            identity: required_string(object, RECORD, "identity")?,
+            signature: optional_string(object, RECORD, "signature")?,
+        })
+    }
+}
+
+/// Strict, lowercase-only hex. Same rule as everywhere else in this crate:
+/// accepting `AB` as well as `ab` would give one share two spellings and
+/// therefore one record two ids.
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    let nibble = |b: u8| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    };
+    text.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+        .collect()
 }
 
 // -- claim -----------------------------------------------------------------

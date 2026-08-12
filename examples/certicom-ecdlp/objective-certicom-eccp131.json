@@ -1,0 +1,29 @@
+{
+  "artifact_schema": {
+    "description": "The discrete logarithm, as 64 lowercase hex characters.",
+    "example": {
+      "k": "000000000000000000000000000000000000000000000000001a2b3c4d5e6f1234"
+    },
+    "properties": {
+      "k": {
+        "description": "k with k*G = Q, in [1, n), zero-padded to exactly 64 lowercase hex characters.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "k"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-09T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-certicom-eccp131",
+  "reward": 2000000,
+  "statement": "Solve Certicom's ECCp-131, open since 1997: find k with k*P = Q on the 131-bit prime-order curve pinned in the checker. The parameters are Certicom's own, taken from the archived challenge page and authenticated by arithmetic rather than by their source -- p prime, curve non-singular, P and Q on it, n prime, nP = nQ = O -- so a corrupted digit could not have survived. THIS IS A FRONTIER OBJECTIVE AND IS NOT EXPECTED TO SETTLE. Pollard rho needs about 2^65 group operations, roughly 2,048x the ECCp-109 effort, which took 549 days across about 10,000 machines in 2002. It is posted because the network should carry an externally-defined benchmark whose difficulty nobody here chose, not because anyone expects to pay it out soon. Certicom's own prize is NOT claimable: BlackBerry retired the challenge and the pages are gone. This objective pays proofwork's reward and nothing of Certicom's. Submit {\"k\"} as 64 lowercase hex characters, k in [1, n). See examples/certicom-ecdlp/README.md.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/certicom_eccp131.py",
+    "checker_sha256": "053cfc008cabebe502e06a171f616000632cf39ff3274cabea7ac66d786d9f4a",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

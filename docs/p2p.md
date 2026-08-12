@@ -44,7 +44,51 @@ the wrong person. What it cannot do is decide. That needs the base layer
 [consensus.md](consensus.md) argues for, and nothing here changes that
 conclusion.
 
-## Transport security: Classic McEliece
+## Key exchange: Classic McEliece, mandatory, plus whatever else you publish
+
+Built: [`src/crypto/kem.rs`](../src/crypto/kem.rs), used by
+[`src/p2p/handshake.rs`](../src/p2p/handshake.rs) and by the sealed-envelope
+committee.
+
+**There is one key-exchange primitive in this crate and it is a KEM.** Classic
+McEliece is mandatory in every key bundle; ML-KEM-768 and HQC-128 are optional
+legs a party may also publish. `x25519-dalek` is no longer a dependency, and
+`tests/cipher_policy.rs` fails the build if it comes back — a transport that is
+quantum-resistant wrapped around submissions sealed with X25519 has moved the
+weakness rather than removed it.
+
+Optional legs are **additive, never alternative**, and the distinction is the
+whole design. Encapsulating to a bundle produces one ciphertext per suite and
+hashes *every* leg's shared secret into the final key, so opening it requires
+breaking all of them: a bundle is as strong as its **strongest** member. The
+obvious alternative — negotiate a suite both ends support — is as strong as the
+weakest suite an attacker can force you down to, which is a downgrade attack
+with extra steps.
+
+| suite | family | public key | ciphertext |
+|---|---|---|---|
+| `mceliece348864` | code-based, binary Goppa | 261,120 B | 96 B |
+| `ml-kem-768` (FIPS 203) | module-LWE lattice | 1,184 B | 1,088 B |
+| `hqc-128` | code-based, quasi-cyclic | 2,241 B | 4,433 B |
+
+Two hardness assumptions, and the two code-based suites from different code
+families — a bundle of two lattice schemes would fall to one break, which is why
+the cheapest two are not the ones chosen.
+
+**A node's identity stays the McEliece key alone.** `Bundle::id()` is
+`sha256(McEliece public key)`, deliberately not a hash over the whole bundle: a
+peer that adds an ML-KEM key would otherwise get a new `PeerId`, silently leave
+the DHT, and orphan every bootstrap file and `PeerRecord` naming it. Adding a
+leg changes what the cryptography rests on and changes no identity. The other
+legs are still bound — the combiner absorbs every suite and ciphertext, so a
+bundle whose optional keys were swapped derives a different secret.
+
+Rank-metric schemes (RQC, ROLLO) and CSIDH were considered and are not here:
+the rank ones were broken by algebraic attacks in 2020 and dropped by NIST, and
+CSIDH's quantum security is contested with no maintained Rust implementation.
+`src/crypto/kem.rs` carries the reasoning so it is not re-litigated.
+
+## Transport security
 
 Built: [`src/p2p/handshake.rs`](../src/p2p/handshake.rs).
 
@@ -260,6 +304,31 @@ is sealed with an AEAD keyed by the Classic McEliece handshake, with the
 family's context string bound into the tag. Adding a round means adding a
 context, not adding a socket write, and `p2p::dht` was added that way.
 
+**ChaCha20-Poly1305, and there is no AES anywhere in the tree.** Not a
+preference: without hardware AES-NI, AES is either slow or a cache-timing side
+channel, and a research network runs on whatever its participants have — ARM
+boards, VMs with the instruction masked off, WASM. ChaCha20 is constant-time in
+software by construction, so there is no deployment where this crate quietly
+runs a table-lookup cipher over secret data. One cipher rather than two is the
+rest of it: every AEAD here takes a 32-byte key and a 12-byte nonce and dies the
+same way on nonce reuse, so that is one rule to enforce rather than one per
+call site.
+
+**And no TLS.** The transport authenticates by *key*: a `PeerId` is the SHA-256
+of a McEliece public key, so completing a handshake **is** the proof of
+identity, and there is no authority to consult or to compromise. TLS underneath
+would add a certificate authority to trust, a second name for a peer, and a
+second handshake to get wrong, in exchange for nothing this already has — and it
+would not be post-quantum, which is most of the point. `src/serve.rs` is the
+exception and is not node-to-node: a local read-only HTTP API, behind whatever
+reverse proxy the operator runs.
+
+Both are negative claims, which is exactly the kind that stops being true
+quietly — nobody adds AES on purpose, they add a crate that wants `aes-gcm` for
+one field. `tests/cipher_policy.rs` reads `Cargo.lock` and fails if an AES or
+TLS crate is anywhere in the resolved tree, transitive dependencies included,
+with a positive control so it cannot pass on an empty parse.
+
 That claim is checked rather than asserted. `tests/wire_encryption.rs` puts a
 recording relay between two real nodes, runs a session that carries an
 objective, a blob and a DHT ask/tell, and asserts none of the content appears in
@@ -423,6 +492,38 @@ replaced with the real seed's public key (or the seed operator's own
 the connection means anything. `make p2p` calls it automatically to produce
 `.local/seed.json` for `SEED_ADDR` when no other `--bootstrap` is given; see
 the README.
+
+### Running a seed on a public host
+
+Everything above is written for loopback, and a cloud instance breaks three of
+its assumptions at once. All three produce the same symptom — a seed that looks
+up and talks to nobody — so they are worth separating.
+
+**Bind the wildcard, publish the public address.** An instance's public address
+is NAT'd to it and appears on no local interface, so `--listen <public ip>:9000`
+cannot bind at all. Bind `0.0.0.0:9000` and put the public address (or the
+public DNS name, which survives a restart that moves the IP) in the bootstrap
+file you hand out. That is safe because a bootstrap address is only a dial hint:
+the peer id is the hash of the key, so the key decides who answered and the
+address decides nothing.
+
+**Open the port inbound.** A security group that does not admit the p2p port
+does not refuse connections, it *drops* them. There is no RST, so nothing on
+either side reports an error until a timeout expires — which is why this looks
+like silence rather than like a firewall.
+
+**Unreachable peers are bounded, and were not always.** `transport::connect`
+uses `DIAL_TIMEOUT` rather than the kernel's SYN-retransmit schedule (~127 s on
+Linux), every session carries `IO_TIMEOUT` per read and write, and an accepted
+stream has `HANDSHAKE_TIMEOUT` to produce its 128-byte hello. The last one is
+not an optimisation: `proofwork-p2p` runs the handshake with the node mutex
+held, a public address is port-scanned within minutes of existing, and an
+unbounded read there is a seed that wedges on the first scanner and never dials,
+drains, or beacons again. On a LAN none of this shows, because a host that is
+down sends an RST in microseconds.
+
+Multicast discovery does not work on EC2 and is not supposed to; the daemon
+reports that and continues without LAN discovery.
 
 `--population` is optional and turns on the second half of each round. Given it,
 the daemon loads the file at startup, reconciles populations after records on

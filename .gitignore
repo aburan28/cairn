@@ -16,6 +16,12 @@ venv/
 # Logs produced by demos
 *.jsonl
 !conformance/*.json
+# `*.json` above does not match `*.jsonl` -- this is the corpus
+# `scripts/differential.sh` requires and was silently uncommitted for exactly
+# that reason. Named explicitly rather than widened to `conformance/*.jsonl*`,
+# so a scratch `.jsonl` dropped in `conformance/` during debugging stays
+# ignored.
+!conformance/adversarial.jsonl
 # ...except the published one. A project whose whole claim is "anyone can
 # re-derive every settled result from the log" has to ship a log. See
 # launch/README.md and scripts/make-launch-log.sh.
@@ -34,9 +40,10 @@ venv/
 # repository, under a different path, that nothing checks against the first.
 .proofwork/
 
-# Written by .claude/skills/proofwork/scripts/setup.sh with absolute paths
-# for one machine. Generated, not shared.
+# Written by setup.sh / `make mcp` with absolute paths for one machine.
+# Generated, not shared.
 .mcp.json
+opencode.json
 
 # Bootstrap addresses are local configuration, never repository content.
 # `proofwork-p2p`'s own module doc says it: "Identity files and bootstrap files
@@ -45,3 +52,12 @@ venv/
 # catch a hand-written one beside it.
 bootstrap.json
 bootstrap.*.json
+
+# The Next.js chain reader in ui/. Lockfile is committed (a UI built from an
+# unpinned resolution is as unreproducible as a binary built from one); build
+# output and dependencies are not.
+ui/node_modules/
+ui/.next/
+ui/out/
+ui/next-env.d.ts
+ui/tsconfig.tsbuildinfo

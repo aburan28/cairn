@@ -56,6 +56,7 @@
 
 use std::fmt;
 
+use crate::hex;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest as _, Sha256};
 
@@ -70,6 +71,91 @@ type HmacSha256 = Hmac<Sha256>;
 /// silently differs between two nodes, and the length is exactly the kind of
 /// parameter a consensus split hides in.
 pub const EPOCH_SECONDS: u64 = 600;
+
+/// How many closed epochs must pass before an epoch may settle.
+///
+/// A batch's ordering anchor is the epoch chain head *as it stood when the
+/// batch was written*, which makes settlement order depend on the order a node
+/// happened to drain epochs in -- and two nodes that learn about work in
+/// different orders drain in different orders. See
+/// `docs/design/settlement-convergence.md`; the fork is real, both logs audit
+/// clean, and it is a disagreement about who got paid.
+///
+/// The delay closes it by making eligibility a function of the clock instead
+/// of a function of arrival. An epoch may not settle until it has been closed
+/// for `FINALITY_EPOCHS` further epochs, so a node that hears about epoch `E`
+/// late still has every earlier epoch in hand by the time `E` becomes
+/// eligible, and drains them in epoch order -- the same order as every other
+/// node.
+///
+/// **What this does and does not buy.** Convergence holds *under a synchrony
+/// bound*: if every record for epoch `E` reaches every honest node within
+/// `FINALITY_EPOCHS` epochs of `E` closing, every node settles the same
+/// batches in the same order. Outside that bound it does not converge, and no
+/// choice of delay makes it -- agreeing on the settled set when messages can
+/// be arbitrarily late is consensus, which stage 0 does not have. What the
+/// delay changes is the *failure mode*: a record that misses the window is
+/// refused as late and shows up in `audit`, instead of silently producing two
+/// clean logs that paid different people. See [`Node::late_epochs`].
+///
+/// One epoch, not zero and not ten. Zero is the old behaviour. Ten minutes of
+/// slack is generous for a gossip network whose records are a few kilobytes,
+/// and every additional epoch is settlement latency paid by every honest
+/// participant to tolerate a straggler.
+///
+/// [`Node::late_epochs`]: crate::node::Node::late_epochs
+pub const FINALITY_EPOCHS: u64 = 1;
+
+/// Overrides [`FINALITY_EPOCHS`] for a local demo. Never set this in
+/// production, and never set it to a *different* value than a peer: two nodes
+/// disagreeing about the delay disagree about which epochs are eligible, which
+/// is precisely the fork the constant exists to prevent.
+pub const FINALITY_EPOCHS_ENV: &str = "PROOFWORK_FINALITY_EPOCHS";
+
+/// How many peers hold a share of a sealed submission's content key.
+///
+/// Consensus-critical in the strongest sense: the committee is drawn by
+/// [`beacon`] from the log's peer records, so two nodes using different sizes
+/// draw different committees and disagree about whether a published share came
+/// from a seat that exists. Changing it is a hard fork.
+///
+/// Five, and the number is a trade between two failure modes that pull in
+/// opposite directions. A larger committee makes collusion (which reads
+/// artifacts early) more expensive and makes absentees (which stall a reveal)
+/// more likely to be tolerated; it also means more shares on the log per
+/// submission and more peers who must actually be running. Five with a
+/// threshold of three tolerates two absentees and needs three colluders, which
+/// is the smallest committee where both numbers are greater than one.
+///
+/// **This is a Stage 0 number.** It is safe only while the peer set is an
+/// operator configuration decision. Once anyone can add a peer record, an
+/// attacker who registers enough peers owns a majority of every drawn
+/// committee, and no choice of size fixes that -- it needs identities that cost
+/// something, which is the same Stage 2 problem `docs/p2p.md` names for peer
+/// sampling. `docs/threat-model.md` carries the row.
+pub const COMMITTEE_SIZE: u8 = 5;
+
+/// How many of [`COMMITTEE_SIZE`] must publish before a sealed submission opens.
+///
+/// Three of five. Below the threshold the content key is
+/// information-theoretically hidden -- `t-1` shares reconstruct a well-formed
+/// *wrong* key and nothing distinguishes it from the right one -- so this is
+/// the number of members who must collude to read an artifact early, and
+/// `COMMITTEE_SIZE - COMMITTEE_THRESHOLD` is the number who can be offline
+/// before a reveal stalls.
+pub const COMMITTEE_THRESHOLD: u8 = 3;
+
+/// [`FINALITY_EPOCHS`], unless the environment overrides it.
+///
+/// A malformed or absent value means the default rather than an error: this is
+/// read on the settlement path, and refusing to settle because an environment
+/// variable is misspelled would turn a typo into a halt.
+pub fn finality_epochs() -> u64 {
+    match std::env::var(FINALITY_EPOCHS_ENV) {
+        Ok(raw) => raw.trim().parse().unwrap_or(FINALITY_EPOCHS),
+        Err(_) => FINALITY_EPOCHS,
+    }
+}
 
 /// Size of the assignment space: the unit interval scaled to `2^32`.
 ///
@@ -135,7 +221,7 @@ impl std::error::Error for PartitionError {}
 /// spelling is part of the wire format. Prefixing it would change every
 /// assignment in the network.
 pub fn beacon(epoch: u64, anchor: &str) -> String {
-    crate::canonical::hex(&Sha256::digest(format!("{epoch}:{anchor}").as_bytes()))
+    hex::encode(&Sha256::digest(format!("{epoch}:{anchor}").as_bytes()))
 }
 
 /// Which slice of the search space this node takes. Pure, local, checkable.
@@ -244,7 +330,7 @@ pub fn epoch_seconds() -> u64 {
 /// Returned as hex so the ordering is a plain lexicographic string compare that
 /// any implementation reproduces, and so an auditor can print it.
 pub fn settlement_rank(epoch: u64, anchor: &str, key: &str) -> String {
-    crate::canonical::hex(&Sha256::digest(
+    hex::encode(&Sha256::digest(
         format!("{}{key}", beacon(epoch, anchor)).as_bytes(),
     ))
 }
@@ -731,7 +817,7 @@ mod tests {
 
     #[test]
     fn settlement_rank_is_the_hash_of_the_beacon_and_the_id() {
-        let expected = crate::canonical::hex(&Sha256::digest(
+        let expected = crate::hex::encode(&Sha256::digest(
             format!("{}{}", beacon(3, "head"), "claim:x").as_bytes(),
         ));
         assert_eq!(settlement_rank(3, "head", "claim:x"), expected);

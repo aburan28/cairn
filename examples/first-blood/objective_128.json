@@ -6,7 +6,7 @@
   "statement": "Recover the discrete logarithm k for the 128-bit generic prime-field ECDLP instance pinned in the checker: find k with k*G == Q, 1 <= k < n. Submit {\"k\": <integer>}. Any method is admissible -- this is the representation track, not the generic-group arena, so the curve is public and the solver holds it. k was discarded at generation and is unknown to the funder.",
   "verifier": {
     "checker": "examples/first-blood/checkers/instance_128.py",
-    "checker_sha256": "97b4e3b7377656451aa8ca11c9f5c478f63699636c538bf341d46efaf9596966",
+    "checker_sha256": "7803245dcc554a17b5067eed9752e05f264dece3069ec51b112c50b5fa6814e8",
     "entrypoint": "check",
     "kind": "certificate"
   }

@@ -156,16 +156,18 @@ languages the two are written in.
 
 ## What still remains, in priority order
 
-0. **Citation-flow dilution.** The one open item that is a *soundness*
-   problem rather than a missing feature: slicing an improvement into many
-   steps is free in direct reward and strictly profitable in citation flow,
-   costing the upstream contributor 27% and inverting the payout result the
-   README uses to argue publishing pays. A reward-weighted rule was explored
-   and measured — it fully closes the downstream half and leaves an 8% leak
-   from the slicer's own claims. Not implemented, deliberately: it changes how
-   settled money splits and moves the conformance vectors, so a partial fix
-   shipped as a fix would be worse than the documented gap. See
+0. ~~**Citation-flow dilution.**~~ **Fixed, and this entry was stale.** It
+   described slicing an improvement into many steps as an open soundness
+   problem, and said the reward-weighted rule "is not implemented,
+   deliberately". It is: `attribution::payouts_over` delegates to
+   `payouts_weighted`, so the live rule weights δ by each ancestor's settled
+   reward instead of decaying per hop. `docs/threat-model.md` has the accurate
+   version and marks the row **handled**. See
    [design/citation-flow-dilution.md](design/citation-flow-dilution.md).
+
+   Left here rather than deleted because the drift is the lesson: this file is
+   a snapshot of one review and ages against the code, while the threat model
+   is maintained. Read it as history.
 
 1. **Nothing is escrowed, and a nickname submitter is still unauthenticated.**
    The forgery half of this is now closed: a `submitter` that is 64 lowercase
@@ -188,13 +190,24 @@ languages the two are written in.
    backs. **Every surface a contributor sees still has to say the rewards are
    notional**, which `examples/README.md`, `examples/first-blood/README.md`,
    `launch/README.md` and `docs/serving.md` do.
-2. **Settlement order does not converge across peers.** Two nodes reconcile
-   records by anti-entropy and each re-derives its own verdicts, but each
-   orders a batch against its own head at the epoch boundary, so two operators
-   can disagree about who was paid first (`docs/p2p.md`). A single-operator
-   launch is unaffected — one log, one order — and *any* multi-operator story
-   is blocked on this. It is the real content of "Stage 3: decentralized
-   settlement".
+2. ~~**Settlement order does not converge across peers.**~~ **Fixed.** This was exactly right: each node ordered a batch
+   against its own log head, which covers `seq`, `prev` and the local write
+   time, so two operators disagreed about who was paid first. The anchor is now
+   the head of an **epoch chain** — each link commits to the previous link, the
+   epoch, and that batch's sorted claim ids — so it is content-only and equal
+   on every node holding the same batches. Both implementations derive it and
+   `tests/p2p_convergence.rs` fails without it.
+
+   The smaller case this originally left open — a node draining an epoch
+   **before sync has delivered a claim belonging to it** — is now closed too,
+   along with a third found later (two nodes draining the same epochs in a
+   different sequence). Both are fixed by a **finality delay**: an epoch waits
+   `FINALITY_EPOCHS` past its close before it may settle, so eligibility
+   depends on the clock rather than on when a node happened to hear. What
+   remains is the synchrony bound that implies — a record later than the
+   window is refused rather than paid out of order, and reported by
+   `Node::late_epochs` and by `audit` instead of forking two clean logs. See
+   [design/settlement-convergence.md](design/settlement-convergence.md).
 3. **The beacon is grindable by the sequencer.** Documented (threat model row
    38) and unchanged, but worth restating next to the item above: the same
    beacon that orders work assignment now orders *money*, so grinding the
@@ -214,12 +227,22 @@ languages the two are written in.
    `p2p`'s address book. The DHT was already de-duplicated into `src/dht.rs`;
    folding the rest is a genuine refactor rather than a launch blocker, and
    doing it badly under time pressure would be worse than the duplication.
-7. **The `first-blood` bounties rest on operator trust.** The checkers assert
-   the discrete log was discarded at instance generation and nothing in this
-   repository lets a contributor verify that. Now disclosed plainly in
-   `examples/first-blood/README.md` rather than fixed — fixing it means a
-   public-coin instance derivation, which is real work and probably worth
-   doing before those bounties are advertised anywhere.
+7. ~~**The `first-blood` bounties rest on operator trust.**~~ **Fixed.** The
+   public-coin instance derivation this line asked for is built. `Q` is now
+   *hashed to the curve* from a published seed rather than computed as `k*G`
+   by somebody promising to forget `k`, so recovering `log_G(Q)` is the ECDLP
+   itself and the funder has no head start — the nothing-up-my-sleeve
+   construction used for secp256k1's Pedersen generator `H`. The derivation
+   runs inside every check and is pinned by the objective's id;
+   `scripts/derive-first-blood.py --check` re-runs it in CI so a hand-edited
+   checker cannot quietly reintroduce a known answer. Grinding the seed buys
+   nothing, because recognising a `Q` you could solve means solving it.
+
+   The residue is stated rather than closed: the *curve* is still the poster's
+   choice. Each checker verifies `N` is prime and that `G` and `Q` both have
+   order `N` — which rules out Pohlig-Hellman on a smooth-order curve — but
+   not every weak-curve family. Deriving the curve from the seed too is the
+   stronger construction and is not done.
 8. **Rate limiting.** `proofwork-serve` caps concurrent connections and body
    size and nothing else. An operator exposing it to the open internet should
    put it behind something that does rate limiting, the same as any other

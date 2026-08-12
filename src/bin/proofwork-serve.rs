@@ -43,6 +43,9 @@ fn usage(code: i32) -> ! {
 }
 
 fn main() {
+    // Before anything that could log. Stderr only -- see `logging` -- which
+    // matters most here in the MCP server, where stdout is the protocol.
+    proofwork::logging::init();
     let mut log = PathBuf::from("proofwork.jsonl");
     let mut root = PathBuf::from(".");
     let mut listen = String::from("127.0.0.1:8080");

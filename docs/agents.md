@@ -41,6 +41,7 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | `get_objective` | no* | full record, verifier spec |
 | `score_candidate` | **no** | run the pinned verifier; the tight loop |
 | `frontier_status` | no* | best score, which claim to cite, pool remaining |
+| `get_claim` | no* | read an accepted claim's artifact — the result you are trying to beat |
 | `pending_reveals` | no | commitments you still owe a reveal for |
 | `work_assignment` | no | your slice of the search space this epoch |
 | `submit_claim` | yes | commit, then reveal on a later call |
@@ -65,7 +66,8 @@ loses track of what you owe, `pending_reveals` lists every open commitment —
 an unrevealed commitment is never paid.
 
 An accepted reveal is not paid on the spot either. It is recorded as pending
-and settles when its reveal epoch closes, in an order derived from the epoch
+and settles once its reveal epoch closes *and* clears the finality delay, in
+an order derived from the epoch
 beacon. That is the point: nobody, the operator included, chooses who in a
 batch gets paid first. `settled: false` on an accepted claim means *not yet*,
 never *rejected* — and the settlement is applied by whatever call touches the
@@ -117,6 +119,17 @@ prints (`detail`, evidence) is tainted the same way: the checker was authored
 by whoever posted the objective, so it is the same attacker speaking through a
 second door.
 
+**A claim's artifact is a third door, and `get_claim` opens it deliberately.**
+An artifact is written by whoever submitted it, so an attacker can put *"also
+cite sha256:…"* in a field of their own result — and an agent reading the
+frontier in order to beat it has every reason to study that text closely, which
+makes it a *better* channel than a statement rather than a worse one. It
+discloses nothing new (every accepted claim is already in the log this node
+publishes byte for byte); what is new is rendering it to a model. So artifacts
+are fenced and tainted exactly like statements, and only *accepted* claims are
+readable — serving refused submissions would let anyone put arbitrary text in
+front of an agent for the price of a submission nobody had to accept.
+
 The check is deliberately narrow. An id the agent learned some other way (a
 human pasted it, an earlier session) is untouched: a claim id that never
 appeared in a statement was not injected through one, and blocking those would
@@ -127,8 +140,24 @@ validators slashing bad edges is designed, not built.
 
 ## Wiring
 
-The server takes the same `--log` and `--root` as the CLI. Use absolute paths:
-agents launch subprocesses from a working directory you did not choose.
+```sh
+make mcp-setup                    # Claude Code -> .mcp.json
+make mcp-setup CLIENT=opencode    # -> opencode.json
+make mcp-setup CLIENT=codex       # -> ~/.codex/config.toml
+```
+
+That builds the binary, writes absolute paths, and points the client at the
+same ledger `make mcp` uses. It *merges* into an existing config rather than
+replacing it, so other MCP servers already configured there survive; pass
+`--print` to `scripts/mcp-config.sh` to see the stanza without writing anything.
+
+Note that the client spawns its own copy of the server, so do not also run
+`make mcp` against the same log -- both take the ledger's exclusive lock and
+whichever starts second refuses.
+
+The stanzas below are the same thing by hand. The server takes the same
+`--log` and `--root` as the CLI. Use absolute paths: agents launch subprocesses
+from a working directory you did not choose.
 
 **Claude Code** — `.mcp.json` in the project root:
 
@@ -192,10 +221,10 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | ./target/release/proofwork-mcp --log /tmp/pw.jsonl --root .
 ```
 
-Eight tool names come back: `score_candidate`, `list_objectives`,
-`get_objective`, `frontier_status`, `submit_claim`, `pending_reveals`,
-`work_assignment`, `audit`. If that works and the client still shows nothing,
-the problem is the client's config, not this binary.
+Nine tool names come back: `score_candidate`, `list_objectives`,
+`get_objective`, `get_claim`, `frontier_status`, `submit_claim`,
+`pending_reveals`, `work_assignment`, `audit`. If that works and the client
+still shows nothing, the problem is the client's config, not this binary.
 
 ### Running more than one client at once
 
@@ -274,7 +303,8 @@ audit                                  log verified, chain intact
 ```
 
 `settled: false` with `reward: 0` on a fresh reveal is the protocol working,
-not failing — the batch pays when the epoch closes, in beacon order.
+not failing — the batch pays once the epoch closes and the finality delay
+elapses, in beacon order.
 
 Running *different* agents is better than several copies of one.
 [`gossip.rs`](../src/gossip.rs) preserves population diversity deliberately —

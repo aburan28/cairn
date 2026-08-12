@@ -23,13 +23,46 @@ pub fn epoch_seconds() -> u64 {
     }
 }
 
+/// Closed epochs an epoch must wait out before it may settle.
+///
+/// A batch's anchor is the epoch chain head as it stood when the batch was
+/// written, so which epochs had already settled locally decides the payment
+/// order -- and two nodes that learn about work in different orders settle in
+/// different orders. Delaying eligibility makes it a function of the clock
+/// instead: by the time epoch `E` may settle, a node that heard about `E` late
+/// is holding every earlier epoch too, and drains them in epoch order.
+///
+/// Converges only *within* the delay. A record later than that is refused
+/// rather than paid out of order -- see `Node::late_epochs` -- because
+/// agreeing on the settled set with unbounded message delay is consensus, and
+/// this is not a consensus protocol. Policy, like `EPOCH_SECONDS`: two nodes
+/// with different settings disagree about which epochs are eligible.
+pub const FINALITY_EPOCHS: u64 = 1;
+
+pub fn finality_epochs() -> u64 {
+    match std::env::var("PROOFWORK_FINALITY_EPOCHS") {
+        Ok(text) => text.trim().parse().unwrap_or(FINALITY_EPOCHS),
+        Err(_) => FINALITY_EPOCHS,
+    }
+}
+
+/// How many peers hold a share of a sealed submission's content key, and how
+/// many must publish before it opens.
+///
+/// Consensus-critical: the committee is a beacon draw over the log's peer
+/// records, so two implementations using different sizes draw different
+/// committees and disagree about whether a published share answered a seat that
+/// exists. They are here, in the second implementation, for exactly that
+/// reason — a constant only one side holds is a constant only one side can be
+/// wrong about.
+pub const COMMITTEE_SIZE: u8 = 5;
+pub const COMMITTEE_THRESHOLD: u8 = 3;
+
 pub fn epoch_of(timestamp_seconds: u64, epoch_seconds: u64) -> u64 {
     timestamp_seconds / epoch_seconds
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
+use crate::canonical::hex_lower as hex;
 
 pub fn beacon(epoch: u64, anchor: &str) -> String {
     let mut hasher = Sha256::new();

@@ -1,0 +1,7 @@
+EXAMPLE FIXTURE -- not a reproduction of any real archival document.
+Written for examples/attested-fact/ to exercise the provenance checker.
+
+James A. Garfield, twentieth President of the United States, was shot on
+2 July 1881 at the Baltimore and Potomac Railroad Station in Washington,
+D.C. He died of his wounds on 19 September 1881 at Elberon, New Jersey.
+Charles J. Guiteau was convicted of the killing and executed in 1882.

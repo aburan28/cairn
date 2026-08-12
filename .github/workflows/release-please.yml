@@ -1,0 +1,54 @@
+name: release-please
+
+# Owns the *version* and the *changelog*. It owns no binaries: merging the PR
+# it opens creates a `v*` tag, and that tag triggers `release.yml`, which
+# builds and publishes the artifacts. Two workflows because deciding "what
+# version is this" and "what bytes ship" are different jobs — a tool that does
+# both tends to do one of them badly, and this repository already has strong
+# opinions about what goes into a release tarball.
+#
+# How it works, for anyone who has not used it: on every push to main it keeps
+# a single open "chore(main): release X.Y.Z" PR up to date, accumulating the
+# changelog from commit messages. Nothing is released until a human merges
+# that PR. So the release button is a code review, which is the right shape
+# for a repository whose central claim is that results are independently
+# checkable.
+#
+# ONE-TIME REPOSITORY SETTING, without which this workflow fails at the last
+# step. The `permissions:` block below is necessary and not sufficient: there
+# is a separate repository-level switch that forbids Actions from opening pull
+# requests at all, and it is off by default.
+#
+#   Settings -> Actions -> General -> Workflow permissions
+#   -> [x] Allow GitHub Actions to create and approve pull requests
+#
+# Until it is ticked, the run gets as far as committing the version bump and
+# then dies with:
+#
+#   release-please failed: GitHub Actions is not permitted to create or
+#   approve pull requests
+#
+# which reads like a bug in the token and is not one. It leaves the branch
+# `release-please--branches--main--components--proofwork` behind, already
+# holding the correct commit; the next run after the setting is enabled opens
+# the PR from it, so nothing is lost and nothing needs re-running by hand.
+#
+# Recorded here rather than in a runbook because this is where somebody will
+# be looking when it happens.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: .github/release-please-config.json
+          manifest-file: .release-please-manifest.json

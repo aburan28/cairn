@@ -14,6 +14,42 @@ const HANDSHAKE_BYTES: usize = 32 + CIPHERTEXT_BYTES;
 /// subsystem that *does* know should say so — see [`Connection::set_max_frame`].
 pub const MAX_FRAME: u32 = 16 * 1024 * 1024;
 
+/// How long a dial may spend waiting for the SYN to be answered.
+///
+/// `TcpStream::connect` has no deadline of its own, and what it does when
+/// nothing answers depends on the *kind* of nothing. A host that refuses sends
+/// an RST and the call returns in microseconds — which is every local test, a
+/// LAN peer that is down, and the reason this was never noticed. A host whose
+/// packets are **dropped** answers nothing at all, so the kernel retransmits
+/// on its own schedule: ~127 s on Linux defaults, and no error until then.
+///
+/// Dropping rather than refusing is the normal state of a public cloud host:
+/// an EC2 security group that does not admit the p2p port is a silent DROP.
+/// The daemon dials each endpoint holding its node mutex, so one such address
+/// froze the whole process for two minutes per tick — no accepts, no queue
+/// drain, no beacons — which is indistinguishable from a node that simply does
+/// not work.
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long any single read or write on an established session may block.
+///
+/// Same failure, one layer up: a peer that completes a handshake and then
+/// stops sending holds a `read_exact` forever, and the daemon holds its node
+/// mutex for exactly as long. Per *call*, not per session, so a large frame
+/// that keeps arriving is never cut off.
+pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long an accepted stream has to produce its 128-byte hello.
+///
+/// Shorter than [`IO_TIMEOUT`] because this one is reachable by anybody who
+/// can open a TCP connection, before any authentication has happened. A public
+/// address is port-scanned within minutes of existing, and a scanner that
+/// connects and sends nothing is the cheapest possible way to hold the accept
+/// path — which, in `proofwork-p2p`, holds the node mutex. A real peer has its
+/// hello in flight before the connection completes, so this is generous for
+/// every honest case.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug)]
 pub enum TransportError {
     Io(io::Error),
@@ -127,12 +163,17 @@ impl Connection {
 
     /// Bound how long a read or a write may block.
     ///
-    /// Off by default, which is right for the daemon: its sessions are short,
-    /// request-response, and driven by a loop that already decides when to give
-    /// up. It is *not* right for a long-lived transfer, where a peer that goes
-    /// quiet mid-piece would otherwise hold a thread forever and never return
-    /// its reservations — see [`crate::swarm::tcp`], whose liveness story this
-    /// is. Set before [`Connection::split`] so both halves inherit it.
+    /// [`IO_TIMEOUT`] by default on every connection this module produces, so
+    /// this is for a subsystem that wants a *different* bound rather than for
+    /// one that wants any bound at all — a long-lived transfer, where a peer
+    /// that goes quiet mid-piece must not hold a thread and its reservations,
+    /// is the case that asks; see [`crate::swarm::tcp`]. Set before
+    /// [`Connection::split`] so both halves inherit it.
+    ///
+    /// `None` restores blocking-forever behaviour and is almost never what a
+    /// caller wants: the default exists because an unbounded read is how a
+    /// single unreachable or silent peer stops a daemon that dials under a
+    /// lock.
     pub fn set_timeouts(&self, read: Option<Duration>, write: Option<Duration>) -> io::Result<()> {
         self.stream.set_read_timeout(read)?;
         self.stream.set_write_timeout(write)
@@ -245,7 +286,12 @@ pub fn connect(
     addr: SocketAddr,
     local: &PeerIdentity,
 ) -> Result<Connection, TransportError> {
-    let mut stream = TcpStream::connect(addr)?;
+    let mut stream = TcpStream::connect_timeout(&addr, DIAL_TIMEOUT)?;
+    // Before the write, not after: the hello is 128 bytes, but a peer that
+    // accepted the connection and then stalled would otherwise hold this
+    // thread in `write_all` with the caller's lock still taken.
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let (ciphertext, channel) = endpoint.initiate(local.id());
     let mut hello = [0u8; HANDSHAKE_BYTES];
     hello[..32].copy_from_slice(&local.id());
@@ -266,6 +312,12 @@ pub fn connect(
 /// previously discovered key or add a signature at the session layer.
 pub fn accept(mut stream: TcpStream, local: &PeerIdentity) -> Result<Connection, TransportError> {
     let mut hello = [0u8; HANDSHAKE_BYTES];
+    // The tight one first, then the session default once a hello has actually
+    // arrived: an unauthenticated stranger gets `HANDSHAKE_TIMEOUT` to say
+    // something, and a peer that has said something gets `IO_TIMEOUT` per call
+    // for the rest of the session.
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
     stream.read_exact(&mut hello).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
             TransportError::FrameTruncated
@@ -274,6 +326,8 @@ pub fn accept(mut stream: TcpStream, local: &PeerIdentity) -> Result<Connection,
         }
     })?;
     let remote: PeerId = hello[..32].try_into().expect("fixed handshake header");
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let channel = local.accept(remote, &hello[32..])?;
     Ok(Connection {
         stream,
@@ -303,6 +357,78 @@ mod tests {
         let initiator = PeerIdentity::generate();
         let dialed = connect(&public, addr, &initiator).expect("connects");
         (dialed, accepted.join().expect("accept thread"))
+    }
+
+    /// Both ends of a completed handshake carry a session timeout.
+    ///
+    /// Checked on the socket rather than through a hang, because the honest
+    /// way to observe the absence of a timeout is to wait out a read that
+    /// never returns, and a test that waits `IO_TIMEOUT` to prove
+    /// `IO_TIMEOUT` is a slow test that proves it twice.
+    #[test]
+    fn a_session_never_starts_out_able_to_block_forever() {
+        let (dialed, accepted) = pair();
+        for (side, connection) in [("initiator", &dialed), ("responder", &accepted)] {
+            assert_eq!(
+                connection.stream.read_timeout().expect("read timeout"),
+                Some(IO_TIMEOUT),
+                "{side} would block forever on a peer that goes quiet"
+            );
+            assert_eq!(
+                connection.stream.write_timeout().expect("write timeout"),
+                Some(IO_TIMEOUT),
+                "{side} would block forever on a peer that stops reading"
+            );
+        }
+    }
+
+    /// A stranger that connects and says nothing must not hold the accept path.
+    ///
+    /// This is what a public address costs: an EC2 instance is port-scanned
+    /// within minutes of getting one, and `proofwork-p2p` runs `accept` with
+    /// the node mutex held. An unbounded `read_exact` here is a seed that
+    /// wedges on the first scan and never talks to anybody again.
+    #[test]
+    fn a_silent_stranger_cannot_hold_the_accept_path() {
+        let responder = PeerIdentity::generate();
+        let listener = listen("127.0.0.1:0".parse().expect("addr")).expect("binds");
+        let addr = listener.local_addr().expect("addr");
+        // Connected from this thread and kept alive to the end: the connection
+        // completes through the listener's backlog without anybody accepting
+        // it, and a socket that *closed* would give `accept` an EOF and prove
+        // nothing.
+        let scanner = TcpStream::connect(addr).expect("connects");
+        let (stream, _) = listener.accept().expect("accepts");
+        let started = std::time::Instant::now();
+        let outcome = accept(stream, &responder);
+        assert!(outcome.is_err(), "a mute stranger completed a handshake");
+        assert!(
+            started.elapsed() < HANDSHAKE_TIMEOUT * 2,
+            "accept took {:?}, so the handshake read is unbounded",
+            started.elapsed()
+        );
+        drop(scanner);
+    }
+
+    /// A dial to an address that drops packets gives up on a schedule this
+    /// crate chose, not on the kernel's SYN-retransmit schedule.
+    ///
+    /// `192.0.2.0/24` is TEST-NET-1 and is not routed. Whether it blackholes
+    /// or is rejected outright depends on the host, so the assertion is the
+    /// one that matters either way: bounded, and an error rather than a
+    /// connection.
+    #[test]
+    fn a_dial_into_a_blackhole_gives_up() {
+        let responder = PeerIdentity::generate().to_public();
+        let initiator = PeerIdentity::generate();
+        let started = std::time::Instant::now();
+        let outcome = connect(&responder, "192.0.2.1:9".parse().expect("addr"), &initiator);
+        assert!(outcome.is_err(), "connected to an unroutable address");
+        assert!(
+            started.elapsed() < DIAL_TIMEOUT * 2,
+            "dial took {:?}, so it is on the kernel's schedule",
+            started.elapsed()
+        );
     }
 
     #[test]

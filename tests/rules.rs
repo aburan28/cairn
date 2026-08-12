@@ -70,6 +70,15 @@ fn epoch() -> i64 {
     epoch_seconds() as i64
 }
 
+/// Epochs an epoch must wait, past closing, before its batch may settle.
+///
+/// Read from `finality_epochs()` rather than written as a number: a test that
+/// hard-codes the delay does not fail when the delay changes, it silently
+/// starts asserting that nothing settled.
+fn finality() -> i64 {
+    proofwork::partition::finality_epochs() as i64
+}
+
 /// [`TS`] plus `offset` seconds.
 fn stamp(offset: i64) -> String {
     format_iso8601_utc(BASE + offset)
@@ -152,15 +161,7 @@ impl Drop for TempDir {
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    // `sha2`'s digest output stopped implementing `LowerHex` under the
-    // `hybrid-array` migration, so `{:x}` no longer applies to it directly.
-    // `crate::canonical::hex` fixes this crate-side; it is `pub(crate)`, so an
-    // integration test -- a separate crate -- needs its own copy.
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    proofwork::hex::encode(&hasher.finalize())
 }
 
 /// Write pinned source into the bundle root and return the hash the objective
@@ -286,7 +287,7 @@ fn submit(
     nonce: &str,
     cites: Vec<String>,
 ) -> Result<Outcome, RuleViolation> {
-    let step = node.ledger().len() as i64 * 4 * epoch();
+    let step = node.ledger().len() as i64 * (3 + finality()) * epoch();
     commit_at(node, objective, submitter, &artifact, nonce, &stamp(step));
     let outcome = reveal_at(
         node,
@@ -300,7 +301,7 @@ fn submit(
     if !outcome.is_pending() {
         return Ok(outcome);
     }
-    let settled = node.settle_at(&stamp(step + 2 * epoch()))?;
+    let settled = node.settle_at(&stamp(step + (2 + finality()) * epoch()))?;
     Ok(settled
         .into_iter()
         .find(|candidate| candidate.claim_id == outcome.claim_id)
@@ -506,7 +507,7 @@ fn a_duplicate_artifact_verifies_but_mints_nothing() {
     .expect("reveal");
     assert!(first.is_pending(), "{}", first.note);
     let first = node
-        .settle_at(&stamp(2 * epoch()))
+        .settle_at(&stamp((2 + finality()) * epoch()))
         .expect("close the batch")
         .into_iter()
         .find(|candidate| candidate.claim_id == first.claim_id)
@@ -525,7 +526,7 @@ fn a_duplicate_artifact_verifies_but_mints_nothing() {
     )
     .expect("reveal");
     let second = node
-        .settle_at(&stamp(3 * epoch()))
+        .settle_at(&stamp((3 + finality()) * epoch()))
         .expect("close the batch")
         .into_iter()
         .find(|candidate| candidate.claim_id == second.claim_id)

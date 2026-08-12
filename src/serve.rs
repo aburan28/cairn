@@ -465,8 +465,11 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", "/") | ("GET", "/index") => index(stream, serving),
         ("GET", "/health") => respond(stream, 200, "text/plain", b"ok\n"),
         ("GET", "/objectives") => objectives(stream, serving),
+        ("GET", "/peers") => peers(stream, serving),
         ("GET", "/log") => log(stream, serving),
         ("GET", "/checkpoint") => checkpoint(stream, serving),
+        ("GET", "/chain") => chain(stream, serving),
+        ("GET", "/chain.html") => chain_page(stream, serving),
         ("GET", path) if path.starts_with("/objective/") => {
             one_objective(stream, serving, &path["/objective/".len()..])
         }
@@ -601,6 +604,8 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /frontier/{id}"),
                 Value::string("GET /log"),
                 Value::string("GET /checkpoint"),
+                Value::string("GET /chain"),
+                Value::string("GET /chain.html"),
                 Value::string("GET /health"),
                 Value::string(if writable {
                     "POST /submit"
@@ -620,6 +625,63 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ),
     ]);
     json(stream, 200, &body)
+}
+
+/// The peers this node has been *told about*, which is not the same as the
+/// peers it is talking to.
+///
+/// # What this is not
+///
+/// It is not a connection list. Live sessions belong to `proofwork-p2p`, which
+/// has no HTTP surface at all, and this process only ever reads a log. A peer
+/// appears here because a `peer` record naming it reached this node, and it
+/// keeps appearing after that peer goes away forever -- the log is append-only,
+/// so nothing here can go stale in the direction a reader would want.
+///
+/// Serving it anyway, and saying so in the payload, because "who could this
+/// node dial" is a real question with a real answer, and the alternative to an
+/// honest address book is somebody reading `/log` and rebuilding this by hand
+/// with no note attached.
+///
+/// # Why the transport key is an id rather than a key
+///
+/// A `peer` record carries the ed25519 identity in full and the McEliece
+/// transport key as a 32-byte *id*, because the key itself is 261,120 bytes and
+/// a log every node replicates cannot carry that. See [`crate::records`].
+fn peers(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let items: Vec<Value> = node
+        .peers()
+        .into_iter()
+        .map(|(identity, record)| {
+            Value::object([
+                ("identity", Value::string(identity)),
+                ("transport", Value::string(record.transport.clone())),
+                ("addr", Value::string(record.addr.clone())),
+                ("seq", Value::Int(i128::from(record.seq))),
+                ("created_at", Value::string(record.created_at.clone())),
+            ])
+        })
+        .collect();
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("peers", Value::Array(items)),
+            (
+                "note",
+                Value::string(
+                    "Known peers, from `peer` records in this log -- not open connections. \
+                     A peer listed here may be long gone: the log is append-only and nothing \
+                     retracts a record. Live session state lives in proofwork-p2p, which \
+                     serves no HTTP.",
+                ),
+            ),
+        ]),
+    )
 }
 
 fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
@@ -746,6 +808,192 @@ fn log(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         }
         Err(error) => json_error(stream, 500, &format!("cannot read the log: {error}")),
     }
+}
+
+/// The epoch chain, as JSON.
+///
+/// One object per link: the epoch, the claims it settled (sorted, as the link
+/// commits to them), the previous link, and this link. The head is the
+/// settlement anchor every later batch sorts against.
+///
+/// Published because comparing chains is how two operators find *where* they
+/// diverged rather than only that they did — the head alone says a mismatch
+/// exists and nothing about which epoch caused it.
+fn chain(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let links = node.epoch_chain();
+    let head = links
+        .last()
+        .map(|link| link.link.clone())
+        .unwrap_or_default();
+    let body = Value::object([
+        ("head", Value::string(head)),
+        ("links", Value::Int(links.len() as i128)),
+        (
+            "chain",
+            Value::Array(
+                links
+                    .iter()
+                    .map(|link| {
+                        Value::object([
+                            ("epoch", Value::Int(i128::from(link.epoch))),
+                            ("prev", Value::string(link.prev.clone())),
+                            ("link", Value::string(link.link.clone())),
+                            (
+                                "claims",
+                                Value::Array(
+                                    link.claims.iter().cloned().map(Value::String).collect(),
+                                ),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "note",
+            Value::string(
+                "Derived from GET /log, not stored: each link is \
+                 H({prev, epoch, sorted claim ids}). Two nodes that settled the same claims \
+                 in the same epochs compute the same head. A head that differs from a peer's \
+                 means a fork -- compare link by link to find the epoch it started at.",
+            ),
+        ),
+    ]);
+    respond(
+        stream,
+        200,
+        "application/json",
+        format!("{}\n", body.canonical_string()).as_bytes(),
+    )
+}
+
+/// The same chain, as a page a human can read.
+///
+/// Self-contained: no CDN, no fonts, no scripts fetched from anywhere. A node
+/// operator is often looking at this over an SSH tunnel on a box with no route
+/// to the internet, and a page that needs one would be blank exactly then.
+fn chain_page(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let links = node.epoch_chain();
+    let head = links
+        .last()
+        .map(|link| link.link.clone())
+        .unwrap_or_default();
+
+    let mut rows = String::new();
+    if links.is_empty() {
+        rows.push_str(
+            "<tr><td colspan=\"4\" class=\"empty\">No epoch has settled yet. \
+             The chain starts at the first batch.</td></tr>",
+        );
+    }
+    for link in links.iter().rev() {
+        let claims = if link.claims.is_empty() {
+            "<span class=\"dim\">none</span>".to_string()
+        } else {
+            link.claims
+                .iter()
+                .map(|c| format!("<div class=\"claim\">{}</div>", escape(c)))
+                .collect::<Vec<_>>()
+                .join("")
+        };
+        rows.push_str(&format!(
+            "<tr><td class=\"epoch\">{}</td>\
+             <td><code class=\"link\">{}</code></td>\
+             <td><code class=\"dim\">{}</code></td>\
+             <td>{claims}</td></tr>",
+            link.epoch,
+            escape(&link.link),
+            escape(if link.prev.is_empty() {
+                "— genesis"
+            } else {
+                &link.prev
+            }),
+        ));
+    }
+
+    let body = format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>proofwork — knowledge chain</title>
+<style>
+:root {{ color-scheme: light dark; --fg:#111; --dim:#666; --bg:#fff; --line:#d8d8d8; --accent:#0b6; }}
+@media (prefers-color-scheme: dark) {{
+  :root {{ --fg:#e6e6e6; --dim:#999; --bg:#111; --line:#333; --accent:#3d8; }}
+}}
+body {{ background:var(--bg); color:var(--fg); margin:0 auto; padding:2rem 1.25rem; max-width:60rem;
+  font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; }}
+h1 {{ font-size:1.15rem; margin:0 0 .35rem; }}
+p {{ color:var(--dim); margin:.35rem 0 1.25rem; max-width:48rem; }}
+.head {{ border:1px solid var(--line); border-left:3px solid var(--accent);
+  padding:.75rem .9rem; margin-bottom:1.5rem; overflow-wrap:anywhere; }}
+.head b {{ color:var(--dim); font-weight:400; display:block; font-size:.85em; }}
+.wrap {{ overflow-x:auto; }}
+table {{ border-collapse:collapse; width:100%; }}
+th,td {{ text-align:left; padding:.5rem .6rem; border-bottom:1px solid var(--line);
+  vertical-align:top; overflow-wrap:anywhere; }}
+th {{ color:var(--dim); font-weight:400; font-size:.85em; white-space:nowrap; }}
+.epoch {{ white-space:nowrap; }}
+.link {{ color:var(--accent); }}
+.dim {{ color:var(--dim); }}
+.claim {{ font-size:.9em; }}
+.empty {{ color:var(--dim); text-align:center; padding:2rem; }}
+a {{ color:inherit; }}
+</style></head><body>
+<h1>knowledge chain</h1>
+<p>Each link is <code>H({{prev, epoch, sorted claim ids}})</code> — content only, so two nodes
+that settled the same claims in the same epochs compute the same head. The head is the anchor
+every later batch is ordered against. Nothing here is stored: it is derived from
+<a href="/log">/log</a>, and <a href="/chain">/chain</a> is the same data as JSON.</p>
+<div class="head"><b>head — compare this with a peer's; if they differ, you have forked</b>
+<code class="link">{head}</code></div>
+<div class="wrap"><table>
+<tr><th>epoch</th><th>link</th><th>prev</th><th>claims settled</th></tr>
+{rows}
+</table></div>
+<p style="margin-top:1.5rem">{count} link(s), newest first. Verify none of this on trust:
+<code>proofwork --log &lt;log&gt; --root . audit</code> re-derives the chain and checks every batch
+against the anchor it recorded.</p>
+</body></html>
+"#,
+        head = if head.is_empty() {
+            "— empty chain".to_string()
+        } else {
+            escape(&head)
+        },
+        rows = rows,
+        count = links.len(),
+    );
+    respond(stream, 200, "text/html; charset=utf-8", body.as_bytes())
+}
+
+/// Minimal HTML escaping for values rendered into the page.
+///
+/// Claim ids and link hashes are hex and could not carry markup, but they are
+/// read out of a log this node may have received from a peer, and "it cannot
+/// contain a bracket" is a property of today's records rather than a rule the
+/// format enforces. Escaping costs nothing and does not depend on that holding.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn checkpoint(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {

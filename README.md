@@ -65,11 +65,16 @@ cargo install --path .        # puts `proofwork` and the other binaries on PATH
 cargo test                    # the full suite, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
+./scripts/try-demo.sh         # one round in one command, and a scaffolded challenge
 ./scripts/interop.sh          # each implementation audits the other's log
 ./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
 ./scripts/blob-demo.sh        # a node with only the log fetches its verifier and uses it
 ./scripts/p2p-demo.sh         # two daemons: an empty node syncs, then audits under both
 proofwork incentives          # evaluate the node-operator game (~2s)
+proofwork incentives --sweep canary-rate=1/20..1/5:5 --out grid.csv
+                              # ...across a grid instead of at one point, one row per
+                              # point, so a threshold is visible without re-reading
+                              # a hundred reports by eye
 proofwork incentives --robustness   # ...and how far each parameter can move before it
                                     # breaks. Seventeen parameters walked out along a
                                     # twelve-rung ladder in both directions, the whole
@@ -133,49 +138,110 @@ holds the ledger's single write lock, so nothing else can — or
 
 ### Start a p2p node
 
-The easiest local launch is:
+There are two roles and they run different commands. Nearly everyone wants the
+first.
+
+**Joining — dial out, serve nobody.**
 
 ```sh
 make p2p
 ```
 
-On first run this creates `.local/node.identity.json`, `.local/root.key`, and
-`.local/checkpoint.json`. The first two contain private key material; keep
-`.local/` out of version control. The node listens on `127.0.0.1:9000` by
-default, accepts inbound peers, periodically dials configured bootstrap files,
-and re-derives received records locally.
+Binds `127.0.0.1:9000` (nothing needs to dial you), writes
+`.local/proofwork-p2p.jsonl`, and on first run creates
+`.local/node.identity.json`, `.local/root.key`, and `.local/checkpoint.json`.
+The first two are private keys; `.local/` is gitignored, keep it that way.
 
-To connect to a peer, provide a bootstrap file containing its address and
-McEliece public key:
+**One thing will stop this working, and it is not the network.** With no
+explicit `BOOTSTRAP_ARGS`, the first run generates `.local/seed.json` for
+`SEED_ADDR` with a **placeholder** public key — a real key, freshly minted, that
+belongs to nobody. The address is only ever a dial hint; `p2p::handshake`
+authenticates the *key*, so a placeholder authenticates nobody and every
+handshake fails. Until you paste the seed's real key into `"public"`, the daemon
+says so at startup:
 
-```json
-{"addr":"127.0.0.1:9001","public":"<peer public-key hex>"}
+```
+bootstrap .local/seed.json: still carries the PLACEHOLDER key ...
 ```
 
-Then launch with:
+That warning clears itself once the key is real — it is keyed on the peer id of
+the generated key, not on a flag anyone has to remember to delete. Point
+somewhere else instead if you prefer:
 
 ```sh
-make p2p LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS='--bootstrap peer.json'
+make p2p SEED_ADDR=203.0.113.9:9001      # regenerate the hint for another host
+make p2p BOOTSTRAP_ARGS='--bootstrap peer.json'   # or supply the file outright
 ```
 
-Without an explicit `BOOTSTRAP_ARGS`, `make p2p` bootstraps against
-`SEED_ADDR` (default `44.229.170.164:5000`), generating
-`.local/seed.json` on first run via `proofwork-gen-bootstrap`. That file's
-`addr` is the real seed's; its `public` is a freshly generated placeholder key,
-because the address is only a hint and `p2p::handshake` authenticates the key,
-not the socket it answered on. Replace `"public"` in `.local/seed.json` with
-the seed's actual public key before relying on the connection, or point
-`SEED_ADDR`/`SEED_BOOTSTRAP` elsewhere:
+A bootstrap file is just `{"addr":"host:port","public":"<peer public-key hex>"}`.
+`addr` may be a hostname, which survives a restart that moves an IP.
+
+**Seeding — accept strangers.**
 
 ```sh
-make p2p SEED_ADDR=203.0.113.9:9001
-# or supply your own bootstrap file outright:
-make p2p BOOTSTRAP_ARGS='--bootstrap peer.json'
+make seed
 ```
 
-Use separate `LOCAL_DIR`, `LOG`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT`
-paths for each node. The root checkpoint key is ML-DSA-65 and is separate from
-the transport identity.
+Binds `0.0.0.0` on `SEED_ADDR`'s port (the port is derived from `SEED_ADDR`, so
+the two cannot disagree). Binding the wildcard is the counterintuitive part and
+the one that matters on a cloud host: an instance's public address is NAT'd to
+it and appears on no local interface, so `--listen <public ip>` cannot bind at
+all. Publish the public address in the bootstrap file you hand out.
+
+Two things `make seed` cannot do for you, both of which look identical to a
+seed that is simply down:
+
+- **Open the port inbound.** A security group that *drops* rather than refuses
+  produces no error on either end — just silence until a timeout.
+- **Distribute your real key.** Hand out the `"public"` field from your
+  `--identity` file (`.local/node.identity.json`), not your own `.local/seed.json`,
+  which holds a placeholder for somebody *else*.
+
+**Is it actually connected?** Successful sessions are logged, not just failures:
+
+```
+2026-08-08T00:33:42+00:00 INFO  proofwork inbound session:  <peer id> ok, 12 entries now
+2026-08-08T00:33:42+00:00 INFO  proofwork outbound session: <peer id> ok, 12 entries now
+```
+
+Silence with neither those nor an error means nothing has been dialled yet;
+`outbound session: transport I/O: ...` on repeat means the address, the
+firewall, or the key. Check them in that order — the key is the one with no
+network symptom.
+
+### Turning up the logs
+
+`PROOFWORK_LOG` sets the level — `error`, `warn`, `info` (default), `debug`,
+`trace`, or `off`. Everything goes to **stderr**, always, which is what makes it
+safe to raise on `proofwork-mcp`, whose *stdout* is the JSON-RPC protocol.
+
+`debug` adds every p2p protocol message, in both directions, with the peer it
+was exchanged with:
+
+```
+$ PROOFWORK_LOG=debug make p2p
+… DEBUG proofwork::p2p 59758322… -> Hello peer=083e078e… records=0
+… DEBUG proofwork::p2p 59758322… <- Inventory records=1
+… DEBUG proofwork::p2p 59758322… -> Want ids=1
+… DEBUG proofwork::p2p 59758322… <- Records n=1
+… DEBUG proofwork::p2p 59758322… -> code.Want addresses=1
+… DEBUG proofwork::p2p 59758322… -> dht.Ask addresses=1
+```
+
+That is a whole anti-entropy round: records, then verifier code, then the DHT,
+then populations — the order [p2p.md](docs/p2p.md) describes, now observable
+rather than inferred. Counts and sizes, never contents: a record round moves
+whole claims, and a population round would otherwise print other people's
+candidate artifacts into your terminal.
+
+Use separate `LOCAL_DIR`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT` paths for each
+node. `make mcp` uses `.local/proofwork-mcp.jsonl` by default, and `make p2p`
+uses `.local/proofwork-p2p.jsonl`, so the two commands can run together without
+contention over a single hash-linked ledger. Use `P2P_LOG` and `MCP_LOG` to
+override these paths directly.
+
+The root checkpoint key is ML-DSA-65 and is separate from the transport
+identity.
 
 Rust 1.89+ (verified in CI, and asserted by `rust-version`). No network access
 needed at runtime.
@@ -225,6 +291,10 @@ unrepresentable.
 proofwork post   examples/capset/objective.json
 proofwork commit <objective-id> --submitter bob --artifact solution.json --nonce s3cret
 proofwork reveal <objective-id> --submitter bob --artifact solution.json --nonce s3cret
+proofwork try    examples/capset/objective.json --submitter bob --artifact solution.json
+                                                 # the three lines above in one, waiting out
+                                                 # the epoch between commit and reveal
+proofwork scaffold my-challenge --kind certificate  # the files a new objective starts from
 proofwork audit
 proofwork attribute
 proofwork checkpoint --root-key key.json --out checkpoint.json   # sign it
@@ -574,6 +644,34 @@ blob at 1 MiB, which is four pieces. At that size rarest-first and choking buy
 nothing, and `p2p::code`'s whole-blob transfer is the right call. The swarm
 machinery is sized for a constraint this design does not currently have.
 
+### `src/shards/`: holding part of a blob, and proving you hold it
+
+Every path above moves a *whole* blob, so surviving `f` holders vanishing costs
+`f + 1` full copies. [`src/shards/`](src/shards/) splits it instead: `k` data
+shards plus `m` parity, any `k` of which rebuild it, at `(k+m)/k` on disk —
+1.5× at (4, 2) where replication wants 3× for the same two tolerated losses.
+
+The reason this is not just a compression trick is what coding *costs*.
+Replication has a property so cheap nobody names it: every copy is
+self-checking, so a liar implicates only itself. A shard does not hash to the
+blob's digest, and one corrupt shard makes every output byte wrong — the digest
+then says somebody lied and nothing about who, leaving `n choose k` full decodes
+to find them. So each shard is cut into chunks, each chunk is committed under a
+per-shard Merkle root, and the shard roots under one manifest root; nothing
+enters the linear combination until it has been checked, and a liar is dropped
+and **named**.
+
+Systematic Cauchy Reed–Solomon over GF(2^8) — now the crate's only GF(2^8),
+shared with Shamir, with the bulk lookup table *built from* the branch-free
+multiply rather than written beside it. Two multiplies disagreeing on one of
+65,536 products would produce shards that reconstruct to garbage on the node
+that used the other one.
+
+No record kind and no transfer path, both deliberately: a manifest is derived
+from bytes and is checked against the digest the log already pinned, and
+`proofwork shard` is the caller that keeps the module honest until `swarm` grows
+one. See [shards.md](docs/shards.md).
+
 
 ## Censorship resistance
 
@@ -599,9 +697,9 @@ So submissions are **sealed**, and opened *without* the submitter:
 
 ```
 commit    commitment = H(artifact ‖ submitter ‖ nonce)      (unchanged)
-          envelope   = ChaCha20-Poly1305(K, {artifact, nonce})
-          shares     = Shamir(K, t-of-n), each sealed via ephemeral X25519
-epoch end ≥t committee members publish shares → anyone reconstructs → opens
+          envelope   = ChaCha20-Poly1305(K, the whole signed claim)
+          shares     = Shamir(K, 3-of-5), each sealed by post-quantum KEM
+epoch end ≥3 seats publish `committee_share` records → anyone opens it
 ```
 
 You can be offline, jailed, or firewalled and still be paid. It also kills
@@ -611,6 +709,17 @@ indiscriminately. The commitment binds the plaintext, so a submitter who seals
 garbage is caught the moment the committee opens it.
 
 Sealing moves **when** an artifact becomes public, never **whether**.
+
+**And who opens it, and when, are consensus rules rather than promises.** The
+committee is a beacon draw over the log's own peer records — nobody issues an
+invitation, so nobody can decline to send one, and any reader recomputes any
+seat. A share published before the commitment's epoch closes is refused, and
+that check compares two timestamps already in the log rather than consulting a
+clock, so a member with a fast clock writes a record every node rejects. The
+threshold is pinned at commit time against the network's constant, because a
+submitter who could seal one-of-five would be handing any single member an
+early read. `tests/committee_reveal.rs` runs the whole thing with the submitter
+gone after commit.
 
 Two things are stated rather than papered over: **citation flow requires
 linkage** — the pseudonym graph is public by construction because paying people
@@ -651,6 +760,7 @@ src/                 Rust implementation (primary)
   sealed.rs          sealed submissions, openable without the submitter
   incentive/         the node-operator mechanism, and the harness that evaluates it
   store/             at-rest encryption, the data directory, the size cap, the mirror
+  shards/            erasure coding, with a Merkle commitment per chunk
   swarm/             piece-level transfer and a Kademlia DHT, alongside p2p/
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
@@ -671,6 +781,7 @@ examples/            worked objectives with real artifacts
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
+- [shards.md](docs/shards.md) — erasure coding, and why per-chunk commitments are what make it safe rather than merely cheap
 - [serving.md](docs/serving.md) — publishing a log over HTTP, and why submissions queue instead of appending
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [launch-review.md](docs/launch-review.md) — the pre-launch pass: what was fixed, and the gaps that remain, in priority order

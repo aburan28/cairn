@@ -45,7 +45,7 @@
 //! Nothing in this module does that for you.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use classic_mceliece_rust::{
     decapsulate_boxed, encapsulate_boxed, keypair_boxed, Ciphertext, PublicKey, SecretKey,
     CRYPTO_CIPHERTEXTBYTES, CRYPTO_PUBLICKEYBYTES, CRYPTO_SECRETKEYBYTES,
@@ -335,7 +335,7 @@ fn seal_frame(
     if counter == u64::MAX {
         return Err(HandshakeError::CounterExhausted);
     }
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(key.into());
     cipher
         .encrypt(
             &nonce_for(counter),
@@ -355,7 +355,7 @@ fn open_frame(
     ciphertext: &[u8],
     context: &[u8],
 ) -> Result<Vec<u8>, HandshakeError> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(key.into());
     cipher
         .decrypt(
             &nonce_for(counter),
@@ -525,7 +525,7 @@ impl Opener {
 fn nonce_for(counter: u64) -> Nonce {
     let mut bytes = [0u8; 12];
     bytes[..8].copy_from_slice(&counter.to_le_bytes());
-    *Nonce::from_slice(&bytes)
+    bytes.into()
 }
 
 /// The counter is authenticated as well as used as the nonce, so a frame
@@ -537,11 +537,17 @@ fn aad(counter: u64, context: &[u8]) -> Vec<u8> {
     out
 }
 
-fn peer_id_of(public: &[u8; CRYPTO_PUBLICKEYBYTES]) -> PeerId {
-    let mut h = Sha256::new();
-    h.update(b"proofwork/p2p/peer-id/v1");
-    h.update(public);
-    h.finalize().into()
+/// A peer's id from its public key.
+///
+/// Delegated to [`crate::crypto::kem::key_id`] rather than hashed here, because
+/// [`crate::crypto::kem::Bundle::id`] must produce the identical 32 bytes: a
+/// node's transport id, its Kademlia node id, its `PeerRecord::transport` and
+/// the committee identity its shares are sealed under are all the same value,
+/// and two copies of the derivation are two chances for that to stop being
+/// true. Public so the committee layer can name a member without importing the
+/// transport.
+pub fn peer_id_of(public: &[u8; CRYPTO_PUBLICKEYBYTES]) -> PeerId {
+    crate::crypto::kem::key_id(public)
 }
 
 fn boxed_array<const N: usize>(bytes: &[u8]) -> Option<Box<[u8; N]>> {

@@ -56,13 +56,27 @@ trap 'rm -rf "$STAGE"' EXIT
 EPOCH_SECONDS=${PROOFWORK_EPOCH_SECONDS:-600}
 export PROOFWORK_EPOCH_SECONDS="$EPOCH_SECONDS"
 
-# Sleep until the next epoch boundary, plus a small margin. Waiting a fixed
-# EPOCH_SECONDS would work too and would take twice as long on average.
-wait_for_next_epoch() {
+FINALITY_EPOCHS=${PROOFWORK_FINALITY_EPOCHS:-1}
+export PROOFWORK_FINALITY_EPOCHS="$FINALITY_EPOCHS"
+
+# Sleep until the epoch's work is eligible to settle: to the next boundary,
+# plus one whole epoch per FINALITY_EPOCHS, plus a small margin. Waiting a
+# fixed EPOCH_SECONDS to reach the boundary would work too and would take
+# twice as long on average.
+#
+# The finality delay is the reason for the second term. An epoch is not
+# settleable when it closes any more -- it waits, so that a node which heard
+# about it late still holds every earlier epoch before anything drains. Under
+# the production 600s epoch that is ten extra minutes on a run of this script,
+# which is the honest cost of the log being reproducible by someone who was
+# not here when it was written.
+wait_until_settleable() {
   local now remainder
   now=$(date +%s)
   remainder=$((EPOCH_SECONDS - (now % EPOCH_SECONDS) + 2))
-  printf '    (waiting %ss for the next epoch)\n' "$remainder"
+  remainder=$((remainder + EPOCH_SECONDS * FINALITY_EPOCHS))
+  printf '    (waiting %ss: next boundary, plus %s finality epoch(s))\n' \
+    "$remainder" "$FINALITY_EPOCHS"
   sleep "$remainder"
 }
 
@@ -82,7 +96,7 @@ submit() {
   shift 4
   "$RUST" --log "$LOG" --root . commit "$oid" --submitter "$who" \
     --artifact "$artifact" --nonce "$nonce" >/dev/null
-  wait_for_next_epoch
+  wait_until_settleable
   local revealed
   revealed=$("$RUST" --log "$LOG" --root . reveal "$oid" --submitter "$who" \
     --artifact "$artifact" --nonce "$nonce" "$@")
@@ -90,7 +104,7 @@ submit() {
   # The reveal prints `claim sha256:<64 hex>` on its first line. The `log`
   # view shows *entry* hashes, which are a different thing and not citable.
   LAST_CLAIM=$(echo "$revealed" | grep -o 'sha256:[0-9a-f]\{64\}' | head -1)
-  wait_for_next_epoch
+  wait_until_settleable
   "$RUST" --log "$LOG" --root . settle >/dev/null
 }
 

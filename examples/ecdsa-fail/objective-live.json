@@ -1,0 +1,22 @@
+{
+  "created_at": "2026-08-08T00:00:00+00:00",
+  "funder": "ecdsa-fail-port",
+  "goal": "GOAL-ecdsa-fail-secp256k1-cost",
+  "ratchet": {
+    "baseline": 10758874395,
+    "direction": "minimize",
+    "min_improvement": 100000000,
+    "reward": 5000000,
+    "target": 1400000000
+  },
+  "reward": 5000000,
+  "statement": "Minimize the qubit x Toffoli product for a reversible secp256k1 ECDSA point-add circuit. Score = peak_qubits * avg_toffoli (lower is better). Submit {\"qubits\": <int>, \"toffoli\": <int>} with an optional \"score\" field that must equal the product. Baseline 10,758,874,395 is the ecdsa.fail challenge-start score (3.96M T x 2,715 Q, Aug 2026). Target 1,400,000,000 is below the current published world-best of 1,483,649,332 (1.29M T x 1,154 Q by edi3on, GPT-5, Aug 7 2026) and Google's classified result (~1.48B). The pinned evaluator enforces feasibility bounds (qubits >= 500, toffoli >= 100K, product >= 500M) and the product-identity check on the optional score field; it does NOT re-simulate the circuit. Use ecdsafail run to obtain a verified score.json, then ecdsafail submit for the real leaderboard. Convert via: python3 examples/ecdsa-fail/score_to_artifact.py score.json. See examples/ecdsa-fail/GAP.md.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/ecdsa-fail/evaluators/circuit_cost_live.py",
+    "evaluator_sha256": "4fac71d4ed2a4b7733e2e17262b12aaad321eaf93a00ad72c724e6bbc5776044",
+    "kind": "evaluator",
+    "threshold": 10758874395
+  }
+}

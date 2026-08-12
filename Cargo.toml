@@ -32,20 +32,65 @@ default = []
 # Parsing untrusted JSON only. Canonical *output* is written by this crate's own
 # encoder -- see src/canonical.rs for why the two are deliberately separate.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+# RustCrypto crates version in lockstep through their shared `digest`,
+# `crypto-common`, `aead` and `rand_core` traits, so these move together or not
+# at all. Bumping one alone type-errors at the seam rather than failing to
+# resolve: `hmac 0.13` wants `digest 0.11` and `sha2 0.10` implements `digest
+# 0.10`, so `Hmac<Sha256>` stops satisfying `CoreProxy`; `chacha20poly1305 0.11`
+# does the same through `aead`. Three such bumps landed separately and left
+# `main` uncompilable in four files.
+#
+# Raising any of them means raising the set, in one reviewed change, with the
+# call sites updated -- see the `ignore` entries in .github/dependabot.yml.
 sha2 = "0.11"
 hmac = "0.13"
+
+# The one symmetric cipher, everywhere: transport frames, sealed envelopes, the
+# at-rest store. **Not AES**, and that is a decision rather than an accident.
+#
+# AES without hardware AES-NI is either slow or a cache-timing side channel, and
+# a research network runs on whatever its participants have -- ARM boards, VMs
+# with the instruction masked off, WASM. ChaCha20 is constant-time in software
+# by construction, so there is no configuration in which this crate is running
+# a table-lookup cipher on secret data without anybody noticing.
+#
+# One cipher and not two is the rest of it. Every AEAD in this crate has the
+# same 32-byte key, the same 12-byte nonce and the same failure mode, so
+# "nonce reuse is fatal" is one rule to enforce rather than one per site.
+# `tests/cipher_policy.rs` fails the build if an AES or TLS crate enters the
+# dependency tree, so the claim is checked and not merely written down.
+chacha20poly1305 = "0.10"
 
 # Confidentiality layer. Censorship resistance needs unlinkable, sealed
 # submissions that can be revealed WITHOUT the submitter being online -- see
 # docs/censorship.md. Threshold secret sharing is implemented in-crate over
 # GF(2^8) rather than pulled in, so the reconstruction path is auditable here.
+#
+# ed25519 signs and ML-DSA signs; **nothing here does key exchange but the three
+# KEMs below**. `x25519-dalek` was here until the sealed envelope stopped using
+# it, and removing it rather than leaving it unused is the point: a network
+# whose transport is quantum-resistant and whose submissions were sealed with
+# X25519 had moved the weakness rather than removed it, and a dependency still
+# in the tree is one the next person can reach for. See `src/crypto/kem.rs`.
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-chacha20poly1305 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
-classic-mceliece-rust = { version = "3.1.0", default-features = false, features = ["mceliece348864", "zeroize", "alloc"] }
 ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
+
+# Key encapsulation, three suites, combined so adding one can never weaken
+# another -- `src/crypto/kem.rs` has the argument. Classic McEliece is mandatory
+# in every bundle and is what a peer id names; the other two exist because a
+# 261,120-byte public key cannot go everywhere a key has to go.
+#
+# All three are pure Rust. `pqcrypto-hqc` wraps PQClean's C and is the more
+# established HQC, and it was declined for the reason the Shamir implementation
+# is in-crate: this is a path that decides who gets paid, and it should be
+# auditable in the language the rest of it is written in. The cost is honest --
+# `hqc-kem` is a release candidate, which is why HQC is never a bundle's only
+# optional leg and never the mandatory one.
+classic-mceliece-rust = { version = "3.1.0", default-features = false, features = ["mceliece348864", "zeroize", "alloc"] }
+ml-kem = { version = "0.3.2", features = ["zeroize"] }
+hqc-kem = "0.1.0-rc.0"
 
 # At-rest encryption of the local store. Argon2id is used only to wrap the key
 # file with a passphrase -- the data itself is sealed with the ChaCha20-Poly1305
@@ -55,8 +100,25 @@ ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
 # wrong shape of defence against a GPU.
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 
+# The logging *facade* only -- the backend that writes the lines is
+# `src/logging.rs`, about a hundred lines, and is deliberately ours.
+#
+# Taking the facade and not a full framework is the whole of the trade. The
+# facade is what lets a library module call `debug!` without deciding where
+# the output goes, which matters here more than usual: `proofwork-mcp` speaks
+# JSON-RPC on *stdout*, so a backend that guessed wrong would corrupt the
+# protocol rather than merely look untidy. Owning the backend is how "stderr,
+# always, no exceptions" becomes something a test can assert rather than a
+# convention to remember. `tracing` would bring spans this crate has no use
+# for yet, and two more dependencies to justify.
+#
+# `std` for `set_boxed_logger`, and nothing else: the `kv` machinery is for
+# structured backends this does not have, and `serde` is not wanted anywhere
+# near a diagnostic path.
+log = { version = "0.4", default-features = false, features = ["std"] }
+
 [dev-dependencies]
-rand = "0.8"
+rand = "0.10"
 
 [lib]
 name = "proofwork"
@@ -73,3 +135,16 @@ path = "src/bin/mcp.rs"
 
 [profile.release]
 overflow-checks = true   # money arithmetic must never wrap silently
+
+# Dependencies are optimised even in debug builds, and this is about Classic
+# McEliece rather than about taste. Unoptimised, `keypair_boxed` takes ~12
+# seconds; the `p2p::handshake` tests alone ran for 260 s, and the sealed
+# envelope now generates committee keys too, so an unoptimised test suite would
+# be measured in hours and would stop being run. At `opt-level = 2` keygen is
+# ~250 ms, which is the number `docs/p2p.md` quotes.
+#
+# Only `package."*"` -- this crate itself stays unoptimised, so backtraces,
+# stepping and `debug_assert!` are all unchanged. Nothing here reaches a
+# release build or changes a single byte any record carries.
+[profile.dev.package."*"]
+opt-level = 2

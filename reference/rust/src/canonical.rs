@@ -204,21 +204,20 @@ fn escape(text: &str, out: &mut String) {
     out.push('"');
 }
 
-/// `sha2`'s digest output stopped implementing `LowerHex` when `digest` moved
-/// from `generic-array` to `hybrid-array`, which carries no formatting impl at
-/// all -- so `format!("{:x}", ...)`, which worked on every prior release,
-/// stopped compiling here. `partition::hex` is the same three-line fold for
-/// the same reason, kept private and local to each module rather than made
-/// crate-public, matching how this crate already duplicates the small stuff
-/// rather than growing an internal-utilities module for it.
-fn hex(bytes: &[u8]) -> String {
+/// Lowercase hex, two characters per byte.
+///
+/// `sha2` 0.11's output type dropped the `LowerHex` impl the previous
+/// `format!("{:x}", ..)` spelling relied on. Spelled out here rather than
+/// reached for from the primary implementation: the hex text of a digest *is*
+/// a record id, and this crate exists to derive those independently.
+pub fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn digest_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{DIGEST_PREFIX}{}", hex(&hasher.finalize()))
+    format!("{DIGEST_PREFIX}{}", hex_lower(&hasher.finalize()))
 }
 
 /// Display form. By characters, never bytes: these strings come from records

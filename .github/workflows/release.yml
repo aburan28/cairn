@@ -1,38 +1,191 @@
 name: release
 
-# Tag builds only. `--locked` because a release built from an unlocked
-# dependency resolution is a release nobody can reproduce.
+# Tag builds, plus a manual trigger. `--locked` because a release built from an
+# unlocked dependency resolution is a release nobody can reproduce.
+#
+# Tags are cut by `release-please.yml`, not by hand: that workflow owns the
+# version and the changelog, this one owns the binaries. The split is
+# deliberate — deciding *what version this is* and *what bytes ship* are
+# different jobs with different failure modes, and a tool that does both tends
+# to do one of them badly.
+#
+# `workflow_dispatch` exists because this workflow had never run once: releases
+# only fire on tags, so a break in it stays invisible until the moment somebody
+# is trying to cut a release and least wants to debug YAML. Dispatching builds
+# and packages without publishing, so the path can be exercised on demand.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   build:
+    name: ${{ matrix.target }}
     strategy:
+      # One target's toolchain failing should not hide whether the others
+      # packaged. On a release that is the difference between "ship five of six
+      # and fix one" and "ship nothing and guess which broke".
+      fail-fast: false
       matrix:
         include:
+          # --- Linux, native runners per architecture -------------------------
+          #
+          # Native rather than cross-compiled, everywhere it is possible. A
+          # cross-built binary is only as trustworthy as the sysroot it was
+          # linked against, and the arm64 runner is free on public
+          # repositories, so there is nothing to buy by cross-compiling.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-latest
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            musl: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl: true
+          # --- macOS ----------------------------------------------------------
+          - os: macos-latest        # Apple Silicon
             target: aarch64-apple-darwin
+          - os: macos-13            # the last Intel image
+            target: x86_64-apple-darwin
+          #
+          # No Windows target, and that is a decision rather than an oversight.
+          # `src/verifiers`, `src/blobs.rs`, `src/store/{quota,atrest}.rs` and
+          # both binaries reach for `std::os::unix` and the seatbelt/bubblewrap
+          # sandbox; shipping a Windows build would mean porting the sandbox,
+          # and a node that verifies objective-authored code *without* one is
+          # the configuration `PROOFWORK_REQUIRE_SANDBOX` exists to refuse.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --locked --target ${{ matrix.target }}
-      # All four binaries ship together: a node operator needs the CLI, the
-      # MCP server, the p2p daemon, and the serve daemon to be the same
-      # commit, and separate tarballs invite mixing versions.
-      - name: package
-        run: |
-          tar -C "target/${{ matrix.target }}/release" -czf \
-            "proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" \
-            proofwork proofwork-mcp proofwork-p2p proofwork-serve
-      - uses: softprops/action-gh-release@v2
+      - uses: Swatinem/rust-cache@v2
         with:
-          files: proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          key: ${{ matrix.target }}
+
+      # musl links statically, which is the point of shipping it: a node
+      # operator on a distribution older than the runner's glibc gets a binary
+      # that runs, instead of a symbol-version error.
+      #
+      # A linker is all this needs, and that was checked rather than assumed:
+      # no crate in the locked graph has a build script that compiles C — no
+      # `cc`, no `cmake`, no bindgen — and neither OpenSSL nor `ring` is in the
+      # tree at all, the crypto here being pure-Rust RustCrypto plus
+      # `classic-mceliece-rust`. `sha3` can compile assembly, but only behind
+      # its non-default `asm` feature, which nothing here enables. If that ever
+      # changes, this step is where it will surface.
+      - name: musl toolchain
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # All five binaries ship together: a node operator needs the CLI, the MCP
+      # server, the p2p daemon, the serve daemon and the bootstrap generator to
+      # be the same commit, and separate tarballs invite mixing versions.
+      #
+      # `gen-bootstrap` used to be left out, which made the shipped README
+      # wrong — it tells an operator to run it, and a release did not contain
+      # it. The loop below fails on a missing binary rather than quietly
+      # packaging four of five, because that is exactly how it went unnoticed.
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="proofwork-${{ github.ref_name }}-${{ matrix.target }}"
+          DIR="target/${{ matrix.target }}/release"
+          BINS="proofwork proofwork-mcp proofwork-p2p proofwork-serve proofwork-gen-bootstrap"
+          for bin in $BINS; do
+            [ -x "$DIR/$bin" ] || { echo "release is missing $bin" >&2; exit 1; }
+          done
+          tar -C "$DIR" -czf "$NAME.tar.gz" $BINS
+          # A checksum beside the artifact, because this project's whole claim
+          # is that you do not have to trust the party who served you the
+          # bytes. Shipping binaries with no way to check them would be the one
+          # inconsistency nobody could miss. `shasum` on macOS, `sha256sum` on
+          # Linux — neither is present on both.
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
+          else
+            shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
+          fi
+          cat "$NAME.tar.gz.sha256"
+
+      # Proof the thing that was just packaged actually runs on a clean unpack.
+      # That is the failure a wrong-architecture build or a missing dynamic
+      # library produces, and no other job in this repository would catch it,
+      # because every other job runs binaries straight out of `target/`.
+      #
+      # Skipped when the runner cannot execute what it just built — nothing
+      # here cross-compiles today, so this always runs, and the guard is here
+      # so that adding a cross target later fails loudly rather than silently
+      # skipping its only verification.
+      - name: the unpacked binaries run
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="proofwork-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p /tmp/unpacked && tar -C /tmp/unpacked -xzf "$NAME.tar.gz"
+          for bin in proofwork proofwork-serve proofwork-p2p proofwork-gen-bootstrap; do
+            "/tmp/unpacked/$bin" --help >/dev/null 2>&1 \
+              || { echo "$bin --help failed from the tarball" >&2; exit 1; }
+          done
+          # And one real end-to-end check, not just `--help`: the published log
+          # ships in the repository, so a release can verify it the way a
+          # downloader would. This is the strongest single statement a release
+          # artifact can make about itself.
+          /tmp/unpacked/proofwork --log launch/proofwork.jsonl --root . audit
+          echo "unpacked binaries run and audit the published log"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+      # Publishing is tag-only. A manual dispatch builds, packages and proves
+      # the tarball runs, then stops — so the path can be exercised without
+      # minting a release nobody asked for.
+      - uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            proofwork-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          body: |
+            Binaries for `${{ github.ref_name }}`. Five to a tarball: `proofwork`
+            (CLI), `proofwork-mcp`, `proofwork-p2p`, `proofwork-serve`,
+            `proofwork-gen-bootstrap`.
+
+            | platform | target |
+            |---|---|
+            | Linux amd64 | `x86_64-unknown-linux-gnu`, `…-musl` (static) |
+            | Linux arm64 | `aarch64-unknown-linux-gnu`, `…-musl` (static) |
+            | macOS Apple Silicon | `aarch64-apple-darwin` |
+            | macOS Intel | `x86_64-apple-darwin` |
+
+            Prefer **musl** on Linux if your distribution is older than the
+            build runner: it links statically, so there is no glibc version to
+            match.
+
+            ```sh
+            tar -xzf proofwork-${{ github.ref_name }}-<target>.tar.gz
+            sha256sum -c proofwork-${{ github.ref_name }}-<target>.tar.gz.sha256
+            ./proofwork --help
+            ```
+
+            **Check it before you trust it.** A copy of the settled log ships in
+            `launch/`, and re-deriving it is the point of the whole project:
+
+            ```sh
+            ./proofwork --log launch/proofwork.jsonl --root . audit
+            ./proofwork --log launch/proofwork.jsonl --root . verify \
+                --from launch/checkpoint.json --root-key launch/root-key.pub --audit
+            ```

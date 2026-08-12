@@ -116,13 +116,39 @@ That kills in-flight front-running and removes the sequencer's ability to
 reorder *within* a batch for profit. It does not remove the sequencer's ability
 to choose the beacon, which is the next item and is now the load-bearing one.
 
-**A real randomness beacon.** `partition.py` currently derives its beacon from
+**Threshold key reveal.** *Built* — `records::CommitteeShare`,
+`Node::committee_for`, `Node::open_sealed`, and the same rules in
+`reference/rust`. A sealed submission's content key is opened by a committee
+drawn from the log rather than by its author, which is what makes a censored
+submitter collectable.
+
+It belongs in this list rather than in `censorship.md` alone because the thing
+that had to be designed was not the cryptography — threshold sharing is
+textbook — but *making the reveal agree without a consensus protocol*. Three
+questions had to become pure functions of the log, and each one is a place two
+honest nodes could otherwise have reached different answers while both audited
+clean: **who** is on the committee (a beacon draw over peer records, bounded by
+the commitment's own position so later appends cannot move it), **when** a share
+may be published (strictly later than the commitment's epoch, compared between
+two records rather than against a clock), and **what** the parameters are (`t`
+and `n` pinned at commit against network constants, because a submitter-chosen
+threshold is a submitter-chosen collusion cost).
+
+Note what did *not* need agreement, which is the same lesson as the rest of this
+document: the claim a committee opens is an ordinary claim, so every node
+re-derives its verdict and its settlement exactly as before. The committee
+decides when an artifact becomes readable. It decides nothing about whether it
+is correct or what it is worth.
+
+**A real randomness beacon.** `partition.rs` currently derives its beacon from
 ledger heads and admits in its own docstring that a sequencer free to choose
 that value could grind it. That was a work-assignment problem when it was
 written. It is a settlement problem now: the same beacon orders a settlement
-batch, so grinding the anchor picks who gets paid first. A VDF or threshold
-signature is required before the sequencer is untrusted, and epoch batching
-moved this from "should" to "must".
+batch, so grinding the anchor picks who gets paid first — **and it now also
+draws the committee that can read a sealed artifact early**, so a ground anchor
+buys a seat as well as a payment slot. A VDF or threshold signature is required
+before the sequencer is untrusted, and each of these moved it further from
+"should" to "must".
 
 ## The verifier's dilemma, and why it is mild here
 
@@ -166,5 +192,5 @@ all, and every objective that drifts out of those shapes drags one back in.
 | Fastest finality needed? | Seconds. Frontier advances are minutes apart. |
 | Build a new consensus protocol? | No. |
 | Run an L1? | No — rollup on an established chain. |
-| Where is the real protocol work? | Verification committees and a randomness beacon. Epoch-batched reveal is built, and it is what made the beacon urgent. |
+| Where is the real protocol work? | Verification committees and a randomness beacon. Epoch-batched reveal and threshold key reveal are both built, and both made the beacon more urgent — it now picks who gets paid first *and* who can read a sealed artifact. |
 | What keeps this tractable? | Verification costing one evaluation. |
