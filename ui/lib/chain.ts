@@ -83,3 +83,35 @@ export function short(hash: string): string {
   const bare = hash.startsWith("sha256:") ? hash.slice(7) : hash;
   return bare.length > 16 ? `${bare.slice(0, 16)}…` : bare;
 }
+
+/**
+ * Epoch lengths this chain appears to have been settled under, largest first.
+ *
+ * An epoch is `unix_seconds / PROOFWORK_EPOCH_SECONDS`, floor-divided, and that
+ * divisor is **not stored** — `src/partition.rs` derives it and says so. So a
+ * chain settled at one length and then another carries epoch numbers that differ
+ * by roughly the ratio of the two, and nothing in the log records why.
+ *
+ * This groups the epochs by order of magnitude and reports how many distinct
+ * groups there are. More than one is worth showing an operator: `docs` calls
+ * `PROOFWORK_EPOCH_SECONDS` a *policy* parameter, and two settings disagree
+ * about which epoch a record falls in and therefore about which reveals were
+ * legal. A log holding both was settled under two different rules.
+ *
+ * Deliberately a heuristic, and labelled as one wherever it is rendered. The
+ * divisor is unrecoverable from the log, so this cannot be a derivation — it
+ * notices a discontinuity and says where, which is enough to send somebody to
+ * look.
+ */
+export function epochScales(chain: EpochLink[]): number[] {
+  const scales = new Set<number>();
+  for (const link of chain) {
+    if (link.epoch > 0) scales.add(Math.floor(Math.log10(link.epoch)));
+  }
+  return [...scales].sort((a, b) => b - a);
+}
+
+/** Total claims settled across every link. */
+export function totalClaims(chain: EpochLink[]): number {
+  return chain.reduce((sum, link) => sum + link.claims.length, 0);
+}

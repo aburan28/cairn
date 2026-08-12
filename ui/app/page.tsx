@@ -4,10 +4,17 @@ import { useCallback, useEffect, useState } from "react";
 import {
   type Chain,
   NODE_URL,
+  epochScales,
   fetchChain,
   firstBrokenLink,
   short,
+  totalClaims,
 } from "@/lib/chain";
+import {
+  type CheckpointResponse,
+  coversHead,
+  fetchCheckpoint,
+} from "@/lib/checkpoint";
 
 /**
  * The knowledge chain of one node.
@@ -20,6 +27,7 @@ import {
 export default function Page() {
   const [base, setBase] = useState(NODE_URL);
   const [chain, setChain] = useState<Chain | null>(null);
+  const [checkpoint, setCheckpoint] = useState<CheckpointResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -27,9 +35,18 @@ export default function Page() {
     setLoading(true);
     setError(null);
     try {
-      setChain(await fetchChain(url));
+      // Both, and the checkpoint never fails the page: a node with no
+      // checkpoint is an ordinary state, so `fetchCheckpoint` resolves to null
+      // rather than turning "nobody has signed this yet" into an error.
+      const [next, signed] = await Promise.all([
+        fetchChain(url),
+        fetchCheckpoint(url),
+      ]);
+      setChain(next);
+      setCheckpoint(signed);
     } catch (cause) {
       setChain(null);
+      setCheckpoint(null);
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
@@ -41,6 +58,8 @@ export default function Page() {
   }, [load]);
 
   const broken = chain ? firstBrokenLink(chain.chain) : null;
+  const scales = chain ? epochScales(chain.chain) : [];
+  const claims = chain ? totalClaims(chain.chain) : 0;
 
   return (
     <main>
@@ -82,6 +101,45 @@ export default function Page() {
             <code className="accent">{chain.head || "— empty chain"}</code>
           </div>
 
+          {checkpoint && (
+            <div className="panel">
+              <b>
+                signed at height {checkpoint.checkpoint.height}
+                {coversHead(checkpoint.checkpoint, chain.links) === "behind" &&
+                  " — behind the head below, which is normal after further appends"}
+              </b>
+              <div className="meta">
+                merkle root{" "}
+                <code className="dim" title={checkpoint.checkpoint.root}>
+                  {short(checkpoint.checkpoint.root)}
+                </code>{" "}
+                · issued {checkpoint.checkpoint.issued_at}
+              </div>
+              {/* Said plainly, because the alternative is a reader assuming the
+                  green text means somebody checked. Verifying ML-DSA here would
+                  put a third implementation of a consensus-critical primitive
+                  in a third language. */}
+              <div className="meta dim">
+                This page does not verify that signature — it shows that one
+                exists and what it covers. <code>proofwork verify --from</code>{" "}
+                is what checks it.
+              </div>
+            </div>
+          )}
+
+          {scales.length > 1 && (
+            <div className="panel bad">
+              <b>this chain was settled under more than one epoch length</b>
+              Its epoch numbers span {scales.length} orders of magnitude, which
+              happens when <code>PROOFWORK_EPOCH_SECONDS</code> changed between
+              batches — the demo scripts set it to 1, the default is 600. The
+              divisor is derived and never stored, so this is a heuristic and
+              not a derivation. It matters because that value decides which
+              epoch a record falls in, and therefore which reveals were legal:
+              a log holding both was settled under two different rules.
+            </div>
+          )}
+
           {/* The one claim this page makes on its own behalf. The node says
               "here is a chain"; rendering it without checking would be taking
               that on faith, which is the thing this project does not do. */}
@@ -109,7 +167,11 @@ export default function Page() {
                     <span className="epoch">epoch {link.epoch}</span>{" "}
                     <code className="accent" title={link.link}>
                       {short(link.link)}
-                    </code>
+                    </code>{" "}
+                    <span className="tag">
+                      {link.claims.length}{" "}
+                      {link.claims.length === 1 ? "claim" : "claims"}
+                    </span>
                   </div>
                   <div className="meta">
                     prev{" "}
@@ -138,7 +200,8 @@ export default function Page() {
           )}
 
           <p className="lede" style={{ marginTop: "2rem" }}>
-            {chain.links} link(s), newest first. Verify none of it on trust:{" "}
+            {chain.links} link(s) settling {claims} claim(s) in total, newest
+            first. Verify none of it on trust:{" "}
             <code>proofwork --log &lt;log&gt; --root . audit</code> re-derives
             the chain and checks every batch against the anchor it recorded.
           </p>

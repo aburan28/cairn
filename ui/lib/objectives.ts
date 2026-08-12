@@ -112,3 +112,78 @@ export function short(value: string): string {
 export function amount(value: number): string {
   return value.toLocaleString("en-US");
 }
+
+/** A ratcheted objective's declared progression. From `GET /objective/:id`. */
+export type Ratchet = {
+  baseline: number;
+  target: number;
+  direction: "maximize" | "minimize" | string;
+  min_improvement: number;
+  reward: number;
+};
+
+/** The verifier an objective pins. Its hash is part of the objective's id. */
+export type Verifier = {
+  kind: string;
+  checker?: string;
+  checker_sha256?: string;
+  evaluator?: string;
+  evaluator_sha256?: string;
+  entrypoint?: string;
+  threshold?: number;
+  direction?: string;
+};
+
+/** What `GET /objective/:id` adds over the list view. */
+export type ObjectiveDetail = {
+  created_at?: string;
+  ratchet?: Ratchet;
+  verifier?: Verifier;
+};
+
+/**
+ * Fetch the full record for one objective.
+ *
+ * The list endpoint carries a summary; the ratchet, the pinned verifier and
+ * `created_at` only exist here. Fetched per card rather than folded into the
+ * list, because widening `/objectives` would make every reader pay for detail
+ * most of them do not want — and this is a reader, so N small requests against
+ * a local node is the cheaper mistake.
+ *
+ * Resolves to `null` on any failure. Detail is an enhancement: a card that
+ * cannot load it should show what the list already gave it rather than
+ * becoming an error.
+ */
+export async function fetchObjectiveDetail(
+  base: string,
+  id: string,
+): Promise<ObjectiveDetail | null> {
+  try {
+    const response = await fetch(`${base}/objective/${id}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { record?: ObjectiveDetail };
+    return body.record ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How far a ratchet has travelled from baseline to target, in [0, 1].
+ *
+ * Direction-aware, because a `minimize` objective counts *down* and a bar that
+ * filled as the score rose would show a submitter making things worse as
+ * progress. Returns null when the span is degenerate rather than dividing by
+ * zero and rendering a confident wrong number.
+ */
+export function ratchetProgress(
+  ratchet: Ratchet,
+  score: number,
+): number | null {
+  const span = ratchet.target - ratchet.baseline;
+  if (span === 0) return null;
+  const moved = (score - ratchet.baseline) / span;
+  return Math.max(0, Math.min(1, moved));
+}

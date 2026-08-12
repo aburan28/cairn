@@ -326,3 +326,18 @@ h2 {
     align-items: start;
   }
 }
+
+/* -- objective detail ------------------------------------------------------ */
+
+.ratchet {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+}
+
+.verifier {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+  word-break: break-all;
+}

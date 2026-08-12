@@ -55,3 +55,19 @@ is the one to use on a server, and it is what `serve-smoke.sh` tests.
 This app is the richer client — a URL you can retarget, a visual spine, the
 consistency check. It needs a Node toolchain, which a node operator should not
 be required to have just to look at their own chain. Hence both.
+
+## If the page renders unstyled
+
+Correct content, serif font, unreadable dark-on-dark, nav links run together:
+that is a **stale `.next`**, not a code fault. It happens when `npm run build`
+runs while `npm run dev` is running — they share the directory, and the
+production build replaces the dev server's stylesheet with one it cannot use.
+The tell is that `app/globals.css` is intact on disk while the served
+`/_next/static/css/app/layout.css` is a few bytes.
+
+```sh
+rm -rf .next && npm run dev
+```
+
+Worth knowing because the symptom looks like broken CSS and sends you reading
+the stylesheet, which is fine. Stop the dev server before running a build.
