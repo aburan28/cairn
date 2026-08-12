@@ -32,8 +32,8 @@ default = []
 # Parsing untrusted JSON only. Canonical *output* is written by this crate's own
 # encoder -- see src/canonical.rs for why the two are deliberately separate.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 
 # Confidentiality layer. Censorship resistance needs unlinkable, sealed
 # submissions that can be revealed WITHOUT the submitter being online -- see

@@ -204,10 +204,21 @@ fn escape(text: &str, out: &mut String) {
     out.push('"');
 }
 
+/// `sha2`'s digest output stopped implementing `LowerHex` when `digest` moved
+/// from `generic-array` to `hybrid-array`, which carries no formatting impl at
+/// all -- so `format!("{:x}", ...)`, which worked on every prior release,
+/// stopped compiling here. `partition::hex` is the same three-line fold for
+/// the same reason, kept private and local to each module rather than made
+/// crate-public, matching how this crate already duplicates the small stuff
+/// rather than growing an internal-utilities module for it.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn digest_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{DIGEST_PREFIX}{:x}", hasher.finalize())
+    format!("{DIGEST_PREFIX}{}", hex(&hasher.finalize()))
 }
 
 /// Display form. By characters, never bytes: these strings come from records

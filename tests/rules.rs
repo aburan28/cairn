@@ -152,7 +152,15 @@ impl Drop for TempDir {
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    // `sha2`'s digest output stopped implementing `LowerHex` under the
+    // `hybrid-array` migration, so `{:x}` no longer applies to it directly.
+    // `crate::canonical::hex` fixes this crate-side; it is `pub(crate)`, so an
+    // integration test -- a separate crate -- needs its own copy.
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Write pinned source into the bundle root and return the hash the objective

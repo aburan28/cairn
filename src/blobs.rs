@@ -83,7 +83,7 @@ pub const MAX_BLOB_BYTES: usize = 1 << 20;
 pub fn address(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    crate::canonical::hex(&hasher.finalize())
 }
 
 /// Whether `text` is a well-formed content address.

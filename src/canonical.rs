@@ -534,7 +534,21 @@ fn write_escaped(s: &str, out: &mut String) {
 pub fn digest_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{DIGEST_PREFIX}{:x}", hasher.finalize())
+    format!("{DIGEST_PREFIX}{}", hex(&hasher.finalize()))
+}
+
+/// Lowercase hex, byte by byte.
+///
+/// `sha2`'s digest output stopped implementing `LowerHex` when the `digest`
+/// ecosystem moved from `generic-array` to `hybrid-array`'s `Array<u8, N>`,
+/// which carries no formatting impl at all -- so `format!("{:x}", ...)` on a
+/// hash, which worked every time before, now fails to compile everywhere it is
+/// used. One helper here rather than a `{:02x}` fold re-typed at each of the
+/// four call sites that broke: [`crate::partition`] and [`crate::blobs`] both
+/// need it too, and a hash display rule copied four times is four chances for
+/// one of them to drift.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Display form, e.g. `sha256:ab12cd34`. Never use for equality.
