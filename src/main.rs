@@ -4089,8 +4089,14 @@ fn cmd_knowledge(
             // Ungrounded assertions are printed too, marked. Hiding what was
             // said because it did not count would make the output impossible to
             // reconcile against the log somebody else is reading.
+            // A `retracts` is grounded on identity, not acceptance, so the two
+            // refusals need different words: reporting an impostor retraction
+            // as a failed verdict sends the reader looking for a verdict that
+            // is not the reason.
             let note = if assertion.grounded {
                 format!("class {}", assertion.class)
+            } else if assertion.kind == proofwork::records::Relation::Retracts {
+                "not heard: only the claim's own submitter can retract it".to_string()
             } else {
                 "not heard: author's claim was not accepted".to_string()
             };
