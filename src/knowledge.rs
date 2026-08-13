@@ -147,12 +147,17 @@ pub enum Standing {
     Unverified,
     /// The submitter retracted their own claim.
     ///
-    /// Only the target's own submitter string can do this. For a per-objective
-    /// pseudonym that means a retraction must come from a claim on the same
-    /// objective, since that is the only place the same pseudonym appears —
-    /// a real limit of pseudonymity, not an oversight, and the alternative
-    /// (letting a *different* name withdraw your work) is not a trade anyone
-    /// should want.
+    /// Only the target's own **key** can do this: a matching submitter
+    /// *string* is not enough, because a nickname authenticates nothing and
+    /// anybody may use one. Two limits follow, both deliberate:
+    ///
+    /// * A claim submitted under an unauthenticated nickname can never reach
+    ///   this state. Nobody owns that name, so nobody is its author.
+    /// * A per-objective pseudonym derives a different key per objective, so a
+    ///   retraction must come from a claim on the same objective — the only
+    ///   place that pseudonym appears. A real limit of pseudonymity, not an
+    ///   oversight, and the alternative (letting a *different* key withdraw
+    ///   your work) is not a trade anyone should want.
     Withdrawn,
     /// A later verified claim supersedes, corrects, or narrows it.
     Superseded,
@@ -599,15 +604,47 @@ impl<'a> KnowledgeGraph<'a> {
 
     /// Whether an assertion is heard at all.
     ///
-    /// `retracts` needs no verdict and needs the same submitter; everything
-    /// else needs its author's claim to have been accepted. See the module
-    /// docs for why acceptance is the price of being heard.
+    /// `retracts` needs no verdict and needs a *cryptographically* equal
+    /// submitter; everything else needs its author's claim to have been
+    /// accepted. See the module docs for why acceptance is the price of being
+    /// heard.
+    ///
+    /// # Why string equality is not enough for a retraction
+    ///
+    /// It was, in the first version of this module, and it was a hole. A
+    /// submitter is either a 64-hex **public key**, which
+    /// [`records::signed_submitter`] recognises and which the rules engine
+    /// forces to carry a valid signature, or an **unauthenticated nickname**
+    /// that stops nobody from using it —
+    /// [`records::signed_submitter`]'s own docs say so. Comparing the strings
+    /// therefore let anyone post a claim naming `alice` and retract alice's
+    /// work: not the impersonation the rest of the crate already tolerates for
+    /// nicknames (submitting *as* a name pays that name), but an integrity
+    /// attack on somebody else's record, and one that reaches every reader
+    /// including the agents reading `get_claim` over MCP.
+    ///
+    /// So a retraction grounds only when the name is a key. Two consequences,
+    /// and both are the honest answer rather than a compromise:
+    ///
+    /// * **A nickname's work can never be retracted, including by whoever
+    ///   submitted it.** An unauthenticated name has no owner, so there is
+    ///   nobody who *is* its author. The alternative is letting a stranger
+    ///   withdraw it, which is worse.
+    /// * The signature is re-checked here rather than assumed from admission.
+    ///   A graph can be built from any snapshot, and a predicate that decides
+    ///   whether one party may silence another should not rest on the caller
+    ///   having validated first. It costs one verification per retraction,
+    ///   which is the rarest relation there is.
+    ///
+    /// [`records::signed_submitter`]: crate::records::signed_submitter
     fn is_grounded(&self, by: &str, kind: &Relation, target: &ClaimFacts<'a>) -> bool {
         let Some(author) = self.facts.get(by) else {
             return false;
         };
         if *kind == Relation::Retracts {
-            return author.claim.submitter == target.claim.submitter;
+            return crate::records::signed_submitter(&target.claim.submitter).is_some()
+                && author.claim.submitter == target.claim.submitter
+                && author.claim.verify_signature().is_ok();
         }
         author.verdict == Some(Status::Accept)
     }
@@ -785,6 +822,7 @@ fn confidence_of(
 mod tests {
     use super::*;
     use crate::canonical::Value;
+    use crate::crypto::identity::Identity;
 
     fn claim(submitter: &str, n: i128) -> Claim {
         Claim::new(
@@ -949,9 +987,12 @@ mod tests {
 
     #[test]
     fn only_the_submitter_can_retract_their_own_work() {
-        let subject = claim("alice", 1);
+        let author = Identity::from_secret_bytes([7u8; 32]);
+        let subject = claim("placeholder", 1).signed_with(&author);
         let id = subject.id();
-        let impostor = relating("mallory", 3, Relation::Retracts, &id);
+
+        let stranger = Identity::from_secret_bytes([9u8; 32]);
+        let impostor = relating("placeholder", 3, Relation::Retracts, &id).signed_with(&stranger);
         let impostor_id = impostor.id();
         let graph = KnowledgeGraph::new([
             facts(&id, &subject, Some(Status::Accept)),
@@ -964,18 +1005,74 @@ mod tests {
         assert_eq!(state.standing, Standing::Accepted);
         assert_eq!(state.retracted_by, None);
 
-        let author = relating("alice", 4, Relation::Retracts, &id);
-        let author_id = author.id();
+        let withdrawal = relating("placeholder", 4, Relation::Retracts, &id).signed_with(&author);
+        let withdrawal_id = withdrawal.id();
         let graph = KnowledgeGraph::new([
             facts(&id, &subject, Some(Status::Accept)),
             // No verdict at all: withdrawing your own work needs no permission.
-            facts(&author_id, &author, None),
+            facts(&withdrawal_id, &withdrawal, None),
         ]);
         let state = graph
             .state(&id, &ConfidencePolicy::default(), 0)
             .expect("known claim");
         assert_eq!(state.standing, Standing::Withdrawn);
         assert_eq!(state.confidence, 0);
+    }
+
+    #[test]
+    fn a_nickname_cannot_be_impersonated_into_retracting_somebody_elses_work() {
+        // The hole this closes. `submitter` is either a public key the rules
+        // engine forces a signature for, or a nickname anybody may use. String
+        // equality treated the second as proof of authorship, so a stranger
+        // posting a claim named "alice" could withdraw alice's work -- a
+        // different and worse thing than the nickname impersonation this crate
+        // already tolerates, because it destroys somebody else's standing
+        // rather than merely paying their name.
+        let subject = claim("alice", 1);
+        let id = subject.id();
+        let impostor = relating("alice", 3, Relation::Retracts, &id);
+        let impostor_id = impostor.id();
+        let graph = KnowledgeGraph::new([
+            facts(&id, &subject, Some(Status::Accept)),
+            facts(&impostor_id, &impostor, Some(Status::Accept)),
+        ]);
+        let state = graph
+            .state(&id, &ConfidencePolicy::default(), 0)
+            .expect("known claim");
+        assert_eq!(
+            state.standing,
+            Standing::Accepted,
+            "an unauthenticated name was allowed to retract"
+        );
+        assert_eq!(state.retracted_by, None);
+        // Still reported, marked as not heard -- the reader sees the attempt.
+        assert_eq!(state.assertions.len(), 1);
+        assert!(!state.assertions[0].grounded);
+    }
+
+    #[test]
+    fn a_retraction_carrying_a_broken_signature_is_not_heard() {
+        // Belt to the braces above: the graph may be built from a snapshot
+        // nobody validated, so the predicate that decides whether one party may
+        // silence another re-checks the signature itself.
+        let author = Identity::from_secret_bytes([11u8; 32]);
+        let subject = claim("placeholder", 1).signed_with(&author);
+        let id = subject.id();
+
+        let mut forged = relating("placeholder", 5, Relation::Retracts, &id).signed_with(&author);
+        // Same key-shaped name, signature no longer covering these bytes.
+        forged.artifact = Value::object([("n", Value::Int(999))]);
+        let forged_id = forged.id();
+
+        let graph = KnowledgeGraph::new([
+            facts(&id, &subject, Some(Status::Accept)),
+            facts(&forged_id, &forged, Some(Status::Accept)),
+        ]);
+        let state = graph
+            .state(&id, &ConfidencePolicy::default(), 0)
+            .expect("known claim");
+        assert_eq!(state.standing, Standing::Accepted);
+        assert_eq!(state.retracted_by, None);
     }
 
     #[test]
