@@ -1685,6 +1685,15 @@ mod tests {
     /// default epoch is ten -- no `PROOFWORK_EPOCH_SECONDS` here, which would
     /// race every other test in this binary.
     fn server_with_accepted_claim(artifact: Value) -> (Server, String) {
+        server_with_claim_by(artifact, None)
+    }
+
+    /// The same fixture, with the claim submitted under a real key.
+    ///
+    /// Needed because a retraction now grounds on an *authenticated* submitter:
+    /// a nickname has no owner, so nobody can speak for it. A fixture that used
+    /// one could not exercise the withdrawal path at all.
+    fn server_with_claim_by(artifact: Value, signer: Option<&Identity>) -> (Server, String) {
         const TS: &str = "2026-07-28T00:00:00+00:00";
         const LATER: &str = "2026-07-28T00:20:00+00:00";
         let dir = std::env::temp_dir().join(format!("proofwork-mcp-test-{}", fresh_nonce()));
@@ -1715,17 +1724,30 @@ mod tests {
         .expect("valid objective");
         let objective_id = server.node.post_objective(&objective, TS).expect("posted");
 
-        let hash = proofwork::records::commitment_hash(&objective_id, "rival", &artifact, "n1");
-        server
-            .node
-            .commit(
-                &proofwork::records::Commitment::new(&objective_id, "rival", hash, TS),
-                TS,
-            )
-            .expect("commit");
-        let claim =
-            proofwork::records::Claim::new(&objective_id, "rival", artifact, "n1", TS, Vec::new())
-                .expect("valid claim");
+        let submitter = match signer {
+            Some(identity) => identity.submitter_id(),
+            None => "rival".to_string(),
+        };
+        let hash = proofwork::records::commitment_hash(&objective_id, &submitter, &artifact, "n1");
+        let commitment = proofwork::records::Commitment::new(&objective_id, &submitter, hash, TS);
+        let commitment = match signer {
+            Some(identity) => commitment.signed_with(identity),
+            None => commitment,
+        };
+        server.node.commit(&commitment, TS).expect("commit");
+        let claim = proofwork::records::Claim::new(
+            &objective_id,
+            &submitter,
+            artifact,
+            "n1",
+            TS,
+            Vec::new(),
+        )
+        .expect("valid claim");
+        let claim = match signer {
+            Some(identity) => claim.signed_with(identity),
+            None => claim,
+        };
         let outcome = server.node.reveal(&claim, LATER).expect("reveal");
         assert!(
             outcome.verdict.accepted(),
@@ -2134,8 +2156,12 @@ mod tests {
         const TS: &str = "2026-07-28T00:00:00+00:00";
         const LATER: &str = "2026-07-28T00:20:00+00:00";
         const LATEST: &str = "2026-07-28T00:40:00+00:00";
+        // Submitted under a real key. A nickname could not be retracted at all:
+        // an unauthenticated name has no owner, so there is nobody who *is* its
+        // author -- see `KnowledgeGraph::is_grounded`.
+        let author = Identity::from_secret_bytes([23u8; 32]);
         let (mut server, claim_id) =
-            server_with_accepted_claim(Value::object([("n", Value::Int(42))]));
+            server_with_claim_by(Value::object([("n", Value::Int(42))]), Some(&author));
 
         // Quiet while nothing has been said: the resting state must not print a
         // line, or the line that matters gets skipped.
@@ -2144,11 +2170,10 @@ mod tests {
 
         // The retraction rides on a *second* objective, because the fixture's
         // bounty is a one-shot certificate and closed on the claim above. That
-        // is not a workaround: it is the cross-objective case, and it works
-        // here only because "rival" is a nickname. A per-objective pseudonym
-        // would produce a different submitter string on the second objective
-        // and the retraction would not ground -- the limit `Standing::Withdrawn`
-        // documents, exercised rather than asserted.
+        // is also the cross-objective case, and it works here because the key
+        // is the same on both. A *per-objective pseudonym* would derive a
+        // different key on the second objective and the retraction would not
+        // ground -- the limit `Standing::Withdrawn` documents.
         let first = server
             .node
             .objectives()
@@ -2169,23 +2194,26 @@ mod tests {
         .expect("valid objective");
         let second_id = server.node.post_objective(&second, TS).expect("posted");
 
+        let who = author.submitter_id();
         let artifact = Value::object([("n", Value::Int(43))]);
-        let hash = proofwork::records::commitment_hash(&second_id, "rival", &artifact, "n2");
+        let hash = proofwork::records::commitment_hash(&second_id, &who, &artifact, "n2");
         server
             .node
             .commit(
-                &proofwork::records::Commitment::new(&second_id, "rival", hash, LATER),
+                &proofwork::records::Commitment::new(&second_id, &who, hash, LATER)
+                    .signed_with(&author),
                 LATER,
             )
             .expect("commit");
         let retraction =
-            proofwork::records::Claim::new(&second_id, "rival", artifact, "n2", LATER, Vec::new())
+            proofwork::records::Claim::new(&second_id, &who, artifact, "n2", LATER, Vec::new())
                 .expect("valid claim")
                 .relating(vec![proofwork::records::ClaimRelation::new(
                     proofwork::records::Relation::Retracts,
                     &claim_id,
                 )])
-                .expect("valid claim");
+                .expect("valid claim")
+                .signed_with(&author);
         server.node.reveal(&retraction, LATEST).expect("reveal");
 
         let out = call(&mut server, "get_claim", json!({ "claim_id": claim_id }));

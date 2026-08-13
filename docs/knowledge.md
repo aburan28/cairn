@@ -90,11 +90,28 @@ true — which is exactly why the output is a *view* that reports who with
 standing said what, rather than a verdict.
 
 `retracts` is the exception and needs no verdict: it counts only from the
-target's own submitter, so nobody else can spam it. The cost is real — a
-per-objective pseudonym cannot retract work it did under a different pseudonym,
-because that is the only place the same submitter string appears. The
-alternative, letting a different name withdraw your work, is not a trade anyone
-should want.
+target's own **key**, so nobody else can spam it.
+
+Not the same submitter *string*, and the difference is a hole this shipped with
+before review caught it. A submitter is either a 64-hex public key that the
+rules engine forces to carry a valid signature, or an unauthenticated nickname
+that stops nobody from using it. Comparing strings therefore let anyone post a
+claim named `alice` and withdraw alice's work — a different and worse thing than
+the nickname impersonation the network already tolerates, because submitting
+*as* a name merely pays that name, while retracting destroys the standing of
+somebody else's record, and it reaches every reader including agents on
+`get_claim`. The signature is re-verified in the knowledge layer rather than
+assumed from admission: a graph can be built from any snapshot, and a predicate
+deciding whether one party may silence another should not rest on the caller
+having checked first.
+
+Two costs, both the honest answer rather than a compromise:
+
+- **A nickname's claim can never be retracted, including by whoever submitted
+  it.** An unauthenticated name has no owner. The alternative is letting a
+  stranger withdraw it.
+- A per-objective pseudonym cannot retract work it did under a different
+  pseudonym, since that key appears nowhere else.
 
 ## Standing
 

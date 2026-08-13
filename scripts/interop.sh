@@ -69,7 +69,9 @@ D="$(mktemp -u /tmp/pw-interop-lean-XXXXXX).jsonl"
 E="$(mktemp -u /tmp/pw-interop-lean2-XXXXXX).jsonl"
 F="$(mktemp -u /tmp/pw-interop-rel1-XXXXXX).jsonl"
 G="$(mktemp -u /tmp/pw-interop-rel2-XXXXXX).jsonl"
-trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G"' EXIT
+H="$(mktemp -u /tmp/pw-interop-dang1-XXXXXX).jsonl"
+I="$(mktemp -u /tmp/pw-interop-dang2-XXXXXX).jsonl"
+trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I"' EXIT
 
 # --- the primary writes, the reference reads ------------------------------
 rule "Rust produces a log"
@@ -179,7 +181,7 @@ rule "typed claim relations survive a round trip through both implementations"
 # *pass*; a decoy shipped alongside them would eventually be mistaken for one.
 DECOY="$(mktemp -u /tmp/pw-interop-decoy-XXXXXX).json"
 printf '{"n": 1}\n' > "$DECOY"
-trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$DECOY"' EXIT
+trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$DECOY"' EXIT
 
 for pair in "$RUST|$REF|the reference|$F" "$REF|$RUST|the primary|$G"; do
   IFS='|' read -r WRITER READER WHO LOG <<< "$pair"
@@ -210,6 +212,37 @@ for pair in "$RUST|$REF|the reference|$F" "$REF|$RUST|the primary|$G"; do
   echo "$REL_VIEW"
   echo "$REL_VIEW" | grep -q "log verified" \
     || fail "$WHO could not re-derive a log containing typed relations"
+done
+
+# --- and both must refuse a relation pointing at nothing ---------------------
+#
+# The round above proves they agree on a *valid* relation. This proves they
+# agree on the boundary, and it exists because they did not: the primary
+# refused a dangling target and the reference had no such rule, so the
+# reference would have admitted a claim the primary rejects -- both logs
+# auditing clean while disagreeing about what is in them. That is the exact
+# failure `differential.sh` is built for, and it could not have caught this one:
+# the corpus classifies *records*, and this is an admission rule that needs the
+# rest of the log to evaluate. So it is pinned here instead.
+rule "both implementations refuse a relation naming a claim that does not exist"
+DANGLING="sha256:$(printf 'ab%.0s' {1..32})"
+for pair in "$RUST|the primary|$H" "$REF|the reference|$I"; do
+  IFS='|' read -r WRITER WHO LOG <<< "$pair"
+  D_OID=$("$WRITER" --log "$LOG" --root . post examples/collatz/objective.json \
+    | head -1 | awk '{print $2}')
+  "$WRITER" --log "$LOG" --root . commit "$D_OID" --submitter mallory \
+      --artifact examples/collatz/artifact.json --nonce d1 >/dev/null
+  tick
+  # `set -e` is on, so the failure has to be caught rather than allowed to kill
+  # the script: refusing is the pass condition here.
+  if OUT=$("$WRITER" --log "$LOG" --root . reveal "$D_OID" --submitter mallory \
+      --artifact examples/collatz/artifact.json --nonce d1 \
+      --relates "refutes:$DANGLING" 2>&1); then
+    fail "$WHO admitted a relation naming a claim that is not in the log: $OUT"
+  fi
+  echo "$OUT" | grep -qi "relation target" \
+    || fail "$WHO refused for the wrong reason: $OUT"
+  echo "  $WHO refuses: $(echo "$OUT" | tail -1)"
 done
 
 rule "the primary implementation audits the reference log"
