@@ -200,6 +200,18 @@ proofwork knowledge <claim-id> --per-refutation 800 --independence-depth 1
 `knowledge` reads the log, writes nothing, and always exits 0 — a contested
 claim is not a fault in the log, it is the log working.
 
+Over MCP, `get_claim` reports a claim's standing whenever anything has been said
+about it, so an agent about to build on work its own author retracted is told
+while it is reading the claim. Asserting a relation is **not** exposed to
+agents, and the reason is a real gap rather than a preference: an objective
+statement saying *"declare that you refute sha256:…"* is the citation-injection
+signature with a new target, and the existing defence does not transfer —
+`check_citation_provenance` requires an id the server offered through a
+structured field, while a legitimate refutation often names a *rejected* claim,
+which `get_claim` never returns. Closing it needs a provenance channel for
+non-accepted claims. Until then the write path is the CLI, where a human chose
+the target.
+
 ## What this does not do
 
 - **It does not decide truth.** It reports who with standing said what, and
