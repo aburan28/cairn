@@ -343,6 +343,12 @@ proving nothing.
 - **Attribution conserves exactly.** Citation-flow payouts sum to the amount
   distributed, at any reward and any δ, with a deterministic rule for the odd
   unit in an uneven split.
+- **Saying something about a claim moves no money.** A claim may carry typed
+  relations — `refutes`, `replicates`, `supersedes`, `retracts` — and
+  attribution, settlement and the frontier read `cites` and none of them read
+  those. If declaring "X is wrong" could shift a payout, refutation would be a
+  way to bill X. Relations feed a *derived* view instead; see
+  [knowledge.md](docs/knowledge.md).
 
 ## Coordination: don't schedule it, price it
 
@@ -743,6 +749,25 @@ has no starting point, and forced inclusion via a base layer delivers the primar
 security property directly. The state transition is already the pure function in
 `node.rs`, and `audit()` is already the re-derivation a fraud proof needs.
 
+### And nobody votes on standing either
+
+A verdict is not the end of a claim's life — results get replicated, superseded,
+narrowed, retracted — so the log records those as typed edges too, and anyone
+derives a claim's **standing** and a confidence number from them. The rules that
+keep this from becoming the vote the section above refuses:
+
+- **The reader picks the policy.** There is no network-agreed confidence number.
+  Two readers with different weights get different answers from identical bytes,
+  and neither is authoritative. `proofwork knowledge <claim>` exposes every knob.
+- **The machine outranks the assertions.** A claim the pinned verifier rejected
+  is `refuted`, and no quantity of claims saying otherwise moves it.
+- **Being heard costs a verified result.** A relation counts only from a claim
+  that passed its own objective's verifier — so contesting somebody costs real
+  work rather than a record append.
+- **Ten copies of one press release are one source.** Assertions sharing a
+  submitter or an artifact id collapse into one voice. That is not sybil
+  resistance and [knowledge.md](docs/knowledge.md) says so plainly.
+
 ## Layout
 
 ```
@@ -753,6 +778,7 @@ src/                 Rust implementation (primary)
   node.rs            the rules engine and the audit
   frontier.rs        progressive bounties
   attribution.rs     recursive citation flow
+  knowledge.rs       standing and confidence, derived — never stored, never paid
   gossip.rs          the candidate population CRDT
   partition.rs       coordinator-free work assignment
   verifiers/         certificate, evaluator, lean, replay
@@ -776,6 +802,7 @@ examples/            worked objectives with real artifacts
 - [coordination.md](docs/coordination.md) — the hoarding trap, the ratchet, CRDT gossip
 - [agent-market.md](docs/agent-market.md) — agent-to-agent rewards: what a peer-to-peer mechanism would be, and what it breaks
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
+- [knowledge.md](docs/knowledge.md) — typed relations, derived standing, and reader-chosen confidence: revising knowledge without rewriting history
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it

@@ -27,7 +27,7 @@ use proofwork_reference::ledger::{Ledger, Proof};
 use proofwork_reference::node::Node;
 use proofwork_reference::partition::{assign, beacon, settlement_rank};
 use proofwork_reference::records::{
-    commitment_hash, Claim, Commitment, CommitteeShare, Objective, PeerRecord,
+    commitment_hash, Claim, ClaimRelation, Commitment, CommitteeShare, Objective, PeerRecord,
 };
 use proofwork_reference::time::timestamp;
 
@@ -708,6 +708,29 @@ fn cli(args: &[String]) -> Result<(), String> {
                 .filter(|(_, a)| a.as_str() == "--cites")
                 .filter_map(|(at, _)| rest.get(at + 1).cloned())
                 .collect();
+            // `--relates <kind>:<target>`, repeatable. Present so this crate can
+            // *write* a claim carrying relations and not only read one: interop
+            // that exercises a field in one direction proves the encoder and the
+            // decoder of a single implementation agree, which they always do.
+            let mut relations = Vec::new();
+            for (at, _) in rest.iter().enumerate().filter(|(_, a)| *a == "--relates") {
+                let spec = rest.get(at + 1).ok_or("--relates needs <kind>:<target>")?;
+                let (kind, target) = spec
+                    .split_once(':')
+                    .ok_or("--relates takes <kind>:<target>")?;
+                relations.push(ClaimRelation {
+                    kind: kind.to_string(),
+                    target: target.to_string(),
+                });
+            }
+            // Round-tripped through the decoder rather than trusted from the
+            // command line, so an unknown kind is refused here exactly as it
+            // would be arriving off a peer's log.
+            let relations = relations
+                .iter()
+                .map(|r| ClaimRelation::from_value(&r.to_value()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
             let claim = Claim {
                 objective_id,
                 submitter,
@@ -715,6 +738,7 @@ fn cli(args: &[String]) -> Result<(), String> {
                 nonce,
                 created_at: ts.clone(),
                 cites,
+                relations,
                 signature: None,
             };
             claim.validate().map_err(|e| e.to_string())?;

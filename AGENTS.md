@@ -62,6 +62,17 @@ bug is invisible: sync succeeds, the log just stops growing.
 `PROOFWORK_EPOCH_SECONDS` changes the epoch length for demos and changes no
 record bytes — epochs are derived, never stored.
 
+**`cites` pays and `relations` does not, and nothing may blur that.**
+Attribution, settlement and the frontier read `cites`. `knowledge` reads
+`relations`. If a relation ever reaches a payout, "I refute you" becomes a way
+to bill somebody and "I supersede you" becomes a way to take their frontier —
+both for the price of one record append. `tests/knowledge.rs` runs two logs
+identical but for one `refutes` edge and requires the same settled amounts and
+the same citation flow; if you find yourself making that test more permissive,
+stop. Relations are also inside `Claim::signing_payload`, so an unsigned
+relation appended to somebody else's claim breaks their signature — that is
+what stops a stranger retracting your work, and it is not decoration.
+
 **Settlement order is keyed on the commitment hash, not the claim id.** A batch
 settles in order of `H(beacon(epoch, anchor) ‖ commitment_hash)`. The anchor is
 public by the time anyone reveals, so any part of that key a submitter can still

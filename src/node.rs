@@ -58,6 +58,9 @@ use crate::blobs;
 use crate::canonical::Inclusion;
 use crate::canonical::{short, Value};
 use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
+use crate::knowledge::{
+    ClaimFacts, ConfidencePolicy, KnowledgeGraph, KnowledgeState, Reproducible,
+};
 use crate::ledger::{Entry, Ledger, LedgerError, Proof};
 use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
 use crate::records::{
@@ -186,6 +189,12 @@ pub enum RuleViolation {
     NoMatchingCommitment,
     /// A citation that is not an accepted claim in this log.
     UnknownCitation { claim_id: String },
+    /// A relation naming a claim that is not in this log.
+    ///
+    /// Separate from [`RuleViolation::UnknownCitation`] because the rule is
+    /// weaker and the fix is different: a relation target must merely *exist*,
+    /// where a citation must have been accepted.
+    UnknownRelationTarget { claim_id: String },
     /// An improvement that does not cite the frontier it improves on.
     MissingFrontierCitation { claim_id: String },
     /// `paid_cumulative + reward` does not fit `u64`.
@@ -440,6 +449,12 @@ impl fmt::Display for RuleViolation {
                 f,
                 "citation {claim_id} is not an accepted claim in this log; \
                  citations point backwards only"
+            ),
+            RuleViolation::UnknownRelationTarget { claim_id } => write!(
+                f,
+                "relation target {claim_id} is not a claim in this log; \
+                 a relation may name any claim, accepted or not, but not one \
+                 that does not exist"
             ),
             RuleViolation::MissingFrontierCitation { claim_id } => write!(
                 f,
@@ -2014,6 +2029,92 @@ impl Node {
     /// A verdict record that cannot be read as a verdict does not count as an
     /// acceptance -- the failure direction that refuses a citation rather than
     /// admitting one.
+    /// Every claim in the log, keyed by id, verdict or no verdict.
+    ///
+    /// Distinct from [`Node::accepted_claims`], which is the set citations and
+    /// settlement are allowed to point at. This one includes rejected and
+    /// unverified claims, because the knowledge layer has things to say about
+    /// those and a reader auditing what was *claimed* needs them.
+    pub fn all_claims(&self) -> BTreeMap<String, Claim> {
+        let mut out = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            if let Ok(claim) = Claim::from_value(&entry.payload) {
+                out.insert(claim.id(), claim);
+            }
+        }
+        out
+    }
+
+    /// Ids of every claim in the log. The cheap half of [`Node::all_claims`],
+    /// for membership tests on the rules path.
+    fn claim_ids(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            if let Ok(claim) = Claim::from_value(&entry.payload) {
+                out.insert(claim.id());
+            }
+        }
+        out
+    }
+
+    /// The knowledge graph over every claim in the log.
+    ///
+    /// Borrowed from `claims`, which the caller owns, because the graph indexes
+    /// into it rather than copying: building it per claim would re-read the
+    /// whole log for every query.
+    ///
+    /// `reproducible` is answered from **this node's** store and bundle. A
+    /// claim whose objective's pinned code is missing here is reported
+    /// [`Reproducible::NotHere`], which is a statement about this node and not
+    /// about the network — see that type's docs for why the distinction is not
+    /// pedantry.
+    pub fn knowledge_graph<'a>(&self, claims: &'a BTreeMap<String, Claim>) -> KnowledgeGraph<'a> {
+        let missing = self.missing_code();
+        let objectives = self.objectives();
+        let mut unreproducible: BTreeSet<&str> = BTreeSet::new();
+        for (id, objective) in &objectives {
+            let wanted = self.registry.missing_code(&objective.verifier);
+            if wanted.iter().any(|address| missing.contains(address)) {
+                unreproducible.insert(id.as_str());
+            }
+        }
+
+        let facts = claims.iter().map(|(id, claim)| {
+            let epoch = crate::time::parse_rfc3339(&claim.created_at)
+                .filter(|seconds| *seconds >= 0)
+                .map(|seconds| epoch_of(seconds as u64, epoch_seconds()))
+                .unwrap_or(0);
+            ClaimFacts {
+                id: id.as_str(),
+                claim,
+                verdict: self.recorded_verdict(id).map(|verdict| verdict.status),
+                epoch,
+                reproducible: if unreproducible.contains(claim.objective_id.as_str()) {
+                    Reproducible::NotHere
+                } else {
+                    Reproducible::Yes
+                },
+            }
+        });
+        KnowledgeGraph::new(facts)
+    }
+
+    /// Standing and confidence for one claim, under `policy`.
+    ///
+    /// A convenience over [`Node::knowledge_graph`] for the single-claim case.
+    /// Callers reporting on many claims should build the graph once instead --
+    /// this rebuilds the whole index per call.
+    pub fn knowledge_state(
+        &self,
+        claim_id: &str,
+        policy: &ConfidencePolicy,
+        as_of_epoch: u64,
+    ) -> Option<KnowledgeState> {
+        let claims = self.all_claims();
+        self.knowledge_graph(&claims)
+            .state(claim_id, policy, as_of_epoch)
+    }
+
     pub fn accepted_claims(&self) -> BTreeMap<String, Claim> {
         let accepted = self.accepted_claim_ids();
         let mut out = BTreeMap::new();
@@ -2121,6 +2222,29 @@ impl Node {
                 return Err(RuleViolation::UnknownCitation {
                     claim_id: cited.clone(),
                 });
+            }
+        }
+
+        // A relation's target must already be in the log -- but, unlike a
+        // citation, it need *not* be accepted. Refuting a claim the verifier
+        // rejected is a legitimate and useful thing to record, and requiring
+        // acceptance would mean the only claims anyone could speak about are
+        // the ones that passed.
+        //
+        // The check is existence only. Whether the assertion is *heard* is not
+        // decided here and must not be: admission is a consensus rule every
+        // node applies identically, and how much an assertion counts for is a
+        // reader's policy question that `knowledge` answers differently for
+        // different readers. Mixing the two would put the confidence function
+        // into consensus, which is the thing this whole design refuses.
+        if !claim.relations.is_empty() {
+            let known = self.claim_ids();
+            for relation in &claim.relations {
+                if !known.contains(&relation.target) {
+                    return Err(RuleViolation::UnknownRelationTarget {
+                        claim_id: relation.target.clone(),
+                    });
+                }
             }
         }
 

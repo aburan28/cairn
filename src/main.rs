@@ -71,11 +71,12 @@ use proofwork::checkpoint::{RootKey, SignedCheckpoint};
 use proofwork::crypto::identity::Identity;
 use proofwork::incentive::design::Report as IncentiveReport;
 use proofwork::incentive::{sweep, NodeParams, ParamError, Rat};
+use proofwork::knowledge::ConfidencePolicy;
 use proofwork::ledger::{Codec, Ledger, LedgerError, Proof};
 use proofwork::node::Node;
 use proofwork::records::{
-    commitment_hash, Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Objective,
-    PeerRecord, RecordError, Undertaking,
+    commitment_hash, Availability, AvailabilityPool, Claim, ClaimRelation, Commitment,
+    CommitteeShare, Objective, PeerRecord, RecordError, Relation, Undertaking,
 };
 use proofwork::scaffold;
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
@@ -467,8 +468,16 @@ enum Command {
         artifact: String,
         nonce: String,
         cites: Vec<String>,
+        /// Typed assertions about earlier claims. Parsed but never merged into
+        /// `cites`: one of these fields moves money and the other does not.
+        relations: Vec<ClaimRelation>,
         /// Identity file to sign with. See `Commit::identity`.
         identity: Option<String>,
+    },
+    /// What the log says about a claim, under a reader-chosen policy.
+    Knowledge {
+        claim_id: Option<String>,
+        policy: ConfidencePolicy,
     },
     Settle,
     /// Record the randomness one epoch's settlement is ordered against.
@@ -1009,6 +1018,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "check" => parse_check(&mut cursor)?,
         "availability" => parse_availability(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
+        "knowledge" => parse_knowledge(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
         "shard" => parse_shard(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
@@ -1164,6 +1174,7 @@ fn parse_reveal(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut nonce: Option<String> = None;
     let mut identity: Option<String> = None;
     let mut cites: Vec<String> = Vec::new();
+    let mut relations: Vec<ClaimRelation> = Vec::new();
 
     while let Some(token) = cursor.take() {
         if token == "--submitter" {
@@ -1174,6 +1185,26 @@ fn parse_reveal(cursor: &mut Cursor) -> Result<Command, CliError> {
             nonce = Some(cursor.value("--nonce")?);
         } else if token == "--identity" {
             identity = Some(cursor.value("--identity")?);
+        } else if token == "--relates" {
+            // `<kind>:<target>`, repeatable. Split on the *first* colon only:
+            // a target is `sha256:<hex>` and contains one of its own.
+            let spec = cursor.value("--relates")?;
+            let (kind, target) = spec.split_once(':').ok_or_else(|| {
+                CliError::Usage(format!(
+                    "reveal: --relates takes <kind>:<claim-id>, got {spec:?}"
+                ))
+            })?;
+            let kind = Relation::from_wire(kind).ok_or_else(|| {
+                CliError::Usage(format!(
+                    "reveal: unknown relation {kind:?}; expected one of {}",
+                    Relation::ALL
+                        .iter()
+                        .map(|r| r.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
+            relations.push(ClaimRelation::new(kind, target));
         } else if token == "--cites" {
             // `nargs="*"`: consume until the next flag or the end. Claim ids are
             // `sha256:` digests, so none of them can be mistaken for a flag.
@@ -1212,6 +1243,7 @@ fn parse_reveal(cursor: &mut Cursor) -> Result<Command, CliError> {
         // generate.
         nonce: require(nonce, "reveal", "--nonce")?,
         cites,
+        relations,
         identity,
     })
 }
@@ -1929,6 +1961,67 @@ fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Attribute { params })
 }
 
+/// `knowledge [<claim-id>] [--demanding] [--knob N]...`
+///
+/// Every weight is exposed. The point of the module is that the reader picks
+/// the policy, and a CLI that hard-coded one would be asserting the network has
+/// an official opinion about confidence -- which is the thing it does not have.
+fn parse_knowledge(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut policy = ConfidencePolicy::default();
+    let mut claim_id: Option<String> = None;
+
+    while let Some(token) = cursor.take() {
+        if token == "--demanding" {
+            // Applied as a base the later flags can still override, so
+            // `--demanding --per-refutation 100` means what it looks like.
+            policy = ConfidencePolicy::demanding();
+        } else if token == "--verified" {
+            policy.verified = parse_u32(&cursor.value("--verified")?, "--verified")?;
+        } else if token == "--per-corroboration" {
+            policy.per_corroboration =
+                parse_u32(&cursor.value("--per-corroboration")?, "--per-corroboration")?;
+        } else if token == "--max-corroboration" {
+            policy.max_corroboration =
+                parse_u32(&cursor.value("--max-corroboration")?, "--max-corroboration")?;
+        } else if token == "--per-refutation" {
+            policy.per_refutation =
+                parse_u32(&cursor.value("--per-refutation")?, "--per-refutation")?;
+        } else if token == "--per-dispute" {
+            policy.per_dispute = parse_u32(&cursor.value("--per-dispute")?, "--per-dispute")?;
+        } else if token == "--superseded-weight" {
+            policy.superseded_weight =
+                parse_u32(&cursor.value("--superseded-weight")?, "--superseded-weight")?;
+        } else if token == "--unreproducible-weight" {
+            policy.unreproducible_weight = parse_u32(
+                &cursor.value("--unreproducible-weight")?,
+                "--unreproducible-weight",
+            )?;
+        } else if token == "--decay-period" {
+            policy.decay_period = parse_u64(&cursor.value("--decay-period")?, "--decay-period")?;
+        } else if token == "--decay-retention" {
+            policy.decay_retention =
+                parse_u32(&cursor.value("--decay-retention")?, "--decay-retention")?;
+        } else if token == "--independence-depth" {
+            policy.independence_depth = parse_u32(
+                &cursor.value("--independence-depth")?,
+                "--independence-depth",
+            )?;
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!(
+                "knowledge: unknown option {token:?}"
+            )));
+        } else if claim_id.is_some() {
+            return Err(CliError::Usage(format!(
+                "knowledge: unexpected argument {token:?}"
+            )));
+        } else {
+            claim_id = Some(token);
+        }
+    }
+
+    Ok(Command::Knowledge { claim_id, policy })
+}
+
 fn expect_end(cursor: &mut Cursor, command: &str) -> Result<(), CliError> {
     match cursor.take() {
         None => Ok(()),
@@ -2251,6 +2344,18 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      reveal a committed artifact and verify it (settles once the epoch closes\n       and clears the finality delay)",
     );
+    say(
+        out,
+        "      [--relates <kind>:<claim-id> ...] says what you found about an earlier",
+    );
+    say(
+        out,
+        "      claim -- refutes, replicates, supersedes, ... -- and pays nobody;",
+    );
+    say(
+        out,
+        "      `--cites` is the edge that moves money, not this one",
+    );
     say(out, "  settle");
     say(out, "      pay out every reveal epoch that has closed");
     say(
@@ -2307,6 +2412,12 @@ fn print_help(out: &mut dyn Write) {
         "  attribute [--delta-num N] [--delta-den N] [--max-depth N]",
     );
     say(out, "      compute citation-flow payouts");
+    say(out, "  knowledge [<claim-id>] [--demanding] [--<weight> N]");
+    say(
+        out,
+        "      standing and confidence for a claim, under a policy you choose;",
+    );
+    say(out, "      reads the log, writes nothing, moves no money");
     say(out, "  blob [ls|need|publish|gc]");
     say(
         out,
@@ -2933,6 +3044,10 @@ impl Submitter<'_> {
     }
 }
 
+// Eight, because `--relates` is a genuinely separate input from `--cites` and
+// merging the two into one bag is the one refactor that must not happen here:
+// they differ in whether they move money.
+#[allow(clippy::too_many_arguments)]
 fn cmd_reveal(
     out: &mut dyn Write,
     options: &Options,
@@ -2941,6 +3056,7 @@ fn cmd_reveal(
     artifact_path: &str,
     nonce: &str,
     cites: &[String],
+    relations: &[ClaimRelation],
 ) -> Result<i32, CliError> {
     let mut node = open_node_for_writing(options)?;
     let artifact = read_json(artifact_path)?;
@@ -2954,6 +3070,10 @@ fn cmd_reveal(
         stamp.as_str(),
         cites.to_vec(),
     )
+    .map_err(CliError::Record)?
+    // Attached before signing, because the signature covers them: a relation
+    // added after the fact would be one the submitter never authorised.
+    .relating(relations.to_vec())
     .map_err(CliError::Record)?;
     let claim = match &identity {
         Some(identity) => claim.signed_with(identity),
@@ -3874,6 +3994,117 @@ fn cmd_attribute(
 
     for line in render_attribution(params, &payouts)? {
         say(out, line);
+    }
+    Ok(0)
+}
+
+/// Report standing and confidence — for one claim, or every claim in the log.
+///
+/// Exit code is always 0, including for a refuted or withdrawn claim. That is
+/// deliberate and differs from `audit`, which exits 1 on a finding: a contested
+/// claim is not a fault in the log, it is the log working. Scripts that want to
+/// gate on confidence should read the number, not the exit code.
+fn cmd_knowledge(
+    out: &mut dyn Write,
+    options: &Options,
+    claim_id: Option<&str>,
+    policy: &ConfidencePolicy,
+) -> Result<i32, CliError> {
+    let node = open_node(options)?;
+    let claims = node.all_claims();
+    let graph = node.knowledge_graph(&claims);
+
+    // The epoch the report is *as of*, from the clock, and used for nothing but
+    // decay -- which is off unless the reader asked for it. Everything else in
+    // this output is a pure function of the log.
+    let as_of = proofwork::partition::epoch_of(
+        proofwork::time::unix_seconds(),
+        proofwork::partition::epoch_seconds(),
+    );
+
+    let wanted: Vec<String> = match claim_id {
+        Some(id) => {
+            if !graph.contains(id) {
+                return Err(CliError::Usage(format!(
+                    "no claim {id} in this log; `proofwork log` lists what is here"
+                )));
+            }
+            vec![id.to_string()]
+        }
+        None => graph.claim_ids().map(|id| (*id).to_string()).collect(),
+    };
+
+    if wanted.is_empty() {
+        say(out, "no claims in this log");
+        return Ok(0);
+    }
+
+    for (at, id) in wanted.iter().enumerate() {
+        let Some(state) = graph.state(id, policy, as_of) else {
+            continue;
+        };
+        if at > 0 {
+            say(out, "");
+        }
+        say(out, format!("claim {id}"));
+        say(
+            out,
+            format!(
+                "  standing    {}  (confidence {}/1000)",
+                state.standing, state.confidence
+            ),
+        );
+        say(
+            out,
+            format!(
+                "  verdict     {}",
+                state
+                    .verdict
+                    .map(|status| status.as_str())
+                    .unwrap_or("none recorded")
+            ),
+        );
+        if state.reproducible != proofwork::knowledge::Reproducible::Yes {
+            say(
+                out,
+                format!("  re-derive   {}", state.reproducible.as_str()),
+            );
+        }
+        if state.corroborations + state.refutations + state.disputes > 0 {
+            say(
+                out,
+                format!(
+                    "  independent {} corroborating, {} refuting, {} disputing",
+                    state.corroborations, state.refutations, state.disputes
+                ),
+            );
+        }
+        if let Some(by) = &state.retracted_by {
+            say(out, format!("  retracted   by {by}"));
+        }
+        for by in &state.superseded_by {
+            say(out, format!("  superseded  by {by}"));
+        }
+        for assertion in &state.assertions {
+            // Ungrounded assertions are printed too, marked. Hiding what was
+            // said because it did not count would make the output impossible to
+            // reconcile against the log somebody else is reading.
+            // A `retracts` is grounded on identity, not acceptance, so the two
+            // refusals need different words: reporting an impostor retraction
+            // as a failed verdict sends the reader looking for a verdict that
+            // is not the reason.
+            let note = if assertion.grounded {
+                format!("class {}", assertion.class)
+            } else if assertion.kind == proofwork::records::Relation::Retracts {
+                "not heard: only the claim's own submitter can retract it".to_string()
+            } else {
+                "not heard: author's claim was not accepted".to_string()
+            };
+            say(
+                out,
+                format!("  said        {} {} ({note})", assertion.kind, assertion.by),
+            );
+        }
     }
     Ok(0)
 }
@@ -6128,6 +6359,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             artifact,
             nonce,
             cites,
+            relations,
             identity,
         } => cmd_reveal(
             out,
@@ -6140,6 +6372,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             artifact,
             nonce,
             cites,
+            relations,
         ),
         Command::Settle => cmd_settle(out, options),
         Command::Beacon {
@@ -6186,6 +6419,9 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         ),
         Command::Availability { action } => cmd_availability(out, options, action),
         Command::Attribute { params } => cmd_attribute(out, options, params),
+        Command::Knowledge { claim_id, policy } => {
+            cmd_knowledge(out, options, claim_id.as_deref(), policy)
+        }
         Command::Blob { action } => cmd_blob(out, options, action),
         Command::Shard { action } => cmd_shard(out, options, action),
         Command::Try {

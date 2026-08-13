@@ -377,6 +377,19 @@ behaviour ships and is tested, not that TLC has checked it.
       rather than a rule -- the pinned verifier stays the only authority -- so
       an agent has a source for the shape that is not the attacker-authored
       statement.
+- [x] **Typed claim relations and a derived knowledge view**
+      (`Claim::relations`, `src/knowledge.rs`, `proofwork knowledge`). A
+      verified artifact is not the end of a claim's life: it gets replicated,
+      superseded, narrowed, retracted. The log now records those assertions as
+      typed edges and anyone derives `Standing` and a confidence number from
+      them under a policy **the reader chooses**, not one the network agrees on.
+      Relations carry no money -- attribution, settlement and the frontier all
+      read `cites` and none of them reads this -- which is what stops "I refute
+      you" from being a way to bill somebody. The field is omitted when empty,
+      so it moved no ids and the frozen vectors still pass. What it does *not*
+      do is priced honestly in [knowledge.md](knowledge.md): it does not decide
+      truth, does not pay for refutations, does not resolve a contest between
+      two verified claims, and does not yet carry scope.
 
 ## Stage 1 — bounty market, real contributors
 

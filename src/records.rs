@@ -114,6 +114,15 @@ pub enum RecordError {
     /// Citations are a set. A repeated edge would otherwise be counted twice by
     /// attribution, which is a way of paying yourself for the same input.
     DuplicateCitation { id: String },
+    /// Two relations naming one target. See [`Claim::validate`] for why the key
+    /// is the target rather than the `(kind, target)` pair.
+    DuplicateRelation { id: String },
+    /// A relation kind outside the declared set.
+    ///
+    /// Refused, never skipped: an implementation that ignored what another read
+    /// would compute a different [`crate::knowledge::Standing`] from the same
+    /// log, and neither would error.
+    UnknownRelation { kind: String },
     /// `confidentiality` carried a value outside the declared classes.
     ///
     /// Refused rather than defaulted, because every wrong guess here is a
@@ -165,6 +174,17 @@ impl fmt::Display for RecordError {
             RecordError::DuplicateCitation { id } => {
                 write!(f, "duplicate citation {id:?}")
             }
+            RecordError::DuplicateRelation { id } => write!(
+                f,
+                "two relations name the target {id:?}; a claim says one thing \
+                 about any other claim"
+            ),
+            RecordError::UnknownRelation { kind } => write!(
+                f,
+                "unknown relation kind {kind:?} (expected one of: refutes, \
+                 fails_to_replicate, replicates, generalizes, narrows, corrects, \
+                 supersedes, conflicts_with, retracts)"
+            ),
             RecordError::UnknownConfidentiality { value } => write!(
                 f,
                 "unknown confidentiality class {value:?} (expected \
@@ -1186,6 +1206,189 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+// -- claim relations -------------------------------------------------------
+
+/// How one claim stands to an earlier one, beyond "built on".
+///
+/// # Why this is not just another citation
+///
+/// `cites` says *I used this*, and it moves money: attribution flows value back
+/// along those edges. A relation says *this is what I found about that*, and it
+/// moves **nothing**. The separation is the whole security argument. If
+/// declaring "I refute X" paid, refutation would be a way to bill X; if it
+/// demoted X on the frontier, it would be a way to steal X's bounty. So
+/// [`crate::attribution`] walks `cites` and never reads this field, settlement
+/// never reads it, and the frontier never reads it. What reads it is
+/// [`crate::knowledge`], which computes a *view* nobody has to agree with.
+///
+/// # Why these nine and not the fourteen an evidence graph usually lists
+///
+/// "Supports", "depends on", "uses dataset" and "uses methodology" are all
+/// `cites` — a second spelling for the paying edge would mean two ways to say
+/// one thing, only one of which pays, and submitters would learn which. And a
+/// relation earns its place here only by having a distinct mechanical effect in
+/// [`crate::knowledge::Standing`]; "reinterprets" has none, so it would be a
+/// comment with a schema, which is worse than a comment.
+///
+/// # A relation cannot point forward, and nothing had to enforce that
+///
+/// A claim's id covers its relations, so naming a target requires knowing the
+/// target's id, which requires the target to already exist. Self-reference is
+/// impossible for the same reason: computing your own id would require it as an
+/// input. This is the hash-linking doing the work a validity rule would
+/// otherwise have to do — the same reason `cites` is acyclic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Relation {
+    /// The target is wrong, and this claim is the demonstration.
+    Refutes,
+    /// This claim ran the target's procedure and did not get its result.
+    /// Weaker than [`Relation::Refutes`]: a failure to reproduce is evidence
+    /// against, not a disproof.
+    FailsToReplicate,
+    /// This claim ran the target's procedure and got its result.
+    Replicates,
+    /// The target's result holds more broadly than it stated.
+    Generalizes,
+    /// The target's result holds, but on a smaller scope than it stated.
+    Narrows,
+    /// The target contains an error this claim fixes; what remains still
+    /// stands.
+    Corrects,
+    /// The target is replaced wholesale by this claim.
+    Supersedes,
+    /// Both cannot hold, and this claim does not settle which. Distinct from
+    /// [`Relation::Refutes`], which asserts an answer.
+    ConflictsWith,
+    /// The submitter withdraws their own earlier claim. Only meaningful from
+    /// the same submitter; see [`crate::knowledge`] for what happens when
+    /// somebody points it at a claim that is not theirs.
+    Retracts,
+}
+
+impl Relation {
+    /// The wire spelling. Consensus-relevant: it is inside the claim's id.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Relation::Refutes => "refutes",
+            Relation::FailsToReplicate => "fails_to_replicate",
+            Relation::Replicates => "replicates",
+            Relation::Generalizes => "generalizes",
+            Relation::Narrows => "narrows",
+            Relation::Corrects => "corrects",
+            Relation::Supersedes => "supersedes",
+            Relation::ConflictsWith => "conflicts_with",
+            Relation::Retracts => "retracts",
+        }
+    }
+
+    /// Decode a wire spelling. `None` for anything unrecognized.
+    ///
+    /// Refused rather than preserved-and-ignored, and this is the opposite of
+    /// the choice a cryptographic envelope makes about an unknown algorithm.
+    /// The reason is that an envelope's unknown suite is *inert* — an old
+    /// client cannot verify it and says so — whereas an unknown relation would
+    /// be read by one implementation's knowledge view and skipped by another's,
+    /// so the two would report different standings for the same claim from the
+    /// same log. A new relation kind is a protocol change, and should be
+    /// visible as one.
+    pub fn from_wire(text: &str) -> Option<Relation> {
+        match text {
+            "refutes" => Some(Relation::Refutes),
+            "fails_to_replicate" => Some(Relation::FailsToReplicate),
+            "replicates" => Some(Relation::Replicates),
+            "generalizes" => Some(Relation::Generalizes),
+            "narrows" => Some(Relation::Narrows),
+            "corrects" => Some(Relation::Corrects),
+            "supersedes" => Some(Relation::Supersedes),
+            "conflicts_with" => Some(Relation::ConflictsWith),
+            "retracts" => Some(Relation::Retracts),
+            _ => None,
+        }
+    }
+
+    /// Every kind, for schema generation and exhaustiveness tests.
+    pub const ALL: [Relation; 9] = [
+        Relation::Refutes,
+        Relation::FailsToReplicate,
+        Relation::Replicates,
+        Relation::Generalizes,
+        Relation::Narrows,
+        Relation::Corrects,
+        Relation::Supersedes,
+        Relation::ConflictsWith,
+        Relation::Retracts,
+    ];
+}
+
+impl fmt::Display for Relation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One typed edge: what this claim says about `target`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClaimRelation {
+    pub kind: Relation,
+    /// The claim being spoken about.
+    pub target: String,
+}
+
+impl ClaimRelation {
+    pub fn new(kind: Relation, target: impl Into<String>) -> ClaimRelation {
+        ClaimRelation {
+            kind,
+            target: target.into(),
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("kind", Value::string(self.kind.as_str())),
+            ("target", Value::string(self.target.clone())),
+        ])
+    }
+
+    pub fn from_value(value: &Value) -> Result<ClaimRelation, RecordError> {
+        const RECORD: &str = "claim";
+        let object = expect_object(value, RECORD)?;
+        let kind = required_string(object, RECORD, "kind")?;
+        let kind = Relation::from_wire(&kind).ok_or(RecordError::UnknownRelation { kind })?;
+        let target = required_string(object, RECORD, "target")?;
+        if target.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "relations",
+                expected: "a non-empty target claim id",
+            });
+        }
+        // A relation is a closed two-field object, and an unknown key is
+        // refused rather than ignored. Ignoring it would be worse than untidy:
+        // this decoder feeds `to_value`, which emits `kind` and `target` and
+        // nothing else, so a record admitted carrying a third key would be
+        // *stored* under a different digest than the one it arrived with. The
+        // published schema says `additionalProperties: false` here for the same
+        // reason, and a decoder laxer than the schema is a second, quieter
+        // answer to what a record is.
+        //
+        // Found by `scripts/differential.sh` on the first run after this field
+        // landed: the reference implementation refused the extra key and this
+        // one accepted it.
+        if let Some(map) = object.as_object() {
+            for key in map.keys() {
+                if key != "kind" && key != "target" {
+                    return Err(RecordError::InvalidField {
+                        record: RECORD,
+                        field: "relations",
+                        expected: "an object with exactly `kind` and `target`",
+                    });
+                }
+            }
+        }
+        Ok(ClaimRelation { kind, target })
+    }
+}
+
 // -- claim -----------------------------------------------------------------
 
 /// Phase 2: reveal the artifact, with the citations it builds on.
@@ -1200,6 +1403,22 @@ pub struct Claim {
     pub created_at: String,
     /// Claim ids this one builds on. A set, not a list: duplicates are refused.
     pub cites: Vec<String>,
+    /// What this claim asserts *about* earlier claims — refutes, replicates,
+    /// supersedes, and so on. Empty for almost every claim.
+    ///
+    /// Omitted from the canonical form when empty, which is the only reason
+    /// this field could be added at all: every claim ever written predates it
+    /// and carries none, so every existing id is unchanged and the frozen
+    /// conformance vectors still pass byte-for-byte. `cites` could *not* have
+    /// been added this way — it is emitted even when empty, deliberately, so
+    /// that one claim cannot have two ids depending on how it was built. The
+    /// difference is that `cites` was there from the start and this was not.
+    ///
+    /// It is inside [`Claim::signing_payload`], so a relation cannot be added
+    /// to or stripped from a signed claim by anyone but its author. That is not
+    /// optional: an attacker who could append `retracts` to somebody else's
+    /// signed claim could withdraw their work.
+    pub relations: Vec<ClaimRelation>,
     /// Ed25519 signature over this record, hex, or `None`. Omitted from the
     /// canonical form when absent, so adding it moved no ids. See
     /// [`signed_submitter`].
@@ -1224,18 +1443,38 @@ impl Claim {
             nonce: nonce.into(),
             created_at: created_at.into(),
             cites,
+            relations: Vec::new(),
             signature: None,
         };
         claim.validate()?;
         Ok(claim)
     }
 
-    /// Reject a malformed artifact and repeated citations.
+    /// Attach typed relations, returning the amended claim.
     ///
-    /// The duplicate check is not tidiness. Attribution walks the citation DAG
-    /// and splits credit across a claim's edges; the same parent listed twice
-    /// would draw twice the flow, which is a way of paying yourself for one
-    /// input.
+    /// Separate from [`Claim::new`] rather than a tenth positional argument,
+    /// because the reference implementation's constructor takes the original
+    /// six and the two must stay callable the same way.
+    pub fn relating(mut self, relations: Vec<ClaimRelation>) -> Result<Claim, RecordError> {
+        self.relations = relations;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Reject a malformed artifact, repeated citations, and a claim that says
+    /// two things about one target.
+    ///
+    /// The duplicate-citation check is not tidiness. Attribution walks the
+    /// citation DAG and splits credit across a claim's edges; the same parent
+    /// listed twice would draw twice the flow, which is a way of paying
+    /// yourself for one input.
+    ///
+    /// Relations are keyed on the **target alone**, not on `(kind, target)`, so
+    /// one claim may say exactly one thing about any other claim. Allowing two
+    /// would mean deciding what `refutes` *and* `replicates` on one target
+    /// means, and any such table is a rule two implementations can read
+    /// differently — a consensus split bought with expressiveness nobody asked
+    /// for. A claim needing to say two things about one target is two claims.
     pub fn validate(&self) -> Result<(), RecordError> {
         if self.artifact.as_object().is_none() {
             return Err(RecordError::InvalidField {
@@ -1248,6 +1487,21 @@ impl Claim {
         for cited in &self.cites {
             if !seen.insert(cited.as_str()) {
                 return Err(RecordError::DuplicateCitation { id: cited.clone() });
+            }
+        }
+        let mut targets: BTreeSet<&str> = BTreeSet::new();
+        for relation in &self.relations {
+            if relation.target.is_empty() {
+                return Err(RecordError::InvalidField {
+                    record: "claim",
+                    field: "relations",
+                    expected: "a non-empty target claim id",
+                });
+            }
+            if !targets.insert(relation.target.as_str()) {
+                return Err(RecordError::DuplicateRelation {
+                    id: relation.target.clone(),
+                });
             }
         }
         Ok(())
@@ -1268,7 +1522,7 @@ impl Claim {
     /// See [`Commitment::signing_payload`] for why it is excluded rather than
     /// zeroed.
     pub fn signing_payload(&self) -> Value {
-        Value::object([
+        let mut value = Value::object([
             ("type", Value::string(RecordKind::Claim.as_str())),
             ("objective_id", Value::string(self.objective_id.clone())),
             ("submitter", Value::string(self.submitter.clone())),
@@ -1284,7 +1538,20 @@ impl Claim {
                         .collect(),
                 ),
             ),
-        ])
+        ]);
+        // Emitted only when non-empty. An empty array would be different bytes
+        // from no field at all, so every id issued before relations existed
+        // would move -- and with them every citation and every funded bounty
+        // pointing at one.
+        if !self.relations.is_empty() {
+            if let Value::Object(map) = &mut value {
+                map.insert(
+                    "relations".to_string(),
+                    Value::Array(self.relations.iter().map(ClaimRelation::to_value).collect()),
+                );
+            }
+        }
+        value
     }
 
     pub fn id(&self) -> String {
@@ -1370,6 +1637,24 @@ impl Claim {
             }
         };
 
+        // Absent reads as none; present-but-not-an-array is an error, matching
+        // `cites` exactly. `null` is *not* an empty list here either: a record
+        // that spells "no relations" two different ways has two ids.
+        let relations = match value.get("relations") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(ClaimRelation::from_value)
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "relations",
+                    expected: "an array of {kind, target} objects",
+                })
+            }
+        };
+
         let claim = Claim {
             objective_id: required_string(value, RECORD, "objective_id")?,
             submitter: required_string(value, RECORD, "submitter")?,
@@ -1377,6 +1662,7 @@ impl Claim {
             nonce: required_string(value, RECORD, "nonce")?,
             created_at: required_string(value, RECORD, "created_at")?,
             cites,
+            relations,
             signature: optional_string(value, RECORD, "signature")?,
         };
         claim.validate()?;

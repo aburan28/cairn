@@ -683,6 +683,28 @@ impl Node {
                 ));
             }
         }
+        // A relation's target must already be in the log -- but, unlike a
+        // citation, it need *not* be accepted: refuting a claim the verifier
+        // rejected is a legitimate thing to record. Existence only, so that
+        // admission stays a consensus rule and how much an assertion counts
+        // for stays a reader's question.
+        if !claim.relations.is_empty() {
+            let known: BTreeSet<String> = self
+                .ledger
+                .entries_of_kind(CLAIM)
+                .into_iter()
+                .filter_map(|entry| Claim::from_value(&entry.payload).ok().map(|c| c.id()))
+                .collect();
+            for relation in &claim.relations {
+                if !known.contains(&relation.target) {
+                    return Err(format!(
+                        "relation target {} is not a claim in this log; relations point \
+                         backwards only",
+                        relation.target
+                    ));
+                }
+            }
+        }
         // Once a frontier exists on a ratcheted objective, *every* claim must
         // cite the holder -- not only improvements.
         if objective.ratchet.is_some() {

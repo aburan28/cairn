@@ -374,15 +374,84 @@ pub struct Claim {
     pub nonce: String,
     pub created_at: String,
     pub cites: Vec<String>,
+    /// Typed assertions about earlier claims. Carries no money — this crate
+    /// re-derives attribution from `cites` alone and never consults this.
+    ///
+    /// Held as decoded `(kind, target)` pairs rather than raw values so that an
+    /// unknown kind fails here, where the primary also fails, instead of
+    /// surviving as an opaque blob this crate would happily re-emit.
+    pub relations: Vec<ClaimRelation>,
     pub signature: Option<String>,
+}
+
+/// The nine relation kinds, spelled as they appear on the wire.
+///
+/// Kept as a list rather than an enum: this crate's job is to agree with the
+/// primary about which spellings exist, and a list is the smallest way to say
+/// that. What matters is that the set is closed and that an unknown spelling is
+/// an error — a kind one implementation accepted and the other dropped would
+/// give the two different claim bytes for the same input.
+pub const RELATION_KINDS: [&str; 9] = [
+    "refutes",
+    "fails_to_replicate",
+    "replicates",
+    "generalizes",
+    "narrows",
+    "corrects",
+    "supersedes",
+    "conflicts_with",
+    "retracts",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimRelation {
+    pub kind: String,
+    pub target: String,
+}
+
+impl ClaimRelation {
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("kind", Value::string(self.kind.clone())),
+            ("target", Value::string(self.target.clone())),
+        ])
+    }
+
+    pub fn from_value(value: &Value) -> Result<ClaimRelation, RecordError> {
+        if value.as_object().is_none() {
+            return Err(RecordError("a relation must be an object".into()));
+        }
+        let kind = text(value, "kind")?;
+        if !RELATION_KINDS.contains(&kind.as_str()) {
+            return Err(RecordError(format!("unknown relation kind {kind:?}")));
+        }
+        let target = text(value, "target")?;
+        if target.is_empty() {
+            return Err(RecordError("a relation target must not be empty".into()));
+        }
+        // Refused rather than ignored: a key the primary rejects and this crate
+        // accepts is a record the two disagree about admitting.
+        if let Some(map) = value.as_object() {
+            for key in map.keys() {
+                if key != "kind" && key != "target" {
+                    return Err(RecordError(format!("unknown relation field {key:?}")));
+                }
+            }
+        }
+        Ok(ClaimRelation { kind, target })
+    }
 }
 
 impl Claim {
     /// `cites` is always present, empty list included: it is not optional, and
     /// omitting it when empty would give one claim two ids depending on how it
     /// was built.
+    ///
+    /// `relations` is the opposite: omitted entirely when empty. It was added
+    /// after ids were in circulation, so an empty array would have moved every
+    /// one of them.
     pub fn signing_payload(&self) -> Value {
-        Value::object([
+        let mut value = Value::object([
             ("type", Value::string("claim")),
             ("objective_id", Value::string(self.objective_id.clone())),
             ("submitter", Value::string(self.submitter.clone())),
@@ -398,7 +467,16 @@ impl Claim {
                         .collect(),
                 ),
             ),
-        ])
+        ]);
+        if !self.relations.is_empty() {
+            if let Value::Object(map) = &mut value {
+                map.insert(
+                    "relations".into(),
+                    Value::Array(self.relations.iter().map(ClaimRelation::to_value).collect()),
+                );
+            }
+        }
+        value
     }
 
     pub fn to_value(&self) -> Value {
@@ -454,6 +532,18 @@ impl Claim {
                 return Err(RecordError(format!("duplicate citation {cited:?}")));
             }
         }
+        // Keyed on the target, not the (kind, target) pair: one claim says one
+        // thing about any other claim, so there is never a pair of relations
+        // whose combined meaning the two implementations must agree on.
+        let mut targets: BTreeSet<&str> = BTreeSet::new();
+        for relation in &self.relations {
+            if !targets.insert(relation.target.as_str()) {
+                return Err(RecordError(format!(
+                    "two relations name the target {:?}",
+                    relation.target
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -475,6 +565,20 @@ impl Claim {
             }
             Some(_) => return Err(RecordError("cites must be an array of claim ids".into())),
         };
+        // Absent is empty; `null` is not. A record spelling "no relations" two
+        // ways would have two ids.
+        let relations = match value.get("relations") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(ClaimRelation::from_value)
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => {
+                return Err(RecordError(
+                    "relations must be an array of {kind, target} objects".into(),
+                ))
+            }
+        };
         let claim = Claim {
             objective_id: text(value, "objective_id")?,
             submitter: text(value, "submitter")?,
@@ -482,6 +586,7 @@ impl Claim {
             nonce: text(value, "nonce")?,
             created_at: text(value, "created_at")?,
             cites,
+            relations,
             signature: optional_text(value, "signature")?,
         };
         claim.validate()?;
@@ -906,6 +1011,7 @@ mod tests {
             nonce: "s3cret".into(),
             created_at: "2026-07-28T00:00:00+00:00".into(),
             cites: vec![],
+            relations: vec![],
             signature: None,
         };
         let mut signed = claim.clone();

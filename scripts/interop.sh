@@ -67,7 +67,9 @@ B="$(mktemp -u /tmp/pw-interop-ref-XXXXXX).jsonl"
 C="$(mktemp -u /tmp/pw-interop-min-XXXXXX).jsonl"
 D="$(mktemp -u /tmp/pw-interop-lean-XXXXXX).jsonl"
 E="$(mktemp -u /tmp/pw-interop-lean2-XXXXXX).jsonl"
-trap 'rm -f "$A" "$B" "$C" "$D" "$E"' EXIT
+F="$(mktemp -u /tmp/pw-interop-rel1-XXXXXX).jsonl"
+G="$(mktemp -u /tmp/pw-interop-rel2-XXXXXX).jsonl"
+trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G"' EXIT
 
 # --- the primary writes, the reference reads ------------------------------
 rule "Rust produces a log"
@@ -156,6 +158,58 @@ for pair in "$RUST|$REF|the reference|$D" "$REF|$RUST|the primary|$E"; do
   echo "$LEAN_VIEW"
   echo "$LEAN_VIEW" | grep -q "log verified" \
     || fail "$WHO could not re-derive a lean rejection"
+done
+
+# --- a claim carrying typed relations, written by each and read by the other -
+#
+# `relations` is omitted from the canonical form when empty, so every round
+# above exercises only its absence -- and a field that is always absent is a
+# field whose encoding nobody has checked. This round writes one in each
+# implementation and has the other re-derive the log, which is the only way a
+# disagreement about relation bytes shows up before it forks a claim id.
+#
+# The relation targets a *rejected* claim on purpose. It is the case the two
+# implementations could most easily differ on: citations must name accepted
+# claims and relations need only name existing ones, so an implementation that
+# reused the citation rule here would refuse a record the other admits -- and
+# both would audit clean while disagreeing about what is in the log.
+rule "typed claim relations survive a round trip through both implementations"
+# `n = 1` reaches 1 in no steps at all, so the pinned checker rejects it. Written
+# here rather than added to `examples/`, which holds artifacts that are meant to
+# *pass*; a decoy shipped alongside them would eventually be mistaken for one.
+DECOY="$(mktemp -u /tmp/pw-interop-decoy-XXXXXX).json"
+printf '{"n": 1}\n' > "$DECOY"
+trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$DECOY"' EXIT
+
+for pair in "$RUST|$REF|the reference|$F" "$REF|$RUST|the primary|$G"; do
+  IFS='|' read -r WRITER READER WHO LOG <<< "$pair"
+  REL_OID=$("$WRITER" --log "$LOG" --root . post examples/collatz/objective.json \
+    | head -1 | awk '{print $2}')
+
+  # A claim the pinned checker throws out, so the bounty stays open and there
+  # is a rejected claim to speak about.
+  "$WRITER" --log "$LOG" --root . commit "$REL_OID" --submitter alice \
+      --artifact "$DECOY" --nonce r1 >/dev/null
+  tick
+  WRONG=$("$WRITER" --log "$LOG" --root . reveal "$REL_OID" --submitter alice \
+      --artifact "$DECOY" --nonce r1)
+  echo "$WRONG" | grep -q "reject" || fail "the decoy artifact was not rejected: $WRONG"
+  WRONG_ID=$(echo "$WRONG" | head -1 | awk '{print $2}')
+
+  "$WRITER" --log "$LOG" --root . commit "$REL_OID" --submitter bob \
+      --artifact examples/collatz/artifact.json --nonce r2 >/dev/null
+  tick
+  "$WRITER" --log "$LOG" --root . reveal "$REL_OID" --submitter bob \
+      --artifact examples/collatz/artifact.json --nonce r2 \
+      --relates "refutes:$WRONG_ID" >/dev/null
+  settle_tick
+  "$WRITER" --log "$LOG" --root . settle >/dev/null
+
+  grep -q '"relations"' "$LOG" || fail "$WHO's peer wrote no relations field"
+  REL_VIEW=$("$READER" --log "$LOG" --root . audit)
+  echo "$REL_VIEW"
+  echo "$REL_VIEW" | grep -q "log verified" \
+    || fail "$WHO could not re-derive a log containing typed relations"
 done
 
 rule "the primary implementation audits the reference log"
