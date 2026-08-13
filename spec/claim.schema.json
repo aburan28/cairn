@@ -46,6 +46,36 @@
       },
       "description": "Accepted claims this one builds on. Citations point backwards only, which keeps the DAG acyclic and citation-flow attribution terminating."
     },
+    "relations": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "What this claim asserts about earlier claims. Carries no money: attribution, settlement and the frontier all read `cites` and none of them read this. At most one relation per target -- a claim says one thing about any other claim. Omitted entirely when empty, never sent as [].",
+      "items": {
+        "type": "object",
+        "required": ["kind", "target"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "refutes",
+              "fails_to_replicate",
+              "replicates",
+              "generalizes",
+              "narrows",
+              "corrects",
+              "supersedes",
+              "conflicts_with",
+              "retracts"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
     "signature": {
       "type": "string",
       "pattern": "^[0-9a-f]{128}$",
