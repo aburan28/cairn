@@ -42,8 +42,8 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 #
 # Raising any of them means raising the set, in one reviewed change, with the
 # call sites updated -- see the `ignore` entries in .github/dependabot.yml.
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 
 # The one symmetric cipher, everywhere: transport frames, sealed envelopes, the
 # at-rest store. **Not AES**, and that is a decision rather than an accident.
