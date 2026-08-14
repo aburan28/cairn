@@ -1798,9 +1798,28 @@ impl Node {
         // timestamps an auditor re-reads out of the file, so a member with a
         // fast clock writes a record every node refuses rather than a record
         // every node accepts on their word.
-        if share_epoch <= commit_epoch {
+        //
+        // **And the embargo, which is the same rule with a longer arm.** A
+        // committee share is what opens a sealed artifact, so "hold this one
+        // for N more epochs" is enforceable in exactly one place: here. An
+        // embargoed objective declares its length inside its own id, so the
+        // wait cannot be shortened after work has started, and the check is
+        // two integers an auditor re-reads out of the file rather than a
+        // policy anyone has to be trusted to apply.
+        //
+        // The class alone was not enforcement. It said *when* an artifact
+        // becomes public and nothing consulted it, so a committee that felt
+        // like opening early could, and the funder who chose `embargoed` for a
+        // dual-use result would find out afterwards.
+        let embargo = self
+            .objectives()
+            .get(&commitment.objective_id)
+            .map(Objective::embargo)
+            .unwrap_or(0);
+        let opens_at = commit_epoch.saturating_add(embargo);
+        if share_epoch <= opens_at {
             return Err(RuleViolation::ShareBeforeEpoch {
-                commit_epoch,
+                commit_epoch: opens_at,
                 share_epoch,
             });
         }

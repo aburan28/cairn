@@ -86,6 +86,15 @@
       "default": "public",
       "description": "When settled artifacts become public -- never whether. Omitted or null means 'public', and writing it explicitly produces byte-identical output, so this field did not reissue any pre-existing objective id. 'sealed' is declared so its cost is explicit but is refused at validation: paying for an artifact nobody may read requires a zero-knowledge proof that the pinned verifier accepts it, which is not implemented. Use 'embargoed' for delayed disclosure."
     },
+    "embargo_epochs": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "description": "How many epochs an embargoed artifact stays shut after its commitment's epoch closes. Meaningful only with confidentiality 'embargoed', and refused on anything else rather than ignored -- a funder who thinks they asked for delay and did not is the failure they cannot see. Zero is refused for the same reason: an artifact readable in the epoch after its commitment is on the normal reveal schedule, which is what 'public' already means. Inside the objective's id when present, so an embargo cannot be shortened after work has started; omitted when absent, so adding it reissued nothing. Enforced where it can be: a committee share is what opens a sealed artifact, so a share published before the embargo lifts is refused by both implementations. An embargoed objective with no length is legal and unenforced -- that is the shape the class had when it was a label nothing checked.",
+      "$comment": "The presence of the number is what turns enforcement on, the same shape as the issuance record turning supply accounting on."
+    },
     "artifact_schema": {
       "type": [
         "object",

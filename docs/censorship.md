@@ -280,15 +280,41 @@ properties are worth stating because each is a decision rather than a detail:
   conformance vectors pin this directly: one fixture writes `"public"`
   explicitly and must produce an id byte-identical to the fixture that omits it.
 
-What is *not* implemented is any enforcement of the embargo itself. The class is
-recorded in the objective's identity, so it cannot be changed mid-bounty, but
-nothing in Stage 0 withholds an `embargoed` artifact at the appropriate time.
-The hook it needs now exists: settlement is deferred to the close of the reveal
-epoch and drains in batches, so "hold this one for N more epochs" has somewhere
-to live that it did not before. Wiring `sealed.rs` and the class into that
-drain is the remaining work. Declaring the class is the part that had to come
-first, because it is part of the objective's id and therefore cannot be
-retrofitted onto objectives already funded.
+### The embargo is enforced
+
+`embargo_epochs` says how long, and it is enforced in the one place that can
+enforce it: **a committee share is what opens a sealed artifact**, so a share
+published before `commit_epoch + embargo_epochs` is refused, by
+`Node::check_committee_share` on the way in and by `audit` on the way back —
+in both implementations, each deriving the number for itself.
+
+Three decisions worth naming.
+
+- **The length is inside the objective's id.** An embargo a funder could
+  shorten after work had started is a promise made to a submitter and then
+  taken back, and a submitter deciding whether to disclose *through this
+  network* is deciding on the strength of that promise.
+  `shortening_an_embargo_makes_a_different_objective` pins it.
+- **A length without the class is refused, not ignored.** A funder who thinks
+  they asked for delay and did not is the failure they cannot see — the same
+  reasoning that refuses `sealed` rather than downgrading it. So is an explicit
+  zero: an artifact readable in the epoch after its commitment is on the normal
+  reveal schedule, which is what `public` already means.
+- **An embargoed objective with no length is legal and unenforced.** That is
+  the shape the class had when it was a label nothing checked, and refusing it
+  would make old logs undecodable to settle a point about new ones. The
+  *presence* of the number is what turns enforcement on — the same shape as the
+  issuance record turning supply accounting on.
+
+Nothing here reads a clock. "Too early" is a comparison of two timestamps an
+auditor re-reads out of the file, so a committee member with a fast clock
+writes a record every node refuses rather than one every node accepts on their
+word.
+
+What remains: the embargo binds the *committee*, which is what holds the key.
+It does not bind a submitter who publishes their own artifact elsewhere, and
+nothing can — the point of the class is coordinated disclosure among people who
+want it, not a gag.
 
 ## 7. What encryption cannot fix
 

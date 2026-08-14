@@ -1231,10 +1231,24 @@ impl Node {
             };
             let commit_epoch = epoch_of(commit_seconds, epoch_seconds());
             let share_epoch = epoch_of(share_seconds, epoch_seconds());
-            if share_epoch <= commit_epoch {
+            // An embargo is this rule with a longer arm. A committee share is
+            // what opens a sealed artifact, so an objective that declared
+            // "revealed after N epochs" is enforced here or nowhere -- and
+            // derived here independently, because an embargo the two
+            // implementations disagreed about is a committee opening an
+            // artifact one of them still thinks is shut.
+            let embargo = self
+                .objectives()
+                .get(&commitment.objective_id)
+                .filter(|objective| objective.confidentiality == "embargoed")
+                .and_then(|objective| objective.embargo_epochs)
+                .unwrap_or(0);
+            let opens_at = commit_epoch.saturating_add(embargo);
+            if share_epoch <= opens_at {
                 problems.push(format!(
-                    "entry {}: committee_share is in epoch {share_epoch} but its commitment is \
-                     in epoch {commit_epoch}; a committee must wait for a strictly later epoch",
+                    "entry {}: committee_share is in epoch {share_epoch} but its commitment \
+                     opens at epoch {opens_at}; a committee must wait for a strictly later \
+                     epoch, and longer still under an embargo",
                     entry.seq
                 ));
                 continue;

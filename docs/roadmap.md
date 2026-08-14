@@ -420,9 +420,15 @@ This is the stage that answers the only question that matters: **will strangers
 point compute at these objectives.** If demand is zero, stop here — everything
 downstream is unbacked.
 
-- [ ] Agent proposer loop (propose → self-check against the pinned verifier →
-      submit only what already passes locally). Free verification means the
-      proposer can filter before it spends the network's time.
+- [x] Agent proposer loop. `proofwork propose <objective> --artifact F
+      [--artifact G ...]` runs the pinned verifier locally on each candidate,
+      reports what each scored, and submits only the best one that already
+      passes — and on a ratchet, only one that actually beats the frontier,
+      since a claim that verifies without improving mints nothing and still
+      costs the network a verification. `--dry-run` is the same loop with the
+      submission removed, which is what an agent iterating actually wants; it
+      needs no identity, because scoring writes nothing. Exit code 2 when
+      nothing passed, so a script can tell "not ready yet" from a crash.
 - [x] Objective discovery API and a work queue. `proofwork-serve` publishes
       the log and the open objectives; `POST /submit` queues proposals that
       `proofwork drain` admits through the same rules engine. See

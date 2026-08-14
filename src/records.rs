@@ -364,6 +364,19 @@ pub struct Objective {
     /// existing objective. The conformance vectors that predate it still pass
     /// unchanged, which is the check that this is true rather than intended.
     pub confidentiality: Confidentiality,
+    /// How many epochs an [`Confidentiality::Embargoed`] artifact stays shut
+    /// after its commitment's epoch closes.
+    ///
+    /// `None` on a public objective, and on an embargoed one it is the number
+    /// the class exists to name: declaring "revealed later" without saying
+    /// *how much* later is a class that means nothing an auditor can check.
+    ///
+    /// Omitted from the canonical form when absent, exactly like `deadline`,
+    /// `ratchet` and `confidentiality`, so adding it reissued no existing id.
+    /// It is *inside* the id when present, which is the point — an embargo a
+    /// funder could shorten after work had started would be a promise made to
+    /// the submitter and then taken back.
+    pub embargo_epochs: Option<u64>,
     /// What shape of artifact the verifier expects, for a submitter who has
     /// only the record.
     ///
@@ -428,6 +441,7 @@ impl Objective {
             deadline,
             ratchet,
             confidentiality: Confidentiality::Public,
+            embargo_epochs: None,
             artifact_schema: None,
             require_signed_submitter: false,
         };
@@ -468,6 +482,41 @@ impl Objective {
         Ok(self)
     }
 
+    /// Set the embargo length, re-validating.
+    ///
+    /// Meaningful only on an [`Confidentiality::Embargoed`] objective;
+    /// [`Objective::validate`] refuses the combinations that do not make sense
+    /// rather than ignoring the field, because a length silently dropped on a
+    /// public objective is a funder who thinks they asked for delay.
+    pub fn with_embargo_epochs(mut self, epochs: u64) -> Result<Objective, RecordError> {
+        self.embargo_epochs = Some(epochs);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Declare an embargo: the class and its length, together.
+    ///
+    /// One step because they only mean anything together. Setting the class
+    /// alone leaves an objective that says "revealed later" without saying how
+    /// much later — legal, because that is the shape every embargoed objective
+    /// had before the length existed, and useless, because nothing can enforce
+    /// it. This is the call a funder should reach for.
+    pub fn with_embargo(self, epochs: u64) -> Result<Objective, RecordError> {
+        self.with_confidentiality(Confidentiality::Embargoed)?
+            .with_embargo_epochs(epochs)
+    }
+
+    /// Epochs an embargoed artifact stays shut after its commitment's epoch.
+    ///
+    /// `0` for a public objective, which is the same answer as "no wait" and
+    /// lets the share rule read one number instead of branching on the class.
+    pub fn embargo(&self) -> u64 {
+        match self.confidentiality {
+            Confidentiality::Embargoed => self.embargo_epochs.unwrap_or(0),
+            _ => 0,
+        }
+    }
+
     /// The structural invariants the reference implementation checks in
     /// `__post_init__`.
     ///
@@ -490,6 +539,35 @@ impl Objective {
                     expected: "an object",
                 });
             }
+        }
+        // An embargo length on an objective that is not embargoed is a funder
+        // who thinks they asked for delay and did not. Refused rather than
+        // ignored, for the same reason `sealed` is refused rather than
+        // downgraded: silently dropping the one field somebody cared about is
+        // the failure they cannot see.
+        if self.embargo_epochs.is_some() && self.confidentiality != Confidentiality::Embargoed {
+            return Err(RecordError::InvalidField {
+                record: "objective",
+                field: "embargo_epochs",
+                expected: "an embargoed objective; a length has no meaning without one",
+            });
+        }
+        // An explicit zero is `public` wearing a longer name: an artifact
+        // readable in the epoch after its commitment is on the normal reveal
+        // schedule. Refused so the number means what it says.
+        //
+        // An *absent* length is a different thing and is allowed: that is the
+        // shape every embargoed objective had before this field existed, when
+        // the class was a label nothing enforced. Refusing it would make old
+        // logs undecodable to settle a point about new ones. So the presence
+        // of the number is what turns enforcement on, exactly as the presence
+        // of an issuance is what turns the supply accounting on.
+        if self.embargo_epochs == Some(0) {
+            return Err(RecordError::InvalidField {
+                record: "objective",
+                field: "embargo_epochs",
+                expected: "at least one epoch; zero is what `public` already means",
+            });
         }
         // Shape only. What the hint *says* is never checked -- the pinned
         // verifier decides what passes, and validating an artifact against
@@ -558,6 +636,14 @@ impl Objective {
                 Value::string(self.confidentiality.as_str()),
             );
         }
+        // Inside the id when present, omitted when absent. Inside, because an
+        // embargo a funder could shorten after work had started is a promise
+        // made to a submitter and then taken back; omitted, because every
+        // objective written before this field existed had no embargo and its
+        // digest must not move.
+        if let Some(epochs) = self.embargo_epochs {
+            body.insert("embargo_epochs".to_string(), Value::Int(i128::from(epochs)));
+        }
         // Omitted when absent, for the reason every optional field here is.
         if let Some(schema) = &self.artifact_schema {
             body.insert("artifact_schema".to_string(), schema.clone());
@@ -610,6 +696,20 @@ impl Objective {
             }
         };
 
+        let embargo_epochs = match value.get("embargo_epochs") {
+            None | Some(Value::Null) => None,
+            Some(Value::Int(epochs)) if *epochs >= 0 && *epochs <= i128::from(u64::MAX) => {
+                Some(*epochs as u64)
+            }
+            Some(_) => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "embargo_epochs",
+                    expected: "a non-negative integer number of epochs",
+                })
+            }
+        };
+
         // Absent and null both mean "no hint", exactly as for `ratchet`.
         let artifact_schema = match value.get("artifact_schema") {
             None | Some(Value::Null) => None,
@@ -626,6 +726,7 @@ impl Objective {
             deadline: optional_string(value, RECORD, "deadline")?,
             ratchet,
             confidentiality,
+            embargo_epochs,
             require_signed_submitter: match value.get("require_signed_submitter") {
                 None | Some(Value::Null) => false,
                 Some(Value::Bool(flag)) => *flag,
@@ -2632,6 +2733,7 @@ mod tests {
             deadline: None,
             ratchet: None,
             confidentiality: Confidentiality::Public,
+            embargo_epochs: None,
             artifact_schema: None,
             require_signed_submitter: false,
         }

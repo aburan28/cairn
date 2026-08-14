@@ -637,6 +637,18 @@ enum Command {
         /// payout rather than a "settles when epoch N closes".
         settle: bool,
     },
+    /// Score candidate artifacts locally and submit only the ones that already
+    /// pass. The proposer loop.
+    Propose {
+        objective: String,
+        artifacts: Vec<String>,
+        submitter: String,
+        identity: Option<String>,
+        cites: Vec<String>,
+        /// Score and report; submit nothing.
+        dry_run: bool,
+        settle: bool,
+    },
     /// Write the files a new objective starts from, and post nothing.
     ///
     /// The posting stays a separate, reviewed step: an objective's statement
@@ -1015,6 +1027,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
 
     let command = match name.as_str() {
         "post" => parse_post(&mut cursor)?,
+        "propose" => parse_propose(&mut cursor)?,
         "issue" => parse_issue(&mut cursor)?,
         "balances" => {
             expect_end(&mut cursor, "balances")?;
@@ -1628,6 +1641,76 @@ fn parse_try(cursor: &mut Cursor) -> Result<Command, CliError> {
         nonce: nonce.filter(|value| !value.is_empty()),
         identity,
         cites,
+        settle,
+    })
+}
+
+/// `propose <objective> --artifact F [--artifact G ...] [--dry-run] ...`
+fn parse_propose(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut objective: Option<String> = None;
+    let mut submitter: Option<String> = None;
+    let mut artifacts: Vec<String> = Vec::new();
+    let mut identity: Option<String> = None;
+    let mut cites: Vec<String> = Vec::new();
+    let mut dry_run = false;
+    let mut settle = false;
+
+    while let Some(token) = cursor.take() {
+        if token == "--submitter" {
+            submitter = Some(cursor.value("--submitter")?);
+        } else if token == "--artifact" {
+            artifacts.push(cursor.value("--artifact")?);
+        } else if token == "--identity" {
+            identity = Some(cursor.value("--identity")?);
+        } else if token == "--dry-run" {
+            dry_run = true;
+        } else if token == "--settle" {
+            settle = true;
+        } else if token == "--cites" {
+            while let Some(next) = cursor.peek_owned() {
+                if is_flag(&next) {
+                    break;
+                }
+                cursor.take();
+                cites.push(next);
+            }
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!(
+                "propose: unknown option {token:?}"
+            )));
+        } else if objective.is_some() {
+            return Err(CliError::Usage(format!(
+                "propose: unexpected argument {token:?}"
+            )));
+        } else {
+            objective = Some(token);
+        }
+    }
+
+    if artifacts.is_empty() {
+        return Err(CliError::Usage(String::from(
+            "propose: at least one --artifact",
+        )));
+    }
+    Ok(Command::Propose {
+        objective: require(objective, "propose", "an objective id or a JSON file")?,
+        artifacts,
+        // `--dry-run` scores without submitting, so it needs no name to submit
+        // under. Requiring one anyway would make the cheapest, safest use of
+        // this command the one that needs the most setup.
+        submitter: match (submitter, &identity, dry_run) {
+            (Some(submitter), _, _) => submitter,
+            (None, Some(_), _) => String::new(),
+            (None, None, true) => String::new(),
+            (None, None, false) => {
+                return Err(CliError::Usage(
+                    "propose: --submitter or --identity is required unless --dry-run".into(),
+                ))
+            }
+        },
+        identity,
+        cites,
+        dry_run,
         settle,
     })
 }
@@ -2461,6 +2544,22 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      check such a proof -- needs no log, which is the point",
+    );
+    say(
+        out,
+        "  propose <objective> --artifact F [--artifact G ...] [--dry-run]",
+    );
+    say(
+        out,
+        "      score candidates locally, submit only the best that passes",
+    );
+    say(
+        out,
+        "  issue --holder <name> --units N     declare supply (genesis only)",
+    );
+    say(
+        out,
+        "  balances                            who holds what, what is escrowed",
     );
     say(
         out,
@@ -4394,6 +4493,140 @@ struct Round<'a> {
     nonce: Option<&'a str>,
     cites: &'a [String],
     settle: bool,
+}
+
+/// Score candidates against the pinned verifier locally, then submit the best
+/// one that already passes.
+///
+/// # Why local scoring is the whole point
+///
+/// Verification here is free and it is *ground truth*: the objective pins the
+/// checker, so the verdict a proposer computes at home is the verdict the
+/// network will compute. That makes the filter exact rather than heuristic —
+/// there is no "probably passes", and a proposer that submits only what already
+/// accepted spends nobody's time on a rejection.
+///
+/// It also removes the reason to spray. Under a mechanism where submitting is
+/// cheap and checking is expensive, volume is a strategy; here the proposer can
+/// tell in advance, so submitting a rejection is pure waste for the submitter
+/// too. `--dry-run` is the same loop with the submission removed, which is what
+/// an agent iterating on candidates actually wants most of the time.
+///
+/// # Why the best rather than all of them
+///
+/// On a ratchet only an improvement settles, and a batch of five candidates
+/// where four are worse than the fifth is four claims that verify, mint
+/// nothing, and still cost the network five verifications. So the loop ranks
+/// and submits one. On a non-ratcheted objective the first acceptance wins for
+/// the same reason: the pool settles once.
+fn cmd_propose(
+    out: &mut dyn Write,
+    options: &Options,
+    objective: &str,
+    artifacts: &[String],
+    who: Submitter<'_>,
+    cites: &[String],
+    dry_run: bool,
+    settle: bool,
+) -> Result<i32, CliError> {
+    let objective_id = if objective.starts_with("sha256:") {
+        objective.to_string()
+    } else {
+        let data = read_json(objective)?;
+        validate_objective(&data).map_err(CliError::Schema)?;
+        Objective::from_value(&data).map_err(CliError::Record)?.id()
+    };
+
+    let node = open_node(options)?;
+    let record = node
+        .objectives()
+        .get(&objective_id)
+        .cloned()
+        .ok_or_else(|| CliError::Refused(format!("objective {objective_id} is not in this log")))?;
+    let held = node.frontier_of(&objective_id);
+    let ratchet = record
+        .ratchet
+        .as_ref()
+        .and_then(|block| proofwork::frontier::Ratchet::from_value(block).ok());
+
+    // One pass, scoring only. Nothing is written, so a candidate that fails
+    // costs the proposer a local run and the network nothing at all.
+    let mut passing: Vec<(usize, &String, Option<i64>)> = Vec::new();
+    for (index, path) in artifacts.iter().enumerate() {
+        let artifact = read_json(path)?;
+        let verdict = node.registry().run(&record.verifier, &artifact);
+        let score = verdict.score();
+        let mut line = format!("  {path}: {}", verdict.status.as_str());
+        if let Some(score) = score {
+            line.push_str(&format!("  score {score}"));
+        }
+        if !verdict.accepted() {
+            // The detail comes from objective-authored code. Rendered, because
+            // it is the only diagnostic a proposer has, but never acted on.
+            line.push_str(&format!("  ({})", verdict.detail));
+            say(out, line);
+            continue;
+        }
+        // Accepted is necessary and not sufficient on a ratchet: a claim that
+        // does not beat the frontier verifies and mints nothing.
+        if let (Some(score), Some(frontier)) = (score, held.as_ref()) {
+            let improves = match &ratchet {
+                Some(ratchet) => ratchet.improves(Some(frontier.score), score),
+                None => score > frontier.score,
+            };
+            if !improves {
+                line.push_str(&format!(
+                    "  (does not beat the frontier at {})",
+                    frontier.score
+                ));
+                say(out, line);
+                continue;
+            }
+        }
+        say(out, line);
+        passing.push((index, path, score));
+    }
+
+    if passing.is_empty() {
+        say(
+            out,
+            String::from("nothing passed locally, so nothing was submitted"),
+        );
+        // Not an error: "I checked and none of these are ready" is the loop
+        // working, and an agent scripting this should not have to distinguish
+        // it from a crash.
+        return Ok(2);
+    }
+
+    // Highest score wins; ties and unscored verdicts fall back to the order the
+    // caller gave, which is the only tiebreak that does not invent a preference.
+    passing.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    let (_, best, score) = passing[0];
+    say(
+        out,
+        match score {
+            Some(score) => format!("submitting {best} (score {score})"),
+            None => format!("submitting {best}"),
+        },
+    );
+    if dry_run {
+        say(out, String::from("  --dry-run: nothing was written"));
+        return Ok(0);
+    }
+    drop(node);
+
+    cmd_try(
+        out,
+        options,
+        Round {
+            objective: &objective_id,
+            who,
+            artifact_path: best,
+            nonce: None,
+            cites,
+            settle,
+        },
+    )
 }
 
 fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i32, CliError> {
@@ -6642,6 +6875,27 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
                 settle: *settle,
             },
         ),
+        Command::Propose {
+            objective,
+            artifacts,
+            submitter,
+            identity,
+            cites,
+            dry_run,
+            settle,
+        } => cmd_propose(
+            out,
+            options,
+            objective,
+            artifacts,
+            Submitter {
+                declared: submitter,
+                identity: identity.as_deref(),
+            },
+            cites,
+            *dry_run,
+            *settle,
+        ),
         Command::Scaffold { request, force } => cmd_scaffold(out, options, request, *force),
         Command::Incentives {
             params,
@@ -8191,6 +8445,51 @@ mod tests {
             }
             other => panic!("expected a try command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn propose_takes_many_artifacts_and_needs_a_name_only_to_submit() {
+        // The cheapest use is the one with the least setup: scoring candidates
+        // writes nothing, so it needs no identity to write under.
+        assert!(parse(argv(&["propose", "sha256:aa", "--artifact", "a.json"])).is_err());
+        assert!(parse(argv(&[
+            "propose",
+            "sha256:aa",
+            "--artifact",
+            "a.json",
+            "--dry-run"
+        ]))
+        .is_ok());
+
+        match parse(argv(&[
+            "propose",
+            "sha256:aa",
+            "--artifact",
+            "a.json",
+            "--artifact",
+            "b.json",
+            "--submitter",
+            "agent",
+        ]))
+        .expect("parses")
+        .command
+        {
+            Command::Propose {
+                artifacts,
+                submitter,
+                dry_run,
+                ..
+            } => {
+                assert_eq!(artifacts, vec!["a.json", "b.json"]);
+                assert_eq!(submitter, "agent");
+                assert!(!dry_run);
+            }
+            other => panic!("expected propose, got {other:?}"),
+        }
+
+        // No candidates is a usage error rather than a run that scores nothing
+        // and reports success.
+        assert!(parse(argv(&["propose", "sha256:aa", "--dry-run"])).is_err());
     }
 
     #[test]
