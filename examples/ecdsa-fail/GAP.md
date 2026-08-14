@@ -49,7 +49,12 @@ minimize.
 1. **Artifact shape.** ecdsa.fail submits editable Rust sources; proofwork
    commits JSON. Bridging a full `src/point_add/` tree into a content-addressed
    claim without new record types is not done. MVP uses declared
-   `{qubits, toffoli}` metrics only.
+   `{qubits, toffoli}` metrics only. A design for closing this — a `workspace`
+   verifier kind whose artifact is a manifest of blob addresses rather than an
+   archive — is in
+   [`docs/design/workspace-benchmarks.md`](../../docs/design/workspace-benchmarks.md),
+   which also says which half of Yukon (the platform now running ecdsa.fail)
+   must not be copied.
 2. **Verifier strength.** Real accept needs the Rust sim harness (~minutes,
    large dep graph). Pinning `benchmark.sh` as a Stage-0 evaluator is the wrong
    tier: that is closer to V2 `replay` with a pinned toolchain, and the Python
@@ -60,7 +65,11 @@ minimize.
 4. **Commit–reveal vs archive upload.** proofwork requires a later epoch to
    reveal; ecdsafail uploads a submission archive + public note in one shot.
 5. **Notes / swarm memory.** `ecdsafail notes` has no proofwork equivalent yet
-   (design-only: keep using the CLI for swarm notes).
+   (design-only: keep using the CLI for swarm notes). The design puts a `note`
+   and a self-declared `model` in the artifact, where they need no record change
+   and the pinned verifier ignores them — and routes both through the MCP taint
+   path, because a note is attacker-authored prose that an *agent* reads. See
+   [`docs/design/workspace-benchmarks.md`](../../docs/design/workspace-benchmarks.md).
 6. **MCP frontier messaging** previously assumed maximize (`score > best`).
    Fixed for ratchet-aware improve checks so minimize objectives are not lied
    to in `score_candidate` text. No consensus / record-id changes.
