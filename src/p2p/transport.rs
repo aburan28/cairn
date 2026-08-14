@@ -292,7 +292,26 @@ pub fn connect(
     // thread in `write_all` with the caller's lock still taken.
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let (ciphertext, channel) = endpoint.initiate(local.id());
+    // **This dial is McEliece-only, even when the endpoint's bundle is known,
+    // and that is a framing limit rather than a cryptographic choice.**
+    //
+    // `PeerPublic::initiate` will hedge across every leg the peer published,
+    // and `PeerIdentity::accept` already reads either shape. What is missing is
+    // a way to *frame* the longer ciphertext: the hello is a fixed
+    // `[32-byte id][96-byte ciphertext]` with no version field and no length
+    // prefix, so a responder reading 128 bytes cannot tell a legacy handshake
+    // from the first 128 bytes of a hedged one. Adding a length prefix is a
+    // transport-wide format change, and guessing at it — probing for extra
+    // bytes with a timeout, or reading a length out of what may be ciphertext —
+    // buys compatibility with a heuristic, which is the wrong way to pay for it.
+    //
+    // So the transport keeps the format it has until that decision is made,
+    // and the hedging is real for every caller that frames its own handshake.
+    // Sealed committee shares — the thing actually worth protecting — are
+    // hedged today by `crypto::envelope`, which has no such constraint.
+    let legacy = PeerPublic::from_bytes(endpoint.as_bytes())
+        .map_err(|_| TransportError::Handshake(HandshakeError::BadPublicKeyLength { got: 0 }))?;
+    let (ciphertext, channel) = legacy.initiate(local.id());
     let mut hello = [0u8; HANDSHAKE_BYTES];
     hello[..32].copy_from_slice(&local.id());
     hello[32..].copy_from_slice(&ciphertext);

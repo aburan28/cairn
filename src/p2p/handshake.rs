@@ -46,9 +46,11 @@
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use classic_mceliece_rust::{
-    decapsulate_boxed, encapsulate_boxed, keypair_boxed, Ciphertext, PublicKey, SecretKey,
-    CRYPTO_CIPHERTEXTBYTES, CRYPTO_PUBLICKEYBYTES, CRYPTO_SECRETKEYBYTES,
+use classic_mceliece_rust::{CRYPTO_CIPHERTEXTBYTES, CRYPTO_PUBLICKEYBYTES, CRYPTO_SECRETKEYBYTES};
+
+use crate::crypto::kem::{
+    Bundle, Encapsulated, Leg, PublicKey as KemPublicKey, SecretBundle, SecretKey as KemSecretKey,
+    Suite, SUITES,
 };
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
@@ -120,9 +122,23 @@ impl std::error::Error for HandshakeError {}
 ///
 /// Generating one costs ~243 ms, so generate it once and persist it. Not
 /// `Clone`: two copies of a secret key are two things to lose.
+///
+/// # Why this is a bundle and not a McEliece keypair
+///
+/// It was a bare `mceliece348864` keypair, so a session key rested on one
+/// hardness family with no combiner in front of it — while a *committee share*
+/// travelling over that session was sealed to a whole bundle. Protecting the
+/// cargo and not the road. The 2026 cryptanalysis of binary Goppa codes made
+/// the asymmetry worth closing: see `crypto::kem::Family`.
+///
+/// The id is unchanged, and that is the whole reason this was affordable.
+/// [`peer_id_of`] delegates to [`crate::crypto::kem::key_id`], which hashes the
+/// **McEliece leg only**, so an identity that grows legs keeps its
+/// [`PeerId`] — it stays in the DHT, its bootstrap files stay valid, and its
+/// `PeerRecord` still names it. Nothing about this change reaches the log.
 pub struct PeerIdentity {
-    secret: SecretKey<'static>,
-    public: Box<[u8; CRYPTO_PUBLICKEYBYTES]>,
+    secrets: SecretBundle,
+    public: Bundle,
     id: PeerId,
 }
 
@@ -134,78 +150,221 @@ impl fmt::Debug for PeerIdentity {
 }
 
 impl PeerIdentity {
-    /// Generate a fresh long-term identity. ~243 ms.
+    /// Generate a fresh long-term identity over every suite this build has.
+    ///
+    /// ~243 ms, which is McEliece's keygen and unchanged: the other legs cost
+    /// microseconds. A new identity is hedged by default, because an option
+    /// nobody turns on protects nobody.
     pub fn generate() -> PeerIdentity {
-        let (public, secret) = keypair_boxed(&mut OsRng);
-        let public: Box<[u8; CRYPTO_PUBLICKEYBYTES]> = Box::new(*public.as_array());
-        let id = peer_id_of(public.as_ref());
-        PeerIdentity { secret, public, id }
-    }
-
-    /// Restore an identity from persisted key material.
-    pub fn from_bytes(public: &[u8], secret: &[u8]) -> Result<PeerIdentity, HandshakeError> {
-        let public: Box<[u8; CRYPTO_PUBLICKEYBYTES]> =
-            boxed_array(public).ok_or(HandshakeError::BadPublicKeyLength { got: public.len() })?;
-        let secret_arr: Box<[u8; CRYPTO_SECRETKEYBYTES]> =
-            boxed_array(secret).ok_or(HandshakeError::BadSecretKeyLength { got: secret.len() })?;
-        let id = peer_id_of(public.as_ref());
-        Ok(PeerIdentity {
-            secret: SecretKey::from(secret_arr),
+        let (public, secrets) = SecretBundle::generate(&SUITES, &mut OsRng);
+        let id = public.id();
+        PeerIdentity {
+            secrets,
             public,
             id,
-        })
+        }
+    }
+
+    /// Restore a **McEliece-only** identity from persisted key material.
+    ///
+    /// The shape an identity file written before bundles existed has, so it is
+    /// kept and behaves exactly as it did. Such a node still accepts hedged
+    /// handshakes it cannot benefit from — it simply has no extra legs to
+    /// decapsulate — and its own sessions rest on one family until it is
+    /// regenerated. [`PeerIdentity::from_secrets`] is the hedged constructor.
+    pub fn from_bytes(public: &[u8], secret: &[u8]) -> Result<PeerIdentity, HandshakeError> {
+        if public.len() != CRYPTO_PUBLICKEYBYTES {
+            return Err(HandshakeError::BadPublicKeyLength { got: public.len() });
+        }
+        if secret.len() != CRYPTO_SECRETKEYBYTES {
+            return Err(HandshakeError::BadSecretKeyLength { got: secret.len() });
+        }
+        let key = KemSecretKey::from_bytes(Suite::McEliece, secret, public)
+            .map_err(|_| HandshakeError::BadSecretKeyLength { got: secret.len() })?;
+        let secrets = SecretBundle::new([key])
+            .map_err(|_| HandshakeError::BadSecretKeyLength { got: secret.len() })?;
+        Ok(PeerIdentity::from_secrets(secrets))
+    }
+
+    /// Adopt a full secret bundle. The hedged path.
+    pub fn from_secrets(secrets: SecretBundle) -> PeerIdentity {
+        let public = secrets.public_bundle();
+        let id = public.id();
+        PeerIdentity {
+            secrets,
+            public,
+            id,
+        }
     }
 
     pub fn id(&self) -> PeerId {
         self.id
     }
 
-    /// The 255 KB public key. Publish once; peers cache it by id.
-    pub fn public_key(&self) -> &[u8; CRYPTO_PUBLICKEYBYTES] {
+    /// The 255 KB McEliece public key. Publish once; peers cache it by id.
+    ///
+    /// Still only the McEliece leg, because this is what the id is derived
+    /// from and what every existing bootstrap file carries. A peer that wants
+    /// the hedged handshake needs [`PeerIdentity::bundle`] as well.
+    pub fn public_key(&self) -> &[u8] {
+        self.mceliece_public()
+    }
+
+    /// The whole published bundle: what a peer must hold to hedge a session to
+    /// this one.
+    pub fn bundle(&self) -> &Bundle {
         &self.public
+    }
+
+    fn mceliece_public(&self) -> &[u8] {
+        self.public
+            .key_for(Suite::McEliece)
+            .expect("a bundle always carries the mandatory leg")
+            .as_bytes()
     }
 
     /// Secret key material for an explicitly persisted node identity.
     /// Callers must protect the returned bytes like any other private key.
-    pub fn secret_key(&self) -> &[u8; CRYPTO_SECRETKEYBYTES] {
-        self.secret.as_array()
+    ///
+    /// The McEliece leg only, matching the legacy identity-file shape.
+    /// [`PeerIdentity::secrets`] is what persists a hedged identity whole.
+    pub fn secret_key(&self) -> &[u8] {
+        self.secrets
+            .keys()
+            .iter()
+            .find(|key| key.suite() == Suite::McEliece)
+            .expect("a bundle always carries the mandatory leg")
+            .expose()
+    }
+
+    /// The whole secret bundle, for persisting a hedged identity.
+    pub fn secrets(&self) -> &SecretBundle {
+        &self.secrets
     }
 
     /// What other peers hold about this one.
     pub fn to_public(&self) -> PeerPublic {
         PeerPublic {
-            public: self.public.clone(),
+            bundle: self.public.clone(),
             id: self.id,
         }
     }
 
-    /// Accept an incoming handshake.
+    /// Accept an incoming handshake, hedged or legacy.
     ///
     /// Costs ~12 ms. See the module docs on amplification before exposing this
     /// to unauthenticated traffic.
+    ///
+    /// # Which path, and why length is enough to tell
+    ///
+    /// There is no version byte and none is needed. A legacy handshake is
+    /// exactly [`CRYPTO_CIPHERTEXTBYTES`]; a hedged one is the sum of this
+    /// identity's own legs. The responder knows both numbers without asking, so
+    /// it can serve old and new initiators at once — which is what lets
+    /// responders upgrade unilaterally, with no flag day and no negotiation.
+    ///
+    /// Negotiation is what is being avoided. A protocol that *asked* which
+    /// suites to use would be as strong as the weakest set an attacker could
+    /// force, which is the downgrade attack `crypto::kem` refuses by only ever
+    /// combining.
+    ///
+    /// # Truncation is a liveness attack, not a downgrade
+    ///
+    /// McEliece sorts first, so the first 96 bytes of a hedged ciphertext *are*
+    /// a valid McEliece ciphertext, and an attacker can cut a hedged handshake
+    /// down to the legacy path. It gains them nothing: the initiator derived
+    /// its keys through the combiner over every leg, the responder would derive
+    /// from the McEliece secret alone, the two disagree, and every frame fails
+    /// to authenticate. The session dies and nothing is read — which an
+    /// attacker who can truncate could achieve by dropping the packet anyway.
     pub fn accept(&self, initiator: PeerId, ciphertext: &[u8]) -> Result<Channel, HandshakeError> {
-        let ct: [u8; CRYPTO_CIPHERTEXTBYTES] =
-            ciphertext
-                .try_into()
+        let hedged_len: usize = self
+            .public
+            .suites()
+            .iter()
+            .map(|suite| suite.ciphertext_len())
+            .sum();
+
+        // Legacy first: for a McEliece-only identity the two lengths coincide,
+        // and the legacy derivation is the one an old peer will agree with.
+        let shared = if ciphertext.len() == CRYPTO_CIPHERTEXTBYTES {
+            self.secrets
+                .keys()
+                .iter()
+                .find(|key| key.suite() == Suite::McEliece)
+                .expect("a bundle always carries the mandatory leg")
+                .decapsulate(ciphertext)
                 .map_err(|_| HandshakeError::BadCiphertextLength {
                     got: ciphertext.len(),
-                })?;
-        let shared = decapsulate_boxed(&Ciphertext::from(ct), &self.secret);
+                })?
+        } else if ciphertext.len() == hedged_len {
+            let sealed = split_legs(&self.public, ciphertext)?;
+            self.secrets
+                .decapsulate(&sealed)
+                .map_err(|_| HandshakeError::BadCiphertextLength {
+                    got: ciphertext.len(),
+                })?
+        } else {
+            return Err(HandshakeError::BadCiphertextLength {
+                got: ciphertext.len(),
+            });
+        };
+
         // Classic McEliece is IND-CCA2: a malformed ciphertext yields a
         // pseudorandom shared secret rather than an error, so there is nothing
         // to check here. The mismatch surfaces at the first frame that fails to
         // authenticate, which is exactly where it should.
         Ok(Channel::new(
-            derive(shared.as_array(), initiator, self.id, &ct),
+            derive(shared.expose(), initiator, self.id, ciphertext),
             Role::Responder,
         ))
     }
 }
 
+/// Split a concatenated handshake ciphertext into its legs.
+///
+/// Concatenation in suite order rather than a length-prefixed framing: both
+/// ends already know the suite set — the responder from its own bundle, the
+/// initiator from the bundle it encapsulated to — and every suite's ciphertext
+/// is fixed-length, so the split is unambiguous. A framing would add bytes an
+/// attacker could vary while changing nothing either side is allowed to
+/// disagree about.
+fn split_legs(bundle: &Bundle, ciphertext: &[u8]) -> Result<Encapsulated, HandshakeError> {
+    let mut legs = Vec::with_capacity(bundle.keys().len());
+    let mut rest = ciphertext;
+    for suite in bundle.suites() {
+        let want = suite.ciphertext_len();
+        if rest.len() < want {
+            return Err(HandshakeError::BadCiphertextLength {
+                got: ciphertext.len(),
+            });
+        }
+        let (head, tail) = rest.split_at(want);
+        legs.push(Leg {
+            suite,
+            ciphertext: head.to_vec(),
+        });
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        return Err(HandshakeError::BadCiphertextLength {
+            got: ciphertext.len(),
+        });
+    }
+    Encapsulated::new(legs).map_err(|_| HandshakeError::BadCiphertextLength {
+        got: ciphertext.len(),
+    })
+}
+
 /// What a peer caches about another peer.
+///
+/// Carries a whole [`Bundle`], which may be one leg. A peer learned from a
+/// source that only conveys the McEliece key — a pre-bundle bootstrap file, the
+/// DHT's key-learning round — arrives as a one-leg bundle and gets exactly the
+/// handshake it always got. Hedging engages when the source carried more.
 #[derive(Clone)]
 pub struct PeerPublic {
-    public: Box<[u8; CRYPTO_PUBLICKEYBYTES]>,
+    bundle: Bundle,
     id: PeerId,
 }
 
@@ -221,31 +380,86 @@ impl PeerPublic {
     /// The id is computed here rather than taken on trust, so a peer cannot
     /// hand you a key under someone else's name.
     pub fn from_bytes(public: &[u8]) -> Result<PeerPublic, HandshakeError> {
-        let public: Box<[u8; CRYPTO_PUBLICKEYBYTES]> =
-            boxed_array(public).ok_or(HandshakeError::BadPublicKeyLength { got: public.len() })?;
-        let id = peer_id_of(public.as_ref());
-        Ok(PeerPublic { public, id })
+        if public.len() != CRYPTO_PUBLICKEYBYTES {
+            return Err(HandshakeError::BadPublicKeyLength { got: public.len() });
+        }
+        let key = KemPublicKey::from_bytes(Suite::McEliece, public)
+            .map_err(|_| HandshakeError::BadPublicKeyLength { got: public.len() })?;
+        let bundle = Bundle::new([key])
+            .map_err(|_| HandshakeError::BadPublicKeyLength { got: public.len() })?;
+        Ok(PeerPublic::from_bundle(bundle))
+    }
+
+    /// Adopt a whole bundle. The hedged path.
+    ///
+    /// The id comes from the bundle rather than being taken on trust, exactly
+    /// as [`PeerPublic::from_bytes`] derives it — and it is the same id, since
+    /// [`Bundle::id`] hashes the McEliece leg alone.
+    pub fn from_bundle(bundle: Bundle) -> PeerPublic {
+        let id = bundle.id();
+        PeerPublic { bundle, id }
     }
 
     pub fn id(&self) -> PeerId {
         self.id
     }
 
-    pub fn as_bytes(&self) -> &[u8; CRYPTO_PUBLICKEYBYTES] {
-        &self.public
+    /// The McEliece leg, which is what the id commits to and what pre-bundle
+    /// readers expect.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.bundle
+            .key_for(Suite::McEliece)
+            .expect("a bundle always carries the mandatory leg")
+            .as_bytes()
     }
 
-    /// Open a session to this peer. ~22 µs, 96 bytes on the wire.
-    pub fn initiate(&self, initiator: PeerId) -> ([u8; CRYPTO_CIPHERTEXTBYTES], Channel) {
-        let mut key_bytes = self.public.clone();
-        let pk = PublicKey::from(key_bytes.as_mut());
-        let (ct, shared) = encapsulate_boxed(&pk, &mut OsRng);
-        let ct_bytes = *ct.as_array();
+    pub fn bundle(&self) -> &Bundle {
+        &self.bundle
+    }
+
+    /// Does a session to this peer survive a break of any one hardness family?
+    pub fn is_hedged(&self) -> bool {
+        self.bundle.is_hedged()
+    }
+
+    /// Open a session to this peer.
+    ///
+    /// 96 bytes to a peer known only by its McEliece key; 5,617 to one whose
+    /// whole bundle is known. **Every leg the peer published is encapsulated
+    /// to, never a subset.** Choosing a subset would be negotiation by another
+    /// name, and a session would then be as strong as the fewest legs an
+    /// attacker could talk either side into — the downgrade `crypto::kem`
+    /// exists to refuse. The wire cost is the honest price of that refusal, and
+    /// it is paid per dial, not per frame.
+    pub fn initiate(&self, initiator: PeerId) -> (Vec<u8>, Channel) {
+        // A one-leg bundle takes the **raw** McEliece secret, not the combiner
+        // over a single leg. Not an optimisation: a peer running the pre-bundle
+        // build decapsulates and uses the shared secret directly, so combining
+        // here would derive a different key and every session with an old node
+        // would fail to authenticate. The single-leg case must stay byte- and
+        // key-identical to what it always was, and `accept`'s legacy branch is
+        // the other half of that promise.
+        let (wire, shared) = if self.bundle.keys().len() == 1 {
+            let key = self
+                .bundle
+                .key_for(Suite::McEliece)
+                .expect("a bundle always carries the mandatory leg");
+            let (ciphertext, secret) = key.encapsulate(&mut OsRng);
+            (ciphertext, secret)
+        } else {
+            let (sealed, secret) = self.bundle.encapsulate(&mut OsRng);
+            let wire: Vec<u8> = sealed
+                .legs()
+                .iter()
+                .flat_map(|leg| leg.ciphertext.iter().copied())
+                .collect();
+            (wire, secret)
+        };
         let channel = Channel::new(
-            derive(shared.as_array(), initiator, self.id, &ct_bytes),
+            derive(shared.expose(), initiator, self.id, &wire),
             Role::Initiator,
         );
-        (ct_bytes, channel)
+        (wire, channel)
     }
 }
 
@@ -276,7 +490,7 @@ fn derive(
     shared: &[u8; 32],
     initiator: PeerId,
     responder: PeerId,
-    ciphertext: &[u8; CRYPTO_CIPHERTEXTBYTES],
+    ciphertext: &[u8],
 ) -> SessionKeys {
     let leg = |label: &str| -> [u8; 32] {
         let mut h = Sha256::new();
@@ -550,15 +764,6 @@ pub fn peer_id_of(public: &[u8; CRYPTO_PUBLICKEYBYTES]) -> PeerId {
     crate::crypto::kem::key_id(public)
 }
 
-fn boxed_array<const N: usize>(bytes: &[u8]) -> Option<Box<[u8; N]>> {
-    if bytes.len() != N {
-        return None;
-    }
-    let mut out = Box::new([0u8; N]);
-    out.copy_from_slice(bytes);
-    Some(out)
-}
-
 fn short(id: &PeerId) -> String {
     id.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
@@ -608,11 +813,21 @@ mod tests {
 
     #[test]
     fn the_wire_cost_is_a_ciphertext_not_a_key() {
-        // The whole reason the public key is a cached long-term identity.
+        // The whole reason the public key is a cached long-term identity: even
+        // hedged across every leg, the handshake is three orders of magnitude
+        // smaller than the key it opens a session to.
         let (alice, bob) = pair();
         let (ct, _) = bob.to_public().initiate(alice.id());
-        assert_eq!(ct.len(), 96);
         assert_eq!(bob.public_key().len(), 261_120);
+
+        let legacy = PeerPublic::from_bytes(bob.public_key()).unwrap();
+        let (short, _) = legacy.initiate(alice.id());
+        assert_eq!(short.len(), 96, "a McEliece-only peer costs what it did");
+
+        // Hedged: 96 + 1,088 + 4,433. HQC's ciphertext dominates, which is the
+        // number to look at first if this ever needs to come down.
+        assert_eq!(ct.len(), 5_617);
+        assert!(ct.len() * 46 < bob.public_key().len());
     }
 
     #[test]
@@ -738,14 +953,94 @@ mod tests {
     #[test]
     fn identities_persist_and_restore() {
         let (alice, _) = pair();
-        let restored =
-            PeerIdentity::from_bytes(alice.public_key(), alice.secret.as_array()).unwrap();
+        // The legacy identity-file shape: the McEliece leg alone. It restores
+        // to a one-leg identity with the *same id*, which is the property that
+        // let bundles be added without reissuing anybody's name.
+        let restored = PeerIdentity::from_bytes(alice.public_key(), alice.secret_key()).unwrap();
         assert_eq!(restored.id(), alice.id());
+        assert!(!restored.bundle().is_hedged());
         // And a restored identity can still accept.
         let (ct, mut chan) = restored.to_public().initiate([1u8; 32]);
+        assert_eq!(
+            ct.len(),
+            CRYPTO_CIPHERTEXTBYTES,
+            "one leg, legacy wire size"
+        );
         let mut theirs = restored.accept([1u8; 32], &ct).unwrap();
         let (n, f) = chan.seal(b"ok", b"c").unwrap();
         assert_eq!(theirs.open(n, &f, b"c").unwrap(), b"ok");
+    }
+
+    #[test]
+    fn a_hedged_identity_keeps_the_id_its_mceliece_leg_gave_it() {
+        let hedged = PeerIdentity::generate();
+        assert!(hedged.bundle().is_hedged());
+        // The id is the hash of the McEliece leg and nothing else, so the DHT,
+        // every bootstrap file and every `PeerRecord` naming this peer stay
+        // valid. This is the whole reason the change needed no migration.
+        let leg: &[u8; CRYPTO_PUBLICKEYBYTES] =
+            hedged.public_key().try_into().expect("mceliece leg length");
+        assert_eq!(hedged.id(), peer_id_of(leg));
+
+        let legacy = PeerIdentity::from_bytes(hedged.public_key(), hedged.secret_key()).unwrap();
+        assert_eq!(
+            legacy.id(),
+            hedged.id(),
+            "dropping the extra legs must not rename the peer"
+        );
+    }
+
+    #[test]
+    fn a_hedged_session_is_bigger_on_the_wire_and_still_opens() {
+        let alice = PeerIdentity::generate();
+        let bob = PeerIdentity::generate();
+        let (ct, mut chan) = bob.to_public().initiate(alice.id());
+        // Every leg, never a subset -- see `PeerPublic::initiate`.
+        let expected: usize = SUITES.iter().map(|s| s.ciphertext_len()).sum();
+        assert_eq!(ct.len(), expected);
+        assert!(ct.len() > CRYPTO_CIPHERTEXTBYTES);
+
+        let mut theirs = bob.accept(alice.id(), &ct).unwrap();
+        let (n, f) = chan.seal(b"hedged", b"c").unwrap();
+        assert_eq!(theirs.open(n, &f, b"c").unwrap(), b"hedged");
+    }
+
+    #[test]
+    fn a_hedged_responder_still_serves_a_legacy_initiator() {
+        // The rollout property: responders upgrade unilaterally. A node that
+        // has grown legs must keep talking to one that has not, or nobody can
+        // upgrade first.
+        let hedged = PeerIdentity::generate();
+        let legacy_view = PeerPublic::from_bytes(hedged.public_key()).unwrap();
+        assert!(!legacy_view.is_hedged());
+
+        let (ct, mut chan) = legacy_view.initiate([9u8; 32]);
+        assert_eq!(ct.len(), CRYPTO_CIPHERTEXTBYTES);
+        let mut theirs = hedged.accept([9u8; 32], &ct).unwrap();
+        let (n, f) = chan.seal(b"old client", b"c").unwrap();
+        assert_eq!(theirs.open(n, &f, b"c").unwrap(), b"old client");
+    }
+
+    #[test]
+    fn truncating_a_hedged_handshake_kills_the_session_rather_than_downgrading_it() {
+        // McEliece sorts first, so the first 96 bytes of a hedged ciphertext
+        // are a valid McEliece ciphertext and an attacker can cut one down.
+        // They gain nothing: the two sides derive different keys and every
+        // frame fails. A liveness attack already available by dropping packets.
+        let alice = PeerIdentity::generate();
+        let bob = PeerIdentity::generate();
+        let (ct, mut chan) = bob.to_public().initiate(alice.id());
+
+        let truncated = &ct[..CRYPTO_CIPHERTEXTBYTES];
+        let mut theirs = bob
+            .accept(alice.id(), truncated)
+            .expect("a truncated handshake still decapsulates -- that is the point");
+        let (n, f) = chan.seal(b"secret", b"c").unwrap();
+        assert_eq!(
+            theirs.open(n, &f, b"c"),
+            Err(HandshakeError::NotAuthentic),
+            "a downgraded session must not carry data"
+        );
     }
 
     #[test]

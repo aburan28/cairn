@@ -107,14 +107,40 @@ next, an identity that names one suite is the thing that makes responding
 expensive. A suite-agnostic id with a dual-id transition is the fix and is not
 built.
 
-**The transport identity is worse off than a committee member.** `PeerIdentity`
-is a bare McEliece keypair, not a `Bundle` at all, so a session key rests on
-that one family with no combiner in front of it — where committee shares at
-least get the hedging rule above. Recovering a peer's McEliece secret is then
-both a confidentiality break and an impersonation one, since the id is a hash of
-the public key it is derived from. Closing it means giving `PeerIdentity` a
-bundle and versioning the handshake, which is a larger change than the sealing
-path and has not been made.
+**`PeerIdentity` is now a bundle**, and a new one is generated over every suite
+— the extra legs cost microseconds against McEliece's 243 ms keygen, so hedged
+is the default rather than an option nobody turns on. `PeerIdentity::accept`
+reads either shape, distinguished by ciphertext length with no version byte:
+legacy is exactly 96 bytes, hedged is the sum of that identity's own legs, and
+the responder knows both numbers without asking. That is what lets **responders
+upgrade unilaterally** — no flag day, no negotiation, and negotiation is the
+point being avoided, since a protocol that asked which suites to use would be as
+strong as the weakest set an attacker could force.
+
+Truncation is a liveness attack and not a downgrade. McEliece sorts first, so
+the first 96 bytes of a hedged ciphertext are a valid McEliece ciphertext and
+can be cut down — but the initiator derived through the combiner and the
+responder would derive from the McEliece secret alone, so the two disagree and
+every frame fails. Nothing is read. An attacker who can truncate could drop the
+packet instead.
+
+**What is still McEliece-only: the TCP dial itself.** `transport::connect`
+sends a fixed `[32-byte id][96-byte ciphertext]` hello with no length prefix and
+no version field, so a responder reading 128 bytes cannot tell a legacy
+handshake from the first 128 bytes of a hedged one. Until that framing is
+decided the transport uses the legacy path deliberately, and the alternatives
+were rejected rather than overlooked: probing for extra bytes with a timeout
+taxes every legacy dial, and reading a length out of what may be ciphertext buys
+compatibility with a heuristic. Sealed committee shares — the payload actually
+worth protecting — are hedged today by `crypto::envelope`, which frames its own
+ciphertext and has no such constraint.
+
+**The id coupling is the other half.** Because the peer id is the hash of the
+McEliece key, the answer to "can we stop depending on McEliece?" is "no, every
+peer id is derived from it" — a migration argument dressed as a cryptographic
+one. It is also what made *this* change free: growing legs moved no id, so
+nothing left the DHT and no bootstrap file or `PeerRecord` was orphaned. A
+suite-agnostic id with a dual-id transition is the fix and is not built.
 
 Rank-metric schemes (RQC, ROLLO) and CSIDH were considered and are not here:
 the rank ones were broken by algebraic attacks in 2020 and dropped by NIST, and

@@ -1965,11 +1965,11 @@ mod tests {
         );
         // And a real one round-trips.
         let identity = crate::p2p::handshake::PeerIdentity::generate();
-        let hex = encode_key(identity.public_key().as_ref());
+        let hex = encode_key(identity.public_key());
         assert_eq!(hex.len(), KEY_HEX_LEN);
         assert_eq!(
             decode_key(NodeId::from_bytes(identity.id()), &hex).as_deref(),
-            Some(identity.public_key().as_ref() as &[u8])
+            Some(identity.public_key())
         );
         // Wrong length is refused before anything is copied.
         assert_eq!(decode_key(NodeId::from_bytes(identity.id()), "abcd"), None);

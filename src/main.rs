@@ -5496,10 +5496,7 @@ fn cmd_blob_serve(
         out,
         Value::object([
             ("addr", Value::string(listener.addr().to_string())),
-            (
-                "public",
-                Value::string(hex_of(identity.public_key().as_slice())),
-            ),
+            ("public", Value::string(hex_of(identity.public_key()))),
         ])
         .canonical_string(),
     );

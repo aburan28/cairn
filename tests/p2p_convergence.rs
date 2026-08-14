@@ -646,7 +646,7 @@ fn a_lookup_crosses_a_hop_and_learns_the_key_it_needs_to_do_it() {
 
     // Bob serves the key on the next round. Verified against the id, which is
     // what makes relaying it safe: a peer id *is* sha256(public key).
-    let key = proofwork::p2p::dht::encode_key(carol.public_key().as_ref());
+    let key = proofwork::p2p::dht::encode_key(carol.public_key());
     let adopted = proofwork::p2p::dht::decode_key(carol_node, &key).expect("carol's real key");
     alice.with_book(|book| {
         book.insert(Endpoint::new(
@@ -680,7 +680,7 @@ fn a_forged_key_never_reaches_the_address_book() {
     let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
 
     // Mallory's real, well-formed key, offered under carol's name.
-    let forged = proofwork::p2p::dht::encode_key(mallory.public_key().as_ref());
+    let forged = proofwork::p2p::dht::encode_key(mallory.public_key());
     assert_eq!(
         proofwork::p2p::dht::decode_key(carol_node, &forged),
         None,
@@ -688,7 +688,7 @@ fn a_forged_key_never_reaches_the_address_book() {
     );
     // Carol's own key still works, so the check is not simply refusing
     // everything.
-    let honest = proofwork::p2p::dht::encode_key(carol.public_key().as_ref());
+    let honest = proofwork::p2p::dht::encode_key(carol.public_key());
     assert!(proofwork::p2p::dht::decode_key(carol_node, &honest).is_some());
 }
 
