@@ -71,9 +71,25 @@ with extra steps.
 | `ml-kem-768` (FIPS 203) | module-LWE lattice | 1,184 B | 1,088 B |
 | `hqc-128` | code-based, quasi-cyclic | 2,241 B | 4,433 B |
 
-Two hardness assumptions, and the two code-based suites from different code
-families — a bundle of two lattice schemes would fall to one break, which is why
-the cheapest two are not the ones chosen.
+Three hardness assumptions, one per suite — `crypto::kem::Family` is the unit,
+not the label. "Both code-based" is not a correlation: the 2026 cryptanalysis of
+binary Goppa codes (the syzygy distinguisher, and the subexponential and
+quasipolynomial key-recovery results after it) works by recovering the hidden
+structured code behind a McEliece public key, and HQC has no hidden structured
+code to recover. A bundle of two schemes in *one* family would fall to a single
+break, which is why the cheapest two are not the ones chosen.
+
+**A committee is as strong as its `threshold` weakest members.** Each member's
+share is sealed to their whole bundle, so a member carrying one family is opened
+by one break of it — and an attacker who breaks that family holds exactly the
+unhedged members' shares. They reconstruct the content key at `threshold` of
+them, so `SealedEnvelope::seal` refuses a committee with that many. The bound is
+tight rather than cautious: at `threshold - 1` a family break yields one share
+too few. Nothing refuses an unhedged *member*, which would cost liveness for no
+security.
+
+None of this says `mceliece348864` is broken. It is not. It says what a single
+future result would cost, which is the only thing a combiner is for.
 
 **A node's identity stays the McEliece key alone.** `Bundle::id()` is
 `sha256(McEliece public key)`, deliberately not a hash over the whole bundle: a
@@ -82,6 +98,23 @@ the DHT, and orphan every bootstrap file and `PeerRecord` naming it. Adding a
 leg changes what the cryptography rests on and changes no identity. The other
 legs are still bound — the combiner absorbs every suite and ciphertext, so a
 bundle whose optional keys were swapped derives a different secret.
+
+**That coupling is now a liability, and it is worth naming.** Because the peer
+id is the hash of the McEliece key, the answer to "can we stop depending on
+McEliece?" is "no, every peer id is derived from it" — which is a migration
+argument dressed as a cryptographic one. Whatever the Goppa cryptanalysis does
+next, an identity that names one suite is the thing that makes responding
+expensive. A suite-agnostic id with a dual-id transition is the fix and is not
+built.
+
+**The transport identity is worse off than a committee member.** `PeerIdentity`
+is a bare McEliece keypair, not a `Bundle` at all, so a session key rests on
+that one family with no combiner in front of it — where committee shares at
+least get the hedging rule above. Recovering a peer's McEliece secret is then
+both a confidentiality break and an impersonation one, since the id is a hash of
+the public key it is derived from. Closing it means giving `PeerIdentity` a
+bundle and versioning the handshake, which is a larger change than the sealing
+path and has not been made.
 
 Rank-metric schemes (RQC, ROLLO) and CSIDH were considered and are not here:
 the rank ones were broken by algebraic attacks in 2020 and dropped by NIST, and

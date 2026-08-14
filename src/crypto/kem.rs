@@ -31,11 +31,37 @@
 //! | [`Suite::MlKem768`] | module-LWE lattice | 1,184 B | 1,088 B | FIPS 203, optional |
 //! | [`Suite::Hqc128`] | code-based (quasi-cyclic) | 2,241 B | 4,433 B | NIST-selected, optional, **on a release-candidate crate** |
 //!
-//! The three are deliberately from *two different* hardness assumptions, and
-//! the two code-based ones from different code families. A bundle of McEliece
-//! and ML-KEM survives a break of either lattices or Goppa codes; a bundle of
-//! two lattice schemes would not, which is the whole reason not to pick the
-//! cheapest two.
+//! The three are deliberately from *three different* hardness assumptions —
+//! see [`Family`], which is the unit that matters. A bundle of McEliece and
+//! ML-KEM survives a break of either lattices or Goppa codes; a bundle of two
+//! schemes in **one** family would not, which is the whole reason not to pick
+//! the cheapest two.
+//!
+//! Read that as a statement about families and not about *labels*. "Both
+//! code-based" is not a correlation: [`Suite::Hqc128`] and [`Suite::McEliece`]
+//! fall in different families precisely because the attacks that matter target
+//! different things — recovering a hidden structured Goppa code, versus
+//! decoding random quasi-cyclic codes. A future plain-LWE leg beside ML-KEM
+//! would be the mirror image, defensible for the same reason: unstructured and
+//! module lattices fail differently, so they are not one assumption wearing two
+//! names. What the rule forbids is two suites in one [`Family`] being counted
+//! as diversity.
+//!
+//! # Mandatory is structural; hedging is the security property
+//!
+//! [`Suite::is_mandatory`] says a bundle must carry McEliece. That is a
+//! *structural* rule and always was: [`Bundle::id`] is the hash of the McEliece
+//! key, so a bundle without one has no peer id. It says nothing about how much
+//! the bundle survives, and reading it as a security guarantee is the mistake
+//! this section exists to prevent.
+//!
+//! [`Bundle::is_hedged`] is the security property: does this bundle span more
+//! than one [`Family`]? A bundle that does not is opened by a single break, and
+//! [`super::envelope::SealedEnvelope::seal`] refuses a committee with
+//! `threshold` such members. The two rules are independent, and the coupling of
+//! identity to one suite is a known problem — it is why "should we drop
+//! McEliece?" currently answers "no, because peer ids are its hash", which is
+//! not a cryptographic reason. See `docs/p2p.md`.
 //!
 //! ## What was considered and is not here
 //!
@@ -89,6 +115,7 @@
 //!   Signatures live in [`super::identity`].
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest as _, Sha256};
@@ -238,6 +265,53 @@ pub enum Suite {
 /// Every suite this build implements, in bundle order.
 pub const SUITES: [Suite; 3] = [Suite::McEliece, Suite::MlKem768, Suite::Hqc128];
 
+/// The hardness assumption a suite rests on.
+///
+/// # Why the suite is not the unit of diversity
+///
+/// A bundle survives a break of any one *assumption*, not of any one *scheme*.
+/// Two suites in the same family fall together, so counting suites overstates
+/// how hedged a bundle is — and until this existed there was no way to say so
+/// in code. The rule was written as [`Suite::is_mandatory`], which names one
+/// scheme, so the only policy expressible was "has McEliece", and that is the
+/// property that stopped being reassuring.
+///
+/// The split matters concretely right now. The 2026 cryptanalysis of binary
+/// Goppa codes — the syzygy distinguisher and the subexponential and
+/// quasipolynomial key-recovery results that followed — is an attack on
+/// **[`Family::GoppaCode`] specifically**. It works by recovering the hidden
+/// structured code behind the public key. [`Family::QuasiCyclicCode`] has no
+/// hidden structured code to recover: HQC rests on decoding *random*
+/// quasi-cyclic codes. So the two are code-based and are not correlated under
+/// this attack, which is exactly why "code-based" is the wrong granularity and
+/// this enum is the right one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Family {
+    /// Decoding a binary Goppa code whose structure is hidden by the public
+    /// key. Classic McEliece.
+    GoppaCode,
+    /// Syndrome decoding of random quasi-cyclic codes. HQC.
+    QuasiCyclicCode,
+    /// Learning with errors over module lattices. ML-KEM.
+    ModuleLattice,
+}
+
+impl Family {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Family::GoppaCode => "goppa-code",
+            Family::QuasiCyclicCode => "quasi-cyclic-code",
+            Family::ModuleLattice => "module-lattice",
+        }
+    }
+}
+
+impl fmt::Display for Family {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl Suite {
     /// The wire name. These strings reach records and are hashed into the
     /// combiner transcript, so they are as consensus-critical as any other
@@ -289,8 +363,22 @@ impl Suite {
     }
 
     /// Is this the suite a bundle may not omit?
+    ///
+    /// A *structural* rule, kept because [`Bundle::id`] is the hash of the
+    /// McEliece key and a bundle without one has no peer id. It is not a
+    /// security rule and must not be read as one — see [`Suite::family`] for
+    /// the property that decides how much a bundle survives.
     pub const fn is_mandatory(self) -> bool {
         matches!(self, Suite::McEliece)
+    }
+
+    /// The hardness assumption this suite rests on.
+    pub const fn family(self) -> Family {
+        match self {
+            Suite::McEliece => Family::GoppaCode,
+            Suite::MlKem768 => Family::ModuleLattice,
+            Suite::Hqc128 => Family::QuasiCyclicCode,
+        }
     }
 
     /// Generate a keypair, drawing every byte of randomness from `rng`.
@@ -662,6 +750,28 @@ impl Bundle {
 
     pub fn suites(&self) -> Vec<Suite> {
         self.keys.iter().map(|key| key.suite).collect()
+    }
+
+    /// The distinct hardness assumptions this bundle rests on.
+    pub fn families(&self) -> BTreeSet<Family> {
+        self.keys.iter().map(|key| key.suite.family()).collect()
+    }
+
+    /// Does breaking one hardness assumption open everything sealed to this
+    /// bundle?
+    ///
+    /// The combiner hashes every leg's shared secret into the final key, so
+    /// opening a share requires breaking **all** legs. A bundle spanning two
+    /// families therefore survives a break of either; a bundle inside one
+    /// family does not, however many suites it carries.
+    ///
+    /// Note what this is *not*: a claim that an unhedged bundle is insecure
+    /// today. `mceliece348864` is not practically broken. It is a claim about
+    /// what a single future result would cost, which is the only thing worth
+    /// designing against — and the whole reason the bundle is a combiner
+    /// rather than a negotiation.
+    pub fn is_hedged(&self) -> bool {
+        self.families().len() > 1
     }
 
     /// The mandatory Classic McEliece key. Present by construction.
