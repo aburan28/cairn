@@ -108,6 +108,7 @@ use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::kem::{Bundle, Encapsulated, KemError, Leg, SecretBundle, Suite, SUITES};
+use super::policy::Policy;
 use super::shamir::{self, Share};
 use crate::canonical::Value;
 
@@ -726,9 +727,14 @@ impl SealedEnvelope {
         // of `mceliece348864`, and a committee whose members are all
         // McEliece-only is one result away from being opened wholesale. See
         // `Family` in `super::kem`.
+        //
+        // "Hedged" is the *policy's* definition, not a constant here: raising
+        // `Policy::min_families` is how the network responds to cryptanalysis,
+        // and it must not require editing this function to take effect.
+        let policy = Policy::current();
         let unhedged = committee
             .iter()
-            .filter(|member| !member.keys.is_hedged())
+            .filter(|member| policy.admits(&member.keys).is_err())
             .count();
         if unhedged >= usize::from(threshold) {
             return Err(EnvelopeError::CommitteeNotHedged {

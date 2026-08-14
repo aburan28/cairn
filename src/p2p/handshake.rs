@@ -50,7 +50,7 @@ use classic_mceliece_rust::{CRYPTO_CIPHERTEXTBYTES, CRYPTO_PUBLICKEYBYTES, CRYPT
 
 use crate::crypto::kem::{
     Bundle, Encapsulated, Leg, PublicKey as KemPublicKey, SecretBundle, SecretKey as KemSecretKey,
-    Suite, SUITES,
+    Suite,
 };
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
@@ -156,7 +156,13 @@ impl PeerIdentity {
     /// microseconds. A new identity is hedged by default, because an option
     /// nobody turns on protects nobody.
     pub fn generate() -> PeerIdentity {
-        let (public, secrets) = SecretBundle::generate(&SUITES, &mut OsRng);
+        // What to publish comes from the policy, not from `SUITES`. Deprecating
+        // a suite then stops new identities carrying it with no change here --
+        // which is the difference between a registry and a comment.
+        let (public, secrets) = SecretBundle::generate(
+            &crate::crypto::policy::Policy::current().suites_to_publish(),
+            &mut OsRng,
+        );
         let id = public.id();
         PeerIdentity {
             secrets,
@@ -996,7 +1002,10 @@ mod tests {
         let bob = PeerIdentity::generate();
         let (ct, mut chan) = bob.to_public().initiate(alice.id());
         // Every leg, never a subset -- see `PeerPublic::initiate`.
-        let expected: usize = SUITES.iter().map(|s| s.ciphertext_len()).sum();
+        let expected: usize = crate::crypto::kem::SUITES
+            .iter()
+            .map(|s| s.ciphertext_len())
+            .sum();
         assert_eq!(ct.len(), expected);
         assert!(ct.len() > CRYPTO_CIPHERTEXTBYTES);
 
