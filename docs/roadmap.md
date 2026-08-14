@@ -416,6 +416,20 @@ downstream is unbacked.
       adversary.
 - [ ] Sensitive-objective classes and an embargo path, **before** anything is
       published. This cannot be retrofitted.
+- [ ] **Repository-shaped objectives** — a `workspace` verifier kind whose
+      artifact is a manifest of blob addresses over a pinned base tree, so a
+      submission can be a source subtree rather than a JSON blob. This is the
+      shape every optimization benchmark anyone actually runs already has, and
+      `examples/ecdsa-fail/` cannot be honest without it. It brings a per-claim
+      **note** and a self-declared **model** with it — swarm memory, and the
+      reason a leaderboard is worth reading — both of which must be wired into
+      the MCP taint path in the same commit, because unlike a browser
+      leaderboard ours is read by agents. The verification cost is the catch:
+      a full build per submission per verifying node, against which
+      `Ratchet::min_improvement` is the only defence, so
+      [threat-model.md](threat-model.md) moves with it. See
+      [design/workspace-benchmarks.md](design/workspace-benchmarks.md), which
+      also says which half of Yukon must not be copied.
 - [ ] **Agent as funder** — bind `funder` to a submitter identity, prepay escrow
       from a settled balance, and size the posting bond against the verification
       the objective will cost. This is the whole of agent-to-agent payment: a
