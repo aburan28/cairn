@@ -57,11 +57,39 @@ The corollary is the whole engineering constraint: **the network can only work o
 tasks whose outputs are cheap to check.** That is a specification for what to
 build, not a limitation to route around.
 
-## Quick start
+## Install
+
+```sh
+curl -fsSL https://github.com/aburan28/distributed-researcher/releases/latest/download/install.sh | sh
+```
+
+Detects the platform, downloads the matching tarball, checks it against the
+published `.sha256`, and installs all five binaries to `~/.local/bin`.
+`--version` pins a release, `--bin-dir` picks somewhere else, and on Linux
+`--libc gnu` takes the dynamically-linked build instead of the static musl one.
+Linux amd64/arm64 and macOS Intel/Apple Silicon; no Windows, because the
+verifier sandbox is seatbelt and bubblewrap.
+
+**What that checksum does and does not prove.** It comes from the same server as
+the tarball, so it detects a corrupted download and nothing else — there is no
+signing key here yet, and saying otherwise would be worse than saying this. The
+check that means something is the one this project exists for, and it runs
+against bytes that ship in the repository:
+
+```sh
+proofwork --log launch/proofwork.jsonl --root . audit
+```
+
+From source instead:
 
 ```sh
 cargo build --release
 cargo install --path .        # puts `proofwork` and the other binaries on PATH
+```
+
+## Quick start
+
+```sh
 cargo test                    # the full suite, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
@@ -131,10 +159,35 @@ whole point — they need not trust the server that served it.
 
 Add `--queue ./queue` to accept `POST /submit`. Submissions are *queued*, never
 appended: the operator's node admits them, re-checking every rule against the
-whole log. That is `proofwork-p2p --queue ./queue` if a daemon is running — it
-holds the ledger's single write lock, so nothing else can — or
-`proofwork drain --queue ./queue` if one is not. See
-[serving.md](docs/serving.md).
+whole log. See [serving.md](docs/serving.md).
+
+Which raises the question of who admits them — a `Ledger` has one writer, so a
+publisher on its own can only ever queue. The answer is usually not a second
+process:
+
+### One node, one process
+
+```sh
+proofwork-p2p --identity id.json --root-key root.key --checkpoint cp.json \
+    --listen 0.0.0.0:9000 --log proofwork.jsonl --root . \
+    --queue ./queue --serve 0.0.0.0:8080
+```
+
+`--serve` puts the HTTP server on a thread beside the sync loop, against the
+same log. Because that process is the one holding the write lock, it drains the
+queue it fills: a submission arriving over HTTP is admitted on the next tick,
+with nobody running `proofwork drain` at all.
+
+`proofwork-serve --p2p-listen 0.0.0.0:9000 --identity … --root-key … --checkpoint …`
+is the same daemon entered from the other side — both call
+`proofwork::daemon::run`, so there is one implementation of "be a node" rather
+than one per binary. `make node` runs it with the repository's defaults, and
+`./scripts/node-smoke.sh` is the test that a submission really does get admitted
+by the process that received it.
+
+The split topology still works and is still right for a read-only mirror:
+`proofwork-serve` alone takes no lock and holds no `Node`, so it is safe to
+point at a log something else is writing. What it cannot do is admit anything.
 
 ### Start a p2p node
 

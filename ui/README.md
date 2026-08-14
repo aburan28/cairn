@@ -4,17 +4,32 @@ A small Next.js app that reads one node's epoch chain over `GET /chain` and
 draws it as a chain: each link, the link it commits to, and the claims it
 settled.
 
-```sh
-# a node to read (from the repository root)
-make serve
+**You probably do not need to run this.** It is built into the binaries and
+served by the node itself at **`/ui/`** — so on a machine that installed
+proofwork with `install.sh`, reading your own node's chain is a URL, not a
+toolchain:
 
-# the reader
-cd ui && npm install && npm run dev     # http://localhost:3000
+```sh
+proofwork-p2p --identity id.json --root-key root.key --checkpoint cp.json \
+    --listen 0.0.0.0:9000 --log proofwork.jsonl --root . --serve 0.0.0.0:8080
+# then http://localhost:8080/ui/
 ```
 
-Point it elsewhere with `NEXT_PUBLIC_PROOFWORK_NODE`, or just edit the URL in
-the page — the whole value of this is comparing one node's head against a
-peer's, so switching nodes must not need a redeploy.
+To build it into the binaries from a checkout, `make ui-build` (the `ui` cargo
+feature is off by default, because `cargo build` must work without Node).
+
+To work *on* the reader:
+
+```sh
+make node          # a node to read, from the repository root
+make ui            # the reader in dev mode, http://localhost:3000
+```
+
+In dev mode the page is on a different origin from the node, so point it with
+`NEXT_PUBLIC_PROOFWORK_NODE=http://127.0.0.1:8080` or just edit the URL in the
+page. Served from the node, the default is same-origin and there is nothing to
+configure — and the URL box still retargets it, which is the whole value here:
+comparing one node's head against a peer's must not need a redeploy.
 
 ## What it is for
 
@@ -43,18 +58,27 @@ else. A break is shown in red and the head is called untrustworthy.
 over an SSH tunnel on a box with no route out. Same reason the server-rendered
 page is self-contained.
 
-**Not a static export.** `output: "export"` would bake a chain in at build time
-— a snapshot pretending to be a reader.
+**A static export, and the objection that used to be here does not apply.** The
+old note said `output: "export"` would bake a chain in at build time — "a
+snapshot pretending to be a reader". That is true of a *server* component that
+fetches during the build. Every page here is `"use client"` and fetches in
+`useEffect` against a URL the page lets you edit, so the export contains no
+chain, no head and no objective. It is the reader, shipped as files rather than
+as a Node process — which is what lets the daemon carry it.
 
-## There are two of these, on purpose
+## There are still two of these, on purpose
 
 `proofwork-serve` also renders the chain itself at **`GET /chain.html`**: one
-self-contained 3.7 KB page, no Node.js, no build step, nothing to install. That
-is the one to use on a server, and it is what `serve-smoke.sh` tests.
+self-contained 3.7 KB page written in Rust, no build step of any kind. It is
+what `serve-smoke.sh` tests, and it is what a binary built *without* the `ui`
+feature has — `/ui/` then 404s with a message that says so, rather than a
+generic one.
 
-This app is the richer client — a URL you can retarget, a visual spine, the
-consistency check. It needs a Node toolchain, which a node operator should not
-be required to have just to look at their own chain. Hence both.
+This app is the richer client: three pages, a URL you can retarget, and the
+consistency check below. It used to need a Node toolchain at *run* time, which a
+node operator should not have to install to look at their own chain. Now the
+toolchain is needed only to *build* it, once, in CI — `release.yml` has a job
+that exports it and every release tarball carries the result.
 
 ## If the page renders unstyled
 

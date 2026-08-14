@@ -14,6 +14,17 @@ readme = "README.md"
 [features]
 default = []
 
+# Embed the built `ui/` reader in the binary and serve it at `/ui/`.
+#
+# Off by default because it needs `ui/out`, which needs a Node toolchain, and a
+# Rust crate that cannot be built with cargo alone is a crate nobody can
+# contribute to. `build.rs` fails loudly rather than shipping an empty page when
+# the feature is on and the directory is not there.
+#
+# The build script generates Rust and compiles no C, so the musl note on
+# `release.yml` still holds: there is still no `cc` in the graph.
+ui = []
+
 # The `swarm` TCP driver, which is **not encrypted**.
 #
 # `swarm::tcp` speaks a plaintext framing over a bare `TcpStream`: no handshake,

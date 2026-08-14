@@ -50,6 +50,12 @@ jobs:
       # where the client shares nothing with the node but an address, which is
       # the arrangement every outside contributor is in.
       - run: ./scripts/serve-smoke.sh
+      # The same socket, one process. `serve-smoke` drains with a separate
+      # command, so it cannot tell whether `daemon::run` wired the queue to the
+      # loop that holds the write lock -- and that seam is the whole reason the
+      # unified node exists. Also the only check that both binaries build the
+      # same Config: an argument wired wrong in one is invisible to the other.
+      - run: ./scripts/node-smoke.sh
       # Two processes sharing nothing but a socket: a node with only the log
       # fetches its pinned verifier from a stranger and settles a claim with it.
       #
