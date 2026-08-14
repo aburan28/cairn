@@ -328,19 +328,38 @@ behaviour ships and is tested, not that TLC has checked it.
       the answer carried only a path, so an answerer needed the entry hashes and
       no payloads at all — 10% of a log reproduced the honest answer byte for
       byte. A promise now covers the log as it stood, the share is weighted by
-      that height, one identity is paid once, and the answer carries the entry.
+      the **bond** the promiser locked, and the answer carries the entry.
       Two consensus defects came out of the same review: the sampled index moved
       whenever the log grew, and it read `PROOFWORK_EPOCH_SECONDS`, so the same
       log audited clean or dirty depending on the auditor's environment — six
       times in ten. Both are pinned by injection and by a cross-configuration
       run in `scripts/differential.sh`.
 
-      One bound remains and is not fixable at this stage. The answer proves a
-      node **produced** the challenged entry, not that it **stored** it, and a
-      fixed pot does not price identity: ten identities behind one disk take ten
-      shares. That is the bond in [node-incentives.md](node-incentives.md), and
-      why Stage 2 lists availability sampling as *bonded* — **an availability
-      pool should not carry real money until it exists.**
+      Identity is now *priced*, and not yet priced at anything. An undertaking
+      carries a `bond` backed by units the log says the identity was **paid**;
+      unaffordable bonds are refused on admission, filtered out of the list
+      settlement divides by, and re-derived by the audit from the prefix below
+      the record. The pot follows the bond rather than the head count, so an
+      operator splitting a fixed stake across sixteen keys earns exactly what it
+      earns holding it under one — measured both ways round in
+      `splitting_a_stake_across_many_identities_earns_what_one_identity_earns`,
+      where the old rule paid the splitter an 88% premium.
+
+      **Three bounds remain, and the first is the one that matters.**
+      `post_objective` takes no deposit, so a balance can be minted: post a
+      bounty for any sum against a verifier you chose, answer it yourself,
+      stake the proceeds, repeat per key.
+      `minting_a_bond_is_free_because_an_objective_needs_no_deposit` does it for
+      10^12 units and the log audits clean. Splitting is exactly neutral, which
+      is the property a scarce stake needs and is not by itself resistance;
+      closing it means debiting a reward from its funder's balance, which needs
+      a genesis rule and moves both implementations. Second, the answer proves
+      a node **produced** the challenged entry, not that it **stored** it —
+      closing that needs proof of replication. Third, the bond is locked but
+      never **slashed**: silence is recorded and the units are held, so a
+      penalty has something to attach to, but nothing takes them. Stage 2
+      finishes all three; **until then an availability pool should not carry
+      real money.**
 - [x] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [x] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while

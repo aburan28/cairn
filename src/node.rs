@@ -264,6 +264,15 @@ pub enum RuleViolation {
         epoch: u64,
         index: u64,
     },
+    /// A bond larger than the log says the identity can afford.
+    ///
+    /// The check that makes the stake-weighted split mean anything: a bond
+    /// anybody could set freely would be the even split wearing a disguise.
+    UnfundedBond {
+        identity: String,
+        bond: u64,
+        spendable: u128,
+    },
     /// An undertaking that does not cover the whole log as it stood.
     ///
     /// The promiser does not choose how much to promise, because when they
@@ -545,6 +554,17 @@ impl fmt::Display for RuleViolation {
                 f,
                 "epoch {epoch} already has a beacon; a second one would let whoever \
                  writes it re-roll the settlement order after reading the first"
+            ),
+            RuleViolation::UnfundedBond {
+                identity,
+                bond,
+                spendable,
+            } => write!(
+                f,
+                "{} staked {bond} units and the log has paid it {spendable} it has not \
+                 already locked; a bond is what the availability pool is divided by, so \
+                 one nobody earned would let a fresh identity take a share for free",
+                crate::canonical::short(identity)
             ),
             RuleViolation::PartialUndertaking { promised, log } => write!(
                 f,
@@ -1147,6 +1167,20 @@ impl Node {
             });
         }
 
+        // The bond has to be affordable *here*, against the log as it stands
+        // below this record. Checked on the way in and re-derived by the audit,
+        // because a promise staking units the identity never had is the one
+        // failure that would make the weighting meaningless while still looking
+        // like it worked.
+        let spendable = self.spendable_within(&record.identity, self.ledger.len());
+        if u128::from(record.bond) > spendable {
+            return Err(RuleViolation::UnfundedBond {
+                identity: record.identity.clone(),
+                bond: record.bond,
+                spendable,
+            });
+        }
+
         let id = record.id();
         self.append(UNDERTAKING, record.to_value(), ts)?;
         Ok(id)
@@ -1166,6 +1200,11 @@ impl Node {
     /// and one naming a root this log never had cannot be sampled, so paying or
     /// slashing against it would be paying against nothing.
     pub fn undertakings(&self) -> Vec<Undertaking> {
+        self.undertakings_within(self.ledger.len())
+    }
+
+    /// [`Node::undertakings`] over the first `positions` entries only.
+    pub fn undertakings_within(&self, positions: usize) -> Vec<Undertaking> {
         // Memoised by height: `prefix(h).root()` is O(h), and a log where many
         // nodes undertook at the same height -- which is the normal case, since
         // they are all watching the same checkpoints -- would otherwise pay for
@@ -1174,6 +1213,7 @@ impl Node {
         self.ledger
             .entries_of_kind(UNDERTAKING)
             .into_iter()
+            .filter(|entry| (entry.seq as usize) < positions)
             // `seq` is the number of entries below this record, which is the
             // height it was required to name. Reading it off the entry rather
             // than off a clock or the current length is what makes the rule
@@ -1182,8 +1222,17 @@ impl Node {
                 Undertaking::from_value(&entry.payload)
                     .ok()
                     .filter(|record| record.height == entry.seq)
+                    .map(|record| (entry.seq as usize, record))
             })
-            .filter(|record| record.verify_signature().is_ok())
+            .filter(|(_, record)| record.verify_signature().is_ok())
+            .filter(|(at, record)| {
+                // Unaffordable when written is unaffordable forever. Filtered
+                // here as well as refused on admission, because settlement
+                // divides the pool by these bonds and a log assembled by other
+                // means must not be able to hand a fresh identity a share.
+                u128::from(record.bond) <= self.spendable_within(&record.identity, *at)
+            })
+            .map(|(_, record)| record)
             .filter(|record| {
                 let at = roots.entry(record.height).or_insert_with(|| {
                     usize::try_from(record.height)
@@ -2374,6 +2423,136 @@ impl Node {
     }
 
     /// Every availability pool in the log, in log order.
+    /// What each identity has been paid, and what it has locked, as of
+    /// `positions` entries into the log.
+    ///
+    /// # Why a balance exists at all
+    ///
+    /// Because a bond has to be *scarce*, and nothing else here is. Sybil
+    /// resistance is not a property the rules can assert: it is a property of
+    /// the map from resources to payoff, and `incentive::mechanism`'s
+    /// `SplitIdentities` already proves which map has it. A stake-weighted
+    /// split is **exactly** invariant to splitting one operator into forty,
+    /// because stake is conserved when it is divided; an even split, or a split
+    /// weighted by anything an identity can mint for free, is farmed by
+    /// whoever mints the most.
+    ///
+    /// A `bond` field that anyone could fill in with `u64::MAX` would be worse
+    /// than no bond at all -- it would look like the invariant rule while
+    /// behaving like the free one. So the bond is backed by units the log
+    /// itself says the identity was paid, which nobody can forge without
+    /// forging a settlement, and a settlement is re-derived by every auditor.
+    ///
+    /// # What it is derived from
+    ///
+    /// Every settlement, of both kinds, plus every bond currently locked.
+    /// Nothing is stored: two auditors reading the same prefix compute the same
+    /// balances, which is the only way this can be a consensus rule rather than
+    /// an operator's private ledger.
+    ///
+    /// Bounded by `positions` for the reason every other derivation here is: a
+    /// bond's admissibility is decided when it is written, and a later append
+    /// must not be able to change whether an already-accepted undertaking was
+    /// affordable.
+    pub fn balances_within(&self, positions: usize) -> BTreeMap<String, u128> {
+        let mut paid = self.gross_paid_within(positions);
+        for (identity, locked) in self.locked_within(positions) {
+            if let Some(slot) = paid.get_mut(&identity) {
+                *slot = slot.saturating_sub(locked);
+            }
+        }
+        paid
+    }
+
+    /// Everything the log says each identity was *paid*, ignoring what it has
+    /// locked. Settlements only.
+    ///
+    /// Separate from the locked side so that neither reads
+    /// [`Node::undertakings_within`]: that accessor filters on affordability,
+    /// affordability is derived from balances, and a balance that consulted the
+    /// filtered list would recurse forever. Both halves here read raw entries.
+    fn gross_paid_within(&self, positions: usize) -> BTreeMap<String, u128> {
+        let mut paid: BTreeMap<String, u128> = BTreeMap::new();
+        let entries = self.ledger.entries();
+        for entry in &entries[..positions.min(entries.len())] {
+            match entry.kind.as_str() {
+                // The inflow that makes this bootstrappable: you earn by
+                // contributing research, and only then can you stake to earn by
+                // serving. A fresh identity has nothing and is worth nothing.
+                SETTLEMENT => {
+                    if let (Some(who), Some(reward)) = (
+                        payload_str(&entry.payload, "submitter"),
+                        entry.payload.get("reward").and_then(Value::as_u64),
+                    ) {
+                        *paid.entry(who.to_string()).or_insert(0) += u128::from(reward);
+                    }
+                }
+                AVAILABILITY_SETTLEMENT => {
+                    for row in entry
+                        .payload
+                        .get("paid")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                    {
+                        if let (Some(who), Some(reward)) = (
+                            payload_str(row, "identity"),
+                            row.get("reward").and_then(Value::as_u64),
+                        ) {
+                            *paid.entry(who.to_string()).or_insert(0) += u128::from(reward);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        paid
+    }
+
+    /// What each identity has staked and not yet had returned.
+    ///
+    /// Reads raw undertaking entries -- decodable and signed, nothing more --
+    /// precisely because the affordability rule is what it feeds. An
+    /// unaffordable bond therefore counts against its own author here, which is
+    /// self-correcting: a forged `u64::MAX` bond drives that identity's
+    /// spendable balance to zero and every promise it makes, including that
+    /// one, fails the check.
+    fn locked_within(&self, positions: usize) -> BTreeMap<String, u128> {
+        let mut locked: BTreeMap<String, u128> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(UNDERTAKING) {
+            if (entry.seq as usize) >= positions {
+                continue;
+            }
+            let Ok(record) = Undertaking::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.verify_signature().is_err() {
+                continue;
+            }
+            let slot = locked.entry(record.identity.clone()).or_insert(0);
+            *slot = slot.saturating_add(u128::from(record.bond));
+        }
+        locked
+    }
+
+    /// [`Node::balances_within`] over the whole log.
+    pub fn balances(&self) -> BTreeMap<String, u128> {
+        self.balances_within(self.ledger.len())
+    }
+
+    /// What `identity` could still bond, as of `positions` entries in.
+    pub fn spendable_within(&self, identity: &str, positions: usize) -> u128 {
+        self.gross_paid_within(positions)
+            .get(identity)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(
+                self.locked_within(positions)
+                    .get(identity)
+                    .copied()
+                    .unwrap_or(0),
+            )
+    }
+
     pub fn availability_pools(&self) -> Vec<AvailabilityPool> {
         self.ledger
             .entries_of_kind(AVAILABILITY_POOL)
@@ -2415,9 +2594,12 @@ impl Node {
     /// The half that makes an undertaking enforceable. Three properties, and
     /// each is a rule somebody would otherwise have to trust:
     ///
-    /// - **Equal integer shares.** `offered / answers`, floor-divided. The
-    ///   remainder is not paid and not hidden: it is recorded on the settlement
-    ///   so the pool's arithmetic closes. No floats anywhere near it.
+    /// - **Stake-weighted integer shares.** `offered * bond / total_bond`,
+    ///   floor-divided. The remainder is not paid and not hidden: it is
+    ///   recorded on the settlement so the pool's arithmetic closes. No floats
+    ///   anywhere near it. Weighting by bond rather than by head count is what
+    ///   makes the payout invariant to splitting an identity, since a bond is
+    ///   conserved when it is divided and a head count is not.
     /// - **Nothing is paid twice.** An epoch settles once; a second call is a
     ///   no-op rather than a second payout.
     /// - **Silence is recorded.** A promise that was samplable in this epoch
@@ -2452,22 +2634,30 @@ impl Node {
             .map(|answer| (answer.undertaking, answer.identity))
             .collect();
 
-        // Weighted by height, and grouped by **identity**, taking the largest
-        // promise each one answered. Both halves of that sentence are load
+        // Weighted by **bond**, summed per identity. Both halves are load
         // bearing, and each closes a way of being paid for storage nobody
         // bought.
         //
         // *Weighted*, because an equal split paid a one-entry promise what it
-        // paid a twenty-thousand-entry promise. Forcing the promise to cover
-        // the whole log ([`Node::post_undertaking`]) stops a node choosing a
-        // small one today, but promises made at different times cover different
-        // amounts and always will, so the share has to follow the size.
+        // paid a twenty-thousand-entry promise, so a node could answer with a
+        // thimble and collect like a warehouse.
         //
-        // *By identity, taking the max*, because otherwise one disk answers
-        // through many promises: undertaking repeatedly costs a signature and
-        // pays another full weight every time, which is the sybil attack
-        // without even needing new keys. One identity, one weight, whatever it
-        // promised most.
+        // *By bond rather than by height*, because height is not a scarce
+        // resource. Promising the whole log costs a signature; forty keys each
+        // promising the whole log is the sybil attack with nothing spent, and
+        // no rule that reads only the promise can tell those forty from forty
+        // real disks. A bond can be told apart, because the log knows what each
+        // identity was paid and [`Node::post_undertaking`] refuses to lock more
+        // than that.
+        //
+        // *Summed rather than maxed*, because summing is what makes the rule
+        // sybil-*invariant* rather than merely sybil-*expensive*: an operator
+        // splitting one identity holding `S` into forty holding `S/40` has the
+        // same total weight either way, since stake is conserved when it is
+        // divided. Maxing -- which the height-weighted version had to do, since
+        // height is not conserved -- would here punish an honest operator for
+        // making two promises out of one balance, which the bond accounting
+        // already prevents from being free.
         let mut weight: BTreeMap<String, u64> = BTreeMap::new();
         let mut paid: Vec<(String, String)> = Vec::new();
         let mut silent: Vec<String> = Vec::new();
@@ -2475,8 +2665,19 @@ impl Node {
             let id = promise.id();
             match answered.get(&id) {
                 Some(identity) => {
+                    // **Summed**, not maxed, and weighted by bond rather than
+                    // height. Summing is what makes the rule Sybil-invariant:
+                    // an operator splitting one identity holding `S` into forty
+                    // holding `S/40` has the same total weight either way,
+                    // because stake is conserved when it is divided. Maxing --
+                    // which the height-weighted version had to do, since height
+                    // is *not* conserved and forty full-height promises would
+                    // otherwise be forty times the weight -- would here punish
+                    // an honest operator for making two promises out of one
+                    // balance, which the bond accounting already prevents from
+                    // being free.
                     let slot = weight.entry(identity.clone()).or_insert(0);
-                    *slot = (*slot).max(promise.height);
+                    *slot = slot.saturating_add(promise.bond);
                     paid.push((id, identity.clone()));
                 }
                 None => silent.push(id),
@@ -3524,6 +3725,19 @@ impl Node {
                     "undertaking at entry {}: promises {} entries where the log below it \
                      had {}; the size of a promise is not the promiser's to choose",
                     entry.seq, record.height, entry.seq
+                ));
+                continue;
+            }
+            // The bond must have been affordable when this record was
+            // written. Re-derived from the prefix below it, never from the
+            // whole log: a later payout must not retroactively justify a bond
+            // that was unfunded at the time, and a later bond must not
+            // retroactively bankrupt one that was funded.
+            let spendable = self.spendable_within(&record.identity, entry.seq as usize);
+            if u128::from(record.bond) > spendable {
+                problems.push(format!(
+                    "undertaking at entry {}: bonds {} units against a balance of {}",
+                    entry.seq, record.bond, spendable
                 ));
                 continue;
             }
@@ -4651,11 +4865,23 @@ mod tests {
     }
 
     fn replay_objective(reward: u64) -> Option<Objective> {
+        replay_objective_called(reward, "reproduce n")
+    }
+
+    /// A replay objective with a caller-chosen statement.
+    ///
+    /// An objective's id is the digest of its whole record, so two objectives
+    /// that agree on reward and verifier are the *same* objective and the
+    /// second post is refused as a duplicate. Fixtures that fund several
+    /// identities need a distinct objective each time round, and the statement
+    /// is the field that is free to vary without changing what the verifier
+    /// does.
+    fn replay_objective_called(reward: u64, statement: &str) -> Option<Objective> {
         let binary = echo()?;
         Some(
             Objective::new(
                 "G",
-                "reproduce n",
+                statement,
                 Value::object([
                     ("kind", Value::string("replay")),
                     (
@@ -6547,16 +6773,22 @@ mod tests {
         let mut node = node(&dir);
         let identity = crate::crypto::identity::Identity::from_secret_bytes([7u8; 32]);
 
-        // Something to undertake.
+        // Something to undertake, and a balance to stake against it -- every
+        // record below bonds 1000, and an identity that cannot afford its bond
+        // is refused for *that* reason, which would hide the rule under test.
         node.post_objective(&lean_objective(100), TS)
             .expect("objective");
         node.post_objective(&lean_objective(200), TS)
             .expect("a second, so there is more than one prefix");
+        assert!(
+            fund(&mut node, &identity, 2_000),
+            "this host has no `echo`, so no funding cycle can reach ACCEPT"
+        );
         let height = node.ledger().len() as u64;
         let root = node.ledger().root().expect("a non-empty log has a root");
 
-        let good =
-            Undertaking::new(identity.submitter_id(), &root, height, TS).signed_with(&identity);
+        let good = Undertaking::new(identity.submitter_id(), &root, height, 1_000, TS)
+            .signed_with(&identity);
         node.post_undertaking(&good, TS)
             .expect("the log's own root at its own height");
 
@@ -6568,6 +6800,7 @@ mod tests {
             identity.submitter_id(),
             crate::canonical::digest_bytes(b"not a root of anything"),
             height,
+            1_000,
             TS,
         )
         .signed_with(&identity);
@@ -6582,8 +6815,8 @@ mod tests {
         // An older prefix's real root at the height the log now stands at: the
         // size rule passes and the root rule catches it. This is the reason
         // both are signed -- a root alone does not pin the tree's shape.
-        let mismatched =
-            Undertaking::new(identity.submitter_id(), &root, height, TS).signed_with(&identity);
+        let mismatched = Undertaking::new(identity.submitter_id(), &root, height, 1_000, TS)
+            .signed_with(&identity);
         assert!(
             matches!(
                 node.post_undertaking(&mismatched, TS),
@@ -6594,7 +6827,7 @@ mod tests {
 
         // A height past the end of this log: refused by the size rule, which
         // now runs first because it does not depend on the root at all.
-        let future = Undertaking::new(identity.submitter_id(), &root, height + 1000, TS)
+        let future = Undertaking::new(identity.submitter_id(), &root, height + 1000, 1_000, TS)
             .signed_with(&identity);
         assert!(
             matches!(
@@ -6609,8 +6842,8 @@ mod tests {
         // `u32`, so a taller promise could never be sampled in the first place.
         // Two different refusals for two different reasons, and the format one
         // comes first because it does not depend on this log at all.
-        let unrepresentable =
-            Undertaking::new(identity.submitter_id(), &root, u64::MAX, TS).signed_with(&identity);
+        let unrepresentable = Undertaking::new(identity.submitter_id(), &root, u64::MAX, 1_000, TS)
+            .signed_with(&identity);
         let _ = &unrepresentable;
         assert!(
             matches!(
@@ -6641,7 +6874,7 @@ mod tests {
 
         node.post_objective(&lean_objective(100), TS)
             .expect("objective");
-        let early = promise(&mut node, &identity);
+        let early = promise(&mut node, &identity, 1_000);
         let stale_root = node
             .ledger()
             .prefix(early.height as usize)
@@ -6661,8 +6894,14 @@ mod tests {
         assert_eq!(node.audit(false), Vec::<String>::new());
 
         // But nobody may make a *new* promise about that older, smaller prefix.
-        let backdated = Undertaking::new(identity.submitter_id(), &stale_root, early.height, TS)
-            .signed_with(&identity);
+        let backdated = Undertaking::new(
+            identity.submitter_id(),
+            &stale_root,
+            early.height,
+            1_000,
+            TS,
+        )
+        .signed_with(&identity);
         assert!(
             matches!(
                 node.post_undertaking(&backdated, TS),
@@ -6686,8 +6925,8 @@ mod tests {
         let root = node.ledger().root().expect("root");
 
         // Mallory signs, then relabels it as Alice's promise.
-        let mut forged =
-            Undertaking::new(mallory.submitter_id(), &root, height, TS).signed_with(&mallory);
+        let mut forged = Undertaking::new(mallory.submitter_id(), &root, height, 1_000, TS)
+            .signed_with(&mallory);
         forged.identity = alice.submitter_id();
         assert!(
             node.post_undertaking(&forged, TS).is_err(),
@@ -6695,7 +6934,7 @@ mod tests {
         );
 
         // And an unsigned one is nobody's promise at all.
-        let unsigned = Undertaking::new(alice.submitter_id(), &root, height, TS);
+        let unsigned = Undertaking::new(alice.submitter_id(), &root, height, 1_000, TS);
         assert!(
             node.post_undertaking(&unsigned, TS).is_err(),
             "an unsigned promise was admitted"
@@ -6717,6 +6956,14 @@ mod tests {
         let identity = crate::crypto::identity::Identity::from_secret_bytes([3u8; 32]);
         node.post_objective(&lean_objective(100), TS)
             .expect("objective");
+        // Funded, so the bond is affordable and the *only* thing wrong with the
+        // record below is its root. The audit reports the first fault it finds
+        // and stops, so an unfunded fixture would test the bond rule under the
+        // name of the root rule.
+        assert!(
+            fund(&mut node, &identity, 1_000),
+            "this host has no `echo`, so no funding cycle can reach ACCEPT"
+        );
         let height = node.ledger().len() as u64;
 
         // Straight past `post_undertaking`, the way a concatenated log would.
@@ -6724,6 +6971,7 @@ mod tests {
             identity.submitter_id(),
             crate::canonical::digest_bytes(b"invented"),
             height,
+            1_000,
             TS,
         )
         .signed_with(&identity);
@@ -6733,12 +6981,96 @@ mod tests {
         let problems = node.audit(false);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(
-            problems[0].contains("no prefix of 1 entries is rooted at"),
+            problems[0].contains(&format!("no prefix of {height} entries is rooted at")),
             "{}",
             problems[0]
         );
         // And it is not counted as a promise by anybody who reads the log.
         assert!(node.undertakings().iter().all(|u| u.root != invented.root));
+    }
+
+    /// A bond nobody funded is caught by the audit, not only on the way in.
+    ///
+    /// `post_undertaking` refuses one, but a log that arrived from somebody
+    /// else was never posted anywhere — it is bytes, and a node concatenating
+    /// it calls no rule at all. So the rule has to be re-derivable from the
+    /// record's own position in the log, and it has to be re-derived in all
+    /// three places that spend on it: the door, the reader
+    /// ([`Node::undertakings`], which settlement divides the pool by) and the
+    /// audit.
+    ///
+    /// This test exists because removing the audit's copy broke *nothing*: 74
+    /// node tests passed against a build that had stopped checking it. A rule
+    /// enforced only on the way in makes the weighting exactly as strong as the
+    /// politeness of whoever wrote the log, which is not a rule.
+    #[test]
+    fn the_audit_names_a_bond_the_log_never_funded() {
+        let dir = TempDir::new("undertaking-unfunded");
+        let mut node = node(&dir);
+        let liar = crate::crypto::identity::Identity::from_secret_bytes([31u8; 32]);
+        node.post_objective(&lean_objective(100), TS)
+            .expect("objective");
+
+        // Perfect in every other respect: the height the log stands at, that
+        // prefix's real root, a valid signature over the whole record. Only the
+        // bond is a lie, and it is the one lie the record cannot tell about
+        // itself — what this identity has been paid is written below it.
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+        let forged =
+            Undertaking::new(liar.submitter_id(), &root, height, 1_000, TS).signed_with(&liar);
+        assert!(
+            matches!(
+                node.post_undertaking(&forged, TS),
+                Err(RuleViolation::UnfundedBond {
+                    bond: 1_000,
+                    spendable: 0,
+                    ..
+                })
+            ),
+            "an unfunded bond was admitted"
+        );
+
+        // Straight past the rule, the way a concatenated log would carry it.
+        node.append(UNDERTAKING, forged.to_value(), TS)
+            .expect("append");
+        let problems = node.audit(false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("bonds 1000 units against a balance of 0"),
+            "{}",
+            problems[0]
+        );
+        // And it buys no weight: settlement divides the pool by what
+        // `undertakings` returns, so a forged bond that survived to here would
+        // hand a fresh identity a share of somebody else's money.
+        assert!(
+            node.undertakings().is_empty(),
+            "a bond nobody funded was counted as a promise"
+        );
+
+        // And the check is not simply always-failing. Fund the same identity,
+        // promise the same way, and the same code path admits it — so what the
+        // audit is reporting above is the *balance*, not the shape.
+        //
+        // Two thousand for a thousand-unit promise, because the forged record
+        // above still counts against its author: `locked_within` reads
+        // undertakings that decode and verify, not ones that passed the rules,
+        // since the affordability rule is what it feeds. Self-correcting rather
+        // than circular — a forged `u64::MAX` bond drives its own author's
+        // balance to zero.
+        assert!(
+            fund(&mut node, &liar, 2_000),
+            "this host has no `echo`, so no funding cycle can reach ACCEPT"
+        );
+        let honest = stake(&mut node, &liar, 1_000);
+        assert_eq!(honest.bond, 1_000);
+        assert_eq!(node.undertakings().len(), 1, "the funded promise is in");
+        assert_eq!(
+            node.audit(false).len(),
+            1,
+            "the funded promise added a fault of its own"
+        );
     }
 
     /// The honest answer a node holding the log would produce: the sampled
@@ -6769,11 +7101,186 @@ mod tests {
         .signed_with(who)
     }
 
-    /// Promise the whole log as it stands, which is the only promise there is.
-    fn promise(node: &mut Node, who: &crate::crypto::identity::Identity) -> Undertaking {
+    /// Credit `who` with units the way the network actually does: by earning
+    /// them.
+    ///
+    /// A bond has to be backed by a settlement the audit accepts, so this runs
+    /// the real cycle -- objective, commit, reveal, settle -- rather than
+    /// appending a settlement record directly. The first version of this helper
+    /// did append one, against an invented objective id, and every fixture
+    /// using it failed the audit with *paid a claim that was not accepted*.
+    /// The audit was right; a balance with no accepted claim behind it is
+    /// exactly the forgery the bond exists to make impossible.
+    fn fund(node: &mut Node, who: &crate::crypto::identity::Identity, units: u64) -> bool {
+        // `replay` over `echo`, because it is the one verifier that reaches a
+        // real ACCEPT with no language toolchain installed. `None` on a host
+        // without `echo`, and every caller then skips rather than asserting
+        // against a verdict this machine could not reach.
+        // The statement carries the identity so that funding two hosts for the
+        // same amount posts two objectives rather than the same one twice.
+        let Some(objective) =
+            replay_objective_called(units, &format!("reproduce n for {}", who.submitter_id()))
+        else {
+            return false;
+        };
+        node.post_objective(&objective, TS).expect("objective");
+        // Signed, because the submitter is a public key and this crate
+        // refuses a key-shaped submitter without a signature -- the same rule
+        // that makes an undertaking's identity mean something.
+        //
+        // The artifact is the verifier's shape, not a bare `n`: the replay
+        // verifier compares `reproducible_fields` under `results`, so an
+        // artifact of `{"n": 1}` reproduces nothing and never reaches ACCEPT.
+        let artifact = results(1);
+        let nonce = format!("n-{units}");
+        // The same epoch arithmetic as [`submit`], deliberately rather than by
+        // accident: a batch does not settle until the finality window has
+        // passed, and a helper that reveals and settles an epoch too early
+        // returns a *pending* outcome that pays nothing. Read from
+        // `partition::finality_epochs` for the same reason `submit` does — a
+        // hard-coded stride is a second copy of a rule that can move.
+        let stride = 3 + crate::partition::finality_epochs() as i64;
+        let step = node.ledger().len() as i64 * stride * EPOCH;
+        let hash = commitment_hash(&objective.id(), &who.submitter_id(), &artifact, &nonce);
+        node.commit(
+            &Commitment::new(objective.id(), who.submitter_id(), hash, stamp(step))
+                .signed_with(who),
+            &stamp(step),
+        )
+        .expect("commit");
+        let claim = Claim::new(
+            objective.id(),
+            who.submitter_id(),
+            artifact,
+            &nonce,
+            TS,
+            Vec::new(),
+        )
+        .expect("valid claim")
+        .signed_with(who);
+        let outcome = node.reveal(&claim, &stamp(step + EPOCH)).expect("reveal");
+        let settled = node
+            .settle_at(&stamp(
+                step + (2 + crate::partition::finality_epochs() as i64) * EPOCH,
+            ))
+            .expect("settle")
+            .into_iter()
+            .find(|candidate| candidate.claim_id == outcome.claim_id)
+            .unwrap_or(outcome);
+        let outcome = settled;
+        assert!(
+            outcome.settled,
+            "the funding cycle must actually pay, or the bond has nothing behind it"
+        );
+        true
+    }
+
+    /// **The bound on everything above, measured rather than asserted.**
+    ///
+    /// The bond makes the availability payout invariant to splitting an
+    /// identity, which is worth exactly as much as the stake being scarce. It
+    /// is not scarce yet, and this test is here so that fact is a *failing
+    /// premise somebody can read* rather than a paragraph in a document that
+    /// drifts away from the code.
+    ///
+    /// `post_objective` takes no deposit. A funder names a reward and the
+    /// settlement pays it; nothing checks that the funder had it. So one key
+    /// can post an objective for an arbitrary sum against a verifier it chose,
+    /// answer its own question, and stake the proceeds — and the same trick run
+    /// under forty keys gives forty funded sybils. Splitting is still exactly
+    /// neutral, and that no longer buys much when *making* the stake is free.
+    ///
+    /// Closing it means an objective's reward has to be debited from its
+    /// funder's own balance, which needs a genesis rule for where the first
+    /// units come from, and it moves both implementations. That is a change of
+    /// its own; this test marks the spot. If it ever starts failing because
+    /// `post_objective` grew a funding check, **that is the good outcome** —
+    /// delete it and take the caveat out of `docs/threat-model.md`.
+    #[test]
+    fn minting_a_bond_is_free_because_an_objective_needs_no_deposit() {
+        let dir = TempDir::new("unfunded-objective");
+        let mut node = node(&dir);
+        let attacker = crate::crypto::identity::Identity::from_secret_bytes([77u8; 32]);
+
+        // A sum no honest participant could have earned, against a verifier the
+        // attacker picked, funded by a name that is not a key and holds
+        // nothing.
+        const ABSURD: u64 = 1_000_000_000_000;
+        let Some(objective) = replay_objective_called(ABSURD, "a bounty I set myself") else {
+            return;
+        };
+        assert_eq!(objective.funder, "treasury");
+        node.post_objective(&objective, TS)
+            .expect("nothing checks that a funder can afford its own bounty");
+
+        let artifact = results(1);
+        let stride = 3 + crate::partition::finality_epochs() as i64;
+        let step = node.ledger().len() as i64 * stride * EPOCH;
+        let hash = commitment_hash(&objective.id(), &attacker.submitter_id(), &artifact, "n");
+        node.commit(
+            &Commitment::new(objective.id(), attacker.submitter_id(), hash, stamp(step))
+                .signed_with(&attacker),
+            &stamp(step),
+        )
+        .expect("commit");
+        let claim = Claim::new(
+            objective.id(),
+            attacker.submitter_id(),
+            artifact,
+            "n",
+            TS,
+            Vec::new(),
+        )
+        .expect("valid claim")
+        .signed_with(&attacker);
+        node.reveal(&claim, &stamp(step + EPOCH)).expect("reveal");
+        node.settle_at(&stamp(
+            step + (2 + crate::partition::finality_epochs() as i64) * EPOCH,
+        ))
+        .expect("settle");
+
+        // And it is spendable. This is the whole finding: the balance the bond
+        // rule treats as scarce was conjured in four commands.
+        let spendable = node.spendable_within(&attacker.submitter_id(), node.ledger().len());
+        assert_eq!(
+            spendable,
+            u128::from(ABSURD),
+            "the mint did not work, which would mean this caveat is stale — check \
+             whether `post_objective` grew a funding check and delete this test if so"
+        );
+        let promise = stake(&mut node, &attacker, ABSURD);
+        assert_eq!(promise.bond, ABSURD);
+
+        // The log is *clean*. Not a fault anywhere, because nothing here breaks
+        // a rule -- the rule is missing.
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// Promise the whole log as it stands, staking `bond`.
+    ///
+    /// Funds the identity first: a bond has to be backed by units the log says
+    /// it earned, so a fixture that stakes has to have been paid.
+    fn promise(node: &mut Node, who: &crate::crypto::identity::Identity, bond: u64) -> Undertaking {
+        // `expect` rather than a skip: every caller of this helper is about the
+        // bond arithmetic, not about the verifier, and a host without `echo`
+        // should say so loudly here rather than silently pass a suite that
+        // never exercised the thing it names.
+        assert!(
+            fund(node, who, bond),
+            "this host has no `echo`, so no funding cycle can reach ACCEPT"
+        );
+        stake(node, who, bond)
+    }
+
+    /// Promise the whole log as it stands out of a balance the identity
+    /// *already* has.
+    ///
+    /// Split out of [`promise`] so a fixture can stake one balance twice and
+    /// ask what the split earned, which is the whole question a sybil poses.
+    fn stake(node: &mut Node, who: &crate::crypto::identity::Identity, bond: u64) -> Undertaking {
         let height = node.ledger().len() as u64;
         let root = node.ledger().root().expect("root");
-        let record = Undertaking::new(who.submitter_id(), &root, height, TS).signed_with(who);
+        let record = Undertaking::new(who.submitter_id(), &root, height, bond, TS).signed_with(who);
         node.post_undertaking(&record, TS).expect("undertaking");
         record
     }
@@ -6793,7 +7300,7 @@ mod tests {
             node.post_objective(&lean_objective(reward), TS)
                 .expect("objective");
         }
-        let held = promise(&mut node, &identity);
+        let held = promise(&mut node, &identity, 1_000);
 
         let epoch = 7;
         let index = node
@@ -6858,7 +7365,7 @@ mod tests {
             node.post_objective(&lean_objective(reward), TS)
                 .expect("objective");
         }
-        let held = promise(&mut node, &identity);
+        let held = promise(&mut node, &identity, 1_000);
         let epoch = 3;
         let index = node
             .sampled_index(&held, epoch, node.ledger().len())
@@ -6933,7 +7440,7 @@ mod tests {
             node.post_objective(&lean_objective(reward), TS)
                 .expect("objective");
         }
-        let held = promise(&mut node, &identity);
+        let held = promise(&mut node, &identity, 1_000);
         // An epoch the fixture timestamps actually fall *before*, so entries
         // qualify and the anchor is a real hash. The first version of this test
         // used epoch 11, which is long before 2026: no entry qualified, the
@@ -6991,7 +7498,7 @@ mod tests {
             .expect("objective");
         node.post_objective(&lean_objective(200), TS)
             .expect("objective");
-        let held = promise(&mut node, &alice);
+        let held = promise(&mut node, &alice, 1_000);
 
         // Mallory holds the log too -- the entry and path are correct. What
         // Mallory does not have is Alice's promise, and the pool pays promises.
@@ -7060,6 +7567,16 @@ mod tests {
             node.post_objective(&lean_objective(reward), TS)
                 .expect("objective");
         }
+        // Funded for *two* promises, because the rejected one below is appended
+        // raw and its bond still counts against its author: `locked_within`
+        // reads undertakings that decode and verify, deliberately not ones that
+        // pass the rules, since the affordability rule is what it feeds. So the
+        // honest promise at the end needs a second 1000 behind it, and the
+        // refusals in between are refusals of *size*, not of affordability.
+        assert!(
+            fund(&mut node, &cheat, 2_000),
+            "this host has no `echo`, so no funding cycle can reach ACCEPT"
+        );
         let full = node.ledger().len() as u64;
         let small = node
             .ledger()
@@ -7069,7 +7586,8 @@ mod tests {
 
         // The whole point: this is a *real* root of a *real* prefix, signed by
         // a real key. Only the size rule refuses it.
-        let partial = Undertaking::new(cheat.submitter_id(), &small, 1, TS).signed_with(&cheat);
+        let partial =
+            Undertaking::new(cheat.submitter_id(), &small, 1, 1_000, TS).signed_with(&cheat);
         assert!(
             matches!(
                 node.post_undertaking(&partial, TS),
@@ -7101,6 +7619,7 @@ mod tests {
             cheat.submitter_id(),
             node.ledger().root().expect("root"),
             now,
+            1_000,
             TS,
         )
         .signed_with(&cheat);
@@ -7131,17 +7650,20 @@ mod tests {
         )
         .expect("pool");
 
-        // `early` promises a short log; the log then grows and `late` promises
-        // the long one. Both promises are honest -- neither chose its size --
-        // and the weighting is what makes the larger one worth more.
-        let early_promise = promise(&mut node, &early);
+        // `early` promises a short log and stakes a lot; the log then grows and
+        // `late` promises the long one and stakes a little. The two signals
+        // point in *opposite* directions on purpose, so the test can tell which
+        // one the share follows: under the old height weighting `late` would
+        // take the larger share, and under bond weighting `early` does.
+        let early_promise = promise(&mut node, &early, 3_000);
         for reward in [200, 300, 400, 500, 600] {
             node.post_objective(&lean_objective(reward), TS)
                 .expect("objective");
         }
-        let late_promise = promise(&mut node, &late);
-        let _quiet_promise = promise(&mut node, &quiet);
+        let late_promise = promise(&mut node, &late, 1_000);
+        let _quiet_promise = promise(&mut node, &quiet, 1_000);
         assert!(late_promise.height > early_promise.height);
+        assert!(early_promise.bond > late_promise.bond);
 
         let epoch = 4;
         for (who, held) in [(&early, &early_promise), (&late, &late_promise)] {
@@ -7156,14 +7678,18 @@ mod tests {
         assert_eq!(outcome.answered, 2, "two identities answered");
         assert_eq!(outcome.silent, 1, "the quiet one is named");
 
-        // The larger promise took the larger share, and the split follows the
-        // heights rather than the head count.
+        // The larger *stake* took the larger share, and it took it while
+        // holding the *shorter* log. The split follows what was put at risk,
+        // not the head count and not the size of the claim.
         let paid = availability_payouts(&node);
         let early_paid = paid[&early.submitter_id()];
         let late_paid = paid[&late.submitter_id()];
         assert!(
-            late_paid > early_paid,
-            "the bigger promise earned no more: {late_paid} vs {early_paid}"
+            early_paid > late_paid,
+            "the share followed the promise instead of the bond: \
+             early staked {} and earned {early_paid}, late staked {} and earned {late_paid}",
+            early_promise.bond,
+            late_promise.bond
         );
         assert_eq!(
             u128::from(early_paid) + u128::from(late_paid) + outcome.unpaid,
@@ -7180,13 +7706,17 @@ mod tests {
         assert_eq!(node.audit(false), Vec::<String>::new());
     }
 
-    /// Extra promises from one identity do not multiply its share.
+    /// Splitting one balance across two promises earns what one promise of the
+    /// whole balance earns.
     ///
-    /// Weighting by height alone would have opened a sybil attack that needs no
-    /// new keys: undertake repeatedly, answer each, collect a full weight every
-    /// time, all from one copy of the log. One identity, one weight.
+    /// The same question a sybil asks, asked without new keys. Under the old
+    /// height weighting the answer was *twice as much*: undertake repeatedly,
+    /// answer each, collect a full weight every time, all from one copy of the
+    /// log and at the cost of a signature. The bond is what makes the answer
+    /// *exactly the same*, because the two promises share one balance and the
+    /// weights are summed.
     #[test]
-    fn undertaking_twice_does_not_pay_twice() {
+    fn splitting_one_balance_across_two_promises_earns_what_one_promise_earns() {
         let dir = TempDir::new("availability-double");
         let mut node = node(&dir);
         let greedy = crate::crypto::identity::Identity::from_secret_bytes([24u8; 32]);
@@ -7205,11 +7735,35 @@ mod tests {
         )
         .expect("pool");
 
-        let plain_promise = promise(&mut node, &plain);
-        let first = promise(&mut node, &greedy);
+        // Equal balances. `plain` stakes its 1000 once; `greedy` stakes the
+        // same 1000 as two promises of 500, and the log grows in between so the
+        // second promise really is the larger claim.
+        let plain_promise = promise(&mut node, &plain, 1_000);
+        assert!(
+            fund(&mut node, &greedy, 1_000),
+            "this host has no `echo`, so no funding cycle can reach ACCEPT"
+        );
+        let first = stake(&mut node, &greedy, 500);
         node.post_objective(&lean_objective(200), TS)
             .expect("objective");
-        let second = promise(&mut node, &greedy);
+        let second = stake(&mut node, &greedy, 500);
+        assert!(second.height > first.height);
+
+        // And there could not have been a third: the balance is spent. Checked
+        // *here*, before the settlement below pays greedy and gives it
+        // something new to stake -- which is correct behaviour and would have
+        // made this assertion pass for the wrong reason.
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+        let third =
+            Undertaking::new(greedy.submitter_id(), &root, height, 1, TS).signed_with(&greedy);
+        assert!(
+            matches!(
+                node.post_undertaking(&third, TS),
+                Err(RuleViolation::UnfundedBond { .. })
+            ),
+            "a third promise was free, so the split was never bounded by anything"
+        );
 
         let epoch = 2;
         for (who, held) in [
@@ -7228,22 +7782,123 @@ mod tests {
         assert_eq!(paid.len(), 2, "one row per identity, not per promise");
 
         // The precise property, read off the record: greedy's weight is the
-        // *larger* of its two promises, not their sum. Greedy still earns more
-        // than plain -- its promise really is bigger, because the log grew --
-        // and what it does not get is a second helping for saying so twice.
+        // *sum* of what it staked, which is what plain staked in one go. Equal
+        // stake, equal weight, equal pay -- the split bought nothing.
         let weights = availability_weights(&node);
         assert_eq!(
             weights[&greedy.submitter_id()],
-            first.height.max(second.height),
-            "weight should be the largest promise"
+            first.bond + second.bond,
+            "stake is conserved when it is divided; the weight must be too"
         );
-        assert_ne!(
-            weights[&greedy.submitter_id()],
-            first.height + second.height,
-            "two promises were added together"
+        assert_eq!(weights[&plain.submitter_id()], plain_promise.bond);
+        assert_eq!(
+            paid[&greedy.submitter_id()],
+            paid[&plain.submitter_id()],
+            "two promises out of one balance outearned one promise of it"
         );
-        assert_eq!(weights[&plain.submitter_id()], plain_promise.height);
         assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// One operator splitting a fixed stake across many keys earns exactly what
+    /// it earns holding that stake under one key.
+    ///
+    /// This is the sybil property stated as an equation rather than as an
+    /// intuition, and it is the strongest form the network can have: identities
+    /// are free to make, so no rule can stop them being made. What a rule *can*
+    /// do is make them worthless, by paying a resource that is conserved when
+    /// it is divided instead of a head count that is not.
+    ///
+    /// Note what this does **not** claim. It bounds sybil *profit*, not sybil
+    /// *existence*: forty keys still appear in the log, still answer, still
+    /// occupy rows. And it says nothing about whether the bonded node holds the
+    /// data itself or fetches a challenged entry from somebody else on demand.
+    /// Closing that needs proof of replication, which this does not have.
+    ///
+    /// Sixteen keys rather than forty only because each one has to *earn* its
+    /// stake through a real objective/commit/reveal/settle cycle and the
+    /// fixture is already the slowest test in the crate. The equation does not
+    /// care about the count: any `n` that divides the stake evenly gives the
+    /// same two numbers, and the injection that breaks it (weight by head count
+    /// instead of bond) breaks it at `n = 2`.
+    #[test]
+    fn splitting_a_stake_across_many_identities_earns_what_one_identity_earns() {
+        const KEYS: u64 = 16;
+        const STAKE: u64 = 16_000;
+
+        let (honest_alone, attacker_whole) = split_payouts("sybil-one", 1, STAKE);
+        let (honest_beside_many, attacker_split) = split_payouts("sybil-many", KEYS, STAKE);
+
+        assert!(attacker_whole > 0, "the fixture paid nobody");
+        assert_eq!(
+            attacker_split, attacker_whole,
+            "splitting one stake across {KEYS} keys changed what it earned: \
+             {attacker_whole} whole, {attacker_split} split"
+        );
+        assert_eq!(
+            honest_beside_many, honest_alone,
+            "the honest operator's share moved because somebody else made keys: \
+             {honest_alone} beside one, {honest_beside_many} beside {KEYS}"
+        );
+    }
+
+    /// One epoch of availability settlement in which an honest operator stakes
+    /// `total` under a single key and an attacker stakes the same `total` split
+    /// evenly across `keys` keys. Returns `(honest, attacker_total)`.
+    ///
+    /// The pool and the stakes are chosen to divide exactly, so the two runs
+    /// can be compared with `assert_eq!` rather than a tolerance. Flooring
+    /// would otherwise cost the splitter dust -- `keys` remainders instead of
+    /// one -- which is a rounding artefact and not the property under test.
+    fn split_payouts(tag: &str, keys: u64, total: u64) -> (u64, u64) {
+        let dir = TempDir::new(tag);
+        let mut node = node(&dir);
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 32_000,
+                from_epoch: 0,
+                to_epoch: 1_000,
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+
+        let honest = crate::crypto::identity::Identity::from_secret_bytes([7u8; 32]);
+        let honest_promise = promise(&mut node, &honest, total);
+
+        let share = total / keys;
+        let attackers: Vec<_> = (0..keys)
+            .map(|n| {
+                let who = crate::crypto::identity::Identity::from_secret_bytes(
+                    [100u8.wrapping_add(n as u8); 32],
+                );
+                let held = promise(&mut node, &who, share);
+                (who, held)
+            })
+            .collect();
+
+        let epoch = 4;
+        node.post_availability(&honest_answer(&node, &honest_promise, epoch, &honest), TS)
+            .expect("answer");
+        for (who, held) in &attackers {
+            node.post_availability(&honest_answer(&node, held, epoch, who), TS)
+                .expect("answer");
+        }
+        node.settle_availability(epoch, TS)
+            .expect("settles")
+            .expect("something to settle");
+        assert_eq!(node.audit(false), Vec::<String>::new());
+
+        let paid = availability_payouts(&node);
+        let attacker_total = attackers
+            .iter()
+            .map(|(who, _)| paid.get(&who.submitter_id()).copied().unwrap_or(0))
+            .sum();
+        (
+            paid.get(&honest.submitter_id()).copied().unwrap_or(0),
+            attacker_total,
+        )
     }
 
     /// Weighted shares floor-divide and the remainder is recorded, never
@@ -7270,7 +7925,7 @@ mod tests {
         let mut held = Vec::new();
         for i in 0..3u8 {
             let who = crate::crypto::identity::Identity::from_secret_bytes([30 + i; 32]);
-            let promise = promise(&mut node, &who);
+            let promise = promise(&mut node, &who, 1_000);
             held.push((who, promise));
         }
         for (who, promise) in &held {

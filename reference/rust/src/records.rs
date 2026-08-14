@@ -1065,6 +1065,15 @@ pub struct Undertaking {
     pub identity: String,
     pub root: String,
     pub height: u64,
+    /// Units staked behind this promise, and the whole of its sybil resistance.
+    ///
+    /// The availability pool is split in proportion to this rather than evenly
+    /// or by height, because a stake-weighted split is the one rule that is
+    /// exactly invariant to an operator wearing forty identities instead of
+    /// one. Read independently of the primary implementation, from
+    /// `docs/node-incentives.md`; the two agreeing about it is the point of
+    /// there being two.
+    pub bond: u64,
     pub created_at: String,
     pub signature: Option<String>,
 }
@@ -1073,6 +1082,7 @@ impl Undertaking {
     pub fn signing_payload(&self) -> Value {
         Value::object([
             ("type", Value::string("undertaking")),
+            ("bond", Value::Int(i128::from(self.bond))),
             ("created_at", Value::string(self.created_at.clone())),
             ("height", Value::Int(i128::from(self.height))),
             ("identity", Value::string(self.identity.clone())),
@@ -1127,6 +1137,14 @@ impl Undertaking {
                 "undertaking height must be between 1 and 2^32 - 1".into(),
             ));
         }
+        // A promise backed by nothing earns nothing, so it is refused on
+        // admission rather than admitted at zero weight and paid nothing in
+        // silence.
+        if self.bond == 0 {
+            return Err(RecordError(
+                "undertaking bond must be at least one unit".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1135,6 +1153,7 @@ impl Undertaking {
             identity: text(value, "identity")?,
             root: text(value, "root")?,
             height: count(value, "height")?,
+            bond: count(value, "bond")?,
             created_at: text(value, "created_at")?,
             signature: optional_text(value, "signature")?,
         };

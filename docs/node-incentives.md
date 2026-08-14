@@ -81,10 +81,16 @@ a challenge nobody answers:
 ```
 proofwork availability fund --funder treasury --per-epoch 7 \
     --from-epoch 0 --to-epoch 4000
-proofwork availability undertake --identity node.json   # the promise
+proofwork availability undertake --identity node.json --bond 1000   # the promise
 proofwork availability answer    --identity node.json   # this epoch's sample
 proofwork availability settle                           # pay it, name the silent
 ```
+
+The `--bond` is not decoration. It is locked against units the log says this
+identity was *paid*, `post_undertaking` refuses more than the identity can
+afford, and the audit re-derives affordability from the prefix below the record
+so a later payout cannot retroactively justify a bond that was unfunded when it
+was written.
 
 The sample is drawn `assign(identity, undertaking, beacon(epoch, anchor),
 height)` — a pure function of the log, so nobody issues the challenge and
@@ -93,11 +99,10 @@ pool one stored entry; the undertaking id is in it so a node that promised
 twice answers two questions; the beacon is in it so the answer is not knowable
 in advance.
 
-Settlement divides the epoch's pot **by weight** — floor-divided in proportion
-to how much each identity promised — records the remainder it could not divide,
-and names every promise that was samplable and said nothing. The silence is the half a slash would attach to. Writing it down
-before a bond exists is what makes the record worth having: the accusation is
-permanent and checkable, even while the penalty is not yet money.
+Settlement divides the epoch's pot **by stake** — floor-divided in proportion to
+what each identity bonded, summed across its promises — records the remainder it
+could not divide, and names every promise that was samplable and said nothing.
+The silence is the half a slash attaches to; the bond is what a slash would take.
 
 The answer carries the sampled **entry** as well as its path, and that is the
 difference between proving storage and proving arithmetic. It did not, at first:
@@ -109,21 +114,97 @@ tree.
 The promise is not the promiser's to size, either. With the height free,
 promising *one* entry drew index 0 every epoch, answered with an empty path, and
 collected exactly what promising the whole log collected. An undertaking now
-covers the log as it stood, the share is weighted by that height, and one
-identity is paid once however many promises it made.
+covers the log as it stood, checked against its own `seq` so the rule survives
+the log growing under it.
 
-**One bound remains, stated plainly.** The answer proves a node *produced* the
-challenged entry, not that it *stored* it — fetching it from a peer the moment
-the epoch opens is not ruled out, and ruling it out needs a time bound or
-sequential work this stage does not have. So it excludes a node that stored
-nothing and has no source, which is the population the payment exists to
-exclude, and it does not catch a cache. And a fixed pot bounds a funder's cost
-however many nodes appear, but it does not price **identity**: ten identities
-behind one disk answer ten samples from one copy and take ten shares. Weighting
-by height stops one identity multiplying itself through extra promises; nothing
-here stops ten identities. That is what `stake` above is for, and why the
-roadmap lists availability sampling as *bonded* at Stage 2 — **so a pool should
-not carry real money until it exists.**
+### Why the share follows the bond and not the promise
+
+Weighting by height was the obvious rule and it was the wrong one, because
+**height is not scarce**. Promising the whole log costs a signature. Forty keys
+each promising the whole log is the sybil attack with nothing spent, and no rule
+reading only the promise can tell those forty from forty real disks.
+
+A bond can be told apart, because the log knows what each identity was paid.
+So the share is `offered * bond / total_bond`, and the property that buys is an
+equation rather than an intuition:
+
+> An operator splitting a fixed stake `S` across `n` identities earns exactly
+> what it earns holding `S` under one, because **stake is conserved when it is
+> divided and a head count is not.**
+
+That is
+`splitting_a_stake_across_many_identities_earns_what_one_identity_earns`, which
+runs the same epoch twice — once with the stake whole, once split sixteen ways —
+and compares the attacker's total *and* the honest operator's share unit for
+unit. Both ways round, because a rule that only ever sees the fixed number
+proves nothing: reverting the weighting to a head count pays the splitter
+**30,112 against 16,000**, an 88% premium for making fifteen extra keys, and the
+honest operator's share collapses from half the pot to a seventeenth of it.
+`incentive::mechanism::SplitIdentities` is the same statement in the model,
+holding real resources constant and varying only the identity count: `PerNode`
+grows with `n`, `PerStake` is flat.
+
+Sixteen keys rather than forty only because each one has to *earn* its stake
+through a real objective/commit/reveal/settle cycle. The equation does not care
+about the count.
+
+Summed rather than maxed, for the same reason. The height rule had to take the
+largest promise, since two full-height promises from one disk would otherwise be
+twice the weight. Bonds need no such patch — two promises share one balance —
+and `splitting_one_balance_across_two_promises_earns_what_one_promise_earns`
+pins it, ending with a third promise of a *single* unit being refused because
+the balance is spent.
+
+### The bound that undercuts all of this: the stake is not scarce yet
+
+Everything above is a statement about a *weighting*. A weighting by stake is
+worth exactly what the stake costs, and right now the stake costs nothing.
+
+**`post_objective` takes no deposit.** A funder names a reward and the
+settlement pays it; nothing checks that the funder had it. So the sequence is:
+post a bounty for an arbitrary sum against a verifier you chose, answer your own
+question, collect, stake. Four commands, one key, and the log audits **clean**
+afterwards — nothing there breaks a rule, the rule is missing. Run it once per
+key and you have forty funded sybils.
+
+`minting_a_bond_is_free_because_an_objective_needs_no_deposit` does exactly that
+and mints 10¹² units. It is a test rather than a paragraph so the caveat cannot
+quietly stop being true: if it ever fails because `post_objective` grew a
+funding check, that is the good outcome, and the fix is to delete the test and
+this section.
+
+So state the achievement precisely. Splitting an identity is **exactly
+neutral** — that is real, measured, and it was not true before. It is the
+property a scarce stake would need. It is not, on its own, sybil resistance,
+because *creating* stake is free. Closing that means debiting an objective's
+reward from its funder's own balance, which needs a genesis rule for where the
+first units come from and moves both implementations — a change of its own
+size. **Until it lands, an availability pool should not carry real money.**
+
+### Three further bounds, stated plainly
+
+1. The answer proves a node *produced* the challenged entry, not that it
+   *stored* it. Fetching it from a peer the moment the epoch opens is not ruled
+   out; ruling it out needs a time bound or sequential work this stage does not
+   have. So it excludes a node that stored nothing and has no source, which is
+   the population the payment exists to exclude, and it does not catch a cache.
+   Closing it needs proof of replication.
+2. Even with a scarce stake this would bound sybil *profit*, not sybil
+   *existence*. Forty keys still appear in the log, still answer, still occupy
+   rows, and still consume an auditor's time. What they would no longer do is
+   earn more than one key holding the same stake.
+3. The bond is not yet *slashed*. Silence is recorded and the units are locked,
+   so the penalty has something to attach to and the accusation is permanent and
+   checkable — but nothing takes them yet. Until it does, an unanswered promise
+   costs its holder liquidity and not money.
+
+And one consequence that is a cost rather than a bound, worth naming because it
+is easy to hit and looks like a bug: **a fresh key cannot promise anything.**
+Spendable balance is settlements naming the identity minus bonds it has already
+locked, so on an honest log the only way in is to have been paid for something.
+It does mean the first storage node on a new log has to do research before it
+can serve. `scripts/differential.sh` runs the full objective/commit/reveal/settle
+cycle for each node before it undertakes, for exactly this reason.
 
 ## The verifier's dilemma is structural, not quantitative
 

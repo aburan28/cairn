@@ -798,12 +798,15 @@ impl Default for CodingChoice {
 /// The four steps of the availability mechanism.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AvailabilityAction {
-    /// Promise to hold this log at its current root and height.
+    /// Promise to hold this log at its current root and height, staking
+    /// `bond` units behind it.
     ///
-    /// No `--height`. The promise covers the whole log as it stands, because
-    /// the size of the promise is what the pool pays for, and a promiser who
-    /// could choose it chose one entry and took a full share.
-    Undertake { identity: String },
+    /// No `--height`: the promise covers the whole log as it stands, because a
+    /// promiser who could choose its size chose one entry and took a full
+    /// share. `--bond` is not optional for the mirror-image reason -- the pool
+    /// is divided in proportion to it, and that proportionality is the only
+    /// thing that makes forty identities no more profitable than one.
+    Undertake { identity: String, bond: u64 },
     /// Answer this epoch's sample for every promise this identity made.
     Answer {
         identity: String,
@@ -1393,6 +1396,7 @@ fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
                 funder = Some(cursor.value("--funder")?);
                 continue;
             }
+            "--bond" => "bond",
             "--epoch" => "epoch",
             "--per-epoch" => "per-epoch",
             "--from-epoch" => "from-epoch",
@@ -1414,6 +1418,9 @@ fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
     let action = match action.as_str() {
         "undertake" => AvailabilityAction::Undertake {
             identity: need_identity("undertake")?,
+            bond: numbers.get("bond").copied().ok_or_else(|| {
+                CliError::Usage(String::from("availability undertake: --bond <units>"))
+            })?,
         },
         "answer" => AvailabilityAction::Answer {
             identity: need_identity("answer")?,
@@ -3510,7 +3517,7 @@ fn cmd_availability(
     action: &AvailabilityAction,
 ) -> Result<i32, CliError> {
     match action {
-        AvailabilityAction::Undertake { identity } => {
+        AvailabilityAction::Undertake { identity, bond } => {
             let signer = load_identity(Some(identity))?.ok_or_else(|| {
                 CliError::Usage(String::from(
                     "availability undertake: --identity is required",
@@ -3521,8 +3528,14 @@ fn cmd_availability(
             let root = ledger_of(&node)
                 .root()
                 .ok_or_else(|| CliError::Usage(String::from("the log is empty")))?;
-            let record = Undertaking::new(signer.submitter_id(), &root, height as u64, timestamp())
-                .signed_with(&signer);
+            let record = Undertaking::new(
+                signer.submitter_id(),
+                &root,
+                height as u64,
+                *bond,
+                timestamp(),
+            )
+            .signed_with(&signer);
             let id = refused(node.post_undertaking(&record, &timestamp()))?;
             say(out, format!("undertaking {id}"));
             say(

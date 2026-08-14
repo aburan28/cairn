@@ -1940,6 +1940,41 @@ pub struct Undertaking {
     /// How many entries that root covers. See the type docs: a challenge needs
     /// the tree's shape, not only its root.
     pub height: u64,
+    /// Units staked behind this promise, and the whole of its Sybil
+    /// resistance.
+    ///
+    /// The availability pool is split **in proportion to this**, not evenly and
+    /// not by height, because a stake-weighted split is the one rule that is
+    /// exactly invariant to an operator wearing forty identities instead of
+    /// one: stake is conserved when it is divided, so forty promises of `S/40`
+    /// earn between them exactly what one promise of `S` earns.
+    /// `incentive::mechanism::SplitIdentities` proves that rather than
+    /// asserting it.
+    ///
+    /// It has to be *scarce* or the invariance is worthless -- a number anyone
+    /// can set to `u64::MAX` would look like the invariant rule and behave like
+    /// the free one. So it is bounded by what the log says this identity has
+    /// been paid and has not already locked: see
+    /// `crate::node::Node::balances_within`.
+    ///
+    /// # It is not scarce yet, and the difference matters
+    ///
+    /// A balance comes from a settlement, a settlement comes from an objective,
+    /// and `crate::node::Node::post_objective` **takes no deposit**: a funder
+    /// names a reward and nothing checks it had one. So an attacker posts a
+    /// bounty for an arbitrary sum against a verifier it chose, answers its own
+    /// question, and stakes the proceeds -- and does it once per key.
+    /// `node::tests::minting_a_bond_is_free_because_an_objective_needs_no_deposit`
+    /// mints 10^12 units in four commands and audits clean afterwards, because
+    /// nothing there breaks a rule; the rule is missing.
+    ///
+    /// So what this field buys today is *invariance*, not resistance: splitting
+    /// a stake across identities is exactly neutral, which is the property a
+    /// scarce stake would need and is not by itself enough. Closing it means
+    /// debiting an objective's reward from its funder's own balance, which
+    /// needs a genesis rule and moves both implementations. Until then, an
+    /// availability pool should not carry real money.
+    pub bond: u64,
     pub created_at: String,
     /// Ed25519 signature over [`Undertaking::signing_payload`], hex.
     ///
@@ -1968,12 +2003,14 @@ impl Undertaking {
         identity: impl Into<String>,
         root: impl Into<String>,
         height: u64,
+        bond: u64,
         created_at: impl Into<String>,
     ) -> Undertaking {
         Undertaking {
             identity: identity.into(),
             root: root.into(),
             height,
+            bond,
             created_at: created_at.into(),
             signature: None,
         }
@@ -1983,6 +2020,7 @@ impl Undertaking {
     pub fn signing_payload(&self) -> Value {
         Value::object([
             ("type", Value::string(RecordKind::Undertaking.as_str())),
+            ("bond", Value::Int(i128::from(self.bond))),
             ("created_at", Value::string(self.created_at.clone())),
             ("height", Value::Int(i128::from(self.height))),
             ("identity", Value::string(self.identity.clone())),
@@ -2063,6 +2101,17 @@ impl Undertaking {
                 expected: "between 1 and 2^32 - 1 entries",
             });
         }
+        // A promise backed by nothing earns nothing, so it is refused rather
+        // than admitted at zero weight: an unbonded undertaking in the log is a
+        // node that believes it is being sampled and will never be paid, and
+        // saying so on admission is kinder than saying it by silence.
+        if self.bond == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "bond",
+                expected: "at least one unit staked",
+            });
+        }
         Ok(())
     }
 
@@ -2073,6 +2122,7 @@ impl Undertaking {
             identity: required_string(value, RECORD, "identity")?,
             root: required_string(value, RECORD, "root")?,
             height: required_u64(value, RECORD, "height")?,
+            bond: required_u64(value, RECORD, "bond")?,
             created_at: required_string(value, RECORD, "created_at")?,
             signature: optional_string(value, RECORD, "signature")?,
         };
@@ -2097,15 +2147,19 @@ impl Undertaking {
 ///
 /// # What a fixed pot buys, and what it does not
 ///
-/// The pot is split equally among the epoch's verified answers, so the cost to
-/// a funder is bounded no matter how many nodes appear. What that does *not*
-/// buy is sybil resistance: ten identities behind one disk answer ten different
-/// samples from one copy of the log and take ten shares. Bounding that needs a
-/// bond — it is [`crate::incentive::NodeParams::stake`] in the model, and
-/// `docs/roadmap.md` puts bonded availability sampling in Stage 2. So this pays
-/// for answers, and it does not yet price the identity giving them. Stated here
-/// rather than left to be discovered, because a funder reading only the
-/// ceiling would conclude something stronger than is true.
+/// The pot is split among the epoch's verified answers **in proportion to the
+/// bond behind each**, so the cost to a funder is bounded no matter how many
+/// nodes appear *and* splitting one identity into forty earns exactly what it
+/// earned as one — stake is conserved when it is divided, a head count is not.
+/// Split equally, as this first did, ten identities behind one disk answered
+/// ten samples from one copy and took ten shares.
+///
+/// What it still does not buy is proof that the answerer *stored* anything: the
+/// answer proves the entry was produced, and a node fetching it from a peer as
+/// the epoch opens is not excluded. Nor is the bond slashed yet — silence is
+/// recorded and the units are locked, but nothing takes them. Stated here
+/// rather than left to be discovered, because a funder reading only the ceiling
+/// would conclude something stronger than is true.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvailabilityPool {
     /// Who is paying. A name, not necessarily a key: funding is not a claim
@@ -3245,6 +3299,41 @@ mod tests {
                 .expect("the top of the range decodes")
                 .seq,
             u64::MAX
+        );
+    }
+
+    /// The signed undertaking the *other* implementation pins as a fixture.
+    ///
+    /// `reference/rust` cannot sign — deliberately, so it can never agree with
+    /// this crate by sharing its bug — which means its audit tests need a
+    /// genuinely signed record borrowed from here. A borrowed constant rots
+    /// silently: add a field to the record and the reference's copy becomes a
+    /// record this crate would no longer write, so the two implementations stop
+    /// being compared on the same bytes while both still pass.
+    ///
+    /// So the bytes live here, where changing the record breaks *this* test
+    /// first and names the file to update. If you are reading this because it
+    /// failed: paste the printed value into `SIGNED` in
+    /// `reference/rust/src/node.rs`.
+    #[test]
+    fn the_signed_undertaking_the_reference_crate_pins_is_still_what_this_crate_writes() {
+        const SIGNED: &str = r#"{"bond":500,"created_at":"2026-08-14T00:00:00+00:00","height":3,"identity":"197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61","root":"sha256:30ffa4f80f8e0198fd85844b9a63b682f11f1bca7a67532aaaae0f20d17e78ed","signature":"bac8259da5214a3026e01f1e912988a1cb4fd6969085a6ad0cddb6a43af99ee1a6202b4df610dd2e8df8472c34f6a7985d3ee0ed2ea37d1094f1f64ef15d4f06","type":"undertaking"}"#;
+
+        let who = crate::crypto::identity::Identity::from_secret_bytes([42u8; 32]);
+        let record = Undertaking::new(
+            "",
+            crate::canonical::digest_bytes(b"a root no log ever had"),
+            3,
+            500,
+            "2026-08-14T00:00:00+00:00",
+        )
+        .signed_with(&who);
+        record.verify_signature().expect("this crate signs it");
+        assert_eq!(
+            record.to_value().canonical_string(),
+            SIGNED,
+            "the undertaking record changed shape; \
+             reference/rust/src/node.rs pins the old bytes"
         );
     }
 }

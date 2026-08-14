@@ -127,6 +127,75 @@ impl Node {
             .map(|entry| &entry.payload)
     }
 
+    /// What `identity` could still bond, reading only the first `positions`
+    /// entries of the log.
+    ///
+    /// Paid minus locked. *Paid* is settlements naming this identity as
+    /// submitter plus availability payouts naming it, because the only way into
+    /// this network is to have contributed something somebody verified: a fresh
+    /// key has nothing and is worth nothing, which is what makes the bond a
+    /// scarce resource rather than a number anyone can write. *Locked* is every
+    /// bond it has already staked and not had returned.
+    ///
+    /// Bounded by position rather than taken over the whole log, because the
+    /// rule this feeds is about what a record could afford *when it was
+    /// written*. Reading the whole log would let a later payout retroactively
+    /// justify a bond that was unfunded at the time, and let a later bond
+    /// retroactively bankrupt one that was funded.
+    ///
+    /// Locked reads the raw undertaking entries -- decodable and signed,
+    /// nothing more -- precisely because the affordability rule is what it
+    /// feeds. Filtering on affordability here would be circular, and counting
+    /// an unaffordable bond against its own author is self-correcting: a forged
+    /// `u64::MAX` drives that identity's balance to zero and every promise it
+    /// makes, that one included, fails the check.
+    pub fn spendable_within(&self, identity: &str, positions: u64) -> u128 {
+        let mut paid = 0u128;
+        for entry in self.ledger.entries() {
+            if entry.seq >= positions {
+                break;
+            }
+            match entry.kind.as_str() {
+                SETTLEMENT => {
+                    if entry.payload.get("submitter").and_then(Value::as_str) == Some(identity) {
+                        if let Some(reward) = entry.payload.get("reward").and_then(Value::as_u64) {
+                            paid = paid.saturating_add(u128::from(reward));
+                        }
+                    }
+                }
+                AVAILABILITY_SETTLEMENT => {
+                    for row in entry
+                        .payload
+                        .get("paid")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                    {
+                        if row.get("identity").and_then(Value::as_str) == Some(identity) {
+                            if let Some(reward) = row.get("reward").and_then(Value::as_u64) {
+                                paid = paid.saturating_add(u128::from(reward));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut locked = 0u128;
+        for entry in self.ledger.entries_of_kind(UNDERTAKING) {
+            if entry.seq >= positions {
+                break;
+            }
+            let Ok(record) = Undertaking::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.identity != identity || record.verify_signature().is_err() {
+                continue;
+            }
+            locked = locked.saturating_add(u128::from(record.bond));
+        }
+        paid.saturating_sub(locked)
+    }
+
     pub fn frontier_of(&self, objective_id: &str) -> Option<FrontierEntry> {
         // The *last* frontier entry wins: the log records every advance, and
         // the current holder is whoever moved it most recently.
@@ -1161,6 +1230,15 @@ impl Node {
                              it had {}; the size of a promise is not the promiser's to choose",
                             entry.seq, record.height, entry.seq
                         ));
+                    } else if u128::from(record.bond)
+                        > self.spendable_within(&record.identity, entry.seq)
+                    {
+                        problems.push(format!(
+                            "entry {}: undertaking bonds {} units against a balance of {}",
+                            entry.seq,
+                            record.bond,
+                            self.spendable_within(&record.identity, entry.seq)
+                        ));
                     } else if !promises.contains_key(&record.id()) {
                         problems.push(format!(
                             "entry {}: undertaking names {} entries rooted at {}, which no \
@@ -1949,10 +2027,31 @@ mod tests {
         ledger
             .append("note", Value::string("one"), TS)
             .expect("append");
+        // A settlement paying the fixture's identity, so its bond is
+        // affordable. Without it the audit reports the *bond* and stops, and
+        // the root check below -- the branch this test exists for -- would
+        // never run while the test still looked like it was exercising it.
+        ledger
+            .append(
+                SETTLEMENT,
+                Value::object([
+                    ("claim_id", Value::string("00".repeat(32))),
+                    ("objective_id", Value::string("11".repeat(32))),
+                    ("reward", Value::Int(1000)),
+                    (
+                        "submitter",
+                        Value::string(
+                            "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+                        ),
+                    ),
+                ]),
+                TS,
+            )
+            .expect("append");
         ledger
             .append("note", Value::string("two"), TS)
             .expect("append");
-        let root = ledger.root_at(2).expect("root");
+        let root = ledger.root_at(3).expect("root");
 
         // A *genuinely signed* undertaking, lifted from a log the primary
         // implementation wrote, naming a root that is not a prefix root of
@@ -1961,7 +2060,14 @@ mod tests {
         // check -- and this crate cannot sign, by design. Borrowing a real
         // record from the other implementation is the honest way to exercise
         // the branch, and it doubles as a decode test against its bytes.
-        const SIGNED: &str = r#"{"created_at":"2026-08-06T15:35:22+00:00","height":2,"identity":"bee6e7dca0b328454bcb7b23475cb080d220c5a416168b051a47d76700dec386","root":"sha256:8fc854636ab4a4b63fd04b95cd837202a39c81b71f4c29e4c563e59508ae513c","signature":"2de2e015e147e43428491baa40a8dbe5b906b6187ebb90e30e65af7997490679c2e43b3edd81f4ca88768622e6f1309d890c2a23fb662e0603524ccee36a7507","type":"undertaking"}"#;
+        //
+        // These exact bytes are pinned on the other side too, by
+        // `the_signed_undertaking_the_reference_crate_pins_is_still_what_this_crate_writes`.
+        // A borrowed constant rots silently -- add a field to the record and
+        // this copy becomes one the primary would no longer write, so the two
+        // implementations stop being compared on the same bytes while both
+        // still pass. That test fails first and names this file.
+        const SIGNED: &str = r#"{"bond":500,"created_at":"2026-08-14T00:00:00+00:00","height":3,"identity":"197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61","root":"sha256:30ffa4f80f8e0198fd85844b9a63b682f11f1bca7a67532aaaae0f20d17e78ed","signature":"bac8259da5214a3026e01f1e912988a1cb4fd6969085a6ad0cddb6a43af99ee1a6202b4df610dd2e8df8472c34f6a7985d3ee0ed2ea37d1094f1f64ef15d4f06","type":"undertaking"}"#;
         let borrowed = Value::from_json(SIGNED).expect("the fixture is canonical JSON");
         let decoded = Undertaking::from_value(&borrowed).expect("and it decodes here");
         decoded
@@ -2011,8 +2117,59 @@ mod tests {
         );
         // And the check is not simply always-failing: this log's own root at
         // that height is a value the same code path accepts.
-        assert_eq!(node.ledger.root_at(2).as_deref(), Some(root.as_str()));
+        assert_eq!(node.ledger.root_at(3).as_deref(), Some(root.as_str()));
         assert_ne!(root, decoded.root, "the fixture must name a different root");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bond the log never funded is named here too.
+    ///
+    /// The rule the availability pool is divided by: a promise's share is
+    /// proportional to what it staked, so a stake nobody paid for is a share of
+    /// somebody else's money. It is the one number in an undertaking that the
+    /// record cannot establish about itself — what the identity has been paid
+    /// is written below it — which is exactly why a second implementation has
+    /// to derive it independently rather than take the first one's word.
+    ///
+    /// Same bytes as the fixture above, in a log that does *not* pay their
+    /// author. That is the whole difference, so what is reported is the
+    /// balance and not the shape.
+    #[test]
+    fn a_bond_the_log_never_funded_is_reported() {
+        let dir = scratch("unfunded-bond");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        for note in ["one", "two", "three"] {
+            ledger
+                .append("note", Value::string(note), TS)
+                .expect("append");
+        }
+        const SIGNED: &str = r#"{"bond":500,"created_at":"2026-08-14T00:00:00+00:00","height":3,"identity":"197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61","root":"sha256:30ffa4f80f8e0198fd85844b9a63b682f11f1bca7a67532aaaae0f20d17e78ed","signature":"bac8259da5214a3026e01f1e912988a1cb4fd6969085a6ad0cddb6a43af99ee1a6202b4df610dd2e8df8472c34f6a7985d3ee0ed2ea37d1094f1f64ef15d4f06","type":"undertaking"}"#;
+        let borrowed = Value::from_json(SIGNED).expect("the fixture is canonical JSON");
+        ledger.append(UNDERTAKING, borrowed, TS).expect("append");
+
+        let node = Node::new(ledger, ".");
+        let problems = node.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("bonds 500 units against a balance of 0")),
+            "a bond nobody funded went unreported: {problems:?}"
+        );
+        // The height rule is satisfied, so this is not that fault wearing a
+        // different message: the record sits at seq 3 and promises 3.
+        assert!(
+            !problems
+                .iter()
+                .any(|p| p.contains("not the promiser's to choose")),
+            "the fixture tripped the size rule instead: {problems:?}"
+        );
+        assert_eq!(
+            node.spendable_within(
+                "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+                3,
+            ),
+            0
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
