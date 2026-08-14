@@ -155,31 +155,57 @@ and `splitting_one_balance_across_two_promises_earns_what_one_promise_earns`
 pins it, ending with a third promise of a *single* unit being refused because
 the balance is spent.
 
-### The bound that undercuts all of this: the stake is not scarce yet
+### What makes the stake scarce: a declared supply
 
-Everything above is a statement about a *weighting*. A weighting by stake is
-worth exactly what the stake costs, and right now the stake costs nothing.
+A weighting by stake is worth exactly what the stake costs, and for one change
+it cost nothing. `post_objective` took no deposit: a funder named a reward and
+the settlement paid it, so the sequence was *post a bounty for an arbitrary sum
+against a verifier you chose, answer your own question, collect, stake.* Four
+commands, one key, and the log audited clean afterwards — nothing there broke a
+rule, the rule was missing. Once per key, and you had forty funded sybils.
 
-**`post_objective` takes no deposit.** A funder names a reward and the
-settlement pays it; nothing checks that the funder had it. So the sequence is:
-post a bounty for an arbitrary sum against a verifier you chose, answer your own
-question, collect, stake. Four commands, one key, and the log audits **clean**
-afterwards — nothing there breaks a rule, the rule is missing. Run it once per
-key and you have forty funded sybils.
+The rule is the **issuance** record:
 
-`minting_a_bond_is_free_because_an_objective_needs_no_deposit` does exactly that
-and mints 10¹² units. It is a test rather than a paragraph so the caveat cannot
-quietly stop being true: if it ever fails because `post_objective` grew a
-funding check, that is the good outcome, and the fix is to delete the test and
-this section.
+```
+proofwork issue --holder treasury --units 1000000   # genesis prefix only
+proofwork balances                                  # who holds what, what is escrowed
+```
 
-So state the achievement precisely. Splitting an identity is **exactly
-neutral** — that is real, measured, and it was not true before. It is the
-property a scarce stake would need. It is not, on its own, sybil resistance,
-because *creating* stake is free. Closing that means debiting an objective's
-reward from its funder's own balance, which needs a genesis rule for where the
-first units come from and moves both implementations — a change of its own
-size. **Until it lands, an availability pool should not carry real money.**
+Three properties, and each is the answer to a way of making money for free.
+
+**It is only admissible in the genesis prefix** — the run of issuance records at
+the very front, before anything else is written. So the supply is a property of
+the log's opening bytes: fixed at creation, readable by anyone starting from
+line one, and an issuance below it is a fault rather than a balance. This is the
+"initial common knowledge" the consensus literature assumes and never gets to
+skip; here it is a few lines of JSON you can read.
+
+**Position authorises it, not a signature.** A signature would prove who wrote
+the record, and in a log's first entries there is nobody else it could be.
+
+**Every commitment is charged against it.** Posting an objective charges its
+whole `reward`; funding an availability pool charges its whole ceiling; an
+undertaking charges its bond. `spendable = issued + settled − committed`, and
+`post_objective` refuses what the funder cannot cover — so a bounty for a sum
+nobody issued is refused at the door, and one appended past the door is named by
+the audit, in both implementations, from their own arithmetic.
+
+Charged *in full and permanently*, which is the part that is easy to get wrong:
+the first version released a reward from escrow as settlements drew it down,
+which is the natural reading of the word and wrong by a whole supply — the units
+went to the submitter, so returning them to the funder credited the same money
+twice. `a_settled_reward_moves_escrow_and_mints_nothing` found 2000 held against
+1000 issued. What draws down is the *outstanding* escrow, which exists to be
+reported and never to be subtracted.
+
+**A log with no issuance is still legal**, and that is the whole backward
+compatibility story. Such a log has not claimed its units are scarce, so escrow
+is not enforced and `proofwork balances` says so in as many words. The moment a
+supply is declared, every unit has to trace to it.
+
+So the claim about sybils can finally be stated without a caveat attached:
+splitting an identity is exactly neutral, *and* the stake it splits is scarce.
+Which leaves the bounds below, none of which is about money.
 
 ### Three further bounds, stated plainly
 
@@ -189,10 +215,10 @@ size. **Until it lands, an availability pool should not carry real money.**
    have. So it excludes a node that stored nothing and has no source, which is
    the population the payment exists to exclude, and it does not catch a cache.
    Closing it needs proof of replication.
-2. Even with a scarce stake this would bound sybil *profit*, not sybil
-   *existence*. Forty keys still appear in the log, still answer, still occupy
-   rows, and still consume an auditor's time. What they would no longer do is
-   earn more than one key holding the same stake.
+2. This bounds sybil *profit*, not sybil *existence*. Forty keys still appear in
+   the log, still answer, still occupy rows, and still consume an auditor's
+   time. What they no longer do is earn more than one key holding the same
+   stake.
 3. The bond is not yet *slashed*. Silence is recorded and the units are locked,
    so the penalty has something to attach to and the accusation is permanent and
    checkable — but nothing takes them yet. Until it does, an unanswered promise
@@ -200,8 +226,9 @@ size. **Until it lands, an availability pool should not carry real money.**
 
 And one consequence that is a cost rather than a bound, worth naming because it
 is easy to hit and looks like a bug: **a fresh key cannot promise anything.**
-Spendable balance is settlements naming the identity minus bonds it has already
-locked, so on an honest log the only way in is to have been paid for something.
+Spendable balance is what the genesis prefix issued you plus what settlements
+paid you, minus what you have committed — so on a log with a declared supply the
+only way in is to have been issued units or to have been paid for something.
 It does mean the first storage node on a new log has to do research before it
 can serve. `scripts/differential.sh` runs the full objective/commit/reveal/settle
 cycle for each node before it undertakes, for exactly this reason.

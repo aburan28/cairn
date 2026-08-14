@@ -452,6 +452,15 @@ enum Command {
     Post {
         objective: String,
     },
+    /// Declare units into the log's supply. Genesis prefix only — see
+    /// [`proofwork::records::Issuance`].
+    Issue {
+        holder: String,
+        units: u64,
+    },
+    /// Who holds what, what is escrowed behind a promise to pay, and what the
+    /// genesis prefix issued.
+    Balances,
     Commit {
         objective_id: String,
         submitter: String,
@@ -1006,6 +1015,11 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
 
     let command = match name.as_str() {
         "post" => parse_post(&mut cursor)?,
+        "issue" => parse_issue(&mut cursor)?,
+        "balances" => {
+            expect_end(&mut cursor, "balances")?;
+            Command::Balances
+        }
         "commit" => parse_commit(&mut cursor)?,
         "reveal" => parse_reveal(&mut cursor)?,
         "settle" => {
@@ -1101,6 +1115,32 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
     };
 
     Ok(Invocation { options, command })
+}
+
+/// `issue --holder <name> --units <n>`.
+///
+/// Deliberately not `--signed-by`: a supply is authorised by its *position* in
+/// the log, not by a key. Nothing else has been written yet, so a signature
+/// would only say who opened the log, which is not in dispute.
+fn parse_issue(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut holder: Option<String> = None;
+    let mut units: Option<u64> = None;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--holder" => holder = Some(cursor.value("issue: --holder")?),
+            "--units" => {
+                let raw = cursor.value("issue: --units")?;
+                units = Some(raw.parse().map_err(|_| {
+                    CliError::Usage(format!("issue: --units expects an integer, got {raw:?}"))
+                })?);
+            }
+            other => return Err(CliError::Usage(format!("issue: unknown option {other:?}"))),
+        }
+    }
+    Ok(Command::Issue {
+        holder: require(holder, "issue", "--holder <name>")?,
+        units: units.ok_or_else(|| CliError::Usage(String::from("issue: --units <n>")))?,
+    })
 }
 
 fn parse_post(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -2665,6 +2705,74 @@ fn read_json(path: &str) -> Result<Value, CliError> {
 
 fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
     post_objective_file(out, options, path)?;
+    Ok(0)
+}
+
+fn cmd_issue(
+    out: &mut dyn Write,
+    options: &Options,
+    holder: &str,
+    units: u64,
+) -> Result<i32, CliError> {
+    let mut node = open_node_for_writing(options)?;
+    let record = proofwork::records::Issuance::new(holder, units, timestamp());
+    let id = node
+        .post_issuance(&record, &timestamp())
+        .map_err(|error| CliError::Refused(error.to_string()))?;
+    say(out, format!("issued {units} to {holder}"));
+    say(out, format!("  record {}", short(&id)));
+    say(
+        out,
+        String::from(
+            "  the supply is the log's opening entries; once anything else is \
+             written, `issue` is refused",
+        ),
+    );
+    Ok(0)
+}
+
+/// Who holds what, and where the rest of the supply is sitting.
+///
+/// Three columns rather than one, because "balance" is three different numbers
+/// and conflating them is how a funder concludes it can afford something twice:
+/// what the log issued or paid you, what you have committed and cannot spend
+/// again, and the difference.
+fn cmd_balances(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
+    let node = open_node(options)?;
+    let issued = node.issued();
+    let escrowed = node.escrowed();
+    let balances = node.balances();
+
+    if !node.declares_supply() {
+        say(
+            out,
+            String::from(
+                "this log declares no supply, so nothing here is scarce: rewards are \
+                 backed by the operator's word rather than by an issuance. `issue` \
+                 before anything else to change that.",
+            ),
+        );
+    }
+    let total: u128 = issued.values().sum();
+    say(out, format!("issued {total}"));
+
+    let mut names: std::collections::BTreeSet<String> = balances.keys().cloned().collect();
+    names.extend(issued.keys().cloned());
+    names.extend(escrowed.keys().cloned());
+    for name in &names {
+        let spendable = balances.get(name).copied().unwrap_or(0);
+        let held = escrowed.get(name).copied().unwrap_or(0);
+        if spendable == 0 && held == 0 {
+            continue;
+        }
+        say(
+            out,
+            format!(
+                "  {:<20} spendable {spendable:>12}   escrowed {held:>12}",
+                short(name)
+            ),
+        );
+    }
     Ok(0)
 }
 
@@ -6349,6 +6457,8 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             Ok(0)
         }
         Command::Post { objective } => cmd_post(out, options, objective),
+        Command::Issue { holder, units } => cmd_issue(out, options, holder, *units),
+        Command::Balances => cmd_balances(out, options),
         Command::Commit {
             objective_id,
             submitter,

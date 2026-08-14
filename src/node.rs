@@ -64,8 +64,8 @@ use crate::knowledge::{
 use crate::ledger::{Entry, Ledger, LedgerError, Proof};
 use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
 use crate::records::{
-    Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Objective, PeerRecord,
-    Undertaking,
+    Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Issuance, Objective,
+    PeerRecord, Undertaking,
 };
 use crate::sealed::{OpenedSubmission, SealedSubmission};
 use crate::verifiers::{self, Kind, Status, Verdict, VerifierRegistry};
@@ -118,6 +118,9 @@ const AVAILABILITY_SETTLEMENT: &str = "availability_settlement";
 /// One committee member opening its share of a sealed submission's content key.
 /// See [`Node::post_committee_share`].
 const COMMITTEE_SHARE: &str = "committee_share";
+/// A unit of money entering the log. Admissible only in the genesis prefix —
+/// see [`Node::issued_within`].
+const ISSUANCE: &str = "issuance";
 
 // ---------------------------------------------------------------------------
 // Rule violations
@@ -272,6 +275,23 @@ pub enum RuleViolation {
         identity: String,
         bond: u64,
         spendable: u128,
+    },
+    /// A reward larger than the log says its funder can afford.
+    ///
+    /// The check that makes every other money rule mean something. Without it
+    /// a funder names a sum and the settlement pays it, so the units a bond is
+    /// weighed in are free to make and weighing by them buys nothing. Only
+    /// enforced on a log that declares a supply — see [`Node::declares_supply`].
+    UnfundedReward {
+        funder: String,
+        reward: u128,
+        spendable: u128,
+    },
+    /// An issuance below the genesis prefix: money made after the fact.
+    MintedAfterGenesis {
+        holder: String,
+        units: u64,
+        seq: u64,
     },
     /// An undertaking that does not cover the whole log as it stood.
     ///
@@ -565,6 +585,23 @@ impl fmt::Display for RuleViolation {
                  already locked; a bond is what the availability pool is divided by, so \
                  one nobody earned would let a fresh identity take a share for free",
                 crate::canonical::short(identity)
+            ),
+            RuleViolation::UnfundedReward {
+                funder,
+                reward,
+                spendable,
+            } => write!(
+                f,
+                "{} offers {reward} units and holds {spendable} it has not already \
+                 committed; this log declares its supply, so a reward nobody issued \
+                 would be money made by naming it",
+                crate::canonical::short(funder)
+            ),
+            RuleViolation::MintedAfterGenesis { holder, units, seq } => write!(
+                f,
+                "entry {seq} issues {units} units to {}; a supply is declared in the \
+                 log's opening entries and never again, or it is not a supply",
+                crate::canonical::short(holder)
             ),
             RuleViolation::PartialUndertaking { promised, log } => write!(
                 f,
@@ -965,6 +1002,12 @@ impl Node {
                 });
             }
         }
+
+        // The reward is escrowed from the funder's own balance. Last of the
+        // checks, because it is the only one that depends on the rest of the
+        // log rather than on the record, and a record that is malformed should
+        // be reported as malformed rather than as unaffordable.
+        self.afford(&objective.funder, u128::from(objective.reward))?;
 
         self.append(OBJECTIVE, objective.to_value(), ts)?;
         // How pinned code enters the network: the funder has the checker on
@@ -2455,24 +2498,206 @@ impl Node {
     /// must not be able to change whether an already-accepted undertaking was
     /// affordable.
     pub fn balances_within(&self, positions: usize) -> BTreeMap<String, u128> {
-        let mut paid = self.gross_paid_within(positions);
-        for (identity, locked) in self.locked_within(positions) {
-            if let Some(slot) = paid.get_mut(&identity) {
-                *slot = slot.saturating_sub(locked);
-            }
+        let mut held = self.gross_paid_within(positions);
+        for (identity, committed) in self.committed_within(positions) {
+            let slot = held.entry(identity).or_insert(0);
+            *slot = slot.saturating_sub(committed);
         }
-        paid
+        held
     }
 
-    /// Everything the log says each identity was *paid*, ignoring what it has
-    /// locked. Settlements only.
+    /// What each identity has put at risk and not yet had returned: bonds
+    /// locked behind promises, plus rewards escrowed behind objectives and
+    /// availability pools it funded.
     ///
-    /// Separate from the locked side so that neither reads
+    /// One function because they are one rule. A funder who could post a
+    /// bounty it cannot pay is minting, and a promiser who could stake units it
+    /// does not hold is minting; the two differ only in which record does it.
+    fn committed_within(&self, positions: usize) -> BTreeMap<String, u128> {
+        let mut committed = self.locked_within(positions);
+        for (funder, charged) in self.charged_within(positions) {
+            let slot = committed.entry(funder).or_insert(0);
+            *slot = slot.saturating_add(charged);
+        }
+        committed
+    }
+
+    /// What each funder has parted with by posting: the *whole* reward of every
+    /// objective it funded, and the whole ceiling of every availability pool.
+    ///
+    /// Charged once, at post time, and never given back. The first version
+    /// released a reward from escrow as settlements drew it down, which is the
+    /// natural reading of the word and is wrong by a whole supply: the units
+    /// left for the submitter, so returning them to the funder credited the
+    /// same money twice and `a_settled_reward_moves_escrow_and_mints_nothing`
+    /// found 2000 held against 1000 issued. What draws down is
+    /// [`Node::escrowed_within`], which is the *outstanding* part and exists to
+    /// be reported rather than to be subtracted.
+    fn charged_within(&self, positions: usize) -> BTreeMap<String, u128> {
+        let mut charged: BTreeMap<String, u128> = BTreeMap::new();
+        let entries = self.ledger.entries();
+        for entry in &entries[..positions.min(entries.len())] {
+            let (funder, amount) = match entry.kind.as_str() {
+                OBJECTIVE => match Objective::from_value(&entry.payload) {
+                    Ok(objective) => (objective.funder, u128::from(objective.reward)),
+                    Err(_) => continue,
+                },
+                AVAILABILITY_POOL => match AvailabilityPool::from_value(&entry.payload) {
+                    Ok(pool) => {
+                        let ceiling = pool.ceiling();
+                        (pool.funder, ceiling)
+                    }
+                    Err(_) => continue,
+                },
+                _ => continue,
+            };
+            let slot = charged.entry(funder).or_insert(0);
+            *slot = slot.saturating_add(amount);
+        }
+        charged
+    }
+
+    /// How many entries of this log are its genesis prefix: the run of
+    /// [`ISSUANCE`] records at the very front, before anything else.
+    ///
+    /// The supply is defined by *position* rather than by a signature, because
+    /// a signature would only say who wrote the record and in the opening bytes
+    /// of a log there is nobody else it could be. Reading forward from line one
+    /// and stopping at the first record of any other kind gives every auditor
+    /// the same number, which is what makes the supply common knowledge in the
+    /// sense the consensus literature means: agreed before the protocol starts,
+    /// rather than agreed by running it.
+    pub fn genesis_prefix(&self) -> usize {
+        self.ledger
+            .entries()
+            .iter()
+            .take_while(|entry| entry.kind == ISSUANCE)
+            .count()
+    }
+
+    /// Does this log declare a money supply?
+    ///
+    /// The switch that turns the accounting on. A log with no issuance has not
+    /// claimed its units are scarce, so escrow is not enforced on it and the
+    /// audit says the backing is the operator's word. A log with one has, and
+    /// then every unit in it must trace to the declaration.
+    pub fn declares_supply(&self) -> bool {
+        self.genesis_prefix() > 0
+    }
+
+    /// The declared supply, by holder.
+    ///
+    /// Only the genesis prefix counts. An issuance below it is a mint and is
+    /// reported by [`Node::audit`] rather than credited — otherwise the record
+    /// that exists to make money scarce would be the cheapest way to make more.
+    pub fn issued_within(&self, positions: usize) -> BTreeMap<String, u128> {
+        let mut issued: BTreeMap<String, u128> = BTreeMap::new();
+        let genesis = self.genesis_prefix().min(positions);
+        for entry in self.ledger.entries().iter().take(genesis) {
+            if let Ok(record) = Issuance::from_value(&entry.payload) {
+                let slot = issued.entry(record.holder).or_insert(0);
+                *slot = slot.saturating_add(u128::from(record.units));
+            }
+        }
+        issued
+    }
+
+    /// [`Node::issued_within`] over the whole log.
+    pub fn issued(&self) -> BTreeMap<String, u128> {
+        self.issued_within(self.ledger.len())
+    }
+
+    /// Of what each funder has been charged, how much is still owed to nobody
+    /// in particular: rewards posted and not yet settled.
+    ///
+    /// **Reporting only.** Balances subtract [`Node::charged_within`], which is
+    /// the full commitment and never returns; this is the part of it that has
+    /// not yet reached a submitter, and it exists so `balances` can show where
+    /// the supply is sitting and so the audit can print a total that closes.
+    /// Subtracting *this* instead would hand a funder back the units its
+    /// settlement had already paid out.
+    ///
+    /// Reads raw entries for the same reason [`Node::locked_within`] does.
+    pub fn escrowed_within(&self, positions: usize) -> BTreeMap<String, u128> {
+        let entries = self.ledger.entries();
+        let window = &entries[..positions.min(entries.len())];
+
+        // Drawn down per objective, and per pool, before anything is charged to
+        // a funder: a reward already in somebody's hands is not still escrowed,
+        // and charging it twice would make an honest funder look insolvent.
+        let mut drawn: BTreeMap<String, u128> = BTreeMap::new();
+        let mut availability_drawn: u128 = 0;
+        for entry in window {
+            match entry.kind.as_str() {
+                SETTLEMENT => {
+                    if let (Some(objective_id), Some(reward)) = (
+                        payload_str(&entry.payload, "objective_id"),
+                        entry.payload.get("reward").and_then(Value::as_u64),
+                    ) {
+                        let slot = drawn.entry(objective_id.to_string()).or_insert(0);
+                        *slot = slot.saturating_add(u128::from(reward));
+                    }
+                }
+                AVAILABILITY_SETTLEMENT => {
+                    for row in entry
+                        .payload
+                        .get("paid")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                    {
+                        if let Some(reward) = row.get("reward").and_then(Value::as_u64) {
+                            availability_drawn = availability_drawn.saturating_add(reward.into());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut escrowed: BTreeMap<String, u128> = BTreeMap::new();
+        for entry in window {
+            match entry.kind.as_str() {
+                OBJECTIVE => {
+                    let Ok(objective) = Objective::from_value(&entry.payload) else {
+                        continue;
+                    };
+                    let paid = drawn.get(&objective.id()).copied().unwrap_or(0);
+                    let outstanding = u128::from(objective.reward).saturating_sub(paid);
+                    let slot = escrowed.entry(objective.funder.clone()).or_insert(0);
+                    *slot = slot.saturating_add(outstanding);
+                }
+                AVAILABILITY_POOL => {
+                    let Ok(pool) = AvailabilityPool::from_value(&entry.payload) else {
+                        continue;
+                    };
+                    // Pools are not individually identified in a settlement
+                    // row, so the draw-down is shared: charged against the
+                    // pools in log order, which every auditor reproduces.
+                    let take = availability_drawn.min(pool.ceiling());
+                    availability_drawn -= take;
+                    let slot = escrowed.entry(pool.funder.clone()).or_insert(0);
+                    *slot = slot.saturating_add(pool.ceiling() - take);
+                }
+                _ => {}
+            }
+        }
+        escrowed
+    }
+
+    /// [`Node::escrowed_within`] over the whole log.
+    pub fn escrowed(&self) -> BTreeMap<String, u128> {
+        self.escrowed_within(self.ledger.len())
+    }
+
+    /// Everything the log says each identity holds before its commitments:
+    /// what the genesis prefix issued it, plus what settlements have paid it.
+    ///
+    /// Separate from the committed side so that neither reads
     /// [`Node::undertakings_within`]: that accessor filters on affordability,
     /// affordability is derived from balances, and a balance that consulted the
     /// filtered list would recurse forever. Both halves here read raw entries.
     fn gross_paid_within(&self, positions: usize) -> BTreeMap<String, u128> {
-        let mut paid: BTreeMap<String, u128> = BTreeMap::new();
+        let mut paid: BTreeMap<String, u128> = self.issued_within(positions);
         let entries = self.ledger.entries();
         for entry in &entries[..positions.min(entries.len())] {
             match entry.kind.as_str() {
@@ -2541,16 +2766,16 @@ impl Node {
 
     /// What `identity` could still bond, as of `positions` entries in.
     pub fn spendable_within(&self, identity: &str, positions: usize) -> u128 {
-        self.gross_paid_within(positions)
+        // Reads [`Node::balances_within`] rather than subtracting for itself.
+        // It did subtract for itself, and knew only about bonds, so when escrow
+        // arrived every affordability check in the crate still saw an escrowed
+        // reward as spendable -- a funder could post the same units twice and
+        // the audit's conservation sum was the only thing that noticed. One
+        // definition of "spendable", in one place.
+        self.balances_within(positions)
             .get(identity)
             .copied()
             .unwrap_or(0)
-            .saturating_sub(
-                self.locked_within(positions)
-                    .get(identity)
-                    .copied()
-                    .unwrap_or(0),
-            )
     }
 
     pub fn availability_pools(&self) -> Vec<AvailabilityPool> {
@@ -2568,9 +2793,58 @@ impl Node {
         ts: &str,
     ) -> Result<String, RuleViolation> {
         pool.validate().map_err(RuleViolation::InadmissibleRecord)?;
+        // The *ceiling*, not one epoch's worth: a pool promises `per_epoch`
+        // for every epoch in range, and escrowing only the first would let a
+        // funder promise a thousand epochs it can pay one of.
+        self.afford(&pool.funder, pool.ceiling())?;
         let id = pool.id();
         self.append(AVAILABILITY_POOL, pool.to_value(), ts)?;
         Ok(id)
+    }
+
+    /// Declare units into the log's supply.
+    ///
+    /// Refused once anything else has been written: the supply is the log's
+    /// opening statement, and an issuance below it is a mint. See
+    /// [`Issuance`] for why position rather than a signature is what
+    /// authorises it.
+    pub fn post_issuance(&mut self, record: &Issuance, ts: &str) -> Result<String, RuleViolation> {
+        record
+            .validate()
+            .map_err(RuleViolation::InadmissibleRecord)?;
+        let seq = self.ledger.len() as u64;
+        if self.genesis_prefix() as u64 != seq {
+            return Err(RuleViolation::MintedAfterGenesis {
+                holder: record.holder.clone(),
+                units: record.units,
+                seq,
+            });
+        }
+        let id = record.id();
+        self.append(ISSUANCE, record.to_value(), ts)?;
+        Ok(id)
+    }
+
+    /// Refuse a commitment `funder` cannot cover.
+    ///
+    /// Conditional on the log declaring a supply, and that is the whole of the
+    /// backward compatibility story: a log with no issuance record has never
+    /// claimed its units are scarce, so there is nothing to check and the audit
+    /// says the backing is the operator's word. The moment a supply is
+    /// declared, every unit in the log has to trace to it.
+    fn afford(&self, funder: &str, amount: u128) -> Result<(), RuleViolation> {
+        if !self.declares_supply() {
+            return Ok(());
+        }
+        let spendable = self.spendable_within(funder, self.ledger.len());
+        if amount > spendable {
+            return Err(RuleViolation::UnfundedReward {
+                funder: funder.to_string(),
+                reward: amount,
+                spendable,
+            });
+        }
+        Ok(())
     }
 
     /// Units on offer for one epoch, summed across every pool covering it.
@@ -3692,6 +3966,63 @@ impl Node {
                     record.seat,
                     crate::canonical::short(&record.commitment)
                 ));
+            }
+        }
+
+        // The money supply. Two faults, and between them they are what makes
+        // every other number in this audit mean something.
+        //
+        // First: an issuance below the genesis prefix. A supply is the log's
+        // opening statement or it is not a supply, so a mint further down is
+        // reported wherever it sits rather than quietly credited.
+        //
+        // Second: conservation. On a log that declares a supply, no identity
+        // may have committed more than the log says it holds — issued plus
+        // settled, against bonds locked plus rewards escrowed. `post_objective`
+        // and `post_undertaking` refuse that on the way in, but a log arriving
+        // from somebody else was never posted anywhere, so the rule has to be
+        // re-derivable from the records alone. Without this pass, the whole
+        // chain is only as strong as the politeness of whoever wrote the log,
+        // and the bond that the availability pool is divided by is decoration.
+        let genesis = self.genesis_prefix();
+        for entry in self.ledger.entries_of_kind(ISSUANCE) {
+            if (entry.seq as usize) < genesis {
+                continue;
+            }
+            let (holder, units) = match Issuance::from_value(&entry.payload) {
+                Ok(record) => (record.holder, record.units),
+                Err(error) => {
+                    problems.push(format!(
+                        "issuance at entry {}: cannot be decoded ({error})",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            problems.push(format!(
+                "issuance at entry {}: {units} units to {} after the genesis prefix \
+                 ended at entry {genesis}; a supply is declared once, in the log's \
+                 opening entries, or it is not a supply",
+                entry.seq,
+                crate::canonical::short(&holder)
+            ));
+        }
+        if self.declares_supply() {
+            let positions = self.ledger.len();
+            let held = self.gross_paid_within(positions);
+            let mut names: BTreeSet<String> = held.keys().cloned().collect();
+            let committed = self.committed_within(positions);
+            names.extend(committed.keys().cloned());
+            for name in names {
+                let holds = held.get(&name).copied().unwrap_or(0);
+                let owes = committed.get(&name).copied().unwrap_or(0);
+                if owes > holds {
+                    problems.push(format!(
+                        "{} has committed {owes} units against {holds} the log issued or \
+                         paid it; a unit nobody issued is money made by naming it",
+                        crate::canonical::short(&name)
+                    ));
+                }
             }
         }
 
@@ -7175,85 +7506,252 @@ mod tests {
         true
     }
 
-    /// **The bound on everything above, measured rather than asserted.**
+    /// The attack that used to work, run against a log that declares a supply.
     ///
-    /// The bond makes the availability payout invariant to splitting an
-    /// identity, which is worth exactly as much as the stake being scarce. It
-    /// is not scarce yet, and this test is here so that fact is a *failing
-    /// premise somebody can read* rather than a paragraph in a document that
-    /// drifts away from the code.
+    /// Post a bounty for a sum nobody issued you, against a verifier you chose,
+    /// answer your own question, stake the proceeds. It minted 10^12 units in
+    /// four commands and the log audited clean, because nothing there broke a
+    /// rule — the rule was missing. The reward now comes out of the funder's own
+    /// balance, so the first command is the one that fails.
     ///
-    /// `post_objective` takes no deposit. A funder names a reward and the
-    /// settlement pays it; nothing checks that the funder had it. So one key
-    /// can post an objective for an arbitrary sum against a verifier it chose,
-    /// answer its own question, and stake the proceeds — and the same trick run
-    /// under forty keys gives forty funded sybils. Splitting is still exactly
-    /// neutral, and that no longer buys much when *making* the stake is free.
-    ///
-    /// Closing it means an objective's reward has to be debited from its
-    /// funder's own balance, which needs a genesis rule for where the first
-    /// units come from, and it moves both implementations. That is a change of
-    /// its own; this test marks the spot. If it ever starts failing because
-    /// `post_objective` grew a funding check, **that is the good outcome** —
-    /// delete it and take the caveat out of `docs/threat-model.md`.
+    /// This is what makes the bond worth weighing by. A stake-weighted split is
+    /// exactly invariant to splitting an identity, which is worth precisely as
+    /// much as the stake is scarce; before this, it was worth nothing.
     #[test]
-    fn minting_a_bond_is_free_because_an_objective_needs_no_deposit() {
+    fn a_bounty_nobody_funded_is_refused_once_the_log_declares_a_supply() {
         let dir = TempDir::new("unfunded-objective");
         let mut node = node(&dir);
         let attacker = crate::crypto::identity::Identity::from_secret_bytes([77u8; 32]);
 
-        // A sum no honest participant could have earned, against a verifier the
-        // attacker picked, funded by a name that is not a key and holds
-        // nothing.
+        // A supply exists, and the attacker is not in it. One unit to somebody
+        // else is enough: what matters is that the log has *declared* its
+        // units, not how many there are.
+        node.post_issuance(&Issuance::new("treasury", 500, TS), TS)
+            .expect("genesis issuance");
+
         const ABSURD: u64 = 1_000_000_000_000;
         let Some(objective) = replay_objective_called(ABSURD, "a bounty I set myself") else {
             return;
         };
         assert_eq!(objective.funder, "treasury");
-        node.post_objective(&objective, TS)
-            .expect("nothing checks that a funder can afford its own bounty");
+        assert!(
+            matches!(
+                node.post_objective(&objective, TS),
+                Err(RuleViolation::UnfundedReward {
+                    reward: 1_000_000_000_000,
+                    spendable: 500,
+                    ..
+                })
+            ),
+            "a funder posted a bounty two thousand million times its balance"
+        );
+
+        // Not always-failing: what it can afford, it can post, and posting
+        // spends it.
+        let Some(affordable) = replay_objective_called(500, "a bounty I can pay for") else {
+            return;
+        };
+        node.post_objective(&affordable, TS)
+            .expect("a reward the funder holds");
+        assert_eq!(
+            node.spendable_within("treasury", node.ledger().len()),
+            0,
+            "posting did not escrow the reward"
+        );
+        assert_eq!(
+            node.escrowed().get("treasury").copied(),
+            Some(500),
+            "the units went nowhere rather than into escrow"
+        );
+
+        // And a second bounty of one unit is refused, because the first one is
+        // holding the whole supply.
+        let Some(second) = replay_objective_called(1, "one more, on credit") else {
+            return;
+        };
+        assert!(
+            matches!(
+                node.post_objective(&second, TS),
+                Err(RuleViolation::UnfundedReward { .. })
+            ),
+            "the same units funded two bounties"
+        );
+        assert_eq!(node.audit(false), Vec::<String>::new());
+
+        // Meanwhile the attacker, who was issued nothing, cannot even open.
+        let unfunded = Objective::new(
+            "G",
+            "mine",
+            affordable.verifier.clone(),
+            1,
+            attacker.submitter_id(),
+            TS,
+            None,
+            None,
+        )
+        .expect("valid objective");
+        assert!(matches!(
+            node.post_objective(&unfunded, TS),
+            Err(RuleViolation::UnfundedReward { spendable: 0, .. })
+        ));
+    }
+
+    /// A settlement moves escrow to the submitter rather than creating units.
+    ///
+    /// The conservation half: after a full cycle the supply is where it started
+    /// in total and somewhere else in particular. Checked as an equation over
+    /// the whole log, because "nothing was minted" is a statement about a sum
+    /// and not about any one record.
+    #[test]
+    fn a_settled_reward_moves_escrow_and_mints_nothing() {
+        let dir = TempDir::new("escrow-conserves");
+        let mut node = node(&dir);
+        let worker = crate::crypto::identity::Identity::from_secret_bytes([78u8; 32]);
+        node.post_issuance(&Issuance::new("treasury", 1_000, TS), TS)
+            .expect("genesis issuance");
+
+        let Some(objective) = replay_objective_called(1_000, "the whole supply, at stake") else {
+            return;
+        };
+        node.post_objective(&objective, TS).expect("post");
 
         let artifact = results(1);
         let stride = 3 + crate::partition::finality_epochs() as i64;
         let step = node.ledger().len() as i64 * stride * EPOCH;
-        let hash = commitment_hash(&objective.id(), &attacker.submitter_id(), &artifact, "n");
+        let hash = commitment_hash(&objective.id(), &worker.submitter_id(), &artifact, "n");
         node.commit(
-            &Commitment::new(objective.id(), attacker.submitter_id(), hash, stamp(step))
-                .signed_with(&attacker),
+            &Commitment::new(objective.id(), worker.submitter_id(), hash, stamp(step))
+                .signed_with(&worker),
             &stamp(step),
         )
         .expect("commit");
         let claim = Claim::new(
             objective.id(),
-            attacker.submitter_id(),
+            worker.submitter_id(),
             artifact,
             "n",
             TS,
             Vec::new(),
         )
         .expect("valid claim")
-        .signed_with(&attacker);
+        .signed_with(&worker);
         node.reveal(&claim, &stamp(step + EPOCH)).expect("reveal");
         node.settle_at(&stamp(
             step + (2 + crate::partition::finality_epochs() as i64) * EPOCH,
         ))
         .expect("settle");
 
-        // And it is spendable. This is the whole finding: the balance the bond
-        // rule treats as scarce was conjured in four commands.
-        let spendable = node.spendable_within(&attacker.submitter_id(), node.ledger().len());
+        // The units moved: escrow released, worker paid, total unchanged.
+        assert_eq!(node.escrowed().get("treasury").copied().unwrap_or(0), 0);
         assert_eq!(
-            spendable,
-            u128::from(ABSURD),
-            "the mint did not work, which would mean this caveat is stale — check \
-             whether `post_objective` grew a funding check and delete this test if so"
+            node.balances().get(&worker.submitter_id()).copied(),
+            Some(1_000)
         );
-        let promise = stake(&mut node, &attacker, ABSURD);
-        assert_eq!(promise.bond, ABSURD);
-
-        // The log is *clean*. Not a fault anywhere, because nothing here breaks
-        // a rule -- the rule is missing.
+        let issued: u128 = node.issued().values().sum();
+        let held: u128 = node.balances().values().sum();
+        let escrowed: u128 = node.escrowed().values().sum();
+        assert_eq!(
+            held + escrowed,
+            issued,
+            "the supply did not close: {issued} issued, {held} held, {escrowed} escrowed"
+        );
         assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    /// A bounty nobody funded is named by the audit, not only refused at the
+    /// door.
+    ///
+    /// `post_objective` refuses one, but a log that arrived from somebody else
+    /// was never posted anywhere — it is bytes, and a node concatenating it
+    /// calls no rule at all. So the supply has to be re-derivable from the
+    /// records: issued plus settled, against escrowed plus locked, per
+    /// identity.
+    ///
+    /// This test exists because removing the audit's copy broke *nothing*: 85
+    /// node tests passed against a build that had stopped checking it. The same
+    /// trap as the bond, in the same place, one change later.
+    #[test]
+    fn the_audit_names_a_reward_the_supply_never_covered() {
+        let dir = TempDir::new("unfunded-reward-audit");
+        let mut broke = node(&dir);
+        broke
+            .post_issuance(&Issuance::new("treasury", 100, TS), TS)
+            .expect("genesis issuance");
+
+        let objective = lean_objective(1_000);
+        assert!(
+            matches!(
+                broke.post_objective(&objective, TS),
+                Err(RuleViolation::UnfundedReward {
+                    reward: 1_000,
+                    spendable: 100,
+                    ..
+                })
+            ),
+            "an unfunded bounty was admitted"
+        );
+
+        // Straight past the rule, the way a concatenated log would carry it.
+        broke
+            .append(OBJECTIVE, objective.to_value(), TS)
+            .expect("append");
+        let problems = broke.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("has committed 1000 units against 100")),
+            "a bounty the supply never covered went unreported: {problems:?}"
+        );
+
+        // And the check is not always-failing: a log whose commitments fit
+        // inside its supply reports nothing about the supply at all.
+        let clean = TempDir::new("funded-reward-audit");
+        let mut solvent = node(&clean);
+        solvent
+            .post_issuance(&Issuance::new("treasury", 1_000, TS), TS)
+            .expect("genesis issuance");
+        solvent
+            .post_objective(&lean_objective(1_000), TS)
+            .expect("a reward the supply covers");
+        assert_eq!(solvent.audit(false), Vec::<String>::new());
+    }
+
+    /// An issuance below the genesis prefix is a mint, and the audit names it.
+    ///
+    /// The rule that makes the supply a supply. `post_issuance` refuses one,
+    /// but a log arriving from somewhere else was never posted anywhere, so the
+    /// position rule has to be re-derivable from the records alone.
+    #[test]
+    fn an_issuance_after_the_genesis_prefix_is_a_mint_the_audit_names() {
+        let dir = TempDir::new("late-issuance");
+        let mut node = node(&dir);
+        node.post_issuance(&Issuance::new("treasury", 10, TS), TS)
+            .expect("genesis issuance");
+        node.post_objective(&lean_objective(10), TS)
+            .expect("something after genesis");
+
+        let late = Issuance::new("treasury", 1_000_000, TS);
+        assert!(
+            matches!(
+                node.post_issuance(&late, TS),
+                Err(RuleViolation::MintedAfterGenesis { .. })
+            ),
+            "the supply grew after it was declared"
+        );
+
+        // Straight past the rule, the way a concatenated log would carry it.
+        node.append(ISSUANCE, late.to_value(), TS).expect("append");
+        let problems = node.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("after the genesis prefix")),
+            "a mint went unreported: {problems:?}"
+        );
+        // And it is not credited: the balance is what genesis said, minus what
+        // the objective escrowed.
+        assert_eq!(node.issued().get("treasury").copied(), Some(10));
+        assert_eq!(node.spendable_within("treasury", node.ledger().len()), 0);
     }
 
     /// Promise the whole log as it stands, staking `bond`.

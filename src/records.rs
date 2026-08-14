@@ -2249,6 +2249,110 @@ impl AvailabilityPool {
     }
 }
 
+/// A unit of money entering the log, and the only way any ever does.
+///
+/// # Why the supply is a record and not a constant
+///
+/// Everything this crate weights by money — the availability pool's stake
+/// split, an objective's escrow, a bond — is worth exactly what the money is
+/// scarce. It was not. [`crate::node::Node::post_objective`] took no deposit,
+/// so a funder named a reward and nothing checked it had one: post a bounty for
+/// an arbitrary sum against a verifier you chose, answer your own question,
+/// stake the proceeds, repeat per key. Four commands, and the log audited
+/// clean, because nothing there broke a rule — the rule was missing.
+///
+/// An issuance is that rule. It says *this identity holds these units*, and
+/// once a log declares a supply, every unit in it is traceable to one:
+/// [`crate::node::Node::audit`] checks that issued equals held plus escrowed
+/// plus locked, in `u128`, and reports the difference rather than rounding it
+/// away.
+///
+/// # Why only in the genesis prefix
+///
+/// An issuance anywhere else is a mint, so it is admissible only *before* the
+/// log's first non-issuance entry. That makes the supply a property of the
+/// log's opening bytes: common knowledge in the sense the consensus literature
+/// means it, fixed at creation, and checkable by anyone reading forward from
+/// the first line. Anything later is an audit fault, not a balance.
+///
+/// # Why a log with no issuance is still legal
+///
+/// Declaring a supply is what turns the accounting on. A log with no issuance
+/// record has not claimed its units are scarce, and refusing every such log
+/// would refuse every log written before this record existed, including the
+/// published one. So the rule is conditional on the record, not on a flag: on a
+/// log with a declared supply, no unit exists that the supply did not issue; on
+/// a log without one, the operator's word is the backing and the audit says so
+/// rather than pretending otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issuance {
+    /// Who receives the units. A name or a key: a supply is declared by
+    /// whoever opened the log, and it is the *position* of the record rather
+    /// than a signature that authorises it — a signature would only prove who
+    /// wrote it, and in the genesis prefix there is nobody else it could be.
+    pub holder: String,
+    /// Units issued to `holder`.
+    pub units: u64,
+    pub created_at: String,
+}
+
+impl Issuance {
+    pub fn new(holder: impl Into<String>, units: u64, created_at: impl Into<String>) -> Issuance {
+        Issuance {
+            holder: holder.into(),
+            units,
+            created_at: created_at.into(),
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("type", Value::string("issuance")),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("holder", Value::string(self.holder.clone())),
+            ("units", Value::Int(i128::from(self.units))),
+        ])
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "issuance";
+        if self.holder.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "holder",
+                expected: "a non-empty name",
+            });
+        }
+        // Zero is refused rather than admitted as a no-op: it is a record that
+        // declares nothing while looking like a declaration, and a supply
+        // padded with them reads as larger than it is.
+        if self.units == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "units",
+                expected: "at least one unit",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Issuance, RecordError> {
+        const RECORD: &str = "issuance";
+        let value = expect_object(value, RECORD)?;
+        let record = Issuance {
+            holder: required_string(value, RECORD, "holder")?,
+            units: required_u64(value, RECORD, "units")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
 /// An answer to one availability sample: the path the holder produced.
 ///
 /// # Why this carries a path and not a proof

@@ -32,6 +32,7 @@ pub const AVAILABILITY: &str = "availability";
 pub const AVAILABILITY_POOL: &str = "availability_pool";
 pub const AVAILABILITY_SETTLEMENT: &str = "availability_settlement";
 pub const COMMITTEE_SHARE: &str = "committee_share";
+pub const ISSUANCE: &str = "issuance";
 
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -130,12 +131,14 @@ impl Node {
     /// What `identity` could still bond, reading only the first `positions`
     /// entries of the log.
     ///
-    /// Paid minus locked. *Paid* is settlements naming this identity as
-    /// submitter plus availability payouts naming it, because the only way into
-    /// this network is to have contributed something somebody verified: a fresh
-    /// key has nothing and is worth nothing, which is what makes the bond a
-    /// scarce resource rather than a number anyone can write. *Locked* is every
-    /// bond it has already staked and not had returned.
+    /// Held minus committed. *Held* is what the genesis prefix issued this
+    /// identity, plus settlements naming it as submitter, plus availability
+    /// payouts naming it. *Committed* is every bond it has staked and every
+    /// reward it has offered by funding an objective or a pool.
+    ///
+    /// The issuance half is what makes any of it scarce. Without it a funder
+    /// named a reward and the settlement paid it, so units were free to make
+    /// and weighing anything by them bought nothing.
     ///
     /// Bounded by position rather than taken over the whole log, because the
     /// rule this feeds is about what a record could afford *when it was
@@ -150,7 +153,14 @@ impl Node {
     /// `u64::MAX` drives that identity's balance to zero and every promise it
     /// makes, that one included, fails the check.
     pub fn spendable_within(&self, identity: &str, positions: u64) -> u128 {
-        let mut paid = 0u128;
+        self.held_within(identity, positions)
+            .saturating_sub(self.committed_within(identity, positions))
+    }
+
+    /// What the log says `identity` holds, before its commitments: issued at
+    /// genesis, plus settled, plus availability payouts.
+    fn held_within(&self, identity: &str, positions: u64) -> u128 {
+        let mut paid = self.issued_within(identity, positions);
         for entry in self.ledger.entries() {
             if entry.seq >= positions {
                 break;
@@ -180,7 +190,17 @@ impl Node {
                 _ => {}
             }
         }
-        let mut locked = 0u128;
+        paid
+    }
+
+    /// What `identity` has put at risk or parted with: bonds staked, plus
+    /// rewards offered by funding an objective or an availability pool.
+    ///
+    /// Rewards are charged in full at post time and never returned: the units
+    /// go to whoever settles the objective, so releasing them back as the
+    /// settlement lands would credit the same money twice.
+    fn committed_within(&self, identity: &str, positions: u64) -> u128 {
+        let mut committed = 0u128;
         for entry in self.ledger.entries_of_kind(UNDERTAKING) {
             if entry.seq >= positions {
                 break;
@@ -191,9 +211,71 @@ impl Node {
             if record.identity != identity || record.verify_signature().is_err() {
                 continue;
             }
-            locked = locked.saturating_add(u128::from(record.bond));
+            committed = committed.saturating_add(u128::from(record.bond));
         }
-        paid.saturating_sub(locked)
+        for entry in self.ledger.entries() {
+            if entry.seq >= positions {
+                break;
+            }
+            let offered = match entry.kind.as_str() {
+                OBJECTIVE => entry
+                    .payload
+                    .get("funder")
+                    .and_then(Value::as_str)
+                    .filter(|funder| *funder == identity)
+                    .and_then(|_| entry.payload.get("reward").and_then(Value::as_u64))
+                    .map(u128::from),
+                AVAILABILITY_POOL => AvailabilityPool::from_value(&entry.payload)
+                    .ok()
+                    .filter(|pool| pool.funder == identity)
+                    .map(|pool| pool.ceiling()),
+                _ => None,
+            };
+            if let Some(offered) = offered {
+                committed = committed.saturating_add(offered);
+            }
+        }
+        committed
+    }
+
+    /// What the genesis prefix issued `identity`.
+    ///
+    /// Only the run of issuance records at the very front of the log counts. An
+    /// issuance below it is a mint and is reported by [`Node::audit`] rather
+    /// than credited, or the record that exists to make money scarce would be
+    /// the cheapest way to make more. Position rather than a signature is what
+    /// authorises it: in a log's opening bytes there is nobody else it could
+    /// be.
+    fn issued_within(&self, identity: &str, positions: u64) -> u128 {
+        let mut issued = 0u128;
+        for entry in self.ledger.entries() {
+            if entry.kind != ISSUANCE || entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("holder").and_then(Value::as_str) == Some(identity) {
+                if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                    issued = issued.saturating_add(u128::from(units));
+                }
+            }
+        }
+        issued
+    }
+
+    /// Does this log declare a money supply? See [`Node::issued_within`].
+    pub fn declares_supply(&self) -> bool {
+        self.ledger
+            .entries()
+            .first()
+            .is_some_and(|entry| entry.kind == ISSUANCE)
+    }
+
+    /// How many entries of this log are its genesis prefix.
+    fn genesis_prefix(&self) -> u64 {
+        self.ledger
+            .entries()
+            .iter()
+            .take_while(|entry| entry.kind == ISSUANCE)
+            .count() as u64
     }
 
     pub fn frontier_of(&self, objective_id: &str) -> Option<FrontierEntry> {
@@ -1217,6 +1299,51 @@ impl Node {
             })
             .map(|record| (record.id(), record))
             .collect();
+
+        // The money supply, derived here rather than taken from the primary's
+        // word. Two faults: a mint below the genesis prefix, and an identity
+        // that has committed more than the log says it holds. Together they are
+        // the statement that no unit exists which the supply did not issue —
+        // and without them every other number here is weighed in a currency
+        // anyone can make.
+        let genesis = self.genesis_prefix();
+        for entry in self.ledger.entries_of_kind(ISSUANCE) {
+            if entry.seq < genesis {
+                continue;
+            }
+            problems.push(format!(
+                "entry {}: issues units after the genesis prefix ended at entry \
+                 {genesis}; a supply is declared in a log's opening entries or it is \
+                 not a supply",
+                entry.seq
+            ));
+        }
+        if self.declares_supply() {
+            let positions = self.ledger.entries().len() as u64;
+            let mut names: BTreeSet<String> = BTreeSet::new();
+            for entry in self.ledger.entries() {
+                for key in ["holder", "funder", "submitter", "identity"] {
+                    if let Some(name) = entry.payload.get(key).and_then(Value::as_str) {
+                        names.insert(name.to_string());
+                    }
+                }
+            }
+            // `spendable_within` saturates at zero, so it cannot report an
+            // overdraft on its own. Recomputing the two sides here is the point
+            // of a second implementation: the primary reports the same fault
+            // from its own arithmetic, and the two agreeing is evidence.
+            for name in names {
+                let holds = self.held_within(&name, positions);
+                let owes = self.committed_within(&name, positions);
+                if owes > holds {
+                    problems.push(format!(
+                        "{} has committed {owes} units against {holds} issued or paid; \
+                         a unit nobody issued is money made by naming it",
+                        short(&name)
+                    ));
+                }
+            }
+        }
 
         for entry in self.ledger.entries_of_kind(UNDERTAKING) {
             match Undertaking::from_value(&entry.payload) {
