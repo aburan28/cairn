@@ -102,6 +102,12 @@ pub struct Config {
     pub serve: Option<String>,
     /// Bound on undrained submissions, when serving.
     pub max_queued: usize,
+    /// The at-rest key, when the log is sealed.
+    ///
+    /// `None` uses [`crate::store::Store::default_key_path`], which is what the
+    /// CLI does — so a daemon on a machine with `~/.proofwork/key` opens the
+    /// same logs the CLI writes, instead of reporting them as spliced.
+    pub key_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -127,6 +133,15 @@ impl Config {
             fanout: crate::p2p::service::DEFAULT_FANOUT,
             serve: None,
             max_queued: serve::DEFAULT_MAX_QUEUED,
+            key_file: None,
+        }
+    }
+
+    /// Where the at-rest key lives: the flag, or the CLI's own default.
+    fn key_path(&self) -> PathBuf {
+        match &self.key_file {
+            Some(path) => path.clone(),
+            None => crate::store::Store::new(&self.root).default_key_path(),
         }
     }
 }
@@ -357,6 +372,10 @@ fn bind_http(config: &Config) -> Result<Option<(TcpListener, serve::Serving)>, S
     let listener = TcpListener::bind(addr.as_str())
         .map_err(|error| format!("cannot bind the HTTP listener on {addr}: {error}"))?;
     let mut serving = serve::Serving::new(&config.log, &config.root);
+    // The same key the daemon opened the log with. Without it the HTTP half
+    // reports the operator's own sealed log as altered on every request, while
+    // the p2p half beside it reads it perfectly.
+    serving = serving.with_key(config.key_path(), None);
     // The checkpoint this daemon writes is the one it publishes. Two paths for
     // one file would be a way to serve a checkpoint nobody is updating.
     serving = serving.with_checkpoint(&config.checkpoint);
@@ -365,6 +384,12 @@ fn bind_http(config: &Config) -> Result<Option<(TcpListener, serve::Serving)>, S
             .accepting_into(queue)
             .with_max_queued(config.max_queued);
     }
+    // Before the loops start, for the reason the bind is here: a node whose
+    // HTTP half cannot read the log is one that answers 500 to every request
+    // while the p2p half beside it works perfectly.
+    serving
+        .check_startup()
+        .map_err(|error| format!("cannot publish this log: {error}"))?;
     Ok(Some((listener, serving)))
 }
 
@@ -390,7 +415,14 @@ pub fn run(config: Config) -> Result<(), String> {
     // unbindable address — now leaves an empty log where it used to leave
     // nothing. That file is byte-for-byte the one a successful start would have
     // created, so the next run simply uses it. Worth an empty file.
-    let ledger = Ledger::open_exclusive(&config.log).map_err(|e| format!("ledger: {e}"))?;
+    // Sealed if the log on disk is sealed, or if a key exists and the log is
+    // new -- the same rule the CLI applies, from the same function, because a
+    // daemon that guessed differently would refuse to open its operator's own
+    // log and report it as spliced.
+    let codec = crate::store::resolve_codec(&config.log, &config.key_path(), None)
+        .map_err(|e| format!("at-rest key: {e}"))?;
+    let ledger =
+        Ledger::open_exclusive_with(&config.log, codec).map_err(|e| format!("ledger: {e}"))?;
     let identity = Arc::new(load_identity(&config.identity).map_err(|e| format!("identity: {e}"))?);
     let root_key = Arc::new(load_root_key(&config.root_key).map_err(|e| format!("root key: {e}"))?);
 

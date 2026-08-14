@@ -4649,49 +4649,21 @@ fn cmd_incentives_sweep(
 
 /// Decide how to read and write this invocation's log.
 ///
-/// The ledger deliberately refuses to guess ([`Ledger::open_with`]); this is
-/// where the guessing is allowed to happen, because it is a user-experience
-/// decision rather than an integrity one. The rule:
-///
-/// * a log whose first line is sealed needs the key, and says so if it is
-///   missing rather than reporting the file as corrupt;
-/// * a log that is already plaintext stays plaintext, even if a key exists --
-///   converting somebody's log as a side effect of an unrelated command would
-///   be indefensible, and `store encrypt` is the command that does it on
-///   purpose;
-/// * a log that does not exist yet is created sealed **if a key is there**, so
-///   `keygen` followed by ordinary use encrypts without further ceremony.
+/// The rule lives in [`proofwork::store::resolve_codec`], which the two daemons
+/// call too. This is the CLI's half: turn its flags into that function's
+/// arguments, and its error into a [`CliError`].
 fn resolve_codec(options: &Options) -> Result<Codec, CliError> {
-    let sealed_on_disk = first_line_is_sealed(&options.log)?;
     let key_path = options.key_path();
-    let exists = key_path.exists();
-
-    match (sealed_on_disk, exists) {
-        (Some(true), false) => Err(CliError::AtRest(AtRestError::NoKeyFile { path: key_path })),
-        (Some(true), true) | (None, true) => {
-            let passphrase = options.passphrase()?;
-            let cipher = Cipher::read_key_file(&key_path, passphrase.as_deref())
-                .map_err(CliError::AtRest)?;
-            Ok(Codec::Sealed(Box::new(cipher)))
-        }
-        // Plaintext log, or no log and no key: unchanged behaviour.
-        (Some(false), _) | (None, false) => Ok(Codec::Plain),
-    }
+    // Read *before* the call, because supplying one may mean reading a file,
+    // and that failure is a CLI error rather than an at-rest one.
+    let passphrase = options.passphrase()?;
+    proofwork::store::resolve_codec(Path::new(&options.log), &key_path, passphrase.as_deref())
+        .map_err(CliError::AtRest)
 }
 
-/// `Some(true)` sealed, `Some(false)` plaintext, `None` for an absent or empty log.
+/// [`proofwork::store::first_line_is_sealed`], in the CLI's error type.
 fn first_line_is_sealed(path: &str) -> Result<Option<bool>, CliError> {
-    if !Path::new(path).exists() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(path).map_err(|source| CliError::Io {
-        context: format!("reading {path}"),
-        source,
-    })?;
-    Ok(text
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(proofwork::store::atrest::is_sealed_line))
+    proofwork::store::first_line_is_sealed(Path::new(path)).map_err(CliError::AtRest)
 }
 
 fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32, CliError> {

@@ -25,19 +25,22 @@ default = []
 # `release.yml` still holds: there is still no `cc` in the graph.
 ui = []
 
-# The `swarm` TCP driver, which is **not encrypted**.
+# There is no `swarm` TCP feature, and this note is here because there used to
+# be one and the comment describing it outlived it by long enough to be read as
+# a live security warning.
 #
-# `swarm::tcp` speaks a plaintext framing over a bare `TcpStream`: no handshake,
-# no AEAD, no peer authentication. `p2p::transport` is the encrypted transport
-# and everything the daemon runs goes through it. The two stacks were written
-# independently and `swarm` never grew the handshake, because its peer records
-# carry an ed25519 identity while the encrypted transport needs a McEliece key
-# the records have no room for -- see `docs/p2p.md`.
+# It said `swarm::tcp` was "**not encrypted**" -- plaintext framing over a bare
+# `TcpStream`, gated off by default "so the gap cannot be shipped by accident".
+# That was true and is not: `swarm::tcp` now dials and accepts through
+# `p2p::transport`, Classic McEliece to an AEAD channel, like everything else in
+# this crate that opens a socket. The gate went when the reason for it did, and
+# `swarm::tcp::tests::a_transfer_puts_no_plaintext_on_the_wire` is the check
+# that this is true of the bytes rather than only of the API -- a recording
+# relay sits between leech and seed, and neither the blob nor its digest appears
+# in the capture. `src/swarm/mod.rs` tells the rest of the story.
 #
-# Off by default so the gap cannot be shipped by accident. The state machines it
-# drives -- `swarm::piece`, `swarm::wire`, `swarm::dht`, `swarm::discovery` --
-# are pure and always available; only the socket-facing part is gated. CI builds
-# and tests with `--all-features`, so gating it does not stop it being checked.
+# Left as a comment rather than deleted because "the gate is missing" is the
+# obvious reading of its absence, and it is the wrong one.
 
 [dependencies]
 # Parsing untrusted JSON only. Canonical *output* is written by this crate's own

@@ -50,6 +50,76 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Decide how to read and write a log, given a key that may or may not be there.
+///
+/// The ledger deliberately refuses to guess ([`crate::ledger::Ledger::open_with`]);
+/// this is where the guessing is allowed to happen, because it is a
+/// user-experience decision rather than an integrity one. The rule:
+///
+/// * a log whose first line is sealed needs the key, and says so if it is
+///   missing rather than reporting the file as corrupt;
+/// * a log that is already plaintext stays plaintext, even if a key exists --
+///   converting somebody's log as a side effect of an unrelated command would
+///   be indefensible, and `store encrypt` is the command that does it on
+///   purpose;
+/// * a log that does not exist yet is created sealed **if a key is there**, so
+///   `keygen` followed by ordinary use encrypts without further ceremony.
+///
+/// # Why this is in the library
+///
+/// It was a private function in `main.rs`, which meant the CLI could open a
+/// sealed log and the two daemons could not. On a machine with a key file --
+/// the arrangement `proofwork store keygen` leaves behind -- every log the CLI
+/// wrote was sealed, and `proofwork-serve` answered 500 to every request that
+/// touched it, reporting the operator's own log as altered or spliced. Two
+/// answers to "how is this log encoded" is one answer too many.
+pub fn resolve_codec(
+    log: &Path,
+    key_path: &Path,
+    passphrase: Option<&str>,
+) -> Result<crate::ledger::Codec, atrest::AtRestError> {
+    let sealed_on_disk = first_line_is_sealed(log)?;
+    let exists = key_path.exists();
+
+    match (sealed_on_disk, exists) {
+        (Some(true), false) => Err(atrest::AtRestError::NoKeyFile {
+            path: key_path.to_path_buf(),
+        }),
+        (Some(true), true) | (None, true) => {
+            let cipher = atrest::Cipher::read_key_file(key_path, passphrase)?;
+            Ok(crate::ledger::Codec::Sealed(Box::new(cipher)))
+        }
+        // Plaintext log, or no log and no key.
+        (Some(false), _) | (None, false) => Ok(crate::ledger::Codec::Plain),
+    }
+}
+
+/// `Some(true)` sealed, `Some(false)` plaintext, `None` for an absent or empty log.
+///
+/// Reads only as far as the first non-blank line: this runs per request in
+/// [`crate::serve`], and a sealed log is exactly as large as a plaintext one.
+pub fn first_line_is_sealed(path: &Path) -> Result<Option<bool>, atrest::AtRestError> {
+    use std::io::BufRead as _;
+
+    if !path.exists() {
+        return Ok(None);
+    }
+    let file = fs::File::open(path).map_err(|error| atrest::AtRestError::Io {
+        context: format!("reading {}", path.display()),
+        reason: error.to_string(),
+    })?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.map_err(|error| atrest::AtRestError::Io {
+            context: format!("reading {}", path.display()),
+            reason: error.to_string(),
+        })?;
+        if !line.trim().is_empty() {
+            return Ok(Some(atrest::is_sealed_line(&line)));
+        }
+    }
+    Ok(None)
+}
+
 /// Environment variable naming the data directory.
 pub const DATA_ENV: &str = "PROOFWORK_DATA";
 /// Environment variable naming the key file.

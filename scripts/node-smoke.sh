@@ -58,11 +58,17 @@ sys.exit(0 if s.connect_ex(('127.0.0.1',$1))==0 else 1)" 2>/dev/null; then
 }
 
 # Queued records are admitted on the daemon's own tick, so the check has to
-# wait for one rather than assume it has already happened. Polling the log and
-# giving up loudly beats a `sleep` tuned to one machine.
-await_kind() {
+# wait for one rather than assume it has already happened. Polling and giving
+# up loudly beats a `sleep` tuned to one machine.
+#
+# Over HTTP rather than by grepping the file, because the file may be sealed:
+# on any machine carrying `~/.proofwork/key` the CLI writes an encrypted log,
+# and grep finds nothing in ciphertext however well the daemon is working. That
+# is a better check anyway -- it asks the public surface, which is where an
+# outside contributor would look.
+await_kind() {  # port kind
   for _ in $(seq 1 60); do
-    grep -q "\"kind\": *\"$2\"" "$1" && return 0
+    curl -s "http://127.0.0.1:$1/log" | grep -q "\"kind\": *\"$2\"" && return 0
     sleep 0.5
   done
   return 1
@@ -168,7 +174,7 @@ esac
 
 rule "a submission is admitted by the process that received it"
 submit "$HTTP" "$OID" commitment
-await_kind "$LOG" commitment \
+await_kind "$HTTP" commitment \
   || { cat "$A/node.log" >&2; fail "the daemon never admitted the commitment"; }
 echo "  the commitment reached the log with no external drain"
 [ -z "$(ls -A "$A/queue" 2>/dev/null)" ] || fail "the queue was not emptied"
@@ -177,7 +183,7 @@ echo "  the queue emptied itself"
 rule "reveal in a later epoch, same process"
 sleep 1.2
 submit "$HTTP" "$OID" claim
-await_kind "$LOG" claim \
+await_kind "$HTTP" claim \
   || { cat "$A/node.log" >&2; fail "the daemon never admitted the claim"; }
 echo "  the claim reached the log with no external drain"
 
@@ -186,9 +192,18 @@ rule "the log audits, and it audits from outside the process"
 # before anything settles. The daemon settles on its own tick after a drain.
 sleep 2.6
 curl -s "http://127.0.0.1:$HTTP/log" >"$WORK/fetched.jsonl"
-cmp -s "$WORK/fetched.jsonl" "$LOG" \
-  || fail "the served log is not byte-identical to the operator's file"
-echo "  GET /log is byte-identical to the file on disk"
+if head -c 7 "$LOG" | grep -q '^pwenc1:'; then
+  # A sealed log is unsealed on the way out -- serving ciphertext would hand a
+  # stranger bytes they cannot audit. So the check is that what came out is
+  # usable, not that it matches the file byte for byte.
+  head -c 1 "$WORK/fetched.jsonl" | grep -q '{' \
+    || fail "the log is sealed and GET /log did not serve plaintext JSONL"
+  echo "  GET /log unsealed a sealed log into plaintext JSONL"
+else
+  cmp -s "$WORK/fetched.jsonl" "$LOG" \
+    || fail "the served log is not byte-identical to the operator's file"
+  echo "  GET /log is byte-identical to the file on disk"
+fi
 "$RUST" --log "$WORK/fetched.jsonl" --root . audit --no-rerun | grep -q "log verified" \
   || fail "the log a stranger fetched does not audit"
 echo "  a stranger's copy re-derives"
