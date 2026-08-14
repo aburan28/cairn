@@ -441,13 +441,20 @@ downstream is unbacked.
       trade expressed as an objective reuses escrow, settlement, audit and
       citation flow, and needs no transfer primitive. See
       [agent-market.md](agent-market.md).
-- [ ] **Reserved citation share**, and a discretionary split weighted by settled
-      reward. Citation flow divides δ evenly, which is safe only while citable
-      claims are scarce; agent funding makes them free to manufacture, and five
-      citations recover four fifths of what the ratchet promised the frontier
-      holder. A change to how settled money splits, so it lands *before* the
-      first agent-funded objective, not after — and it moves the conformance
-      vectors and the reference implementation with it.
+- [x] **Reserved citation share**, and a discretionary split weighted by settled
+      reward. The discretionary half was already shipped — δ splits among all
+      transitive ancestors by settled reward, which is slicing-invariant and
+      identity-blind. The reserve is the half that survives *manufactured*
+      ancestors, which agent funding makes cheap: `FlowParams::with_reserved`
+      holds a fraction of δ for the citation the protocol forced, and
+      `Node::enforced_citations` re-derives which that was by reading the
+      frontier as it stood below each claim's own entry — no new record, so no
+      conformance vector moves. Measured both ways: with nothing reserved, 200
+      manufactured ancestors leave the frontier holder **498 units of the
+      100,000** she was owed; with half of δ reserved the floor is 50,000 at
+      any fanout. Default zero, because a reserve moves settled money and
+      `agent-market.md`'s question 3 — the smallest reserve that makes dilution
+      unprofitable — is a question for the harness, not a constant to guess.
 - [ ] Surface the **decomposition floor** at post time. A sub-objective the
       network verifies for more than it settles is subsidized by everything else;
       the break-even is a function of the objective's verifier tier and is

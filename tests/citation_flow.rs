@@ -382,3 +382,140 @@ fn weighted_attribution_matches_the_design_harness() {
     assert_eq!(take(&four, "alice"), 414_107);
     assert_eq!(take(&four, "carol"), 300_000);
 }
+
+// ---------------------------------------------------------------------------
+// The reserved share
+// ---------------------------------------------------------------------------
+
+/// Settle a chain where the frontier holder is `alice`, then `fanout`
+/// self-funded claims by `mallory`, then a final `mallory` claim citing all of
+/// them *and* alice. Returns the payouts under `params`.
+///
+/// This is the attack agent funding makes cheap. Under a declared supply,
+/// funding your own objective and settling it yourself costs the verification
+/// and returns the units — so a high-weight ancestor is close to free, and
+/// citing enough of them thins alice's share by the ratio of weights rather
+/// than because anybody disputed what she contributed.
+fn diluted(fanout: usize, params: &FlowParams) -> BTreeMap<String, u64> {
+    let mut claims = BTreeMap::new();
+    let mut settlements = Vec::new();
+
+    let alice = claim("alice", 0, Vec::new());
+    let alice_id = alice.id();
+    claims.insert(alice_id.clone(), alice);
+    settlements.push((alice_id.clone(), 400_000u64));
+
+    let mut cites = vec![alice_id.clone()];
+    for n in 0..fanout {
+        let padding = claim("mallory", 100 + n as i128, Vec::new());
+        let id = padding.id();
+        claims.insert(id.clone(), padding);
+        settlements.push((id.clone(), 400_000));
+        cites.push(id);
+    }
+
+    let final_claim = claim("mallory", 999, cites);
+    let final_id = final_claim.id();
+    claims.insert(final_id.clone(), final_claim);
+    settlements.push((final_id.clone(), 400_000));
+
+    let enforced: BTreeMap<String, String> = [(final_id, alice_id)].into_iter().collect();
+    proofwork::attribution::payouts_with_enforced(&settlements, &claims, &enforced, params)
+        .expect("flow succeeds")
+}
+
+#[test]
+fn manufactured_ancestors_thin_the_frontier_holder_when_nothing_is_reserved() {
+    // The measurement the reserve exists for, taken first so the fix has
+    // something to be compared against. `alice` is cited either way; what
+    // changes is how many other ancestors stand next to her, and the weighted
+    // split divides by all of them.
+    //
+    // Her own settlement is 400,000 and the flow she is owed is 100,000. At
+    // fanout 200 she keeps 498 of it -- half a percent -- and nobody disputed
+    // anything she did.
+    let open = FlowParams::default();
+    assert_eq!(take(&diluted(0, &open), "alice"), 500_000);
+    assert_eq!(take(&diluted(5, &open), "alice"), 416_667);
+    assert_eq!(take(&diluted(40, &open), "alice"), 402_439);
+    assert_eq!(take(&diluted(200, &open), "alice"), 400_498);
+}
+
+#[test]
+fn a_reserved_share_is_the_part_dilution_cannot_reach() {
+    // Half of delta reserved for the citation the rules forced. The
+    // discretionary half still thins exactly as before -- that is not what a
+    // reserve fixes -- and the reserved half does not move at any fanout,
+    // because its recipient was never the submitter's to choose.
+    let half = FlowParams::default()
+        .with_reserved(1, 2)
+        .expect("half of delta");
+    assert_eq!(take(&diluted(0, &half), "alice"), 500_000);
+    assert_eq!(take(&diluted(5, &half), "alice"), 458_334);
+    assert_eq!(take(&diluted(40, &half), "alice"), 451_220);
+    assert_eq!(take(&diluted(200, &half), "alice"), 450_249);
+
+    // The floor, stated as the property rather than as four numbers: whatever
+    // the fanout, she keeps her own settlement plus the reserved half of the
+    // flow. Dilution can take the other half and no more.
+    for fanout in [0, 5, 40, 200, 1000] {
+        assert!(
+            take(&diluted(fanout, &half), "alice") >= 450_000,
+            "fanout {fanout} broke the floor"
+        );
+    }
+
+    // And reserving all of delta makes the flow immovable: the same 500,000 at
+    // every fanout, because there is no discretionary remainder left to dilute.
+    let all = FlowParams::default()
+        .with_reserved(1, 1)
+        .expect("all of delta");
+    for fanout in [0, 5, 40, 200] {
+        assert_eq!(take(&diluted(fanout, &all), "alice"), 500_000);
+    }
+}
+
+#[test]
+fn a_reserve_takes_nothing_from_the_submitter_that_delta_did_not_already() {
+    // A fraction *of delta*, not of the reward. Raising the reserve moves
+    // money between upstream recipients and never out of the claimant's own
+    // share, so a funder cannot be talked into a reserve that costs it more
+    // than the delta it already agreed to.
+    for (num, den) in [(0, 1), (1, 4), (1, 2), (1, 1)] {
+        let params = FlowParams::default()
+            .with_reserved(num, den)
+            .expect("valid reserve");
+        let paid = diluted(5, &params);
+        let total: u64 = paid.values().sum();
+        assert_eq!(
+            total, 2_800_000,
+            "reserving {num}/{den} conserved differently"
+        );
+    }
+}
+
+#[test]
+fn a_reserve_moves_nothing_when_the_enforced_citation_is_not_an_ancestor() {
+    // A reserve pointed at a claim this one never cited would be paying for a
+    // relationship the log does not record. The units still leave and still go
+    // upstream; they are simply split discretionarily.
+    let params = FlowParams::default()
+        .with_reserved(1, 1)
+        .expect("all of delta");
+    let mut claims = BTreeMap::new();
+    let alice = claim("alice", 0, Vec::new());
+    let alice_id = alice.id();
+    claims.insert(alice_id.clone(), alice);
+    let bob = claim("bob", 1, vec![alice_id.clone()]);
+    let bob_id = bob.id();
+    claims.insert(bob_id.clone(), bob);
+    let settlements = vec![(alice_id.clone(), 400_000u64), (bob_id.clone(), 400_000)];
+
+    let stranger = claim("stranger", 77, Vec::new()).id();
+    let enforced: BTreeMap<String, String> = [(bob_id, stranger)].into_iter().collect();
+    let with_bogus =
+        proofwork::attribution::payouts_with_enforced(&settlements, &claims, &enforced, &params)
+            .expect("flow succeeds");
+    let without = payouts_over(&settlements, &claims, &params);
+    assert_eq!(with_bogus, without.expect("flow succeeds"));
+}

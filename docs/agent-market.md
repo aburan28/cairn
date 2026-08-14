@@ -397,10 +397,20 @@ The questions worth solving for, in the order they should be answered:
 **Before any of it — the gates.** These change how money moves and cannot be
 retrofitted onto settled claims.
 
-- [ ] Reserved citation share for protocol-enforced citations, so the ratchet's
-      guarantee survives a free supply of citable claims.
-- [ ] Reward-weighted discretionary split, with the conformance vectors and the
-      reference implementation moved together.
+- [x] Reserved citation share for protocol-enforced citations, so the ratchet's
+      guarantee survives a free supply of citable claims. `FlowParams::with_reserved`
+      holds a fraction *of delta* for the citation the rules forced -- on a
+      ratchet, the frontier claim the improvement beat, re-derived from the log
+      by `Node::enforced_citations` rather than stored on the record. Measured
+      at both ends: with nothing reserved, 200 manufactured ancestors leave the
+      frontier holder **498 of the 100,000** she was owed; with half of delta
+      reserved she floors at 50,000 whatever the fanout, and with all of it
+      reserved the flow does not move at all. Default is zero, because a
+      reserve moves settled money and question 3 above has not been answered
+      yet -- the mechanism is there for the number the harness will produce.
+- [x] Reward-weighted discretionary split. Shipped: `payouts_over` delegates to
+      `payouts_weighted`, which splits delta among all transitive ancestors by
+      settled reward.
 
 **Stage 1 — agent as funder.** Everything here is enabling an existing field.
 

@@ -65,7 +65,7 @@ use std::io::{self, Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
-use proofwork::attribution::{payouts_over, FlowError, FlowParams};
+use proofwork::attribution::{payouts_with_enforced, FlowError, FlowParams};
 use proofwork::canonical::{short, CanonicalError, Value};
 use proofwork::checkpoint::{RootKey, SignedCheckpoint};
 use proofwork::crypto::identity::Identity;
@@ -1987,6 +1987,8 @@ fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut delta_num = defaults.delta_num();
     let mut delta_den = defaults.delta_den();
     let mut max_depth = defaults.max_depth();
+    let mut reserved_num = defaults.reserved_num();
+    let mut reserved_den = defaults.reserved_den();
 
     while let Some(token) = cursor.take() {
         if token == "--delta-num" {
@@ -1995,6 +1997,10 @@ fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
             delta_den = parse_u64(&cursor.value("--delta-den")?, "--delta-den")?;
         } else if token == "--max-depth" {
             max_depth = parse_u32(&cursor.value("--max-depth")?, "--max-depth")?;
+        } else if token == "--reserved-num" {
+            reserved_num = parse_u64(&cursor.value("--reserved-num")?, "--reserved-num")?;
+        } else if token == "--reserved-den" {
+            reserved_den = parse_u64(&cursor.value("--reserved-den")?, "--reserved-den")?;
         } else {
             return Err(CliError::Usage(format!(
                 "attribute: unknown option {token:?}"
@@ -2004,7 +2010,9 @@ fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
 
     // Validated here rather than at use, so an impossible delta is a command
     // line error and not a surprise partway through a payout table.
-    let params = FlowParams::new(delta_num, delta_den, max_depth).map_err(CliError::Flow)?;
+    let params = FlowParams::new(delta_num, delta_den, max_depth)
+        .and_then(|params| params.with_reserved(reserved_num, reserved_den))
+        .map_err(CliError::Flow)?;
     Ok(Command::Attribute { params })
 }
 
@@ -2458,7 +2466,15 @@ fn print_help(out: &mut dyn Write) {
         out,
         "  attribute [--delta-num N] [--delta-den N] [--max-depth N]",
     );
-    say(out, "      compute citation-flow payouts");
+    say(out, "            [--reserved-num N] [--reserved-den N]");
+    say(
+        out,
+        "      compute citation-flow payouts; --reserved-* holds that",
+    );
+    say(
+        out,
+        "      share of delta for the citation the rules forced",
+    );
     say(out, "  knowledge [<claim-id>] [--demanding] [--<weight> N]");
     say(
         out,
@@ -2708,6 +2724,55 @@ fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, C
     Ok(0)
 }
 
+/// What this reward costs the network to verify, said at post time.
+///
+/// A settlement pays for its own verification out of a fraction of itself. One
+/// too small to cover that fraction is paid for by everything else that
+/// settles, which is legal, unenforceable, and exactly the thing a funder
+/// deciding how finely to decompose a bounty needs to know *before* it funds
+/// rather than after.
+///
+/// Two numbers because the harness models full redundancy as the conservative
+/// case and real networks sample: the gap between them is the whole argument
+/// for sampled verification, so printing only one would be picking a side of an
+/// open question. Silent when the reward clears even the conservative floor,
+/// because a warning that fires on every healthy bounty is a warning nobody
+/// reads.
+fn decomposition_note(reward: u64) -> Vec<String> {
+    let params = NodeParams::default();
+    let (Ok(Some(full)), Ok(Some(sampled))) = (
+        proofwork::incentive::design::decomposition_floor(&params, params.nodes),
+        proofwork::incentive::design::decomposition_floor(&params, 3),
+    ) else {
+        return Vec::new();
+    };
+    let reward = Rat::units(reward);
+    if reward >= full {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "  note: below the decomposition floor -- this settlement does not pay \
+         for the verification it asks for"
+    )];
+    lines.push(format!(
+        "    {} at full redundancy ({} nodes), {} at 3-fold sampling",
+        full.floor(),
+        params.nodes,
+        sampled.floor()
+    ));
+    if reward >= sampled {
+        lines.push(String::from(
+            "    it clears the sampled floor, so this is a subsidy only while \
+             every node checks every artifact",
+        ));
+    } else {
+        lines.push(String::from(
+            "    it clears neither; sub-objectives want to be few and large",
+        ));
+    }
+    lines
+}
+
 fn cmd_issue(
     out: &mut dyn Write,
     options: &Options,
@@ -2809,6 +2874,9 @@ fn post_objective_file(
             objective.verifier_kind().unwrap_or("?")
         ),
     );
+    for line in decomposition_note(objective.reward) {
+        say(out, line);
+    }
 
     // A pin this node cannot resolve is not an error: content addressing is
     // what lets a node post an objective whose checker a peer will serve, and
@@ -4111,7 +4179,11 @@ fn cmd_attribute(
     let ledger = ledger_of(&node);
     let claims = claim_index(ledger)?;
     let settlements = settlements_of(ledger)?;
-    let payouts = payouts_over(&settlements, &claims, params).map_err(CliError::Flow)?;
+    // The enforced citations are re-derived from the log rather than passed in:
+    // a reserved share is only defensible if its recipient is the one the rules
+    // chose, and that is the frontier as it stood below each claim's own entry.
+    let payouts = payouts_with_enforced(&settlements, &claims, &node.enforced_citations(), params)
+        .map_err(CliError::Flow)?;
 
     for line in render_attribution(params, &payouts)? {
         say(out, line);

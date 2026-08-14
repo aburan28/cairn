@@ -4839,6 +4839,57 @@ impl Node {
 
     /// The strict frontier reader used by the rules path: the latest entry for
     /// this objective, or an error if that entry cannot be read.
+    /// For every claim the rules *forced* to cite something, what it was forced
+    /// to cite.
+    ///
+    /// On a ratcheted objective an improvement must cite the frontier claim it
+    /// beat — [`Node::reveal`] refuses one that does not — so that citation is
+    /// the one an attribution rule can reserve a share for: the submitter chose
+    /// everything else in its `cites` list, and anything chosen can be
+    /// manufactured once funding an objective is something an agent can do.
+    ///
+    /// Re-derived by walking the log forward rather than stored on the claim.
+    /// A stored field would be a new record shape and a consensus surface; the
+    /// frontier as it stood *below* a claim's own entry is already written down,
+    /// and reading it back is what every other position-bounded derivation in
+    /// this module does. It also means this answers correctly for logs written
+    /// before the reserve existed.
+    pub fn enforced_citations(&self) -> BTreeMap<String, String> {
+        let ratcheted: BTreeSet<String> = self
+            .objectives()
+            .iter()
+            .filter(|(_, objective)| objective.ratchet.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut out: BTreeMap<String, String> = BTreeMap::new();
+        let mut held: BTreeMap<String, String> = BTreeMap::new();
+        for entry in self.ledger.entries() {
+            match entry.kind.as_str() {
+                CLAIM => {
+                    let Ok(claim) = Claim::from_value(&entry.payload) else {
+                        continue;
+                    };
+                    if !ratcheted.contains(&claim.objective_id) {
+                        continue;
+                    }
+                    if let Some(frontier) = held.get(&claim.objective_id) {
+                        out.insert(claim.id(), frontier.clone());
+                    }
+                }
+                FRONTIER => {
+                    if let (Some(objective_id), Some(claim_id)) = (
+                        payload_str(&entry.payload, "objective_id"),
+                        payload_str(&entry.payload, "claim_id"),
+                    ) {
+                        held.insert(objective_id.to_string(), claim_id.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
     fn latest_frontier(&self, objective_id: &str) -> Result<Option<FrontierEntry>, RuleViolation> {
         let mut latest: Option<&Value> = None;
         for entry in self.ledger.entries_of_kind(FRONTIER) {

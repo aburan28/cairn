@@ -191,6 +191,52 @@ pub fn minimum_audit_rate(params: &NodeParams) -> Result<Option<Rat>, DesignErro
     })
 }
 
+/// Smallest reward a settlement can carry without the network subsidising it.
+///
+/// ```text
+/// V_min  =  redundancy × verify_cost / (fee × verify_split)
+/// ```
+///
+/// # What it is for
+///
+/// Node rewards are a fee on settlement, so every settled artifact pays for the
+/// verification it consumed out of a fraction of its own reward. A settlement
+/// too small to cover that fraction is paid for by everything else that
+/// settles. That is not a rule anyone can enforce — a small bounty is legal and
+/// should be — but it is a number a funder is entitled to know **before** it
+/// funds, which is the difference between a subsidy and a surprise.
+///
+/// It matters most for *decomposition*. An agent breaking a bounty into
+/// sub-objectives is asking the network for one verification per piece, and the
+/// pieces get smaller as the decomposition gets finer: a hundred thousand-unit
+/// tasks can easily cost more to check than the parent bounty pays. So
+/// sub-objectives should be **few and large**, and this is the arithmetic that
+/// says how large.
+///
+/// # Why redundancy is a parameter and not `params.nodes`
+///
+/// The harness models full redundancy — every node checks every artifact —
+/// deliberately, as the conservative case. Under sampling only `k` nodes check,
+/// and the difference between those two numbers is the entire argument for
+/// sampled verification. Passing it in means a caller can ask either question,
+/// and `docs/agent-market.md` quotes both.
+///
+/// `None` when the fee reaching verifiers is zero: with no revenue per
+/// settlement there is no reward large enough, which is a real answer rather
+/// than a division to guard against.
+pub fn decomposition_floor(
+    params: &NodeParams,
+    redundancy: u32,
+) -> Result<Option<Rat>, DesignError> {
+    params.validate()?;
+    let reaching_verifiers = params.fee * params.verify_split;
+    if reaching_verifiers.is_zero() {
+        return Ok(None);
+    }
+    let cost = Rat::units(params.verify_cost) * Rat::int(i64::from(redundancy.max(1)));
+    Ok(Some(cost / reaching_verifiers))
+}
+
 // ---------------------------------------------------------------------------
 // Bisection against the solver
 // ---------------------------------------------------------------------------
@@ -1122,5 +1168,59 @@ mod tests {
             Some(999)
         );
         assert_eq!(most_ok(5, |value| Ok(value < 5)).expect("total"), None);
+    }
+
+    // -- the decomposition floor -------------------------------------------
+
+    #[test]
+    fn the_decomposition_floor_matches_the_number_the_design_note_quotes() {
+        // docs/agent-market.md: "full redundancy, 100 nodes  100 x 200 x 40 =
+        // 800,000 per settled artifact". A fee of 1/20 split half to verifiers
+        // is a fortieth of settled value reaching them, so a verification
+        // costing 200 per node needs 8,000 of settlement per node checking.
+        //
+        // If this number moves, either the parameters moved or the arithmetic
+        // did, and the note is describing something nobody has built.
+        let params = reference();
+        let full = decomposition_floor(&params, params.nodes)
+            .expect("validated")
+            .expect("a floor exists");
+        assert_eq!(full, Rat::units(800_000));
+
+        let sampled = decomposition_floor(&params, 3)
+            .expect("validated")
+            .expect("a floor exists");
+        assert_eq!(sampled, Rat::units(24_000));
+    }
+
+    #[test]
+    fn the_floor_is_linear_in_redundancy_and_zero_fee_has_none() {
+        // Linear, because each checker is paid for separately -- which is the
+        // whole reason sampling is the argument it is.
+        let params = reference();
+        let one = decomposition_floor(&params, 1)
+            .expect("validated")
+            .expect("floor");
+        let ten = decomposition_floor(&params, 10)
+            .expect("validated")
+            .expect("floor");
+        assert_eq!(ten, one * Rat::int(10));
+
+        // A redundancy of zero is read as one: nobody checking is not a
+        // network with a free floor, it is a network with no verification, and
+        // reporting an answer of zero would be a lie shaped like a bargain.
+        assert_eq!(
+            decomposition_floor(&params, 0)
+                .expect("validated")
+                .expect("floor"),
+            one
+        );
+
+        // No fee reaching verifiers means no reward is large enough. `None` is
+        // the honest answer; a division would have panicked or produced an
+        // infinity nobody could act on.
+        let mut free = reference();
+        free.fee = Rat::ZERO;
+        assert_eq!(decomposition_floor(&free, 100).expect("validated"), None);
     }
 }
