@@ -61,7 +61,7 @@ Read them in this order; each uses vocabulary the previous one introduced.
 | `Gossip` | `src/gossip.rs`, the population CRDT | merge is commutative, associative and idempotent; pruning early is indistinguishable from pruning late; convergence under fair pairwise merge |
 | `Sync` | `src/p2p/sync.rs` record anti-entropy | derived records never cross the wire; unsolicited records are refused; a forged bucket digest costs the liar its own gossip; honest peers converge around it |
 | `Partition` | `src/partition.rs` | the slices tile the space with no gaps and no overlaps; a malformed assignment covers nothing; an assignment cannot be replayed into another epoch; `epoch_of` is monotone and contiguous |
-| `Proofwork` | the composition | **the Stage 0 guarantee**: exactly one settlement sequence survives a log-only audit, and the pool is exactly conserved |
+| `Cairn` | the composition | **the Stage 0 guarantee**: exactly one settlement sequence survives a log-only audit, and the pool is exactly conserved |
 
 ## State-space bounds, and why these ones
 
@@ -81,7 +81,7 @@ ones.
 | `Gossip` | 3 nodes, 5 candidates, 2 islands, K = 2 | 23,102 / 191,989 | 9 |
 | `Sync` | 3 peers, 4 records, 2 buckets | 1,305 / 18,668 | 11 |
 | `Partition` | space 16, 7 partition counts, 3 epochs | 4,368 / 17,745 | 15 |
-| `Proofwork` | 4 claims, 2 epochs, span 6, reward 10 | 30 / 30 | 6 |
+| `Cairn` | 4 claims, 2 epochs, span 6, reward 10 | 30 / 30 | 6 |
 
 Each `.cfg` carries the argument for its own numbers at the top of the file.
 The reasoning is always the same shape — *what is the smallest instance in which
@@ -131,7 +131,7 @@ is a two-line check that the corresponding rule is load-bearing:
 | `CommitReveal` | `EpochBatched` | `TRUE` | `FALSE` — same-epoch reveal — violates `NoFrontRunning` in 7 steps |
 | `CommitReveal` | `OrderKey` | `"commitment"` | `"claim"` — the key §5 originally specified — violates `NothingToGrind` in 4 steps and `OrderIsNotSubmitterChosen` in 7 |
 | `Verification` | `SeedPinned` | `TRUE` | `FALSE` violates `HonestNodesAgree` in 3 steps |
-| `Proofwork` | `RequireMaximal` | `TRUE` | `FALSE` violates `SettlementIsUniquelyDetermined` immediately |
+| `Cairn` | `RequireMaximal` | `TRUE` | `FALSE` violates `SettlementIsUniquelyDetermined` immediately |
 | `Attribution` | `MaxRewires` | `2` | `0` makes the cycle defence untested |
 
 `OrderKey` earns its place twice over: the module was written before the

@@ -199,7 +199,7 @@ def _isqrt(n):
 
 def derive(bits, seed=None, report=None):
     """A complete instance for a group of roughly `bits` bits."""
-    seed = seed or f"proofwork ecdlp nums v1 {bits}"
+    seed = seed or f"cairn ecdlp nums v1 {bits}"
     # p = 3 mod 4 keeps the square root in `hash_to_point` a single
     # exponentiation; the largest such prime under 2^bits is still a function
     # of the bit size and nothing else.

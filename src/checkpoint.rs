@@ -14,7 +14,7 @@ use ml_dsa::{Signer, Verifier};
 use rand_core::RngCore;
 use std::fmt;
 
-const DOMAIN: &str = "proofwork/knowledge-checkpoint/v1";
+const DOMAIN: &str = "cairn/knowledge-checkpoint/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckpointError {

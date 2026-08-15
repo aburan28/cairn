@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Convert an ecdsafail score.json into a proofwork artifact.
+"""Convert an ecdsafail score.json into a cairn artifact.
 
 ecdsa.fail writes::
 
     {"score": <int>, "metrics": {"toffoli": <int>, "qubits": <int>}}
 
-proofwork's pinned evaluator in this example expects::
+cairn's pinned evaluator in this example expects::
 
     {"qubits": <int>, "toffoli": <int>, "score": <int>}  # score optional
 

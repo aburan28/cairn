@@ -1,6 +1,6 @@
 # Its own workspace, deliberately.
 #
-# This crate must not depend on `proofwork`, and being a separate workspace is
+# This crate must not depend on `cairn`, and being a separate workspace is
 # what makes that structural rather than a rule somebody remembers. A path
 # dependency would let a shared helper leak across, and the moment the two
 # implementations share the code that decides an id, they stop being two
@@ -8,16 +8,16 @@
 [workspace]
 
 [package]
-name = "proofwork-reference"
+name = "cairn-reference"
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
-description = "An independent reference implementation of the proofwork protocol, for cross-checking the primary one."
+description = "An independent reference implementation of the cairn protocol, for cross-checking the primary one."
 license = "Apache-2.0"
 publish = false
 
 [[bin]]
-name = "proofwork-reference"
+name = "cairn-reference"
 path = "src/main.rs"
 
 [dependencies]

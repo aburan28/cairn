@@ -13,16 +13,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
-use proofwork::canonical::Value;
-use proofwork::gossip::{Candidate, Population};
-use proofwork::ledger::Ledger;
-use proofwork::node::Node;
-use proofwork::p2p::discovery::Endpoint;
-use proofwork::p2p::handshake::PeerIdentity;
-use proofwork::p2p::pop::PopLimits;
-use proofwork::p2p::service::Service;
-use proofwork::p2p::sync::{reconcile, Peer, Record, SyncError};
-use proofwork::records::{commitment_hash, Claim, Commitment, Objective};
+use cairn::canonical::Value;
+use cairn::gossip::{Candidate, Population};
+use cairn::ledger::Ledger;
+use cairn::node::Node;
+use cairn::p2p::discovery::Endpoint;
+use cairn::p2p::handshake::PeerIdentity;
+use cairn::p2p::pop::PopLimits;
+use cairn::p2p::service::Service;
+use cairn::p2p::sync::{reconcile, Peer, Record, SyncError};
+use cairn::records::{commitment_hash, Claim, Commitment, Objective};
 
 const TS: &str = "2026-07-29T00:00:00+00:00";
 /// One epoch after [`TS`]. A reveal must be in a strictly later epoch than the
@@ -517,7 +517,7 @@ fn a_dialling_node_learns_who_holds_a_blob_and_asks_that_peer_next() {
 
     // Alice heard the announcement, and attributed it to the peer she was
     // actually talking to.
-    let now = proofwork::time::unix_seconds();
+    let now = cairn::time::unix_seconds();
     let (holders, _) =
         alice_service.with_directory(|directory| directory.lookup_providers(&bob_holds[0], now));
     assert_eq!(
@@ -551,7 +551,7 @@ fn a_needed_blob_puts_its_known_holder_ahead_of_the_random_sample() {
     // instead looks like it works and does not: the record expires 1800 seconds
     // after the epoch, `candidates` falls through to the nearest-peer list, and
     // which peer that is depends on two randomly generated ids.
-    let now = proofwork::time::unix_seconds();
+    let now = cairn::time::unix_seconds();
     let mut needs = std::collections::BTreeSet::new();
     needs.insert(wanted.clone());
     service.with_directory(|directory| {
@@ -606,7 +606,7 @@ fn a_lookup_crosses_a_hop_and_learns_the_key_it_needs_to_do_it() {
     let first = alice.peers_for(&needs, 2);
     assert_eq!(first.len(), 1, "alice can only reach bob");
     assert_eq!(first[0].peer.id(), bob.id());
-    let bob_node = proofwork::p2p::dht::NodeId::from_bytes(bob.id());
+    let bob_node = cairn::p2p::dht::NodeId::from_bytes(bob.id());
     assert_eq!(
         alice.with_directory(|d| d.ask_of(bob_node)),
         vec![wanted.clone()],
@@ -617,11 +617,11 @@ fn a_lookup_crosses_a_hop_and_learns_the_key_it_needs_to_do_it() {
     // `exchange_dht` puts on the wire; driving it through the directory keeps
     // the test about routing rather than about sockets, which
     // `a_dht_round_records_who_holds_a_blob` already covers.
-    let carol_contact = proofwork::p2p::dht::PeerContact::new(carol.id(), carol_addr, 0);
+    let carol_contact = cairn::p2p::dht::PeerContact::new(carol.id(), carol_addr, 0);
     alice.with_directory(|directory| {
         directory.on_providers(
             bob_node,
-            &[proofwork::p2p::dht::ProviderAnswer {
+            &[cairn::p2p::dht::ProviderAnswer {
                 address: wanted.clone(),
                 holders: Vec::new(),
                 closer: vec![carol_contact],
@@ -631,7 +631,7 @@ fn a_lookup_crosses_a_hop_and_learns_the_key_it_needs_to_do_it() {
 
     // Alice has heard of carol. She cannot dial her yet — no key — so the hop
     // is deferred and carol's key is queued.
-    let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
+    let carol_node = cairn::p2p::dht::NodeId::from_bytes(carol.id());
     let second = alice.peers_for(&needs, 2);
     assert!(
         !second.iter().any(|e| e.peer.id() == carol.id()),
@@ -646,12 +646,12 @@ fn a_lookup_crosses_a_hop_and_learns_the_key_it_needs_to_do_it() {
 
     // Bob serves the key on the next round. Verified against the id, which is
     // what makes relaying it safe: a peer id *is* sha256(public key).
-    let key = proofwork::p2p::dht::encode_key(carol.public_key().as_ref());
-    let adopted = proofwork::p2p::dht::decode_key(carol_node, &key).expect("carol's real key");
+    let key = cairn::p2p::dht::encode_key(carol.public_key().as_ref());
+    let adopted = cairn::p2p::dht::decode_key(carol_node, &key).expect("carol's real key");
     alice.with_book(|book| {
         book.insert(Endpoint::new(
             carol_addr,
-            proofwork::p2p::handshake::PeerPublic::from_bytes(&adopted).expect("a key"),
+            cairn::p2p::handshake::PeerPublic::from_bytes(&adopted).expect("a key"),
         ))
     });
     alice.with_directory(|directory| directory.resolved_key(carol_node));
@@ -677,19 +677,19 @@ fn a_forged_key_never_reaches_the_address_book() {
     // the id that was asked for, or they are discarded.
     let carol = PeerIdentity::generate();
     let mallory = PeerIdentity::generate();
-    let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
+    let carol_node = cairn::p2p::dht::NodeId::from_bytes(carol.id());
 
     // Mallory's real, well-formed key, offered under carol's name.
-    let forged = proofwork::p2p::dht::encode_key(mallory.public_key().as_ref());
+    let forged = cairn::p2p::dht::encode_key(mallory.public_key().as_ref());
     assert_eq!(
-        proofwork::p2p::dht::decode_key(carol_node, &forged),
+        cairn::p2p::dht::decode_key(carol_node, &forged),
         None,
         "a key that does not hash to the id asked for was accepted"
     );
     // Carol's own key still works, so the check is not simply refusing
     // everything.
-    let honest = proofwork::p2p::dht::encode_key(carol.public_key().as_ref());
-    assert!(proofwork::p2p::dht::decode_key(carol_node, &honest).is_some());
+    let honest = cairn::p2p::dht::encode_key(carol.public_key().as_ref());
+    assert!(cairn::p2p::dht::decode_key(carol_node, &honest).is_some());
 }
 
 #[test]
@@ -723,16 +723,16 @@ fn a_lookup_that_finds_a_holder_actually_dials_it() {
     let dialled = alice.peers_for(&needs, 2);
     assert!(!dialled.is_empty(), "the lookup chose nobody to ask");
     for endpoint in &dialled {
-        let node = proofwork::p2p::dht::NodeId::from_bytes(endpoint.peer.id());
+        let node = cairn::p2p::dht::NodeId::from_bytes(endpoint.peer.id());
         if alice.with_directory(|d| d.ask_of(node)).is_empty() {
             continue;
         }
         alice.with_directory(|directory| {
             directory.on_providers(
                 node,
-                &[proofwork::p2p::dht::ProviderAnswer {
+                &[cairn::p2p::dht::ProviderAnswer {
                     address: wanted.clone(),
-                    holders: vec![proofwork::p2p::dht::Holder::new(carol.id(), carol_addr)],
+                    holders: vec![cairn::p2p::dht::Holder::new(carol.id(), carol_addr)],
                     closer: Vec::new(),
                 }],
             )
@@ -752,7 +752,7 @@ fn a_lookup_that_finds_a_holder_actually_dials_it() {
 
     // Never stored: a relayed claim that entered the provider store would be
     // re-served to other peers, which is the amplification this design refuses.
-    let now = proofwork::time::unix_seconds();
+    let now = cairn::time::unix_seconds();
     let (stored, _) = alice.with_directory(|d| d.lookup_providers(&wanted, now));
     assert!(
         stored.is_empty(),
@@ -791,11 +791,11 @@ fn a_node_handed_a_log_is_handed_the_network_with_it() {
     // carries a transport *id*, not the 261 KiB McEliece key. So a seeded
     // contact is routable immediately and dialable once its key arrives, which
     // is the same two-step the DHT already uses for a contact it hears about.
-    use proofwork::records::PeerRecord;
+    use cairn::records::PeerRecord;
 
     let carol = PeerIdentity::generate();
     let carol_addr: std::net::SocketAddr = "127.0.0.1:9401".parse().expect("loopback");
-    let announcer = proofwork::crypto::identity::Identity::from_secret_bytes([11u8; 32]);
+    let announcer = cairn::crypto::identity::Identity::from_secret_bytes([11u8; 32]);
 
     let mut writer = Node::new(
         Ledger::open(scratch("peer-log")).expect("open ledger"),
@@ -803,7 +803,7 @@ fn a_node_handed_a_log_is_handed_the_network_with_it() {
     );
     let record = PeerRecord::new(
         announcer.submitter_id(),
-        proofwork::p2p::dht::NodeId::from_bytes(carol.id()).to_hex(),
+        cairn::p2p::dht::NodeId::from_bytes(carol.id()).to_hex(),
         carol_addr.to_string(),
         1,
         TS,
@@ -819,7 +819,7 @@ fn a_node_handed_a_log_is_handed_the_network_with_it() {
     assert_eq!(alice.seed_from_log(&writer), 1);
 
     // Routable now.
-    let carol_node = proofwork::p2p::dht::NodeId::from_bytes(carol.id());
+    let carol_node = cairn::p2p::dht::NodeId::from_bytes(carol.id());
     let known: Vec<_> = alice.with_directory(|d| {
         d.routing()
             .contacts()
@@ -855,13 +855,13 @@ fn a_replayed_peer_record_cannot_steer_the_routing_table_back() {
     // go on steering traffic at it, while the log itself was fully protected:
     // `Node::peers` resolves highest-seq-wins and the audit reports a record
     // that does not advance. All of that stopped at the routing table's edge.
-    use proofwork::records::PeerRecord;
+    use cairn::records::PeerRecord;
 
     let moved = PeerIdentity::generate();
     let old_addr: std::net::SocketAddr = "127.0.0.1:9501".parse().expect("loopback");
     let new_addr: std::net::SocketAddr = "127.0.0.1:9502".parse().expect("loopback");
-    let announcer = proofwork::crypto::identity::Identity::from_secret_bytes([21u8; 32]);
-    let transport = proofwork::p2p::dht::NodeId::from_bytes(moved.id());
+    let announcer = cairn::crypto::identity::Identity::from_secret_bytes([21u8; 32]);
+    let transport = cairn::p2p::dht::NodeId::from_bytes(moved.id());
 
     let mut writer = Node::new(
         Ledger::open(scratch("peer-replay")).expect("open ledger"),
@@ -908,10 +908,10 @@ fn a_peer_record_a_node_cannot_parse_is_skipped_not_fatal() {
     // implementations disagreeing about an IPv6 form would be a split. So the
     // network layer is where a form this build cannot dial gets dropped, and
     // dropping one contact must not cost the rest of the log.
-    use proofwork::records::PeerRecord;
+    use cairn::records::PeerRecord;
 
-    let announcer = proofwork::crypto::identity::Identity::from_secret_bytes([12u8; 32]);
-    let other = proofwork::crypto::identity::Identity::from_secret_bytes([13u8; 32]);
+    let announcer = cairn::crypto::identity::Identity::from_secret_bytes([12u8; 32]);
+    let other = cairn::crypto::identity::Identity::from_secret_bytes([13u8; 32]);
     let reachable = PeerIdentity::generate();
 
     let mut writer = Node::new(
@@ -936,7 +936,7 @@ fn a_peer_record_a_node_cannot_parse_is_skipped_not_fatal() {
         .post_peer(
             &PeerRecord::new(
                 other.submitter_id(),
-                proofwork::p2p::dht::NodeId::from_bytes(reachable.id()).to_hex(),
+                cairn::p2p::dht::NodeId::from_bytes(reachable.id()).to_hex(),
                 "127.0.0.1:9402",
                 1,
                 TS,
@@ -964,7 +964,7 @@ fn a_peer_record_a_node_cannot_parse_is_skipped_not_fatal() {
 /// is exactly what `seed_from_log` promises for records.
 #[test]
 fn a_beacon_becomes_a_routable_contact_with_its_key_queued() {
-    use proofwork::p2p::multicast;
+    use cairn::p2p::multicast;
 
     let heard_id = PeerIdentity::generate();
     let alice = Service::new(Arc::new(PeerIdentity::generate()));
@@ -1003,7 +1003,7 @@ fn a_beacon_becomes_a_routable_contact_with_its_key_queued() {
     }
     assert_eq!(taken, 1, "one beacon, one contact");
 
-    let node_id = proofwork::p2p::dht::NodeId::from_bytes(heard_id.id());
+    let node_id = cairn::p2p::dht::NodeId::from_bytes(heard_id.id());
     let known: Vec<_> = alice.with_directory(|d| {
         d.routing()
             .contacts()
@@ -1131,8 +1131,8 @@ fn the_settlement_anchor_is_the_same_on_both_nodes() {
     apply(&mut bob, &records_of(&alice));
 
     // The epoch the reveals landed in, whose close settles the batch.
-    let epoch = proofwork::time::parse_rfc3339(TS_REVEAL).expect("parse") as u64
-        / proofwork::partition::epoch_seconds();
+    let epoch = cairn::time::parse_rfc3339(TS_REVEAL).expect("parse") as u64
+        / cairn::partition::epoch_seconds();
 
     assert_eq!(
         bob.anchor_of_epoch(epoch),

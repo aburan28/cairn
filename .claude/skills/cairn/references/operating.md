@@ -12,7 +12,7 @@ objective and claims against the original stop resolving. Mid-bounty rule
 changes are not guarded against; they are unrepresentable.
 
 ```sh
-proofwork --log LOG --root . post examples/reversible-adder/objective.json
+cairn --log LOG --root . post examples/reversible-adder/objective.json
 ```
 
 The pin must be the file's real SHA-256:
@@ -57,8 +57,8 @@ Practical requirements:
 ## Giving contributors an unforgeable name
 
 ```sh
-proofwork identity --out alice.json      # the public half IS the submitter
-proofwork --log LOG --root . commit <objective> --identity alice.json --artifact a.json
+cairn identity --out alice.json      # the public half IS the submitter
+cairn --log LOG --root . commit <objective> --identity alice.json --artifact a.json
 ```
 
 A submitter that is 64 lowercase hex characters is an ed25519 public key, and
@@ -66,15 +66,15 @@ the network refuses a record naming one without a valid signature from it — so
 an identity used once cannot be stolen. A nickname stays unauthenticated, which
 is what keeps older logs working.
 
-`proofwork-mcp --identity <file>` does the same for an agent. Worth knowing
+`cairn-mcp --identity <file>` does the same for an agent. Worth knowing
 before you invite strangers: nothing yet lets an *objective* require key-shaped
 submitters, so a network with real value should say so in its statements.
 
 ## Serving to strangers
 
 ```sh
-proofwork-serve --log LOG --root . --listen 127.0.0.1:8787 --queue ./queue
-proofwork drain --queue ./queue --log LOG --root .   # admit what arrived
+cairn-serve --log LOG --root . --listen 127.0.0.1:8787 --queue ./queue
+cairn drain --queue ./queue --log LOG --root .   # admit what arrived
 ```
 
 `GET` is read-only and safe to expose. `POST /submit` **queues**; nothing
@@ -88,7 +88,7 @@ their work queued and unsettled.
 ## Epochs
 
 Commit and reveal must land in different epochs. The length defaults to **600
-seconds** and is set by `PROOFWORK_EPOCH_SECONDS`.
+seconds** and is set by `CAIRN_EPOCH_SECONDS`.
 
 Export it in **every** shell that touches the log — the CLI, the MCP server,
 the daemon. Epochs are derived from record timestamps and never stored, so a
@@ -96,15 +96,15 @@ log written at one length audits as thoroughly broken at another: anchors do
 not match and every batch looks settled out of order. `audit` names this when
 every batch faults at once, but it is easier to not do it.
 
-Use `PROOFWORK_EPOCH_SECONDS=1` for demos. Use the default for anything whose
+Use `CAIRN_EPOCH_SECONDS=1` for demos. Use the default for anything whose
 log you intend to publish.
 
 ## Settling and auditing
 
 ```sh
-proofwork --log LOG --root . settle     # drain closed epochs
-proofwork --log LOG --root . audit      # chain, batches, verdicts
-proofwork --log LOG --root . attribute  # citation-flow payouts
+cairn --log LOG --root . settle     # drain closed epochs
+cairn --log LOG --root . audit      # chain, batches, verdicts
+cairn --log LOG --root . attribute  # citation-flow payouts
 ```
 
 `audit` re-derives every settled result from the artifacts. It is the thing
@@ -114,14 +114,14 @@ and after importing from a peer.
 ## Publishing what you settled
 
 ```sh
-proofwork --log LOG --root . checkpoint --root-key KEY --out checkpoint.json
+cairn --log LOG --root . checkpoint --root-key KEY --out checkpoint.json
 ```
 
 A checkpoint is `(merkle_root, height, signature)`. A reader pins it and
 detects a rewrite:
 
 ```sh
-proofwork --log LOG --root . verify --from checkpoint.json --root-key PUBKEY --audit
+cairn --log LOG --root . verify --from checkpoint.json --root-key PUBKEY --audit
 ```
 
 Publish the public key **somewhere the reader already trusts**. A key served

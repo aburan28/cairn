@@ -28,7 +28,7 @@ flowchart TB
     operator["Node operator<br/><i>re-verifies, stores, serves</i>"]
     auditor["Auditor<br/><i>anyone at all</i>"]
 
-    subgraph pw["proofwork"]
+    subgraph pw["cairn"]
         direction TB
         rules["Rules engine<br/>node.rs"]
         log[("Hash-linked log<br/>ledger.rs")]
@@ -307,7 +307,7 @@ flowchart TB
     codec{"Codec"}
     plain["Plain<br/>JSONL, one record per line"]
     sealedc["Sealed<br/>pwenc1:nonce:ciphertext<br/><i>aad binds the line index</i>"]
-    file[("log/proofwork.jsonl")]
+    file[("log/cairn.jsonl")]
 
     node --> ledger
     ledger --> codec
@@ -330,15 +330,15 @@ The data directory, its two storage classes, and the mirror:
 flowchart LR
     subgraph data["--data-dir"]
         direction TB
-        logd["log/proofwork.jsonl<br/><b>PINNED</b> — never evicted"]
+        logd["log/cairn.jsonl<br/><b>PINNED</b> — never evicted"]
         cache["cache/<br/>RECLAIMABLE"]
         tmp["tmp/<br/>RECLAIMABLE"]
     end
-    key["~/.proofwork/key<br/><b>outside the data dir,<br/>on purpose</b>"]
+    key["~/.cairn/key<br/><b>outside the data dir,<br/>on purpose</b>"]
     dest[("chosen directory<br/>NAS · external disk · cloud folder")]
 
     key -.->|"unlocks"| logd
-    data -->|"proofwork sync"| dest
+    data -->|"cairn sync"| dest
     key -->|"NEVER copied"| blocked(("blocked"))
 
     quota["--max-size 20GB"] --> cache
@@ -392,7 +392,7 @@ flowchart TB
 Two consequences the diagram makes visible:
 
 - **Security spend is proportional to settled value — and is zero at launch.**
-  `proofwork incentives --settled 0` prints `fee pool supports no nodes`. Stated,
+  `cairn incentives --settled 0` prints `fee pool supports no nodes`. Stated,
   not solved.
 - **The pool decides how many nodes exist; it has no effect on whether they do
   the work.** A rubber-stamper collects the same share, so the pool cancels out

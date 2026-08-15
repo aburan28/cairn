@@ -43,7 +43,7 @@ other produced; the second has both classify every record in
 about admissibility is a disagreement about what was settled. If you touched a record, a
 hash, or an encoding, you must change **both** implementations (`src/` and
 `reference/rust/`) and confirm that
-`proofwork-reference conformance conformance/vectors.json` still passes.
+`cairn-reference conformance conformance/vectors.json` still passes.
 
 Those vectors are **frozen**. They came from a Python reference implementation
 that no longer exists, and that provenance is their whole value: they are
@@ -106,7 +106,7 @@ by default and is separate from the `permissions:` block in the workflow:
 
 The run fails with *"GitHub Actions is not permitted to create or approve pull
 requests"* after it has already committed the version bump, so the branch
-`release-please--branches--main--components--proofwork` sits there looking
+`release-please--branches--main--components--cairn` sits there looking
 correct while no PR exists. Nothing is lost: enable the setting and the next
 push to `main` opens the PR from the branch that is already there.
 

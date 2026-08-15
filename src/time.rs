@@ -3,7 +3,7 @@
 //! These strings land inside records whose digests must match the Python
 //! reference byte for byte, so the format is consensus-critical: `+00:00`, not
 //! `Z`, and seconds precision. It lives in the library rather than in a binary
-//! because more than one binary needs it -- `proofwork` and `proofwork-mcp` --
+//! because more than one binary needs it -- `cairn` and `cairn-mcp` --
 //! and a second copy of a date formatter is a second chance to disagree about
 //! what time it is.
 

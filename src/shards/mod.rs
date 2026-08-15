@@ -94,7 +94,7 @@
 //! reconstructed here; moving one between peers is [`crate::swarm`]'s job and is
 //! not wired up. Said plainly because this crate has been bitten before by a
 //! subsystem tested only against itself — see `docs/storage.md` on the two bugs
-//! that sat in the `swarm`/`blobs` seam. `proofwork shard` is the caller that
+//! that sat in the `swarm`/`blobs` seam. `cairn shard` is the caller that
 //! keeps this module honest until a transfer path exists.
 //!
 //! **No repair.** Regenerating a lost shard means reconstructing the blob and
@@ -482,7 +482,7 @@ impl Layout {
 /// A chunk length for a blob of this size: the smallest legal power of two that
 /// keeps a shard under `TARGET_CHUNKS_PER_SHARD` chunks.
 ///
-/// A convenience for `proofwork shard plan`, never a rule. Two nodes choosing
+/// A convenience for `cairn shard plan`, never a rule. Two nodes choosing
 /// differently produce different manifests for one blob, which is fine — a
 /// manifest is checked against the blob digest, not against another manifest.
 pub fn suggest_chunk_len(total: u64, coding: Coding) -> u32 {

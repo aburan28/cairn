@@ -17,13 +17,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use proofwork::canonical::Value;
-use proofwork::ledger::Ledger;
-use proofwork::node::Node;
-use proofwork::p2p::discovery::Endpoint;
-use proofwork::p2p::handshake::PeerIdentity;
-use proofwork::p2p::service::Service;
-use proofwork::records::Objective;
+use cairn::canonical::Value;
+use cairn::ledger::Ledger;
+use cairn::node::Node;
+use cairn::p2p::discovery::Endpoint;
+use cairn::p2p::handshake::PeerIdentity;
+use cairn::p2p::service::Service;
+use cairn::records::Objective;
 
 const TS: &str = "2026-07-29T00:00:00+00:00";
 

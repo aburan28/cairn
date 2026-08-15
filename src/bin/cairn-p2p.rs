@@ -1,18 +1,18 @@
-//! `proofwork-p2p` — a long-running node: p2p sync, and optionally HTTP.
+//! `cairn-p2p` — a long-running node: p2p sync, and optionally HTTP.
 //!
-//! The loop itself lives in [`proofwork::daemon`], which this and
-//! `proofwork-serve` both call. Two entry points, one implementation of "be a
+//! The loop itself lives in [`cairn::daemon`], which this and
+//! `cairn-serve` both call. Two entry points, one implementation of "be a
 //! node": the alternative was two copies of a startup sequence that has to
 //! agree about locking, checkpoint writing and queue draining.
 //!
 //! ```sh
 //! # p2p only, as before
-//! proofwork-p2p --identity id.json --root-key key.json --checkpoint cp.json \
-//!     --listen 0.0.0.0:9000 --log proofwork.jsonl --root .
+//! cairn-p2p --identity id.json --root-key key.json --checkpoint cp.json \
+//!     --listen 0.0.0.0:9000 --log cairn.jsonl --root .
 //!
 //! # and publishing over HTTP from the same process
-//! proofwork-p2p --identity id.json --root-key key.json --checkpoint cp.json \
-//!     --listen 0.0.0.0:9000 --log proofwork.jsonl --root . \
+//! cairn-p2p --identity id.json --root-key key.json --checkpoint cp.json \
+//!     --listen 0.0.0.0:9000 --log cairn.jsonl --root . \
 //!     --serve 0.0.0.0:8080 --queue ./queue
 //! ```
 //!
@@ -23,7 +23,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use proofwork::daemon::{self, Config};
+use cairn::daemon::{self, Config};
 
 /// Print the usage and exit with `code`.
 ///
@@ -33,9 +33,9 @@ use proofwork::daemon::{self, Config};
 /// packaging check asks whether a binary runs at all.
 fn usage(code: i32) -> ! {
     eprintln!(
-        "proofwork-p2p — a proofwork node: p2p sync, and optionally HTTP\n\n\
+        "cairn-p2p — a cairn node: p2p sync, and optionally HTTP\n\n\
          USAGE\n    \
-         proofwork-p2p --identity FILE --root-key FILE --checkpoint FILE\n                  \
+         cairn-p2p --identity FILE --root-key FILE --checkpoint FILE\n                  \
          --listen ADDR --log FILE --root DIR\n                  \
          [--bootstrap FILE ...] [--population FILE] [--queue DIR]\n                  \
          [--fanout N] [--serve ADDR] [--max-queue N] [--key-file FILE]\n\n\
@@ -61,7 +61,7 @@ fn usage(code: i32) -> ! {
 fn main() {
     // Before anything that could log. Stderr only -- see `logging` -- which
     // matters most here in the MCP server, where stdout is the protocol.
-    proofwork::logging::init();
+    cairn::logging::init();
 
     let mut identity = None;
     let mut root_key = None;
@@ -129,7 +129,7 @@ fn main() {
         match text.parse::<usize>() {
             Ok(value) if value > 0 => config.max_queued = value,
             _ => {
-                eprintln!("proofwork-p2p: --max-queue needs a positive integer");
+                eprintln!("cairn-p2p: --max-queue needs a positive integer");
                 std::process::exit(2);
             }
         }

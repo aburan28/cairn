@@ -25,7 +25,7 @@ venv/
 # ...except the published one. A project whose whole claim is "anyone can
 # re-derive every settled result from the log" has to ship a log. See
 # launch/README.md and scripts/make-launch-log.sh.
-!launch/proofwork.jsonl
+!launch/cairn.jsonl
 
 # macOS AppleDouble sidecars; this volume creates one per file
 ._*
@@ -38,7 +38,7 @@ venv/
 # recoverable from the pin in the objective that names it, so it is a cache and
 # never a source: committing one would put a second copy of a checker in the
 # repository, under a different path, that nothing checks against the first.
-.proofwork/
+.cairn/
 
 # Written by setup.sh / `make mcp` with absolute paths for one machine.
 # Generated, not shared.
@@ -46,7 +46,7 @@ venv/
 opencode.json
 
 # Bootstrap addresses are local configuration, never repository content.
-# `proofwork-p2p`'s own module doc says it: "Identity files and bootstrap files
+# `cairn-p2p`'s own module doc says it: "Identity files and bootstrap files
 # are local configuration. They are never placed in the append-only ledger."
 # `.local/seed.json` above already covers the one `make p2p` generates; these
 # catch a hand-written one beside it.

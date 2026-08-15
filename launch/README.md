@@ -1,6 +1,6 @@
 # A published log, and how to check it yourself
 
-This directory holds one real, settled proofwork log, the signed checkpoint
+This directory holds one real, settled cairn log, the signed checkpoint
 over it, and the public key that signed it. It exists because the project's
 whole claim is
 
@@ -9,7 +9,7 @@ whole claim is
 and that is worth nothing without a log anyone can actually get.
 
 ```
-proofwork.jsonl    the log: objectives, commitments, claims, verdicts,
+cairn.jsonl    the log: objectives, commitments, claims, verdicts,
                    settlements, frontier moves, and the settlement batches
 checkpoint.json    (height, head, merkle_root) signed with ML-DSA-65
 root-key.pub       the public half, hex
@@ -17,13 +17,13 @@ root-key.pub       the public half, hex
 
 ## Check it
 
-From a checkout of this repository, with `proofwork` built:
+From a checkout of this repository, with `cairn` built:
 
 ```sh
-proofwork --log launch/proofwork.jsonl --root . audit
-proofwork --log launch/proofwork.jsonl --root . verify \
+cairn --log launch/cairn.jsonl --root . audit
+cairn --log launch/cairn.jsonl --root . verify \
     --from launch/checkpoint.json --root-key launch/root-key.pub --audit
-proofwork --log launch/proofwork.jsonl --root . attribute
+cairn --log launch/cairn.jsonl --root . attribute
 ```
 
 The first re-runs every pinned verifier against every settled artifact and
@@ -35,8 +35,8 @@ And the check that actually matters — the independent reference implementation
 re-deriving the same log, having shared no code with the Rust one:
 
 ```sh
-./reference/rust/target/release/proofwork-reference \
-    --log launch/proofwork.jsonl --root . audit
+./reference/rust/target/release/cairn-reference \
+    --log launch/cairn.jsonl --root . audit
 ```
 
 Both print the same Merkle root. That is the claim made concrete: not "anyone
@@ -84,8 +84,8 @@ produced it, which is exactly the case where that does not matter.
 Takes the better part of an hour, deliberately: it uses the **default**
 600-second epoch length rather than the one-second epochs the demo scripts
 use. Epochs are derived from record timestamps and never stored, so a log
-built with `PROOFWORK_EPOCH_SECONDS=1` can only be audited by somebody who
-sets the same value — and a published artifact that fails `proofwork audit`
+built with `CAIRN_EPOCH_SECONDS=1` can only be audited by somebody who
+sets the same value — and a published artifact that fails `cairn audit`
 for anyone running it with defaults would say the project's central claim is
 false. (If you ever see every batch in a log fault at once, that is the first
 thing to check; `audit` now says so.)

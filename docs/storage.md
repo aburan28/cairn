@@ -3,12 +3,12 @@
 Where a node's data lives, who can read it, and how big it is allowed to get.
 
 ```sh
-proofwork keygen                                  # 32-byte key at ~/.proofwork/key, 0600
-proofwork --data-dir /Volumes/ext/pw post obj.json # data where you want it, sealed
-proofwork --data-dir /Volumes/ext/pw store status
-proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
-proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
-proofwork --data-dir /Volumes/ext/pw store rekey    # fresh key, same root
+cairn keygen                                  # 32-byte key at ~/.cairn/key, 0600
+cairn --data-dir /Volumes/ext/pw post obj.json # data where you want it, sealed
+cairn --data-dir /Volumes/ext/pw store status
+cairn --data-dir /Volumes/ext/pw --max-size 20GB store gc
+cairn --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
+cairn --data-dir /Volumes/ext/pw store rekey    # fresh key, same root
 ```
 
 ## Encryption at rest
@@ -17,7 +17,7 @@ proofwork --data-dir /Volumes/ext/pw store rekey    # fresh key, same root
 
 A node's data directory ends up in places its operator did not think hard about:
 a cloud-synced folder, a laptop backup, an external drive, a machine that gets
-sold. `proofwork sync` exists precisely to put a copy somewhere else, which makes
+sold. `cairn sync` exists precisely to put a copy somewhere else, which makes
 the question urgent rather than theoretical. Encrypting at rest makes those
 copies inert.
 
@@ -85,17 +85,17 @@ Two details are doing real work:
 ### Keys
 
 ```sh
-proofwork keygen                      # bare key, 0600
-proofwork keygen --passphrase         # wrapped with argon2id
+cairn keygen                      # bare key, 0600
+cairn keygen --passphrase         # wrapped with argon2id
 ```
 
-The default location is `~/.proofwork/key` — **outside the data directory, on
+The default location is `~/.cairn/key` — **outside the data directory, on
 purpose.** The default has to be the safe one, because the unsafe one is
 invisible: a key beside its ciphertext looks fine right up until the directory is
 synced somewhere else, and then it was never encryption at all. `keygen` prints a
 warning if you put it inside anyway, and `sync` refuses to copy it.
 
-A passphrase is supplied through `$PROOFWORK_PASSPHRASE` or `--passphrase-file`,
+A passphrase is supplied through `$CAIRN_PASSPHRASE` or `--passphrase-file`,
 never a prompt. Reading one without echoing it needs terminal control this crate
 has no dependency for, and echoing a passphrase into shell history is worse than
 not offering the option.
@@ -109,7 +109,7 @@ design, and `keygen` says so.
 ### Converting an existing log
 
 ```sh
-proofwork store encrypt
+cairn store encrypt
 ```
 
 Verifies the chain first (sealing a broken log would bake the breakage into
@@ -121,8 +121,8 @@ able to destroy your only copy — and you are told, loudly, to remove it yourse
 ### Rotating the key
 
 ```sh
-proofwork store rekey
-proofwork store rekey --new-passphrase-file ~/new-phrase   # and wrap the new one
+cairn store rekey
+cairn store rekey --new-passphrase-file ~/new-phrase   # and wrap the new one
 ```
 
 Without this, rotating means decrypting the log by hand, generating a key,
@@ -172,7 +172,7 @@ answer for `keygen` and leaves that case with no command at all.
 ### Handing someone a readable copy
 
 ```sh
-proofwork store export --out /tmp/public.jsonl
+cairn store export --out /tmp/public.jsonl
 ```
 
 The inverse of `store encrypt`, and it has to exist. The project's central claim
@@ -204,8 +204,8 @@ copy is inert.
 | | sealed? | why |
 |---|---|---|
 | `log/` | **yes** | a stolen disk would otherwise yield the node's whole operating record in one readable file |
-| `.proofwork/blobs/` | no | every byte *and every name* is something this node hands to any peer that asks. `p2p::code` serves them on request; the name is the content address the objective itself declares |
-| `.proofwork/shards/` | no | erasure-coded pieces of a blob the network publishes, filed under that blob's digest. `k` of them *are* the blob, and the blob is public. See [shards.md](shards.md) |
+| `.cairn/blobs/` | no | every byte *and every name* is something this node hands to any peer that asks. `p2p::code` serves them on request; the name is the content address the objective itself declares |
+| `.cairn/shards/` | no | erasure-coded pieces of a blob the network publishes, filed under that blob's digest. `k` of them *are* the blob, and the blob is public. See [shards.md](shards.md) |
 | the `--population` file | no | gossiped candidates were shared with peers on purpose |
 | `cache/`, `tmp/` | no | reclaimable by construction — a local copy of something fetchable, and scratch |
 
@@ -257,14 +257,14 @@ same rule `sync` applies, and for the same reason.
 
 ```
 <data-dir>/
-  log/proofwork.jsonl    PINNED       never evicted
+  log/cairn.jsonl    PINNED       never evicted
   cache/                 RECLAIMABLE  evicted under pressure
   tmp/                   RECLAIMABLE  always safe to drop
 ```
 
-`--data-dir`, or `$PROOFWORK_DATA`. **Not adopting it changes nothing**: without
-it, the log is still a bare `proofwork.jsonl` in the working directory, and
-`--log` / `$PROOFWORK_LOG` still override everything. Quietly relocating an
+`--data-dir`, or `$CAIRN_DATA`. **Not adopting it changes nothing**: without
+it, the log is still a bare `cairn.jsonl` in the working directory, and
+`--log` / `$CAIRN_LOG` still override everything. Quietly relocating an
 existing operator's log on upgrade would be the worst possible way to introduce
 this.
 
@@ -278,7 +278,7 @@ can re-derive every settled result from nothing but a copy of the log" quietly
 needed a copy of the verifier tree as well.
 
 [`src/blobs.rs`](../src/blobs.rs) closes that: the digest is a *name*, blobs live
-in `.proofwork/blobs`, and `blob ls | need | publish | gc` is the operator's view
+in `.cairn/blobs`, and `blob ls | need | publish | gc` is the operator's view
 of what the log pins and what is missing. **The name is the hash**, so reads
 re-hash and refuse bytes that do not match the name they were filed under, and
 integrity needs no second record to keep in sync.
@@ -319,13 +319,13 @@ before the transfer started.
 
 ```sh
 # On the node that has the code:
-proofwork blob serve --identity transport.json --listen 0.0.0.0:9900
+cairn blob serve --identity transport.json --listen 0.0.0.0:9900
 #   … prints an {addr, public} endpoint. The key is 261,120 bytes of Classic
 #   McEliece public key, which is why a relayed peer record carries its 32-byte
 #   id instead and something has to complete the hint before a dial.
 
 # On the node that has only the log:
-proofwork blob fetch --identity transport.json --peer seed-endpoint.json
+cairn blob fetch --identity transport.json --peer seed-endpoint.json
 ```
 
 `scripts/blob-demo.sh` runs both sides and then verifies a claim with what was
@@ -354,8 +354,8 @@ from either side's unit tests:
 ## The size cap
 
 ```sh
-proofwork --max-size 20GB store gc
-proofwork --max-size 20GiB store status
+cairn --max-size 20GB store gc
+cairn --max-size 20GiB store status
 ```
 
 Both `GB` (10⁹) and `GiB` (2³⁰) are accepted and mean different things. A cap that
@@ -374,7 +374,7 @@ the answer is a refusal naming the pinned bytes in the way:
 
 ```
 error: store limit of 100 B cannot hold 1.8 KiB of data that must not be deleted
-(the log and anything beside it). Raise the limit or move the store; proofwork
+(the log and anything beside it). Raise the limit or move the store; cairn
 will not prune a hash-linked log to fit
 ```
 
@@ -435,8 +435,8 @@ The cap is a risk setting as much as a disk setting.
 ## Sync
 
 ```sh
-proofwork sync ~/Dropbox/pw-backup
-proofwork sync /Volumes/backup --prune --dry-run
+cairn sync ~/Dropbox/pw-backup
+cairn sync /Volumes/backup --prune --dry-run
 ```
 
 One-way, idempotent, resumable. A file whose size and mtime match is left alone,

@@ -83,7 +83,7 @@ def check(artifact: dict) -> tuple[bool, str]:
 # -- the pinned instance -----------------------------------------------------
 #
 # A nothing-up-my-sleeve instance: every number below is derived from the public
-# seed string "proofwork ecdlp nums v2 50" by SHA-256, and
+# seed string "cairn ecdlp nums v2 50" by SHA-256, and
 # `tools/nums.py verify` re-derives it. Nobody chose a scalar at any step, so
 # the discrete log is as unknown to whoever posted this as to anyone else --
 # which is what keeps it clear of the self-dealing row in docs/threat-model.md.

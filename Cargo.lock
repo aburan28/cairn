@@ -65,6 +65,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn"
+version = "0.2.0"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "classic-mceliece-rust",
+ "ed25519-dalek",
+ "hmac",
+ "hqc-kem",
+ "log",
+ "ml-dsa",
+ "ml-kem",
+ "rand 0.10.2",
+ "rand_core 0.6.4",
+ "serde_json",
+ "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -534,26 +554,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "proofwork"
-version = "0.2.0"
-dependencies = [
- "argon2",
- "chacha20poly1305",
- "classic-mceliece-rust",
- "ed25519-dalek",
- "hmac",
- "hqc-kem",
- "log",
- "ml-dsa",
- "ml-kem",
- "rand 0.10.2",
- "rand_core 0.6.4",
- "serde_json",
- "sha2 0.11.0",
- "zeroize",
 ]
 
 [[package]]

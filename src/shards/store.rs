@@ -4,7 +4,7 @@
 //! self-naming the way a blob is:
 //!
 //! ```text
-//! .proofwork/shards/
+//! .cairn/shards/
 //!   <64 hex characters of the blob's digest>/
 //!     manifest      the canonical encoding of [`Manifest`], one line
 //!     000, 001, …   shard bytes, filed under their index in the coding
@@ -55,9 +55,9 @@ use super::{reconstruct, Manifest, Reconstruction, Shard, ShardError};
 use crate::blobs::is_address;
 use crate::canonical::Value;
 
-/// Where a shard store lives under a bundle root — beside `.proofwork/blobs`,
+/// Where a shard store lives under a bundle root — beside `.cairn/blobs`,
 /// for the same reason and against the same root.
-pub const STORE_DIR: &str = ".proofwork/shards";
+pub const STORE_DIR: &str = ".cairn/shards";
 
 /// The manifest's filename inside a blob's directory.
 ///

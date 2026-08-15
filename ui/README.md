@@ -6,12 +6,12 @@ settled.
 
 **You probably do not need to run this.** It is built into the binaries and
 served by the node itself at **`/ui/`** — so on a machine that installed
-proofwork with `install.sh`, reading your own node's chain is a URL, not a
+cairn with `install.sh`, reading your own node's chain is a URL, not a
 toolchain:
 
 ```sh
-proofwork-p2p --identity id.json --root-key root.key --checkpoint cp.json \
-    --listen 0.0.0.0:9000 --log proofwork.jsonl --root . --serve 0.0.0.0:8080
+cairn-p2p --identity id.json --root-key root.key --checkpoint cp.json \
+    --listen 0.0.0.0:9000 --log cairn.jsonl --root . --serve 0.0.0.0:8080
 # then http://localhost:8080/ui/
 ```
 
@@ -26,7 +26,7 @@ make ui            # the reader in dev mode, http://localhost:3000
 ```
 
 In dev mode the page is on a different origin from the node, so point it with
-`NEXT_PUBLIC_PROOFWORK_NODE=http://127.0.0.1:8080` or just edit the URL in the
+`NEXT_PUBLIC_CAIRN_NODE=http://127.0.0.1:8080` or just edit the URL in the
 page. Served from the node, the default is same-origin and there is nothing to
 configure — and the URL box still retargets it, which is the whole value here:
 comparing one node's head against a peer's must not need a redeploy.
@@ -68,7 +68,7 @@ as a Node process — which is what lets the daemon carry it.
 
 ## There are still two of these, on purpose
 
-`proofwork-serve` also renders the chain itself at **`GET /chain.html`**: one
+`cairn-serve` also renders the chain itself at **`GET /chain.html`**: one
 self-contained 3.7 KB page written in Rust, no build step of any kind. It is
 what `serve-smoke.sh` tests, and it is what a binary built *without* the `ui`
 feature has — `/ui/` then 404s with a message that says so, rather than a

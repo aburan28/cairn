@@ -4,7 +4,7 @@
   "packages": {
     ".": {
       "release-type": "rust",
-      "package-name": "proofwork",
+      "package-name": "cairn",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false,
       "changelog-sections": [

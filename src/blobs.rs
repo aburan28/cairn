@@ -62,7 +62,13 @@ use sha2::{Digest as _, Sha256};
 /// Beside the pinned code rather than beside the log, because the root is what
 /// a pinned path is resolved against and a node may audit several logs against
 /// one bundle.
-pub const STORE_DIR: &str = ".proofwork/blobs";
+pub const STORE_DIR: &str = ".cairn/blobs";
+
+/// Where a store lived when this project was called `proofwork`.
+///
+/// Read-only, and adopted only when [`STORE_DIR`] does not exist. See
+/// [`BlobStore::under`]; it can go once nobody is upgrading across the rename.
+pub const LEGACY_STORE_DIR: &str = ".proofwork/blobs";
 
 /// Largest blob this implementation will store, serve, or accept.
 ///
@@ -164,10 +170,25 @@ pub struct BlobStore {
 
 impl BlobStore {
     /// The store belonging to a bundle root.
+    /// The store under a bundle root, preferring [`STORE_DIR`].
+    ///
+    /// A bundle written before the project was renamed has its blobs in
+    /// [`LEGACY_STORE_DIR`], and it is adopted when the current one does not
+    /// exist yet. Less serious than the key fallback in
+    /// [`crate::store::Store::default_key_path`] — a blob is content-addressed
+    /// and re-fetchable, so the worst case here is a node that republishes what
+    /// it already had — but a node that silently stops being able to serve
+    /// pinned code its peers are asking it for is worth five lines to avoid.
     pub fn under(root: impl AsRef<Path>) -> BlobStore {
-        BlobStore {
-            dir: root.as_ref().join(STORE_DIR),
+        let root = root.as_ref();
+        let current = root.join(STORE_DIR);
+        if !current.is_dir() {
+            let legacy = root.join(LEGACY_STORE_DIR);
+            if legacy.is_dir() {
+                return BlobStore { dir: legacy };
+            }
         }
+        BlobStore { dir: current }
     }
 
     /// A store at an explicit directory, for a node that keeps its cache

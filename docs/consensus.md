@@ -87,7 +87,7 @@ the base layer.
 - Forced inclusion via the base layer delivers the primary security property
   directly, rather than as a secondary consideration.
 - The state transition is *already* the deterministic function in
-  `proofwork/node.py`, and `audit()` is already the re-derivation a fraud proof
+  `cairn/node.py`, and `audit()` is already the re-derivation a fraud proof
   needs. That is not a coincidence — it is why Stage 0 was built as a pure
   function over an append-only log.
 - No validator recruitment, no token needed for security, no new protocol.

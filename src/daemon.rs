@@ -2,8 +2,8 @@
 //!
 //! # Why this is a library module and not a binary
 //!
-//! It used to be the body of `proofwork-p2p`, and publishing the log was a
-//! *second* process running `proofwork-serve` against the same file. That
+//! It used to be the body of `cairn-p2p`, and publishing the log was a
+//! *second* process running `cairn-serve` against the same file. That
 //! topology works — [`Ledger::open`] takes no lock, so a reader is safe beside
 //! the daemon's exclusive writer — but it makes an operator run two units, keep
 //! two sets of paths in agreement, and discover by reading `docs/serving.md`
@@ -105,7 +105,7 @@ pub struct Config {
     /// The at-rest key, when the log is sealed.
     ///
     /// `None` uses [`crate::store::Store::default_key_path`], which is what the
-    /// CLI does — so a daemon on a machine with `~/.proofwork/key` opens the
+    /// CLI does — so a daemon on a machine with `~/.cairn/key` opens the
     /// same logs the CLI writes, instead of reporting them as spliced.
     pub key_file: Option<PathBuf>,
 }
@@ -439,7 +439,7 @@ pub fn run(config: Config) -> Result<(), String> {
             // screen before the first dial rather than absent from all of them.
             log::warn!(
                 "bootstrap {}: still carries the PLACEHOLDER key \
-                 `proofwork-gen-bootstrap` generated, which authenticates nobody. \
+                 `cairn-gen-bootstrap` generated, which authenticates nobody. \
                  Dials to {} will fail their handshake and report a plain transport \
                  error. Replace \"public\" in that file with the seed's real key -- \
                  the seed operator can print theirs from the \"public\" field of \
@@ -625,7 +625,7 @@ pub fn run(config: Config) -> Result<(), String> {
         // This is what makes the topology in `docs/serving.md` actually
         // compose. A submission "lands in a spool directory, and the operator's
         // own node admits it" -- but a `Ledger` is single-writer by
-        // enforcement, so `proofwork drain` wanted the write lock this daemon
+        // enforcement, so `cairn drain` wanted the write lock this daemon
         // holds. A node that was online could not accept a submission at all.
         //
         // The daemon *is* the operator's node and already holds the lock, so it

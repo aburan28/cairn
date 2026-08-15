@@ -45,7 +45,7 @@ use crate::obj;
 /// Distinct from the record protocol's, so a frame sealed for one family fails
 /// to open under the other. That is the mechanical half of "never mixed into
 /// record buckets": a confusion attack does not get as far as the decoder.
-pub const CONTEXT: &[u8] = b"proofwork/p2p/pop/v1";
+pub const CONTEXT: &[u8] = b"cairn/p2p/pop/v1";
 
 /// Why a population message was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]

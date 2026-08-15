@@ -36,7 +36,7 @@ so the launch can be scoped honestly.
   `"project_root": "/"` turned the sandbox into a writable pass-through of
   the operator's filesystem. Both now resolve against the objective root and
   are refused when they escape it, in both implementations, with tests.
-- `PROOFWORK_REQUIRE_SANDBOX` recognised only the literal `"1"`; `=true`
+- `CAIRN_REQUIRE_SANDBOX` recognised only the literal `"1"`; `=true`
   silently meant "run objective code unjailed". The switch now fails closed.
 
 **The MCP loop (what an agent actually experiences).**
@@ -78,8 +78,8 @@ so the launch can be scoped honestly.
   `cargo install` / bubblewrap steps.
 - `examples/README.md` now exists: worked examples vs open bounties,
   prerequisites, and a plain statement that Stage-0 rewards are notional.
-- The Python package's console script no longer claims the name `proofwork`
-  (it is `proofwork-py`), so `pip install -e` and `cargo install` stop racing
+- The Python package's console script no longer claims the name `cairn`
+  (it is `cairn-py`), so `pip install -e` and `cargo install` stop racing
   for PATH.
 - Threat-model rows 17/36/73 were stale in both directions; updated, plus the
   sandbox row and `verification.md` for the containment fix.
@@ -92,17 +92,17 @@ Everything numbered 1–8 in the original list below has been built, plus the
 CI and packaging items. What follows the closed list is what genuinely
 remains.
 
-1. **A remote surface exists.** `proofwork-serve` publishes `GET /log` byte
+1. **A remote surface exists.** `cairn-serve` publishes `GET /log` byte
    for byte, plus `/objectives`, `/objective/{id}`, `/frontier/{id}` and
    `/checkpoint`; `POST /submit` queues into a spool the operator drains with
-   `proofwork drain`, so admission stays in the rules engine and the log keeps
+   `cairn drain`, so admission stays in the rules engine and the log keeps
    one writer. `scripts/serve-smoke.sh` drives the whole path over a real
    socket — a client sharing nothing with the node but an address fetches the
    log, submits a commitment and a reveal, and gets paid. See
    [serving.md](serving.md).
 2. **A log is published.** `launch/` holds a real settled log, its signed
    checkpoint, and the public key, built by `scripts/make-launch-log.sh` so
-   nobody has to take the file on faith. `proofwork checkpoint` is new — until
+   nobody has to take the file on faith. `cairn checkpoint` is new — until
    it existed only the p2p daemon could sign one, so an operator not running
    p2p had nothing for `verify --from` to check.
 3. **One writer per log is enforced.** `Ledger::open_exclusive` takes an
@@ -129,10 +129,10 @@ remains.
    `scripts/check-examples.sh` re-pinning and posting all 12 examples (CI
    previously exercised 3), dependabot, a release workflow, and `SECURITY.md`.
 8. **A discovery from building the artifact, now guarded.** A log written with
-   `PROOFWORK_EPOCH_SECONDS=1` audits as *thoroughly broken* under the default
+   `CAIRN_EPOCH_SECONDS=1` audits as *thoroughly broken* under the default
    600 — in both implementations, and both are right, because epochs are
    derived from timestamps and never stored. A contributor's first
-   `proofwork audit` on a demo-built log would have accused the operator of
+   `cairn audit` on a demo-built log would have accused the operator of
    paying people out of turn. `audit` now says so when every batch faults at
    once, and the published log uses the default epoch length.
 
@@ -243,7 +243,7 @@ languages the two are written in.
    order `N` — which rules out Pohlig-Hellman on a smooth-order curve — but
    not every weak-curve family. Deriving the curve from the seed too is the
    stronger construction and is not done.
-8. **Rate limiting.** `proofwork-serve` caps concurrent connections and body
+8. **Rate limiting.** `cairn-serve` caps concurrent connections and body
    size and nothing else. An operator exposing it to the open internet should
    put it behind something that does rate limiting, the same as any other
    small service.
@@ -254,11 +254,11 @@ Everything above is now either built or disclosed, so the launch is no longer
 blocked on plumbing. What it is blocked on is a choice, and it is item 1:
 
 - **Launch as a single operator** — you post objectives, run
-  `proofwork-serve`, and contributors fetch the log, work, and submit through
+  `cairn-serve`, and contributors fetch the log, work, and submit through
   the queue. This works end to end today.
 - **Launch as an open network** — viable now. Contributors make an identity
-  (`proofwork identity --out alice.json`) and pass `--identity` to the CLI or
-  to `proofwork-mcp`; such a name cannot be forged or replayed. Post objectives
+  (`cairn identity --out alice.json`) and pass `--identity` to the CLI or
+  to `cairn-mcp`; such a name cannot be forged or replayed. Post objectives
   with `require_signed_submitter: true` and nicknames are refused outright, so
   every claim on that bounty is attributable to a key nobody else holds. What
   still argues for care is escrow, not identity: rewards are notional, so what

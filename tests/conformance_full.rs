@@ -19,18 +19,18 @@
 //! into the test: hard-coding the expectations here would let the file and the
 //! test drift apart, and the file is the artifact CI regenerates.
 //!
-//! Public API only (`use proofwork::...`), so this also checks that a reader
+//! Public API only (`use cairn::...`), so this also checks that a reader
 //! holding nothing but a copy of the log and this crate can re-derive every
 //! settled result -- which is the guarantee Stage 0 actually makes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use proofwork::attribution::{flow, FlowParams};
-use proofwork::canonical::Value;
-use proofwork::frontier::Ratchet;
-use proofwork::gossip::Candidate;
-use proofwork::partition::{assign, assignment_for, beacon};
-use proofwork::records::{commitment_hash, Claim, Commitment, Objective};
+use cairn::attribution::{flow, FlowParams};
+use cairn::canonical::Value;
+use cairn::frontier::Ratchet;
+use cairn::gossip::Candidate;
+use cairn::partition::{assign, assignment_for, beacon};
+use cairn::records::{commitment_hash, Claim, Commitment, Objective};
 
 // -- vector plumbing -------------------------------------------------------
 //

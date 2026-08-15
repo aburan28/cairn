@@ -58,7 +58,7 @@ use crate::p2p::transport::{
 /// [`crate::p2p`] gives at length: a frame sealed for one subsystem cannot be
 /// opened as another's even by a peer that wants to. A blob transfer and a
 /// record sync run over the same transport and must not be confusable.
-pub const CONTEXT: &[u8] = b"proofwork/swarm/v1";
+pub const CONTEXT: &[u8] = b"cairn/swarm/v1";
 
 /// How long a socket may be silent before it is considered gone.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1116,7 +1116,7 @@ mod tests {
             .unwrap_or(0);
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "proofwork-swarm-{}-{nanos}-{n}-{tag}",
+            "cairn-swarm-{}-{nanos}-{n}-{tag}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create scratch dir");

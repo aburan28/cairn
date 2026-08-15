@@ -1,4 +1,4 @@
-//! proofwork's node game, written down.
+//! cairn's node game, written down.
 //!
 //! Three sub-games, one per service, each in the representation that suits it.
 //! All payoffs are **marginal**: the cost of running a node at all

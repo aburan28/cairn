@@ -7,7 +7,7 @@
 #
 # What this covers is the thing the split one structurally cannot: a submission
 # arriving over HTTP and being admitted by the same process, with nobody
-# running `proofwork drain` at all. The reason that is not a convenience is
+# running `cairn drain` at all. The reason that is not a convenience is
 # `Ledger`'s single-writer rule -- whatever admits a record must hold the write
 # lock, so a publisher that does not hold it can only ever queue. Before
 # `daemon::run`, an operator who wanted both had to run two units and get the
@@ -19,9 +19,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
-P2P="${P2P_BIN:-./target/release/proofwork-p2p}"
-SERVE="${SERVE_BIN:-./target/release/proofwork-serve}"
+RUST="${RUST_BIN:-./target/release/cairn}"
+P2P="${P2P_BIN:-./target/release/cairn-p2p}"
+SERVE="${SERVE_BIN:-./target/release/cairn-serve}"
 
 if [ ! -x "$RUST" ] || [ ! -x "$P2P" ] || [ ! -x "$SERVE" ]; then
   echo "building release binaries..." >&2
@@ -41,7 +41,7 @@ trap cleanup EXIT
 
 # A reveal must land in a strictly later epoch than its commitment, and this
 # script would otherwise take ten minutes.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
 # Wait for a listener rather than sleeping a fixed amount.
 await_port() {
@@ -62,7 +62,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1',$1))==0 else 1)" 2>/dev/null; then
 # up loudly beats a `sleep` tuned to one machine.
 #
 # Over HTTP rather than by grepping the file, because the file may be sealed:
-# on any machine carrying `~/.proofwork/key` the CLI writes an encrypted log,
+# on any machine carrying `~/.cairn/key` the CLI writes an encrypted log,
 # and grep finds nothing in ciphertext however well the daemon is working. That
 # is a better check anyway -- it asks the public surface, which is where an
 # outside contributor would look.
@@ -116,7 +116,7 @@ PY
 }
 
 # --------------------------------------------------------------------------
-# One process, entered through proofwork-p2p
+# One process, entered through cairn-p2p
 # --------------------------------------------------------------------------
 
 A="$WORK/a"; mkdir -p "$A"
@@ -213,10 +213,10 @@ wait "$NODE_PID" 2>/dev/null || true
 NODE_PID=""
 
 # --------------------------------------------------------------------------
-# The same node, entered through proofwork-serve
+# The same node, entered through cairn-serve
 # --------------------------------------------------------------------------
 
-rule "proofwork-serve --p2p-listen is the same daemon, not a second one"
+rule "cairn-serve --p2p-listen is the same daemon, not a second one"
 B="$WORK/b"; mkdir -p "$B"
 "$SERVE" --log "$B/log.jsonl" --root . --listen "127.0.0.1:$((HTTP + 1))" \
   --p2p-listen "127.0.0.1:$((P2P_PORT + 1))" \

@@ -1,4 +1,4 @@
-//! `proofwork-reference` — the independent checker.
+//! `cairn-reference` — the independent checker.
 //!
 //! Two jobs:
 //!
@@ -20,21 +20,21 @@
 use std::io::Write as _;
 use std::process::ExitCode;
 
-use proofwork_reference::attribution::{flow, FlowParams};
-use proofwork_reference::canonical::{merkle_root, Value};
-use proofwork_reference::frontier::Ratchet;
-use proofwork_reference::ledger::{Ledger, Proof};
-use proofwork_reference::node::Node;
-use proofwork_reference::partition::{assign, beacon, settlement_rank};
-use proofwork_reference::records::{
+use cairn_reference::attribution::{flow, FlowParams};
+use cairn_reference::canonical::{merkle_root, Value};
+use cairn_reference::frontier::Ratchet;
+use cairn_reference::ledger::{Ledger, Proof};
+use cairn_reference::node::Node;
+use cairn_reference::partition::{assign, beacon, settlement_rank};
+use cairn_reference::records::{
     commitment_hash, Claim, ClaimRelation, Commitment, CommitteeShare, Objective, PeerRecord,
 };
-use proofwork_reference::time::timestamp;
+use cairn_reference::time::timestamp;
 
 /// Write one line, treating a closed pipe as the end of output.
 ///
 /// `println!` **panics** when the reader has gone away, and
-/// `proofwork-reference post … | head -1` is the everyday way to make that
+/// `cairn-reference post … | head -1` is the everyday way to make that
 /// happen -- `scripts/interop.sh` does exactly that to pick an objective id out
 /// of field 2. `post` prints two lines, so whether the panic fires is a race
 /// between this process reaching the second line and `head` exiting after the
@@ -76,18 +76,18 @@ fn main() -> ExitCode {
         }
         Some("--help") | Some("help") | None => {
             eprintln!(
-                "proofwork-reference — an independent check on the primary implementation\n\n\
+                "cairn-reference — an independent check on the primary implementation\n\n\
                  USAGE\n    \
-                 proofwork-reference conformance <vectors.json>\n    \
-                 proofwork-reference signed-records <signed-records.json>\n    \
-                 proofwork-reference signatures <signatures.json>\n    \
-                 proofwork-reference [--log P] [--root D] post <objective.json>\n    \
-                 proofwork-reference [--log P] [--root D] commit <id> --submitter S --artifact F [--nonce N]\n    \
-                 proofwork-reference [--log P] [--root D] reveal <id> --submitter S --artifact F --nonce N [--cites ID]\n    \
-                 proofwork-reference [--log P] [--root D] settle\n    \
-                 proofwork-reference [--log P] [--root D] audit\n    \
-                 proofwork-reference [--log P] prove <seq> [--out FILE]\n    \
-                 proofwork-reference check <proof.json> --merkle-root <sha256:...>\n"
+                 cairn-reference conformance <vectors.json>\n    \
+                 cairn-reference signed-records <signed-records.json>\n    \
+                 cairn-reference signatures <signatures.json>\n    \
+                 cairn-reference [--log P] [--root D] post <objective.json>\n    \
+                 cairn-reference [--log P] [--root D] commit <id> --submitter S --artifact F [--nonce N]\n    \
+                 cairn-reference [--log P] [--root D] reveal <id> --submitter S --artifact F --nonce N [--cites ID]\n    \
+                 cairn-reference [--log P] [--root D] settle\n    \
+                 cairn-reference [--log P] [--root D] audit\n    \
+                 cairn-reference [--log P] prove <seq> [--out FILE]\n    \
+                 cairn-reference check <proof.json> --merkle-root <sha256:...>\n"
             );
             return ExitCode::SUCCESS;
         }
@@ -96,7 +96,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("proofwork-reference: {message}");
+            eprintln!("cairn-reference: {message}");
             ExitCode::FAILURE
         }
     }
@@ -522,11 +522,11 @@ fn signatures(path: Option<&str>) -> Result<(), String> {
             .unwrap_or(true);
 
         let verified = match (
-            proofwork_reference::sig::public_key(key_hex),
-            proofwork_reference::sig::signature(signature_hex),
+            cairn_reference::sig::public_key(key_hex),
+            cairn_reference::sig::signature(signature_hex),
         ) {
             (Some(key), Some(signature)) => {
-                proofwork_reference::sig::verify(&key, &message, &signature)
+                cairn_reference::sig::verify(&key, &message, &signature)
             }
             // A key or signature this implementation cannot even parse is a
             // failure to verify, not an error: that is exactly what a negative
@@ -596,7 +596,7 @@ fn str_of<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {
 // means nothing if it means "anyone running my code".
 
 fn cli(args: &[String]) -> Result<(), String> {
-    let mut log = String::from("proofwork.jsonl");
+    let mut log = String::from("cairn.jsonl");
     let mut root = String::from(".");
     let mut rest: Vec<String> = Vec::new();
     let mut i = 0;
@@ -642,7 +642,7 @@ fn cli(args: &[String]) -> Result<(), String> {
             "proof ok: entry {} ({}) is in the log rooted at {}",
             proof.entry.seq,
             proof.entry.kind,
-            proofwork_reference::canonical::short(&want)
+            cairn_reference::canonical::short(&want)
         );
         say!(
             "  {} entries, {} hashes checked",
@@ -693,7 +693,7 @@ fn cli(args: &[String]) -> Result<(), String> {
                 signature: None,
             };
             node.commit(&commitment, &ts)?;
-            say!("committed {}", proofwork_reference::canonical::short(&hash));
+            say!("committed {}", cairn_reference::canonical::short(&hash));
             say!("  nonce {nonce}   <- keep this; you need it to reveal");
         }
         "reveal" => {
@@ -846,7 +846,7 @@ fn cli(args: &[String]) -> Result<(), String> {
                 "  entry {seq} ({})  height {}  root {}  path {} hashes",
                 proof.entry.kind,
                 node.ledger.len(),
-                proofwork_reference::canonical::short(&root),
+                cairn_reference::canonical::short(&root),
                 proof.inclusion.siblings.len()
             );
         }
@@ -863,7 +863,7 @@ fn random_nonce() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    proofwork_reference::canonical::digest_bytes(&seed.to_le_bytes())
+    cairn_reference::canonical::digest_bytes(&seed.to_le_bytes())
         .trim_start_matches("sha256:")
         .chars()
         .take(32)

@@ -32,7 +32,7 @@ In scope — the properties this project actually claims:
 
 - **Sandbox escapes.** Objective-authored checker/evaluator code reaching the
   network, the filesystem outside its scratch directory, or the host
-  environment, with `PROOFWORK_REQUIRE_SANDBOX` set.
+  environment, with `CAIRN_REQUIRE_SANDBOX` set.
 - **Consensus splits.** Any input on which the Rust and Python
   implementations disagree about a record's id, a Merkle root, a verdict, or
   a settlement.
@@ -48,7 +48,7 @@ Out of scope:
 
 - Denial of service against a node you operate yourself. You can always make
   your own node slow.
-- Anything that requires `PROOFWORK_REQUIRE_SANDBOX` to be off. An
+- Anything that requires `CAIRN_REQUIRE_SANDBOX` to be off. An
   unconfined child on a host with no sandbox mechanism is a documented,
   deliberate failure mode — the switch exists so operators can refuse it.
 - Attacks already listed as **not handled** in the threat model. They are

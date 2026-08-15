@@ -61,7 +61,7 @@ use std::fmt;
 pub type PeerId = [u8; 32];
 
 /// Domain separation. Changing any of these changes every derived key.
-const KDF_DOMAIN: &str = "proofwork/p2p/mceliece/v1";
+const KDF_DOMAIN: &str = "cairn/p2p/mceliece/v1";
 const LABEL_I2R: &str = "initiator-to-responder";
 const LABEL_R2I: &str = "responder-to-initiator";
 
@@ -879,9 +879,9 @@ mod tests {
         let (initiator, responder) = paired();
         let (mut sealer, _) = initiator.split();
         let (_, mut opener) = responder.split();
-        let (counter, frame) = sealer.seal(b"payload", b"proofwork/a").expect("seals");
+        let (counter, frame) = sealer.seal(b"payload", b"cairn/a").expect("seals");
         assert!(matches!(
-            opener.open(counter, &frame, b"proofwork/b"),
+            opener.open(counter, &frame, b"cairn/b"),
             Err(HandshakeError::NotAuthentic)
         ));
     }

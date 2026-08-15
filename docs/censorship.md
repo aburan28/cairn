@@ -19,7 +19,7 @@ actually need against a censor, and two of them need the opposite of secrecy.
 
 ## The tension, stated plainly
 
-proofwork's entire guarantee is **anyone can independently re-derive every result
+cairn's entire guarantee is **anyone can independently re-derive every result
 the network has settled**. That requires settled artifacts to be public. Encrypt
 them and nobody can re-verify anything; you are left trusting an operator's word,
 which is precisely the thing the project exists to avoid.

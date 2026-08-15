@@ -11,10 +11,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use proofwork::canonical::Value;
-use proofwork::ledger::{Codec, Ledger, LedgerError};
-use proofwork::store::atrest::{AtRestError, Cipher};
-use proofwork::store::{format_size, mirror, parse_size, quota, Store, StoreError};
+use cairn::canonical::Value;
+use cairn::ledger::{Codec, Ledger, LedgerError};
+use cairn::store::atrest::{AtRestError, Cipher};
+use cairn::store::{format_size, mirror, parse_size, quota, Store, StoreError};
 
 fn scratch(tag: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -25,7 +25,7 @@ fn scratch(tag: &str) -> PathBuf {
         .unwrap_or(0);
     let mut path = std::env::temp_dir();
     path.push(format!(
-        "proofwork-storage-{}-{nanos}-{n}-{tag}",
+        "cairn-storage-{}-{nanos}-{n}-{tag}",
         std::process::id()
     ));
     fs::create_dir_all(&path).expect("create scratch dir");
@@ -283,7 +283,7 @@ fn a_mirror_is_ciphertext_and_the_key_never_travels_with_it() {
 
     assert_eq!(report.skipped_keys, vec![key]);
     assert!(!destination.join("key").exists(), "the key was mirrored");
-    let copied = fs::read_to_string(destination.join("log/proofwork.jsonl")).expect("read");
+    let copied = fs::read_to_string(destination.join("log/cairn.jsonl")).expect("read");
     assert!(copied.starts_with("pwenc1:"));
     assert!(!copied.contains("still-a-secret"));
     assert!(report.summary().contains("NOT copied"));
@@ -393,6 +393,6 @@ fn mirroring_a_store_that_was_never_encrypted_says_so() {
     assert!(report.summary().contains("NOT encrypted"));
     // Copied anyway: it is the operator's call, and refusing would push them
     // towards `cp -r`, which has no opinion at all.
-    assert!(destination.join("log/proofwork.jsonl").exists());
+    assert!(destination.join("log/cairn.jsonl").exists());
     let _ = fs::remove_dir_all(&dir);
 }

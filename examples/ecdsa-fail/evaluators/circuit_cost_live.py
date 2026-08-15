@@ -81,7 +81,7 @@ def score(artifact: dict) -> int:
 
     product = qubits * toffoli
 
-    # i64 ceiling for proofwork scores.
+    # i64 ceiling for cairn scores.
     if product > (2 ** 63 - 1):
         return INVALID_SCORE
 

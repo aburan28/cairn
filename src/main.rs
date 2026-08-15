@@ -1,7 +1,7 @@
-//! `proofwork` -- the command line.
+//! `cairn` -- the command line.
 //!
 //! ```text
-//! proofwork [--log PATH] [--root PATH] <command>
+//! cairn [--log PATH] [--root PATH] <command>
 //!   post      examples/collatz/objective.json
 //!   commit    <objective-id> --submitter alice --artifact a.json --nonce n1
 //!   reveal    <objective-id> --submitter alice --artifact a.json --nonce n1
@@ -17,7 +17,7 @@
 //! Everything this binary prints is re-derivable by anyone holding a copy of the
 //! log. That is the whole Stage 0 proposition -- one operator, no consensus, no
 //! trust required -- so the commands are deliberately thin: they read files,
-//! hand records to [`proofwork::node`], and format what comes back.
+//! hand records to [`cairn::node`], and format what comes back.
 //!
 //! # Why the argument parser is hand-rolled
 //!
@@ -34,7 +34,7 @@
 //!
 //! 1. [`std::env::args`] panics on an argument that is not valid UTF-8. This
 //!    binary reads [`std::env::args_os`] and reports the bad argument instead.
-//! 2. `println!` panics when stdout is gone -- `proofwork log | head -1` is the
+//! 2. `println!` panics when stdout is gone -- `cairn log | head -1` is the
 //!    everyday way to trigger it, and `scripts/demo.sh` does exactly that. Every
 //!    line goes through [`say`], where a closed pipe simply ends the output.
 //! 3. Slicing a string by byte offset panics on a multi-byte boundary. The log
@@ -65,28 +65,28 @@ use std::io::{self, Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
-use proofwork::attribution::{payouts_over, FlowError, FlowParams};
-use proofwork::canonical::{short, CanonicalError, Value};
-use proofwork::checkpoint::{RootKey, SignedCheckpoint};
-use proofwork::crypto::identity::Identity;
-use proofwork::incentive::design::Report as IncentiveReport;
-use proofwork::incentive::{sweep, NodeParams, ParamError, Rat};
-use proofwork::knowledge::ConfidencePolicy;
-use proofwork::ledger::{Codec, Ledger, LedgerError, Proof};
-use proofwork::node::Node;
-use proofwork::records::{
+use cairn::attribution::{payouts_over, FlowError, FlowParams};
+use cairn::canonical::{short, CanonicalError, Value};
+use cairn::checkpoint::{RootKey, SignedCheckpoint};
+use cairn::crypto::identity::Identity;
+use cairn::incentive::design::Report as IncentiveReport;
+use cairn::incentive::{sweep, NodeParams, ParamError, Rat};
+use cairn::knowledge::ConfidencePolicy;
+use cairn::ledger::{Codec, Ledger, LedgerError, Proof};
+use cairn::node::Node;
+use cairn::records::{
     commitment_hash, Availability, AvailabilityPool, Claim, ClaimRelation, Commitment,
     CommitteeShare, Objective, PeerRecord, RecordError, Relation, Undertaking,
 };
-use proofwork::scaffold;
-use proofwork::schema::{validate_claim, validate_objective, SchemaError};
-use proofwork::serve::Spool;
-use proofwork::store::atrest::{AtRestError, Cipher};
-use proofwork::store::{exposure, mirror, quota, Store, StoreError};
-use proofwork::time::timestamp;
+use cairn::scaffold;
+use cairn::schema::{validate_claim, validate_objective, SchemaError};
+use cairn::serve::Spool;
+use cairn::store::atrest::{AtRestError, Cipher};
+use cairn::store::{exposure, mirror, quota, Store, StoreError};
+use cairn::time::timestamp;
 
-/// Where the log lives when `--log` and `$PROOFWORK_LOG` are both silent.
-const DEFAULT_LOG: &str = "proofwork.jsonl";
+/// Where the log lives when `--log` and `$CAIRN_LOG` are both silent.
+const DEFAULT_LOG: &str = "cairn.jsonl";
 
 /// Bytes of entropy in a generated nonce -- `secrets.token_hex(16)`.
 const NONCE_BYTES: usize = 16;
@@ -154,7 +154,7 @@ fn post_peer_record(node: &mut Node, record: &PeerRecord, ts: &str) -> Result<St
         .map_err(|violation| CliError::Refused(violation.to_string()))
 }
 
-fn refused<T>(result: Result<T, proofwork::node::RuleViolation>) -> Result<T, CliError> {
+fn refused<T>(result: Result<T, cairn::node::RuleViolation>) -> Result<T, CliError> {
     result.map_err(|violation| CliError::Refused(violation.to_string()))
 }
 
@@ -330,7 +330,7 @@ impl CliError {
     /// a mistyped path without parsing prose.
     fn report(&self) -> String {
         match self {
-            CliError::Usage(message) => format!("usage: {message}\ntry `proofwork help`"),
+            CliError::Usage(message) => format!("usage: {message}\ntry `cairn help`"),
             // A schema violation *is* a refusal: the network declined to record
             // the body, and a script watching for `refused:` needs to see it as
             // one rather than as a local file-handling error.
@@ -359,9 +359,9 @@ struct Options {
     log: String,
     root: String,
     /// The data directory, when one was chosen. `None` keeps the pre-existing
-    /// behaviour exactly: a bare `proofwork.jsonl` wherever you are standing.
+    /// behaviour exactly: a bare `cairn.jsonl` wherever you are standing.
     data: Option<String>,
-    /// Explicit key file, overriding `$PROOFWORK_KEY` and the default.
+    /// Explicit key file, overriding `$CAIRN_KEY` and the default.
     key_file: Option<String>,
     /// File holding the passphrase for a wrapped key.
     passphrase_file: Option<String>,
@@ -371,14 +371,14 @@ struct Options {
 
 impl Options {
     fn from_env() -> Options {
-        let data = env::var(proofwork::store::DATA_ENV)
+        let data = env::var(cairn::store::DATA_ENV)
             .ok()
             .filter(|value| !value.is_empty());
-        // `--log` and `$PROOFWORK_LOG` still win, and the default when neither
+        // `--log` and `$CAIRN_LOG` still win, and the default when neither
         // is set still depends on whether a data directory was chosen. An
         // operator upgrading into this release must find their log exactly
         // where they left it.
-        let log = env::var("PROOFWORK_LOG").ok().filter(|v| !v.is_empty());
+        let log = env::var("CAIRN_LOG").ok().filter(|v| !v.is_empty());
         Options {
             log: match (log, &data) {
                 (Some(explicit), _) => explicit,
@@ -420,7 +420,7 @@ impl Options {
 
     /// The passphrase, if one was supplied.
     ///
-    /// From a file or `$PROOFWORK_PASSPHRASE`, never from a prompt. Reading a
+    /// From a file or `$CAIRN_PASSPHRASE`, never from a prompt. Reading a
     /// passphrase without echoing it needs terminal control this crate has no
     /// dependency for, and echoing one into a shell's scrollback and history is
     /// worse than not offering the option.
@@ -428,7 +428,7 @@ impl Options {
         if let Some(path) = &self.passphrase_file {
             return read_passphrase_file(path).map(Some);
         }
-        Ok(env::var("PROOFWORK_PASSPHRASE")
+        Ok(env::var("CAIRN_PASSPHRASE")
             .ok()
             .filter(|value| !value.is_empty()))
     }
@@ -510,7 +510,7 @@ enum Command {
         root_key: String,
         out: Option<String>,
     },
-    /// Admit records queued by `proofwork-serve` into the log.
+    /// Admit records queued by `cairn-serve` into the log.
     ///
     /// Separate from the server on purpose: the server is a transport and this
     /// is the rules engine. A queued record has been parsed and schema-checked
@@ -633,7 +633,7 @@ enum Command {
     /// The posting stays a separate, reviewed step: an objective's statement
     /// is untrusted text that a human decides to fund, and a tool that wrote
     /// and funded one in the same breath would remove the place that decision
-    /// happens. See [`proofwork::scaffold`].
+    /// happens. See [`cairn::scaffold`].
     Scaffold {
         request: Box<scaffold::Request>,
         /// Overwrite files that are already there. Off by default, because the
@@ -659,7 +659,7 @@ enum Command {
     /// Announce a peer identity in the log, or move one to a new address.
     ///
     /// The record that makes finding the network part of obtaining the log
-    /// rather than a second bootstrap problem. See [`proofwork::records::PeerRecord`].
+    /// rather than a second bootstrap problem. See [`cairn::records::PeerRecord`].
     Peer {
         identity: String,
         transport: String,
@@ -696,7 +696,7 @@ enum TableFormat {
     Jsonl,
 }
 
-/// What `proofwork blob` was asked to do.
+/// What `cairn blob` was asked to do.
 ///
 /// Collection is a command rather than something a sync round does on its way
 /// past, and that is deliberate: a node cannot distinguish a blob nobody wants
@@ -728,7 +728,7 @@ enum BlobAction {
     },
 }
 
-/// What `proofwork shard` was asked to do.
+/// What `cairn shard` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ShardAction {
     /// How a file *would* be cut, and what it would cost on disk. Writes
@@ -771,7 +771,7 @@ enum ShardAction {
 ///
 /// `chunk` is optional and the others have defaults, so the common invocation
 /// is `shard encode <file>`. A chunk length that was not chosen is derived from
-/// the file's size by [`proofwork::shards::suggest_chunk_len`] rather than
+/// the file's size by [`cairn::shards::suggest_chunk_len`] rather than
 /// fixed, because a good chunk length for a 4 KiB checker and for a 400 MiB
 /// artifact are three orders of magnitude apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -966,7 +966,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             cursor.take();
             let data = cursor.value("--data-dir")?;
             // Only redirect the log if nothing more specific already did.
-            if env::var("PROOFWORK_LOG")
+            if env::var("CAIRN_LOG")
                 .ok()
                 .filter(|v| !v.is_empty())
                 .is_none()
@@ -984,7 +984,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         } else if token == "--max-size" {
             cursor.take();
             let text = cursor.value("--max-size")?;
-            options.max_size = Some(proofwork::store::parse_size(&text).map_err(CliError::Store)?);
+            options.max_size = Some(cairn::store::parse_size(&text).map_err(CliError::Store)?);
         } else if token == "-h" || token == "--help" {
             cursor.take();
             return Ok(Invocation {
@@ -1770,7 +1770,7 @@ fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
                 params.detection_rate =
                     parse_rate(&cursor.value("--detection-rate")?, "--detection-rate")?
             }
-            "--per-node-rewards" => params.reward_rule = proofwork::incentive::RewardRule::PerNode,
+            "--per-node-rewards" => params.reward_rule = cairn::incentive::RewardRule::PerNode,
             other => {
                 return Err(CliError::Usage(format!(
                     "incentives: unknown option {other:?}"
@@ -2195,7 +2195,7 @@ fn parse_shard(cursor: &mut Cursor) -> Result<Command, CliError> {
                         // `--merkle-root`, not `--root`: the global `--root`
                         // names the bundle directory, and two meanings for one
                         // flag is how a caller silently checks against nothing.
-                        // Same reasoning as `proofwork check`.
+                        // Same reasoning as `cairn check`.
                         "--merkle-root" => root = Some(cursor.value("--merkle-root")?),
                         other => {
                             return Err(CliError::Usage(format!(
@@ -2314,7 +2314,7 @@ fn parse_u32(text: &str, flag: &str) -> Result<u32, CliError> {
 
 /// Write one line, treating a closed pipe as the end of output.
 ///
-/// `println!` panics if the write fails, and `proofwork post ... | head -1` --
+/// `println!` panics if the write fails, and `cairn post ... | head -1` --
 /// which `scripts/demo.sh` runs to pick the objective id out of field 2 -- is
 /// the ordinary way to make it fail. A CLI dying with a Rust panic because the
 /// reader stopped reading is both ugly and a violation of this crate's no-panic
@@ -2324,9 +2324,9 @@ fn say(out: &mut dyn Write, text: impl AsRef<str>) {
 }
 
 fn print_help(out: &mut dyn Write) {
-    say(out, "proofwork -- verified results as the unit of account");
+    say(out, "cairn -- verified results as the unit of account");
     say(out, "");
-    say(out, "usage: proofwork [--log PATH] [--root PATH] <command>");
+    say(out, "usage: cairn [--log PATH] [--root PATH] <command>");
     say(out, "");
     say(out, "commands:");
     say(out, "  post <objective.json>");
@@ -2382,7 +2382,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "  drain --queue DIR [--dry-run]");
     say(
         out,
-        "      admit records queued by proofwork-serve, re-checking every rule",
+        "      admit records queued by cairn-serve, re-checking every rule",
     );
     say(out, "  audit [--no-rerun]");
     say(out, "      re-derive the entire log independently");
@@ -2510,7 +2510,7 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "      A real round takes a real epoch (600s); $PROOFWORK_EPOCH_SECONDS shortens it",
+        "      A real round takes a real epoch (600s); $CAIRN_EPOCH_SECONDS shortens it",
     );
     say(
         out,
@@ -2603,7 +2603,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "options:");
     say(
         out,
-        "  --log PATH    JSONL log (default: $PROOFWORK_LOG, else proofwork.jsonl)",
+        "  --log PATH    JSONL log (default: $CAIRN_LOG, else cairn.jsonl)",
     );
     say(
         out,
@@ -2611,15 +2611,15 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "  --data-dir PATH        where node data lives (default: $PROOFWORK_DATA)",
+        "  --data-dir PATH        where node data lives (default: $CAIRN_DATA)",
     );
     say(
         out,
-        "  --key-file PATH        at-rest key (default: $PROOFWORK_KEY, else ~/.proofwork/key)",
+        "  --key-file PATH        at-rest key (default: $CAIRN_KEY, else ~/.cairn/key)",
     );
     say(
         out,
-        "  --passphrase-file PATH passphrase for a wrapped key (else $PROOFWORK_PASSPHRASE)",
+        "  --passphrase-file PATH passphrase for a wrapped key (else $CAIRN_PASSPHRASE)",
     );
     say(
         out,
@@ -2920,7 +2920,7 @@ fn cmd_identity(out: &mut dyn Write, path: &str) -> Result<i32, CliError> {
     //
     // The file also does not have to be an identity of *this* kind to be
     // destroyed. `--identity` names an ed25519 signing key here and a
-    // 261,120-byte Classic McEliece transport key in `proofwork-p2p`, so a path
+    // 261,120-byte Classic McEliece transport key in `cairn-p2p`, so a path
     // that looks free to one binary is a live key to the other -- which is how
     // a node identity got replaced by a submitter identity, leaving the daemon
     // refusing to start with "public key must be 261120 bytes, got 32".
@@ -3096,8 +3096,8 @@ fn cmd_reveal(
         Some(epoch) => say(
             out,
             format!(
-                "  pending  settles after epoch {epoch} closes + {} finality epoch(s)  (`proofwork settle`)",
-                proofwork::partition::finality_epochs()
+                "  pending  settles after epoch {epoch} closes + {} finality epoch(s)  (`cairn settle`)",
+                cairn::partition::finality_epochs()
             ),
         ),
         None => say(
@@ -3172,7 +3172,7 @@ fn cmd_beacon(
 /// *rewritten* -- the property a bare hash chain cannot give them, because an
 /// operator who rewrites history rewrites the chain with it.
 ///
-/// The key file is the one `proofwork-p2p` creates: `{"public": hex, "secret":
+/// The key file is the one `cairn-p2p` creates: `{"public": hex, "secret":
 /// hex}`. Read-only on the log, because signing observes and changes nothing.
 fn cmd_checkpoint(
     out: &mut dyn Write,
@@ -3215,13 +3215,13 @@ fn cmd_checkpoint(
     );
     say(
         out,
-        "  Readers verify with `proofwork verify --from <file> --root-key <hex|file>`.",
+        "  Readers verify with `cairn verify --from <file> --root-key <hex|file>`.",
     );
     say(
         out,
         format!(
             "  A reader who wants one entry rather than the log asks for \
-             `proofwork prove <seq> --height {}`.",
+             `cairn prove <seq> --height {}`.",
             ledger.len()
         ),
     );
@@ -3236,7 +3236,7 @@ fn cmd_checkpoint(
     Ok(0)
 }
 
-/// Load the ML-DSA-65 root key from the file `proofwork-p2p` writes.
+/// Load the ML-DSA-65 root key from the file `cairn-p2p` writes.
 fn read_root_key_file(path: &str) -> Result<RootKey, CliError> {
     let value = read_json(path)?;
     let secret = value
@@ -3282,7 +3282,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Admit records queued by `proofwork-serve`, oldest first.
+/// Admit records queued by `cairn-serve`, oldest first.
 ///
 /// The queue holds *proposals*. Every rule is re-derived here against the
 /// whole log, by the same `Node::commit` / `Node::reveal` the CLI uses, so a
@@ -3314,10 +3314,10 @@ fn cmd_drain(
     let (mut admitted, mut refused) = (0usize, 0usize);
 
     // The rules live in `serve::drain_into`, not here. They used to live here,
-    // which put them out of reach of `proofwork-p2p` -- so a node that was
+    // which put them out of reach of `cairn-p2p` -- so a node that was
     // online could not accept a submission, because `drain` wanted the write
     // lock the daemon holds. One copy, two callers.
-    for (path, admission) in proofwork::serve::drain_into(&mut node, &spool, &ts, dry_run) {
+    for (path, admission) in cairn::serve::drain_into(&mut node, &spool, &ts, dry_run) {
         if admission.admitted {
             admitted += 1;
         } else {
@@ -3531,7 +3531,7 @@ fn cmd_availability(
             );
             say(
                 out,
-                "  Answer each epoch's sample with `proofwork availability answer`;",
+                "  Answer each epoch's sample with `cairn availability answer`;",
             );
             say(
                 out,
@@ -3557,7 +3557,7 @@ fn cmd_availability(
                 say(out, "no undertakings for this identity");
                 say(
                     out,
-                    "  Promise first with `proofwork availability undertake --identity <file>`.",
+                    "  Promise first with `cairn availability undertake --identity <file>`.",
                 );
                 return Ok(2);
             }
@@ -3736,17 +3736,17 @@ fn current_epoch() -> Result<u64, CliError> {
 /// The epoch a record stamped `ts` belongs to.
 ///
 /// The epoch of a record is derived from the record, never from a clock -- see
-/// the module docs on [`proofwork::partition`]. Anything that reads a clock
+/// the module docs on [`cairn::partition`]. Anything that reads a clock
 /// again to decide a record's epoch is reading a different number.
 fn epoch_of_stamp(ts: &str) -> Result<u64, CliError> {
-    let seconds = proofwork::time::parse_rfc3339(ts)
+    let seconds = cairn::time::parse_rfc3339(ts)
         .and_then(|seconds| u64::try_from(seconds).ok())
         .ok_or_else(|| {
             CliError::Usage(format!("cannot read the timestamp {ts:?} as an instant"))
         })?;
-    Ok(proofwork::partition::epoch_of(
+    Ok(cairn::partition::epoch_of(
         seconds,
-        proofwork::partition::epoch_seconds(),
+        cairn::partition::epoch_seconds(),
     ))
 }
 
@@ -3824,7 +3824,7 @@ fn cmd_prove(
     );
     say(
         out,
-        "  Readers check with `proofwork check <file> --from <checkpoint.json> --root-key <hex|file>`.",
+        "  Readers check with `cairn check <file> --from <checkpoint.json> --root-key <hex|file>`.",
     );
     if height.is_none() && full.len() > 1 {
         say(
@@ -3908,7 +3908,7 @@ fn cmd_check(
             say(
                 out,
                 format!(
-                    "  ask the holder for `proofwork prove {} --height {height}`",
+                    "  ask the holder for `cairn prove {} --height {height}`",
                     proof.entry.seq
                 ),
             );
@@ -4017,16 +4017,16 @@ fn cmd_knowledge(
     // The epoch the report is *as of*, from the clock, and used for nothing but
     // decay -- which is off unless the reader asked for it. Everything else in
     // this output is a pure function of the log.
-    let as_of = proofwork::partition::epoch_of(
-        proofwork::time::unix_seconds(),
-        proofwork::partition::epoch_seconds(),
+    let as_of = cairn::partition::epoch_of(
+        cairn::time::unix_seconds(),
+        cairn::partition::epoch_seconds(),
     );
 
     let wanted: Vec<String> = match claim_id {
         Some(id) => {
             if !graph.contains(id) {
                 return Err(CliError::Usage(format!(
-                    "no claim {id} in this log; `proofwork log` lists what is here"
+                    "no claim {id} in this log; `cairn log` lists what is here"
                 )));
             }
             vec![id.to_string()]
@@ -4064,7 +4064,7 @@ fn cmd_knowledge(
                     .unwrap_or("none recorded")
             ),
         );
-        if state.reproducible != proofwork::knowledge::Reproducible::Yes {
+        if state.reproducible != cairn::knowledge::Reproducible::Yes {
             say(
                 out,
                 format!("  re-derive   {}", state.reproducible.as_str()),
@@ -4095,7 +4095,7 @@ fn cmd_knowledge(
             // is not the reason.
             let note = if assertion.grounded {
                 format!("class {}", assertion.class)
-            } else if assertion.kind == proofwork::records::Relation::Retracts {
+            } else if assertion.kind == cairn::records::Relation::Retracts {
                 "not heard: only the claim's own submitter can retract it".to_string()
             } else {
                 "not heard: author's claim was not accepted".to_string()
@@ -4139,13 +4139,11 @@ fn cmd_incentives(
              directions, re-evaluating the whole mechanism at every rung -- \
              this takes minutes)"
         );
-        let margins = proofwork::incentive::robustness::margins_reporting(
-            params,
-            |parameter, done, total| {
+        let margins =
+            cairn::incentive::robustness::margins_reporting(params, |parameter, done, total| {
                 eprintln!("  [{done}/{total}] {parameter}");
-            },
-        )
-        .map_err(|error| CliError::Usage(error.to_string()))?;
+            })
+            .map_err(|error| CliError::Usage(error.to_string()))?;
         for margin in &margins {
             say(out, format!("  {margin}"));
         }
@@ -4182,7 +4180,7 @@ fn cmd_incentives(
 /// guess at that rule; re-reading the epoch until it changes is the rule.
 ///
 /// **It never shortens the epoch itself.** A real round takes a real epoch --
-/// 600 seconds by default -- and `PROOFWORK_EPOCH_SECONDS` exists for exactly
+/// 600 seconds by default -- and `CAIRN_EPOCH_SECONDS` exists for exactly
 /// this kind of local trial. Setting it here, silently, for a command that
 /// writes to whatever log it was pointed at, is the documented footgun in
 /// `docs/launch-review.md`: a log written under a short epoch and read back
@@ -4266,7 +4264,7 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
     // ten minutes is indistinguishable from one that has hung, and the usual
     // response to a hang is to kill it -- which leaves a commitment nobody
     // ever opened.
-    let length = proofwork::partition::epoch_seconds();
+    let length = cairn::partition::epoch_seconds();
     say(
         out,
         format!(
@@ -4275,14 +4273,14 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
             committed_in.saturating_add(1)
         ),
     );
-    if length >= proofwork::partition::EPOCH_SECONDS {
+    if length >= cairn::partition::EPOCH_SECONDS {
         say(
             out,
             format!(
                 "  (set ${}=10 for a local trial -- but only against a log used for nothing \
                  else: epochs are derived from record timestamps, so two settings disagree \
                  about which reveals were legal)",
-                proofwork::partition::EPOCH_SECONDS_ENV
+                cairn::partition::EPOCH_SECONDS_ENV
             ),
         );
     }
@@ -4337,7 +4335,7 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
                 format!(
                     "  waiting for epoch {epoch} to close and clear the {}-epoch finality \
                      delay, then settling",
-                    proofwork::partition::finality_epochs()
+                    cairn::partition::finality_epochs()
                 ),
             );
             wait_until_settleable(epoch)?;
@@ -4364,8 +4362,8 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
             out,
             format!(
                 "  pending  settles after epoch {epoch} closes + {} finality epoch(s)  \
-                 (`proofwork try --settle`, or `proofwork settle` later)",
-                proofwork::partition::finality_epochs()
+                 (`cairn try --settle`, or `cairn settle` later)",
+                cairn::partition::finality_epochs()
             ),
         ),
         None => say(
@@ -4396,7 +4394,7 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
 /// for this claim in the batch that just closed": the batch had not closed at
 /// all, the drain had found nothing yet due.
 fn wait_until_settleable(epoch: u64) -> Result<(), CliError> {
-    wait_for_epoch_after(epoch.saturating_add(proofwork::partition::finality_epochs()))
+    wait_for_epoch_after(epoch.saturating_add(cairn::partition::finality_epochs()))
 }
 
 fn wait_for_epoch_after(epoch: u64) -> Result<(), CliError> {
@@ -4427,7 +4425,7 @@ fn wait_for_epoch_after(epoch: u64) -> Result<(), CliError> {
 /// `scaffold <name> --kind <kind> [--out DIR] ...`
 ///
 /// Writes files and stops. The next step is a human reading them and running
-/// the `post` line this prints -- see [`proofwork::scaffold`] for why that
+/// the `post` line this prints -- see [`cairn::scaffold`] for why that
 /// boundary is where it is.
 fn cmd_scaffold(
     out: &mut dyn Write,
@@ -4502,15 +4500,12 @@ fn cmd_scaffold(
     say(out, "then post it:");
     say(
         out,
-        format!(
-            "  proofwork{root_flag} post {}",
-            on_disk(&plan.objective_path)
-        ),
+        format!("  cairn{root_flag} post {}", on_disk(&plan.objective_path)),
     );
     say(
         out,
         format!(
-            "  proofwork{root_flag} try {} --submitter you --artifact {}",
+            "  cairn{root_flag} try {} --submitter you --artifact {}",
             on_disk(&plan.objective_path),
             on_disk(&artifact)
         ),
@@ -4585,8 +4580,7 @@ fn cmd_incentives_sweep(
                 // absent, so every row still has the same columns.
                 Err(_) => String::new(),
                 Ok(()) => {
-                    match proofwork::incentive::robustness::margins_reporting(&point, |_, _, _| {})
-                    {
+                    match cairn::incentive::robustness::margins_reporting(&point, |_, _, _| {}) {
                         Ok(margins) => margins
                             .iter()
                             .find(|margin| margin.factor.is_some())
@@ -4649,7 +4643,7 @@ fn cmd_incentives_sweep(
 
 /// Decide how to read and write this invocation's log.
 ///
-/// The rule lives in [`proofwork::store::resolve_codec`], which the two daemons
+/// The rule lives in [`cairn::store::resolve_codec`], which the two daemons
 /// call too. This is the CLI's half: turn its flags into that function's
 /// arguments, and its error into a [`CliError`].
 fn resolve_codec(options: &Options) -> Result<Codec, CliError> {
@@ -4657,13 +4651,13 @@ fn resolve_codec(options: &Options) -> Result<Codec, CliError> {
     // Read *before* the call, because supplying one may mean reading a file,
     // and that failure is a CLI error rather than an at-rest one.
     let passphrase = options.passphrase()?;
-    proofwork::store::resolve_codec(Path::new(&options.log), &key_path, passphrase.as_deref())
+    cairn::store::resolve_codec(Path::new(&options.log), &key_path, passphrase.as_deref())
         .map_err(CliError::AtRest)
 }
 
-/// [`proofwork::store::first_line_is_sealed`], in the CLI's error type.
+/// [`cairn::store::first_line_is_sealed`], in the CLI's error type.
 fn first_line_is_sealed(path: &str) -> Result<Option<bool>, CliError> {
-    proofwork::store::first_line_is_sealed(Path::new(path)).map_err(CliError::AtRest)
+    cairn::store::first_line_is_sealed(Path::new(path)).map_err(CliError::AtRest)
 }
 
 fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32, CliError> {
@@ -4671,7 +4665,7 @@ fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32,
     let passphrase = options.passphrase()?;
     if wrap && passphrase.is_none() {
         return Err(CliError::Usage(String::from(
-            "keygen --passphrase needs a passphrase: set $PROOFWORK_PASSPHRASE or \
+            "keygen --passphrase needs a passphrase: set $CAIRN_PASSPHRASE or \
              pass --passphrase-file PATH. There is no prompt, because reading one \
              without echoing it needs terminal control this binary does not link",
         )));
@@ -4689,7 +4683,7 @@ fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32,
     if wrap {
         say(out, "  wrapped with a passphrase (argon2id)");
     }
-    if !proofwork::store::atrest::private_permissions_supported() {
+    if !cairn::store::atrest::private_permissions_supported() {
         say(
             out,
             "  warning: this platform cannot restrict the key to its owner",
@@ -4709,7 +4703,7 @@ fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32,
         );
         say(
             out,
-            "  `proofwork sync` refuses to copy it; other tools will not.",
+            "  `cairn sync` refuses to copy it; other tools will not.",
         );
     }
     say(out, "");
@@ -4741,7 +4735,7 @@ fn cmd_store(
                     "sealed  {}",
                     match first_line_is_sealed(&options.log)? {
                         Some(true) => "yes",
-                        Some(false) => "no -- run `proofwork store encrypt`",
+                        Some(false) => "no -- run `cairn store encrypt`",
                         None => "n/a (log is empty)",
                     }
                 ),
@@ -4821,7 +4815,7 @@ fn cmd_store(
             }
             if let Some(limit) = store.limit() {
                 if usage.over(limit) {
-                    say(out, "        OVER LIMIT -- run `proofwork store gc`");
+                    say(out, "        OVER LIMIT -- run `cairn store gc`");
                     return Ok(1);
                 }
             }
@@ -4849,7 +4843,7 @@ fn cmd_store(
                         format!(
                             "evicted {} ({})",
                             path.display(),
-                            proofwork::store::format_size(*bytes)
+                            cairn::store::format_size(*bytes)
                         ),
                     );
                 }
@@ -4857,7 +4851,7 @@ fn cmd_store(
                     out,
                     format!(
                         "freed {} -- {}",
-                        proofwork::store::format_size(eviction.freed),
+                        cairn::store::format_size(eviction.freed),
                         quota::describe(&eviction.after, store.limit())
                     ),
                 );
@@ -5125,7 +5119,7 @@ fn reclaim_cipher(codec: Codec) -> Result<Cipher, CliError> {
 /// by the key the operator is trying to retire.
 ///
 /// The *key* is kept, at `<key>.previous`, because copies of this store made
-/// before now -- a `proofwork sync` mirror, a backup, an external drive -- are
+/// before now -- a `cairn sync` mirror, a backup, an external drive -- are
 /// still sealed under it, and this command cannot see them.
 fn cmd_rekey(
     out: &mut dyn Write,
@@ -5152,7 +5146,7 @@ fn cmd_rekey(
     if sealed_on_disk == Some(false) {
         return Err(CliError::Refused(format!(
             "{} is in plaintext, so no at-rest key is protecting it and there is \
-             nothing to rotate; run `proofwork store encrypt` first",
+             nothing to rotate; run `cairn store encrypt` first",
             options.log
         )));
     }
@@ -5261,7 +5255,7 @@ fn cmd_rekey(
             "  pass --new-passphrase-file PATH if that was not deliberate",
         );
     }
-    if !proofwork::store::atrest::private_permissions_supported() {
+    if !cairn::store::atrest::private_permissions_supported() {
         say(
             out,
             "  warning: this platform cannot restrict the key to its owner",
@@ -5281,7 +5275,7 @@ fn cmd_rekey(
     );
     say(
         out,
-        "from `proofwork sync`, a backup, an external drive. Re-seal or destroy",
+        "from `cairn sync`, a backup, an external drive. Re-seal or destroy",
     );
     say(
         out,
@@ -5429,23 +5423,23 @@ fn cmd_blob(out: &mut dyn Write, options: &Options, action: &BlobAction) -> Resu
 /// shipped command called. A subsystem with no entry point is not a feature.
 ///
 /// The endpoint is printed rather than written anywhere, in the shape
-/// `proofwork-p2p` already reads for `--bootstrap`, because a fetcher needs the
+/// `cairn-p2p` already reads for `--bootstrap`, because a fetcher needs the
 /// 255 KB McEliece key as well as the address and there is nowhere in an
 /// append-only log for a quarter-megabyte hint that changes.
 fn cmd_blob_serve(
     out: &mut dyn Write,
     node: &Node,
-    store: &proofwork::blobs::BlobStore,
+    store: &cairn::blobs::BlobStore,
     identity_path: &str,
     listen: &str,
 ) -> Result<i32, CliError> {
     let identity = std::sync::Arc::new(load_transport_identity(identity_path)?);
     let published = node.publish_local_code();
-    let listener = proofwork::swarm::tcp::serve(
+    let listener = cairn::swarm::tcp::serve(
         listen,
         std::sync::Arc::clone(&identity),
         store.clone(),
-        proofwork::swarm::Limits::default(),
+        cairn::swarm::Limits::default(),
     )
     .map_err(|error| CliError::Usage(format!("blob serve: cannot listen on {listen}: {error}")))?;
 
@@ -5488,7 +5482,7 @@ fn cmd_blob_serve(
 fn cmd_blob_fetch(
     out: &mut dyn Write,
     node: &Node,
-    store: &proofwork::blobs::BlobStore,
+    store: &cairn::blobs::BlobStore,
     identity_path: &str,
     peers: &[String],
     seconds: u64,
@@ -5525,12 +5519,12 @@ fn cmd_blob_fetch(
     let mut got = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for address in &missing {
-        match proofwork::swarm::tcp::fetch(
+        match cairn::swarm::tcp::fetch(
             address,
             &endpoints,
             std::sync::Arc::clone(&identity),
             store,
-            proofwork::swarm::Limits::default(),
+            cairn::swarm::Limits::default(),
             deadline,
         ) {
             Ok(bytes) => {
@@ -5566,7 +5560,7 @@ fn cmd_blob_fetch(
 
 /// Erasure coding, from the command line.
 ///
-/// This is the caller that keeps [`proofwork::shards`] honest. The module could
+/// This is the caller that keeps [`cairn::shards`] honest. The module could
 /// be complete, tested and unreachable — which is precisely the state
 /// `src/swarm/` was in for a long time, and `docs/storage.md` records the two
 /// bugs that were sitting in the seam nobody crossed. Every action here goes
@@ -5580,7 +5574,7 @@ fn cmd_shard(
     options: &Options,
     action: &ShardAction,
 ) -> Result<i32, CliError> {
-    use proofwork::shards;
+    use cairn::shards;
     let store = shards::ShardStore::under(&options.root);
     match action {
         ShardAction::Plan { file, coding } => {
@@ -5592,7 +5586,7 @@ fn cmd_shard(
             say(
                 out,
                 format!(
-                    "  `proofwork shard encode {file} --data {} --parity {} --chunk {chunk}`",
+                    "  `cairn shard encode {file} --data {} --parity {} --chunk {chunk}`",
                     coding.data(),
                     coding.parity()
                 ),
@@ -5775,7 +5769,7 @@ fn cmd_shard(
             say(
                 out,
                 format!(
-                    "  Readers check with `proofwork shard check <file> --merkle-root {}`.",
+                    "  Readers check with `cairn shard check <file> --merkle-root {}`.",
                     manifest.root()
                 ),
             );
@@ -5829,7 +5823,7 @@ fn cmd_shard(
                 // codes for the reason `verify` and `check` give: 1 is
                 // "checked, and the answer is no", 2 is "could not check". A
                 // script fetching shards until a rebuild succeeds needs to tell
-                // those apart, and `try proofwork help` is no use to it.
+                // those apart, and `try cairn help` is no use to it.
                 Err(shards::ShardStoreError::Shards(shards::ShardError::NotEnoughShards {
                     have,
                     need,
@@ -5851,7 +5845,7 @@ fn cmd_shard(
                     }
                     say(
                         out,
-                        format!("  `proofwork shard ls {address}` names the ones held elsewhere"),
+                        format!("  `cairn shard ls {address}` names the ones held elsewhere"),
                     );
                     return Ok(1);
                 }
@@ -5903,7 +5897,7 @@ fn read_blob(path: &str) -> Result<(Vec<u8>, String), CliError> {
         context: format!("reading {path}"),
         source,
     })?;
-    let address = proofwork::blobs::address(&bytes);
+    let address = cairn::blobs::address(&bytes);
     Ok((bytes, address))
 }
 
@@ -5911,18 +5905,18 @@ fn read_blob(path: &str) -> Result<(Vec<u8>, String), CliError> {
 fn resolve_coding(
     choice: CodingChoice,
     total: u64,
-) -> Result<(proofwork::shards::Coding, u32), CliError> {
-    let coding = proofwork::shards::Coding::new(choice.data, choice.parity)
+) -> Result<(cairn::shards::Coding, u32), CliError> {
+    let coding = cairn::shards::Coding::new(choice.data, choice.parity)
         .map_err(|error| CliError::Usage(error.to_string()))?;
     let chunk = choice
         .chunk
-        .unwrap_or_else(|| proofwork::shards::suggest_chunk_len(total, coding));
+        .unwrap_or_else(|| cairn::shards::suggest_chunk_len(total, coding));
     Ok((coding, chunk))
 }
 
 /// The same four lines for `plan`, `encode` and `ls`, so the three cannot
 /// disagree about what a cut looks like.
-fn report_plan(out: &mut dyn Write, address: &str, layout: &proofwork::shards::Layout) {
+fn report_plan(out: &mut dyn Write, address: &str, layout: &cairn::shards::Layout) {
     let coding = layout.coding();
     say(
         out,
@@ -5965,13 +5959,11 @@ fn join_indices(indices: &[u8]) -> String {
 
 /// Load a transport identity, creating one if the file does not exist.
 ///
-/// Same `{public, secret}` shape `proofwork-p2p` reads, so one file serves
+/// Same `{public, secret}` shape `cairn-p2p` reads, so one file serves
 /// both. Generating on absence costs ~243 ms of Classic McEliece keygen and is
 /// what makes `blob serve` a single command rather than a setup ritual.
-fn load_transport_identity(
-    path: &str,
-) -> Result<proofwork::p2p::handshake::PeerIdentity, CliError> {
-    use proofwork::p2p::handshake::PeerIdentity;
+fn load_transport_identity(path: &str) -> Result<cairn::p2p::handshake::PeerIdentity, CliError> {
+    use cairn::p2p::handshake::PeerIdentity;
     let file = std::path::Path::new(path);
     if !file.exists() {
         let identity = PeerIdentity::generate();
@@ -6000,7 +5992,7 @@ fn load_transport_identity(
 }
 
 /// Load one `{addr, public}` endpoint file.
-fn load_endpoint(path: &str) -> Result<proofwork::p2p::discovery::Endpoint, CliError> {
+fn load_endpoint(path: &str) -> Result<cairn::p2p::discovery::Endpoint, CliError> {
     let text =
         std::fs::read_to_string(path).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
     let value = Value::from_json(&text).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
@@ -6010,7 +6002,7 @@ fn load_endpoint(path: &str) -> Result<proofwork::p2p::discovery::Endpoint, CliE
         .ok_or_else(|| CliError::Usage(format!("{path}: addr missing")))?;
     // A hostname is accepted as well as a literal -- see
     // `p2p::discovery::dialable` for why a name is safe to take on trust.
-    let addr = proofwork::p2p::discovery::dialable(addr).ok_or_else(|| {
+    let addr = cairn::p2p::discovery::dialable(addr).ok_or_else(|| {
         CliError::Usage(format!(
             "{path}: addr {addr:?} is neither an address nor a name that resolves"
         ))
@@ -6020,9 +6012,9 @@ fn load_endpoint(path: &str) -> Result<proofwork::p2p::discovery::Endpoint, CliE
         .and_then(Value::as_str)
         .ok_or_else(|| CliError::Usage(format!("{path}: public missing")))?;
     let bytes = decode_hex(hex).map_err(|e| CliError::Usage(format!("{path}: public: {e}")))?;
-    let peer = proofwork::p2p::handshake::PeerPublic::from_bytes(&bytes)
+    let peer = cairn::p2p::handshake::PeerPublic::from_bytes(&bytes)
         .map_err(|error| CliError::Usage(format!("{path}: public: {error}")))?;
-    Ok(proofwork::p2p::discovery::Endpoint::new(addr, peer))
+    Ok(cairn::p2p::discovery::Endpoint::new(addr, peer))
 }
 
 fn hex_of(bytes: &[u8]) -> String {
@@ -6531,7 +6523,7 @@ mod tests {
 
     /// A transport identity is not a signing identity, and this is the path
     /// that conflated them: `--identity` names a 32-byte ed25519 key here and a
-    /// 261,120-byte Classic McEliece key in `proofwork-p2p`. Pointed at a live
+    /// 261,120-byte Classic McEliece key in `cairn-p2p`. Pointed at a live
     /// node identity, this command used to replace it, and the daemon then
     /// refused to start with "public key must be 261120 bytes, got 32".
     #[test]
@@ -6648,7 +6640,7 @@ mod tests {
         .expect_err("shard 9 is not in a (4, 2) coding");
         assert!(format!("{error}").contains("--keep names shard 9"));
         assert!(
-            proofwork::shards::ShardStore::under(&options.root).is_empty(),
+            cairn::shards::ShardStore::under(&options.root).is_empty(),
             "a refused encode wrote shards anyway"
         );
     }
@@ -6666,7 +6658,7 @@ mod tests {
             root: dir.display().to_string(),
             ..Options::from_env()
         };
-        let address = proofwork::blobs::address(&data);
+        let address = cairn::blobs::address(&data);
 
         let mut out = Vec::new();
         cmd_shard(
@@ -6694,7 +6686,7 @@ mod tests {
             },
         )
         .expect("proves");
-        let root = proofwork::shards::ShardStore::under(&options.root)
+        let root = cairn::shards::ShardStore::under(&options.root)
             .manifest(&address)
             .expect("manifest")
             .root();
@@ -6722,7 +6714,7 @@ mod tests {
                 &options,
                 &ShardAction::Check {
                     proof: proof_path.display().to_string(),
-                    root: proofwork::canonical::digest_bytes(b"not the root"),
+                    root: cairn::canonical::digest_bytes(b"not the root"),
                 }
             )
             .expect("checks"),
@@ -6731,7 +6723,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&wrong).contains("FAILED"));
 
         // Rot one shard on disk and rebuild anyway.
-        let rotted = dir.join(".proofwork/shards").join(&address).join("002");
+        let rotted = dir.join(".cairn/shards").join(&address).join("002");
         let mut bytes = std::fs::read(&rotted).expect("reads");
         if let Some(byte) = bytes.get_mut(3) {
             *byte ^= 0x80;
@@ -6781,7 +6773,7 @@ mod tests {
             root: dir.display().to_string(),
             ..Options::from_env()
         };
-        let address = proofwork::blobs::address(&vec![3u8; 20_000]);
+        let address = cairn::blobs::address(&vec![3u8; 20_000]);
 
         let mut out = Vec::new();
         cmd_shard(
@@ -6840,7 +6832,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "proofwork-cli-{tag}-{}-{nanos}-{n}",
+            "cairn-cli-{tag}-{}-{nanos}-{n}",
             std::process::id()
         ));
         std::fs::create_dir_all(&path).expect("scratch dir");
@@ -6851,7 +6843,7 @@ mod tests {
     /// plus `Options` pointing at both. The pin is computed from the bytes
     /// written, so the fixture cannot drift out of agreement with itself.
     fn bundle_with_objective() -> (std::path::PathBuf, Options, Value) {
-        use proofwork::canonical::digest_bytes;
+        use cairn::canonical::digest_bytes;
         let dir = scratch_dir("bundle");
         let source = b"def check(artifact):\n    return artifact.get('n') == 42\n";
         std::fs::write(dir.join("c.py"), source).expect("write checker");
@@ -7610,7 +7602,7 @@ mod tests {
     /// that quietly needed one would be no lighter than `verify`.
     #[test]
     fn a_proof_emitted_by_the_cli_checks_against_the_checkpoint_the_cli_signed() {
-        use proofwork::canonical::digest_bytes;
+        use cairn::canonical::digest_bytes;
         let dir = scratch_dir("prove");
         let options = Options {
             log: dir.join("log.jsonl").display().to_string(),
@@ -7629,8 +7621,8 @@ mod tests {
             }
         }
 
-        // A signing key in the shape `proofwork-p2p` writes.
-        let key = proofwork::checkpoint::RootKey::generate();
+        // A signing key in the shape `cairn-p2p` writes.
+        let key = cairn::checkpoint::RootKey::generate();
         let key_path = dir.join("key.json");
         std::fs::write(
             &key_path,
@@ -7730,7 +7722,7 @@ mod tests {
                     .expect("append");
             }
         }
-        let key = proofwork::checkpoint::RootKey::generate();
+        let key = cairn::checkpoint::RootKey::generate();
         let key_path = dir.join("key.json");
         std::fs::write(
             &key_path,
@@ -8312,17 +8304,17 @@ mod tests {
 
     #[test]
     fn summaries_read_the_fields_the_reference_implementation_reads() {
-        let objective = proofwork::obj! { "statement" => Value::string("Exhibit a cap set") };
+        let objective = cairn::obj! { "statement" => Value::string("Exhibit a cap set") };
         assert_eq!(summarize("objective", &objective), "Exhibit a cap set");
 
-        let claim = proofwork::obj! { "submitter" => Value::string("alice") };
+        let claim = cairn::obj! { "submitter" => Value::string("alice") };
         assert_eq!(summarize("claim", &claim), "by alice");
         assert_eq!(summarize("commitment", &claim), "by alice");
 
         // The identity is truncated and the address is not: two records for one
         // identity are the same peer moving, and a reader has to see that at a
         // glance rather than by comparing two 64-character keys.
-        let peer = proofwork::obj! {
+        let peer = cairn::obj! {
             "identity" => Value::string("ab".repeat(32)),
             "addr" => Value::string("10.0.0.9:9000"),
             "seq" => Value::Int(2),
@@ -8332,8 +8324,8 @@ mod tests {
             "abababab at 10.0.0.9:9000 (seq 2)"
         );
 
-        let verdict = proofwork::obj! {
-            "verdict" => proofwork::obj! {
+        let verdict = cairn::obj! {
+            "verdict" => cairn::obj! {
                 "status" => Value::string("accept"),
                 "detail" => Value::string("certificate checks out"),
             },
@@ -8343,7 +8335,7 @@ mod tests {
             "accept: certificate checks out"
         );
 
-        let settlement = proofwork::obj! {
+        let settlement = cairn::obj! {
             "submitter" => Value::string("bob"),
             "reward" => Value::Int(250_000),
         };
@@ -8362,8 +8354,8 @@ mod tests {
 
     #[test]
     fn a_long_verdict_detail_is_cut_to_forty_characters() {
-        let verdict = proofwork::obj! {
-            "verdict" => proofwork::obj! {
+        let verdict = cairn::obj! {
+            "verdict" => cairn::obj! {
                 "status" => Value::string("reject"),
                 "detail" => Value::string("x".repeat(100)),
             },

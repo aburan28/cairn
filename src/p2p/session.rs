@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 /// AEAD context for record frames.
-pub const RECORD_CONTEXT: &[u8] = b"proofwork/p2p/sync/v1";
+pub const RECORD_CONTEXT: &[u8] = b"cairn/p2p/sync/v1";
 
 // -- protocol tracing --------------------------------------------------------
 //
@@ -135,7 +135,7 @@ fn receive_dht(connection: &mut Connection) -> Result<DhtMessage, SessionError> 
 /// attributed to a peer rather than to a socket.
 fn trace(connection: &Connection, dir: Dir, described: String) {
     log::debug!(
-        target: "proofwork::p2p",
+        target: "cairn::p2p",
         "{} {dir} {described}",
         crate::p2p::discovery::peer_id_string(&connection.remote())
     );

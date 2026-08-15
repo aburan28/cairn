@@ -95,7 +95,7 @@ replicates a hash-linked log, so **discovery is not a new bootstrap problem — 
 is the same one as obtaining the log.** Solving it twice is the mistake. The
 split that makes it work: *identity* is permanent and belongs in the log;
 *location* is ephemeral and does not, because the log is append-only and an IP is
-not. *Built — `records::PeerRecord`, appended with `proofwork peer`.*
+not. *Built — `records::PeerRecord`, appended with `cairn peer`.*
 
 The location half is handled by a `seq` rather than by leaving it out: a peer
 that moves appends a record with a higher one and the highest wins, which is
@@ -158,7 +158,7 @@ entire segment at a third party. It is **announce-only**: there is no query, so
 there is no spoofed query, so there is no reflector. And it carries **no
 inventory**, because `p2p::code` refuses to publish which blobs a node holds and
 a beacon listing them would broadcast exactly that to a whole office, without
-even a handshake. What a listener learns is that a proofwork node exists here.
+even a handshake. What a listener learns is that a cairn node exists here.
 
 Unsigned, and deliberately: a false beacon names a transport id whose McEliece
 key the liar does not have, so the handshake fails and the cost is one dial. Same
@@ -294,10 +294,10 @@ produce a key hashing to somebody else's id. That is the rule above, applied:
 DNS carries the hint, and the hash decides.
 
 Bootstrap files are local configuration and are gitignored, which is why
-nothing generates one into the repository. `proofwork-gen-bootstrap` writes a
+nothing generates one into the repository. `cairn-gen-bootstrap` writes a
 structurally valid file for an address you name — `make p2p` calls it for
 `SEED_ADDR` on first run — and it accepts a hostname for the same reason the
 daemon does. The key it writes is a **placeholder**: only the seed's real public
 key makes the connection mean anything, and that key comes from the seed
-operator (`proofwork blob serve --identity <file>` prints it). See
+operator (`cairn blob serve --identity <file>` prints it). See
 [p2p.md](p2p.md).

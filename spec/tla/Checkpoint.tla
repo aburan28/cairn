@@ -4,7 +4,7 @@
 (*                                                                         *)
 (* Models src/checkpoint.rs (ML-DSA-65 over `(height, head, root,           *)
 (* issued_at)`, `verify_against`) and the reader described in              *)
-(* docs/design-stage0-completion.md §2, `proofwork verify --from`.          *)
+(* docs/design-stage0-completion.md §2, `cairn verify --from`.          *)
 (*                                                                         *)
 (* WHY THIS MODULE EXISTS AT ALL                                           *)
 (*                                                                         *)
@@ -50,7 +50,7 @@ VARIABLES
 vars == <<opLog, rdLog, ckpt, anchor>>
 
 -----------------------------------------------------------------------------
-(* The reader's check: `proofwork verify --from`.                           *)
+(* The reader's check: `cairn verify --from`.                           *)
 
 SigOk(c) == c.signer = RootKey
 

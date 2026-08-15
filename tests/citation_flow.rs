@@ -22,9 +22,9 @@
 
 use std::collections::BTreeMap;
 
-use proofwork::attribution::{payouts_over, FlowParams};
-use proofwork::canonical::Value;
-use proofwork::records::Claim;
+use cairn::attribution::{payouts_over, FlowParams};
+use cairn::canonical::Value;
+use cairn::records::Claim;
 
 const TS: &str = "2026-07-29T00:00:00+00:00";
 const OBJ: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -252,7 +252,7 @@ fn weighted(steps: &[(&str, u64)]) -> BTreeMap<String, u64> {
         settlements.push((id.clone(), *reward));
         previous = Some(id);
     }
-    proofwork::attribution::payouts_weighted(&settlements, &claims, &default_params())
+    cairn::attribution::payouts_weighted(&settlements, &claims, &default_params())
         .expect("no overflow at this size")
 }
 

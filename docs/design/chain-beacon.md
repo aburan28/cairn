@@ -80,7 +80,7 @@ An epoch with no beacon settles against the epoch-chain head exactly as before.
 Three reasons this is not optional:
 
 - every log written before this record existed is in that state, including
-  `launch/proofwork.jsonl`, which is published precisely so readers can check
+  `launch/cairn.jsonl`, which is published precisely so readers can check
   it;
 - a node whose chain source is unreachable must not halt settlement for
   everyone. `Unavailable is never Reject` applies to a randomness source as
@@ -144,7 +144,7 @@ reintroducing the liveness dependency, and a beacon cannot be added late
 without reintroducing the grinding it prevents — so the mechanism alone does
 not close the hole, it only makes the hole *visible*.
 
-`PROOFWORK_REQUIRE_BEACON=1` makes it refusable: an audit under that flag
+`CAIRN_REQUIRE_BEACON=1` makes it refusable: an audit under that flag
 reports every epoch settled on the fallback. It is a **reader's** policy and
 deliberately does not gate settlement — a beacon is admissible only inside the
 epoch it orders, so refusing to settle an epoch that already closed without one
@@ -159,12 +159,12 @@ requires them.
 Built and cross-checked in both implementations.
 
 - record, both timing rules, anchor resolution with fallback, audit checks,
-  `epochs_without_beacon`, `PROOFWORK_REQUIRE_BEACON` — `src/node.rs`
+  `epochs_without_beacon`, `CAIRN_REQUIRE_BEACON` — `src/node.rs`
 - the same rules, independently derived — `reference/rust/src/node.rs`
-- `proofwork beacon --orders N --value HEX [--source NAME] [--block N]`
+- `cairn beacon --orders N --value HEX [--source NAME] [--block N]`
 
 Verified: 79 node tests, 448 conformance vectors unmoved, `interop.sh` and
-`differential.sh` pass, `launch/proofwork.jsonl` still audits clean in both
+`differential.sh` pass, `launch/cairn.jsonl` still audits clean in both
 implementations, and both derive the identical Merkle root for a
 beacon-ordered log. The split was demonstrated before it was fixed — with the
 reference implementation reverted, the same log reports `batch anchor is
@@ -172,9 +172,9 @@ reference implementation reverted, the same log reports `batch anchor is
 
 Remaining:
 
-- [ ] the fetcher: `proofwork beacon` currently takes `--value`, so something
+- [ ] the fetcher: `cairn beacon` currently takes `--value`, so something
       still has to supply the chain's randomness. Deliberately outside the
       rules engine, but until it exists the provenance fields are operator
       assertions
-- [ ] `proofwork-p2p` drawing one per epoch on a timer
+- [ ] `cairn-p2p` drawing one per epoch on a timer
 - [ ] whether to adopt this at all, per anchored-time.md's recommendation 3

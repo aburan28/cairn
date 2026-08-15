@@ -1,4 +1,4 @@
-//! `proofwork-serve` — publish a node's log over HTTP, and queue submissions.
+//! `cairn-serve` — publish a node's log over HTTP, and queue submissions.
 //!
 //! The missing half of "anyone can independently re-derive every settled
 //! result from the log alone": a way for somebody who is not the operator to
@@ -6,8 +6,8 @@
 //! spool rather than into the log.
 //!
 //! ```sh
-//! proofwork-serve --log proofwork.jsonl --root . --listen 127.0.0.1:8080
-//! proofwork-serve --log proofwork.jsonl --root . --listen 0.0.0.0:8080 \
+//! cairn-serve --log cairn.jsonl --root . --listen 127.0.0.1:8080
+//! cairn-serve --log cairn.jsonl --root . --listen 0.0.0.0:8080 \
 //!     --queue ./queue --checkpoint checkpoint.json
 //! ```
 //!
@@ -21,8 +21,8 @@
 //! another process is writing. That is a real role — a read-only mirror, or a
 //! public front for an operator whose daemon runs elsewhere.
 //!
-//! With `--p2p-listen` it is the whole node, running [`proofwork::daemon::run`]
-//! — the same function `proofwork-p2p` calls, in one process, with the HTTP
+//! With `--p2p-listen` it is the whole node, running [`cairn::daemon::run`]
+//! — the same function `cairn-p2p` calls, in one process, with the HTTP
 //! server on a thread. Use it when the alternative would have been two units
 //! sharing a directory.
 //!
@@ -33,8 +33,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use proofwork::daemon::{self, Config};
-use proofwork::serve::{self, Serving};
+use cairn::daemon::{self, Config};
+use cairn::serve::{self, Serving};
 
 /// Print the usage and exit with `code`.
 ///
@@ -44,11 +44,11 @@ use proofwork::serve::{self, Serving};
 /// packaging check or a smoke test asks whether a binary runs at all.
 fn usage(code: i32) -> ! {
     eprintln!(
-        "proofwork-serve — publish a proofwork log over HTTP\n\n\
+        "cairn-serve — publish a cairn log over HTTP\n\n\
          USAGE\n    \
-         proofwork-serve [--log <path>] [--root <dir>] [--listen <addr>]\n                    \
+         cairn-serve [--log <path>] [--root <dir>] [--listen <addr>]\n                    \
          [--queue <dir>] [--checkpoint <path>]\n\n\
-         --log         the append-only log to publish (default proofwork.jsonl)\n\
+         --log         the append-only log to publish (default cairn.jsonl)\n\
          --root        bundle root pinned verifier paths resolve against (default .)\n\
          --listen      address to bind (default 127.0.0.1:8080)\n\
          --queue       accept POST /submit into this spool directory; omit for read-only\n\
@@ -66,7 +66,7 @@ fn usage(code: i32) -> ! {
          --fanout      peers dialled per round\n\n\
          Everything served is public by design. Without --p2p-listen,\n\
          submissions are queued and never admitted: drain them into the log\n\
-         with `proofwork drain --queue <dir>`.\n"
+         with `cairn drain --queue <dir>`.\n"
     );
     std::process::exit(code);
 }
@@ -74,8 +74,8 @@ fn usage(code: i32) -> ! {
 fn main() {
     // Before anything that could log. Stderr only -- see `logging` -- which
     // matters most here in the MCP server, where stdout is the protocol.
-    proofwork::logging::init();
-    let mut log = PathBuf::from("proofwork.jsonl");
+    cairn::logging::init();
+    let mut log = PathBuf::from("cairn.jsonl");
     let mut root = PathBuf::from(".");
     let mut listen = String::from("127.0.0.1:8080");
     let mut queue: Option<PathBuf> = None;
@@ -96,7 +96,7 @@ fn main() {
         let mut next = |what: &str| match args.next() {
             Some(value) => value,
             None => {
-                eprintln!("proofwork-serve: {what} needs a value");
+                eprintln!("cairn-serve: {what} needs a value");
                 std::process::exit(2);
             }
         };
@@ -113,7 +113,7 @@ fn main() {
                     // bound wants that bound, and silently substituting one
                     // hides a full queue behind a number they never chose.
                     _ => {
-                        eprintln!("proofwork-serve: --max-queue needs a positive integer");
+                        eprintln!("cairn-serve: --max-queue needs a positive integer");
                         std::process::exit(2);
                     }
                 }
@@ -128,7 +128,7 @@ fn main() {
             "--bootstrap" => bootstrap.push(PathBuf::from(next("--bootstrap"))),
             "--help" | "-h" => usage(0),
             other => {
-                eprintln!("proofwork-serve: unknown argument {other:?}");
+                eprintln!("cairn-serve: unknown argument {other:?}");
                 usage(2);
             }
         }
@@ -138,23 +138,23 @@ fn main() {
 
     if let Some(addr) = p2p_listen {
         let addr: SocketAddr = addr.parse().unwrap_or_else(|_| {
-            eprintln!("proofwork-serve: --p2p-listen needs host:port");
+            eprintln!("cairn-serve: --p2p-listen needs host:port");
             std::process::exit(2)
         });
         // Named individually rather than as one "missing options" error: an
         // operator who forgot the root key wants to be told which one.
         let identity = identity.unwrap_or_else(|| {
-            eprintln!("proofwork-serve: --p2p-listen also needs --identity");
+            eprintln!("cairn-serve: --p2p-listen also needs --identity");
             std::process::exit(2)
         });
         let root_key = root_key.unwrap_or_else(|| {
-            eprintln!("proofwork-serve: --p2p-listen also needs --root-key");
+            eprintln!("cairn-serve: --p2p-listen also needs --root-key");
             std::process::exit(2)
         });
         // A daemon *writes* its checkpoint every round, so unlike the publisher
         // this is not optional -- there would be nowhere to put it.
         let checkpoint = checkpoint.unwrap_or_else(|| {
-            eprintln!("proofwork-serve: --p2p-listen also needs --checkpoint to write");
+            eprintln!("cairn-serve: --p2p-listen also needs --checkpoint to write");
             std::process::exit(2)
         });
 
@@ -167,7 +167,7 @@ fn main() {
         config.key_file = key_file;
         if let Some(text) = fanout {
             config.fanout = text.parse().unwrap_or_else(|_| {
-                eprintln!("proofwork-serve: --fanout needs a positive integer");
+                eprintln!("cairn-serve: --fanout needs a positive integer");
                 std::process::exit(2)
             });
         }
@@ -191,17 +191,16 @@ fn main() {
         // node, and a publisher that silently dropped them would take no lock,
         // dial nobody and drain nothing while looking like it had started.
         if given {
-            eprintln!("proofwork-serve: {flag} has no effect without --p2p-listen");
+            eprintln!("cairn-serve: {flag} has no effect without --p2p-listen");
             std::process::exit(2);
         }
     }
 
     // The CLI's own default when no flag was given, so a publisher on a machine
-    // that ran `proofwork store keygen` opens the same logs the CLI writes.
+    // that ran `cairn store keygen` opens the same logs the CLI writes.
     // `resolve_codec` treats an absent key file as plaintext, so naming a path
     // that does not exist costs nothing.
-    let key_path =
-        key_file.unwrap_or_else(|| proofwork::store::Store::new(&root).default_key_path());
+    let key_path = key_file.unwrap_or_else(|| cairn::store::Store::new(&root).default_key_path());
     let mut serving = Serving::new(&log, &root).with_key(key_path, None);
     if let Some(dir) = queue {
         serving = serving.accepting_into(dir).with_max_queued(max_queue);
@@ -214,11 +213,11 @@ fn main() {
     // Folded together, a missing key file was reported as "cannot listen on
     // 127.0.0.1:8080", which sends an operator to check the port.
     if let Err(error) = serving.check_startup() {
-        eprintln!("proofwork-serve: {error}");
+        eprintln!("cairn-serve: {error}");
         std::process::exit(1);
     }
     if let Err(error) = serve::listen(&listen, serving) {
-        eprintln!("proofwork-serve: cannot listen on {listen}: {error}");
+        eprintln!("cairn-serve: cannot listen on {listen}: {error}");
         std::process::exit(1);
     }
 }

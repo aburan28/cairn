@@ -155,7 +155,7 @@ impl Survey {
     /// A one-line summary for `store status`.
     pub fn describe(&self) -> String {
         if !self.sealed_log {
-            return String::from("not encrypted (no key in use) -- run `proofwork store encrypt`");
+            return String::from("not encrypted (no key in use) -- run `cairn store encrypt`");
         }
         let mut line = format!(
             "log sealed ({}); {} plaintext by decision -- blobs, shards, cache, tmp",
@@ -256,7 +256,7 @@ pub fn exposure(store: &Store, path: &Path, sealed_log: bool) -> Exposure {
 ///
 /// "Is this store encrypting?" is answered by **whether anything in it is
 /// sealed**, not by whether a file exists at [`Store::log_path`]. `--log` and
-/// `$PROOFWORK_LOG` can put the log anywhere under the root, and a survey that
+/// `$CAIRN_LOG` can put the log anywhere under the root, and a survey that
 /// only looked at the default path would report an encrypting store as plaintext
 /// the moment its operator moved the log — which is both wrong and precisely
 /// backwards, since it would go quiet exactly where it should speak up.
@@ -334,7 +334,7 @@ mod tests {
     fn scratch(tag: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "proofwork-exposure-{tag}-{}-{}",
+            "cairn-exposure-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -439,8 +439,8 @@ mod tests {
 
     #[test]
     fn a_log_moved_off_the_default_path_is_still_recognised_as_sealed() {
-        // `--log` and `$PROOFWORK_LOG` put the log wherever the operator wants.
-        // A survey that asked only about `<root>/log/proofwork.jsonl` would call
+        // `--log` and `$CAIRN_LOG` put the log wherever the operator wants.
+        // A survey that asked only about `<root>/log/cairn.jsonl` would call
         // an encrypting store plaintext the moment they moved it -- going quiet
         // exactly where it should speak up.
         let dir = scratch("moved");

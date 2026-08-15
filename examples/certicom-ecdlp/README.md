@@ -1,7 +1,7 @@
 # ECDLP: Certicom's frontier, and a ladder you can actually climb
 
 ```sh
-proofwork post examples/certicom-ecdlp/objective-nums-50.json
+cairn post examples/certicom-ecdlp/objective-nums-50.json
 python3 examples/certicom-ecdlp/tools/selftest.py
 python3 examples/certicom-ecdlp/tools/nums.py verify examples/certicom-ecdlp/instances/nums-60.json
 ```

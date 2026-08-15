@@ -126,7 +126,7 @@ export default function Page() {
                   in a third language. */}
               <div className="meta dim">
                 This page does not verify that signature — it shows that one
-                exists and what it covers. <code>proofwork verify --from</code>{" "}
+                exists and what it covers. <code>cairn verify --from</code>{" "}
                 is what checks it.
               </div>
             </div>
@@ -136,7 +136,7 @@ export default function Page() {
             <div className="panel bad">
               <b>this chain was settled under more than one epoch length</b>
               Its epoch numbers span {scales.length} orders of magnitude, which
-              happens when <code>PROOFWORK_EPOCH_SECONDS</code> changed between
+              happens when <code>CAIRN_EPOCH_SECONDS</code> changed between
               batches — the demo scripts set it to 1, the default is 600. The
               divisor is derived and never stored, so this is a heuristic and
               not a derivation. It matters because that value decides which
@@ -207,7 +207,7 @@ export default function Page() {
           <p className="lede" style={{ marginTop: "2rem" }}>
             {chain.links} link(s) settling {claims} claim(s) in total, newest
             first. Verify none of it on trust:{" "}
-            <code>proofwork --log &lt;log&gt; --root . audit</code> re-derives
+            <code>cairn --log &lt;log&gt; --root . audit</code> re-derives
             the chain and checks every batch against the anchor it recorded.
           </p>
         </>

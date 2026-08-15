@@ -18,7 +18,7 @@ results independently, and aggregate throughput collapses toward that of the
 single best solo participant. No amount of scheduling fixes this, because the
 participants are behaving correctly — the incentive is the bug.
 
-The fix is `proofwork/frontier.py`: an objective carries a monotone best-known
+The fix is `cairn/frontier.py`: an objective carries a monotone best-known
 score, and whoever moves it from `s0` to `s1` is paid in proportion to the
 distance moved.
 
@@ -182,7 +182,7 @@ now moves money as well. It is the same row in
 [threat-model.md](threat-model.md) and the same answer — a VDF or threshold
 signature, which is Stage 2.
 
-`PROOFWORK_EPOCH_SECONDS` overrides the 600-second epoch for local demos. It
+`CAIRN_EPOCH_SECONDS` overrides the 600-second epoch for local demos. It
 changes no record bytes: epochs are derived from timestamps, never stored, so
 two nodes configured differently disagree about which reveals are legal but not
 about what any record *is*. Production leaves it alone.

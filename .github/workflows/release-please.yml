@@ -29,7 +29,7 @@ name: release-please
 #   approve pull requests
 #
 # which reads like a bug in the token and is not one. It leaves the branch
-# `release-please--branches--main--components--proofwork` behind, already
+# `release-please--branches--main--components--cairn` behind, already
 # holding the correct commit; the next run after the setting is enabled opens
 # the PR from it, so nothing is lost and nothing needs re-running by hand.
 #

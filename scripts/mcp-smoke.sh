@@ -12,10 +12,16 @@
 # the Python evaluator in examples/, executed as a subprocess with its hash
 # checked first, not from anything Rust-side.
 set -euo pipefail
+
+# The body reads the log as text -- it greps for record kinds and counts lines --
+# and the CLI seals every log it creates whenever a key file exists. Forcing a
+# non-existent key makes `resolve_codec` choose plaintext. The sealed path is
+# checked separately below, and by serve-smoke and node-smoke.
+export CAIRN_KEY=/nonexistent/cairn-forces-plaintext
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
-MCP="${MCP_BIN:-./target/release/proofwork-mcp}"
+RUST="${RUST_BIN:-./target/release/cairn}"
+MCP="${MCP_BIN:-./target/release/cairn-mcp}"
 
 if [ ! -x "$RUST" ] || [ ! -x "$MCP" ]; then
   echo "building release binaries..." >&2
@@ -85,7 +91,7 @@ if len(lines) != 3:
 
 init = seen[1]["result"]
 assert init["protocolVersion"] == "2025-06-18", init
-assert init["serverInfo"]["name"] == "proofwork", init
+assert init["serverInfo"]["name"] == "cairn", init
 
 tools = {t["name"] for t in seen[2]["result"]["tools"]}
 for required in ("score_candidate", "list_objectives", "submit_claim", "audit"):
@@ -105,6 +111,48 @@ print("  score_candidate ran the pinned evaluator and returned score 12")
 PY
 
 rule "score_candidate wrote nothing to the log"
+# The log may be sealed at rest -- the CLI seals whenever a key file exists, and
+# this script deliberately does NOT force plaintext, because "the MCP server can
+# open its operator's own sealed ledger" is exactly what it should be proving.
+# So every assertion about log *contents* goes through the CLI, which resolves
+# the codec, rather than grepping ciphertext.
+kinds_in_log() { grep -c "\"kind\": *\"$1\"" "$LOG" || true; }
+
+
+# --- the server opens a sealed ledger ------------------------------------
+#
+# `cairn-mcp` used to open every log with the plaintext codec, so on any machine
+# that had run `cairn keygen` -- where the CLI seals everything it writes -- an
+# agent got "altered, reordered, or spliced" for its operator's own ledger.
+# Checked here rather than by running the whole script sealed: exporting a
+# sealed log inside the polling section below is slow enough to miss a
+# four-second epoch, which would make this script flaky for a harness reason.
+# Deliberately not $CAIRN_KEY: that is overridden above to force the body onto
+# a plaintext log, so the real key has to be found the way the CLI would.
+KEY_PATH="$HOME/.cairn/key"
+[ -f "$KEY_PATH" ] || KEY_PATH="$HOME/.proofwork/key"
+if [ -f "$KEY_PATH" ]; then
+  rule "the MCP server opens a sealed ledger"
+  SEALED="$(mktemp -u /tmp/pw-mcp-sealed-XXXXXX).jsonl"
+  SEALED_OID=$(CAIRN_KEY="$KEY_PATH" "$RUST" --log "$SEALED" --root . \
+    post examples/capset_progressive/objective.json | head -1 | awk '{print $2}')
+  head -c 7 "$SEALED" | grep -q '^pwenc1:' || fail "the CLI did not seal despite a key at $KEY_PATH"
+  SEALED_OUT=$(printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_objectives","arguments":{}}}' \
+    | CAIRN_KEY="$KEY_PATH" "$MCP" --log "$SEALED" --root . 2>/dev/null)
+  # The id of the objective just posted -- `list_objectives` prints ids and
+  # statements, not goals, so this asserts the server decoded the ledger rather
+  # than that it printed some string or other.
+  echo "$SEALED_OUT" | grep -q "$SEALED_OID" \
+    || fail "the MCP server could not read a sealed ledger"
+  rm -f "$SEALED"
+  echo "  list_objectives read a pwenc1: ledger"
+else
+  echo "  (no at-rest key on this machine; sealed-ledger check skipped)"
+fi
+
+
 BEFORE=$(grep -c . "$LOG")
 [ "$BEFORE" = "1" ] || fail "expected the objective alone in the log, found $BEFORE entries"
 echo "  ledger still holds 1 entry (the objective)"
@@ -186,7 +234,7 @@ for who, t in (("agent-a", a), ("agent-b", b)):
 print("  work_assignment answered for two nodes, no coordinator involved")
 
 # An unpinned work_assignment must use the protocol epoch, not a private one.
-# (This ran before PROOFWORK_EPOCH_SECONDS=1 is exported below, so the length
+# (This ran before CAIRN_EPOCH_SECONDS=1 is exported below, so the length
 # here is the 600s default and a boundary race is vanishingly unlikely.)
 unpinned = msgs[5]["content"][0]["text"]
 reported = int(unpinned.split("for epoch ")[1].split()[0])
@@ -223,7 +271,7 @@ echo "  ledger still holds 1 entry: the refusal cost nothing"
 # wait_for_fresh_epoch removes the randomness rather than shrinking it:
 # commit just after a boundary and the assertions have a whole epoch, every
 # run, on any runner.
-export PROOFWORK_EPOCH_SECONDS=4
+export CAIRN_EPOCH_SECONDS=4
 
 wait_for_fresh_epoch() {
   python3 -c '
@@ -232,7 +280,7 @@ length = int(sys.argv[1])
 # Sleep to just past the next boundary. The margin is for the process spawn
 # that follows -- landing exactly on the boundary would race it.
 time.sleep(length - (time.time() % length) + 0.15)
-' "$PROOFWORK_EPOCH_SECONDS"
+' "$CAIRN_EPOCH_SECONDS"
 }
 rule "submit_claim commits, then reveals an epoch later"
 
@@ -250,8 +298,8 @@ wait_for_fresh_epoch
 FIRST=$(call_submit)
 echo "$FIRST" | sed 's/^/  /'
 echo "$FIRST" | grep -q "Committed in epoch" || fail "first submit_claim did not commit"
-grep -q '"kind": *"commitment"' "$LOG" || fail "no commitment reached the log"
-grep -q '"kind": *"claim"' "$LOG" && fail "the artifact was revealed in the same epoch as its commitment"
+[ "$(kinds_in_log commitment)" -ge 1 ] || fail "no commitment reached the log"
+[ "$(kinds_in_log claim)" -eq 0 ] || fail "the artifact was revealed in the same epoch as its commitment"
 
 # The open commitment must be discoverable after a restart -- an agent whose
 # session was compacted has no other way to learn it owes a reveal.
@@ -265,7 +313,7 @@ echo "  pending_reveals lists the open commitment across a server restart"
 # commit and this call is spending the epoch it needs.
 SAME=$(call_submit)
 echo "$SAME" | grep -q "Already committed" || fail "a repeat call in the same epoch made a second commitment"
-[ "$(grep -c '"kind": *"commitment"' "$LOG")" = "1" ] || fail "a repeat call wrote a second commitment"
+[ "$(kinds_in_log commitment)" = "1" ] || fail "a repeat call wrote a second commitment"
 echo "  a repeat inside the same epoch is a no-op, not a second commitment"
 
 # The open commitment must be discoverable after a restart -- an agent whose
@@ -285,7 +333,7 @@ echo "$SECOND" | grep -q "beacon order" || fail "the agent was not told why paym
 echo "  the nonce survived a restart of the server and opened the commitment"
 
 rule "the epoch closes, clears the finality delay, and the batch settles -- over MCP alone"
-# One epoch to close, plus PROOFWORK_FINALITY_EPOCHS more before it is
+# One epoch to close, plus CAIRN_FINALITY_EPOCHS more before it is
 # eligible. Sleeping a single epoch here is what this did before the delay
 # existed, and the symptom was "polling frontier_status did not settle the
 # closed epoch" -- which points at the polling rather than at the clock.
@@ -293,7 +341,7 @@ python3 -c '
 import sys, time
 length, delay = float(sys.argv[1]), int(sys.argv[2])
 time.sleep(length * (1 + delay) + 0.4)
-' "$PROOFWORK_EPOCH_SECONDS" "${PROOFWORK_FINALITY_EPOCHS:-1}"
+' "$CAIRN_EPOCH_SECONDS" "${CAIRN_FINALITY_EPOCHS:-1}"
 # No CLI settle here, deliberately: an agent that reveals and then polls
 # frontier_status must get paid without the operator running anything. The
 # server drains due epochs on any read.

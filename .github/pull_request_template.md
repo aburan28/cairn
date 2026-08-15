@@ -14,7 +14,7 @@ Did this touch a record, a hash, or an encoding?
 - [ ] No — skip the rest of this section.
 - [ ] Yes, and **both** implementations changed together (Rust and
       `reference/rust/`).
-- [ ] Yes, and `proofwork-reference conformance conformance/vectors.json`
+- [ ] Yes, and `cairn-reference conformance conformance/vectors.json`
       still passes. Those vectors are **frozen** -- nothing regenerates them,
       because their value is that they came from an implementation in another
       language. A *diff* in an existing vector means ids moved and live claims

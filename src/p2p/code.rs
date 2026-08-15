@@ -59,7 +59,7 @@ use crate::canonical::Value;
 use crate::obj;
 
 /// AEAD context for verifier-code frames.
-pub const CONTEXT: &[u8] = b"proofwork/p2p/code/v1";
+pub const CONTEXT: &[u8] = b"cairn/p2p/code/v1";
 
 /// Why a code message was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]

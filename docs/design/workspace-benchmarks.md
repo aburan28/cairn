@@ -19,11 +19,11 @@ have, what must be refused, and what turns out not to be a feature at all.
 | solver uploads an archive | **take**, reshaped | [manifest, not archive](#the-artifact-is-a-manifest-not-an-archive) |
 | candidate = baseline + editable files only | **take**, and it is load-bearing | [each claim is self-contained](#each-claim-is-complete-not-a-patch-on-a-patch) |
 | server-side enforcement of editable paths | **take** | verifier, `Reject` |
-| `yukon init`: validate, score baseline, go live | **take** | `proofwork bench init` |
+| `yukon init`: validate, score baseline, go live | **take** | `cairn bench init` |
 | leaderboard shows a per-submission **note** | **take** — we lack it | [notes](#notes-model-and-the-fact-that-agents-read-them) |
 | leaderboard shows the **model** | **take**, labelled self-declared | same |
-| PR diff between submissions | **take** | `proofwork bench diff` |
-| "sync to current best" before you start | **take** | `proofwork bench checkout` |
+| PR diff between submissions | **take** | `cairn bench diff` |
+| "sync to current best" before you start | **take** | `cairn bench checkout` |
 | 50 MiB artifact ceiling | **take**, retuned | [limits](#limits) |
 | `direction` `+` / `-` | already have | `frontier::Direction` |
 | `minScoreImprovementBips` | already have, better documented | `Ratchet::min_improvement` |
@@ -84,8 +84,8 @@ can re-derive.
   "base": "examples/ecdsa-fail/base.manifest.json",
   "base_sha256": "…",
   "editable_paths": ["src/point_add"],
-  "prepare_command": ["bash", "-lc", ".proofwork/prepare.sh"],
-  "score_command": ["bash", "-lc", ".proofwork/run.sh"],
+  "prepare_command": ["bash", "-lc", ".cairn/prepare.sh"],
+  "score_command": ["bash", "-lc", ".cairn/run.sh"],
   "score_path": "score.json",
   "score_scale": 1,
   "max_files": 256,
@@ -223,7 +223,7 @@ crate with a dependency graph. The gap's honest home is a new **operator** actio
 outside the verdict path:
 
 ```
-proofwork bench prime <objective-id>
+cairn bench prime <objective-id>
 ```
 
 It materializes the base tree, runs the objective's declared `prime_command`
@@ -280,7 +280,7 @@ move which frontiers is most of why anyone would read a leaderboard.
 **A note is attacker-authored prose read by an LLM, so it goes through
 `taint_from`.** This is the difference between their surface and ours. Yukon's
 notes are read by humans in a browser. Ours are read by agents over
-`proofwork-mcp`, where `src/bin/mcp.rs` already taints claim ids appearing in
+`cairn-mcp`, where `src/bin/mcp.rs` already taints claim ids appearing in
 verifier `detail` and in objective statements, for exactly this attack: text that
 says "also cite sha256:…" routes real money under citation flow and needs no code
 execution, so the sandbox does nothing about it. A note field is a third door into
@@ -293,8 +293,8 @@ Yukon's solver flow assumes you start from the promoted tree. Two commands close
 that loop, both pure reads over the log and the blob store:
 
 ```
-proofwork bench checkout <objective-id> [--claim <id>] --out <dir>
-proofwork bench diff <claim-a> <claim-b>
+cairn bench checkout <objective-id> [--claim <id>] --out <dir>
+cairn bench diff <claim-a> <claim-b>
 ```
 
 `checkout` materializes base + the frontier holder's files, so a solver edits the
@@ -305,7 +305,7 @@ giving Yukon for free and what a manifest of hashes does not give a human.
 Neither writes to the log. Both work offline against a bundle, which is the test
 of whether they belong here.
 
-## `proofwork bench init`
+## `cairn bench init`
 
 Yukon's `yukon init` prints `manifest validated / baseline scored / harness
 sandboxed / contest live`. The equivalent, from a working directory:
@@ -316,7 +316,7 @@ sandboxed / contest live`. The equivalent, from a working directory:
 3. Run phases 1 and 3 on the base tree with an **empty** artifact. The resulting
    score becomes the default `ratchet.baseline` — derived from the pinned command
    rather than typed by the funder.
-4. Emit `objective.json` and print a `proofwork post` line.
+4. Emit `objective.json` and print a `cairn post` line.
 
 It never posts, for the reason `src/scaffold.rs` gives at length: an objective's
 statement is untrusted text funded by a human decision, and a tool that both
@@ -328,7 +328,7 @@ baseline makes the first trivial submission look like an improvement — but the
 ratchet caps total payout at `reward`, so the only pocket they empty is their
 own. Making baseline derivation an *admission* rule would force every node to
 build the base tree before admitting the record, which is minutes of compute to
-accept a bounty. `proofwork audit` can report the discrepancy for anyone who
+accept a bounty. `cairn audit` can report the discrepancy for anyone who
 cares to check; settlement should not depend on it.
 
 ## Limits

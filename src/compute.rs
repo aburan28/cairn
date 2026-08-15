@@ -3,7 +3,7 @@
 //! This module is deliberately **not** a verifier and it is not part of ledger
 //! settlement. It supplies the metadata and transport building blocks needed to
 //! ask an inference-capable worker to produce a candidate artifact. The result
-//! still has to pass a pinned proofwork verifier before it can affect the log.
+//! still has to pass a pinned cairn verifier before it can affect the log.
 //!
 //! Four boundaries are explicit here:
 //!
@@ -34,7 +34,7 @@ const VERSION: i128 = 1;
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const DIGEST_HEX_LEN: usize = 64;
-const REQUEST_KDF_DOMAIN: &[u8] = b"proofwork/compute/request-key/v1";
+const REQUEST_KDF_DOMAIN: &[u8] = b"cairn/compute/request-key/v1";
 
 /// Trust signals a worker may advertise. A higher level satisfies a request
 /// that asks for a lower level, but none of these levels says that an inference

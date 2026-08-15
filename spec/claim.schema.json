@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aburan28/proofwork/spec/claim.schema.json",
+  "$id": "https://github.com/aburan28/cairn/spec/claim.schema.json",
   "title": "Claim",
   "description": "A revealed artifact submitted against an objective, with the claims it built on. Revealing requires a prior commitment to H(artifact | submitter | nonce); without one, whoever sees the reveal first could resubmit it as their own.",
   "type": "object",

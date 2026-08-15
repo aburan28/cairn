@@ -3,9 +3,9 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "proofwork — a node reader",
+  title: "cairn — a node reader",
   description:
-    "What a proofwork node will pay for, and the epoch chain it settles against.",
+    "What a cairn node will pay for, and the epoch chain it settles against.",
 };
 
 export default function RootLayout({

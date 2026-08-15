@@ -146,7 +146,7 @@ pub use crate::dht::{Distance, Insertion, NodeId, ALPHA, ID_BITS, K, MAX_KEYS, M
 /// Its own context for the same mechanical reason as populations and code: a
 /// DHT frame cannot be opened as a record frame, so no confusion attack reaches
 /// a decoder that was expecting something settlement is derived from.
-pub const CONTEXT: &[u8] = b"proofwork/p2p/dht/v1";
+pub const CONTEXT: &[u8] = b"cairn/p2p/dht/v1";
 
 /// How long a first-hand announcement is trusted, in seconds.
 ///

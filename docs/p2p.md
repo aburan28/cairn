@@ -275,7 +275,7 @@ Two ordering facts that are easy to get wrong:
 
 ## Peer sampling
 
-Built: `AddressBook::sample`, used by `proofwork-p2p` each tick.
+Built: `AddressBook::sample`, used by `cairn-p2p` each tick.
 
 The daemon used to dial every endpoint in its book on every tick. That does not
 survive a book of any size: the traffic is quadratic in the network, and the
@@ -449,7 +449,7 @@ at a time; a daemon schedules retries around it without changing the protocol.
 
 **Accept the socket before you take the node's lock.** `Service` offers both
 `accept_node_once` (listener in, blocks) and `serve_node_once` (accepted stream
-in, does not), and the split is not stylistic. `proofwork-p2p`'s accept thread
+in, does not), and the split is not stylistic. `cairn-p2p`'s accept thread
 took the node's mutex and *then* called the blocking `accept`, so on a node
 nobody was dialling it held the lock for the life of the process. The main loop
 ran exactly once, at startup, and then waited on that mutex forever: no
@@ -468,7 +468,7 @@ discovery/address-book policy or add a signed session greeting. The listener
 also remains responsible for rate limiting before calling the expensive
 McEliece decapsulation.
 
-The `proofwork-p2p` binary is the runnable daemon wrapper. It persists a local
+The `cairn-p2p` binary is the runnable daemon wrapper. It persists a local
 McEliece identity, opens the node ledger, accepts inbound sessions, dials a
 random subset of its address book each tick, and replays newly admitted
 objectives, commitments, and claims through `Node`; verdicts and settlements are
@@ -478,17 +478,17 @@ is canonical JSON of the form
 `{"addr":"127.0.0.1:9001","public":"<hex public key>"}`.
 
 ```text
-proofwork-p2p --identity node.json --listen 127.0.0.1:9000 \
-  --log proofwork.jsonl --root . --bootstrap peer.json \
+cairn-p2p --identity node.json --listen 127.0.0.1:9000 \
+  --log cairn.jsonl --root . --bootstrap peer.json \
   --population population.json --fanout 3
 ```
 
-`proofwork-gen-bootstrap --addr HOST:PORT --out FILE` writes a file in that
+`cairn-gen-bootstrap --addr HOST:PORT --out FILE` writes a file in that
 shape for a given address, with a freshly generated McEliece keypair standing
 in for the seed's own key. It cannot make the address trustworthy -- only the
 key in the file does that, per `p2p::handshake` -- so `"public"` must be
 replaced with the real seed's public key (or the seed operator's own
-`proofwork-p2p --identity FILE` must be pointed at the generated file) before
+`cairn-p2p --identity FILE` must be pointed at the generated file) before
 the connection means anything. `make p2p` calls it automatically to produce
 `.local/seed.json` for `SEED_ADDR` when no other `--bootstrap` is given; see
 the README.
@@ -516,7 +516,7 @@ like silence rather than like a firewall.
 uses `DIAL_TIMEOUT` rather than the kernel's SYN-retransmit schedule (~127 s on
 Linux), every session carries `IO_TIMEOUT` per read and write, and an accepted
 stream has `HANDSHAKE_TIMEOUT` to produce its 128-byte hello. The last one is
-not an optimisation: `proofwork-p2p` runs the handshake with the node mutex
+not an optimisation: `cairn-p2p` runs the handshake with the node mutex
 held, a public address is port-scanned within minutes of existing, and an
 unbounded read there is a seed that wedges on the first scanner and never dials,
 drains, or beacons again. On a LAN none of this shows, because a host that is

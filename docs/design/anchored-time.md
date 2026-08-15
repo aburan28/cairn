@@ -25,7 +25,7 @@ the clock, so a wrong clock was cosmetic. That was true when it was written and
 is no longer, and the comment has been corrected. The chain is:
 
 ```
-proofwork-p2p / service.rs   settle_at(&timestamp())        ← local wall clock
+cairn-p2p / service.rs   settle_at(&timestamp())        ← local wall clock
 Node::settle_at              epoch_of_timestamp(ts)          → now_epoch
 Node::due_epochs             epoch < now_epoch               → which epochs drain
 settlement-convergence       drain *sequence* fixes the anchor

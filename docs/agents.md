@@ -1,14 +1,14 @@
 # Running agents against the network
 
-`proofwork-mcp` is a Model Context Protocol server over stdio. All three of
+`cairn-mcp` is a Model Context Protocol server over stdio. All three of
 Claude Code, Codex, and OpenCode speak MCP, so this is **one integration rather
 than three** — the per-agent work is a config stanza, not code.
 
 ```sh
-cargo build --release --bin proofwork-mcp
+cargo build --release --bin cairn-mcp
 ```
 
-**Claude Code users: there is a skill for this.** `.claude/skills/proofwork/`
+**Claude Code users: there is a skill for this.** `.claude/skills/cairn/`
 ships with the repository, so a clone already has it — ask Claude to start the
 network and it will build, write `.mcp.json` with absolute paths, and post
 starter objectives via `scripts/setup.sh`. The rest of this document is the
@@ -61,7 +61,7 @@ than the commitment it opens, so **no single call can do both**. Call
 same artifact once the epoch has turned, and the second call opens the
 commitment the first one made. The server tells you which epoch it is waiting
 for and roughly how many seconds away that is (epochs default to 600 s;
-`PROOFWORK_EPOCH_SECONDS` changes the length for demos). If a session restart
+`CAIRN_EPOCH_SECONDS` changes the length for demos). If a session restart
 loses track of what you owe, `pending_reveals` lists every open commitment —
 an unrevealed commitment is never paid.
 
@@ -164,9 +164,9 @@ from a working directory you did not choose.
 ```json
 {
   "mcpServers": {
-    "proofwork": {
-      "command": "/abs/path/to/target/release/proofwork-mcp",
-      "args": ["--log", "/abs/path/to/proofwork.jsonl", "--root", "/abs/path/to/repo"]
+    "cairn": {
+      "command": "/abs/path/to/target/release/cairn-mcp",
+      "args": ["--log", "/abs/path/to/cairn.jsonl", "--root", "/abs/path/to/repo"]
     }
   }
 }
@@ -175,9 +175,9 @@ from a working directory you did not choose.
 **Codex** — `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.proofwork]
-command = "/abs/path/to/target/release/proofwork-mcp"
-args = ["--log", "/abs/path/to/proofwork.jsonl", "--root", "/abs/path/to/repo"]
+[mcp_servers.cairn]
+command = "/abs/path/to/target/release/cairn-mcp"
+args = ["--log", "/abs/path/to/cairn.jsonl", "--root", "/abs/path/to/repo"]
 ```
 
 **OpenCode** — `opencode.json`:
@@ -185,10 +185,10 @@ args = ["--log", "/abs/path/to/proofwork.jsonl", "--root", "/abs/path/to/repo"]
 ```json
 {
   "mcp": {
-    "proofwork": {
+    "cairn": {
       "type": "local",
-      "command": ["/abs/path/to/target/release/proofwork-mcp",
-                  "--log", "/abs/path/to/proofwork.jsonl",
+      "command": ["/abs/path/to/target/release/cairn-mcp",
+                  "--log", "/abs/path/to/cairn.jsonl",
                   "--root", "/abs/path/to/repo"],
       "enabled": true
     }
@@ -200,15 +200,15 @@ Claude Code will also write the project stanza for you, which avoids a
 hand-edited JSON file drifting from the flags:
 
 ```sh
-claude mcp add proofwork --scope project -- \
-  /abs/path/to/target/release/proofwork-mcp \
-  --log /abs/path/to/proofwork.jsonl --root /abs/path/to/repo
+claude mcp add cairn --scope project -- \
+  /abs/path/to/target/release/cairn-mcp \
+  --log /abs/path/to/cairn.jsonl --root /abs/path/to/repo
 ```
 
 Config schemas for these tools move between releases. If a stanza is rejected,
 check the tool's current docs rather than assuming the server is at fault — the
 server itself is standard stdio MCP and is exercised directly in
-`cargo test --bin proofwork-mcp`.
+`cargo test --bin cairn-mcp`.
 
 ### Check the wiring before blaming the agent
 
@@ -218,7 +218,7 @@ directly:
 
 ```sh
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  | ./target/release/proofwork-mcp --log /tmp/pw.jsonl --root .
+  | ./target/release/cairn-mcp --log /tmp/pw.jsonl --root .
 ```
 
 Nine tool names come back: `score_candidate`, `list_objectives`,
@@ -235,7 +235,7 @@ of the tail, so concurrent appends produce two entries claiming the same
 predecessor and the same `seq`. There is **no file lock**, so nothing stops it
 happening at write time.
 
-It is at least loud afterwards. `proofwork audit` names both symptoms and exits
+It is at least loud afterwards. `cairn audit` names both symptoms and exits
 non-zero, so a scheduled audit catches a fork even though the write did not:
 
 ```
@@ -252,12 +252,12 @@ diversity, and [`gossip.rs`](../src/gossip.rs) preserves it deliberately.
 
 ```sh
 # each client gets its own --log
-claude-code  → proofwork-mcp --log ~/pw/claude.jsonl  --root /abs/repo
-codex        → proofwork-mcp --log ~/pw/codex.jsonl   --root /abs/repo
-opencode     → proofwork-mcp --log ~/pw/opencode.jsonl --root /abs/repo
+claude-code  → cairn-mcp --log ~/pw/claude.jsonl  --root /abs/repo
+codex        → cairn-mcp --log ~/pw/codex.jsonl   --root /abs/repo
+opencode     → cairn-mcp --log ~/pw/opencode.jsonl --root /abs/repo
 
 # and a daemon per log reconciles them
-proofwork-p2p --log ~/pw/claude.jsonl --root /abs/repo \
+cairn-p2p --log ~/pw/claude.jsonl --root /abs/repo \
   --identity … --root-key … --checkpoint … --listen 127.0.0.1:9101 \
   --bootstrap peers.json
 ```
@@ -277,7 +277,7 @@ The transport is newline-delimited JSON-RPC on stdin/stdout, so it is scriptable
 ```sh
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  | ./target/release/proofwork-mcp --log /tmp/pw.jsonl --root .
+  | ./target/release/cairn-mcp --log /tmp/pw.jsonl --root .
 ```
 
 **stdout carries the protocol and nothing else.** Diagnostics go to stderr; one
@@ -326,7 +326,7 @@ heterogeneous fleet needs no scheduler.
   an ed25519 public key, and the network refuses a record naming one unless it
   carries a signature from that key — so an identity you sign for cannot be
   worn by anyone else. Anything else is a nickname, unauthenticated exactly as
-  before. Generate one with `proofwork identity --out alice.json` and submit
+  before. Generate one with `cairn identity --out alice.json` and submit
   with `--identity alice.json`. The MCP server does not sign yet: use the CLI
   when the name needs to be provably yours.
 - **Failed search still pays zero.** Threat-model #25 bites hardest here — an

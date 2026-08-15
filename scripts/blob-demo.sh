@@ -26,7 +26,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
+RUST="${RUST_BIN:-./target/release/cairn}"
 if [ ! -x "$RUST" ]; then
   echo "building release binary..." >&2
   cargo build --release
@@ -45,7 +45,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 OBJECTIVE=examples/collatz/objective.json
 ARTIFACT=examples/collatz/artifact.json
 
