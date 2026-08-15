@@ -503,11 +503,40 @@ downstream is unbacked.
       [agent-market.md](agent-market.md) is worth building.
 - [ ] Offers on the gossip transport, trades in the log — and purchased goods
       cited at submission, enforced the way the frontier citation already is.
-- [ ] A real randomness beacon (VDF or threshold signature) replacing the
-      ledger-head derivation in `partition.py`, which a sequencer can grind.
-      This got more load-bearing when epoch-batched settlement started ordering
-      a batch by that beacon: grinding the anchor now moves money, not just
-      work assignment.
+- [x] A real randomness beacon. `src/vdf.rs` is a Wesolowski verifiable delay
+      function over the RSA-2048 challenge modulus — a **nothing-up-my-sleeve**
+      parameter, because a VDF over a modulus somebody knows the factorisation
+      of is not a delay at all: the holder of `phi(N)` reduces the exponent and
+      answers instantly.
+
+      `proofwork beacon --orders E --delay T` computes `x^(2^T) mod N` over a
+      seed derived from the log's own Merkle root, and records the answer with
+      its proof. Grinding the anchor used to cost a hash per candidate ordering;
+      it now costs `T` sequential squarings per candidate, and they cannot be
+      parallelised. Better than the chain beacon in one further respect: a chain
+      beacon is *provenance* — "this is what block N held" — and checking it
+      needs an RPC endpoint, while a delay proof is checked against the log
+      alone, which is the one guarantee this project spends everything else to
+      keep.
+
+      Verification is constant in `T`: two exponentiations by a 127-bit
+      Fiat–Shamir prime, about 5ms whatever the difficulty, against 741ms to
+      *produce* a beacon at T = 100,000. The first version of `verify` computed
+      `2^T mod l` by doubling `T` times and so cost the same order as proving,
+      which is the one thing a verifiable *delay* function must not do;
+      `verifying_costs_the_same_at_any_difficulty` pins it.
+
+      Underneath is `src/crypto/bignum.rs` — the crate's only arbitrary-precision
+      arithmetic, Montgomery form, every operation pinned against vectors from
+      Python's integers so a carry bug cannot agree with the test that checks
+      it.
+
+      What it does not do: bound *withholding*. A sequencer that dislikes the
+      beacon it computed can still publish none, and the epoch settles under the
+      documented fallback with `epochs_without_beacon` naming it —
+      `PROOFWORK_REQUIRE_BEACON` makes that refusable rather than invisible.
+      Refusing to settle instead would strand every claim in the epoch, which
+      hands a censor a better weapon than the one being taken away.
 - [ ] Forced inclusion via a base layer. Censorship is the primary threat --
       withholding a reveal steals a bounty -- and Stage 0 has no defence.
 

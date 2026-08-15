@@ -507,6 +507,9 @@ enum Command {
         source: String,
         block: u64,
         value: String,
+        /// Compute the value as a verifiable delay of this many sequential
+        /// squarings, rather than taking it from the caller.
+        delay: Option<u64>,
     },
     /// Sign the log's current state so a reader can pin what this operator
     /// claimed at a point in time.
@@ -1370,6 +1373,7 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut source: Option<String> = None;
     let mut block: Option<u64> = None;
     let mut value: Option<String> = None;
+    let mut delay: Option<u64> = None;
     while let Some(token) = cursor.take() {
         if token == "--orders" {
             orders = Some(parse_u64(&cursor.value("--orders")?, "--orders")?);
@@ -1379,9 +1383,16 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
             block = Some(parse_u64(&cursor.value("--block")?, "--block")?);
         } else if token == "--value" {
             value = Some(cursor.value("--value")?);
+        } else if token == "--delay" {
+            delay = Some(parse_u64(&cursor.value("--delay")?, "--delay")?);
         } else {
             return Err(CliError::Usage(format!("beacon: unexpected {token:?}")));
         }
+    }
+    if delay.is_some() && value.is_some() {
+        return Err(CliError::Usage(String::from(
+            "beacon: --delay computes the value, so --value is not also given",
+        )));
     }
     Ok(Command::Beacon {
         orders: match orders {
@@ -1392,9 +1403,19 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
         // the sequencer did not choose if it came from somewhere -- but an
         // unnamed one is unverifiable by anyone holding a chain, so the name
         // it gets says exactly that rather than pretending to a provenance.
-        source: source.unwrap_or_else(|| "unattributed".into()),
+        source: match (&delay, source) {
+            (Some(_), _) => String::from(proofwork::node::VDF_SOURCE),
+            (None, Some(source)) => source,
+            (None, None) => String::from("unattributed"),
+        },
         block: block.unwrap_or(0),
-        value: require(value, "beacon", "--value")?,
+        // With `--delay` the value is *computed*, so there is nothing to
+        // require: the whole point is that the sequencer does not choose it.
+        value: match (&delay, value) {
+            (Some(_), _) => String::new(),
+            (None, value) => require(value, "beacon", "--value or --delay")?,
+        },
+        delay,
     })
 }
 
@@ -3433,15 +3454,61 @@ fn cmd_beacon(
     source: &str,
     block: u64,
     value: &str,
+    delay: Option<u64>,
 ) -> Result<i32, CliError> {
     let mut node = open_node_for_writing(options)?;
     let before = node.anchor_of_epoch(orders);
-    refused(node.record_beacon(orders, source, block, value, &timestamp()))?;
+
+    // With `--delay`, the value is not the caller's to give. It is computed
+    // over the log's own root, and computing it is the cost that makes trying a
+    // second ordering expensive -- so this command is *supposed* to take a
+    // while, and says so rather than looking hung.
+    let (value, proof) = match delay {
+        None => (value.to_string(), None),
+        Some(difficulty) => {
+            say(
+                out,
+                format!(
+                    "computing a delay of {difficulty} sequential squarings; this is the \
+                     cost a sequencer would pay per ordering it tried"
+                ),
+            );
+            let seed = node.vdf_seed(orders, node.ledger().len());
+            let computed = proofwork::vdf::prove(&seed, difficulty);
+            (
+                computed.output_hex(),
+                Some((difficulty, computed.witness_hex())),
+            )
+        }
+    };
+    refused(
+        node.record_beacon_with(
+            orders,
+            source,
+            block,
+            &value,
+            proof
+                .as_ref()
+                .map(|(difficulty, witness)| (*difficulty, witness.as_str())),
+            &timestamp(),
+        ),
+    )?;
     say(out, format!("beacon for epoch {orders}"));
-    say(out, format!("  source   {source} block {block}"));
+    match &proof {
+        None => say(out, format!("  source   {source} block {block}")),
+        Some((difficulty, _)) => {
+            say(out, format!("  source   {source} difficulty {difficulty}"));
+            say(
+                out,
+                String::from(
+                    "  checked against the log alone -- no chain access needed to audit it",
+                ),
+            );
+        }
+    }
     say(
         out,
-        format!("  anchor   {} -> {}", short(&before), short(value)),
+        format!("  anchor   {} -> {}", short(&before), short(&value)),
     );
     Ok(0)
 }
@@ -4519,16 +4586,28 @@ struct Round<'a> {
 /// nothing, and still cost the network five verifications. So the loop ranks
 /// and submits one. On a non-ratcheted objective the first acceptance wins for
 /// the same reason: the pool settles once.
+struct Proposal<'a> {
+    objective: &'a str,
+    artifacts: &'a [String],
+    who: Submitter<'a>,
+    cites: &'a [String],
+    dry_run: bool,
+    settle: bool,
+}
+
 fn cmd_propose(
     out: &mut dyn Write,
     options: &Options,
-    objective: &str,
-    artifacts: &[String],
-    who: Submitter<'_>,
-    cites: &[String],
-    dry_run: bool,
-    settle: bool,
+    proposal: Proposal<'_>,
 ) -> Result<i32, CliError> {
+    let Proposal {
+        objective,
+        artifacts,
+        who,
+        cites,
+        dry_run,
+        settle,
+    } = proposal;
     let objective_id = if objective.starts_with("sha256:") {
         objective.to_string()
     } else {
@@ -6808,7 +6887,8 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             source,
             block,
             value,
-        } => cmd_beacon(out, options, *orders, source, *block, value),
+            delay,
+        } => cmd_beacon(out, options, *orders, source, *block, value, *delay),
         Command::Checkpoint {
             root_key,
             out: path,
@@ -6886,15 +6966,17 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         } => cmd_propose(
             out,
             options,
-            objective,
-            artifacts,
-            Submitter {
-                declared: submitter,
-                identity: identity.as_deref(),
+            Proposal {
+                objective,
+                artifacts,
+                who: Submitter {
+                    declared: submitter,
+                    identity: identity.as_deref(),
+                },
+                cites,
+                dry_run: *dry_run,
+                settle: *settle,
             },
-            cites,
-            *dry_run,
-            *settle,
         ),
         Command::Scaffold { request, force } => cmd_scaffold(out, options, request, *force),
         Command::Incentives {

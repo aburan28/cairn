@@ -84,6 +84,11 @@ const BATCH: &str = "batch";
 /// One epoch's ordering randomness, drawn where the sequencer cannot choose it.
 /// See [`Node::record_beacon`].
 const BEACON: &str = "beacon";
+/// A beacon whose value is a verifiable delay rather than a chain observation.
+///
+/// The `source` a record carries to say "check this against the log, not
+/// against an RPC endpoint". See [`Node::record_beacon_with`].
+pub const VDF_SOURCE: &str = "vdf";
 
 /// Set to `1` to treat an epoch settled without a beacon as an audit fault.
 ///
@@ -293,6 +298,8 @@ pub enum RuleViolation {
         units: u64,
         seq: u64,
     },
+    /// A delay beacon whose proof does not show the work it claims.
+    BeaconDoesNotVerify { epoch: u64 },
     /// An undertaking that does not cover the whole log as it stood.
     ///
     /// The promiser does not choose how much to promise, because when they
@@ -596,6 +603,12 @@ impl fmt::Display for RuleViolation {
                  committed; this log declares its supply, so a reward nobody issued \
                  would be money made by naming it",
                 crate::canonical::short(funder)
+            ),
+            RuleViolation::BeaconDoesNotVerify { epoch } => write!(
+                f,
+                "the delay proof for epoch {epoch} does not check; a beacon nobody had \
+                 to wait for is a value the sequencer chose, which is the grinding this \
+                 record exists to price"
             ),
             RuleViolation::MintedAfterGenesis { holder, units, seq } => write!(
                 f,
@@ -3411,6 +3424,26 @@ impl Node {
         value: &str,
         ts: &str,
     ) -> Result<(), RuleViolation> {
+        self.record_beacon_with(orders, source, block, value, None, ts)
+    }
+
+    /// [`Node::record_beacon`], optionally carrying a delay proof.
+    ///
+    /// With `Some(proof)` and `source` of [`VDF_SOURCE`], the record is
+    /// **self-verifying from the log alone** — which is the property the chain
+    /// beacon above cannot have. A chain beacon says *this is what block N
+    /// held*, and checking that needs an RPC endpoint; an auditor without one
+    /// takes the sequencer's word for the value and can only check that the
+    /// ordering follows from it. A delay proof needs nothing outside the file.
+    pub fn record_beacon_with(
+        &mut self,
+        orders: u64,
+        source: &str,
+        block: u64,
+        value: &str,
+        proof: Option<(u64, &str)>,
+        ts: &str,
+    ) -> Result<(), RuleViolation> {
         let drawn_in = epoch_of_timestamp("beacon", ts)?;
         if drawn_in != orders {
             return Err(RuleViolation::BeaconOutOfEpoch { orders, drawn_in });
@@ -3421,13 +3454,83 @@ impl Node {
         {
             return Err(RuleViolation::DuplicateBeacon { epoch: orders });
         }
-        let record = Value::object([
+        let mut fields = vec![
             ("orders", Value::Int(i128::from(orders))),
             ("source", Value::string(source)),
             ("block", Value::Int(i128::from(block))),
             ("value", Value::string(value)),
-        ]);
+        ];
+        if let Some((difficulty, witness)) = proof {
+            fields.push(("difficulty", Value::Int(i128::from(difficulty))));
+            fields.push(("witness", Value::string(witness)));
+        }
+        let record = Value::object(fields);
+        // Checked before the append, and checked again by `audit` afterwards.
+        // A rule enforced only on the way in binds only the people who use this
+        // tool to write, and a log can be assembled by concatenation.
+        if source == VDF_SOURCE {
+            self.check_vdf_beacon(&record, self.ledger.len())?;
+        }
         self.append(BEACON, record, ts)
+    }
+
+    /// The seed a delay beacon for `epoch` must be computed over.
+    ///
+    /// The epoch, and the log's Merkle root *below the beacon's own entry*.
+    ///
+    /// The root rather than the epoch chain head, which was the first choice
+    /// and was wrong in a way the test caught: the chain head folds over
+    /// `batch` records only, so on a log that has not drained an epoch yet it
+    /// is the empty string, and a seed that does not move is a seed the
+    /// sequencer can precompute against forever.
+    ///
+    /// The root moves whenever *anything* in the log does, which is the
+    /// property that makes this cost something. A sequencer that wants a
+    /// different beacon has to reorder the log — changing the root — and then
+    /// pay the delay again for the new seed. Grinding the anchor used to cost a
+    /// hash per candidate; it now costs `difficulty` sequential squarings per
+    /// candidate, and they cannot be run in parallel.
+    ///
+    /// Bounded by position for the reason every derivation here is: a beacon
+    /// must stay checkable against the log as it stood when it was written,
+    /// and a beacon is itself an entry, so it cannot be inside its own seed.
+    pub fn vdf_seed(&self, epoch: u64, positions: usize) -> Vec<u8> {
+        let root = self
+            .ledger
+            .prefix(positions)
+            .and_then(|prefix| prefix.root())
+            .unwrap_or_default();
+        let mut seed = Vec::new();
+        seed.extend_from_slice(b"proofwork/vdf/seed");
+        seed.extend_from_slice(&epoch.to_be_bytes());
+        seed.extend_from_slice(root.as_bytes());
+        seed
+    }
+
+    /// Does this delay beacon really show the work it claims?
+    ///
+    /// Split out so [`Node::audit`] asks the same question of a record that
+    /// arrived some other way.
+    pub fn check_vdf_beacon(&self, payload: &Value, positions: usize) -> Result<(), RuleViolation> {
+        let epoch = payload
+            .get("orders")
+            .and_then(Value::as_u64)
+            .ok_or(RuleViolation::BeaconDoesNotVerify { epoch: 0 })?;
+        let fail = || RuleViolation::BeaconDoesNotVerify { epoch };
+        let difficulty = payload
+            .get("difficulty")
+            .and_then(Value::as_u64)
+            .ok_or_else(fail)?;
+        let output =
+            decode_hex(payload_str(payload, "value").ok_or_else(fail)?).ok_or_else(fail)?;
+        let witness =
+            decode_hex(payload_str(payload, "witness").ok_or_else(fail)?).ok_or_else(fail)?;
+        let proof = crate::vdf::Proof { output, witness };
+        if crate::vdf::verify(&self.vdf_seed(epoch, positions), difficulty, &proof) {
+            Ok(())
+        } else {
+            Err(fail())
+        }
     }
 
     /// The epoch chain folded over every `batch` record before `positions`,
@@ -4563,6 +4666,17 @@ impl Node {
                     entry.seq, entry.ts
                 ));
             }
+            // A delay beacon carries its own evidence, so unlike a chain
+            // beacon it can be checked here rather than taken on the
+            // sequencer's word. Checked against the log *as it stood below the
+            // record*, because the seed is the epoch anchor and a later append
+            // must not be able to invalidate a beacon that was right when it
+            // was written.
+            if payload_str(&entry.payload, "source") == Some(VDF_SOURCE) {
+                if let Err(error) = self.check_vdf_beacon(&entry.payload, entry.seq as usize) {
+                    problems.push(format!("beacon at entry {}: {error}", entry.seq));
+                }
+            }
         }
 
         if beacon_required() {
@@ -4928,6 +5042,22 @@ impl Node {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Decode lowercase hex, or `None`.
+///
+/// Local rather than shared: this is the one place in the rules engine that
+/// reads a hex *number* out of a record rather than a digest, and a hex helper
+/// in `canonical` would invite somebody to use it on an identifier, where the
+/// `sha256:` prefix makes the same call wrong.
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&text[index..index + 2], 16).ok())
+        .collect()
+}
 
 fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(Value::as_str)
@@ -8812,6 +8942,105 @@ mod tests {
         assert!(
             matches!(second, RuleViolation::DuplicateBeacon { epoch } if epoch == orders),
             "{second}"
+        );
+    }
+
+    /// A delay beacon carries its own evidence, so nobody has to hold a chain
+    /// to check it.
+    ///
+    /// The chain beacon that came first is provenance and not proof: it says
+    /// *this is what block N held*, and an auditor without an RPC endpoint
+    /// takes the sequencer's word for the value. A delay proof needs nothing
+    /// outside the file, which is the one guarantee this project spends
+    /// everything else to keep — anyone can re-derive every settled result from
+    /// the log alone.
+    #[test]
+    fn a_delay_beacon_is_checked_against_the_log_and_a_forged_one_is_refused() {
+        let dir = TempDir::new("vdf-beacon");
+        let mut honest_node = node(&dir);
+        let orders = epoch_at(EPOCH);
+
+        // Small on purpose: this test is about the rule, not the delay. A real
+        // difficulty is chosen so one beacon takes most of an epoch, which is
+        // what makes trying a hundred orderings unaffordable.
+        const DIFFICULTY: u64 = 256;
+        let seed = honest_node.vdf_seed(orders, honest_node.ledger().len());
+        let proof = crate::vdf::prove(&seed, DIFFICULTY);
+
+        honest_node
+            .record_beacon_with(
+                orders,
+                crate::node::VDF_SOURCE,
+                0,
+                &proof.output_hex(),
+                Some((DIFFICULTY, &proof.witness_hex())),
+                &stamp(EPOCH),
+            )
+            .expect("an honest delay");
+        assert_eq!(honest_node.anchor_of_epoch(orders), proof.output_hex());
+        assert_eq!(honest_node.audit(false), Vec::<String>::new());
+
+        // The grinding attempt: a value the sequencer preferred, with no delay
+        // behind it. Refused on admission.
+        let forged_dir = TempDir::new("vdf-beacon-forged");
+        let mut node = node(&forged_dir);
+        let seed = node.vdf_seed(orders, node.ledger().len());
+        let honest = crate::vdf::prove(&seed, DIFFICULTY);
+        let preferred =
+            crate::vdf::element(b"the answer I wanted").to_be_bytes(crate::vdf::ELEMENT_BYTES);
+        let error = node
+            .record_beacon_with(
+                orders,
+                crate::node::VDF_SOURCE,
+                0,
+                &crate::hex::encode(&preferred),
+                Some((DIFFICULTY, &honest.witness_hex())),
+                &stamp(EPOCH),
+            )
+            .expect_err("a beacon nobody waited for");
+        assert!(
+            matches!(error, RuleViolation::BeaconDoesNotVerify { .. }),
+            "got {error:?}"
+        );
+
+        // And appended past the rule, the way a concatenated log would carry
+        // it, the audit names it.
+        node.append(
+            BEACON,
+            Value::object([
+                ("orders", Value::Int(i128::from(orders))),
+                ("source", Value::string(crate::node::VDF_SOURCE)),
+                ("block", Value::Int(0)),
+                ("value", Value::string(crate::hex::encode(&preferred))),
+                ("difficulty", Value::Int(i128::from(DIFFICULTY))),
+                ("witness", Value::string(honest.witness_hex())),
+            ]),
+            &stamp(EPOCH),
+        )
+        .expect("append");
+        let problems = node.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|problem: &String| problem.contains("does not check")),
+            "a forged delay went unreported: {problems:?}"
+        );
+    }
+
+    /// The seed is the epoch's own anchor, so it is not knowable before the
+    /// epoch's records exist — and a sequencer that reorders them has to pay
+    /// the delay again for each ordering it tries.
+    #[test]
+    fn the_delay_seed_moves_when_the_log_does() {
+        let dir = TempDir::new("vdf-seed");
+        let mut node = node(&dir);
+        let orders = epoch_at(EPOCH);
+        let before = node.vdf_seed(orders, node.ledger().len());
+        node.post_objective(&lean_objective(1), TS).expect("post");
+        let after = node.vdf_seed(orders, node.ledger().len());
+        assert_ne!(
+            before, after,
+            "the seed ignored the log, so grinding it would still be free"
         );
     }
 

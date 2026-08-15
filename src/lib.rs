@@ -44,6 +44,7 @@ pub mod shards;
 pub mod store;
 pub mod swarm;
 pub mod time;
+pub mod vdf;
 pub mod verifiers;
 
 pub use attribution::{flow, FlowParams};
