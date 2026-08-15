@@ -76,6 +76,31 @@
         }
       }
     },
+    "shares": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 32,
+      "description": "Who is paid for this claim and how much. Carries no money yet: settlement pays `submitter` and this is the encoding landing before the split does. `who` must be a public key and `signature` is that payee's consent over this claim's signing payload, which contains `who` and `weight` for every share but no signature -- so every payee signs the same bytes. Omitted entirely when empty, never sent as []; empty means the submitter takes everything.",
+      "items": {
+        "type": "object",
+        "required": ["who", "weight", "signature"],
+        "additionalProperties": false,
+        "properties": {
+          "who": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "signature": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{128}$"
+          }
+        }
+      }
+    },
     "signature": {
       "type": "string",
       "pattern": "^[0-9a-f]{128}$",

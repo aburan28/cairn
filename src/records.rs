@@ -117,6 +117,15 @@ pub enum RecordError {
     /// Two relations naming one target. See [`Claim::validate`] for why the key
     /// is the target rather than the `(kind, target)` pair.
     DuplicateRelation { id: String },
+    /// A payee named by something that is not a public key.
+    ///
+    /// A nickname cannot sign, so it cannot consent, so it cannot be paid. See
+    /// [`Share`] for why consent is not optional.
+    PayeeNotAKey { who: String },
+    /// Two shares naming one payee.
+    DuplicatePayee { who: String },
+    /// More payees than [`MAX_SHARES`].
+    TooManyShares { count: usize },
     /// A relation kind outside the declared set.
     ///
     /// Refused, never skipped: an implementation that ignored what another read
@@ -178,6 +187,19 @@ impl fmt::Display for RecordError {
                 f,
                 "two relations name the target {id:?}; a claim says one thing \
                  about any other claim"
+            ),
+            RecordError::PayeeNotAKey { who } => write!(
+                f,
+                "payee {who:?} is not a public key; a share needs a signature to \
+                 consent to it, and an unauthenticated nickname cannot sign"
+            ),
+            RecordError::DuplicatePayee { who } => {
+                write!(f, "two shares name the payee {who:?}")
+            }
+            RecordError::TooManyShares { count } => write!(
+                f,
+                "{count} shares exceeds the limit of {MAX_SHARES}; the split is \
+                 recomputed by every reader deriving balances"
             ),
             RecordError::UnknownRelation { kind } => write!(
                 f,
@@ -1394,6 +1416,168 @@ impl ClaimRelation {
     }
 }
 
+// -- claim shares ----------------------------------------------------------
+
+/// Most payees one claim may name.
+///
+/// A bound rather than a guess. The split is recomputed every time anyone
+/// derives balances, and an unbounded list is a cheap way to make every node's
+/// settlement arithmetic slow for the price of one record. 32 is far above any
+/// plausible author list and far below anything that costs a reader real time.
+///
+/// The published schema carries the same number as `maxItems`. A decoder
+/// stricter than the schema is the same defect as one laxer than it — two
+/// answers to what a record is.
+pub const MAX_SHARES: usize = 32;
+
+/// One payee of a claim, and their consent to being one.
+///
+/// See `docs/design/co-authorship.md`. The short version: `submitter` stays
+/// singular because [`commitment_hash`] binds exactly one party and that binding
+/// is what stops an observer stealing a revealed artifact. This says where the
+/// money goes, not who committed.
+///
+/// # Why `who` must be a key, and `signature` is not optional
+///
+/// A payee signs the claim's signing payload, so being named costs the namer a
+/// signature they cannot forge. Without that, anyone could name anyone.
+///
+/// The objection is that naming a payee only *gives* them money. Two answers.
+/// Association is a cost in a research network and an append-only log offers no
+/// way to decline it afterwards. And [`crate::knowledge`] merges independence
+/// classes on shared identity — if payees count there, and a shared payee is a
+/// shared interest, then naming a target is a way to make their unrelated claims
+/// look correlated and quietly deflate their corroboration.
+///
+/// So consent is required, and the consequence is inherited rather than invented:
+/// an unauthenticated nickname cannot sign, so it cannot consent, so it cannot
+/// be a payee. That is the same conclusion
+/// [`crate::knowledge::Standing::Withdrawn`] reached about retraction — a name
+/// nobody owns is a name nobody can speak for — and two rules agreeing is worth
+/// more than the convenience of nickname payees.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Share {
+    /// The payee: 64 lowercase hex, which *is* an ed25519 public key.
+    pub who: String,
+    /// Relative weight. Proportional to the sum, so `[1, 1]` and `[50, 50]` are
+    /// the same split and nobody has to normalise to a magic denominator.
+    ///
+    /// `u32`, and never zero. A zero share is either a mistake or an attempt to
+    /// record association without payment; association is what
+    /// [`Relation`] is for.
+    pub weight: u32,
+    /// This payee's signature over the claim's [`Claim::signing_payload`], hex.
+    ///
+    /// Outside the signing payload, exactly as [`Claim::signature`] is outside
+    /// its own — otherwise no payee could ever sign, since each signature would
+    /// change the bytes the next one had to cover. The claim's *id* still covers
+    /// it, so consent cannot be stripped from a claim somebody already cited.
+    pub signature: String,
+}
+
+impl Share {
+    pub fn new(who: impl Into<String>, weight: u32, signature: impl Into<String>) -> Share {
+        Share {
+            who: who.into(),
+            weight: weight.into_weight(),
+            signature: signature.into(),
+        }
+    }
+
+    /// The half the signatures cover: who is paid and how much, never the
+    /// consent itself.
+    pub fn signing_value(&self) -> Value {
+        Value::object([
+            ("who", Value::string(self.who.clone())),
+            ("weight", Value::Int(i128::from(self.weight))),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("who", Value::string(self.who.clone())),
+            ("weight", Value::Int(i128::from(self.weight))),
+            ("signature", Value::string(self.signature.clone())),
+        ])
+    }
+
+    pub fn from_value(value: &Value) -> Result<Share, RecordError> {
+        const RECORD: &str = "claim";
+        let object = expect_object(value, RECORD)?;
+        let who = required_string(object, RECORD, "who")?;
+        let weight = match object.get("weight") {
+            Some(Value::Int(n)) if *n > 0 && *n <= i128::from(u32::MAX) => *n as u32,
+            _ => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "shares",
+                    expected: "a weight in 1..=4294967295",
+                })
+            }
+        };
+        let signature = required_string(object, RECORD, "signature")?;
+        // Closed object, like a relation and for the same reason: this decoder
+        // feeds `to_value`, which emits exactly these three keys, so a record
+        // admitted carrying a fourth would be *stored* under a different digest
+        // than the one it arrived with.
+        if let Some(map) = object.as_object() {
+            for key in map.keys() {
+                if key != "who" && key != "weight" && key != "signature" {
+                    return Err(RecordError::InvalidField {
+                        record: RECORD,
+                        field: "shares",
+                        expected: "an object with exactly `who`, `weight` and `signature`",
+                    });
+                }
+            }
+        }
+        let share = Share {
+            who,
+            weight,
+            signature,
+        };
+        share.validate()?;
+        Ok(share)
+    }
+
+    /// Structural checks. The *cryptographic* one lives in
+    /// [`Claim::verify_signature`], which is the only place with the payload to
+    /// check a signature against.
+    pub fn validate(&self) -> Result<(), RecordError> {
+        if signed_submitter(&self.who).is_none() {
+            return Err(RecordError::PayeeNotAKey {
+                who: self.who.clone(),
+            });
+        }
+        if self.signature.len() != 128 || !is_lower_hex(&self.signature) {
+            return Err(RecordError::InvalidField {
+                record: "claim",
+                field: "shares",
+                expected: "a 128-character lowercase hex signature",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Local helper so `Share::new` reads the same as the struct literal. `u32`
+/// already, so this is identity — it exists to keep the constructor's signature
+/// honest if the type ever widens.
+trait IntoWeight {
+    fn into_weight(self) -> u32;
+}
+
+impl IntoWeight for u32 {
+    fn into_weight(self) -> u32 {
+        self
+    }
+}
+
+fn is_lower_hex(text: &str) -> bool {
+    text.bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 // -- claim -----------------------------------------------------------------
 
 /// Phase 2: reveal the artifact, with the citations it builds on.
@@ -1424,6 +1608,23 @@ pub struct Claim {
     /// optional: an attacker who could append `retracts` to somebody else's
     /// signed claim could withdraw their work.
     pub relations: Vec<ClaimRelation>,
+    /// Who is paid, and how much of this claim's income each receives.
+    ///
+    /// Empty for almost every claim, and empty means what it has always meant:
+    /// the submitter takes everything. There is deliberately no implicit
+    /// hundred-percent share record — absent and `[{submitter, all of it}]` must
+    /// not be two spellings of one thing, or one claim has two ids.
+    ///
+    /// Omitted from the canonical form when empty, which is the only reason the
+    /// field could be added: every claim ever written predates it, so no id
+    /// moves and the frozen vectors still reproduce.
+    ///
+    /// **Nothing reads this yet.** Settlement still pays `submitter` and
+    /// attribution still flows to it; this is the encoding landing before the
+    /// money moves, so that the record shape is settled and agreed across
+    /// implementations before anything depends on it. See
+    /// `docs/design/co-authorship.md` for the steps that follow.
+    pub shares: Vec<Share>,
     /// Ed25519 signature over this record, hex, or `None`. Omitted from the
     /// canonical form when absent, so adding it moved no ids. See
     /// [`signed_submitter`].
@@ -1449,6 +1650,7 @@ impl Claim {
             created_at: created_at.into(),
             cites,
             relations: Vec::new(),
+            shares: Vec::new(),
             signature: None,
         };
         claim.validate()?;
@@ -1462,6 +1664,20 @@ impl Claim {
     /// six and the two must stay callable the same way.
     pub fn relating(mut self, relations: Vec<ClaimRelation>) -> Result<Claim, RecordError> {
         self.relations = relations;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Attach payees, returning the amended claim.
+    ///
+    /// The signatures must already be gathered: a payee signs
+    /// [`Claim::signing_payload`], which covers `who` and `weight` for every
+    /// share, so every payee signs the same bytes and the order they sign in
+    /// does not matter. It also means the split must be *final* before the
+    /// first signature is collected -- changing a weight afterwards invalidates
+    /// every signature already gathered, which is the intended difficulty.
+    pub fn sharing(mut self, shares: Vec<Share>) -> Result<Claim, RecordError> {
+        self.shares = shares;
         self.validate()?;
         Ok(self)
     }
@@ -1509,7 +1725,36 @@ impl Claim {
                 });
             }
         }
+
+        if self.shares.len() > MAX_SHARES {
+            return Err(RecordError::TooManyShares {
+                count: self.shares.len(),
+            });
+        }
+        let mut payees: BTreeSet<&str> = BTreeSet::new();
+        for share in &self.shares {
+            share.validate()?;
+            // One entry per payee. Two entries for one key are either a mistake
+            // or an attempt to make a split read as smaller than it is, and
+            // merging them silently would be this layer deciding what somebody
+            // meant about money.
+            if !payees.insert(share.who.as_str()) {
+                return Err(RecordError::DuplicatePayee {
+                    who: share.who.clone(),
+                });
+            }
+        }
         Ok(())
+    }
+
+    /// Total weight, widened. `u32` weights and up to [`MAX_SHARES`] of them
+    /// cannot overflow `u64`, and computing it here rather than at each use is
+    /// what stops a caller reaching for `u32` and finding out otherwise.
+    pub fn total_weight(&self) -> u64 {
+        self.shares
+            .iter()
+            .map(|share| u64::from(share.weight))
+            .sum()
     }
 
     /// Canonical form. `cites` is always present, empty list included: it is
@@ -1517,8 +1762,20 @@ impl Claim {
     /// claim two different ids depending on how it was built.
     pub fn to_value(&self) -> Value {
         let mut value = self.signing_payload();
-        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
-            map.insert("signature".to_string(), Value::string(signature.clone()));
+        if let Value::Object(map) = &mut value {
+            // Re-emitted with consent attached. `signing_payload` wrote the
+            // signature-free form a moment ago; this replaces it wholesale
+            // rather than merging, so exactly one place decides what a share
+            // looks like on the wire.
+            if !self.shares.is_empty() {
+                map.insert(
+                    "shares".to_string(),
+                    Value::Array(self.shares.iter().map(Share::to_value).collect()),
+                );
+            }
+            if let Some(signature) = &self.signature {
+                map.insert("signature".to_string(), Value::string(signature.clone()));
+            }
         }
         value
     }
@@ -1556,6 +1813,20 @@ impl Claim {
                 );
             }
         }
+        // Shares appear here **without their signatures**, and that asymmetry
+        // is what makes them signable at all: each payee signs these bytes, so
+        // if a signature were inside them the first payee's would change what
+        // the second had to cover and no set of signatures could ever agree.
+        // `to_value` puts the signatures back, so the claim's id still covers
+        // consent and it cannot be stripped from a claim somebody cited.
+        if !self.shares.is_empty() {
+            if let Value::Object(map) = &mut value {
+                map.insert(
+                    "shares".to_string(),
+                    Value::Array(self.shares.iter().map(Share::signing_value).collect()),
+                );
+            }
+        }
         value
     }
 
@@ -1570,14 +1841,28 @@ impl Claim {
         self
     }
 
-    /// Check the signature this record carries, if the rules demand one.
+    /// Check the signature this record carries, if the rules demand one, and
+    /// every payee's consent.
+    ///
+    /// Both in one call rather than two, because a caller who checked the
+    /// submitter and forgot the payees would admit a claim naming people who
+    /// never agreed to be named — and the one thing a split must not be is
+    /// something a stranger can write about you.
     pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        let payload = self.signing_payload();
         verify_record_signature(
             "claim",
             &self.submitter,
-            &self.signing_payload(),
+            &payload,
             self.signature.as_deref(),
-        )
+        )?;
+        // Every payee signs the *same* bytes: `signing_payload` omits the share
+        // signatures precisely so that it can. Order therefore does not matter
+        // and no payee's consent depends on another's.
+        for share in &self.shares {
+            verify_record_signature("claim", &share.who, &payload, Some(&share.signature))?;
+        }
+        Ok(())
     }
 
     /// Identity of the artifact alone -- used to detect duplicate submissions.
@@ -1660,6 +1945,23 @@ impl Claim {
             }
         };
 
+        // Absent is empty; `null` is not, and neither is `[]` a second spelling
+        // of absent -- both refused, exactly as for `cites` and `relations`.
+        let shares = match value.get("shares") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(Share::from_value)
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "shares",
+                    expected: "an array of {who, weight, signature} objects",
+                })
+            }
+        };
+
         let claim = Claim {
             objective_id: required_string(value, RECORD, "objective_id")?,
             submitter: required_string(value, RECORD, "submitter")?,
@@ -1668,6 +1970,7 @@ impl Claim {
             created_at: required_string(value, RECORD, "created_at")?,
             cites,
             relations,
+            shares,
             signature: optional_string(value, RECORD, "signature")?,
         };
         claim.validate()?;
@@ -2458,6 +2761,213 @@ mod tests {
         "sha256:963b51817b25a73e371736c38235dc6ef603f81fe765b41010ed1b89001d76f5";
     const OBJ_RATCHET: &str =
         "sha256:7aa80a57f7c916ba0bcff805b4a2fec9ee9c6b4fcccc1e9321d724c2d92922e4";
+
+    // -- shares -------------------------------------------------------------
+
+    /// A claim with `n` co-authors, each having genuinely signed it.
+    ///
+    /// Built the way a real one must be: the weights are fixed first, every
+    /// payee signs the *same* [`Claim::signing_payload`], and the signatures go
+    /// on afterwards. If that order were wrong the test would pass and the
+    /// scheme would not work.
+    fn shared_claim(weights: &[u32]) -> (Claim, Vec<crate::crypto::identity::Identity>) {
+        use crate::crypto::identity::Identity;
+        let authors: Vec<Identity> = (0..weights.len())
+            .map(|i| Identity::from_secret_bytes([40u8 + i as u8; 32]))
+            .collect();
+
+        // Placeholder consent, only to fix the shape the payload will have.
+        let placeholder: Vec<Share> = authors
+            .iter()
+            .zip(weights)
+            .map(|(who, weight)| Share {
+                who: who.submitter_id(),
+                weight: *weight,
+                signature: "0".repeat(128),
+            })
+            .collect();
+        let draft = Claim::new(
+            "sha256:obj",
+            authors[0].submitter_id(),
+            Value::object([("n", Value::Int(1))]),
+            "nonce",
+            "2026-08-13T00:00:00+00:00",
+            vec![],
+        )
+        .expect("valid claim")
+        .sharing(placeholder)
+        .expect("valid shares");
+
+        // The payload omits share signatures, so it is identical before and
+        // after they are filled in -- which is the property that lets every
+        // payee sign independently.
+        let payload = draft.signing_payload();
+        let shares: Vec<Share> = authors
+            .iter()
+            .zip(weights)
+            .map(|(who, weight)| Share {
+                who: who.submitter_id(),
+                weight: *weight,
+                signature: who.sign_value(&payload).to_hex(),
+            })
+            .collect();
+        let claim = draft.sharing(shares).expect("valid shares");
+        assert_eq!(
+            claim.signing_payload(),
+            payload,
+            "filling in consent must not change what was signed"
+        );
+        let claim = claim.signed_with(&authors[0]);
+        (claim, authors)
+    }
+
+    #[test]
+    fn every_payee_signs_the_same_bytes_and_consent_verifies() {
+        let (claim, _authors) = shared_claim(&[60, 40]);
+        claim
+            .verify_signature()
+            .expect("submitter and both payees consented");
+        assert_eq!(claim.total_weight(), 100);
+    }
+
+    #[test]
+    fn a_payee_who_did_not_consent_is_refused() {
+        let (mut claim, _authors) = shared_claim(&[60, 40]);
+        // Swap in a stranger's key, keeping the signature that was valid for
+        // somebody else. This is the attack the signature exists to stop:
+        // naming a party who never agreed.
+        let stranger = crate::crypto::identity::Identity::from_secret_bytes([99u8; 32]);
+        claim.shares[1].who = stranger.submitter_id();
+        assert!(
+            claim.verify_signature().is_err(),
+            "a share must not be assignable to somebody who never signed"
+        );
+    }
+
+    #[test]
+    fn changing_a_weight_invalidates_every_consent_already_gathered() {
+        let (mut claim, _authors) = shared_claim(&[60, 40]);
+        claim.shares[0].weight = 90;
+        // Weights are inside the signed payload, so re-cutting the split after
+        // signatures are collected breaks them. That is the intended
+        // difficulty: consent is to a *specific* division.
+        assert!(claim.verify_signature().is_err());
+    }
+
+    #[test]
+    fn a_nickname_cannot_be_a_payee() {
+        let (claim, authors) = shared_claim(&[50, 50]);
+        let error = claim
+            .clone()
+            .sharing(vec![Share {
+                who: "alice".to_string(),
+                weight: 1,
+                signature: authors[0].sign_value(&claim.signing_payload()).to_hex(),
+            }])
+            .unwrap_err();
+        assert!(
+            matches!(&error, RecordError::PayeeNotAKey { who } if who == "alice"),
+            "{error}"
+        );
+        // The message must say *why*, because the fix is to make an identity
+        // rather than to retry.
+        assert!(error.to_string().contains("cannot sign"), "{error}");
+    }
+
+    #[test]
+    fn shares_are_omitted_when_empty_so_no_id_moved() {
+        let plain = Claim::new(
+            "sha256:obj",
+            "alice",
+            Value::object([("n", Value::Int(1))]),
+            "nonce",
+            "2026-08-13T00:00:00+00:00",
+            vec![],
+        )
+        .expect("valid claim");
+        let body = plain.to_value();
+        assert!(
+            body.get("shares").is_none(),
+            "an empty share list must not reach the wire: every claim ever \
+             written predates the field, and an empty array would move all of them"
+        );
+        // And the decoder must refuse `[]` rather than read it as absent, or
+        // one claim has two ids depending on how it was written.
+        let mut with_empty = body.as_object().expect("object").clone();
+        with_empty.insert("shares".to_string(), Value::Array(vec![]));
+        let decoded = Claim::from_value(&Value::Object(with_empty)).expect("decodes");
+        assert_eq!(
+            decoded.to_value(),
+            body,
+            "an explicitly empty list normalises to absent"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_payee_and_a_zero_weight_are_refused() {
+        let (claim, authors) = shared_claim(&[50, 50]);
+        let who = authors[0].submitter_id();
+        let signature = authors[0].sign_value(&claim.signing_payload()).to_hex();
+
+        let twice = claim.clone().sharing(vec![
+            Share {
+                who: who.clone(),
+                weight: 1,
+                signature: signature.clone(),
+            },
+            Share {
+                who: who.clone(),
+                weight: 1,
+                signature: signature.clone(),
+            },
+        ]);
+        assert!(matches!(
+            twice.unwrap_err(),
+            RecordError::DuplicatePayee { .. }
+        ));
+
+        // A zero weight is refused at the decoder: association without payment
+        // is what `relations` is for.
+        let body = Value::object([
+            ("who", Value::string(who)),
+            ("weight", Value::Int(0)),
+            ("signature", Value::string(signature)),
+        ]);
+        assert!(Share::from_value(&body).is_err());
+    }
+
+    #[test]
+    fn more_payees_than_the_bound_are_refused() {
+        let (claim, authors) = shared_claim(&[1]);
+        let signature = authors[0].sign_value(&claim.signing_payload()).to_hex();
+        let too_many: Vec<Share> = (0..=MAX_SHARES)
+            .map(|i| Share {
+                // Distinct keys, so it is the count being refused and not a
+                // duplicate.
+                who: format!("{:064x}", i),
+                weight: 1,
+                signature: signature.clone(),
+            })
+            .collect();
+        assert!(matches!(
+            claim.sharing(too_many).unwrap_err(),
+            RecordError::TooManyShares { .. }
+        ));
+    }
+
+    #[test]
+    fn consent_is_inside_the_id_but_not_inside_what_it_signs() {
+        let (claim, _authors) = shared_claim(&[70, 30]);
+        let mut stripped = claim.clone();
+        for share in &mut stripped.shares {
+            share.signature = "0".repeat(128);
+        }
+        // Same payload -- that is what lets every payee sign independently...
+        assert_eq!(claim.signing_payload(), stripped.signing_payload());
+        // ...and a different id, so consent cannot be stripped from a claim
+        // somebody already cited.
+        assert_ne!(claim.id(), stripped.id());
+    }
 
     fn certificate_verifier() -> Value {
         Value::object([

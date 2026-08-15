@@ -739,6 +739,12 @@ fn cli(args: &[String]) -> Result<(), String> {
                 created_at: ts.clone(),
                 cites,
                 relations,
+                // The reference CLI writes no shares. Sharing needs every
+                // payee's signature gathered before the claim is built, which
+                // is a workflow rather than a flag -- and this crate's job is
+                // to agree about the *encoding*, which the decoder above
+                // already does.
+                shares: Vec::new(),
                 signature: None,
             };
             claim.validate().map_err(|e| e.to_string())?;

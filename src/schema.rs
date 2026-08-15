@@ -164,6 +164,7 @@ fn is_supported_keyword(key: &str) -> bool {
             | "items"
             | "uniqueItems"
             | "minLength"
+            | "maxItems"
             | "minimum"
             | "pattern"
             | "format"
@@ -366,6 +367,20 @@ fn check_array(
                 item,
                 &format!("{path}[{i}]"),
             )?;
+        }
+    }
+    // A ceiling on element count. Present because `shares` needs one and a
+    // decoder stricter than the published schema is the same defect as one
+    // laxer than it -- two answers to what a record is.
+    if let Some(max) = map.get("maxItems") {
+        let max = max
+            .as_i128()
+            .ok_or_else(|| SchemaError::unusable(spath, "maxItems must be an integer"))?;
+        if i128::try_from(items.len()).map(|n| n > max).unwrap_or(true) {
+            return Err(SchemaError::invalid(
+                path,
+                format!("{} items exceeds the maximum of {max}", items.len()),
+            ));
         }
     }
     if map.get("uniqueItems") == Some(&Value::Bool(true)) {

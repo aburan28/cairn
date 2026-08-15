@@ -381,7 +381,91 @@ pub struct Claim {
     /// unknown kind fails here, where the primary also fails, instead of
     /// surviving as an opaque blob this crate would happily re-emit.
     pub relations: Vec<ClaimRelation>,
+    /// Who is paid, and how much. Carries no money *yet* -- settlement here
+    /// still pays `submitter`, exactly as the primary does. Re-derived anyway,
+    /// because a field one implementation decodes and the other ignores is a
+    /// field the two disagree about admitting.
+    pub shares: Vec<Share>,
     pub signature: Option<String>,
+}
+
+/// Most payees one claim may name. Must equal the primary's `MAX_SHARES` and
+/// the schema's `maxItems`: a bound two implementations set differently is a
+/// record one admits and the other refuses.
+pub const MAX_SHARES: usize = 32;
+
+/// One payee, and their consent to being one.
+///
+/// `who` must be a public key and `signature` is not optional: a payee signs
+/// the claim's signing payload, so being named costs a signature the namer
+/// cannot forge. A nickname cannot sign, so it cannot be paid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Share {
+    pub who: String,
+    pub weight: u32,
+    pub signature: String,
+}
+
+impl Share {
+    /// What every payee signs: who and how much, never the consent itself.
+    /// A signature inside these bytes would change what the next payee had to
+    /// cover, so no set of signatures could agree.
+    pub fn signing_value(&self) -> Value {
+        Value::object([
+            ("who", Value::string(self.who.clone())),
+            ("weight", Value::Int(i128::from(self.weight))),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("who", Value::string(self.who.clone())),
+            ("weight", Value::Int(i128::from(self.weight))),
+            ("signature", Value::string(self.signature.clone())),
+        ])
+    }
+
+    pub fn from_value(value: &Value) -> Result<Share, RecordError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| RecordError("a share must be an object".into()))?;
+        for key in object.keys() {
+            if key != "who" && key != "weight" && key != "signature" {
+                return Err(RecordError(format!("unknown share field {key:?}")));
+            }
+        }
+        let weight = match value.get("weight") {
+            Some(Value::Int(n)) if *n > 0 && *n <= i128::from(u32::MAX) => *n as u32,
+            _ => return Err(RecordError("share weight must be in 1..=4294967295".into())),
+        };
+        let share = Share {
+            who: text(value, "who")?,
+            weight,
+            signature: text(value, "signature")?,
+        };
+        share.validate()?;
+        Ok(share)
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        if signed_submitter(&self.who).is_none() {
+            return Err(RecordError(format!(
+                "payee {:?} is not a public key; a nickname cannot consent to being paid",
+                self.who
+            )));
+        }
+        let hex_ok = self.signature.len() == 128
+            && self
+                .signature
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !hex_ok {
+            return Err(RecordError(
+                "a share signature must be 128 lowercase hex characters".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The nine relation kinds, spelled as they appear on the wire.
@@ -476,13 +560,29 @@ impl Claim {
                 );
             }
         }
+        if !self.shares.is_empty() {
+            if let Value::Object(map) = &mut value {
+                map.insert(
+                    "shares".into(),
+                    Value::Array(self.shares.iter().map(Share::signing_value).collect()),
+                );
+            }
+        }
         value
     }
 
     pub fn to_value(&self) -> Value {
         let mut value = self.signing_payload();
-        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
-            map.insert("signature".into(), Value::string(signature.clone()));
+        if let Value::Object(map) = &mut value {
+            if !self.shares.is_empty() {
+                map.insert(
+                    "shares".into(),
+                    Value::Array(self.shares.iter().map(Share::to_value).collect()),
+                );
+            }
+            if let Some(signature) = &self.signature {
+                map.insert("signature".into(), Value::string(signature.clone()));
+            }
         }
         value
     }
@@ -511,13 +611,23 @@ impl Claim {
         )
     }
 
+    /// The submitter's signature *and* every payee's consent. Checked together
+    /// because a caller who verified one and forgot the other would admit a
+    /// claim naming people who never agreed to be named.
     pub fn verify_signature(&self) -> Result<(), RecordError> {
+        let payload = self.signing_payload();
         verify_record_signature(
             "claim",
             &self.submitter,
-            &self.signing_payload(),
+            &payload,
             self.signature.as_deref(),
-        )
+        )?;
+        // Every payee signs the same bytes -- `signing_payload` omits the share
+        // signatures precisely so that it can -- so order does not matter.
+        for share in &self.shares {
+            verify_record_signature("claim", &share.who, &payload, Some(&share.signature))?;
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<(), RecordError> {
@@ -541,6 +651,22 @@ impl Claim {
                 return Err(RecordError(format!(
                     "two relations name the target {:?}",
                     relation.target
+                )));
+            }
+        }
+        if self.shares.len() > MAX_SHARES {
+            return Err(RecordError(format!(
+                "{} shares exceeds the limit of {MAX_SHARES}",
+                self.shares.len()
+            )));
+        }
+        let mut payees: BTreeSet<&str> = BTreeSet::new();
+        for share in &self.shares {
+            share.validate()?;
+            if !payees.insert(share.who.as_str()) {
+                return Err(RecordError(format!(
+                    "two shares name the payee {:?}",
+                    share.who
                 )));
             }
         }
@@ -579,6 +705,18 @@ impl Claim {
                 ))
             }
         };
+        let shares = match value.get("shares") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(Share::from_value)
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => {
+                return Err(RecordError(
+                    "shares must be an array of {who, weight, signature} objects".into(),
+                ))
+            }
+        };
         let claim = Claim {
             objective_id: text(value, "objective_id")?,
             submitter: text(value, "submitter")?,
@@ -587,6 +725,7 @@ impl Claim {
             created_at: text(value, "created_at")?,
             cites,
             relations,
+            shares,
             signature: optional_text(value, "signature")?,
         };
         claim.validate()?;
@@ -1012,6 +1151,7 @@ mod tests {
             created_at: "2026-07-28T00:00:00+00:00".into(),
             cites: vec![],
             relations: vec![],
+            shares: vec![],
             signature: None,
         };
         let mut signed = claim.clone();

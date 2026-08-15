@@ -189,9 +189,23 @@ A record change, which is the expensive kind:
 
 ## Order of work
 
-1. `shares` on `Claim`, validation, signing payload, both implementations,
-   schema, vectors. No settlement changes yet — a claim may carry shares that
-   nothing reads.
+1. **`shares` on `Claim`** — validation, signing payload, both implementations,
+   schema. No settlement changes: a claim may carry shares that nothing reads.
+   **Done.** Notes on what that step did and did not cover:
+   - The frozen `vectors.json` was **not** touched. New vectors computed by
+     either Rust implementation would carry that implementation's behaviour as
+     their provenance, which is exactly what `conformance/README.md` says those
+     vectors exist to avoid. Cross-implementation agreement is covered instead
+     by 17 boundary cases in `conformance/adversarial.jsonl`, including a
+     genuinely ed25519-signed 60/40 split that both implementations accept — so
+     the accept path is exercised, not only the refusals.
+   - There is **no interop round**, because neither CLI can write a share:
+     gathering consent is a workflow rather than a flag, and the flag belongs
+     with step 2 when settlement reads the field. `differential.sh` covers the
+     encoding contract in both directions in the meantime.
+   - `schema.rs` gained `maxItems`, so the published schema can state the
+     `MAX_SHARES` bound the decoders enforce. A decoder stricter than the schema
+     is the same defect as one laxer than it.
 2. Settlement derives the split; `attribution` divides income by weight.
 3. `knowledge` counts payees when merging independence classes.
 4. `shares_digest` on `Commitment`, if the defection window turns out to matter.
