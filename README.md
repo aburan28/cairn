@@ -10,6 +10,12 @@ This repository contains **cairn**, the protocol implementation: a Rust
 library and CLI, a second and deliberately independent Rust implementation in
 `reference/`, and the conformance vectors that bind them to the same answers.
 
+**Site: <https://aburan28.github.io/distributed-researcher/>** — what it is, how
+it works, and the challenges a node is paying for. It is the same app a node
+serves at `/ui/` (see [ui/README.md](ui/README.md)), so nothing on it is
+simulated: the numbers come from a node when one answers and from
+`launch/cairn.jsonl` when none does, and the page says which.
+
 Stage 0 — one operator, no token, no consensus. What it does provide is the
 property that actually matters: *anyone can independently re-derive every result
 the network has settled*, from nothing but a copy of the log.

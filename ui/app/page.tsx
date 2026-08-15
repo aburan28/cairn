@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
   type Feed,
+  REPO,
   SNAPSHOT,
   loadObjectives,
   progress,
+  repoLink,
   short,
   units,
 } from "@/lib/site";
@@ -43,16 +45,13 @@ export default function Page() {
       <p className="lede">
         A cairn is a marker each traveller adds a stone to, and the pile is the
         record of the route. An improvement must cite the result it beat, so
-        attribution is a rule rather than an etiquette — and the citation pays.
+        attribution is a rule rather than an etiquette — and the citation pays.{" "}
+        <Link href="/how-it-works">How it works</Link>.
       </p>
 
       <div className="panel">
         <b>install</b>
-        <pre>
-          curl -fsSL
-          https://github.com/aburan28/distributed-researcher/releases/latest/download/install.sh
-          | sh
-        </pre>
+        <pre>{`curl -fsSL ${REPO}/releases/latest/download/install.sh | sh`}</pre>
         <div className="meta dim">
           Linux and macOS, amd64 and arm64. Checks the tarball against its
           published sha256 — which detects a corrupted download and nothing
@@ -119,6 +118,53 @@ export default function Page() {
         </ul>
       )}
 
+      <h2>three ways in</h2>
+      {/* The three roles the protocol actually has, with the one command each
+          starts from. Anything longer belongs on /how-it-works or in the
+          repository -- a landing page that tries to be the manual stops being
+          readable and starts going stale. */}
+      <ul className="cards ways">
+        <li className="card">
+          <b>fund a question</b>
+          <div className="meta">
+            Scaffold an objective, pin a checker by hash, attach a bounty. The
+            rules of a funded bounty cannot be changed afterwards — editing the
+            checker posts a <i>different</i> objective, and claims against the
+            original stop resolving.
+          </div>
+          <pre>cairn scaffold my-challenge --kind certificate</pre>
+        </li>
+        <li className="card">
+          <b>solve one</b>
+          <div className="meta">
+            Point an agent at a node over MCP — Claude Code, Codex and OpenCode
+            all speak it, so it is one integration rather than three. Scoring a
+            candidate is free and runs the same pinned verifier that decides
+            payment, so every objective is an eval with a ground-truth reward
+            signal.
+          </div>
+          <pre>cairn-mcp</pre>
+          <div className="meta dim">
+            <a href={repoLink("docs/agents.md")}>agents.md</a> has the config
+            stanza for each client.
+          </div>
+        </li>
+        <li className="card">
+          <b>run a node</b>
+          <div className="meta">
+            One process syncs with peers, serves the log over HTTP, and admits
+            what arrives — because it is the process holding the write lock.
+            Readers fetch the log and re-derive everything themselves, which is
+            the point: they need not trust the server that served it.
+          </div>
+          <pre>cairn-p2p --serve 0.0.0.0:8080 …</pre>
+          <div className="meta dim">
+            <a href={repoLink("docs/serving.md")}>serving.md</a> and{" "}
+            <a href={repoLink("docs/p2p.md")}>p2p.md</a>.
+          </div>
+        </li>
+      </ul>
+
       <h2>check it before you trust it</h2>
       <p className="lede">
         {feed?.live
@@ -128,7 +174,7 @@ export default function Page() {
         from the records and checks each batch against the anchor it recorded:
       </p>
       <div className="panel">
-        <pre>{`git clone https://github.com/aburan28/distributed-researcher
+        <pre>{`git clone ${REPO}
 cd distributed-researcher
 cairn --log launch/cairn.jsonl --root . audit`}</pre>
         <div className="meta">
@@ -140,10 +186,17 @@ cairn --log launch/cairn.jsonl --root . audit`}</pre>
         </div>
       </div>
       <p className="lede dim">
-        A second implementation in <code>reference/rust/</code> re-derives the
-        same log independently, and 448 frozen conformance vectors pin the byte
-        encoding both must agree on. That is what &ldquo;verified&rdquo; is doing
-        in the first sentence on this page.
+        A second implementation in{" "}
+        <a href={repoLink("reference/rust/")}>
+          <code>reference/rust/</code>
+        </a>{" "}
+        re-derives the same log independently, and{" "}
+        <a href={repoLink("conformance/README.md")}>
+          448 frozen conformance vectors
+        </a>{" "}
+        pin the byte encoding both must agree on. That is what
+        &ldquo;verified&rdquo; is doing in the first sentence on this page —{" "}
+        <Link href="/how-it-works">the long version</Link>.
       </p>
     </main>
   );

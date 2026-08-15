@@ -48,13 +48,32 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
+      # `enablement: true` because the first run of this workflow died here, on
+      # `Get Pages site failed`, and nothing was ever published. Pages has to be
+      # turned on for the repository before a deployment can target it, and the
+      # workflow that needs it is the right place to ask: a green build that
+      # publishes nothing, waiting on a setting nobody remembers to flip, is the
+      # failure mode this parameter exists for. It is idempotent -- once Pages
+      # is on, the action reads the config and moves on.
+      #
+      # If this ever 404s again, the token was refused rather than the setting
+      # being absent, and the fix is one click: Settings -> Pages -> Build and
+      # deployment -> Source: GitHub Actions.
       - uses: actions/configure-pages@v5
         id: pages
+        with:
+          enablement: true
 
       - run: npm ci
         working-directory: ui
       - run: npx tsc --noEmit
         working-directory: ui
+
+      # The snapshot check below builds `cairn-serve`, so this job needs a Rust
+      # toolchain and wants the same cache the other workflows use. Without it
+      # every deploy pays a full cold release build to re-derive a 4 KB file.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
       # The snapshot is committed, so this only checks it still matches the log
       # it claims to come from. A site whose "real settled log" section drifted
