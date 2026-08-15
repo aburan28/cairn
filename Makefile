@@ -60,7 +60,7 @@ CLIENT ?= claude
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-build install demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke node-smoke \
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-build site-snapshot install demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke node-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
@@ -79,7 +79,8 @@ help:
 	  '  make node                One process: p2p sync AND HTTP, sharing a log.' \
 	  '  make install             Install the released binaries from GitHub.' \
 	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
-	  '  make ui-build            Export the reader and build it INTO the binaries.' \
+	  '  make ui-build            Export the site and build it INTO the binaries.' \
+	  '  make site-snapshot       Regenerate the site fallback from launch/.' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
@@ -245,9 +246,18 @@ ui:
 # `cargo build` working for somebody with no Node installed: the `ui` feature is
 # off by default, and this is the target that turns it on. Afterwards
 # `cairn-p2p --serve ADDR` answers the reader at /ui/.
-ui-build:
+ui-build: site-snapshot
 	cd "$(ROOT)/ui" && npm ci && npm run build
 	$(CARGO) build --release --features ui --bins
+
+# Regenerate the site's fallback snapshot from the settled log in launch/.
+#
+# Committed output, so building the site needs Node and nothing else -- but it
+# is produced by the *node*, over HTTP, because relating a ledger entry to an
+# objective's record id means canonical hashing, and a third implementation of
+# that in JavaScript is a third place for a consensus rule to drift.
+site-snapshot: build
+	./scripts/site-snapshot.sh
 
 test-reference:
 	cargo test --manifest-path reference/rust/Cargo.toml

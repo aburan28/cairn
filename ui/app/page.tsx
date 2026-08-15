@@ -1,217 +1,159 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 import {
-  type Chain,
-  NODE_URL,
-  epochScales,
-  fetchChain,
-  firstBrokenLink,
+  type Feed,
+  SNAPSHOT,
+  loadObjectives,
+  progress,
   short,
-  totalClaims,
-} from "@/lib/chain";
-import {
-  type CheckpointResponse,
-  coversHead,
-  fetchCheckpoint,
-} from "@/lib/checkpoint";
+  units,
+} from "@/lib/site";
 
 /**
- * The knowledge chain of one node.
+ * The landing page.
  *
- * A client component that reads a *live* node rather than a server component
- * rendering at build or request time. The value of this page is comparing one
- * node's head against a peer's, so which node it points at has to be
- * changeable without a redeploy — that is a browser-side concern.
+ * A client component, like every page here, because the numbers on it come from
+ * a node at read time rather than from a build. That is the whole difference
+ * between this and a marketing page: nothing here is typed in, and the command
+ * that re-derives all of it is printed underneath.
  */
 export default function Page() {
-  const [base, setBase] = useState(NODE_URL);
-  const [chain, setChain] = useState<Chain | null>(null);
-  const [checkpoint, setCheckpoint] = useState<CheckpointResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const load = useCallback(async (url: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      // Both, and the checkpoint never fails the page: a node with no
-      // checkpoint is an ordinary state, so `fetchCheckpoint` resolves to null
-      // rather than turning "nobody has signed this yet" into an error.
-      const [next, signed] = await Promise.all([
-        fetchChain(url),
-        fetchCheckpoint(url),
-      ]);
-      setChain(next);
-      setCheckpoint(signed);
-    } catch (cause) {
-      setChain(null);
-      setCheckpoint(null);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const [feed, setFeed] = useState<Feed | null>(null);
 
   useEffect(() => {
-    // Show *which* origin, rather than the empty string NODE_URL now holds.
-    // Empty is right for fetching -- it keeps every request relative, so the
-    // page works behind a tunnel or a proxy on an unknown path -- and wrong for
-    // displaying, because nobody can retype "" after they clear the box.
-    setBase(NODE_URL || window.location.origin);
-    void load(NODE_URL);
-  }, [load]);
+    void loadObjectives().then(setFeed);
+  }, []);
 
-  const broken = chain ? firstBrokenLink(chain.chain) : null;
-  const scales = chain ? epochScales(chain.chain) : [];
-  const claims = chain ? totalClaims(chain.chain) : 0;
+  const objectives = feed?.objectives ?? SNAPSHOT.objectives;
+  const open = objectives.filter((o) => !o.settled);
+  const pool = objectives.reduce((sum, o) => sum + o.reward, 0);
+  const paid = objectives.reduce((sum, o) => sum + (o.frontier?.paid_cumulative ?? 0), 0);
 
   return (
     <main>
-      <h1>knowledge chain</h1>
+      <h1>cairn</h1>
       <p className="lede">
-        Each link is <code>H({"{prev, epoch, sorted claim ids}"})</code> —
-        content only, so two nodes that settled the same claims in the same
-        epochs compute the same head. The head is the anchor every later batch
-        is ordered against. Nothing here is stored: the node derives it from its
-        log.
+        A research network where <b>verified results are the unit of account</b>.
+        Post a question with a pinned checker and a bounty; anyone who moves the
+        answer forward is paid in proportion to how far they moved it, and every
+        payment is re-derivable from the log by anyone who has it.
+      </p>
+      <p className="lede">
+        A cairn is a marker each traveller adds a stone to, and the pile is the
+        record of the route. An improvement must cite the result it beat, so
+        attribution is a rule rather than an etiquette — and the citation pays.
       </p>
 
-      <div className="row">
-        <input
-          value={base}
-          onChange={(event) => setBase(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") void load(base);
-          }}
-          aria-label="Node URL"
-          spellCheck={false}
-        />
-        <button onClick={() => void load(base)} disabled={loading}>
-          {loading ? "reading…" : "read"}
-        </button>
+      <div className="panel">
+        <b>install</b>
+        <pre>
+          curl -fsSL
+          https://github.com/aburan28/distributed-researcher/releases/latest/download/install.sh
+          | sh
+        </pre>
+        <div className="meta dim">
+          Linux and macOS, amd64 and arm64. Checks the tarball against its
+          published sha256 — which detects a corrupted download and nothing
+          more, because both files come from the same server. The check that
+          means something is the one below.
+        </div>
       </div>
 
-      {error && (
-        <div className="panel bad">
-          <b>could not read a chain</b>
-          {error}
-        </div>
-      )}
+      <div className="row stats">
+        <Stat label="objectives" value={String(objectives.length)} />
+        <Stat label="open" value={String(open.length)} />
+        <Stat label="pool" value={units(pool)} />
+        <Stat label="paid out" value={units(paid)} />
+        <Stat label="chain links" value={String(SNAPSHOT.links)} />
+      </div>
 
-      {chain && (
-        <>
-          <div className="panel">
-            <b>head — compare with a peer&apos;s; if they differ, you have forked</b>
-            <code className="accent">{chain.head || "— empty chain"}</code>
-          </div>
-
-          {checkpoint && (
-            <div className="panel">
-              <b>
-                signed at height {checkpoint.checkpoint.height}
-                {coversHead(checkpoint.checkpoint, chain.links) === "behind" &&
-                  " — behind the head below, which is normal after further appends"}
-              </b>
-              <div className="meta">
-                merkle root{" "}
-                <code className="dim" title={checkpoint.checkpoint.root}>
-                  {short(checkpoint.checkpoint.root)}
-                </code>{" "}
-                · issued {checkpoint.checkpoint.issued_at}
-              </div>
-              {/* Said plainly, because the alternative is a reader assuming the
-                  green text means somebody checked. Verifying ML-DSA here would
-                  put a third implementation of a consensus-critical primitive
-                  in a third language. */}
-              <div className="meta dim">
-                This page does not verify that signature — it shows that one
-                exists and what it covers. <code>cairn verify --from</code>{" "}
-                is what checks it.
-              </div>
-            </div>
-          )}
-
-          {scales.length > 1 && (
-            <div className="panel bad">
-              <b>this chain was settled under more than one epoch length</b>
-              Its epoch numbers span {scales.length} orders of magnitude, which
-              happens when <code>CAIRN_EPOCH_SECONDS</code> changed between
-              batches — the demo scripts set it to 1, the default is 600. The
-              divisor is derived and never stored, so this is a heuristic and
-              not a derivation. It matters because that value decides which
-              epoch a record falls in, and therefore which reveals were legal:
-              a log holding both was settled under two different rules.
-            </div>
-          )}
-
-          {/* The one claim this page makes on its own behalf. The node says
-              "here is a chain"; rendering it without checking would be taking
-              that on faith, which is the thing this project does not do. */}
-          {broken !== null && (
-            <div className="panel bad">
-              <b>this is not a chain</b>
-              The link for epoch {broken} does not name the link before it. The
-              node served something inconsistent — do not compare this head
-              against anything.
-            </div>
-          )}
-
-          {chain.chain.length === 0 ? (
-            <p className="empty">
-              No epoch has settled yet. The chain starts at the first batch.
-            </p>
-          ) : (
-            <ol className="chain">
-              {[...chain.chain].reverse().map((link) => (
-                <li
-                  key={link.epoch}
-                  className={link.prev === "" ? "link genesis" : "link"}
-                >
-                  <div>
-                    <span className="epoch">epoch {link.epoch}</span>{" "}
-                    <code className="accent" title={link.link}>
-                      {short(link.link)}
-                    </code>{" "}
-                    <span className="tag">
-                      {link.claims.length}{" "}
-                      {link.claims.length === 1 ? "claim" : "claims"}
-                    </span>
-                  </div>
-                  <div className="meta">
-                    prev{" "}
-                    {link.prev === "" ? (
-                      <span className="dim">— genesis</span>
-                    ) : (
-                      <code title={link.prev}>{short(link.prev)}</code>
-                    )}
-                  </div>
-                  {link.claims.length === 0 ? (
-                    <div className="meta">no claims settled</div>
+      <h2>challenges</h2>
+      {objectives.length === 0 ? (
+        <p className="empty">No objectives yet.</p>
+      ) : (
+        <ul className="cards">
+          {objectives.map((o) => {
+            const ratchet = o.record?.ratchet ?? null;
+            const pct =
+              ratchet && o.frontier ? progress(o.frontier.score, ratchet) : null;
+            return (
+              <li key={o.id} className="card">
+                <div>
+                  <Link href={`/challenge?id=${encodeURIComponent(o.id)}`}>
+                    <b>{o.goal || short(o.id)}</b>
+                  </Link>{" "}
+                  <span className={o.settled ? "tag" : "tag open"}>
+                    {o.settled ? "settled" : "open"}
+                  </span>{" "}
+                  <span className="tag">{o.verifier_kind}</span>
+                </div>
+                <div className="meta">
+                  {/* Labelled untrusted wherever it is shown. The funder wrote
+                      it, and an agent reading this page has no other warning. */}
+                  <span className="dim">statement (untrusted): </span>
+                  {o.statement.slice(0, 150)}
+                  {o.statement.length > 150 ? "…" : ""}
+                </div>
+                <div className="meta">
+                  pool <code>{units(o.reward)}</code>
+                  {o.frontier ? (
+                    <>
+                      {" · "}best <code className="accent">{o.frontier.score}</code>
+                      {" held by "}
+                      <code>{o.frontier.holder}</code>
+                      {pct !== null && (
+                        <span className="bar" aria-label={`${pct}% of the span`}>
+                          <span style={{ width: `${pct}%` }} />
+                        </span>
+                      )}
+                    </>
                   ) : (
-                    <ul className="claims">
-                      {link.claims.map((claim) => (
-                        <li key={claim}>
-                          <code className="dim" title={claim}>
-                            {short(claim)}
-                          </code>
-                        </li>
-                      ))}
-                    </ul>
+                    <span className="dim"> · no claim yet</span>
                   )}
-                </li>
-              ))}
-            </ol>
-          )}
-
-          <p className="lede" style={{ marginTop: "2rem" }}>
-            {chain.links} link(s) settling {claims} claim(s) in total, newest
-            first. Verify none of it on trust:{" "}
-            <code>cairn --log &lt;log&gt; --root . audit</code> re-derives
-            the chain and checks every batch against the anchor it recorded.
-          </p>
-        </>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       )}
+
+      <h2>check it before you trust it</h2>
+      <p className="lede">
+        {feed?.live
+          ? `The numbers above came from ${feed.origin}.`
+          : `No node answered, so the numbers above come from ${SNAPSHOT.source} — a real settled log that ships in the repository, not a mock.`}{" "}
+        Either way, re-derive them yourself. This recomputes every settlement
+        from the records and checks each batch against the anchor it recorded:
+      </p>
+      <div className="panel">
+        <pre>{`git clone https://github.com/aburan28/distributed-researcher
+cd distributed-researcher
+cairn --log launch/cairn.jsonl --root . audit`}</pre>
+        <div className="meta">
+          merkle root{" "}
+          <code className="accent" title={SNAPSHOT.merkle_root}>
+            {short(SNAPSHOT.merkle_root)}
+          </code>{" "}
+          · signed at height {SNAPSHOT.height} · {SNAPSHOT.issued_at}
+        </div>
+      </div>
+      <p className="lede dim">
+        A second implementation in <code>reference/rust/</code> re-derives the
+        same log independently, and 448 frozen conformance vectors pin the byte
+        encoding both must agree on. That is what &ldquo;verified&rdquo; is doing
+        in the first sentence on this page.
+      </p>
     </main>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="stat">
+      <div className="statValue">{value}</div>
+      <div className="statLabel">{label}</div>
+    </div>
   );
 }

@@ -154,7 +154,10 @@ rule "the embedded reader is routed, whether or not it was built in"
 UI_CODE=$(curl -s -o "$WORK/ui.body" -w '%{http_code}' "http://127.0.0.1:$HTTP/ui/")
 case "$UI_CODE" in
   200)
-    grep -q "knowledge chain" "$WORK/ui.body" || fail "/ui/ 200 but is not the reader"
+    # The landing page now, with the reader at /ui/chain/. Checked by a string
+    # the page states about itself rather than by a heading, so a wording change
+    # in the prose does not fail the build.
+    grep -q "unit of account" "$WORK/ui.body" || fail "/ui/ 200 but is not the cairn site"
     # basePath has to survive the export, or every asset 404s and the page
     # renders unstyled -- the exact symptom ui/README.md warns reads as a CSS bug.
     grep -q '/ui/_next/' "$WORK/ui.body" || fail "/ui/ does not reference /ui/_next assets"
