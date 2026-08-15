@@ -59,7 +59,14 @@ hmac = "0.13"
 # "nonce reuse is fatal" is one rule to enforce rather than one per site.
 # `tests/cipher_policy.rs` fails the build if an AES or TLS crate enters the
 # dependency tree, so the claim is checked and not merely written down.
-chacha20poly1305 = "0.10"
+#
+# `the_aead_matches_the_rfc_8439_vector` in `src/crypto/envelope.rs` is what
+# makes a bump here safe to take. Every other cipher test seals and opens in one
+# process with one build, so it passes for any construction that is merely
+# self-consistent -- and a sealed store and a recorded transport frame both
+# outlive the binary that wrote them. The known-answer test is the check that
+# 0.10 and 0.11 produce the same bytes, which they do.
+chacha20poly1305 = "0.11"
 
 # Confidentiality layer. Censorship resistance needs unlinkable, sealed
 # submissions that can be revealed WITHOUT the submitter being online -- see
@@ -72,7 +79,18 @@ chacha20poly1305 = "0.10"
 # whose transport is quantum-resistant and whose submissions were sealed with
 # X25519 had moved the weakness rather than removed it, and a dependency still
 # in the tree is one the next person can reach for. See `src/crypto/kem.rs`.
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+#
+# **No `rand_core` feature on dalek, and that is what unblocked the 2 -> 3
+# bump.** `ed25519-dalek 3` takes its RNG from `rand_core 0.10`, while
+# `classic-mceliece-rust` (through `rand 0.8`) and `argon2` (through
+# `password-hash`) take theirs from `rand_core 0.6` -- and `src/crypto/kem.rs`
+# hands one caller-supplied `R` to all of them, which cannot satisfy two
+# versions of one trait. Raising `rand_core` here instead type-errors in four
+# files. `Identity::generate` fills 32 bytes from the caller's RNG and calls
+# `SigningKey::from_bytes`, which is what dalek's own `generate` does, so the
+# signature crate and the KEMs now version independently. The `rand_core` below
+# is the KEMs' version, not ed25519's, and is pinned by them.
+ed25519-dalek = "3"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
 ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }

@@ -50,6 +50,15 @@ honest submission by taking verifiers offline.
 **No floats anywhere near money or identity.** `canonical::Value` has no float
 variant, deliberately. Do not add one.
 
+**A cipher bump needs a known-answer test, not a round-trip.** Every round-trip
+test in this crate seals and opens in one process with one build, so it passes
+for any construction that is merely self-consistent -- including one that has
+quietly changed. A sealed store and a recorded transport frame both outlive the
+binary that wrote them. `the_aead_matches_the_rfc_8439_vector` in
+`src/crypto/envelope.rs` pins the bytes against the IETF vector; the conformance
+vectors do the same job for signatures, which is how `ed25519-dalek 2 -> 3` was
+taken without regenerating anything.
+
 **Money arithmetic is checked.** `overflow-checks` is on in release too. Use
 `u128` intermediates and return errors rather than wrapping.
 
