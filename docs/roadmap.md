@@ -422,6 +422,17 @@ downstream is unbacked.
       trade expressed as an objective reuses escrow, settlement, audit and
       citation flow, and needs no transfer primitive. See
       [agent-market.md](agent-market.md).
+- [ ] **Co-authorship**: one submitter, N consenting payees, so that work which
+      does not decompose into citable units can still pay everyone who did it.
+      Citation flow already pays *sequential* collaboration and work assignment
+      plus gossip already cover *parallel* collaboration; the gap is one
+      indivisible artifact with two authors, which today forces an off-protocol
+      settlement — the trust relationship the rest of this design removes. A
+      payee's share is signed, so consent is not optional and a nickname cannot
+      be a payee. Design, attacks and the open defection window in
+      [design/co-authorship.md](design/co-authorship.md). A record change, so it
+      lands with both implementations, new vectors alongside the frozen ones, and
+      an interop round.
 - [ ] **Reserved citation share**, and a discretionary split weighted by settled
       reward. Citation flow divides δ evenly, which is safe only while citable
       claims are scarce; agent funding makes them free to manufacture, and five

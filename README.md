@@ -802,6 +802,7 @@ examples/            worked objectives with real artifacts
 - [coordination.md](docs/coordination.md) — the hoarding trap, the ratchet, CRDT gossip
 - [agent-market.md](docs/agent-market.md) — agent-to-agent rewards: what a peer-to-peer mechanism would be, and what it breaks
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
+- [design/co-authorship.md](docs/design/co-authorship.md) — paying two people for one indivisible artifact, and why citation flow is the better answer whenever the work decomposes
 - [knowledge.md](docs/knowledge.md) — typed relations, derived standing, and reader-chosen confidence: revising knowledge without rewriting history
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
