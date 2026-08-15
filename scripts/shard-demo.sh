@@ -16,7 +16,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
+RUST="${RUST_BIN:-./target/release/cairn}"
 if [ ! -x "$RUST" ]; then
   echo "building release binary..." >&2
   cargo build --release
@@ -41,7 +41,7 @@ echo "  artifact: $(wc -c < "$WORK/artifact.bin" | tr -d ' ') bytes"
 
 rule "what a (4, 2) cut would cost, before anything is written"
 "$RUST" --root "$WORK/plan" shard plan "$WORK/artifact.bin" | sed 's/^/  /'
-[ -d "$WORK/plan/.proofwork" ] && fail "plan wrote to the store"
+[ -d "$WORK/plan/.cairn" ] && fail "plan wrote to the store"
 
 rule "six holders, one shard each"
 for i in 0 1 2 3 4 5; do
@@ -49,7 +49,7 @@ for i in 0 1 2 3 4 5; do
   "$RUST" --root "$WORK/node-$i" shard encode "$WORK/artifact.bin" --keep "$i" \
     | tail -2 | sed "s/^/  node-$i /"
 done
-ADDR=$(ls "$WORK/node-0/.proofwork/shards")
+ADDR=$(ls "$WORK/node-0/.cairn/shards")
 echo "  address $ADDR"
 
 rule "no holder can rebuild it alone, and each says so rather than failing oddly"
@@ -98,7 +98,7 @@ rule "one holder burns down, and another starts lying"
 rm -rf "$WORK/node-5"
 # node-2 flips one byte in the middle of a chunk: the subtlest corruption there
 # is, and the one a length check would miss.
-SHARD="$WORK/node-2/.proofwork/shards/$ADDR/002"
+SHARD="$WORK/node-2/.cairn/shards/$ADDR/002"
 printf '\xff' | dd of="$SHARD" bs=1 seek=777 conv=notrunc status=none
 echo "  node-5 gone; node-2 corrupted at byte 777"
 
@@ -107,10 +107,10 @@ READER="$WORK/reader"
 mkdir -p "$READER"
 # The reader starts with the manifest and no shards -- which is all anyone needs
 # in order to check what they are handed.
-cp -r "$WORK/node-1/.proofwork" "$READER/"
-rm -f "$READER/.proofwork/shards/$ADDR"/0*
+cp -r "$WORK/node-1/.cairn" "$READER/"
+rm -f "$READER/.cairn/shards/$ADDR"/0*
 for i in 0 1 2 3 4; do
-  cp "$WORK/node-$i/.proofwork/shards/$ADDR/00$i" "$READER/.proofwork/shards/$ADDR/00$i"
+  cp "$WORK/node-$i/.cairn/shards/$ADDR/00$i" "$READER/.cairn/shards/$ADDR/00$i"
 done
 OUT=$("$RUST" --root "$READER" shard reconstruct "$ADDR" --out "$WORK/rebuilt.bin")
 echo "$OUT" | sed 's/^/  /'

@@ -14,12 +14,20 @@
 //! musl targets with nothing but a linker, on the checked claim that no build
 //! script in the graph needs a C toolchain. This does not change that.
 //!
-//! # It fails rather than shipping an empty page
+//! # A missing export warns; it does not fail the build
 //!
-//! With the feature on and `ui/out` absent, the honest options are to error or
-//! to embed nothing. Embedding nothing produces a binary whose `/ui/` answers
-//! 404 for reasons nobody can see from the outside, so: error, and say the
-//! command that fixes it.
+//! It used to panic, on the reasoning that a binary whose `/ui/` answers 404 for
+//! invisible reasons is worse than a build error. That reasoning was right about
+//! releases and wrong about everything else: `--all-features` is how this
+//! repository runs clippy, the test suite, rustdoc and the MSRV check, and a
+//! panic here broke all four for anyone without a Node toolchain -- which is the
+//! configuration the feature exists to keep working.
+//!
+//! So the absence is a `cargo:warning`, and the table comes out empty; `/ui/`
+//! then answers a 404 that names the feature, which is the visibility the panic
+//! was for. The hard requirement lives where it belongs: `release.yml` asserts
+//! the export is present before it builds, so a *release* cannot ship without
+//! the reader.
 
 use std::env;
 use std::fs;
@@ -54,20 +62,26 @@ fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
     let dist = root.join("ui").join("out");
     if !dist.is_dir() {
-        panic!(
-            "the `ui` feature is on but {} does not exist.\n\
-             Build the reader first:\n\n    \
-             cd ui && npm ci && npm run build\n\n\
-             or `make ui-build`. Cargo alone cannot produce it — it needs a Node \
-             toolchain, which is why this is a feature and not the default.",
+        println!(
+            "cargo:warning=the `ui` feature is on but {} does not exist, so no \
+             reader is embedded and /ui/ will 404. Build it with `make ui-build` \
+             (or `cd ui && npm ci && npm run build`) if you wanted one.",
             dist.display()
         );
+        fs::write(
+            &generated,
+            format!("{header}pub static ASSETS: &[Asset] = &[];\n"),
+        )
+        .expect("cannot write the empty asset table");
+        return;
     }
 
     let mut files = Vec::new();
     collect(&dist, &dist, &mut files);
     files.sort();
     if files.is_empty() {
+        // Still a hard error: a directory that exists and is empty is a partial
+        // `next build`, which is a broken state rather than an absent one.
         panic!(
             "{} exists but holds no files; a partial `next build` leaves this. \
              Remove it and build again.",

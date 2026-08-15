@@ -1,5 +1,5 @@
 [package]
-name = "proofwork"
+name = "cairn"
 version = "0.2.0"
 edition = "2021"
 # Verified, not asserted: `cargo +1.85.0 check --all-targets` passes and 1.75
@@ -109,7 +109,7 @@ hqc-kem = "0.1.0-rc.0"
 # At-rest encryption of the local store. Argon2id is used only to wrap the key
 # file with a passphrase -- the data itself is sealed with the ChaCha20-Poly1305
 # already pulled in above. A memory-hard KDF is not optional for that job: a key
-# file that leaves the machine (which is the entire point of `proofwork sync`)
+# file that leaves the machine (which is the entire point of `cairn sync`)
 # is an offline-attackable target, and PBKDF2 at any iteration count is the
 # wrong shape of defence against a GPU.
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
@@ -119,7 +119,7 @@ argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "ze
 #
 # Taking the facade and not a full framework is the whole of the trade. The
 # facade is what lets a library module call `debug!` without deciding where
-# the output goes, which matters here more than usual: `proofwork-mcp` speaks
+# the output goes, which matters here more than usual: `cairn-mcp` speaks
 # JSON-RPC on *stdout*, so a backend that guessed wrong would corrupt the
 # protocol rather than merely look untidy. Owning the backend is how "stderr,
 # always, no exceptions" becomes something a test can assert rather than a
@@ -135,16 +135,16 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 rand = "0.10"
 
 [lib]
-name = "proofwork"
+name = "cairn"
 path = "src/lib.rs"
 
 [[bin]]
-name = "proofwork"
+name = "cairn"
 path = "src/main.rs"
 
 # One MCP server, so Claude Code / Codex / OpenCode need no bespoke client each.
 [[bin]]
-name = "proofwork-mcp"
+name = "cairn-mcp"
 path = "src/bin/mcp.rs"
 
 [profile.release]

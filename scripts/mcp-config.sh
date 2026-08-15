@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Point an MCP client at this checkout's proofwork-mcp.
+# Point an MCP client at this checkout's cairn-mcp.
 #
 #   ./scripts/mcp-config.sh                      # Claude Code -> .mcp.json
 #   ./scripts/mcp-config.sh --client opencode    # -> opencode.json
@@ -9,7 +9,7 @@
 # --identity defaults to .local/node.identity.json and is included in the
 # stanza only when that file already exists, so a fresh checkout with no
 # signed identity yet still wires up cleanly -- run
-# `proofwork identity --out .local/node.identity.json` first if you want a
+# `cairn identity --out .local/node.identity.json` first if you want a
 # submitter name nobody else can claim.
 #
 # Three clients, three schemas, one set of flags. docs/agents.md carries the
@@ -34,7 +34,7 @@ CLIENT=claude
 # Defaults to the same ledger `make mcp` uses. If the config named a different
 # path, starting the server one way and then the other would show two different
 # worlds, and neither would look broken.
-LOG="${MCP_LOG:-$REPO/.local/proofwork-mcp.jsonl}"
+LOG="${MCP_LOG:-$REPO/.local/cairn-mcp.jsonl}"
 # Same default the Makefile's IDENTITY variable uses. Included only when the
 # file exists, so a fresh checkout with no signed identity yet still wires up
 # -- an agent that submits unsigned is a worse outcome than one that submits
@@ -67,7 +67,7 @@ OUT="${OUT:-$DEFAULT_OUT}"
 # Absolute, and normalised: the log is created on first write, so realpath must
 # not require it to exist yet.
 case "$LOG" in /*) ;; *) LOG="$REPO/$LOG" ;; esac
-MCP_BIN="$REPO/target/release/proofwork-mcp"
+MCP_BIN="$REPO/target/release/cairn-mcp"
 
 say() { printf '  %s\n' "$1"; }
 
@@ -85,12 +85,12 @@ args = ["--log", log, "--root", repo]
 if os.path.exists(identity):
     args += ["--identity", identity]
 if client == "claude":
-    print(json.dumps({"mcpServers": {"proofwork": {"command": b, "args": args}}}, indent=2))
+    print(json.dumps({"mcpServers": {"cairn": {"command": b, "args": args}}}, indent=2))
 elif client == "opencode":
-    print(json.dumps({"mcp": {"proofwork": {"type": "local", "command": [b, *args], "enabled": True}}}, indent=2))
+    print(json.dumps({"mcp": {"cairn": {"type": "local", "command": [b, *args], "enabled": True}}}, indent=2))
 else:
     quoted = ", ".join(f'"{a}"' for a in args)
-    print(f'[mcp_servers.proofwork]\ncommand = "{b}"\nargs = [{quoted}]')
+    print(f'[mcp_servers.cairn]\ncommand = "{b}"\nargs = [{quoted}]')
 PY
   exit 0
 fi
@@ -102,8 +102,8 @@ if [ "$CLIENT" = "codex" ]; then
   # section is the one edit that is safe without a round-tripping parser: it
   # cannot disturb what is above it. Refuse when the section already exists
   # rather than appending a duplicate, which TOML rejects outright.
-  if [ -f "$OUT" ] && grep -q '^\[mcp_servers\.proofwork\]' "$OUT"; then
-    say "[mcp_servers.proofwork] already in $OUT -- leaving it alone"
+  if [ -f "$OUT" ] && grep -q '^\[mcp_servers\.cairn\]' "$OUT"; then
+    say "[mcp_servers.cairn] already in $OUT -- leaving it alone"
     say "delete that section and rerun to repoint it, or edit it by hand:"
     "$0" --client codex --log "$LOG" --print | sed 's/^/    /'
     exit 0
@@ -112,12 +112,12 @@ if [ "$CLIENT" = "codex" ]; then
   ARGS_TOML="\"--log\", \"$LOG\", \"--root\", \"$REPO\""
   [ -f "$IDENTITY" ] && ARGS_TOML="$ARGS_TOML, \"--identity\", \"$IDENTITY\""
   {
-    printf '\n# proofwork -- written by scripts/mcp-config.sh\n'
-    printf '[mcp_servers.proofwork]\n'
+    printf '\n# cairn -- written by scripts/mcp-config.sh\n'
+    printf '[mcp_servers.cairn]\n'
     printf 'command = "%s"\n' "$MCP_BIN"
     printf 'args = [%s]\n' "$ARGS_TOML"
   } >>"$OUT"
-  say "appended [mcp_servers.proofwork] -> $OUT"
+  say "appended [mcp_servers.cairn] -> $OUT"
 else
   [ -f "$OUT" ] && cp "$OUT" "$OUT.bak" && say "backed up -> $OUT.bak"
   MCP_BIN="$MCP_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" OUT="$OUT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
@@ -152,15 +152,15 @@ servers = config.setdefault(section, {})
 if not isinstance(servers, dict):
     sys.exit(f"  {out} has a non-object {section!r}; fix or move it, then rerun")
 
-existing = sorted(k for k in servers if k != "proofwork")
-replaced = "proofwork" in servers
-servers["proofwork"] = entry
+existing = sorted(k for k in servers if k != "cairn")
+replaced = "cairn" in servers
+servers["cairn"] = entry
 
 with open(out, "w") as fh:
     json.dump(config, fh, indent=2)
     fh.write("\n")
 
-print(f"  {'updated' if replaced else 'added'} 'proofwork' in {out}")
+print(f"  {'updated' if replaced else 'added'} 'cairn' in {out}")
 if existing:
     print(f"  kept alongside: {', '.join(existing)}")
 PY

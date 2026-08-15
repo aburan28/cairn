@@ -100,7 +100,7 @@ same discipline `docs/threat-model.md` applies elsewhere.
 whoever calls the code and nobody else. Any `t` colluding committee members can
 combine shares whenever they like. The epoch is what an *honest* committee waits
 for; the security argument is the cost of collusion among `t` members, which
-`proofwork incentives` already models and which needs a `threat-model.md` row it
+`cairn incentives` already models and which needs a `threat-model.md` row it
 does not yet have.
 
 `open_regardless` exists so this is visible in one place rather than smeared

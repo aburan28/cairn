@@ -6,7 +6,7 @@ PYTHON ?= python3
 
 ROOT := $(abspath .)
 LOCAL_DIR ?= .local
-LOG ?= $(abspath $(LOCAL_DIR)/proofwork.jsonl)
+LOG ?= $(abspath $(LOCAL_DIR)/cairn.jsonl)
 # `make mcp` and `make p2p` each get their own log so they can run together in
 # one workspace. Both binaries append and both take the ledger's exclusive lock
 # (Ledger::open_exclusive) -- two writers over one hash-linked file each compute
@@ -19,13 +19,13 @@ LOG ?= $(abspath $(LOCAL_DIR)/proofwork.jsonl)
 # get that reconciliation, run a second daemon over this log:
 #
 #   make p2p LOG=$(MCP_LOG) LISTEN=127.0.0.1:9001 CHECKPOINT=... IDENTITY=...
-P2P_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-p2p.jsonl)
-MCP_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-mcp.jsonl)
+P2P_LOG ?= $(abspath $(LOCAL_DIR)/cairn-p2p.jsonl)
+MCP_LOG ?= $(abspath $(LOCAL_DIR)/cairn-mcp.jsonl)
 RELEASE_DIR ?= target/release
-CLI := $(RELEASE_DIR)/proofwork
-MCP := $(RELEASE_DIR)/proofwork-mcp
-P2P := $(RELEASE_DIR)/proofwork-p2p
-SERVE := $(RELEASE_DIR)/proofwork-serve
+CLI := $(RELEASE_DIR)/cairn
+MCP := $(RELEASE_DIR)/cairn-mcp
+P2P := $(RELEASE_DIR)/cairn-p2p
+SERVE := $(RELEASE_DIR)/cairn-serve
 FUZZ_CASES ?= 2000
 IDENTITY ?= $(abspath $(LOCAL_DIR)/node.identity.json)
 ROOT_KEY ?= $(abspath $(LOCAL_DIR)/root.key)
@@ -34,7 +34,7 @@ CHECKPOINT ?= $(abspath $(LOCAL_DIR)/checkpoint.json)
 # needs to dial it. Serving strangers is `make seed`, which binds the wildcard
 # deliberately rather than by having everyone edit this.
 LISTEN ?= 127.0.0.1:9000
-GEN_BOOTSTRAP := $(RELEASE_DIR)/proofwork-gen-bootstrap
+GEN_BOOTSTRAP := $(RELEASE_DIR)/cairn-gen-bootstrap
 SEED_ADDR ?= 44.229.170.164:5000
 SEED_BOOTSTRAP ?= $(abspath $(LOCAL_DIR)/seed.json)
 BOOTSTRAP_ARGS ?= --bootstrap $(SEED_BOOTSTRAP)
@@ -60,13 +60,13 @@ CLIENT ?= claude
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-build install demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke node-smoke \
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-build site-snapshot install demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke node-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
 help:
 	@printf '%s\n' \
-	  'proofwork local commands:' \
+	  'cairn local commands:' \
 	  '  make mcp                 Build, write opencode.json, and run the MCP server (stdio).' \
 	  '  make mcp-setup           Wire an MCP client to this checkout (default: Claude Code).' \
 	  '  make mcp-setup CLIENT=opencode   ...or opencode / codex.' \
@@ -79,7 +79,8 @@ help:
 	  '  make node                One process: p2p sync AND HTTP, sharing a log.' \
 	  '  make install             Install the released binaries from GitHub.' \
 	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
-	  '  make ui-build            Export the reader and build it INTO the binaries.' \
+	  '  make ui-build            Export the site and build it INTO the binaries.' \
+	  '  make site-snapshot       Regenerate the site fallback from launch/.' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
@@ -87,9 +88,9 @@ help:
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
 	  '' \
-	  'Logs: serve and cli share LOG=.local/proofwork.jsonl; mcp uses' \
-	  '      MCP_LOG=.local/proofwork-mcp.jsonl; p2p uses' \
-	  '      P2P_LOG=.local/proofwork-p2p.jsonl. mcp and p2p both append and' \
+	  'Logs: serve and cli share LOG=.local/cairn.jsonl; mcp uses' \
+	  '      MCP_LOG=.local/cairn-mcp.jsonl; p2p uses' \
+	  '      P2P_LOG=.local/cairn-p2p.jsonl. mcp and p2p both append and' \
 	  '      take an exclusive lock, so aiming them at one file makes whichever' \
 	  '      starts second refuse. See docs/agents.md.' \
 	  '' \
@@ -99,7 +100,7 @@ help:
 	  '             SEED_ADDR=44.229.170.164:5000  default bootstrap peer address;' \
 	  '                                     .local/seed.json is generated on first' \
 	  '                                     `make p2p` with a placeholder key -- see' \
-	  '                                     proofwork-gen-bootstrap and docs/p2p.md'
+	  '                                     cairn-gen-bootstrap and docs/p2p.md'
 
 build:
 	$(CARGO) build --release --bins
@@ -137,7 +138,7 @@ mcp-setup: build | $(LOCAL_DIR)
 # A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
 # inside is freshly generated, not the real seed's. It authenticates nobody
 # until "public" is replaced with the seed's actual key -- see
-# proofwork-gen-bootstrap.rs. Regenerated only if missing, so a real key
+# cairn-gen-bootstrap.rs. Regenerated only if missing, so a real key
 # dropped in by hand is never overwritten.
 $(SEED_BOOTSTRAP): build | $(LOCAL_DIR)
 	@test -f "$(SEED_BOOTSTRAP)" || "$(GEN_BOOTSTRAP)" --addr "$(SEED_ADDR)" --out "$(SEED_BOOTSTRAP)"
@@ -176,10 +177,10 @@ identity: build
 	./scripts/identity-demo.sh
 
 demo: build
-	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/demo.sh
+	CAIRN_BIN="$(abspath $(CLI))" ./scripts/demo.sh
 
 ratchet: build
-	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/ratchet-demo.sh
+	CAIRN_BIN="$(abspath $(CLI))" ./scripts/ratchet-demo.sh
 
 shard-demo: build
 	RUST_BIN="$(abspath $(CLI))" ./scripts/shard-demo.sh
@@ -230,7 +231,7 @@ node: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 
 # Install the *released* binaries, not this checkout's. The script resolves the
 # latest tag, checks the tarball against its published sha256, and installs to
-# ~/.local/bin unless PROOFWORK_BIN says otherwise.
+# ~/.local/bin unless CAIRN_BIN says otherwise.
 install:
 	./scripts/install.sh
 
@@ -244,15 +245,24 @@ ui:
 # Two steps because they need two toolchains, and separating them is what keeps
 # `cargo build` working for somebody with no Node installed: the `ui` feature is
 # off by default, and this is the target that turns it on. Afterwards
-# `proofwork-p2p --serve ADDR` answers the reader at /ui/.
-ui-build:
+# `cairn-p2p --serve ADDR` answers the reader at /ui/.
+ui-build: site-snapshot
 	cd "$(ROOT)/ui" && npm ci && npm run build
 	$(CARGO) build --release --features ui --bins
+
+# Regenerate the site's fallback snapshot from the settled log in launch/.
+#
+# Committed output, so building the site needs Node and nothing else -- but it
+# is produced by the *node*, over HTTP, because relating a ledger entry to an
+# objective's record id means canonical hashing, and a third implementation of
+# that in JavaScript is a third place for a consensus rule to drift.
+site-snapshot: build
+	./scripts/site-snapshot.sh
 
 test-reference:
 	cargo test --manifest-path reference/rust/Cargo.toml
 	cargo build --release --locked --manifest-path reference/rust/Cargo.toml
-	./reference/rust/target/release/proofwork-reference conformance conformance/vectors.json
+	./reference/rust/target/release/cairn-reference conformance conformance/vectors.json
 
 test-rust:
 	$(CARGO) test --all-targets

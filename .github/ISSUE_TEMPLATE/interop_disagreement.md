@@ -20,18 +20,18 @@ of them; a reformatted paste can hide the bug.
 **What the primary implementation says.**
 
 ```
-$ proofwork --log … audit        # or the exact command you ran
+$ cairn --log … audit        # or the exact command you ran
 ```
 
 **What the reference implementation says.**
 
 ```
-$ ./reference/rust/target/release/proofwork-reference --log … audit
+$ ./reference/rust/target/release/cairn-reference --log … audit
 ```
 
-**Versions.** `proofwork --version`, the commit hash, and your OS.
+**Versions.** `cairn --version`, the commit hash, and your OS.
 
-**Epoch length.** `PROOFWORK_EPOCH_SECONDS` if you set it, and whether the log
+**Epoch length.** `CAIRN_EPOCH_SECONDS` if you set it, and whether the log
 was *written* under a different value than you are *reading* it under. Epochs
 are derived from timestamps and never stored, so a log built with 1-second
 epochs audits as broken under the 600-second default. `audit` says so when

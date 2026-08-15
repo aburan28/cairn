@@ -37,7 +37,7 @@
 //! release epoch is enforced -- would make the committee threshold look like a
 //! convenience rather than the entire security argument. What actually holds
 //! the line is the cost of collusion among `threshold` members, which
-//! `proofwork incentives` reports on and `docs/threat-model.md` should carry a
+//! `cairn incentives` reports on and `docs/threat-model.md` should carry a
 //! row for.
 //!
 //! A time-lock puzzle (Rivest–Shamir–Wagner) would make early opening cost
@@ -101,7 +101,7 @@ pub const CHUNK_LEN: usize = 64 * 1024;
 /// earlier release: a committee member who published for epoch 100 has not
 /// thereby opened a document that was meant to wait for epoch 200.
 fn aad_for(release_epoch: u64) -> String {
-    format!("proofwork-corpus-v1:release={release_epoch}")
+    format!("cairn-corpus-v1:release={release_epoch}")
 }
 
 /// Why a document could not be sealed, opened, or decoded.

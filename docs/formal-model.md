@@ -157,7 +157,7 @@ Bound: 3 claims, δ = 1/2, `max_depth` 2, amounts {0, 7, 12}, 2 rewires.
 Also run at the shipped defaults (δ = 1/4, depth 6) and at δ = 1/1, the boundary
 where a claim passes on everything it received. Same state count, same result.
 
-Citation *flow* is deliberately not recomposed in `Proofwork`: it redistributes
+Citation *flow* is deliberately not recomposed in `Cairn`: it redistributes
 an already-fixed settlement amount, so it cannot change the pool total.
 
 **Not addressed here at all:** the **citation-flow dilution** row of
@@ -224,7 +224,7 @@ it.
 | purity of `assign` | checked, with a caveat | `Assign` reads no variable, so purity holds by construction of the model. What TLC establishes is that the protocol *around* it does not smuggle state in. That the Rust function is pure is a code property, not a modelled one |
 | modulo bias | not modelled | real, on the order of `partitions / 2^64`, and irrelevant: assignment has to spread nodes out, not be uniform to the last bit |
 
-### `Proofwork` — the composition
+### `Cairn` — the composition
 
 Bound: 4 claims, 2 epochs, span 6, reward 10. 30 distinct states — small,
 because the claims are few; the work is in the quantifier, which ranges over all
@@ -409,7 +409,7 @@ Every result on this page is conditional on all of these.
    no module here can express a `u64` wrap. The money paths guard themselves in
    `u128` and are unit-tested.
 8. **The pinned verifier is a deterministic function of `(spec, artifact, seed)`.**
-9. **Nodes agree about epoch boundaries.** `PROOFWORK_EPOCH_SECONDS` is a policy
+9. **Nodes agree about epoch boundaries.** `CAIRN_EPOCH_SECONDS` is a policy
    parameter; two nodes with different settings disagree about which reveals
    were legal, and that disagreement is outside every model here.
 10. **The OS sandbox holds.** Unmodellable in TLA+, and a launch blocker in its

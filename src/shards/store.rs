@@ -4,7 +4,7 @@
 //! self-naming the way a blob is:
 //!
 //! ```text
-//! .proofwork/shards/
+//! .cairn/shards/
 //!   <64 hex characters of the blob's digest>/
 //!     manifest      the canonical encoding of [`Manifest`], one line
 //!     000, 001, …   shard bytes, filed under their index in the coding
@@ -55,9 +55,17 @@ use super::{reconstruct, Manifest, Reconstruction, Shard, ShardError};
 use crate::blobs::is_address;
 use crate::canonical::Value;
 
-/// Where a shard store lives under a bundle root — beside `.proofwork/blobs`,
+/// Where a shard store lives under a bundle root — beside `.cairn/blobs`,
 /// for the same reason and against the same root.
-pub const STORE_DIR: &str = ".proofwork/shards";
+pub const STORE_DIR: &str = ".cairn/shards";
+
+/// Where shards lived when this project was called `proofwork`.
+///
+/// Read-only, and adopted only when [`STORE_DIR`] does not exist -- the same
+/// fallback [`crate::blobs::BlobStore::under`] carries, for the same reason: a
+/// rename should not make a node stop finding data it already holds. Removable
+/// once nobody is upgrading across the rename.
+pub const LEGACY_STORE_DIR: &str = ".proofwork/shards";
 
 /// The manifest's filename inside a blob's directory.
 ///
@@ -141,9 +149,15 @@ pub struct ShardStore {
 impl ShardStore {
     /// The store belonging to a bundle root.
     pub fn under(root: impl AsRef<Path>) -> ShardStore {
-        ShardStore {
-            dir: root.as_ref().join(STORE_DIR),
+        let root = root.as_ref();
+        let current = root.join(STORE_DIR);
+        if !current.is_dir() {
+            let legacy = root.join(LEGACY_STORE_DIR);
+            if legacy.is_dir() {
+                return ShardStore { dir: legacy };
+            }
         }
+        ShardStore { dir: current }
     }
 
     /// A store at an explicit directory.

@@ -19,10 +19,23 @@
 # `conformance/adversarial.jsonl` is the corpus: one case per line, each with
 # a note saying what would break if the two disagreed about it.
 set -euo pipefail
+
+# The reference implementation reads plain JSONL and nothing else -- sealing is
+# a storage concern of the primary crate, deliberately outside the format the
+# two implementations have to agree on. But the CLI seals every log it creates
+# whenever a key file exists, so on any machine that has run `cairn keygen`
+# this script handed the reference ciphertext and got "malformed JSON: unexpected
+# character at byte 0". It failed there and passed in CI, which is the worst
+# place for a check to be wrong.
+#
+# Pointing CAIRN_KEY at a path that does not exist makes `resolve_codec` choose
+# plaintext, which is what this script means: it compares the two
+# implementations on the format they share.
+export CAIRN_KEY=/nonexistent/cairn-interop-forces-plaintext
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
-REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+RUST="${RUST_BIN:-./target/release/cairn}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 CORPUS="${CORPUS:-conformance/adversarial.jsonl}"
 
 [ -x "$RUST" ] || { echo "building the primary..." >&2; cargo build --release --locked; }
@@ -122,10 +135,10 @@ rule "inclusion proofs"
 # own -- an implementation that is wrong in a self-consistent way passes the
 # second arrangement and fails this one.
 #
-# `launch/proofwork.jsonl` is the corpus because it is a real settled log with
+# `launch/cairn.jsonl` is the corpus because it is a real settled log with
 # a published root: 25 entries covers both shapes of the promotion rule at
 # every level, and the root is one somebody else already signed.
-PROOF_LOG="${PROOF_LOG:-launch/proofwork.jsonl}"
+PROOF_LOG="${PROOF_LOG:-launch/cairn.jsonl}"
 PROOF_ROOT=$(python3 -c '
 import json, sys
 print(json.load(open(sys.argv[1]))["checkpoint"]["root"])
@@ -182,7 +195,7 @@ rule "availability"
 # result from one that is not looking gets quoted as agreement.
 AVAIL="$WORK/availability"
 mkdir -p "$AVAIL"
-export PROOFWORK_EPOCH_SECONDS=2
+export CAIRN_EPOCH_SECONDS=2
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" identity --out "$AVAIL/alice.json" >/dev/null
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" identity --out "$AVAIL/bob.json" >/dev/null
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" post examples/collatz/objective.json >/dev/null
@@ -210,10 +223,10 @@ esac
 # answer that was right when written became wrong two entries later.
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" post examples/collatz/objective.json \
   >/dev/null 2>&1 || true
-unset PROOFWORK_EPOCH_SECONDS
+unset CAIRN_EPOCH_SECONDS
 
 # The same log, audited under three different epoch lengths, must give the same
-# answer. `PROOFWORK_EPOCH_SECONDS` is a demo affordance -- it exists so a shell
+# answer. `CAIRN_EPOCH_SECONDS` is a demo affordance -- it exists so a shell
 # script can cross an epoch boundary -- and `partition`'s own documentation
 # promises that "nothing derived from it enters a record". Availability sampling
 # broke that promise by reaching for it to place the anchor in time: the same
@@ -222,10 +235,10 @@ unset PROOFWORK_EPOCH_SECONDS
 # variable is not a consensus rule, and one that fails six times in ten reads as
 # flakiness rather than as a bug, which is the worst shape it could have.
 for LENGTH in 2 600 3600; do
-  PROOFWORK_EPOCH_SECONDS=$LENGTH "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" \
+  CAIRN_EPOCH_SECONDS=$LENGTH "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" \
     audit >/dev/null \
     || fail "the primary rejects its own availability log at epoch length $LENGTH"
-  PROOFWORK_EPOCH_SECONDS=$LENGTH "$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" \
+  CAIRN_EPOCH_SECONDS=$LENGTH "$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" \
     audit >/dev/null \
     || fail "the reference rejects the availability log at epoch length $LENGTH"
 done

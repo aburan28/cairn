@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Thin bridge between ecdsafail CLI concepts and this proofwork example.
+# Thin bridge between ecdsafail CLI concepts and this cairn example.
 #
 #   ./examples/ecdsa-fail/adapter.sh map
 #   ./examples/ecdsa-fail/adapter.sh score <artifact.json>
@@ -12,9 +12,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-PW="${PROOFWORK_BIN:-$ROOT/target/release/proofwork}"
-LOG="${PROOFWORK_LOG:-/tmp/proofwork-ecdsa-adapter.jsonl}"
-OID_FILE="${PROOFWORK_ECDSA_OID_FILE:-/tmp/proofwork-ecdsa-adapter.oid}"
+PW="${CAIRN_BIN:-$ROOT/target/release/cairn}"
+LOG="${CAIRN_LOG:-/tmp/cairn-ecdsa-adapter.jsonl}"
+OID_FILE="${CAIRN_ECDSA_OID_FILE:-/tmp/cairn-ecdsa-adapter.oid}"
 EXAMPLE="$ROOT/examples/ecdsa-fail"
 
 usage() {
@@ -23,7 +23,7 @@ usage() {
 }
 
 ensure_pw() {
-  [ -x "$PW" ] || { echo "building proofwork..." >&2; (cd "$ROOT" && cargo build --release); }
+  [ -x "$PW" ] || { echo "building cairn..." >&2; (cd "$ROOT" && cargo build --release); }
 }
 
 ensure_objective() {
@@ -42,7 +42,7 @@ cmd_map() {
   cat <<'EOF'
 Concept map (workflow only — not settlement equivalence)
 
-  ecdsafail                          proofwork (this MVP)
+  ecdsafail                          cairn (this MVP)
   -------------------------          ----------------------------------
   ecdsafail login / config           operator funds objective once
   ecdsafail benchmark                get_objective / list_objectives

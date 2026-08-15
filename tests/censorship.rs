@@ -29,13 +29,13 @@
 
 use rand_core::{CryptoRng, RngCore};
 
-use proofwork::canonical::Value;
-use proofwork::crypto::{
+use cairn::canonical::Value;
+use cairn::crypto::{
     CommitteeKey, CommitteeMember, EnvelopeError, MasterSeed, SealedEnvelope, Share,
 };
-use proofwork::records::{Claim, Commitment};
-use proofwork::sealed::{open, SealedError, SealedSubmission};
-use proofwork::{commitment_hash, obj};
+use cairn::records::{Claim, Commitment};
+use cairn::sealed::{open, SealedError, SealedSubmission};
+use cairn::{commitment_hash, obj};
 
 // -- scenario fixtures -----------------------------------------------------
 
@@ -869,7 +869,7 @@ fn sealing_does_not_change_the_commitment() {
 /// Sealing moves **when** an artifact becomes public. It never moves
 /// **whether**.
 ///
-/// proofwork's entire guarantee is that anyone can independently re-derive
+/// cairn's entire guarantee is that anyone can independently re-derive
 /// every settled result, which requires settled artifacts to be public
 /// (`docs/censorship.md`, "The tension, stated plainly"). An opened artifact is
 /// therefore an ordinary [`Value`] with no residue of the mechanism that

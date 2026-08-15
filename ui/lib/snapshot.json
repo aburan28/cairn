@@ -1,0 +1,90 @@
+{
+  "generated_by": "scripts/site-snapshot.sh",
+  "head": "sha256:a209f2638056fe59985e77c6f171987a80d2060c687666f4f245e4cc4fa26e1d",
+  "height": 25,
+  "issued_at": "2026-08-08T03:30:02+00:00",
+  "links": 4,
+  "merkle_root": "sha256:3ae18b50ad6c991285eac0eb1cd17c76221cbe89534fee852d2cdb6cf714a066",
+  "objectives": [
+    {
+      "frontier": {
+        "claim_id": "sha256:7cb2c935c6d1b1f458b024e302a953ba856ed7a5d053830fab53f0287ca8d4e5",
+        "holder": "carol",
+        "must_cite": "sha256:7cb2c935c6d1b1f458b024e302a953ba856ed7a5d053830fab53f0287ca8d4e5",
+        "paid_cumulative": 1100000,
+        "pool_remaining": 0,
+        "score": 20
+      },
+      "funder": "treasury",
+      "goal": "GOAL-capset-lower-bounds",
+      "id": "sha256:4dfa0bbffb2d244de6fdb51d53d186d8d50e14477c366c31320746c171249185",
+      "record": {
+        "created_at": "2026-07-28T00:00:00+00:00",
+        "funder": "treasury",
+        "goal": "GOAL-capset-lower-bounds",
+        "ratchet": {
+          "baseline": 9,
+          "direction": "maximize",
+          "min_improvement": 3,
+          "reward": 1100000,
+          "target": 20
+        },
+        "reward": 1100000,
+        "statement": "Grow a cap set in F_3^4 as large as possible (no three distinct points collinear). Score is the set size. Baseline 9, target 20 (the known maximum). Payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move and every improvement must cite the frontier it beat.",
+        "type": "objective",
+        "verifier": {
+          "direction": "maximize",
+          "entrypoint": "score",
+          "evaluator": "examples/capset_progressive/evaluators/cap_set.py",
+          "evaluator_sha256": "05ad14fa10bd3055a8f3b1962a6a909832887676558035e40e44c4bd0aa271c4",
+          "kind": "evaluator",
+          "threshold": 9
+        }
+      },
+      "reward": 1100000,
+      "settled": true,
+      "statement": "Grow a cap set in F_3^4 as large as possible (no three distinct points collinear). Score is the set size. Baseline 9, target 20 (the known maximum). Payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move and every improvement must cite the frontier it beat.",
+      "verifier_kind": "evaluator"
+    },
+    {
+      "funder": "treasury",
+      "goal": "GOAL-collatz-extremes",
+      "id": "sha256:978beb308f77c4bd1520d474b92dd23c310c6adee774716bf4c39f31fd3ed075",
+      "record": {
+        "artifact_schema": {
+          "description": "An object naming the integer whose trajectory is long. The checker reads exactly one field.",
+          "example": {
+            "n": 27
+          },
+          "properties": {
+            "n": {
+              "description": "The candidate integer, in [1, 10^7).",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "n"
+          ],
+          "type": "object"
+        },
+        "created_at": "2026-07-28T00:00:00+00:00",
+        "funder": "treasury",
+        "goal": "GOAL-collatz-extremes",
+        "reward": 100000,
+        "statement": "Exhibit an integer n in [1, 10^7) whose Collatz trajectory reaches 1 in at least 500 steps.",
+        "type": "objective",
+        "verifier": {
+          "checker": "examples/collatz/checkers/long_trajectory.py",
+          "checker_sha256": "df78b43c279aa931b0ee481ca946cd5788eb7b28351d66f83e5a980a9cf91473",
+          "entrypoint": "check",
+          "kind": "certificate"
+        }
+      },
+      "reward": 100000,
+      "settled": true,
+      "statement": "Exhibit an integer n in [1, 10^7) whose Collatz trajectory reaches 1 in at least 500 steps.",
+      "verifier_kind": "certificate"
+    }
+  ],
+  "source": "launch/cairn.jsonl"
+}

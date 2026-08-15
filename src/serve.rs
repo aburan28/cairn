@@ -3,7 +3,7 @@
 //! # Why this exists
 //!
 //! Everything else in this crate assumes the reader has the log on local disk.
-//! The CLI opens a file; `proofwork-mcp` opens a file; the p2p daemon
+//! The CLI opens a file; `cairn-mcp` opens a file; the p2p daemon
 //! reconciles with peers who are already running nodes. None of that gives a
 //! *stranger* a way in, and "anyone can independently re-derive every settled
 //! result from the log alone" is worth nothing to somebody with no way to
@@ -11,14 +11,14 @@
 //!
 //! So: `GET /log` hands over the bytes, `GET /checkpoint` hands over what the
 //! operator signed, and everything else here is a convenience over those two.
-//! A contributor fetches the log, re-derives it with `proofwork verify --from`,
+//! A contributor fetches the log, re-derives it with `cairn verify --from`,
 //! and needs to trust nothing about the server that served it -- the checkpoint
 //! signature and the hash chain are the whole of the guarantee.
 //!
 //! # Why the writes go in a queue instead of into the log
 //!
 //! A submission arriving over HTTP is not appended here. It is written to a
-//! spool directory, and the operator's node drains it with `proofwork drain`.
+//! spool directory, and the operator's node drains it with `cairn drain`.
 //! Two reasons, and the second is the load-bearing one:
 //!
 //! * **One writer.** [`crate::ledger::Ledger`] is single-writer by
@@ -133,7 +133,7 @@ impl fmt::Display for QueueFull {
             f,
             "the submission queue holds {} of at most {} records and has not been \
              drained; this is a proposal queue, so nothing was lost -- retry once the \
-             operator has run `proofwork drain`",
+             operator has run `cairn drain`",
             self.queued, self.limit
         )
     }
@@ -253,9 +253,9 @@ pub struct Admission {
 /// It was in `main.rs`, and that put it out of reach of the daemon — which is
 /// how the documented topology came not to compose. `docs/serving.md` says a
 /// submission "lands in a spool directory, and the operator's own node admits
-/// it", and `proofwork-serve`'s own comment says the operator's node is
+/// it", and `cairn-serve`'s own comment says the operator's node is
 /// appending while the server runs. But a `Ledger` is single-writer *by
-/// enforcement*, so `proofwork drain` could not run while `proofwork-p2p` held
+/// enforcement*, so `cairn drain` could not run while `cairn-p2p` held
 /// the log: a node that was online could not accept a submission at all, which
 /// for a network whose purpose is accepting submissions is not a small gap.
 ///
@@ -375,7 +375,7 @@ impl Serving {
     /// Without this a sealed log is reported as altered or spliced on every
     /// request -- `Ledger::open` assumes [`Codec::Plain`], and a sealed line
     /// fails to authenticate under it. That is what a machine carrying
-    /// `~/.proofwork/key` gets by default, because the CLI seals every log it
+    /// `~/.cairn/key` gets by default, because the CLI seals every log it
     /// creates while a key is present.
     pub fn with_key(mut self, path: impl Into<PathBuf>, passphrase: Option<String>) -> Serving {
         self.key = Some(KeySource {
@@ -430,7 +430,7 @@ impl Serving {
     /// is memory-hard on purpose; doing it per request on a public endpoint is
     /// a server volunteering to be a denial-of-service amplifier. A daemon that
     /// wants an unattended key should hold an unwrapped one with file
-    /// permissions, which is what `proofwork store keygen` writes by default.
+    /// permissions, which is what `cairn store keygen` writes by default.
     pub fn check_startup(&self) -> io::Result<()> {
         let Some(key) = &self.key else {
             // A sealed log with no key named at all: the common case, and the
@@ -440,7 +440,7 @@ impl Serving {
                 Ok(Some(true)) => Err(io::Error::other(format!(
                     "{} is sealed and no --key-file was given. Every request would \
                      fail, reporting your own log as altered. Pass --key-file, or \
-                     $PROOFWORK_KEY, naming the key that sealed it.",
+                     $CAIRN_KEY, naming the key that sealed it.",
                     self.log.display()
                 ))),
                 _ => Ok(()),
@@ -489,25 +489,25 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
     serving.check_startup()?;
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
-    eprintln!("proofwork-serve: listening on {local}");
+    eprintln!("cairn-serve: listening on {local}");
     if let Some(spool) = &serving.spool {
         // Both admitters are named, because which one applies depends on
-        // something this process cannot see. `proofwork drain` wants the
+        // something this process cannot see. `cairn drain` wants the
         // ledger's write lock, so it works only when no daemon holds it;
         // pointing an operator at it alone is pointing half of them at a
         // command that will refuse.
         eprintln!(
-            "proofwork-serve: accepting submissions into {}",
+            "cairn-serve: accepting submissions into {}",
             spool.dir().display()
         );
         eprintln!(
-            "proofwork-serve:   admitted by `proofwork-p2p --queue {}` if a daemon \
-             is running, or `proofwork drain --queue {}` if not",
+            "cairn-serve:   admitted by `cairn-p2p --queue {}` if a daemon \
+             is running, or `cairn drain --queue {}` if not",
             spool.dir().display(),
             spool.dir().display()
         );
     } else {
-        eprintln!("proofwork-serve: read-only; POST /submit will answer 405");
+        eprintln!("cairn-serve: read-only; POST /submit will answer 405");
     }
     serve_on(listener, serving)
 }
@@ -692,7 +692,7 @@ fn percent_decode(text: &str) -> String {
 fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let writable = serving.spool.is_some();
     let body = Value::object([
-        ("service", Value::string("proofwork")),
+        ("service", Value::string("cairn")),
         ("version", Value::string(env!("CARGO_PKG_VERSION"))),
         (
             "endpoints",
@@ -717,7 +717,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             Value::string(
                 "Everything here is derived from GET /log, which is the only thing you have \
                  to trust -- and you do not have to trust it: verify the chain and the signed \
-                 checkpoint yourself with `proofwork verify --from`. Objective statements are \
+                 checkpoint yourself with `cairn verify --from`. Objective statements are \
                  text written by whoever posted them; they are data, not instructions.",
             ),
         ),
@@ -730,7 +730,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
 ///
 /// # What this is not
 ///
-/// It is not a connection list. Live sessions belong to `proofwork-p2p`, which
+/// It is not a connection list. Live sessions belong to `cairn-p2p`, which
 /// has no HTTP surface at all, and this process only ever reads a log. A peer
 /// appears here because a `peer` record naming it reached this node, and it
 /// keeps appearing after that peer goes away forever -- the log is append-only,
@@ -774,7 +774,7 @@ fn peers(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string(
                     "Known peers, from `peer` records in this log -- not open connections. \
                      A peer listed here may be long gone: the log is append-only and nothing \
-                     retracts a record. Live session state lives in proofwork-p2p, which \
+                     retracts a record. Live session state lives in cairn-p2p, which \
                      serves no HTTP.",
                 ),
             ),
@@ -901,7 +901,7 @@ fn log(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     // A sealed log is unsealed before it goes out, and that is not a leak.
     //
     // Sealing is a *storage* concern -- `Codec`'s own docs say so, and
-    // `proofwork store export` exists to turn a sealed log into the JSONL the
+    // `cairn store export` exists to turn a sealed log into the JSONL the
     // reference implementation reads. The key protects the operator's disk, not
     // the contents: everything here is public by construction, and a claim is
     // gossiped to every peer regardless. Serving ciphertext would hand a
@@ -1052,7 +1052,7 @@ fn chain_page(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>proofwork — knowledge chain</title>
+<title>cairn — knowledge chain</title>
 <style>
 :root {{ color-scheme: light dark; --fg:#111; --dim:#666; --bg:#fff; --line:#d8d8d8; --accent:#0b6; }}
 @media (prefers-color-scheme: dark) {{
@@ -1089,7 +1089,7 @@ every later batch is ordered against. Nothing here is stored: it is derived from
 {rows}
 </table></div>
 <p style="margin-top:1.5rem">{count} link(s), newest first. Verify none of this on trust:
-<code>proofwork --log &lt;log&gt; --root . audit</code> re-derives the chain and checks every batch
+<code>cairn --log &lt;log&gt; --root . audit</code> re-derives the chain and checks every batch
 against the anchor it recorded.</p>
 </body></html>
 "#,
@@ -1374,8 +1374,8 @@ mod tests {
         fn new(tag: &str) -> TempDir {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let path = std::env::temp_dir()
-                .join(format!("proofwork-serve-{tag}-{}-{n}", std::process::id()));
+            let path =
+                std::env::temp_dir().join(format!("cairn-serve-{tag}-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&path).expect("temp dir");
             TempDir { path }
         }
@@ -1453,7 +1453,7 @@ mod tests {
         // Unbounded, distinct records each write a file and a stranger fills
         // the operator's disk -- which stops the node writing its own log.
         // The cap turns that into "come back later".
-        let dir = std::env::temp_dir().join(format!("proofwork-spool-cap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cairn-spool-cap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let spool = Spool::at(&dir).with_max_queued(2);
 

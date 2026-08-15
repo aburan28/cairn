@@ -31,12 +31,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use proofwork::attribution::{flow, FlowError, FlowParams};
-use proofwork::canonical::Value;
-use proofwork::gossip::{ingest, Candidate, GossipError, Population};
-use proofwork::ledger::Ledger;
-use proofwork::partition::{assign, assignment_for, beacon, epoch_of, PartitionError, SPACE};
-use proofwork::records::Claim;
+use cairn::attribution::{flow, FlowError, FlowParams};
+use cairn::canonical::Value;
+use cairn::gossip::{ingest, Candidate, GossipError, Population};
+use cairn::ledger::Ledger;
+use cairn::partition::{assign, assignment_for, beacon, epoch_of, PartitionError, SPACE};
+use cairn::records::Claim;
 
 // -- deterministic randomness ----------------------------------------------
 
@@ -1009,7 +1009,7 @@ impl TempDir {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "proofwork-properties-{label}-{}-{nanos}-{n}",
+            "cairn-properties-{label}-{}-{nanos}-{n}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("scratch directory is creatable");

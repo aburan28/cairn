@@ -96,12 +96,12 @@ jobs:
           # both binaries reach for `std::os::unix` and the seatbelt/bubblewrap
           # sandbox; shipping a Windows build would mean porting the sandbox,
           # and a node that verifies objective-authored code *without* one is
-          # the configuration `PROOFWORK_REQUIRE_SANDBOX` exists to refuse.
+          # the configuration `CAIRN_REQUIRE_SANDBOX` exists to refuse.
     runs-on: ${{ matrix.os }}
     env:
       # `github.ref_name` is the *branch* on a `workflow_dispatch`, and a branch
       # name may contain a slash -- which lands in a tarball filename and makes
-      # `tar -czf proofwork-feat/thing-....tar.gz` write into a directory that
+      # `tar -czf cairn-feat/thing-....tar.gz` write into a directory that
       # does not exist. The dry run this trigger exists for therefore failed at
       # the packaging step on any branch named the way this repository names
       # them, which is the one thing it was added to prove would not happen.
@@ -142,6 +142,13 @@ jobs:
           name: ui-out
           path: ui/out
 
+      # `build.rs` only warns when the export is missing, so that clippy, the
+      # test suite, rustdoc and the MSRV check keep working without a Node
+      # toolchain. A *release* is the one place that must not ship a binary
+      # whose /ui/ 404s, so the requirement is asserted here instead.
+      - name: the reader is present before the binaries are built
+        run: test -f ui/out/index.html
+
       - run: cargo build --release --locked --features ui --target ${{ matrix.target }}
 
       # All five binaries ship together: a node operator needs the CLI, the MCP
@@ -156,9 +163,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NAME="proofwork-${VERSION}-${{ matrix.target }}"
+          NAME="cairn-${VERSION}-${{ matrix.target }}"
           DIR="target/${{ matrix.target }}/release"
-          BINS="proofwork proofwork-mcp proofwork-p2p proofwork-serve proofwork-gen-bootstrap"
+          BINS="cairn cairn-mcp cairn-p2p cairn-serve cairn-gen-bootstrap"
           for bin in $BINS; do
             [ -x "$DIR/$bin" ] || { echo "release is missing $bin" >&2; exit 1; }
           done
@@ -188,9 +195,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NAME="proofwork-${VERSION}-${{ matrix.target }}"
+          NAME="cairn-${VERSION}-${{ matrix.target }}"
           mkdir -p /tmp/unpacked && tar -C /tmp/unpacked -xzf "$NAME.tar.gz"
-          for bin in proofwork proofwork-serve proofwork-p2p proofwork-gen-bootstrap; do
+          for bin in cairn cairn-serve cairn-p2p cairn-gen-bootstrap; do
             "/tmp/unpacked/$bin" --help >/dev/null 2>&1 \
               || { echo "$bin --help failed from the tarball" >&2; exit 1; }
           done
@@ -198,15 +205,15 @@ jobs:
           # ships in the repository, so a release can verify it the way a
           # downloader would. This is the strongest single statement a release
           # artifact can make about itself.
-          /tmp/unpacked/proofwork --log launch/proofwork.jsonl --root . audit
+          /tmp/unpacked/cairn --log launch/cairn.jsonl --root . audit
           echo "unpacked binaries run and audit the published log"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
           path: |
-            proofwork-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
-            proofwork-${{ env.VERSION }}-${{ matrix.target }}.tar.gz.sha256
+            cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
+            cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz.sha256
 
       # Publishing is tag-only. A manual dispatch builds, packages and proves
       # the tarball runs, then stops — so the path can be exercised without
@@ -215,8 +222,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            proofwork-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
-            proofwork-${{ env.VERSION }}-${{ matrix.target }}.tar.gz.sha256
+            cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
+            cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz.sha256
           body: |
             ```sh
             curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh
@@ -227,9 +234,9 @@ jobs:
             version or a directory with `--version` / `--bin-dir`; on Linux it
             takes the static musl build unless you pass `--libc gnu`.
 
-            Binaries for `${{ github.ref_name }}`. Five to a tarball: `proofwork`
-            (CLI), `proofwork-mcp`, `proofwork-p2p`, `proofwork-serve`,
-            `proofwork-gen-bootstrap`.
+            Binaries for `${{ github.ref_name }}`. Five to a tarball: `cairn`
+            (CLI), `cairn-mcp`, `cairn-p2p`, `cairn-serve`,
+            `cairn-gen-bootstrap`.
 
             | platform | target |
             |---|---|
@@ -245,9 +252,9 @@ jobs:
             By hand, if you would rather not pipe a script to a shell:
 
             ```sh
-            tar -xzf proofwork-${{ github.ref_name }}-<target>.tar.gz
-            sha256sum -c proofwork-${{ github.ref_name }}-<target>.tar.gz.sha256
-            ./proofwork --help
+            tar -xzf cairn-${{ github.ref_name }}-<target>.tar.gz
+            sha256sum -c cairn-${{ github.ref_name }}-<target>.tar.gz.sha256
+            ./cairn --help
             ```
 
             **A checksum beside a tarball proves neither came from us** — the
@@ -256,15 +263,15 @@ jobs:
             repository:
 
             ```sh
-            ./proofwork --log launch/proofwork.jsonl --root . audit
+            ./cairn --log launch/cairn.jsonl --root . audit
             ```
 
             **Check it before you trust it.** A copy of the settled log ships in
             `launch/`, and re-deriving it is the point of the whole project:
 
             ```sh
-            ./proofwork --log launch/proofwork.jsonl --root . audit
-            ./proofwork --log launch/proofwork.jsonl --root . verify \
+            ./cairn --log launch/cairn.jsonl --root . audit
+            ./cairn --log launch/cairn.jsonl --root . verify \
                 --from launch/checkpoint.json --root-key launch/root-key.pub --audit
             ```
 

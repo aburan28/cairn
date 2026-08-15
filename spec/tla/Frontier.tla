@@ -104,7 +104,7 @@ Payout(old, new) ==
 (* at the baseline, but it has the same progress, so the arithmetic here    *)
 (* cannot tell them apart and nothing in this module should. The difference *)
 (* that does matter -- an objective with no frontier has no claim to cite   *)
-(* -- is a citation rule, and is modelled in Proofwork.                     *)
+(* -- is a citation rule, and is modelled in Cairn.                     *)
 Gained(new) == IF live THEN Progress(new) - Progress(frontier) ELSE Progress(new)
 
 Improves(new) == Gained(new) >= MinImprovement

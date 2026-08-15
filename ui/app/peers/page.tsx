@@ -13,8 +13,8 @@ import {
  * The address book this node has been handed.
  *
  * Named "peers" and not "connected peers", because the second thing is not
- * available: live sessions live in `proofwork-p2p`, which serves no HTTP, and
- * `proofwork-serve` only reads a log file. The page says so rather than letting
+ * available: live sessions live in `cairn-p2p`, which serves no HTTP, and
+ * `cairn-serve` only reads a log file. The page says so rather than letting
  * a reader assume a list of addresses is a list of connections.
  */
 export default function Page() {
@@ -95,7 +95,7 @@ export default function Page() {
             when they arrive but never announces itself. A node appears in an
             address book only once somebody runs{" "}
             <code>
-              proofwork peer --identity &lt;file&gt; --transport &lt;peer-id&gt;
+              cairn peer --identity &lt;file&gt; --transport &lt;peer-id&gt;
               --addr &lt;host:port&gt;
             </code>
             .

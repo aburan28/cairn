@@ -228,8 +228,8 @@ exists because of the correction at the top of this note.
 
 | claim | test | disabled how | result |
 |---|---|---|---|
-| drain sequence converges | `draining_epochs_in_a_different_sequence_converges_under_the_finality_delay` | `PROOFWORK_FINALITY_EPOCHS=0` | fails |
-| partial view converges | `a_partial_view_at_drain_time_converges_once_the_epoch_waits` | `PROOFWORK_FINALITY_EPOCHS=0` | fails |
+| drain sequence converges | `draining_epochs_in_a_different_sequence_converges_under_the_finality_delay` | `CAIRN_FINALITY_EPOCHS=0` | fails |
+| partial view converges | `a_partial_view_at_drain_time_converges_once_the_epoch_waits` | `CAIRN_FINALITY_EPOCHS=0` | fails |
 | late records are refused and reported | `a_record_arriving_after_the_finality_window_is_refused_not_silently_paid` | monotonicity filter removed from `due_epochs` | fails |
 
 The middle row is the one that nearly shipped wrong twice. The first rewrite of
@@ -244,7 +244,7 @@ Not a refactor. A `batch` record names the anchor it used and `Node::audit`
 re-derives and compares, so changing the derivation invalidates every log
 written under the old rule. What that meant in practice:
 
-1. **`launch/proofwork.jsonl` was invalidated and has been regenerated.** Its
+1. **`launch/cairn.jsonl` was invalidated and has been regenerated.** Its
    four `batch` records named old-style anchors, and after the change the
    published log failed its own audit with exactly the expected message —
    *"anchor … is not the epoch-chain head this batch was written against"* on

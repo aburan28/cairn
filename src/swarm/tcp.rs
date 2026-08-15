@@ -58,6 +58,10 @@ use crate::p2p::transport::{
 /// [`crate::p2p`] gives at length: a frame sealed for one subsystem cannot be
 /// opened as another's even by a peer that wants to. A blob transfer and a
 /// record sync run over the same transport and must not be confusable.
+// Spelled `proofwork/` and not `cairn/`: this is a wire constant, not a
+// brand. It is mixed into a hash or a KDF, so changing it changes the
+// values every peer already computed -- the project rename left it alone
+// deliberately, exactly as it left the `pwenc1:` on-disk marker alone.
 pub const CONTEXT: &[u8] = b"proofwork/swarm/v1";
 
 /// How long a socket may be silent before it is considered gone.
@@ -1116,7 +1120,7 @@ mod tests {
             .unwrap_or(0);
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "proofwork-swarm-{}-{nanos}-{n}-{tag}",
+            "cairn-swarm-{}-{nanos}-{n}-{tag}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create scratch dir");

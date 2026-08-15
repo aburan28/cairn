@@ -4,12 +4,12 @@ Holding a blob without holding all of it, and being able to prove you hold your
 part.
 
 ```sh
-proofwork shard plan artifact.bin                        # what a cut would cost
-proofwork shard encode artifact.bin --keep 1,4           # cut it, keep your slice
-proofwork shard ls <address>                             # what is here, what is elsewhere
-proofwork shard prove <address> --shard 1 --chunk 7      # prove one chunk
-proofwork shard check proof.json --merkle-root sha256:…  # …and check it with no store
-proofwork shard reconstruct <address> --out artifact.bin # put it back together
+cairn shard plan artifact.bin                        # what a cut would cost
+cairn shard encode artifact.bin --keep 1,4           # cut it, keep your slice
+cairn shard ls <address>                             # what is here, what is elsewhere
+cairn shard prove <address> --shard 1 --chunk 7      # prove one chunk
+cairn shard check proof.json --merkle-root sha256:…  # …and check it with no store
+cairn shard reconstruct <address> --out artifact.bin # put it back together
 ```
 
 [`src/shards/`](../src/shards/). Library plus CLI; **not wired into the network
@@ -183,7 +183,7 @@ permanently unshardable for want of an edge case.
 `shard plan` answers this with numbers instead of prose:
 
 ```
-$ proofwork shard plan artifact.bin
+$ cairn shard plan artifact.bin
 fdb7dadce236… -- 300000 bytes, coding (4, 2) (any 4 of 6 rebuild it)
   6 shard(s) of 75000 bytes, 19 chunk(s) of up to 4096 bytes each
   450000 bytes across all holders, tolerating 2 loss(es)
@@ -249,7 +249,7 @@ the same walk — `canonical::Inclusion` documents that its `leaves` field is a
 shape parameter and not a commitment. So a one-chunk shard's proof also verifies
 under a claim of two chunks; the manifest knows better, and refuses.
 `verify_chunk_catches_a_geometry_the_root_alone_cannot` pins exactly that
-boundary, and `proofwork shard check` prints the caveat on every run rather than
+boundary, and `cairn shard check` prints the caveat on every run rather than
 leaving a reader to assume the stronger thing.
 
 The leaf is recomputed from the chunk bytes rather than taken from the proof,
@@ -264,7 +264,7 @@ content.
 ## On disk
 
 ```
-.proofwork/shards/
+.cairn/shards/
   <64 hex characters of the blob's digest>/
     manifest      the canonical encoding, one line
     000, 001, …   shard bytes, filed under their index in the coding
@@ -316,7 +316,7 @@ re-download, dropping the `k`-th surviving shard costs the blob.
   wired up. Said plainly because this crate has been bitten before by a
   subsystem tested only against itself — see [storage.md](storage.md) on the two
   bugs that sat in the `swarm`/`blobs` seam with no caller to find them.
-  `proofwork shard` is the caller that keeps this module honest meanwhile.
+  `cairn shard` is the caller that keeps this module honest meanwhile.
 - **No repair.** Regenerating a lost shard means reconstructing the blob and
   re-encoding. Regenerating codes that repair from less than `k` shards are a
   real improvement and a much larger one; they are not needed to hold six shards

@@ -41,16 +41,16 @@ make the frontier decorative.
 ## Run it
 
 ```sh
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 LOG=/tmp/pw-sorting.jsonl
 
-OID=$(./target/release/proofwork --log $LOG --root . \
+OID=$(./target/release/cairn --log $LOG --root . \
         post examples/sorting-network/objective.json | head -1 | awk '{print $2}')
 
-./target/release/proofwork --log $LOG --root . try "$OID" \
+./target/release/cairn --log $LOG --root . try "$OID" \
   --submitter you --artifact examples/sorting-network/artifacts/bubble-56.json --settle
 
-sleep 3 && ./target/release/proofwork --log $LOG --root . settle
+sleep 3 && ./target/release/cairn --log $LOG --root . settle
 ```
 
 **The second call is not redundant.** `try --settle` waits out the reveal

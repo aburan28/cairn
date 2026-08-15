@@ -46,14 +46,14 @@
 
 use std::path::PathBuf;
 
-use proofwork::canonical::Value;
-use proofwork::ledger::Ledger;
-use proofwork::node::Node;
-use proofwork::records::{commitment_hash, Claim, Commitment, Objective};
-use proofwork::time::format_iso8601_utc;
+use cairn::canonical::Value;
+use cairn::ledger::Ledger;
+use cairn::node::Node;
+use cairn::records::{commitment_hash, Claim, Commitment, Objective};
+use cairn::time::format_iso8601_utc;
 
 /// The protocol's default epoch length. The sim never overrides
-/// `PROOFWORK_EPOCH_SECONDS`; runs simulate the deployed configuration.
+/// `CAIRN_EPOCH_SECONDS`; runs simulate the deployed configuration.
 const EPOCH: i64 = 600;
 
 // ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ impl Sim {
     /// Advance virtual time to `to`, delivering every session due on the way,
     /// in arrival order.
     ///
-    /// Delivery goes through [`proofwork::p2p::service::replay_records`] — the
+    /// Delivery goes through [`cairn::p2p::service::replay_records`] — the
     /// daemon's own replay, not a copy of it. The simulator's claim is "this
     /// is what the real code does under this schedule", and a re-implemented
     /// replay would quietly turn that into "what a copy did".
@@ -188,7 +188,7 @@ impl Sim {
             sessions.into_iter().partition(|s| s.at <= to);
         self.inflight = later;
         for session in due {
-            proofwork::p2p::service::replay_records(&mut self.nodes[session.to], &session.records);
+            cairn::p2p::service::replay_records(&mut self.nodes[session.to], &session.records);
         }
         self.now = to;
     }
@@ -216,7 +216,7 @@ impl Sim {
     /// delay changes — it silently starts asserting that nothing settled,
     /// which is the least useful way for a test to be wrong.
     fn advance_to_eligibility(&mut self) {
-        for _ in 0..=proofwork::partition::finality_epochs() {
+        for _ in 0..=cairn::partition::finality_epochs() {
             let boundary = self.next_boundary();
             self.advance(boundary);
         }
@@ -570,7 +570,7 @@ fn replay_does_not_lose_a_claim_to_the_order_records_arrive_in() {
         .into_iter()
         .filter(|(k, p)| !(k == "claim" && p.digest() == made[2].1.to_value().digest()))
         .collect();
-    proofwork::p2p::service::replay_records(&mut node, &first);
+    cairn::p2p::service::replay_records(&mut node, &first);
 
     // Second session, in the adverse order: the epoch-E+2 claim *before* the
     // epoch-E claim that is still missing.
@@ -578,7 +578,7 @@ fn replay_does_not_lose_a_claim_to_the_order_records_arrive_in() {
         ("claim".to_string(), made[2].1.to_value()),
         ("claim".to_string(), made[1].1.to_value()),
     ];
-    proofwork::p2p::service::replay_records(&mut node, &second);
+    cairn::p2p::service::replay_records(&mut node, &second);
 
     let accepted = node.accepted_claims();
     assert!(
@@ -943,7 +943,7 @@ fn draining_epochs_in_a_different_sequence_converges_under_the_finality_delay() 
     // A learns the *later* group first and tries to settle it before it has
     // heard of the earlier one. This is the drain that used to fork the chain.
     let mut a = Node::new(Ledger::open(scratch("forkseq", 0, 0)).expect("l"), &root);
-    proofwork::p2p::service::replay_records(&mut a, &groups[1]);
+    cairn::p2p::service::replay_records(&mut a, &groups[1]);
     let early = a.settle_at(&format_iso8601_utc(t0 + 3 * EPOCH)).expect("s");
     assert!(
         early.is_empty(),
@@ -954,13 +954,13 @@ fn draining_epochs_in_a_different_sequence_converges_under_the_finality_delay() 
     );
 
     // By the time it *is* eligible, A is holding the earlier group too.
-    proofwork::p2p::service::replay_records(&mut a, &groups[0]);
+    cairn::p2p::service::replay_records(&mut a, &groups[0]);
     a.settle_at(&format_iso8601_utc(t0 + 4 * EPOCH)).expect("s");
 
     // B learns in epoch order.
     let mut b = Node::new(Ledger::open(scratch("forkseq", 0, 1)).expect("l"), &root);
-    proofwork::p2p::service::replay_records(&mut b, &groups[0]);
-    proofwork::p2p::service::replay_records(&mut b, &groups[1]);
+    cairn::p2p::service::replay_records(&mut b, &groups[0]);
+    cairn::p2p::service::replay_records(&mut b, &groups[1]);
     b.settle_at(&format_iso8601_utc(t0 + 4 * EPOCH)).expect("s");
 
     // The premises that make this a fork rather than a loss.
@@ -1079,7 +1079,7 @@ fn a_record_arriving_after_the_finality_window_is_refused_not_silently_paid() {
 
     // A hears only the later group, and settles it once it is eligible.
     let mut a = Node::new(Ledger::open(scratch("latewin", 0, 0)).expect("l"), &root);
-    proofwork::p2p::service::replay_records(&mut a, &groups[1]);
+    cairn::p2p::service::replay_records(&mut a, &groups[1]);
     let on_time = a.settle_at(&format_iso8601_utc(t0 + 4 * EPOCH)).expect("s");
     assert!(
         !on_time.is_empty(),
@@ -1088,7 +1088,7 @@ fn a_record_arriving_after_the_finality_window_is_refused_not_silently_paid() {
     );
 
     // The earlier group turns up afterwards. Too late: a later epoch is paid.
-    proofwork::p2p::service::replay_records(&mut a, &groups[0]);
+    cairn::p2p::service::replay_records(&mut a, &groups[0]);
     let refused = a.settle_at(&format_iso8601_utc(t0 + 5 * EPOCH)).expect("s");
     assert!(
         refused.is_empty(),
@@ -1097,8 +1097,8 @@ fn a_record_arriving_after_the_finality_window_is_refused_not_silently_paid() {
 
     // B heard everything in time.
     let mut b = Node::new(Ledger::open(scratch("latewin", 0, 1)).expect("l"), &root);
-    proofwork::p2p::service::replay_records(&mut b, &groups[0]);
-    proofwork::p2p::service::replay_records(&mut b, &groups[1]);
+    cairn::p2p::service::replay_records(&mut b, &groups[0]);
+    cairn::p2p::service::replay_records(&mut b, &groups[1]);
     b.settle_at(&format_iso8601_utc(t0 + 4 * EPOCH)).expect("s");
 
     // The disagreement is real -- this is the honest half of the claim.

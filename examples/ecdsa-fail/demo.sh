@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # ecdsa.fail-shaped MVP: fund a minimize ratchet, self-check, commit–reveal, settle.
 #
-#   ./examples/ecdsa-fail/demo.sh [/tmp/proofwork-ecdsa-fail.jsonl]
+#   ./examples/ecdsa-fail/demo.sh [/tmp/cairn-ecdsa-fail.jsonl]
 #
 # Does not call the ecdsa.fail API. For the real launch benchmark use
 # `ecdsafail` (see adapter.sh and GAP.md).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-LOG="${1:-/tmp/proofwork-ecdsa-fail.jsonl}"
+LOG="${1:-/tmp/cairn-ecdsa-fail.jsonl}"
 rm -f "$LOG"
-PW="${PROOFWORK_BIN:-./target/release/proofwork}"
+PW="${CAIRN_BIN:-./target/release/cairn}"
 [ -x "$PW" ] || { echo "building release binary..." >&2; cargo build --release; }
 pw() { "$PW" --log "$LOG" --root . "$@"; }
 
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 tick() { sleep 1.1; }
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }

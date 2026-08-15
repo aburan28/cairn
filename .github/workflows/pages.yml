@@ -1,0 +1,94 @@
+name: pages
+
+# The public site: the same Next app the node embeds, built for a different
+# mount point and pushed to GitHub Pages.
+#
+# One app and not two, deliberately. A separate marketing site would drift from
+# the reader in styling, in the shape it expects from `/objectives`, and in what
+# it claims the network does. This way the page a visitor sees and the page an
+# operator sees from their own node are the same code, and the only difference
+# is which node answers.
+#
+# What makes that safe is the fallback: with no node reachable, the site renders
+# `launch/cairn.jsonl` -- a genuinely settled log that ships in the repository
+# and audits -- and says on the page that that is what it is doing. Nothing here
+# is simulated.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ui/**"
+      - "launch/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Read the repo, write the Pages deployment, and mint the OIDC token the deploy
+# action exchanges. No broader write scope: this job publishes a site and must
+# not be able to push to the repository.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and never cancel one in flight: a half-replaced site is
+# worse than a slightly stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: actions/configure-pages@v5
+        id: pages
+
+      - run: npm ci
+        working-directory: ui
+      - run: npx tsc --noEmit
+        working-directory: ui
+
+      # The snapshot is committed, so this only checks it still matches the log
+      # it claims to come from. A site whose "real settled log" section drifted
+      # from `launch/` would be the one falsehood this project cannot afford.
+      - name: the committed snapshot matches the settled log
+        run: |
+          set -euo pipefail
+          cargo build --release --bin cairn-serve
+          cp ui/lib/snapshot.json /tmp/committed.json
+          ./scripts/site-snapshot.sh
+          diff -u /tmp/committed.json ui/lib/snapshot.json || {
+            echo "ui/lib/snapshot.json is stale; re-run ./scripts/site-snapshot.sh" >&2
+            exit 1
+          }
+
+      # `configure-pages` reports the origin and path the site will be served
+      # from, so the base path is taken from it rather than hard-coded -- a
+      # custom domain and a project page need different answers and this asks.
+      - name: build
+        working-directory: ui
+        env:
+          NEXT_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ui/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deploy

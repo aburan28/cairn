@@ -12,7 +12,7 @@ use sha2::{Digest as _, Sha256};
 pub const EPOCH_SECONDS: u64 = 600;
 
 pub fn epoch_seconds() -> u64 {
-    match std::env::var("PROOFWORK_EPOCH_SECONDS") {
+    match std::env::var("CAIRN_EPOCH_SECONDS") {
         Ok(text) => text
             .trim()
             .parse()
@@ -40,7 +40,7 @@ pub fn epoch_seconds() -> u64 {
 pub const FINALITY_EPOCHS: u64 = 1;
 
 pub fn finality_epochs() -> u64 {
-    match std::env::var("PROOFWORK_FINALITY_EPOCHS") {
+    match std::env::var("CAIRN_FINALITY_EPOCHS") {
         Ok(text) => text.trim().parse().unwrap_or(FINALITY_EPOCHS),
         Err(_) => FINALITY_EPOCHS,
     }

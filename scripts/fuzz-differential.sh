@@ -21,8 +21,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
-REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+RUST="${RUST_BIN:-./target/release/cairn}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 CASES="${1:-${FUZZ_CASES:-2000}}"
 SEED="${2:-${FUZZ_SEED:-}}"
 

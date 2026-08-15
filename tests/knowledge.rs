@@ -35,15 +35,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use proofwork::attribution::{payouts_over, FlowParams};
-use proofwork::canonical::Value;
-use proofwork::knowledge::{ConfidencePolicy, Standing};
-use proofwork::ledger::Ledger;
-use proofwork::node::{Node, Outcome, RuleViolation};
-use proofwork::partition::{epoch_seconds, finality_epochs};
-use proofwork::records::{commitment_hash, Claim, ClaimRelation, Commitment, Objective, Relation};
-use proofwork::time::format_iso8601_utc;
-use proofwork::verifiers::{Status, VerifierRegistry};
+use cairn::attribution::{payouts_over, FlowParams};
+use cairn::canonical::Value;
+use cairn::knowledge::{ConfidencePolicy, Standing};
+use cairn::ledger::Ledger;
+use cairn::node::{Node, Outcome, RuleViolation};
+use cairn::partition::{epoch_seconds, finality_epochs};
+use cairn::records::{commitment_hash, Claim, ClaimRelation, Commitment, Objective, Relation};
+use cairn::time::format_iso8601_utc;
+use cairn::verifiers::{Status, VerifierRegistry};
 
 const TS: &str = "2026-07-28T00:00:00+00:00";
 const BASE: i64 = 1_785_196_800;
@@ -85,7 +85,7 @@ impl TempDir {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "proofwork-knowledge-{label}-{}-{nanos}-{n}",
+            "cairn-knowledge-{label}-{}-{nanos}-{n}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("scratch directory is creatable");
@@ -106,7 +106,7 @@ impl Drop for TempDir {
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    proofwork::hex::encode(&hasher.finalize())
+    cairn::hex::encode(&hasher.finalize())
 }
 
 fn write_pinned(dir: &TempDir, name: &str, source: &str) -> String {
@@ -475,7 +475,7 @@ fn a_relation_may_name_a_claim_the_verifier_rejected() {
 
 #[test]
 fn a_retraction_cannot_be_stapled_to_somebody_elses_signed_claim() {
-    use proofwork::crypto::identity::Identity;
+    use cairn::crypto::identity::Identity;
     use rand_core::OsRng;
 
     let identity = Identity::generate(&mut OsRng);

@@ -10,19 +10,26 @@
 // files instead of as a Node process.
 //
 // That is what lets the daemon serve it: `build.rs` embeds this directory in
-// the binary behind the `ui` feature, and `proofwork-p2p --serve` answers it
+// the binary behind the `ui` feature, and `cairn-p2p --serve` answers it
 // at /ui/. An operator reading their own node's chain should not have to
 // install a Node toolchain to do it.
 //
-// `basePath` because it is served under /ui/, not at the root — the root is
-// the endpoint index, which is a different and smaller job. `trailingSlash`
-// so that /ui/peers resolves to peers/index.html without a rewrite engine;
-// the server here is a few hundred lines and has no rewrites.
+// `basePath` is where this build will be mounted, and there are two answers.
+// Embedded in the node binary it lives under /ui/, because / is the endpoint
+// index — a different and smaller job. Deployed to GitHub Pages it lives under
+// the repository name, or at the root behind a custom domain. Neither is more
+// correct, so it comes from the environment and defaults to the embedded case,
+// which is the one `make ui-build` and the release workflow perform.
+//
+// `trailingSlash` so /ui/peers resolves to peers/index.html without a rewrite
+// engine; the server here is a few hundred lines and has none.
 // `images.unoptimized` because the optimizer is a server, and there is none.
+const basePath = process.env.NEXT_BASE_PATH ?? "/ui";
+
 const nextConfig = {
   reactStrictMode: true,
   output: "export",
-  basePath: "/ui",
+  basePath,
   trailingSlash: true,
   images: { unoptimized: true },
 };

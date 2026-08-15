@@ -205,13 +205,13 @@ lost.
 
 ```sh
 # assert what you found, alongside the citations that pay
-proofwork reveal <objective-id> --submitter bob --artifact a.json --nonce n2 \
+cairn reveal <objective-id> --submitter bob --artifact a.json --nonce n2 \
     --cites <frontier-claim> --relates refutes:<claim-id>
 
 # read the graph back, under your own policy
-proofwork knowledge <claim-id>
-proofwork knowledge <claim-id> --demanding
-proofwork knowledge <claim-id> --per-refutation 800 --independence-depth 1
+cairn knowledge <claim-id>
+cairn knowledge <claim-id> --demanding
+cairn knowledge <claim-id> --per-refutation 800 --independence-depth 1
 ```
 
 `knowledge` reads the log, writes nothing, and always exits 0 — a contested

@@ -341,3 +341,99 @@ h2 {
   border-top: 1px solid var(--line);
   word-break: break-all;
 }
+
+/* --- the site: landing and challenge pages ------------------------------- */
+
+h2 {
+  font-size: 1rem;
+  margin: 2rem 0 0.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+pre {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  /* A curl one-liner is longer than any sensible column. Wrapping beats a
+     horizontal scrollbar on the one element a visitor is meant to copy. */
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+
+.row.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.25rem 0;
+}
+
+.stat {
+  flex: 1 1 7rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.statValue {
+  font-size: 1.15rem;
+  color: var(--accent);
+}
+
+.statLabel {
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+
+ul.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.card {
+  padding: 0.75rem;
+  margin-bottom: 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.card a {
+  color: inherit;
+}
+
+.tag.open {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* A ratchet is a distance travelled between two known ends, so it gets a bar.
+   Display only -- the payout is integer arithmetic in frontier.rs. */
+.bar {
+  display: inline-block;
+  vertical-align: middle;
+  width: 6rem;
+  height: 0.45rem;
+  margin-left: 0.5rem;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.bar.wide {
+  display: block;
+  width: 100%;
+  margin: 0.5rem 0;
+  height: 0.6rem;
+}
+
+.bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}

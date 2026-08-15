@@ -44,10 +44,10 @@ use super::which;
 /// jail mechanism into a node that answers `Unavailable` to everything, and a
 /// network of nodes that cannot verify is worse than one that verifies in a
 /// documented weaker mode.
-pub const REQUIRE_ENV: &str = "PROOFWORK_REQUIRE_SANDBOX";
+pub const REQUIRE_ENV: &str = "CAIRN_REQUIRE_SANDBOX";
 
 /// Address-space cap for pinned pure functions, in MiB. `0` disables it.
-pub const MEMORY_ENV: &str = "PROOFWORK_SANDBOX_MEMORY_MB";
+pub const MEMORY_ENV: &str = "CAIRN_SANDBOX_MEMORY_MB";
 
 /// Default address-space cap. A pinned `check`/`score`/`statistic` that needs
 /// more than this is not a verifier anyone should be running synchronously.
@@ -420,7 +420,7 @@ fn with_limits(
         OsString::from("-c"),
         OsString::from(script),
         // `$0` for the shell; `$@` starts at the program.
-        OsString::from("proofwork-jail"),
+        OsString::from("cairn-jail"),
         program.as_os_str().to_os_string(),
     ];
     argv.extend_from_slice(args);
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn a_scrubbed_environment_keeps_path_and_drops_secrets() {
-        let dir = PathBuf::from("/tmp/proofwork-env-test");
+        let dir = PathBuf::from("/tmp/cairn-env-test");
         let plan = Confinement::new(&dir, &dir, 1).scrubbed();
         let env = minimal_env(&plan);
         let keys: Vec<String> = env
@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn limits_wrap_through_a_shell_only_when_a_limit_is_asked_for() {
-        let dir = PathBuf::from("/tmp/proofwork-limit-test");
+        let dir = PathBuf::from("/tmp/cairn-limit-test");
         let none = Confinement::new(&dir, &dir, 0);
         let (bin, argv) = with_limits(Path::new("/usr/bin/true"), &[], &none);
         assert_eq!(bin, OsString::from("/usr/bin/true"));

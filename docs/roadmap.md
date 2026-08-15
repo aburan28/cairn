@@ -26,7 +26,7 @@ behaviour ships and is tested, not that TLC has checked it.
       with no network, writes confined to a scratch directory, a wall-clock
       deadline, and best-effort `RLIMIT_CPU`/`RLIMIT_AS`. This is not the
       container/WASM boundary this line originally asked for: a kernel bug is
-      still an escape, and on macOS reads are not confined. `PROOFWORK_REQUIRE_SANDBOX=1`
+      still an escape, and on macOS reads are not confined. `CAIRN_REQUIRE_SANDBOX=1`
       turns a host with no jail mechanism into `UNAVAILABLE` rather than a
       silent unconfined run. [verification.md](verification.md#sandboxing) and
       the threat-model row name the four remaining gaps; VM-class isolation is
@@ -36,7 +36,7 @@ behaviour ships and is tested, not that TLC has checked it.
       the key defaults to outside the data directory, `sync` mirrors ciphertext
       without ever carrying the key, and the cap refuses rather than pruning a
       hash-linked log. See [storage.md](storage.md).
-- [x] Key rotation: `proofwork store rekey` re-seals every line under a fresh
+- [x] Key rotation: `cairn store rekey` re-seals every line under a fresh
       key and proves the new file re-derives the same entries and the same root
       *before* anything is swapped. The old key is kept at `<key>.previous`,
       because copies made earlier — a `sync` mirror, a backup — are still sealed
@@ -49,7 +49,7 @@ behaviour ships and is tested, not that TLC has checked it.
       separate FIPS 204 ML-DSA-65 root key so a reader can pin what the operator
       claimed at a point in time and detect a rewrite. The daemon writes one
       after each successful p2p synchronization.
-- [x] `proofwork verify --from <checkpoint>` for readers who only have a log
+- [x] `cairn verify --from <checkpoint>` for readers who only have a log
       fragment: verifies the signature against a pinned root key, then recomputes
       head and Merkle root over the prefix of length `height`. A longer local log
       passes, a shorter one fails, and `--audit` re-derives the settlements in
@@ -98,7 +98,7 @@ behaviour ships and is tested, not that TLC has checked it.
       Deliberately **no record kind**: a manifest is derived from bytes, so
       signing one would sign an arithmetic fact, and it is connected to the
       network the way a piece manifest is — by describing a digest the log
-      already pinned. Deliberately **no transfer**: `proofwork shard` is the
+      already pinned. Deliberately **no transfer**: `cairn shard` is the
       caller that keeps the module honest until `swarm` grows one, because a
       subsystem with no entry point is how the two `swarm`/`blobs` seam bugs
       survived, and `scripts/shard-demo.sh` drives six stores that share nothing
@@ -228,7 +228,7 @@ behaviour ships and is tested, not that TLC has checked it.
       places to change one rule. It is a scope decision rather than an
       engineering one, which is why it is still open — the liability that made
       it urgent, an unencrypted socket, is gone.
-- [x] **Peer identities in the log** (`records::PeerRecord`, `proofwork peer`).
+- [x] **Peer identities in the log** (`records::PeerRecord`, `cairn peer`).
       A fourth record kind binding a permanent ed25519 identity to the transport
       id it answers on, plus an address hint and a `seq` that supersedes — so
       obtaining the log *is* obtaining the address book, and finding the network
@@ -317,7 +317,7 @@ behaviour ships and is tested, not that TLC has checked it.
       nobody issues it and nobody can decline to; an `availability` record
       answers it with an inclusion path; and an `availability_pool` funds a
       settlement that pays the answers in equal integer shares and names every
-      promise that stayed silent. `proofwork availability
+      promise that stayed silent. `cairn availability
       [undertake|answer|fund|settle|status]`. Both implementations audit the
       same log to the same root and refuse the same forged promise, checked by
       `scripts/differential.sh`.
@@ -330,7 +330,7 @@ behaviour ships and is tested, not that TLC has checked it.
       byte. A promise now covers the log as it stood, the share is weighted by
       that height, one identity is paid once, and the answer carries the entry.
       Two consensus defects came out of the same review: the sampled index moved
-      whenever the log grew, and it read `PROOFWORK_EPOCH_SECONDS`, so the same
+      whenever the log grew, and it read `CAIRN_EPOCH_SECONDS`, so the same
       log audited clean or dirty depending on the auditor's environment — six
       times in ten. Both are pinned by injection and by a cross-configuration
       run in `scripts/differential.sh`.
@@ -354,14 +354,14 @@ behaviour ships and is tested, not that TLC has checked it.
 
 ### Added in the launch pass
 
-- [x] **A remote surface** (`src/serve.rs`, `proofwork-serve`). `GET /log`
+- [x] **A remote surface** (`src/serve.rs`, `cairn-serve`). `GET /log`
       returns the log byte for byte, with `/objectives`, `/objective/{id}`,
       `/frontier/{id}`, `/checkpoint` and `/health` as conveniences over it.
       This is what makes "anyone can re-derive every settled result from the
       log" reachable by somebody who is not the operator, and it was the item
       standing between Stage 0 and anyone outside using it. See
       [serving.md](serving.md).
-- [x] **A submission queue** (`POST /submit`, `proofwork drain`). Records
+- [x] **A submission queue** (`POST /submit`, `cairn drain`). Records
       arriving over the network are spooled, not appended: a Ledger has one
       writer, and admission is decided against the whole log by the rules
       engine rather than in a request handler. This is the honest version of
@@ -371,14 +371,14 @@ behaviour ships and is tested, not that TLC has checked it.
       always said it; an advisory lock now means a second *process* cannot
       quietly fork the log either.
 - [x] **A published log** (`launch/`), with the signed checkpoint and the key,
-      built by `scripts/make-launch-log.sh`. `proofwork checkpoint` signs one
+      built by `scripts/make-launch-log.sh`. `cairn checkpoint` signs one
       from the CLI, which previously only the p2p daemon could do.
 - [x] **Objective-declared artifact shape** (`artifact_schema`). Documentation
       rather than a rule -- the pinned verifier stays the only authority -- so
       an agent has a source for the shape that is not the attacker-authored
       statement.
 - [x] **Typed claim relations and a derived knowledge view**
-      (`Claim::relations`, `src/knowledge.rs`, `proofwork knowledge`). A
+      (`Claim::relations`, `src/knowledge.rs`, `cairn knowledge`). A
       verified artifact is not the end of a claim's life: it gets replicated,
       superseded, narrowed, retracted. The log now records those assertions as
       typed edges and anyone derives `Standing` and a confidence number from
@@ -404,9 +404,9 @@ downstream is unbacked.
 - [ ] Agent proposer loop (propose → self-check against the pinned verifier →
       submit only what already passes locally). Free verification means the
       proposer can filter before it spends the network's time.
-- [x] Objective discovery API and a work queue. `proofwork-serve` publishes
+- [x] Objective discovery API and a work queue. `cairn-serve` publishes
       the log and the open objectives; `POST /submit` queues proposals that
-      `proofwork drain` admits through the same rules engine. See
+      `cairn drain` admits through the same rules engine. See
       [serving.md](serving.md).
 - [~] Rate limiting and submission bonds against spam. The queue is bounded
       (`--max-queue`, 429 past it), body size, request time and concurrency are

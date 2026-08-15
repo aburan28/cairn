@@ -79,7 +79,7 @@ export default function Page() {
         <code>evaluator</code> objective ratchets, paying each improvement in
         proportion to the distance it moved the frontier. Nothing here is this
         page&apos;s opinion — the node derived it from its log, and{" "}
-        <code>proofwork audit</code> re-derives it from nothing.
+        <code>cairn audit</code> re-derives it from nothing.
       </p>
 
       <div className="row">
@@ -107,7 +107,7 @@ export default function Page() {
       {objectives && objectives.length === 0 && (
         <p className="empty">
           This node knows of no objectives. Fund one with{" "}
-          <code>proofwork post &lt;objective.json&gt;</code>.
+          <code>cairn post &lt;objective.json&gt;</code>.
         </p>
       )}
 

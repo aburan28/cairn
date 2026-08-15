@@ -107,7 +107,7 @@ bounded. Two properties make that defensible rather than a rationalisation:
 **It is identity-blind.** If bob's four slices were four different people, the
 rule returns exactly the same numbers. Nothing keys on who submitted what, so
 there is no sybil version of the attack — which matters more now than it did,
-because `proofwork identity` makes minting a name one command.
+because `cairn identity` makes minting a name one command.
 
 **It rewards the behaviour the ratchet exists to encourage.** A small bounded
 premium for publishing in many steps rather than one is not a bug in a system
@@ -118,7 +118,7 @@ current rule *punishes* incremental publication, which is backwards.
 
 **Collapse consecutive same-submitter citations into one hop.** Fixes the
 measured attack exactly and is worthless: identities are a keypair, and
-`proofwork identity` now makes minting one a single command. Bob slices under
+`cairn identity` now makes minting one a single command. Bob slices under
 four names and the defence evaporates. Any rule keyed on *who* submitted has
 this shape.
 

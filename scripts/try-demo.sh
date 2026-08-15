@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `proofwork try` and `proofwork scaffold`, end to end against a real clock.
+# `cairn try` and `cairn scaffold`, end to end against a real clock.
 #
 #   ./scripts/try-demo.sh
 #
@@ -7,7 +7,7 @@
 # `demo.sh` is: the epoch boundary they wait on is derived from record
 # timestamps against a real clock, and a fixture timestamp cannot exercise it.
 # A unit test of `try` would have to either sleep a production epoch or set
-# `PROOFWORK_EPOCH_SECONDS` process-wide, which every other test in the binary
+# `CAIRN_EPOCH_SECONDS` process-wide, which every other test in the binary
 # would then be racing.
 #
 # What this proves that the unit tests cannot:
@@ -24,19 +24,26 @@
 #      `invalid_spec`: the generated spec has to be *complete*, or the scaffold
 #      has handed somebody a bounty that can never settle.
 set -euo pipefail
+
+# Forces a plaintext log. This script reads the log as text -- it greps for a
+# field, or parses it as JSON -- and the CLI seals every log it creates whenever
+# a key file exists, so on a machine that has run `cairn keygen` the assertion
+# was made against ciphertext. What is under test here is the *record*, not how
+# it is stored; the sealed path is covered by serve-smoke and node-smoke.
+export CAIRN_KEY=/nonexistent/cairn-forces-plaintext
 cd "$(dirname "$0")/.."
 
-LOG="${1:-/tmp/proofwork-try-demo.jsonl}"
+LOG="${1:-/tmp/cairn-try-demo.jsonl}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 rm -f "$LOG"
-PW="${PROOFWORK_BIN:-./target/release/proofwork}"
+PW="${CAIRN_BIN:-./target/release/cairn}"
 [ -x "$PW" ] || { echo "building release binary..." >&2; cargo build --release; }
 pw() { "$PW" --log "$LOG" --root . "$@"; }
 
 # One-second epochs, so the same rules play out in a script that finishes.
 # Changes no canonical bytes: nothing derived from this enters a record.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
@@ -54,7 +61,7 @@ rule "the round really crossed an epoch boundary"
 python3 - "$LOG" <<'PY'
 import json, os, sys
 
-length = int(os.environ.get("PROOFWORK_EPOCH_SECONDS", "600"))
+length = int(os.environ.get("CAIRN_EPOCH_SECONDS", "600"))
 
 
 def unix(ts):

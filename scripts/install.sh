@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install proofwork from a published release.
+# Install cairn from a published release.
 #
 #   curl -fsSL https://raw.githubusercontent.com/aburan28/distributed-researcher/main/scripts/install.sh | sh
 #
@@ -14,34 +14,34 @@
 # The real check is the one this project exists for, and it runs offline against
 # bytes that ship in the repository rather than against a promise from a CDN:
 #
-#     proofwork --log launch/proofwork.jsonl --root . audit
+#     cairn --log launch/cairn.jsonl --root . audit
 #
 # That re-derives every settled result. If it passes, the binary computes what
 # the published log says it should, whoever served it to you.
 #
 # Environment
 # -----------
-#   PROOFWORK_VERSION   tag to install (default: latest release)
-#   PROOFWORK_BIN       install directory (default: ~/.local/bin)
-#   PROOFWORK_LIBC      on Linux, `musl` (default) or `gnu`
+#   CAIRN_VERSION   tag to install (default: latest release)
+#   CAIRN_BIN       install directory (default: ~/.local/bin)
+#   CAIRN_LIBC      on Linux, `musl` (default) or `gnu`
 #
 # Flags mirror the variables: --version, --bin-dir, --libc, --help.
 
 set -eu
 
 REPO="aburan28/distributed-researcher"
-BINS="proofwork proofwork-mcp proofwork-p2p proofwork-serve proofwork-gen-bootstrap"
+BINS="cairn cairn-mcp cairn-p2p cairn-serve cairn-gen-bootstrap"
 
-VERSION="${PROOFWORK_VERSION:-}"
-BIN_DIR="${PROOFWORK_BIN:-}"
-LIBC="${PROOFWORK_LIBC:-musl}"
+VERSION="${CAIRN_VERSION:-}"
+BIN_DIR="${CAIRN_BIN:-}"
+LIBC="${CAIRN_LIBC:-musl}"
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
 
 usage() {
     cat <<'EOF'
-Install proofwork from a published release.
+Install cairn from a published release.
 
 USAGE
     install.sh [--version <tag>] [--bin-dir <dir>] [--libc musl|gnu]
@@ -100,7 +100,7 @@ case "$os" in
         # Windows is absent from the release matrix by decision, not oversight:
         # the verifier sandbox is seatbelt and bubblewrap, and a node that runs
         # objective-authored code without one is the configuration
-        # PROOFWORK_REQUIRE_SANDBOX exists to refuse.
+        # CAIRN_REQUIRE_SANDBOX exists to refuse.
         die "unsupported operating system: $os (this project ships Linux and macOS only)"
         ;;
 esac
@@ -122,7 +122,7 @@ if [ -z "$VERSION" ]; then
     esac
 fi
 
-name="proofwork-$VERSION-$target"
+name="cairn-$VERSION-$target"
 base="https://github.com/$REPO/releases/download/$VERSION"
 
 # -- download and check -----------------------------------------------------
@@ -200,7 +200,7 @@ if [ "$os" = "Linux" ] && ! command -v bwrap >/dev/null 2>&1; then
     cat <<'EOF'
     bubblewrap is not installed. Without it, objective-authored verifier code
     runs unconfined. Install it (`apt install bubblewrap`, `dnf install
-    bubblewrap`) and set PROOFWORK_REQUIRE_SANDBOX=1 on any node that verifies
+    bubblewrap`) and set CAIRN_REQUIRE_SANDBOX=1 on any node that verifies
     objectives it did not write -- that turns "unconfined" into Unavailable
     rather than running it anyway.
 
@@ -212,6 +212,6 @@ cat <<EOF
 
         git clone https://github.com/$REPO
         cd distributed-researcher
-        $BIN_DIR/proofwork --log launch/proofwork.jsonl --root . audit
+        $BIN_DIR/cairn --log launch/cairn.jsonl --root . audit
 
 EOF

@@ -1,4 +1,4 @@
-//! `proofwork-mcp` — a Model Context Protocol server over stdio.
+//! `cairn-mcp` — a Model Context Protocol server over stdio.
 //!
 //! One integration for every agent that speaks MCP (Claude Code, Codex,
 //! OpenCode), rather than three bespoke ones.
@@ -91,23 +91,23 @@ use std::path::PathBuf;
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Map, Value as Json};
 
-use proofwork::canonical::{digest_bytes, Value};
-use proofwork::crypto::identity::Identity;
-use proofwork::frontier::Ratchet;
-use proofwork::knowledge::{ConfidencePolicy, Standing};
-use proofwork::ledger::Ledger;
-use proofwork::node::{Node, RuleViolation};
-use proofwork::partition::{assignment_for, epoch_of, epoch_seconds};
-use proofwork::records::{commitment_hash, Claim, Commitment, Objective};
-use proofwork::schema::validate_claim;
-use proofwork::time::{parse_rfc3339, timestamp};
-use proofwork::verifiers::VerifierRegistry;
+use cairn::canonical::{digest_bytes, Value};
+use cairn::crypto::identity::Identity;
+use cairn::frontier::Ratchet;
+use cairn::knowledge::{ConfidencePolicy, Standing};
+use cairn::ledger::Ledger;
+use cairn::node::{Node, RuleViolation};
+use cairn::partition::{assignment_for, epoch_of, epoch_seconds};
+use cairn::records::{commitment_hash, Claim, Commitment, Objective};
+use cairn::schema::validate_claim;
+use cairn::time::{parse_rfc3339, timestamp};
+use cairn::verifiers::VerifierRegistry;
 
 /// Protocol versions this server implements. The first is the default when a
 /// client asks for something unrecognised.
 const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2024-11-05"];
 
-const SERVER_NAME: &str = "proofwork";
+const SERVER_NAME: &str = "cairn";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Bytes of commit–reveal nonce. Never leaves this process.
@@ -116,10 +116,11 @@ const NONCE_BYTES: usize = 32;
 fn main() {
     // Before anything that could log. Stderr only -- see `logging` -- which
     // matters most here in the MCP server, where stdout is the protocol.
-    proofwork::logging::init();
-    let mut log = PathBuf::from("proofwork.jsonl");
+    cairn::logging::init();
+    let mut log = PathBuf::from("cairn.jsonl");
     let mut root = PathBuf::from(".");
     let mut identity_path: Option<PathBuf> = None;
+    let mut key_file: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -135,14 +136,20 @@ fn main() {
                 Some(v) => identity_path = Some(PathBuf::from(v)),
                 None => fail("--identity needs a path"),
             },
+            "--key-file" => match args.next() {
+                Some(v) => key_file = Some(PathBuf::from(v)),
+                None => fail("--key-file needs a path"),
+            },
             "--help" | "-h" => {
                 eprintln!(
-                    "proofwork-mcp — MCP server over stdio\n\n\
-                     USAGE\n    proofwork-mcp [--log <path>] [--root <dir>]\n\n\
-                     --log       append-only ledger (default proofwork.jsonl)\n\
+                    "cairn-mcp — MCP server over stdio\n\n\
+                     USAGE\n    cairn-mcp [--log <path>] [--root <dir>]\n\n\
+                     --log       append-only ledger (default cairn.jsonl)\n\
                      --root      bundle root that pinned verifier paths resolve against\n\
                      --identity  sign submissions with this key; its public half\n\
-                                 becomes the submitter, and nobody else can claim it\n"
+                                 becomes the submitter, and nobody else can claim it\n\
+                     --key-file  at-rest key, if the ledger is sealed (default: the\n\
+                                 CLI's own, so a sealed log opens with no flag)\n"
                 );
                 return;
             }
@@ -150,10 +157,19 @@ fn main() {
         }
     }
 
+    // Sealed if the log is sealed, by the same rule the CLI applies and from
+    // the same function. Without this, an agent pointed at a log the CLI wrote
+    // on a machine with a key file -- which is every machine that has run
+    // `cairn keygen` -- got "altered, reordered, or spliced" for its own log.
+    let key_path = key_file.unwrap_or_else(|| cairn::store::Store::new(&root).default_key_path());
+    let codec = match cairn::store::resolve_codec(&log, &key_path, None) {
+        Ok(codec) => codec,
+        Err(e) => fail(&format!("at-rest key: {e}")),
+    };
     // Exclusive: this server appends, and two of them over one log fork it
     // silently. The refusal names the fix, because "point each client at its
     // own --log" is the arrangement docs/agents.md recommends anyway.
-    let ledger = match Ledger::open_exclusive(&log) {
+    let ledger = match Ledger::open_exclusive_with(&log, codec) {
         Ok(ledger) => ledger,
         Err(e) => fail(&format!("cannot open ledger {}: {e}", log.display())),
     };
@@ -172,7 +188,7 @@ fn main() {
     let mut server = Server::new(Node::with_registry(ledger, registry), identity);
 
     eprintln!(
-        "proofwork-mcp {SERVER_VERSION}: ledger {}, root {}",
+        "cairn-mcp {SERVER_VERSION}: ledger {}, root {}",
         log.display(),
         root.display()
     );
@@ -212,7 +228,7 @@ fn main() {
 }
 
 /// Read a submitter identity from disk. Same file shape as the CLI's
-/// `proofwork identity --out`.
+/// `cairn identity --out`.
 ///
 /// `public` is checked against `secret` rather than trusted: a file whose
 /// halves disagree signs under a name its owner cannot prove, and an agent
@@ -257,7 +273,7 @@ fn load_identity(path: &std::path::Path) -> Result<Identity, String> {
 }
 
 fn fail(message: &str) -> ! {
-    eprintln!("proofwork-mcp: {message}");
+    eprintln!("cairn-mcp: {message}");
     std::process::exit(2);
 }
 
@@ -300,7 +316,7 @@ impl PendingStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => {
                 eprintln!(
-                    "proofwork-mcp: cannot read pending commitments {}: {error}; \
+                    "cairn-mcp: cannot read pending commitments {}: {error}; \
                      any open commitment is stranded until the file is restored",
                     path.display()
                 );
@@ -310,7 +326,7 @@ impl PendingStore {
                 Ok(Json::Array(items)) => items.iter().filter_map(Pending::from_json).collect(),
                 Ok(_) | Err(_) => {
                     eprintln!(
-                        "proofwork-mcp: pending commitments file {} is corrupt; \
+                        "cairn-mcp: pending commitments file {} is corrupt; \
                          any open commitment is stranded until the file is restored",
                         path.display()
                     );
@@ -363,13 +379,13 @@ impl PendingStore {
         let text = match serde_json::to_string_pretty(&Json::Array(items)) {
             Ok(text) => text,
             Err(error) => {
-                eprintln!("proofwork-mcp: cannot serialize pending commitments: {error}");
+                eprintln!("cairn-mcp: cannot serialize pending commitments: {error}");
                 return;
             }
         };
         if let Err(error) = write_private(&self.path, &text) {
             eprintln!(
-                "proofwork-mcp: cannot save pending commitments to {}: {error}",
+                "cairn-mcp: cannot save pending commitments to {}: {error}",
                 self.path.display()
             );
         }
@@ -482,11 +498,11 @@ impl Server {
     /// retries.
     fn drain_due_settlements(&mut self) {
         if let Err(error) = self.node.ledger_mut().reload_if_changed() {
-            eprintln!("proofwork-mcp: cannot re-read the log: {error}");
+            eprintln!("cairn-mcp: cannot re-read the log: {error}");
         }
         let ts = timestamp();
         if let Err(violation) = self.node.settle_at(&ts) {
-            eprintln!("proofwork-mcp: cannot settle due epochs: {violation}");
+            eprintln!("cairn-mcp: cannot settle due epochs: {violation}");
         }
     }
 
@@ -1200,7 +1216,7 @@ impl Server {
                 ));
             }
         }
-        if verdict.status == proofwork::verifiers::Status::Unavailable {
+        if verdict.status == cairn::verifiers::Status::Unavailable {
             out.push_str(
                 "This says nothing about your artifact -- this node could not check it. \
                  Do not treat it as a rejection.\n",
@@ -1373,7 +1389,7 @@ impl Server {
                      when each node happened to hear about the work. Any later call -- \
                      frontier_status included -- applies the settlement once it is due.\n",
                     now,
-                    proofwork::partition::finality_epochs(),
+                    cairn::partition::finality_epochs(),
                     epoch_seconds(),
                 ));
             } else if outcome.reward == 0 && outcome.verdict.accepted() {
@@ -1669,7 +1685,7 @@ mod tests {
     use super::*;
 
     fn server() -> Server {
-        let dir = std::env::temp_dir().join(format!("proofwork-mcp-test-{}", fresh_nonce()));
+        let dir = std::env::temp_dir().join(format!("cairn-mcp-test-{}", fresh_nonce()));
         std::fs::create_dir_all(&dir).unwrap();
         let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
         Server::new(Node::new(ledger, &dir), None)
@@ -1682,7 +1698,7 @@ mod tests {
     /// `get_claim` serves only accepted ones, so a hand-written fixture would
     /// test a path production cannot reach. The reveal is twenty minutes after
     /// the commit because a reveal must land in a strictly later epoch and the
-    /// default epoch is ten -- no `PROOFWORK_EPOCH_SECONDS` here, which would
+    /// default epoch is ten -- no `CAIRN_EPOCH_SECONDS` here, which would
     /// race every other test in this binary.
     fn server_with_accepted_claim(artifact: Value) -> (Server, String) {
         server_with_claim_by(artifact, None)
@@ -1696,11 +1712,11 @@ mod tests {
     fn server_with_claim_by(artifact: Value, signer: Option<&Identity>) -> (Server, String) {
         const TS: &str = "2026-07-28T00:00:00+00:00";
         const LATER: &str = "2026-07-28T00:20:00+00:00";
-        let dir = std::env::temp_dir().join(format!("proofwork-mcp-test-{}", fresh_nonce()));
+        let dir = std::env::temp_dir().join(format!("cairn-mcp-test-{}", fresh_nonce()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = "def check(artifact):\n    return True\n";
         std::fs::write(dir.join("c.py"), source).unwrap();
-        let sha = proofwork::canonical::digest_bytes(source.as_bytes())
+        let sha = cairn::canonical::digest_bytes(source.as_bytes())
             .trim_start_matches("sha256:")
             .to_string();
 
@@ -1728,22 +1744,16 @@ mod tests {
             Some(identity) => identity.submitter_id(),
             None => "rival".to_string(),
         };
-        let hash = proofwork::records::commitment_hash(&objective_id, &submitter, &artifact, "n1");
-        let commitment = proofwork::records::Commitment::new(&objective_id, &submitter, hash, TS);
+        let hash = cairn::records::commitment_hash(&objective_id, &submitter, &artifact, "n1");
+        let commitment = cairn::records::Commitment::new(&objective_id, &submitter, hash, TS);
         let commitment = match signer {
             Some(identity) => commitment.signed_with(identity),
             None => commitment,
         };
         server.node.commit(&commitment, TS).expect("commit");
-        let claim = proofwork::records::Claim::new(
-            &objective_id,
-            &submitter,
-            artifact,
-            "n1",
-            TS,
-            Vec::new(),
-        )
-        .expect("valid claim");
+        let claim =
+            cairn::records::Claim::new(&objective_id, &submitter, artifact, "n1", TS, Vec::new())
+                .expect("valid claim");
         let claim = match signer {
             Some(identity) => claim.signed_with(identity),
             None => claim,
@@ -1759,7 +1769,7 @@ mod tests {
 
     /// A server that signs, plus the identity it signs with.
     fn signing_server() -> (Server, Identity) {
-        let dir = std::env::temp_dir().join(format!("proofwork-mcp-test-{}", fresh_nonce()));
+        let dir = std::env::temp_dir().join(format!("cairn-mcp-test-{}", fresh_nonce()));
         std::fs::create_dir_all(&dir).unwrap();
         let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
         let identity = Identity::from_secret_bytes([31u8; 32]);
@@ -2196,20 +2206,20 @@ mod tests {
 
         let who = author.submitter_id();
         let artifact = Value::object([("n", Value::Int(43))]);
-        let hash = proofwork::records::commitment_hash(&second_id, &who, &artifact, "n2");
+        let hash = cairn::records::commitment_hash(&second_id, &who, &artifact, "n2");
         server
             .node
             .commit(
-                &proofwork::records::Commitment::new(&second_id, &who, hash, LATER)
+                &cairn::records::Commitment::new(&second_id, &who, hash, LATER)
                     .signed_with(&author),
                 LATER,
             )
             .expect("commit");
         let retraction =
-            proofwork::records::Claim::new(&second_id, &who, artifact, "n2", LATER, Vec::new())
+            cairn::records::Claim::new(&second_id, &who, artifact, "n2", LATER, Vec::new())
                 .expect("valid claim")
-                .relating(vec![proofwork::records::ClaimRelation::new(
-                    proofwork::records::Relation::Retracts,
+                .relating(vec![cairn::records::ClaimRelation::new(
+                    cairn::records::Relation::Retracts,
                     &claim_id,
                 )])
                 .expect("valid claim")
@@ -2331,7 +2341,7 @@ mod tests {
         // Regression: this tool had its own DEFAULT_EPOCH_SECONDS of 3600, so
         // the epoch it reported contradicted the one submit_claim stamped for
         // the same wall-clock moment -- by a factor of six at the default
-        // length, by 3600x under PROOFWORK_EPOCH_SECONDS=1.
+        // length, by 3600x under CAIRN_EPOCH_SECONDS=1.
         let (mut s, objective_id, _) = server_with_injected_objective();
         let before = epoch_of(unix_seconds(&timestamp()).unwrap(), epoch_seconds());
         let out = call(

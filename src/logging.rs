@@ -3,7 +3,7 @@
 //! # Why this exists
 //!
 //! Before it, every diagnostic in the crate was an unconditional `eprintln!`:
-//! seventy of them, twenty-four in `proofwork-p2p` alone, none carrying a
+//! seventy of them, twenty-four in `cairn-p2p` alone, none carrying a
 //! timestamp. A daemon that runs for days on a five-second tick could not say
 //! *when* anything happened, two nodes' output could not be lined up against
 //! each other, and there was no way to ask for more detail without editing the
@@ -14,7 +14,7 @@
 //! # Why the backend is ours
 //!
 //! The [`log`] facade is a dependency; what writes the bytes is here, and that
-//! is deliberate. **`proofwork-mcp` speaks JSON-RPC on stdout.** A logger that
+//! is deliberate. **`cairn-mcp` speaks JSON-RPC on stdout.** A logger that
 //! wrote a line there would not look untidy, it would corrupt the protocol
 //! mid-session and the client would blame itself — the exact failure
 //! `scripts/mcp-smoke.sh` exists to catch. Owning the writer is what turns
@@ -27,7 +27,7 @@
 //!
 //! # Filtering
 //!
-//! `PROOFWORK_LOG` picks the level: `error`, `warn`, `info`, `debug`, `trace`,
+//! `CAIRN_LOG` picks the level: `error`, `warn`, `info`, `debug`, `trace`,
 //! or `off`. Default `info`, which is the daemon's ordinary narration and
 //! nothing per-message. `debug` adds every p2p protocol message with its peer
 //! and direction; `trace` is the same plus payload detail.
@@ -44,7 +44,7 @@ use log::{LevelFilter, Log, Metadata, Record};
 use std::io::Write;
 
 /// The environment variable that sets the level.
-pub const LEVEL_VAR: &str = "PROOFWORK_LOG";
+pub const LEVEL_VAR: &str = "CAIRN_LOG";
 
 /// Writes every record to stderr, prefixed with a UTC timestamp and level.
 struct StderrLogger {
@@ -102,7 +102,7 @@ pub fn parse_level(text: &str) -> Option<LevelFilter> {
 /// already installed one, is a no-op rather than an error. Nothing here is
 /// worth failing a node's startup over.
 ///
-/// An unparseable `PROOFWORK_LOG` warns *through the logger it just installed*
+/// An unparseable `CAIRN_LOG` warns *through the logger it just installed*
 /// and keeps the default, which is the honest order — refusing to start
 /// because a diagnostic setting was misspelled would be worse than the typo.
 pub fn init() {
@@ -165,7 +165,7 @@ mod tests {
 
     /// The property the MCP protocol depends on.
     ///
-    /// `proofwork-mcp` writes JSON-RPC to stdout. One log line there is a
+    /// `cairn-mcp` writes JSON-RPC to stdout. One log line there is a
     /// corrupt frame, and the client blames itself. Asserted on the real
     /// process rather than by reading the source, because the thing that would
     /// break this is a future edit reaching for `println!`.
@@ -176,7 +176,7 @@ mod tests {
         // run the logging body instead of the suite. Spawning a child is the
         // only way to capture what a *process* put on each stream.
         let output = std::process::Command::new(exe)
-            .env("PROOFWORK_LOG_TEST_CHILD", "1")
+            .env("CAIRN_LOG_TEST_CHILD", "1")
             .env(LEVEL_VAR, "trace")
             .arg("--ignored")
             .arg("emit_one_line_at_every_level")
