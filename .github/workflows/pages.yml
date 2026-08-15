@@ -48,17 +48,25 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      # `enablement: true` because the first run of this workflow died here, on
-      # `Get Pages site failed`, and nothing was ever published. Pages has to be
-      # turned on for the repository before a deployment can target it, and the
-      # workflow that needs it is the right place to ask: a green build that
-      # publishes nothing, waiting on a setting nobody remembers to flip, is the
-      # failure mode this parameter exists for. It is idempotent -- once Pages
-      # is on, the action reads the config and moves on.
+      # Pages has to be turned on for the repository before any deployment can
+      # target it, and this step is where its absence shows up. The first two
+      # runs of this workflow both died right here, on `Get Pages site failed`,
+      # having built nothing.
       #
-      # If this ever 404s again, the token was refused rather than the setting
-      # being absent, and the fix is one click: Settings -> Pages -> Build and
-      # deployment -> Source: GitHub Actions.
+      # `enablement: true` asks for it, and for this repository asking is not
+      # enough: run #2 came back `Create Pages site failed: Resource not
+      # accessible by integration`. Creating a Pages site wants
+      # `administration: write`, which a workflow's `permissions:` block cannot
+      # grant to `GITHUB_TOKEN` at all -- so no edit to this file will fix it.
+      # **Somebody with admin on the repository has to flip it once**, at
+      # Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+      # Written down because the error names an API endpoint rather than a
+      # setting, and the obvious next move -- try harder in the workflow -- is
+      # the one that cannot work.
+      #
+      # The parameter stays anyway. It costs one refused call, and it heals the
+      # case it can heal: a fork, or a repository whose token does carry that
+      # scope, enables itself instead of failing the way this one did.
       - uses: actions/configure-pages@v5
         id: pages
         with:

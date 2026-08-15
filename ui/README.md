@@ -69,6 +69,20 @@ page. Served from the node, the default is same-origin and there is nothing to
 configure — and the URL box still retargets it, which is the whole value here:
 comparing one node's head against a peer's must not need a redeploy.
 
+## How the public site gets there
+
+`.github/workflows/pages.yml` builds this app at whatever base path Pages
+reports and deploys it, on every push to `main` touching `ui/`, `launch/`, or
+the workflow itself.
+
+**Pages has to be enabled by hand, once** — Settings → Pages → Build and
+deployment → Source: GitHub Actions. The workflow does ask (`configure-pages`
+with `enablement: true`) and is refused: creating a Pages site wants
+`administration: write`, and a workflow cannot grant that to itself. Until
+somebody flips that switch the job dies at step four, before it builds
+anything, and the site 404s while every check on the pull request that changed
+it is green. Worth knowing, because nothing in the repository can detect it.
+
 ## What it is for
 
 The head is the settlement anchor. Two nodes holding the same records compute
