@@ -45,7 +45,7 @@ to the blob's digest — it only means anything in combination with `k-1` others
 Feed one corrupt shard into that combination and **every** output byte is wrong,
 because the linear algebra spreads the lie across the whole reconstruction. The
 blob digest then tells you that *somebody* lied, which is the useless answer
-[`swarm::piece`](../src/swarm/piece.rs) exists to avoid during a transfer —
+[`p2p::swarm::piece`](../src/p2p/swarm/piece.rs) exists to avoid during a transfer —
 except worse. With `n` holders and one liar there are `n choose k` subsets to
 try and each retry is a full decode; at (10, 4) that is a thousand decodes to
 find one bad byte.
@@ -312,7 +312,7 @@ re-download, dropping the `k`-th surviving shard costs the blob.
 ## What this does not do
 
 - **No network transfer.** Shards are produced, stored, proved and reconstructed
-  locally; moving one between peers is [`swarm`](../src/swarm/)'s job and is not
+  locally; moving one between peers is [`swarm`](../src/p2p/swarm/)'s job and is not
   wired up. Said plainly because this crate has been bitten before by a
   subsystem tested only against itself — see [storage.md](storage.md) on the two
   bugs that sat in the `swarm`/`blobs` seam with no caller to find them.

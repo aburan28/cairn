@@ -105,7 +105,7 @@ does not go in a structure every node replicates — and the key is fetched on
 demand and checked against the id, which needs no trust because the id is its
 hash. `Service::seed_from_log` fills the address book from the log at startup.
 
-**Kademlia DHT with provider records.** *Built — `src/swarm/dht.rs`.* The
+**Kademlia DHT with provider records.** *Built — `src/p2p/swarm/dht.rs`.* The
 standard answer to "who has content X", and the right one: a fetch wants exactly
 a provider lookup, and without one it dials every peer it knows and asks each. That is flooding — fine at ten peers, hopeless at ten thousand, and worse
 exactly as the network becomes worth using.
@@ -188,14 +188,24 @@ Unaddressed here, and the reason a node behind a home router cannot yet seed.
 
 ## What is built
 
-`src/swarm/discovery.rs`, plus peer exchange over the connection `swarm::tcp`
-already opens. **Library-only in this tree.** No CLI subcommand drives it: the
-`blob` verbs belong to `src/blobs.rs` and are `ls | need | publish | gc`, and
-wiring a serve/fetch pair in would mean deciding first whether `src/swarm/` folds
-into `src/p2p/` — see [roadmap.md](roadmap.md).
+`src/p2p/swarm/discovery.rs`, plus peer exchange over the connection
+`p2p::swarm::tcp` already opens, and `proofwork blob serve | fetch` drives both
+from the command line — `scripts/blob-demo.sh` runs a seed and a leech over
+loopback and fetches a pinned checker the leech's log says it needs.
+
+This section said "library-only, no CLI subcommand drives it" for a while after
+both verbs shipped, which is the same failure as overstating what is defended
+pointed the other way. A doc that understates is still a doc that is wrong.
+
+The question it named as the blocker — *does `src/swarm/` fold into
+`src/p2p/`?* — is answered: it did, and it is `src/p2p/swarm/` now. The reason
+was a cycle rather than tidiness. `tcp::KeySource` is declared in the blob
+module and implemented by `p2p::service::Service`, so as siblings each named the
+other and the real direction of the dependency was something a reader had to
+reconstruct.
 
 Told one address, once, a node accumulates the rest by asking. Three nodes over
-loopback, driven directly against `swarm::tcp`:
+loopback, driven directly against `p2p::swarm::tcp`:
 
 ```
 B holds the blob, serving on :9801

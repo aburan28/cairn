@@ -1,5 +1,19 @@
 //! Peer-to-peer blob transfer, in the BitTorrent shape.
 //!
+//! # Where this sits
+//!
+//! Under [`crate::p2p`], not beside it. It was `crate::swarm` for most of this
+//! module's life, and the reason it moved is the sentence below: **the
+//! transport is `p2p`'s**, and so are the keys, the address book that supplies
+//! them, and the session a fetch runs over. A module that consumes all of that
+//! and is consumed by none of it is not a sibling.
+//!
+//! The cycle is what made the question worth settling rather than a matter of
+//! taste. [`tcp::KeySource`] is declared here and implemented by
+//! [`crate::p2p::service::Service`], so as siblings the two modules each named
+//! the other, and every reader had to work out which way the dependency really
+//! ran. It runs one way, and now the tree says so.
+//!
 //! # The transport is `p2p`'s
 //!
 //! [`tcp`] runs over [`crate::p2p::transport`] — Classic McEliece to an AEAD
@@ -41,10 +55,11 @@
 //! for, so a node with a running `p2p` stack needs an endpoint handed to it
 //! once and never again.
 //!
-//! This is the fold arriving as an interface rather than a deletion, and the
-//! shape is the point: the two address books here and in
-//! [`crate::p2p::discovery`] are **not** duplicates, which is worth saying
-//! because the two were described as duplicates for a long time. This one holds
+//! The fold arrived as an interface before it arrived as a move, and that order
+//! was right: the two address books here and in [`crate::p2p::discovery`] are
+//! **not** duplicates, which is worth saying because the two were described as
+//! duplicates for a long time and a merge on that belief would have deleted
+//! something load-bearing. This one holds
 //! signed, relayable records — who a peer is and where it claims to be, with a
 //! monotonic sequence so a stale claim cannot supersede a fresh one. That one
 //! holds a 261 KiB McEliece key per peer, which can never be relayed and is

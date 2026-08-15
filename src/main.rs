@@ -7023,11 +7023,11 @@ fn cmd_blob_serve(
 ) -> Result<i32, CliError> {
     let identity = std::sync::Arc::new(load_transport_identity(identity_path)?);
     let published = node.publish_local_code();
-    let listener = proofwork::swarm::tcp::serve(
+    let listener = proofwork::p2p::swarm::tcp::serve(
         listen,
         std::sync::Arc::clone(&identity),
         store.clone(),
-        proofwork::swarm::Limits::default(),
+        proofwork::p2p::swarm::Limits::default(),
     )
     .map_err(|error| CliError::Usage(format!("blob serve: cannot listen on {listen}: {error}")))?;
 
@@ -7107,12 +7107,12 @@ fn cmd_blob_fetch(
     let mut got = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for address in &missing {
-        match proofwork::swarm::tcp::fetch(
+        match proofwork::p2p::swarm::tcp::fetch(
             address,
             &endpoints,
             std::sync::Arc::clone(&identity),
             store,
-            proofwork::swarm::Limits::default(),
+            proofwork::p2p::swarm::Limits::default(),
             deadline,
         ) {
             Ok(bytes) => {
@@ -7150,7 +7150,7 @@ fn cmd_blob_fetch(
 ///
 /// This is the caller that keeps [`proofwork::shards`] honest. The module could
 /// be complete, tested and unreachable — which is precisely the state
-/// `src/swarm/` was in for a long time, and `docs/storage.md` records the two
+/// `src/p2p/swarm/` was in for a long time, and `docs/storage.md` records the two
 /// bugs that were sitting in the seam nobody crossed. Every action here goes
 /// through the same public API a network path would.
 ///

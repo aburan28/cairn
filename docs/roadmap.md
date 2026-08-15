@@ -57,7 +57,7 @@ behaviour ships and is tested, not that TLC has checked it.
 - [x] Objective schemas in `spec/` wired into `post` as a hard validation gate.
       The schema documents are the validator: both implementations interpret
       `spec/*.json` rather than reimplementing them, so the two cannot drift.
-- [x] **Piece-level blob transfer** (`src/swarm/`), in the BitTorrent shape:
+- [x] **Piece-level blob transfer** (`src/p2p/swarm/`), in the BitTorrent shape:
       pieces, a manifest of piece hashes, bitfields, rarest-first, bounded
       pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver.
       Library-only. The driver ran plaintext behind an off-by-default feature
@@ -103,14 +103,14 @@ behaviour ships and is tested, not that TLC has checked it.
       subsystem with no entry point is how the two `swarm`/`blobs` seam bugs
       survived, and `scripts/shard-demo.sh` drives six stores that share nothing
       in CI. See [shards.md](shards.md).
-- [x] **Signed peer records** (`src/swarm/discovery.rs`) in the ENR shape --
+- [x] **Signed peer records** (`src/p2p/swarm/discovery.rs`) in the ENR shape --
       identity is an ed25519 key, location is a hint signed by it, `seq`
       supersedes -- plus peer exchange, so one address given once accumulates the
       rest. This is the answer to "learning new peers is bootstrap-file only" in
       the gossip entry above, and it is not yet wired into `p2p`'s address book.
       Every hint source is equal because none is trusted, which is what makes DNS
       optional rather than load-bearing. See [discovery.md](discovery.md).
-- [x] **A Kademlia DHT** (`src/swarm/dht.rs`) for the question a fetch actually
+- [x] **A Kademlia DHT** (`src/p2p/swarm/dht.rs`) for the question a fetch actually
       asks -- who holds digest `D` right now. Peer exchange answers which peers
       exist; without provider lookup a fetch floods everyone it knows. XOR
       metric, k-buckets with oldest-live-wins, provider store with expiry, and
@@ -155,7 +155,7 @@ behaviour ships and is tested, not that TLC has checked it.
       nobody is asking for that blob any more.
 - [x] **One Kademlia, not two** (`src/dht.rs`). The metric, the k-buckets, the
       iterative lookup and the provider store are generic over a contact type;
-      `swarm::dht` and `p2p::dht` are instantiations. Written twice they would
+      `p2p::swarm::dht` and `p2p::dht` are instantiations. Written twice they would
       have drifted, and the one part of a DHT that is genuinely subtle is the
       part that must not.
 - [x] **Provider lookup in the daemon** (`src/p2p/dht.rs`). `p2p::code` is
@@ -217,17 +217,25 @@ behaviour ships and is tested, not that TLC has checked it.
       there, or **unaccounted for**, and `store status` reports the last two and
       exits 1. A future feature that writes plaintext state into a data
       directory trips it instead of slipping past.
-- [ ] Fold the rest of `src/swarm/` into `src/p2p/`. Substantially narrowed:
-      the DHT is shared, the transport is shared, and `tcp::KeySource` makes
-      `swarm` consume `p2p`'s key distribution rather than grow its own — so
-      what is left is one *discovery* stack instead of two, not one network
-      stack instead of two.
-      That last step deletes public API: `swarm::discovery`'s signed records
-      overlap `records::PeerRecord` almost exactly now (same shape, same
+- [x] **`swarm` moved under `p2p`** (`src/p2p/swarm/`). The DHT was already
+      shared, the transport was already shared, and `tcp::KeySource` already made
+      blob transfer consume `p2p`'s key distribution rather than grow its own.
+      What the move settles is the *graph*: `KeySource` is declared in the blob
+      module and implemented by `p2p::service::Service`, so as siblings the two
+      each named the other and which way the dependency really ran was something
+      a reader had to reconstruct. It runs one way, and the tree says so.
+      Nothing was deleted and no behaviour changed — every path is
+      `crate::p2p::swarm::…` and `docs/discovery.md` had been claiming
+      "library-only, no CLI subcommand drives it" for a while after
+      `blob serve | fetch` shipped, which is a doc understating what is built
+      rather than the usual failure of overstating it. Both are wrong.
+- [ ] One *discovery* stack instead of two. What is genuinely left, and it
+      deletes public API rather than moving it: `p2p::swarm::discovery`'s signed
+      records overlap `records::PeerRecord` almost exactly (same shape, same
       transport id, same `seq`-supersedes rule), and keeping both means two
       places to change one rule. It is a scope decision rather than an
       engineering one, which is why it is still open — the liability that made
-      it urgent, an unencrypted socket, is gone.
+      it urgent, an unencrypted socket, is long gone.
 - [x] **Peer identities in the log** (`records::PeerRecord`, `proofwork peer`).
       A fourth record kind binding a permanent ed25519 identity to the transport
       id it answers on, plus an address hint and a `seq` that supersedes — so

@@ -547,11 +547,19 @@ must not be a one-way door out of the claim at the top of this file. Without it,
 an operator who encrypted their own copy could no longer produce the readable log
 anyone else would audit.
 
-### `src/swarm/`: piece-level transfer and a DHT, alongside `p2p`
+### `src/p2p/swarm/`: piece-level transfer and a DHT
 
-Two things here that `src/p2p/` does not have, and one honest overlap.
+Two things here that the rest of `src/p2p/` does not have, and one honest
+overlap.
 
-**A Kademlia DHT** (`src/swarm/dht.rs`) for the question a fetch actually asks:
+It sat at `src/swarm/`, beside `p2p` rather than inside it, for most of its
+life. The move settles a cycle rather than a matter of taste: `tcp::KeySource`
+is declared here and implemented by `p2p::service::Service`, so as siblings each
+module named the other and which way the dependency ran was something a reader
+had to reconstruct. Blob transfer consumes the transport, the sessions and the
+key distribution, and nothing there consumes it back.
+
+**A Kademlia DHT** (`src/p2p/swarm/dht.rs`) for the question a fetch actually asks:
 *who holds digest `D` right now*. `p2p::discovery` answers which peers exist;
 without a provider lookup, finding a blob means asking everyone. XOR metric,
 k-buckets, provider records with expiry, and the α-parallel iterative lookup as a
