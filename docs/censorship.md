@@ -290,6 +290,11 @@ drain is the remaining work. Declaring the class is the part that had to come
 first, because it is part of the objective's id and therefore cannot be
 retrofitted onto objectives already funded.
 
+[`design/embargo-release.md`](design/embargo-release.md) designs that wiring.
+Its main finding is that §2's committee cannot be reused as-is: shares are
+sealed to the peers drawn at *commit* time, so a multi-epoch embargo freezes the
+membership this section requires to be "diverse and rotated per epoch".
+
 ## 7. What encryption cannot fix
 
 - **A sequencer that includes nothing.** Blind inclusion stops *targeted*

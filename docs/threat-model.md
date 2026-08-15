@@ -203,6 +203,10 @@ What remains unbuilt is enforcement: nothing yet withholds an `embargoed`
 artifact at settlement time. The class is declared and binding; the mechanism
 that honours it is not wired up. Until it is, this row is **partial**, and an
 `embargoed` objective offers a promise the code does not yet keep.
+[`design/embargo-release.md`](design/embargo-release.md) works out what wiring
+it would take, and why the obvious patch — a delay on `Node::open_sealed` — is
+the wrong one: it freezes a committee for the length of the embargo, so the
+collusion window grows with the one parameter the feature exists to make large.
 
 ## What Stage 0 explicitly does not defend
 
