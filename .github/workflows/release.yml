@@ -88,7 +88,13 @@ jobs:
           # --- macOS ----------------------------------------------------------
           - os: macos-latest        # Apple Silicon
             target: aarch64-apple-darwin
-          - os: macos-13            # the last Intel image
+          # `macos-13` was the Intel image until GitHub retired it, and a job
+          # asking for a retired label does not fail -- it queues, forever, with
+          # no diagnostic. v1.0.0 shipped five of six targets for exactly this
+          # reason, and the giveaway was a queued job from the previous day
+          # sitting beside it. `macos-15-intel` is the supported replacement;
+          # `actions/runner-images` is the list to check when this queues again.
+          - os: macos-15-intel      # Intel, and the label moves when GitHub retires it
             target: x86_64-apple-darwin
           #
           # No Windows target, and that is a decision rather than an oversight.
