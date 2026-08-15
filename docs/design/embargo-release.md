@@ -8,6 +8,10 @@ subject.
 sentence it uses is the right one to start from: *"an `embargoed` objective
 offers a promise the code does not yet keep."*
 
+Diagrams follow [`diagrams.md`](../diagrams.md)'s rule — **dashed is unbuilt** —
+which in this note means most of what is drawn. Solid nodes are things you can
+`grep` for today.
+
 ## What is already built, precisely
 
 Three separate things exist and are easy to mistake for each other.
@@ -46,6 +50,32 @@ a 144-epoch embargo the same five peers hold a 3-of-5 key to the artifact for a
 day, and under a 90-day embargo, for 90 days. **The collusion window grows
 linearly with the embargo length, which is the one parameter an embargo exists
 to make large.** A delay parameter on `open_sealed` would ship that silently.
+
+```mermaid
+flowchart TB
+    subgraph a["built — sealed.rs: reveal <i>sooner</i>, without the submitter"]
+        direction LR
+        c1["epoch E — commit<br/><i>shares sealed to E's draw</i>"]
+        o1["epoch E+1<br/>open_sealed"]
+        c1 -->|"exposure: one epoch"| o1
+    end
+    subgraph b["the obvious patch — the same path, delayed by N"]
+        direction LR
+        c2["epoch E — commit<br/><i>shares sealed to E's draw</i>"]
+        w["E+1 … E+N−1<br/><b>five fixed peers hold a 3-of-5 key</b><br/>rotation is impossible: re-sealing needs K,<br/>and the premise is that the submitter is gone"]
+        o2["epoch E+N<br/>release"]
+        c2 -->|"exposure: the whole embargo"| w --> o2
+    end
+
+    style o1 fill:#d9ead3,stroke:#38761d,color:#141821
+    style c2 stroke-dasharray: 5 5
+    style o2 stroke-dasharray: 5 5
+    style w fill:#f4cccc,stroke:#cc0000,stroke-dasharray: 5 5,color:#141821
+```
+
+The red box is the whole objection, and note what it is not: no new risk is
+introduced. It is the *existing* one-epoch exposure, stretched by exactly the
+factor the feature invites a funder to make large.
 
 ## Three shapes, and what each actually costs
 
@@ -101,6 +131,45 @@ do not have:
   mismatch. Embargo adds a second way to recover `K`, not a second kind of
   submission.
 
+Drawn against §6 of [`diagrams.md`](../diagrams.md), which is the same flow with
+the timing rule inverted:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Peer holding a seat
+    actor S as Submitter
+    participant SEAL as sealed.rs
+    participant L as Log
+    actor A as Anyone
+
+    Note over P,L: long before any submission exists
+    P->>L: release_key{epoch T, bundle} — the public half, signed
+
+    Note over S,L: objective declares embargoed,<br/>embargo_epochs = N, so T = E + N
+    S->>L: release_committee_for(T) — a draw, nobody is asked
+    S->>SEAL: seal_claim(signed claim, seats, t)
+    SEAL->>SEAL: commitment = H(artifact ‖ submitter ‖ nonce)
+    SEAL->>SEAL: Shamir split K, then seal share_i to seat_i's epoch-T bundle
+    SEAL->>L: one commitment record carrying the envelope
+
+    Note over S: the submitter may now vanish —<br/>jailed, firewalled, offline
+
+    Note over P,L: epoch T closes
+    P->>L: release_secret{epoch T} — one record per seat,<br/>however many embargoes it opens
+    A->>SEAL: unseal shares, reconstruct K, open_with_content_key
+    SEAL->>SEAL: re-derive the commitment from what came out
+    alt matches
+        SEAL-->>A: artifact — verifiable now, and settleable only now
+    else does not match
+        SEAL-->>A: refused, by a check that already exists
+    end
+```
+
+Step 7 carries the whole argument. In §6 the equivalent step is one record **per
+submission, per seat**; here it is one record **per epoch, per seat**, and that
+single change is what lets the trust set rotate while an embargo is running.
+
 ## What eprint 2019/904 offers, and what to refuse
 
 [Choi and Vaudenay, *Timed-Release Encryption With Master Time Bound Key*](https://eprint.iacr.org/2019/904)
@@ -110,6 +179,23 @@ the key of any release time. Their motivation is a receiver who has lost the
 release time and can no longer identify which key opens their ciphertext.
 
 **Take the architecture. Refuse both the contribution and the construction.**
+
+```mermaid
+flowchart LR
+    paper["<b>eprint 2019/904</b><br/>Choi and Vaudenay<br/><i>Timed-Release Encryption with<br/>Master Time Bound Key</i>"]
+
+    paper --> arch["the architecture<br/><i>per-epoch key published ahead,<br/>secret released at the epoch</i>"]
+    paper --> master["the contribution<br/><i>one master key substituting for<br/>any release time's key</i>"]
+    paper --> curve["the construction<br/><i>Weil pairing, bilinear DH</i>"]
+
+    arch --> keep["<b>TAKEN</b><br/>release work becomes O(1) per seat<br/>per epoch, and the trust set rotates"]
+    master --> drop1["<b>REFUSED</b> — a universal<br/>embargo-breaking key, and the<br/>lost-release-time problem it solves<br/>cannot arise in a content-addressed<br/>objective on a hash-linked log"]
+    curve --> drop2["<b>REFUSED</b> — X25519-class under Shor.<br/>kem.rs already made this call, and made it<br/>on a <i>shorter</i>-lived secret than this one"]
+
+    style keep fill:#d9ead3,stroke:#38761d,color:#141821
+    style drop1 fill:#f4cccc,stroke:#cc0000,color:#141821
+    style drop2 fill:#f4cccc,stroke:#cc0000,color:#141821
+```
 
 **The master key is a backdoor here, and it fixes a problem this log does not
 have.** The release epoch is in the objective, which is content-addressed and
@@ -289,6 +375,26 @@ Two consequences to resolve before building:
   original — which committed earlier — is the duplicate. Either the consumed-set
   check spans batches by commit epoch, or the class quietly costs you priority
   in exactly the case the commitment was supposed to protect.
+
+  ```mermaid
+  flowchart LR
+      a["<b>epoch E</b><br/>Alice commits<br/><i>embargoed, N epochs</i>"]
+      b["<b>epoch E+5</b><br/>Bob commits<br/><i>public, same artifact</i>"]
+      s1["<b>epoch E+6</b><br/>settle_due drains E+5<br/>Bob is paid"]
+      s2["<b>epoch E+N</b><br/>Alice's artifact released<br/>refused as a duplicate"]
+
+      a --> s2
+      b --> s1
+      s1 -.->|"artifact id already consumed"| s2
+
+      style s1 fill:#fff2cc,stroke:#bf9000,color:#141821
+      style s2 fill:#f4cccc,stroke:#cc0000,stroke-dasharray: 5 5,color:#141821
+  ```
+
+  Nothing here is a bug in `settle_due` — it is the duplicate rule working
+  exactly as written, on a timeline it was never shown. The commitment that came
+  first loses, and it loses *because* its funder asked for coordinated
+  disclosure.
 - **Which epoch's beacon orders it.** A claim released in epoch `T` from a
   commitment in epoch `E` has two candidate sort keys. `E` is the one that
   matches "the anchor is fixed before anyone reveals"; `T` is the one
