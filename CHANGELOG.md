@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.1](https://github.com/aburan28/distributed-researcher/compare/v1.0.0...v1.0.1) (2026-08-15)
+
+
+### Fixes
+
+* public-coin seeds are evidence, not branding ([3c121ce](https://github.com/aburan28/distributed-researcher/commit/3c121ce59769aa1da5fe0b0bdee3c9b3979528ea))
+
+
+### Documentation
+
+* draw the embargo argument, four figures ([4ad20d9](https://github.com/aburan28/distributed-researcher/commit/4ad20d98ea047230026e48c625e275a3c2dd81a2))
+
 ## [1.0.0](https://github.com/aburan28/distributed-researcher/compare/v0.2.0...v1.0.0) (2026-08-15)
 
 
