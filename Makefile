@@ -60,7 +60,7 @@ CLIENT ?= claude
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp mcp-setup p2p seed serve ui demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke \
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-build install demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke node-smoke \
 	test test-rust \
 	test-reference fmt clippy tla check
 
@@ -76,7 +76,10 @@ help:
 	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
 	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
-	  '  make ui                  Run the Next.js UI (port UI_PORT, default 3000).' \
+	  '  make node                One process: p2p sync AND HTTP, sharing a log.' \
+	  '  make install             Install the released binaries from GitHub.' \
+	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
+	  '  make ui-build            Export the reader and build it INTO the binaries.' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build both release binaries.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
@@ -196,14 +199,55 @@ mcp-smoke: build
 serve-smoke: build
 	RUST_BIN="$(abspath $(CLI))" SERVE_BIN="$(abspath $(SERVE))" ./scripts/serve-smoke.sh
 
+# The seam for `daemon::run`: one process that queues a submission over HTTP
+# and admits it itself. `serve-smoke` cannot cover that -- it drains with a
+# separate command, which is the topology this replaces.
+node-smoke: build
+	RUST_BIN="$(abspath $(CLI))" P2P_BIN="$(abspath $(P2P))" SERVE_BIN="$(abspath $(SERVE))" \
+	  ./scripts/node-smoke.sh
+
 # Publish this node's log over HTTP. Read-only unless QUEUE is set, because
 # publishing is safe for anyone and accepting is a decision.
+#
+# Takes no lock and holds no Node: safe to point at a log something else is
+# writing. It can only ever *queue* a submission -- see `node` for the half
+# that can admit one.
 serve: build
 	$(SERVE) --log "$(LOG)" --root "$(ROOT)" --listen "$(SERVE_LISTEN)" $(SERVE_ARGS)
 
-# Run the Next.js UI that reads from the serve endpoint.
+# The whole node in one process: p2p sync, HTTP publishing, and the queue
+# drained by the process that holds the write lock.
+#
+# This is `make p2p` and `make serve` at once, against one log, which is the
+# only arrangement in which a submission arriving over HTTP can actually be
+# admitted -- a Ledger has one writer. Uses the p2p log and identity, since
+# that is the half that needs them.
+node: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
+	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
+	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
+	  --log "$(P2P_LOG)" --root "$(ROOT)" \
+	  --serve "$(SERVE_LISTEN)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
+
+# Install the *released* binaries, not this checkout's. The script resolves the
+# latest tag, checks the tarball against its published sha256, and installs to
+# ~/.local/bin unless PROOFWORK_BIN says otherwise.
+install:
+	./scripts/install.sh
+
+# Run the Next.js reader against a dev server, for working *on* the reader.
+# Reading a node does not need this -- see `ui-build`.
 ui:
-	cd "$(ROOT)/ui" && npx next dev -p $(UI_PORT)
+	cd "$(ROOT)/ui" && npm run dev -- -p $(UI_PORT)
+
+# Export the reader and build it into the binaries.
+#
+# Two steps because they need two toolchains, and separating them is what keeps
+# `cargo build` working for somebody with no Node installed: the `ui` feature is
+# off by default, and this is the target that turns it on. Afterwards
+# `proofwork-p2p --serve ADDR` answers the reader at /ui/.
+ui-build:
+	cd "$(ROOT)/ui" && npm ci && npm run build
+	$(CARGO) build --release --features ui --bins
 
 test-reference:
 	cargo test --manifest-path reference/rust/Cargo.toml
@@ -232,4 +276,4 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke tla
+check: test fmt clippy demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke node-smoke tla

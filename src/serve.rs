@@ -52,7 +52,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::canonical::{digest_bytes, Value};
-use crate::ledger::Ledger;
+use crate::ledger::{Codec, Ledger};
 use crate::node::Node;
 use crate::records::{Claim, Commitment};
 
@@ -338,6 +338,25 @@ pub struct Serving {
     root: PathBuf,
     spool: Option<Spool>,
     checkpoint: Option<PathBuf>,
+    /// Where the at-rest key lives, and the passphrase that unwraps it.
+    ///
+    /// Resolved per request rather than held as a [`crate::store::atrest::Cipher`],
+    /// because `Cipher` deliberately refuses `Clone` -- "a key with an unknown
+    /// number of copies is a key whose lifetime cannot be reasoned about" -- and
+    /// [`Serving::node`] needs an owned [`Codec`] every time it opens the log.
+    ///
+    /// The cost is a file read beside a full re-read of the log, which is
+    /// nothing. The exception is a *passphrase-wrapped* key, where it is an
+    /// Argon2id derivation per request: memory-hard by design, so a public
+    /// server would be doing an attacker's work for them. [`listen`] refuses
+    /// that combination at startup rather than discovering it under load.
+    key: Option<KeySource>,
+}
+
+/// How this server obtains the at-rest key, when the log is sealed.
+struct KeySource {
+    path: PathBuf,
+    passphrase: Option<String>,
 }
 
 impl Serving {
@@ -347,6 +366,37 @@ impl Serving {
             root: root.into(),
             spool: None,
             checkpoint: None,
+            key: None,
+        }
+    }
+
+    /// Read a sealed log with the key at `path`.
+    ///
+    /// Without this a sealed log is reported as altered or spliced on every
+    /// request -- `Ledger::open` assumes [`Codec::Plain`], and a sealed line
+    /// fails to authenticate under it. That is what a machine carrying
+    /// `~/.proofwork/key` gets by default, because the CLI seals every log it
+    /// creates while a key is present.
+    pub fn with_key(mut self, path: impl Into<PathBuf>, passphrase: Option<String>) -> Serving {
+        self.key = Some(KeySource {
+            path: path.into(),
+            passphrase,
+        });
+        self
+    }
+
+    /// The codec this server reads the log with, resolved fresh.
+    ///
+    /// [`crate::store::resolve_codec`] is the one implementation of this
+    /// decision; the CLI and [`crate::daemon`] call the same function, so a log
+    /// the CLI can open is one this can serve.
+    fn codec(&self) -> Result<Codec, String> {
+        match &self.key {
+            Some(key) => {
+                crate::store::resolve_codec(&self.log, &key.path, key.passphrase.as_deref())
+                    .map_err(|error| error.to_string())
+            }
+            None => Ok(Codec::Plain),
         }
     }
 
@@ -370,8 +420,54 @@ impl Serving {
         self
     }
 
+    /// Refuse to start on a configuration that would fail on every request.
+    ///
+    /// Two of them, and both used to surface as a 500 per request with the log
+    /// reported as "altered, reordered, or spliced" — which is alarming, wrong,
+    /// and points the operator at their data instead of their flags.
+    ///
+    /// The passphrase refusal is not fussiness. Unwrapping is Argon2id, which
+    /// is memory-hard on purpose; doing it per request on a public endpoint is
+    /// a server volunteering to be a denial-of-service amplifier. A daemon that
+    /// wants an unattended key should hold an unwrapped one with file
+    /// permissions, which is what `proofwork store keygen` writes by default.
+    pub fn check_startup(&self) -> io::Result<()> {
+        let Some(key) = &self.key else {
+            // A sealed log with no key named at all: the common case, and the
+            // one worth naming precisely, since the CLI seals by default
+            // whenever a key file exists.
+            return match crate::store::first_line_is_sealed(&self.log) {
+                Ok(Some(true)) => Err(io::Error::other(format!(
+                    "{} is sealed and no --key-file was given. Every request would \
+                     fail, reporting your own log as altered. Pass --key-file, or \
+                     $PROOFWORK_KEY, naming the key that sealed it.",
+                    self.log.display()
+                ))),
+                _ => Ok(()),
+            };
+        };
+        if key.passphrase.is_some() {
+            return Err(io::Error::other(
+                "a passphrase-wrapped key cannot be served: unwrapping is an \
+                 argon2id derivation, and this server resolves the key once per \
+                 request, so a public endpoint would run a memory-hard KDF on \
+                 demand for anyone who asks. Use an unwrapped key file with \
+                 restrictive permissions.",
+            ));
+        }
+        // Resolve once, so a wrong or unreadable key is a startup failure.
+        self.codec().map(|_| ()).map_err(io::Error::other)
+    }
+
+    /// Is the log on disk sealed? `false` for an absent or empty one.
+    fn first_line_sealed(&self) -> Result<bool, String> {
+        crate::store::first_line_is_sealed(&self.log)
+            .map(|sealed| sealed.unwrap_or(false))
+            .map_err(|error| error.to_string())
+    }
+
     fn node(&self) -> Result<Node, String> {
-        let ledger = Ledger::open(&self.log).map_err(|e| e.to_string())?;
+        let ledger = Ledger::open_with(&self.log, self.codec()?).map_err(|e| e.to_string())?;
         Ok(Node::new(ledger, &self.root))
     }
 }
@@ -390,6 +486,7 @@ struct Request {
 /// job -- publishing a log -- and an async runtime would be a dependency and a
 /// rewrite for load this will not see.
 pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
+    serving.check_startup()?;
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
     eprintln!("proofwork-serve: listening on {local}");
@@ -476,6 +573,7 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", path) if path.starts_with("/frontier/") => {
             frontier(stream, serving, &path["/frontier/".len()..])
         }
+        ("GET", path) if path == "/ui" || path.starts_with("/ui/") => ui_asset(stream, path),
         ("POST", "/submit") => submit(stream, &mut reader, serving, &request),
         ("GET", _) | ("HEAD", _) => respond(
             stream,
@@ -800,13 +898,44 @@ fn frontier_value(frontier: &crate::frontier::FrontierEntry, reward: u64) -> Val
 /// so what a contributor verifies is what the operator wrote -- a re-encode
 /// that differed by a byte would fail their chain check and look like a lie.
 fn log(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
-    match std::fs::read(&serving.log) {
-        Ok(bytes) => respond(stream, 200, "application/x-ndjson", &bytes),
-        // A log that does not exist yet is an empty log, not an error.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            respond(stream, 200, "application/x-ndjson", b"")
+    // A sealed log is unsealed before it goes out, and that is not a leak.
+    //
+    // Sealing is a *storage* concern -- `Codec`'s own docs say so, and
+    // `proofwork store export` exists to turn a sealed log into the JSONL the
+    // reference implementation reads. The key protects the operator's disk, not
+    // the contents: everything here is public by construction, and a claim is
+    // gossiped to every peer regardless. Serving ciphertext would hand a
+    // stranger bytes they cannot audit, which defeats the one thing this route
+    // is for.
+    //
+    // Confidential objectives are a different mechanism entirely
+    // (`Objective::confidentiality`), enforced on the record rather than on the
+    // file, and unaffected by this.
+    match serving.first_line_sealed() {
+        Ok(true) => {
+            let node = match serving.node() {
+                Ok(node) => node,
+                Err(why) => return json_error(stream, 500, &why),
+            };
+            let mut body = String::new();
+            for entry in node.ledger().entries() {
+                body.push_str(&entry.to_json_line());
+                body.push('\n');
+            }
+            respond(stream, 200, "application/x-ndjson", body.as_bytes())
         }
-        Err(error) => json_error(stream, 500, &format!("cannot read the log: {error}")),
+        // The ordinary path, and deliberately the raw file: a re-encode that
+        // differed by one byte would fail the client's chain check and look
+        // like a lie.
+        Ok(false) => match std::fs::read(&serving.log) {
+            Ok(bytes) => respond(stream, 200, "application/x-ndjson", &bytes),
+            // A log that does not exist yet is an empty log, not an error.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                respond(stream, 200, "application/x-ndjson", b"")
+            }
+            Err(error) => json_error(stream, 500, &format!("cannot read the log: {error}")),
+        },
+        Err(why) => json_error(stream, 500, &why),
     }
 }
 
@@ -1140,6 +1269,69 @@ fn json(stream: &mut TcpStream, status: u16, body: &Value) -> io::Result<()> {
         status,
         "application/json",
         body.canonical_string().as_bytes(),
+    )
+}
+
+/// The embedded reader, generated by `build.rs`. Empty without the `ui` feature.
+mod ui {
+    include!(concat!(env!("OUT_DIR"), "/ui_assets.rs"));
+}
+
+/// Serve one file of the embedded `ui/` reader.
+///
+/// The export is built with `trailingSlash`, so a directory URL maps to
+/// `index.html` inside it and there is no rewrite engine to configure. `/ui`
+/// and `/ui/` both mean the root page.
+///
+/// Without the `ui` feature the table is empty and every path here 404s with a
+/// message naming the feature, rather than the generic "no such path" — a
+/// binary built without the reader is the overwhelmingly likely reason
+/// somebody is looking at this response, and the generic answer sends them to
+/// check their URL instead.
+fn ui_asset(stream: &mut TcpStream, path: &str) -> io::Result<()> {
+    // `/ui` -> "", `/ui/` -> "", `/ui/peers/` -> "peers/"
+    let relative = path
+        .strip_prefix("/ui")
+        .unwrap_or("")
+        .trim_start_matches('/');
+    // A directory, or the root: the exported index inside it.
+    let candidate = if relative.is_empty() || relative.ends_with('/') {
+        format!("{relative}index.html")
+    } else {
+        relative.to_string()
+    };
+
+    for (name, mime, bytes) in ui::ASSETS {
+        if *name == candidate {
+            return respond(stream, 200, mime, bytes);
+        }
+    }
+    // A bare directory path without the trailing slash: Next's own links carry
+    // it, but a hand-typed `/ui/peers` should not be a dead end.
+    let with_index = format!("{relative}/index.html");
+    for (name, mime, bytes) in ui::ASSETS {
+        if *name == with_index {
+            return respond(stream, 200, mime, bytes);
+        }
+    }
+
+    if ui::ASSETS.is_empty() {
+        return respond(
+            stream,
+            404,
+            "application/json",
+            error_body(
+                "this binary was built without the embedded reader; \
+                 rebuild with --features ui, or use /chain.html, which needs no build step",
+            )
+            .as_bytes(),
+        );
+    }
+    respond(
+        stream,
+        404,
+        "application/json",
+        error_body("no such path").as_bytes(),
     )
 }
 

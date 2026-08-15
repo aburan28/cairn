@@ -13,9 +13,27 @@
 //!
 //! Read-only unless `--queue` is given. That default is deliberate: publishing
 //! is safe for anyone to do, accepting is a decision.
+//!
+//! # Publishing alone, and being a node
+//!
+//! Without `--p2p-listen` this is a *publisher*: it takes no lock, holds no
+//! `Node`, and re-reads the log per request, so it is safe to point at a log
+//! another process is writing. That is a real role — a read-only mirror, or a
+//! public front for an operator whose daemon runs elsewhere.
+//!
+//! With `--p2p-listen` it is the whole node, running [`proofwork::daemon::run`]
+//! — the same function `proofwork-p2p` calls, in one process, with the HTTP
+//! server on a thread. Use it when the alternative would have been two units
+//! sharing a directory.
+//!
+//! The queue is why the distinction matters. A `Ledger` is single-writer, so
+//! whatever admits a queued submission must hold the write lock. A publisher
+//! queues and something else drains; a node does both.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use proofwork::daemon::{self, Config};
 use proofwork::serve::{self, Serving};
 
 /// Print the usage and exit with `code`.
@@ -35,9 +53,20 @@ fn usage(code: i32) -> ! {
          --listen      address to bind (default 127.0.0.1:8080)\n\
          --queue       accept POST /submit into this spool directory; omit for read-only\n\
          --max-queue   refuse submissions past this many undrained records\n\
-         --checkpoint  signed checkpoint to publish at GET /checkpoint\n\n\
-         Everything served is public by design. Submissions are queued, never\n\
-         admitted: drain them into the log with `proofwork drain --queue <dir>`.\n"
+         --checkpoint  signed checkpoint to publish at GET /checkpoint\n\
+         --key-file    at-rest key, if the log is sealed (default: the CLI's own)\n\n\
+         ALSO BE A NODE\n    \
+         Add --p2p-listen and this runs the p2p daemon in the same process,\n    \
+         which is what lets it admit what it queues -- a log has one writer.\n\n\
+         --p2p-listen  p2p listen address, e.g. 0.0.0.0:9000\n\
+         --identity    peer identity; required with --p2p-listen\n\
+         --root-key    checkpoint signing key; required with --p2p-listen\n\
+         --bootstrap   a dial hint; repeatable\n\
+         --population  gossip population file\n\
+         --fanout      peers dialled per round\n\n\
+         Everything served is public by design. Without --p2p-listen,\n\
+         submissions are queued and never admitted: drain them into the log\n\
+         with `proofwork drain --queue <dir>`.\n"
     );
     std::process::exit(code);
 }
@@ -51,7 +80,16 @@ fn main() {
     let mut listen = String::from("127.0.0.1:8080");
     let mut queue: Option<PathBuf> = None;
     let mut checkpoint: Option<PathBuf> = None;
-    let mut max_queue = proofwork::serve::DEFAULT_MAX_QUEUED;
+    let mut max_queue = serve::DEFAULT_MAX_QUEUED;
+    let mut key_file: Option<PathBuf> = None;
+
+    // The p2p half. All absent is the ordinary publisher.
+    let mut p2p_listen: Option<String> = None;
+    let mut identity: Option<PathBuf> = None;
+    let mut root_key: Option<PathBuf> = None;
+    let mut population: Option<PathBuf> = None;
+    let mut fanout: Option<String> = None;
+    let mut bootstrap: Vec<PathBuf> = Vec::new();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -81,6 +119,13 @@ fn main() {
                 }
             }
             "--checkpoint" => checkpoint = Some(PathBuf::from(next("--checkpoint"))),
+            "--key-file" => key_file = Some(PathBuf::from(next("--key-file"))),
+            "--p2p-listen" => p2p_listen = Some(next("--p2p-listen")),
+            "--identity" => identity = Some(PathBuf::from(next("--identity"))),
+            "--root-key" => root_key = Some(PathBuf::from(next("--root-key"))),
+            "--population" => population = Some(PathBuf::from(next("--population"))),
+            "--fanout" => fanout = Some(next("--fanout")),
+            "--bootstrap" => bootstrap.push(PathBuf::from(next("--bootstrap"))),
             "--help" | "-h" => usage(0),
             other => {
                 eprintln!("proofwork-serve: unknown argument {other:?}");
@@ -89,7 +134,75 @@ fn main() {
         }
     }
 
-    let mut serving = Serving::new(&log, &root);
+    // -- node mode ----------------------------------------------------------
+
+    if let Some(addr) = p2p_listen {
+        let addr: SocketAddr = addr.parse().unwrap_or_else(|_| {
+            eprintln!("proofwork-serve: --p2p-listen needs host:port");
+            std::process::exit(2)
+        });
+        // Named individually rather than as one "missing options" error: an
+        // operator who forgot the root key wants to be told which one.
+        let identity = identity.unwrap_or_else(|| {
+            eprintln!("proofwork-serve: --p2p-listen also needs --identity");
+            std::process::exit(2)
+        });
+        let root_key = root_key.unwrap_or_else(|| {
+            eprintln!("proofwork-serve: --p2p-listen also needs --root-key");
+            std::process::exit(2)
+        });
+        // A daemon *writes* its checkpoint every round, so unlike the publisher
+        // this is not optional -- there would be nowhere to put it.
+        let checkpoint = checkpoint.unwrap_or_else(|| {
+            eprintln!("proofwork-serve: --p2p-listen also needs --checkpoint to write");
+            std::process::exit(2)
+        });
+
+        let mut config = Config::new(identity, root_key, checkpoint, addr, log, root);
+        config.bootstrap = bootstrap;
+        config.population = population;
+        config.queue = queue;
+        config.serve = Some(listen);
+        config.max_queued = max_queue;
+        config.key_file = key_file;
+        if let Some(text) = fanout {
+            config.fanout = text.parse().unwrap_or_else(|_| {
+                eprintln!("proofwork-serve: --fanout needs a positive integer");
+                std::process::exit(2)
+            });
+        }
+        if let Err(error) = daemon::run(config) {
+            log::error!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+
+    // -- publisher ----------------------------------------------------------
+
+    for (flag, given) in [
+        ("--identity", identity.is_some()),
+        ("--root-key", root_key.is_some()),
+        ("--population", population.is_some()),
+        ("--fanout", fanout.is_some()),
+        ("--bootstrap", !bootstrap.is_empty()),
+    ] {
+        // Refused, not ignored. Every one of these is somebody trying to run a
+        // node, and a publisher that silently dropped them would take no lock,
+        // dial nobody and drain nothing while looking like it had started.
+        if given {
+            eprintln!("proofwork-serve: {flag} has no effect without --p2p-listen");
+            std::process::exit(2);
+        }
+    }
+
+    // The CLI's own default when no flag was given, so a publisher on a machine
+    // that ran `proofwork store keygen` opens the same logs the CLI writes.
+    // `resolve_codec` treats an absent key file as plaintext, so naming a path
+    // that does not exist costs nothing.
+    let key_path =
+        key_file.unwrap_or_else(|| proofwork::store::Store::new(&root).default_key_path());
+    let mut serving = Serving::new(&log, &root).with_key(key_path, None);
     if let Some(dir) = queue {
         serving = serving.accepting_into(dir).with_max_queued(max_queue);
     }
@@ -97,6 +210,13 @@ fn main() {
         serving = serving.with_checkpoint(path);
     }
 
+    // Separately from `listen`, which also checks: this one owns the message.
+    // Folded together, a missing key file was reported as "cannot listen on
+    // 127.0.0.1:8080", which sends an operator to check the port.
+    if let Err(error) = serving.check_startup() {
+        eprintln!("proofwork-serve: {error}");
+        std::process::exit(1);
+    }
     if let Err(error) = serve::listen(&listen, serving) {
         eprintln!("proofwork-serve: cannot listen on {listen}: {error}");
         std::process::exit(1);

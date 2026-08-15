@@ -24,6 +24,7 @@ pub mod canonical;
 pub mod checkpoint;
 pub mod corpus;
 pub mod crypto;
+pub mod daemon;
 pub mod dht;
 pub mod frontier;
 pub mod gossip;

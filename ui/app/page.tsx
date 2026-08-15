@@ -54,6 +54,11 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    // Show *which* origin, rather than the empty string NODE_URL now holds.
+    // Empty is right for fetching -- it keeps every request relative, so the
+    // page works behind a tunnel or a proxy on an unknown path -- and wrong for
+    // displaying, because nobody can retype "" after they clear the box.
+    setBase(NODE_URL || window.location.origin);
     void load(NODE_URL);
   }, [load]);
 

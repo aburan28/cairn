@@ -25,11 +25,19 @@ export type Chain = {
   note: string;
 };
 
-/** The node this UI reads. Same-origin is useless here — the node is a
- *  separate process — so it is configuration, with the CLI default as the
- *  fallback so `npm run dev` works against `make serve` with no setup. */
-export const NODE_URL =
-  process.env.NEXT_PUBLIC_PROOFWORK_NODE ?? "http://127.0.0.1:8080";
+/** The node this UI reads.
+ *
+ *  Same-origin by default, which it was not when this app could only run as a
+ *  separate `next` process. The daemon now serves this build at `/ui/`, so the
+ *  node answering `/chain` is the one that served the page — and an empty base
+ *  makes every fetch relative, which is also what keeps it working behind an
+ *  SSH tunnel or a reverse proxy on a path nobody told the build about.
+ *
+ *  `NEXT_PUBLIC_PROOFWORK_NODE` still overrides it, baked in at build time, for
+ *  `npm run dev` against a node on another port. Neither is load-bearing: the
+ *  page has a URL box, and retargeting it is the entire point of the app —
+ *  comparing one node's head against a peer's. */
+export const NODE_URL = process.env.NEXT_PUBLIC_PROOFWORK_NODE ?? "";
 
 export class NodeUnreachable extends Error {}
 
