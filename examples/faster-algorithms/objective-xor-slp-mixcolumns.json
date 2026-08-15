@@ -1,0 +1,41 @@
+{
+  "artifact_schema": {
+    "description": "A straight-line program of two-input XORs computing the AES MixColumns matrix over GF(2). Values 0..31 are the inputs: value 8*t + b is bit b of input byte t, with b = 0 the least significant. Operation k appends value 32 + k, the XOR of two values that already exist. The outputs name the 32 result values in order: position 8*i + b is bit b of output byte i.",
+    "example": {
+      "operations": [[0, 8], [32, 16]],
+      "outputs": [33, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    },
+    "properties": {
+      "operations": {
+        "description": "Ordered XORs. Operation k is [i, j] with i != j and both below 32 + k, so a value may only use inputs and earlier results. At most 512 of them.",
+        "type": "array"
+      },
+      "outputs": {
+        "description": "Exactly 32 value indices, one per output bit. An index may name an input directly, and two outputs may name the same value.",
+        "type": "array"
+      }
+    },
+    "required": ["operations", "outputs"],
+    "type": "object"
+  },
+  "created_at": "2026-08-15T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-xor-slp-mixcolumns",
+  "ratchet": {
+    "baseline": 160,
+    "direction": "minimize",
+    "min_improvement": 1,
+    "reward": 1400000,
+    "target": 90
+  },
+  "reward": 1400000,
+  "statement": "Compute AES MixColumns with as few two-input XORs as possible. MixColumns is GF(2)-linear, so it is a fixed 32x32 binary matrix and any implementation of it is a straight-line program of XORs; score is the number of operations, minimised, counting operations whose results are never used. Because XOR programs are linear, every value is determined by which input bits it is the parity of, so the pinned evaluator propagates 32-bit masks and decides equality over all 2^32 inputs at the cost of one integer operation per XOR -- complete, not sampled. The target matrix is derived in the evaluator from the AES field and the FIPS-197 circulant rather than pasted in as constants, so the reviewable claim is four lines of field arithmetic. Baseline 160: the obvious program, one output row at a time sharing nothing, costs 152. Target 90, which is under the best implementations published so far -- finding shortest linear straight-line programs is NP-hard and no optimum is known here. Payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move, and every submission must cite the frontier it beat.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/faster-algorithms/evaluators/xor_slp_mixcolumns.py",
+    "evaluator_sha256": "28c9b75699409d135109f1bdb54401f6d99c84191b720894d951913eb91cd3db",
+    "kind": "evaluator",
+    "threshold": 160
+  }
+}
