@@ -322,6 +322,16 @@ having canaries.
 directly, and `Docket::mix` reports what you actually got, because a docket of
 only known-bad canaries is the trap a blind rejecter walks through untouched.
 
+Ask it, though. There is a whole class of objective where one side is not
+mintable at all and nothing warns you: every edit in the catalogue is
+shape- and length-preserving over **numbers and strings**, so a checker whose
+verdict turns on a *boolean* cannot be made to reject by any canary the
+generator can produce. `src/arena`'s own pinned checker was
+`artifact.get("ok") is True`, and its rubber-stamping trial ran against a docket
+with two known-good canaries and zero known-bad ones — the half that catches
+blind *rejection*, pointed at an attacker that blindly accepts — until something
+finally asked `mix`.
+
 Measured, on the shipped examples:
 
 | objective | canary | cost |
@@ -339,6 +349,26 @@ contains an *unordered collection*, because reordering a set is the reliable
 validity-preserving edit. An objective whose artifacts are scalars can only be
 policed against rubber-stamping, not against blind rejection — worth knowing
 before setting `canary_valid_share` for a network of them.
+
+### And what the catch takes
+
+A docket names a wrong verdict. Until `records::Attestation` landed it could not
+name a **party**, because a Stage-0 log has one writer and no record said who
+ran the checker — so `β`, the catch bounty in the two constraints above, had no
+counterpart in the code and every canary result was a statement about a model.
+
+An attestation is a signed, bonded statement of what a verifier returned, and
+`VERIFICATION_BOND` is 50,000 — this section's `catch_bounty`, because the
+catcher is paid the bond and the two have to be the same number. Nothing checks
+at admission whether an attestation is true; the expensive question is asked
+once, by whoever brings a docket, and a verifier that cannot run takes nothing.
+[bonded-verification.md](bonded-verification.md) is the full account, including
+why the bond has to *return* and what the window closes on.
+
+The term still missing is the other one: **nothing requires an attestation.**
+What is priced is lying, not silence, so an operator that stands behind nothing
+risks nothing — and `c`, the cost of one check, is still a cost nobody is paid
+to bear.
 
 ### Why this is affordable
 

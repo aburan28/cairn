@@ -72,20 +72,33 @@ At seed 1, with default costs:
 | standing bought on the cheapest tier | **CLOSED** — 5,000 untyped, 0 spendable where expensive work is priced |
 | griefing bonded disputes | **PROTECTED** — the griefer forfeits 6,000 and the submitter it stalled ends 9,000 up instead of 3,000 |
 | griefing a plain objective | **REFUSED** — an objective with no stepper cannot be disputed at all |
-| rubber-stamping | **OPEN** — see below |
+| rubber-stamping | **CLOSED** — 8,000 undefended against −92,000 defended |
 
-### The open one, and why it is pinned as open
+No attack in this set is profitable against its defence.
 
-A canary docket names a rubber-stamper and **takes nothing from it**, because
-nothing is staked on verification. The stamper ends ahead of an identical honest
-operator by exactly the verification cost it did not pay — 1,600 in the run
-above, which is `verify × 2 claims × 8 rounds` to the unit.
+### The one that used to be open
 
-Every document in this repository already says the bond is missing. This is that
-sentence with a number attached, and `tests/arena.rs` asserts it *stays* true
-until a verification bond lands. Pinning a known-open hole is worth as much as
-pinning a closed one: a closed hole cannot silently re-open without something
-failing first, and an open one can silently be believed fixed.
+This file previously reported rubber-stamping as **OPEN**, and
+`tests/arena.rs` asserted it *stayed* open — with a note saying the test should
+start failing when a verification bond landed. It did.
+
+The docket had always known *which* verdicts were wrong; what it could not do
+was name a party, because a Stage-0 log has one writer and no record said who
+ran the checker. [`records::Attestation`](../src/records.rs) is that record, and
+the docket is now compared against attestations rather than against the node's
+own verdicts, so a finding arrives already attached to a key with a bond behind
+it. Full account in [bonded-verification.md](bonded-verification.md).
+
+The swing between the two arms is 100,000 — two bonds, to the unit, for the two
+known-bad canaries the stamper accepted — and `rubber_stamping_costs_more_than_it_saves`
+checks that it is a whole number of bonds and that every one of them was *named
+by a canary before it was charged*. A slash the docket did not point at would
+mean the expensive half ran on its own, which is the cost the cheap half exists
+to avoid.
+
+Pinning a known-open hole was worth as much as pinning a closed one, and this is
+why: an open hole can silently be believed fixed, and a test that asserts it is
+still open is the only thing that makes closing it an event.
 
 ## What it found
 
@@ -101,7 +114,17 @@ the time the window has run, they forfeit whatever the defender has or has not
 done. `a_dispute_neither_side_plays_resolves_against_the_challenger` in
 `tests/fraud_proofs.rs` is the regression.
 
-Three bugs in the arena's own scenarios turned up the same way, and are worth
+**A trap with only one jaw.** The arena's pinned checker was
+`artifact.get("ok") is True`, and every edit `canary::Generator` makes is shape-
+and length-preserving over *numbers and strings* — it has no move that flips a
+boolean. So no canary it could mint would ever make that checker **reject**, and
+the rubber-stamping scenario had been running against a docket of two known-good
+canaries and zero known-bad ones: the half that catches blind *rejection*,
+pointed at an attacker that blindly accepts. `Docket::mix` existed and said so;
+nothing was asking it. The scenario now asserts both halves before it measures
+anything, and the checker depends on a number the generator can actually move.
+
+Four bugs in the arena's own scenarios turned up the same way, and are worth
 naming because each made a defence look better or worse than it is:
 
 - **A locked bond read as a loss.** Scoring on `balances`, which subtracts what
@@ -113,6 +136,9 @@ naming because each made a defence look better or worse than it is:
 - **The sybil comparison gave every key the same stake**, so an eight-way split
   started with eight times the money and the run measured the extra money rather
   than the extra keys.
+- **Four canaries shared one objective**, which settles once — so the first
+  landed, the other three were refused at commit, and the docket ended up
+  pointed at half a batch it believed was whole.
 
 ## Scope, stated rather than implied
 

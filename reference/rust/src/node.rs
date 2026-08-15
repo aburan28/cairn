@@ -36,6 +36,56 @@ pub const ISSUANCE: &str = "issuance";
 pub const CHALLENGE: &str = "challenge";
 pub const BISECTION: &str = "bisection";
 pub const CHALLENGE_SETTLEMENT: &str = "challenge_settlement";
+pub const ATTESTATION: &str = "attestation";
+pub const VERIFICATION_SLASH: &str = "verification_slash";
+
+/// What standing behind one verdict costs. Mirrors the primary's
+/// `node::VERIFICATION_BOND`, and per *attestation* rather than per attestor
+/// for the reason stated there: one bond covering a thousand statements would
+/// be the same units staked a thousand times.
+///
+/// The number is duplicated rather than shared, like every other consensus
+/// constant in this crate. Two implementations that read the same file agree
+/// about it by construction, which is the one thing a second opinion must not
+/// do.
+pub const VERIFICATION_BOND: u64 = 50_000;
+
+/// How long an attestation stays open to a slash, after which its bond returns.
+/// Mirrors the primary's `node::ATTESTATION_WINDOW_EPOCHS`.
+///
+/// The clock is the log's own: the highest epoch any `batch` record below the
+/// point in question names. Not an entry's `ts`, which is advisory text its own
+/// author writes, and not log height, which anybody can advance for the price
+/// of an append.
+pub const ATTESTATION_WINDOW_EPOCHS: u64 = 6;
+
+/// Whether an attestation record in the log is signed by the identity it names.
+///
+/// The signing payload is rebuilt field by field from the record's own bytes
+/// rather than round-tripped through a decoder shared with the primary. That is
+/// the discipline the whole crate is for: two implementations that agree
+/// because they run the same code agree about nothing, and the one question
+/// worth asking here is whether the *format* is what both believe it is.
+///
+/// An unsigned attestation is not merely irregular, it is free — there is
+/// nobody to take a bond from — so this answer decides money as well as
+/// admissibility.
+fn attestation_is_signed(payload: &Value) -> bool {
+    let field = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default();
+    let attestor = field("attestor");
+    if signed_submitter(attestor).is_none() {
+        return false;
+    }
+    let signing = Value::object([
+        ("type", Value::string("attestation")),
+        ("attestor", Value::string(attestor)),
+        ("claim_id", Value::string(field("claim_id"))),
+        ("created_at", Value::string(field("created_at"))),
+        ("status", Value::string(field("status"))),
+    ]);
+    let signature = payload.get("signature").and_then(Value::as_str);
+    crate::records::verify_record_signature("attestation", attestor, &signing, signature).is_ok()
+}
 
 /// How long a claim's trace stays open to objection, and how long a party has
 /// to answer before silence decides against them. Mirrors the primary's
@@ -208,6 +258,17 @@ impl Node {
                         }
                     }
                 }
+                // The catch bounty: a slashed verification bond goes to
+                // whoever produced the evidence. Same shape as a won dispute
+                // and not new money either -- the attestor is debited for it
+                // in `committed_within`.
+                VERIFICATION_SLASH => {
+                    if entry.payload.get("catcher").and_then(Value::as_str) == Some(identity) {
+                        if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                            paid = paid.saturating_add(u128::from(units));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -270,6 +331,53 @@ impl Node {
                 break;
             }
             if entry.payload.get("loser").and_then(Value::as_str) != Some(identity) {
+                continue;
+            }
+            if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                committed = committed.saturating_add(u128::from(units));
+            }
+        }
+        // A verification bond, live until the attestation it stands behind is
+        // slashed. Counted per attestation, and an attestation whose signature
+        // does not verify is skipped: it stakes nothing because there is nobody
+        // to take it from, and the audit reports it separately.
+        let slashed: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(VERIFICATION_SLASH)
+            .into_iter()
+            .filter(|entry| entry.seq < positions)
+            .filter_map(|entry| {
+                entry
+                    .payload
+                    .get("attestation_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        let settled_to = self.settled_epoch_within(positions);
+        for entry in self.ledger.entries_of_kind(ATTESTATION) {
+            if entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("attestor").and_then(Value::as_str) != Some(identity) {
+                continue;
+            }
+            if !attestation_is_signed(&entry.payload) || slashed.contains(&entry.payload.digest()) {
+                continue;
+            }
+            // Released once the window has shut, or verification would be a
+            // one-shot: an operator could stand behind `S / bond` verdicts in
+            // its whole life and then never verify again.
+            if !self.attestation_window_open(&entry.payload, settled_to) {
+                continue;
+            }
+            committed = committed.saturating_add(u128::from(VERIFICATION_BOND));
+        }
+        for entry in self.ledger.entries_of_kind(VERIFICATION_SLASH) {
+            if entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("attestor").and_then(Value::as_str) != Some(identity) {
                 continue;
             }
             if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
@@ -539,6 +647,158 @@ impl Node {
             }
         }
 
+        problems
+    }
+
+    /// The epoch this log has settled up to, reading its first `positions`
+    /// entries. Zero if nothing has settled yet, which keeps every bond live —
+    /// the safe direction.
+    fn settled_epoch_within(&self, positions: u64) -> u64 {
+        self.ledger
+            .entries_of_kind(BATCH)
+            .into_iter()
+            .filter(|entry| entry.seq < positions)
+            .filter_map(|entry| entry.payload.get("epoch").and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Whether an attestation record is still open to a slash at settled epoch
+    /// `now`. A `created_at` this crate cannot parse keeps the window open, so
+    /// a malformed timestamp is never a way to release a bond early.
+    fn attestation_window_open(&self, payload: &Value, now: u64) -> bool {
+        let created = payload
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match self.epoch_of_ts("attestation", created) {
+            Ok(opened) => now <= opened.saturating_add(ATTESTATION_WINDOW_EPOCHS),
+            Err(_) => true,
+        }
+    }
+
+    /// Bonded attestations, re-derived rather than trusted.
+    ///
+    /// **What this crate can and cannot check, stated rather than implied.**
+    /// No verifier runs here and this crate has none, so whether an attestation
+    /// is *true* is not a question it can ask — that is the primary's
+    /// `audit --rerun`, and the run of the pinned checker is the whole of the
+    /// evidence.
+    ///
+    /// Everything else the transcript decides on its own: who may stand behind
+    /// what, once, under signature; that a slash names an attestation the log
+    /// actually carries, and takes from the identity that made it, and takes
+    /// exactly the bond. That last one matters most here. A slash moves fifty
+    /// thousand units out of somebody's balance on a record anybody can append,
+    /// and a second implementation that certified the log clean by not knowing
+    /// about the record kind would be worse than one that never looked.
+    fn audit_attestations(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let text = |value: &Value, key: &str| -> String {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let claims: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .map(|entry| entry.payload.digest())
+            .collect();
+
+        let mut attestations: BTreeMap<String, Value> = BTreeMap::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(ATTESTATION) {
+            let claim_id = text(&entry.payload, "claim_id");
+            let attestor = text(&entry.payload, "attestor");
+            let status = text(&entry.payload, "status");
+            attestations.insert(entry.payload.digest(), entry.payload.clone());
+
+            if !attestation_is_signed(&entry.payload) {
+                problems.push(format!(
+                    "entry {}: attestation by {} is not signed by the identity it names;                      an attestation nobody signed has nobody to slash, which makes it free",
+                    entry.seq,
+                    short(&attestor)
+                ));
+            }
+            // `unavailable` says the attestor's machine could not run the
+            // check, which is a fact about the attestor. Bonding it would put a
+            // price on admitting a broken toolchain.
+            if status != "accept" && status != "reject" {
+                problems.push(format!(
+                    "entry {}: attestation stands behind {status:?}, which is not a                      settling status and is not bondable",
+                    entry.seq
+                ));
+            }
+            if !seen.insert(format!("{claim_id}|{attestor}")) {
+                problems.push(format!(
+                    "entry {}: {} stood behind claim {} twice",
+                    entry.seq,
+                    short(&attestor),
+                    short(&claim_id)
+                ));
+            }
+            if !claims.contains(&claim_id) {
+                problems.push(format!(
+                    "entry {}: attests to claim {}, which is not in this log",
+                    entry.seq,
+                    short(&claim_id)
+                ));
+            }
+        }
+
+        let mut slashed: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(VERIFICATION_SLASH) {
+            let id = text(&entry.payload, "attestation_id");
+            if !slashed.insert(id.clone()) {
+                problems.push(format!(
+                    "entry {}: attestation {} slashed twice",
+                    entry.seq,
+                    short(&id)
+                ));
+            }
+            let Some(record) = attestations.get(&id) else {
+                problems.push(format!(
+                    "entry {}: slashes attestation {}, which is not in this log",
+                    entry.seq,
+                    short(&id)
+                ));
+                continue;
+            };
+            if text(&entry.payload, "attestor") != text(record, "attestor") {
+                problems.push(format!(
+                    "entry {}: takes a bond from an identity the attestation does not name",
+                    entry.seq
+                ));
+            }
+            if text(&entry.payload, "claim_id") != text(record, "claim_id") {
+                problems.push(format!(
+                    "entry {}: slashes an attestation about a different claim",
+                    entry.seq
+                ));
+            }
+            let units = entry
+                .payload
+                .get("units")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if units != VERIFICATION_BOND {
+                problems.push(format!(
+                    "entry {}: took {units} against a verification bond of {}",
+                    entry.seq, VERIFICATION_BOND
+                ));
+            }
+            if !self.attestation_window_open(record, self.settled_epoch_within(entry.seq)) {
+                problems.push(format!(
+                    "entry {}: slashes attestation {} after its window shut, when the \
+                     bond had already returned",
+                    entry.seq,
+                    short(&id)
+                ));
+            }
+        }
         problems
     }
 
@@ -2001,6 +2261,7 @@ impl Node {
         }
 
         problems.append(&mut self.audit_challenges());
+        problems.append(&mut self.audit_attestations());
         problems.append(&mut self.audit_tiers());
 
         for entry in self.ledger.entries_of_kind(UNDERTAKING) {
@@ -2916,6 +3177,92 @@ mod tests {
     /// is written below it — which is exactly why a second implementation has
     /// to derive it independently rather than take the first one's word.
     ///
+    /// A slash the log carries no attestation for is a taking with no target.
+    ///
+    /// The case a second implementation exists for. `verification_slash` is a
+    /// record kind this crate could have ignored entirely and still reported
+    /// "log verified" — over fifty thousand units moved out of somebody's
+    /// balance by an append anybody can write. That is exactly how availability
+    /// settlements went unchecked here for a while.
+    #[test]
+    fn a_slash_pointing_at_no_attestation_is_reported() {
+        let dir = scratch("orphan-slash");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        ledger
+            .append(
+                VERIFICATION_SLASH,
+                Value::object([
+                    ("attestation_id", Value::string("sha256:nothing")),
+                    ("attestor", Value::string("victim")),
+                    ("catcher", Value::string("thief")),
+                    ("claim_id", Value::string("sha256:also-nothing")),
+                    ("units", Value::Int(i128::from(VERIFICATION_BOND))),
+                ]),
+                TS,
+            )
+            .expect("append");
+
+        let node = Node::new(ledger, ".");
+        let problems = node.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("which is not in this log")),
+            "a slash with no attestation behind it went unreported: {problems:?}"
+        );
+        // And the money is accounted for, which is the half a check on the
+        // record's *shape* would miss. A crate that did not know this kind
+        // would report the catcher holding nothing and the loser holding
+        // everything, and certify both.
+        assert_eq!(
+            node.spendable_within("thief", 1),
+            u128::from(VERIFICATION_BOND),
+            "the catcher's bounty was not credited"
+        );
+        assert_eq!(
+            node.committed_within("victim", 1),
+            u128::from(VERIFICATION_BOND),
+            "the loser was not debited"
+        );
+    }
+
+    /// An attestation nobody signed stakes nothing, and both crates say so.
+    ///
+    /// The two questions are one question. If this crate counted the bond, its
+    /// balances would differ from the primary's on the same bytes — and two
+    /// implementations disagreeing about a balance disagree about what settled.
+    #[test]
+    fn an_unsigned_attestation_is_named_and_stakes_nothing() {
+        let dir = scratch("unsigned-attestation");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        const KEY: &str = "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61";
+        ledger
+            .append(
+                ATTESTATION,
+                Value::object([
+                    ("type", Value::string("attestation")),
+                    ("attestor", Value::string(KEY)),
+                    ("claim_id", Value::string("sha256:whatever")),
+                    ("created_at", Value::string(TS)),
+                    ("status", Value::string("accept")),
+                ]),
+                TS,
+            )
+            .expect("append");
+
+        let node = Node::new(ledger, ".");
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("is not signed")),
+            "an unsigned attestation went unreported: {problems:?}"
+        );
+        assert_eq!(
+            node.committed_within(KEY, 1),
+            0,
+            "an attestation nobody signed staked a bond"
+        );
+    }
+
     /// Same bytes as the fixture above, in a log that does *not* pay their
     /// author. That is the whole difference, so what is reported is the
     /// balance and not the shape.

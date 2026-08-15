@@ -36,29 +36,30 @@ pub fn all(seed: u64) -> Vec<Trial> {
 /// **Attack.** An operator that records `accept` without running the verifier
 /// keeps every cycle the honest one spends.
 ///
-/// **Defence.** Canaries: submissions whose verdict the issuer already knows,
-/// mixed in indistinguishably. The stamper cannot tell them apart, so it stamps
-/// those too, and the docket names it — for a map lookup rather than a verifier
-/// run.
+/// **Defence.** Two halves, and they only work together. **Canaries** —
+/// submissions whose verdict the issuer already knows, mixed in
+/// indistinguishably — say *which* verdicts are wrong, for a map lookup rather
+/// than a verifier run. A **bonded attestation** says *who is answerable* for
+/// each one. The first half without the second names a culprit and takes
+/// nothing; the second without the first has evidence nobody can afford to
+/// find.
 ///
-/// # What the first version of this scenario got wrong
+/// # What the earlier versions of this scenario got wrong
 ///
-/// It paid the stamper nothing and reported `INERT`, which was correct and
-/// useless. Nothing in the protocol pays for verification *at all* — that is
-/// the gap `docs/node-incentives.md` opens with — so a rubber-stamper's gain is
-/// not revenue, it is the **cost it does not pay**. Two operators doing the
-/// same work, one of which verifies, is the comparison that exists.
+/// The first paid the stamper nothing and reported `INERT`, which was correct
+/// and useless. Nothing in the protocol pays for verification *at all*, so a
+/// rubber-stamper's gain is not revenue, it is the **cost it does not pay**.
+/// Two operators doing the same work, one of which verifies, is the comparison
+/// that exists.
 ///
-/// # And what the answer turns out to be
-///
-/// The docket names the stamper and takes nothing from it, because **nothing is
-/// staked on verification**. Every document in this repository says so; this is
-/// that sentence with a number attached. `Verdict::StillPays` is the honest
-/// result and the useful one.
+/// The second got the comparison right and reported `OPEN`: the docket named
+/// the stamper and took nothing from it, because nothing was staked on
+/// verification. That was the finding, it was pinned as open in
+/// `tests/arena.rs`, and `src/records.rs::Attestation` is what closed it.
 pub fn rubber_stamping(seed: u64) -> Trial {
     Trial {
         attack: "rubber-stamping".to_string(),
-        defence: "a canary docket".to_string(),
+        defence: "a canary docket against bonded attestations".to_string(),
         attacker: "stamper".to_string(),
         // The honest operator does exactly the same work and pays to check it.
         benchmark: Some("honest".to_string()),
@@ -70,11 +71,14 @@ pub fn rubber_stamping(seed: u64) -> Trial {
 
 fn rubber_stamp_run(seed: u64, canaries: bool) -> Run {
     let label = if canaries { "canaried" } else { "bare" };
-    let mut arena = Arena::new(
+    // Enough to carry four concurrent verification bonds and still be
+    // recognisably in the same economy: the bond is the reference network's
+    // catch bounty, which is fifty times an objective's reward here.
+    let stake = crate::node::VERIFICATION_BOND * 5;
+    let mut arena = Arena::with_stakes(
         &format!("stamp-{label}"),
         seed,
-        &["stamper", "honest", "auditor"],
-        10_000,
+        &[("stamper", stake), ("honest", stake), ("auditor", 10_000)],
         1_000_000,
     );
     let costs = arena.costs();
@@ -110,7 +114,11 @@ fn rubber_stamp_run(seed: u64, canaries: bool) -> Run {
     // Checking the docket afterwards costs nothing, which is the entire
     // economic argument for canaries.
     arena.charge("auditor", costs.mint_canary);
-    let seed_artifact = Value::object([("ok", Value::Bool(true)), ("tag", Value::string("seedy"))]);
+    let seed_artifact = Value::object([
+        ("n", Value::Int(2)),
+        ("ok", Value::Bool(true)),
+        ("tag", Value::string("seedy")),
+    ]);
     let spec = Value::object([
         ("kind", Value::string("certificate")),
         ("checker", Value::string("c.py")),
@@ -123,46 +131,62 @@ fn rubber_stamp_run(seed: u64, canaries: bool) -> Run {
         minted
     };
     let docket = Docket::from_canaries(&minted);
+    // Both halves of the trap, or the run measures nothing. A docket with no
+    // known-*bad* canary cannot catch a blind accepter however many entries it
+    // has, and this scenario spent its first life pointed at one -- see the
+    // note on `arena::CHECKER` for why the generator could not mint them.
+    let (good, bad) = docket.mix();
+    assert!(
+        good > 0 && bad > 0,
+        "the docket is half a trap ({good} known-good, {bad} known-bad); \
+         a rubber-stamper is caught only by a known-bad canary"
+    );
 
     // The canaries go in as ordinary submissions, from an identity that also
     // submits real work — the deployment rule `src/canary.rs` is emphatic
     // about, and the one its own test fixture got wrong first time.
-    let Some(objective) = arena.fund("treasury", 1_000, "canary-round") else {
-        return arena.finish(&format!("rubber-stamping / {label}"), false);
-    };
+    //
+    // One objective each, because an objective with a settled claim refuses
+    // further submissions: sharing one meant the first canary landed, the rest
+    // were refused at commit, and the docket ended up pointed at half a batch.
+    let mut placed: Vec<(String, String)> = Vec::new();
     for (index, canary) in minted.iter().enumerate() {
+        let Some(objective) = arena.fund("treasury", 1_000, &format!("canary-{index}")) else {
+            continue;
+        };
         // The canary's own artifact, not a stand-in. A docket is keyed on the
         // artifact digest, so submitting something else leaves it matching
         // nothing -- which is exactly what the first version of this scenario
         // did, and why the defence appeared to do nothing.
-        arena.submit_artifact(
+        if let Some(claim) = arena.submit_artifact(
             "auditor",
             &objective,
             &canary.artifact,
             &format!("c{index}"),
-        );
+        ) {
+            placed.push((claim, objective));
+        }
         arena.tick();
         arena.tick();
     }
 
-    // The stamper writes `accept` over every verdict, canaries included,
-    // because it cannot tell them apart. That is the point of the generator.
-    let targets: Vec<(String, String)> = arena
-        .node()
-        .recorded_verdicts()
-        .iter()
-        .filter(|verdict| docket.expectation_of(&verdict.artifact_id).is_some())
-        .map(|verdict| (verdict.claim_id.clone(), objective.clone()))
-        .collect();
-    for (claim_id, objective_id) in targets {
-        arena.stamp(&claim_id, &objective_id, true);
+    // Both operators put a bond behind what they say about each canary. The
+    // honest one pays to look first and attests what it actually found; the
+    // stamper writes `accept` across the board without looking, because it
+    // cannot tell a canary from real work — that is the point of the generator.
+    // Same record, same stake, differing only in whether it is true.
+    for (claim_id, _) in &placed {
+        arena.charge("honest", costs.verify);
+        let truth = arena.verify(claim_id).unwrap_or(true);
+        arena.attest("honest", claim_id, truth);
+        arena.attest("stamper", claim_id, true);
     }
-    arena.police("auditor", &docket, &["stamper"]);
 
-    // And nothing happens to it. Being named is what a slash would attach to;
-    // no stake is posted against verification, so the docket produces evidence
-    // and no transfer. Charging a modelled penalty here would be inventing the
-    // mechanism this run exists to report the absence of.
+    arena.police("auditor", &docket);
+    // The taking. One verifier run per attestation the free half already named,
+    // and the bond goes to whoever brought the evidence.
+    arena.take_bonds("auditor", &docket);
+
     arena.finish(&format!("rubber-stamping / {label}"), false)
 }
 

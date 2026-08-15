@@ -133,7 +133,7 @@ printf '  the word does not appear\n'
 rule "check: clean against an honest log, and no verifier runs"
 OUT=$(pw canary check --docket "$WORK/canaries/docket.json")
 echo "$OUT" | sed 's/^/  /'
-echo "$OUT" | grep -q 'no verdict contradicts' || fail "the honest log was accused"
+echo "$OUT" | grep -q 'nothing in this log contradicts' || fail "the honest log was accused"
 
 rule "now a node that wrote accept without looking"
 # Forge the verdict a rubber-stamper would have written, chained correctly, so

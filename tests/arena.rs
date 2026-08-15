@@ -131,47 +131,101 @@ fn a_griefer_that_prosecutes_nothing_forfeits() {
     }
 }
 
-/// **A known-open hole, pinned deliberately.**
+/// **The hole this file used to pin as open.**
 ///
-/// A canary docket names a rubber-stamper and takes nothing from it, because
-/// nothing is staked on verification. Every document in this repository says
-/// so; this is that sentence with a number attached — the stamper ends ahead of
-/// an identical honest operator by exactly the verification it did not pay for.
+/// The earlier version of this test asserted `StillPays` and carried the note
+/// *"when a verification bond lands, this test should start failing — that is
+/// the point of writing it."* It did, and this is the rewrite.
 ///
-/// When a verification bond lands, this test should start failing. That is the
-/// point of writing it.
+/// What changed is one record. A canary docket always knew *which* verdicts
+/// were wrong for the price of a map lookup; what it could not do was name a
+/// party, because a Stage-0 log has one writer and no record said who ran the
+/// checker. `records::Attestation` is that record, and the docket is now
+/// compared against attestations rather than against the node's own verdicts —
+/// so the finding arrives already attached to a key with a bond behind it.
 #[test]
-fn rubber_stamping_still_pays_because_nothing_is_staked_on_verification() {
+fn rubber_stamping_costs_more_than_it_saves() {
     if !have_python() {
         eprintln!("skipping: no python3");
         return;
     }
     let trial = scenarios::rubber_stamping(SEED);
     match trial.verdict() {
-        Verdict::StillPays { with, without } => {
-            assert!(with > 0 && without > 0);
-            let honest = trial.defended.net("honest");
+        Verdict::Closed { with, without } => {
             assert!(
-                with > honest,
-                "the stamper did not beat the honest operator: {with} against {honest}"
+                without > 0,
+                "stamping did not pay undefended either, so this measures nothing: {without}"
             );
-            // The gap is exactly the verification the stamper skipped, which is
-            // what makes this a measurement rather than an impression.
+            assert!(with < 0, "the stamper kept its bonds: {with}");
+            // The two arms run identical histories, so the whole swing between
+            // them is the bonds a slash took — and it is a whole number of
+            // them, which is what makes this a measurement rather than an
+            // impression.
+            let stamper = trial.attacker.clone();
+            let swing = without - with;
+            let bond = i128::from(proofwork::node::VERIFICATION_BOND);
             assert_eq!(
-                with - honest,
-                trial
-                    .defended
-                    .payoff("honest")
-                    .map(|payoff| payoff.spent as i128)
-                    .unwrap_or(0),
-                "the advantage is not the skipped verification cost"
+                swing % bond,
+                0,
+                "the defence cost the stamper {swing}, which is not a whole \
+                 number of {bond}-unit bonds"
+            );
+            // And every one of them was named before it was charged. A slash
+            // the docket did not point at would mean the expensive half ran on
+            // its own, which is the cost the cheap half exists to avoid.
+            let caught = trial
+                .defended
+                .payoff(&stamper)
+                .map(|payoff| payoff.caught.len())
+                .unwrap_or(0);
+            assert_eq!(
+                caught as i128,
+                swing / bond,
+                "bonds taken and canaries that named them do not match"
             );
         }
-        other => panic!(
-            "rubber-stamping now reports {other}. If a verification bond has \
-             landed, this test has done its job and should be rewritten."
-        ),
+        other => panic!("rubber-stamping now reports {other}"),
     }
+}
+
+/// The honest operator pays to verify and keeps every unit of it.
+///
+/// Half of the pair, and the half that would be easy to lose: a defence that
+/// punishes stamping by making *everybody* poorer has not distinguished
+/// anything. The honest operator stakes exactly the same bonds on exactly the
+/// same claims, and ends the run with all of them.
+#[test]
+fn standing_behind_the_truth_costs_only_the_check() {
+    if !have_python() {
+        eprintln!("skipping: no python3");
+        return;
+    }
+    let trial = scenarios::rubber_stamping(SEED);
+    let honest = trial
+        .defended
+        .payoff("honest")
+        .expect("the benchmark operator");
+    assert!(
+        honest.closed >= honest.opened,
+        "an honest attestor lost a bond: {} -> {}",
+        honest.opened,
+        honest.closed
+    );
+    assert!(
+        honest.caught.is_empty(),
+        "the docket named an honest attestor: {:?}",
+        honest.caught
+    );
+    // And the catcher is paid for the work of catching, or nobody does it.
+    let auditor = trial
+        .defended
+        .payoff("auditor")
+        .expect("the policing party");
+    assert!(
+        auditor.net() > 0,
+        "policing did not pay for itself: {}",
+        auditor.net()
+    );
 }
 
 /// Every scenario is a deterministic function of its seed, or a run is an

@@ -805,6 +805,8 @@ examples/            worked objectives with real artifacts
 - [knowledge.md](docs/knowledge.md) — typed relations, derived standing, and reader-chosen confidence: revising knowledge without rewriting history
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
+- [bonded-verification.md](docs/bonded-verification.md) — who ran the checker, and what it costs them to lie: canaries name it for free, a bond is what a slash takes
+- [arena.md](docs/arena.md) — attack strategies played for money against the real rules engine, and what each one earned
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
@@ -845,13 +847,16 @@ examples/            worked objectives with real artifacts
 - **Not able to price a shared technique.** Citation flow tracks artifacts,
   because artifacts are checkable. If you tell me "try annealing on the third
   coordinate" and I win, nothing pays you.
-- **Not running the node mechanism.** `src/incentive/` is a mechanism and its
-  evaluation, not a code path. Canaries *are* now generated — `src/canary.rs`
-  mints submissions whose verdict it established by running the objective's own
-  pinned verifier, and `proofwork canary check` names a node that recorded
-  something else — but no bond is posted, no Merkle challenge is issued, and a
-  catch moves no money, because nothing is staked. It exists now because the
-  parameters it demands are expensive to discover after launch.
+- **Not running the whole node mechanism.** `src/incentive/` is a mechanism and
+  its evaluation, not a code path. The verification half of it now *is* one:
+  `src/canary.rs` mints submissions whose verdict it established by running the
+  objective's own pinned verifier, `records::Attestation` puts a signed 50,000-
+  unit bond behind what an operator says a verifier returned, and
+  `proofwork attest slash --docket` takes that bond — the naming costs a map
+  lookup, the taking costs one verifier run, and `docs/bonded-verification.md`
+  has the numbers. What is still only a model is the rest: no Merkle
+  availability challenge is issued, no committee seat is bonded, and **nothing
+  requires an attestation at all** — what is priced is lying, not silence.
 
 ## Prior art
 

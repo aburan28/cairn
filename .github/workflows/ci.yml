@@ -52,6 +52,12 @@ jobs:
       # record kind reports "log verified" over money it did not look at,
       # which is how availability settlements went unchecked for a while.
       - run: ./scripts/dispute-demo.sh
+      # Bonded verification the whole way through: two operators standing behind
+      # the same verdicts, a docket naming the one that did not look, a slash
+      # moving the bond, and the reference agreeing about where it went. It is
+      # the only place the free half and the expensive half of the mechanism sit
+      # on one log with the money visible between them.
+      - run: ./scripts/attestation-demo.sh
       # Adversarial strategies played for money against the real rules engine.
       # The verdicts are asserted in `tests/arena.rs`; this run is the readable
       # payoff table, and it exits non-zero if an attack that should be closed

@@ -246,6 +246,15 @@ impl Trial {
         // not whether it beats doing nothing at all.
         if let Some(benchmark) = &self.benchmark {
             let honest = self.defended.net(benchmark);
+            // Losing outright is strictly stronger than merely not beating an
+            // honest player, and saying "the incentive is removed, not priced"
+            // over an attacker that ended forty-two thousand down would
+            // understate the defence. `< 0` rather than `<= 0`: earning
+            // *nothing* is neutrality, not a loss, and availability
+            // free-riding lands exactly on that line.
+            if with < 0 && without > 0 {
+                return Verdict::Closed { with, without };
+            }
             if with <= honest {
                 return Verdict::Neutral {
                     attacker: with,
@@ -396,9 +405,21 @@ const ORIGIN: i64 = 1_785_000_000;
 
 /// A permissive checker. The arena is about *money*, and a checker that
 /// rejected honest work would settle the question before an incentive could.
+/// The arena's one pinned checker.
+///
+/// `ok` alone is not enough, and the second clause is not decoration. Every
+/// edit `crate::canary::Generator` makes is shape- and length-preserving over
+/// *numbers and strings* — it has no move that flips a boolean — so a checker
+/// whose verdict turns only on `ok` cannot be made to **reject** by any canary
+/// the generator can mint. The first version of this file had exactly that, and
+/// the rubber-stamping scenario ran for weeks against a docket with two
+/// known-good canaries and zero known-bad ones: a trap with only the half that
+/// catches blind *rejection*, pointed at an attacker that blindly accepts.
 const CHECKER: &str = r#"
 def check(artifact):
-    return artifact.get("ok") is True
+    if artifact.get("ok") is not True:
+        return False
+    return artifact.get("n", 0) % 2 == 0
 "#;
 
 /// A step function, so an objective can be *disputed* and a challenge bond has
@@ -478,8 +499,22 @@ struct Scratch {
 }
 
 impl Scratch {
+    /// A directory nothing else is using.
+    ///
+    /// The label and seed alone are not enough, and the reason is not
+    /// hypothetical: two tests running the *same* scenario at the same seed —
+    /// which is exactly what a pair of tests measuring the two sides of one
+    /// trial does — collided on one directory, and the second one to arrive
+    /// wiped the first's log out from under it. The counter and the process id
+    /// make the name unique without making a run any less reproducible: nothing
+    /// in a scenario reads this path.
     fn new(label: &str, seed: u64) -> Scratch {
-        let path = std::env::temp_dir().join(format!("proofwork-arena-{label}-{seed}"));
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "proofwork-arena-{label}-{seed}-{}-{unique}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("a working directory");
         Scratch { path }
@@ -743,7 +778,11 @@ impl Arena {
         nonce: &str,
     ) -> Option<String> {
         let who = self.who(player);
-        let artifact = Value::object([("ok", Value::Bool(good)), ("tag", Value::string(nonce))]);
+        let artifact = Value::object([
+            ("n", Value::Int(if good { 2 } else { 3 })),
+            ("ok", Value::Bool(good)),
+            ("tag", Value::string(nonce)),
+        ]);
         let at = self.now();
         let commitment = Commitment::new(
             objective,
@@ -834,6 +873,7 @@ impl Arena {
         let trace = self.trace(states)?;
         let who = self.who(player);
         let artifact = Value::object([
+            ("n", Value::Int(2)),
             ("ok", Value::Bool(true)),
             ("tag", Value::string(nonce)),
             ("trace_root", Value::string(trace.root())),
@@ -959,53 +999,115 @@ impl Arena {
         answered
     }
 
-    /// Write a verdict the verifier disagrees with.
+    /// Run the pinned verifier on a claim, the way an honest operator does.
     ///
-    /// The rubber-stamper's move, and the one thing here that cannot go
-    /// through admission: `reveal` runs the checker itself, which is the
-    /// honest behaviour under test everywhere else. So this goes in at the
-    /// ledger, exactly as a node lying to its own log would, and what catches
-    /// it is [`crate::canary`] and `audit --rerun` rather than anything in
-    /// this module.
-    pub fn stamp(&mut self, claim_id: &str, objective_id: &str, accept: bool) {
-        let record = Value::object([
-            ("claim_id", Value::string(claim_id)),
-            ("objective_id", Value::string(objective_id)),
-            (
-                "verdict",
-                Value::object([
-                    (
-                        "status",
-                        Value::string(if accept { "accept" } else { "reject" }),
-                    ),
-                    ("detail", Value::string("checked, honest, definitely")),
-                    ("evidence", Value::object(Vec::<(&str, Value)>::new())),
-                ]),
-            ),
-        ]);
+    /// `Some(true)` for accept, `Some(false)` for reject, `None` if the checker
+    /// could not run — never `Some(false)` for that last case, because an
+    /// absent toolchain says nothing about the artifact.
+    ///
+    /// The arena charges [`Costs::verify`] for this at the caller rather than
+    /// here: what a check costs is an off-log fact about somebody's machine,
+    /// and burying it inside a move would make it invisible in the payoff.
+    pub fn verify(&self, claim_id: &str) -> Option<bool> {
+        let claim = self
+            .node
+            .ledger()
+            .entries_of_kind("claim")
+            .into_iter()
+            .filter_map(|entry| crate::records::Claim::from_value(&entry.payload).ok())
+            .find(|claim| claim.id() == claim_id)?;
+        let objective = self.node.objectives().get(&claim.objective_id)?.clone();
+        let verdict = self
+            .node
+            .registry()
+            .run(&objective.verifier, &claim.artifact);
+        verdict.settles().then(|| verdict.accepted())
+    }
+
+    /// Stand behind a claim's verdict under bond.
+    ///
+    /// The move that gives a rubber-stamper something to lose. Nothing is
+    /// checked here — that is the design, not a shortcut in the arena — so a
+    /// stamper posts exactly the same record an honest verifier does and is
+    /// distinguished only by whether it paid to look first.
+    pub fn attest(&mut self, who: &str, claim_id: &str, accept: bool) -> Option<String> {
         let ts = self.now();
-        let _ = self.node.ledger_mut().append("verdict", record, &ts);
+        let record = crate::records::Attestation::new(
+            claim_id,
+            self.who(who),
+            if accept { "accept" } else { "reject" },
+            &ts,
+        )
+        .signed_with(self.identity(who));
+        match self.node.post_attestation(&record, &ts) {
+            Ok(id) => {
+                self.note_acted(who);
+                Some(id)
+            }
+            Err(why) => {
+                self.note_refusal(who, "attestation", &why);
+                None
+            }
+        }
+    }
+
+    /// Take the bond of every attestation a docket contradicts.
+    ///
+    /// The expensive half, and it runs the verifier once per attestation the
+    /// cheap half already named. Returns what was taken, in units.
+    ///
+    /// An attestation the verifier agrees with is *stepped over*, not forced:
+    /// a docket names claims, and an honest attestor standing behind a claim
+    /// somebody else misjudged must not lose a bond for it.
+    pub fn take_bonds(&mut self, catcher: &str, docket: &crate::canary::Docket) -> u128 {
+        let verdicts = self.node.recorded_verdicts();
+        let targets: Vec<String> = docket
+            .contradicted(&verdicts, &self.node.attestations())
+            .into_iter()
+            .map(|fault| fault.attestation_id)
+            .collect();
+        let ts = self.now();
+        let who = self.who(catcher);
+        let mut taken = 0u128;
+        for id in targets {
+            if let Ok(record) = self.node.slash_attestation(&id, &who, &ts) {
+                taken = taken.saturating_add(
+                    record
+                        .get("units")
+                        .and_then(Value::as_i128)
+                        .unwrap_or(0)
+                        .max(0) as u128,
+                );
+            }
+        }
+        if taken > 0 {
+            self.note_acted(catcher);
+        }
+        taken
     }
 
     /// Point a canary docket at the log and record who it names.
     ///
     /// The defence half of the rubber-stamping trial. Runs no verifier — that
     /// is the whole economic argument for canaries — and the minting cost is
-    /// charged to `policed_by` once, up front.
-    pub fn police(&mut self, policed_by: &str, docket: &crate::canary::Docket, suspects: &[&str]) {
+    /// charged to `policed_by` by the caller, once, up front.
+    ///
+    /// The earlier version took a list of *suspects*, because a docket compared
+    /// against verdict records names a claim and no party: a Stage-0 log has
+    /// one writer and does not record who ran the checker. Comparing against
+    /// bonded attestations removes the guess — the finding is recorded against
+    /// whoever signed it.
+    pub fn police(&mut self, policed_by: &str, docket: &crate::canary::Docket) {
         let verdicts = self.node.recorded_verdicts();
-        let found = docket.discrepancies(&verdicts);
-        if found.is_empty() {
-            return;
-        }
-        // A discrepancy names a claim; the claim names its submitter. In this
-        // arena the submitter of a canary is the auditor, and the party whose
-        // *verdict* was wrong is whoever wrote it — which the log does not
-        // record, because a Stage-0 log has one writer. So the caller says who
-        // was on the hook, and the finding is recorded against them.
-        for name in suspects {
-            for discrepancy in &found {
-                self.note_caught(name, format!("{discrepancy}"));
+        let found = docket.contradicted(&verdicts, &self.node.attestations());
+        let by_key: BTreeMap<String, String> = self
+            .players
+            .iter()
+            .map(|(name, identity)| (identity.submitter_id(), name.clone()))
+            .collect();
+        for fault in &found {
+            if let Some(name) = by_key.get(&fault.attestor) {
+                self.note_caught(&name.clone(), format!("{fault}"));
             }
         }
         let _ = policed_by;
@@ -1097,7 +1199,14 @@ impl Arena {
         // what is committed, scored every honest participant as having *lost*
         // its stake the moment it staked it, and made a free-rider who staked
         // nothing look prudent.
-        let debits = self.node.challenge_debits();
+        let mut debits = self.node.challenge_debits();
+        // And what a slashed verification bond took. Same reason: a live bond
+        // is still the attestor's money, a forfeited one is gone, and holdings
+        // alone cannot tell them apart.
+        for (who, lost) in self.node.attestation_debits() {
+            let slot = debits.entry(who).or_insert(0);
+            *slot = slot.saturating_add(lost);
+        }
         let held: BTreeMap<String, u128> = self
             .node
             .tiered()

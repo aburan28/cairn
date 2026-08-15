@@ -2700,6 +2700,150 @@ fn required_u64(
     }
 }
 
+/// A signed, bonded statement about what a verifier said.
+///
+/// # Why a verdict was not enough
+///
+/// A `verdict` record says what the checker returned. It does not say **who
+/// ran it**, because at Stage 0 a log has one writer and the question did not
+/// arise. That is exactly the gap `src/arena` measured: a canary docket names a
+/// *claim* whose verdict is wrong and cannot name a *party*, so there is nobody
+/// to slash and rubber-stamping pays. The arena reports it as the only OPEN
+/// attack in the set, and this record is what closes it.
+///
+/// # What it commits to
+///
+/// One identity, one claim, one status, signed. Signing is not decoration: an
+/// unsigned attestation is an attestation by nobody, and a penalty with nobody
+/// attached is not a penalty. The signature covers the status, so an attestor
+/// cannot later claim to have said something else about a claim it attested to.
+///
+/// # And what stands behind it
+///
+/// A bond, checked at admission against the attestor's own balance
+/// ([`crate::node::VERIFICATION_BOND`]). The bond is what a slash takes, and
+/// the reason the whole mechanism is not circular: a canary tells the *issuer*
+/// which attestations are wrong for free, and the slash itself is settled by
+/// running that one verifier, which anybody can do and anybody can check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attestation {
+    /// The claim this is about.
+    pub claim_id: String,
+    /// Ed25519 public key, hex. Who ran the verifier and is answerable for it.
+    pub attestor: String,
+    /// What they say it returned: the wire spelling of a
+    /// [`crate::verifiers::Status`].
+    pub status: String,
+    pub created_at: String,
+    /// Ed25519 signature over [`Attestation::signing_payload`], hex. Required.
+    pub signature: Option<String>,
+}
+
+impl Attestation {
+    pub fn new(
+        claim_id: impl Into<String>,
+        attestor: impl Into<String>,
+        status: impl Into<String>,
+        created_at: impl Into<String>,
+    ) -> Attestation {
+        Attestation {
+            claim_id: claim_id.into(),
+            attestor: attestor.into(),
+            status: status.into(),
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("attestation")),
+            ("attestor", Value::string(self.attestor.clone())),
+            ("claim_id", Value::string(self.claim_id.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("status", Value::string(self.status.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Attestation {
+        self.attestor = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "attestation";
+        if signed_submitter(&self.attestor).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.attestor.clone(),
+            });
+        }
+        let signature = self.signature.as_deref().ok_or(SignatureError::Missing {
+            record: RECORD,
+            submitter: self.attestor.clone(),
+        })?;
+        verify_record_signature(
+            RECORD,
+            &self.attestor,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "attestation";
+        if self.claim_id.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "claim_id",
+                expected: "the id of the claim attested to",
+            });
+        }
+        // Only the two *settling* statuses can be attested to under bond.
+        //
+        // `unavailable` says "my machine could not run this", which is a fact
+        // about the attestor rather than the artifact, and it is the answer the
+        // whole verifier interface exists to protect. Bonding it would put a
+        // price on admitting a broken toolchain, and the cheapest response to
+        // that price is to guess instead.
+        if self.status != "accept" && self.status != "reject" {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "status",
+                expected: "accept or reject; a non-settling status is not bondable",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Attestation, RecordError> {
+        const RECORD: &str = "attestation";
+        let value = expect_object(value, RECORD)?;
+        let record = Attestation {
+            claim_id: required_string(value, RECORD, "claim_id")?,
+            attestor: required_string(value, RECORD, "attestor")?,
+            status: required_string(value, RECORD, "status")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Interactive fraud proofs
 // ---------------------------------------------------------------------------

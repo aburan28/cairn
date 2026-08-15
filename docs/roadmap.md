@@ -484,10 +484,12 @@ downstream is unbacked.
       free-riding NEUTRAL (0 against 11,994); cheap-tier standing CLOSED (5,000
       untyped, 0 spendable where it was wanted); bonded griefing PROTECTED (the
       griefer forfeits 6,000 and its target ends 9,000 up instead of 3,000);
-      griefing a plain objective REFUSED. **Rubber-stamping is OPEN**, pinned
-      deliberately: a docket names the stamper and takes nothing, because
-      nothing is staked on verification, and the stamper ends ahead of an
-      identical honest operator by exactly the verification it skipped.
+      griefing a plain objective REFUSED. Rubber-stamping was **OPEN** and pinned
+      deliberately -- a docket named the stamper and took nothing, because
+      nothing was staked on verification -- until bonded attestations landed;
+      it now reports CLOSED at 8,000 undefended against -92,000 defended, the
+      swing exactly two verification bonds. **No attack in the set is
+      profitable against its defence.**
       It found a real defect on its first run against a griefer that opened
       objections and prosecuted none: at the start of a dispute both sides owe
       their endpoints, so nobody was ever overdue and a challenge nobody played
@@ -566,13 +568,40 @@ downstream is unbacked.
       holds an unordered collection. Checking is free: 1.2 us for a docket
       against 16 verdicts, against 547 ms for the re-verifying audit that
       reaches the same conclusion, and the gap widens with the log.
-      What is *not* built is the money -- a discrepancy is named by the log the
-      node wrote, but nothing is staked, so nothing is slashed. That waits on
-      the same bonding as availability sampling.
+      The money is now built too, in the entry below.
       Also fixed on the way past: `audit --no-rerun` printed "log verified:
       chain intact, every settled claim re-verified" over a log where no
       verifier had run, which was a false statement by the tool on exactly the
       path a rubber-stamper survives.
+- [x] **Bonded verification: a signed statement of what a verifier returned,
+      slashable on a canary catch** (`records::Attestation`,
+      `Node::post_attestation`, `Node::slash_attestation`,
+      `Docket::contradicted`, `pw attest`, `scripts/attestation-demo.sh`).
+      The half the canary generator was missing. A docket always knew *which*
+      verdicts were wrong for the price of a map lookup; it could not name a
+      *party*, because a Stage-0 log has one writer and no record said who ran
+      the checker. An attestation is that record: one identity, one claim, one
+      status, signed, with 50,000 units behind it -- the reference network's
+      catch bounty, since the catcher is paid the bond.
+      Nothing at admission checks whether it is true, deliberately: asking would
+      put the verification cost back exactly where the mechanism took it out of.
+      The expensive question is asked once, by somebody who already has
+      evidence, and a verifier that cannot run slashes nothing.
+      The bond **returns** when its window shuts, and the first draft did not:
+      a permanent lock would fix the network's whole verification capacity at
+      `supply / bond` forever, which is a capital sink rather than a service
+      market. The window closes on the highest epoch any `batch` record names --
+      not on an entry's `ts`, which its own author writes, and not on log
+      height, which anybody can advance for the price of an append.
+      Both implementations re-derive every *slash* on the cheap audit path;
+      whether an unslashed attestation is true is asked only under `--rerun`,
+      which is the cost the bond exists so that nobody pays routinely. Two
+      injection tests pin that split.
+      The arena's rubber-stamping trial moved from OPEN to CLOSED, and on the
+      way found that its own pinned checker turned on a *boolean* -- which the
+      generator's shape-preserving edits cannot flip -- so the trial had been
+      running against a docket with zero known-bad canaries. `Docket::mix`
+      existed and said so; nothing was asking it.
 - [ ] Availability sampling: Merkle challenges against a published checkpoint
       root, which is the cheap half of node incentives and needs the signed
       checkpoints in Stage 0 first.

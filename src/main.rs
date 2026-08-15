@@ -593,6 +593,11 @@ enum Command {
     Dispute {
         action: DisputeAction,
     },
+    /// Stand behind a verdict under bond, and take the bond of somebody who
+    /// stood behind a wrong one.
+    Attest {
+        action: AttestAction,
+    },
     Attribute {
         params: FlowParams,
     },
@@ -881,6 +886,32 @@ enum DisputeAction {
     Status { id: Option<String> },
 }
 
+/// `attest stand|slash|list` — bonded verification.
+///
+/// Separate from `canary`, and the seam between them is the point. A docket
+/// says *this claim's recorded verdict is wrong* and knows it for free; an
+/// attestation says *this identity is answerable for that verdict* and has a
+/// bond behind it. `attest slash --docket` is the two halves meeting: the cheap
+/// half names the target, the expensive half runs once, and the bond moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttestAction {
+    /// Stand behind a claim's verdict, under signature and under bond.
+    Stand {
+        claim: String,
+        status: String,
+        identity: String,
+    },
+    /// Take an attestor's bond, on evidence. Either one attestation by id, or
+    /// every attestation a docket contradicts.
+    Slash {
+        attestation: Option<String>,
+        docket: Option<String>,
+        catcher: String,
+    },
+    /// Who has stood behind what, and whose bond is still live.
+    List,
+}
+
 /// One minting run's settings, in a struct so the command takes one argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Minting {
@@ -1131,6 +1162,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "availability" => parse_availability(&mut cursor)?,
         "canary" => parse_canary(&mut cursor)?,
         "dispute" => parse_dispute(&mut cursor)?,
+        "attest" => parse_attest(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
         "knowledge" => parse_knowledge(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
@@ -1666,6 +1698,60 @@ fn parse_dispute(cursor: &mut Cursor) -> Result<Command, CliError> {
         }
     };
     Ok(Command::Dispute { action })
+}
+
+/// `attest stand --claim ID --status accept|reject --identity FILE`
+/// `attest slash (--attestation ID | --docket FILE) --catcher NAME`
+/// `attest list`
+fn parse_attest(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let verb = cursor.take().unwrap_or_else(|| String::from("list"));
+    let mut claim: Option<String> = None;
+    let mut status: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut attestation: Option<String> = None;
+    let mut docket: Option<String> = None;
+    let mut catcher: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--claim" => claim = Some(cursor.value("--claim")?),
+            "--status" => status = Some(cursor.value("--status")?),
+            "--identity" => identity = Some(cursor.value("--identity")?),
+            "--attestation" => attestation = Some(cursor.value("--attestation")?),
+            "--docket" => docket = Some(cursor.value("--docket")?),
+            "--catcher" => catcher = Some(cursor.value("--catcher")?),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "attest {verb}: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+    let action = match verb.as_str() {
+        "stand" => AttestAction::Stand {
+            claim: require(claim, "attest stand", "--claim")?,
+            status: require(status, "attest stand", "--status")?,
+            identity: require(identity, "attest stand", "--identity")?,
+        },
+        "slash" => {
+            if attestation.is_some() == docket.is_some() {
+                return Err(CliError::Usage(String::from(
+                    "attest slash: exactly one of --attestation ID or --docket FILE",
+                )));
+            }
+            AttestAction::Slash {
+                attestation,
+                docket,
+                catcher: require(catcher, "attest slash", "--catcher")?,
+            }
+        }
+        "list" => AttestAction::List,
+        other => {
+            return Err(CliError::Usage(format!(
+                "attest: unknown action {other:?} (stand, slash, list)"
+            )))
+        }
+    };
+    Ok(Command::Attest { action })
 }
 
 fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -2767,6 +2853,35 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      verifier at all; exits non-zero if a node said what it cannot mean",
     );
+    say(
+        out,
+        "  attest stand --claim ID --status accept|reject --identity FILE",
+    );
+    say(
+        out,
+        "      stand behind a verdict under bond. Nothing is checked here: the",
+    );
+    say(
+        out,
+        "      expensive question is asked once, by whoever brings evidence",
+    );
+    say(
+        out,
+        "  attest slash (--attestation ID | --docket FILE) --catcher NAME",
+    );
+    say(
+        out,
+        "      take the bond of somebody who stood behind a verdict the pinned",
+    );
+    say(
+        out,
+        "      verifier contradicts. A verifier that cannot run takes nothing",
+    );
+    say(out, "  attest list");
+    say(
+        out,
+        "      who has stood behind what, and whose bond is still live",
+    );
     say(out, "  checkpoint --root-key FILE [--out FILE]");
     say(
         out,
@@ -3176,22 +3291,36 @@ fn cmd_balances(out: &mut dyn Write, options: &Options) -> Result<i32, CliError>
     let total: u128 = issued.values().sum();
     say(out, format!("issued {total}"));
 
+    // What a decided dispute or a slashed attestation took. Not visible in
+    // `spendable`, and that is not a display quirk: a live bond and a forfeited
+    // one are both subtracted from it, so an identity that just lost fifty
+    // thousand units prints exactly the number it printed before. The arena hit
+    // the same thing and scored a griefer that forfeited three bonds as having
+    // lost nothing.
+    let mut lost = node.challenge_debits();
+    for (name, units) in node.attestation_debits() {
+        let slot = lost.entry(name).or_insert(0);
+        *slot = slot.saturating_add(units);
+    }
+
     let mut names: std::collections::BTreeSet<String> = balances.keys().cloned().collect();
     names.extend(issued.keys().cloned());
     names.extend(escrowed.keys().cloned());
     for name in &names {
         let spendable = balances.get(name).copied().unwrap_or(0);
         let held = escrowed.get(name).copied().unwrap_or(0);
-        if spendable == 0 && held == 0 {
+        let forfeited = lost.get(name).copied().unwrap_or(0);
+        if spendable == 0 && held == 0 && forfeited == 0 {
             continue;
         }
-        say(
-            out,
-            format!(
-                "  {:<20} spendable {spendable:>12}   escrowed {held:>12}",
-                short(name)
-            ),
+        let mut line = format!(
+            "  {:<20} spendable {spendable:>12}   escrowed {held:>12}",
+            short(name)
         );
+        if forfeited > 0 {
+            line.push_str(&format!("   forfeited {forfeited:>12}"));
+        }
+        say(out, line);
         // Then the provenance, because the total is the number that hides the
         // interesting fact: a thousand units earned on millisecond certificate
         // checks and a thousand earned on Lean proofs print identically above
@@ -4282,6 +4411,10 @@ fn cmd_canary_check(out: &mut dyn Write, options: &Options, path: &str) -> Resul
         .filter(|verdict| docket.expectation_of(&verdict.artifact_id).is_some())
         .count();
     let found = docket.discrepancies(&recorded);
+    // And the other half: who put a *bond* behind a verdict the docket knows is
+    // wrong. A verdict record names a claim and, at Stage 0, no party -- so a
+    // check that read only those could report a liar it could not name.
+    let faults = docket.contradicted(&recorded, &node.attestations());
     say(
         out,
         format!(
@@ -4290,18 +4423,195 @@ fn cmd_canary_check(out: &mut dyn Write, options: &Options, path: &str) -> Resul
             docket.len()
         ),
     );
-    if found.is_empty() {
-        say(out, "no verdict contradicts what the docket knows");
+    if found.is_empty() && faults.is_empty() {
+        say(out, "nothing in this log contradicts what the docket knows");
         return Ok(0);
     }
     for discrepancy in &found {
         say(out, format!("  {discrepancy}"));
     }
+    for fault in &faults {
+        say(out, format!("  {fault}"));
+    }
     say(
         out,
-        format!("{} verdict(s) the verifier disagrees with", found.len()),
+        format!(
+            "{} verdict(s) and {} bonded attestation(s) the verifier disagrees with",
+            found.len(),
+            faults.len()
+        ),
     );
     Ok(1)
+}
+
+/// `attest` — bonded verification, and the seam where a canary becomes money.
+///
+/// Read `docs/bonded-verification.md` before changing any of this. The one rule
+/// that is not obvious from the code: `slash` runs the pinned verifier, and a
+/// verifier that cannot run takes **nothing**. An absent toolchain is a fact
+/// about this machine, and taking somebody's bond because a machine broke would
+/// make breaking machines profitable.
+fn cmd_attest(
+    out: &mut dyn Write,
+    options: &Options,
+    action: &AttestAction,
+) -> Result<i32, CliError> {
+    match action {
+        AttestAction::Stand {
+            claim,
+            status,
+            identity,
+        } => {
+            let who = load_identity(Some(identity))?.ok_or_else(|| {
+                CliError::Usage(String::from("attest stand: --identity is required"))
+            })?;
+            let mut node = open_node_for_writing(options)?;
+            let record = proofwork::records::Attestation::new(
+                claim,
+                who.submitter_id(),
+                status,
+                timestamp(),
+            )
+            .signed_with(&who);
+            let id = refused(node.post_attestation(&record, &timestamp()))?;
+            say(out, format!("attestation {id}"));
+            say(
+                out,
+                format!(
+                    "  {} stands behind {status} on claim {claim}, {} staked",
+                    proofwork::canonical::short(&who.submitter_id()),
+                    proofwork::node::VERIFICATION_BOND
+                ),
+            );
+            Ok(0)
+        }
+        AttestAction::Slash {
+            attestation,
+            docket,
+            catcher,
+        } => {
+            let mut node = open_node_for_writing(options)?;
+            // Which attestations to point at. One named outright, or every one
+            // standing behind a claim a docket already knows is misjudged --
+            // which is the whole economy of the thing: the naming is free and
+            // only the taking runs a verifier.
+            let targets: Vec<String> = match (attestation, docket) {
+                (Some(id), _) => vec![id.clone()],
+                (None, Some(path)) => {
+                    let docket = proofwork::canary::Docket::from_value(&read_json(path)?)
+                        .ok_or_else(|| {
+                            CliError::Usage(format!("attest slash: {path} is not a docket"))
+                        })?;
+                    // Compared against *attestations*, not against the node's
+                    // own verdict records. A verdict names a claim and no
+                    // party; an attestation names the key that signed it, and
+                    // only the second kind of finding has anything to take.
+                    let verdicts = node.recorded_verdicts();
+                    let faults = docket.contradicted(&verdicts, &node.attestations());
+                    if faults.is_empty() {
+                        say(out, "no attestation contradicts what the docket knows");
+                        return Ok(0);
+                    }
+                    for fault in &faults {
+                        say(out, format!("  {fault}"));
+                    }
+                    faults
+                        .into_iter()
+                        .map(|fault| fault.attestation_id)
+                        .collect()
+                }
+                (None, None) => unreachable!("the parser requires one of the two"),
+            };
+            if targets.is_empty() {
+                say(
+                    out,
+                    "the docket names claims nobody stood behind: there is no bond to take",
+                );
+                return Ok(0);
+            }
+
+            let mut taken = 0u128;
+            let mut stood = 0usize;
+            for id in &targets {
+                match node.slash_attestation(id, catcher, &timestamp()) {
+                    Ok(record) => {
+                        taken = taken.saturating_add(
+                            record
+                                .get("units")
+                                .and_then(Value::as_i128)
+                                .unwrap_or(0)
+                                .max(0) as u128,
+                        );
+                        say(out, format!("slashed {id}"));
+                        if let Some(detail) = record.get("detail").and_then(Value::as_str) {
+                            say(out, format!("  {detail}"));
+                        }
+                    }
+                    // Reported and stepped over rather than fatal: a docket
+                    // names claims, and an honest attestor standing behind a
+                    // claim somebody else misjudged must not stop the run.
+                    Err(why) => {
+                        stood += 1;
+                        say(out, format!("  {why}"));
+                    }
+                }
+            }
+            say(
+                out,
+                format!(
+                    "{} bond(s) taken, {taken} units to {}",
+                    targets.len() - stood,
+                    short(catcher)
+                ),
+            );
+            if stood > 0 {
+                // Reported separately, and not as a failure. An attestation the
+                // verifier agrees with is one this run declined to take, which
+                // is the mechanism working rather than the run falling short.
+                say(
+                    out,
+                    format!("{stood} attestation(s) stood up and were left alone"),
+                );
+            }
+            Ok(i32::from(taken == 0))
+        }
+        AttestAction::List => {
+            let node = open_node(options)?;
+            let attestations = node.attestations();
+            if attestations.is_empty() {
+                say(out, "nobody has stood behind a verdict in this log");
+                return Ok(0);
+            }
+            let slashed = node.slashed_attestations();
+            for (id, record) in &attestations {
+                let state = if slashed.contains(id) {
+                    "slashed"
+                } else {
+                    "live"
+                };
+                say(
+                    out,
+                    format!(
+                        "{} {} {} claim {} [{state}]",
+                        proofwork::canonical::short(id),
+                        proofwork::canonical::short(&record.attestor),
+                        record.status,
+                        proofwork::canonical::short(&record.claim_id)
+                    ),
+                );
+            }
+            say(
+                out,
+                format!(
+                    "{} attestation(s), {} still bonded at {} each",
+                    attestations.len(),
+                    attestations.len() - slashed.len().min(attestations.len()),
+                    proofwork::node::VERIFICATION_BOND
+                ),
+            );
+            Ok(0)
+        }
+    }
 }
 
 /// `dispute` — the five things a person does around an interactive fraud proof.
@@ -7670,6 +7980,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             CanaryAction::Check { docket } => cmd_canary_check(out, options, docket),
         },
         Command::Dispute { action } => cmd_dispute(out, options, action),
+        Command::Attest { action } => cmd_attest(out, options, action),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Knowledge { claim_id, policy } => {
             cmd_knowledge(out, options, claim_id.as_deref(), policy)

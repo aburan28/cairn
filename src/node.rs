@@ -64,8 +64,8 @@ use crate::knowledge::{
 use crate::ledger::{Entry, Ledger, LedgerError, Proof};
 use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
 use crate::records::{
-    Availability, AvailabilityPool, BisectionMove, Challenge, Claim, Commitment, CommitteeShare,
-    Issuance, Objective, PeerRecord, Undertaking,
+    Attestation, Availability, AvailabilityPool, BisectionMove, Challenge, Claim, Commitment,
+    CommitteeShare, Issuance, Objective, PeerRecord, Undertaking,
 };
 use crate::sealed::{OpenedSubmission, SealedSubmission};
 use crate::tier::{Ledger as TierLedger, Tier};
@@ -133,6 +133,39 @@ const CHALLENGE: &str = "challenge";
 const BISECTION: &str = "bisection";
 /// The end of a dispute: who won, and what the loser paid.
 const CHALLENGE_SETTLEMENT: &str = "challenge_settlement";
+/// A signed, bonded statement about what a verifier returned.
+const ATTESTATION: &str = "attestation";
+/// An attestation taken apart by execution: the bond moves to the catcher.
+const VERIFICATION_SLASH: &str = "verification_slash";
+
+/// What standing behind one verdict costs to put at risk.
+///
+/// A constant, and per *attestation* rather than per attestor: one bond
+/// covering a thousand attestations would be the same units staked a thousand
+/// times, and a rubber-stamper's whole advantage is volume. Standing behind
+/// more claims costs more, which makes volume its own limit.
+///
+/// The number is the reference network's catch bounty from
+/// `docs/node-incentives.md`, so a slash pays a catcher what that document
+/// prices the catch at.
+pub const VERIFICATION_BOND: u64 = 50_000;
+
+/// How long an attestation stays open to a slash, after which its bond returns.
+///
+/// **The bond has to come back, or verification is a one-shot.** A bond locked
+/// for good would mean an operator holding `S` units could stand behind exactly
+/// `S / VERIFICATION_BOND` verdicts in its entire life and then never verify
+/// again — the network's total verification capacity fixed at
+/// `supply / bond`, forever. That is a capital sink, not a service market, and
+/// the first draft of this rule shipped it and called the permanence a feature.
+/// What actually makes volume its own limit is that the bond is per attestation
+/// and *concurrent*: standing behind a thousand claims at once needs a thousand
+/// bonds, and waiting out the window to re-stake takes time a stamper does not
+/// have.
+///
+/// Same length as [`CHALLENGE_WINDOW_EPOCHS`] and for the same reason: it is
+/// how long somebody holding evidence has to bring it.
+pub const ATTESTATION_WINDOW_EPOCHS: u64 = 6;
 
 /// How long a claim's trace stays open to objection, and how long a party has
 /// to answer a bisection query before silence decides against them.
@@ -252,6 +285,29 @@ pub enum RuleViolation {
         exposure: u128,
         guarded: u128,
         seats: u8,
+    },
+    /// This attestor already stood behind this claim. A second statement is
+    /// either a change of mind the first signature forecloses, or a way to bury
+    /// the first under noise.
+    DuplicateAttestation { claim_id: String, attestor: String },
+    /// A slash names an attestation the log does not carry.
+    UnknownAttestation { attestation_id: String },
+    /// The verifier could not run, so the slash settles nothing. Taking a bond
+    /// because a machine broke would make breaking machines profitable.
+    SlashUnavailable {
+        attestation_id: String,
+        detail: String,
+    },
+    /// The attestation's window has shut and its bond has already returned.
+    AttestationWindowShut {
+        attestation_id: String,
+        opened: u64,
+        now: u64,
+    },
+    /// The verifier agrees with the attestation. Nothing to take.
+    AttestationStands {
+        attestation_id: String,
+        status: String,
     },
     /// A dispute names a claim the log does not carry.
     UnknownClaim { claim_id: String },
@@ -606,6 +662,39 @@ impl fmt::Display for RuleViolation {
                  put only {guarded} at risk; the cheapest members of that committee \
                  are better off opening it early. Seal a later epoch, or split the \
                  bounty"
+            ),
+            RuleViolation::DuplicateAttestation { claim_id, attestor } => write!(
+                f,
+                "{attestor} has already stood behind claim {claim_id}"
+            ),
+            RuleViolation::AttestationWindowShut {
+                attestation_id,
+                opened,
+                now,
+            } => write!(
+                f,
+                "attestation {attestation_id} was open to a slash through epoch {}; \
+                 this log has settled to {now}, so its bond has already returned",
+                opened.saturating_add(ATTESTATION_WINDOW_EPOCHS)
+            ),
+            RuleViolation::UnknownAttestation { attestation_id } => {
+                write!(f, "no attestation {attestation_id} in this log")
+            }
+            RuleViolation::SlashUnavailable {
+                attestation_id,
+                detail,
+            } => write!(
+                f,
+                "attestation {attestation_id} cannot be judged here, so it stands: \
+                 {detail}"
+            ),
+            RuleViolation::AttestationStands {
+                attestation_id,
+                status,
+            } => write!(
+                f,
+                "the verifier agrees with attestation {attestation_id} ({status}); \
+                 there is nothing to take"
             ),
             RuleViolation::UnknownClaim { claim_id } => {
                 write!(f, "no claim {claim_id} in this log")
@@ -2387,6 +2476,24 @@ impl Node {
                 .or_default()
                 .commit(Tier::Universal, bonded);
         }
+        // And verification bonds, which are a service bond like the rest: see
+        // the residual in `docs/tiers.md`.
+        for (attestor, bonded) in self.attestation_bonds_within(positions) {
+            out.entry(attestor)
+                .or_default()
+                .commit(Tier::Universal, bonded);
+        }
+        let (caught, lost) = self.slashed_within(positions);
+        for (catcher, units) in caught {
+            out.entry(catcher)
+                .or_default()
+                .credit(Tier::Universal, units);
+        }
+        for (attestor, units) in lost {
+            out.entry(attestor)
+                .or_default()
+                .commit(Tier::Universal, units);
+        }
         out
     }
 
@@ -2426,6 +2533,284 @@ impl Node {
             });
         }
         Ok(())
+    }
+
+    // -- bonded verification ------------------------------------------------
+
+    /// Every attestation in the log, by id.
+    pub fn attestations(&self) -> BTreeMap<String, Attestation> {
+        let mut out = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(ATTESTATION) {
+            if let Ok(record) = Attestation::from_value(&entry.payload) {
+                out.insert(record.id(), record);
+            }
+        }
+        out
+    }
+
+    /// Stand behind a verdict, under bond.
+    ///
+    /// The refusals:
+    ///
+    /// - **unsigned, or signed by somebody else.** An attestation by nobody has
+    ///   nobody to slash, which makes it free, and a free attestation is
+    ///   rubber-stamping with a record attached.
+    /// - **no such claim.** There is nothing to have checked.
+    /// - **already attested by this identity.** One statement per attestor per
+    ///   claim; a second is either a change of mind, which the first signature
+    ///   already forecloses, or a way to bury the first under noise.
+    /// - **a bond this attestor cannot cover.** The stake is the mechanism.
+    ///
+    /// Deliberately *not* checked here: whether the status is **right**. That
+    /// is the expensive question, it is the one the whole design refuses to ask
+    /// of every node on every claim, and asking it at admission would put the
+    /// verification cost back exactly where the mechanism took it out of. It is
+    /// asked once, of one claim, by [`Node::slash_attestation`], when somebody
+    /// with a canary already knows the answer.
+    pub fn post_attestation(
+        &mut self,
+        record: &Attestation,
+        ts: &str,
+    ) -> Result<String, RuleViolation> {
+        record
+            .validate()
+            .map_err(RuleViolation::InadmissibleRecord)?;
+        record.verify_signature()?;
+
+        if !self.claim_ids().contains(&record.claim_id) {
+            return Err(RuleViolation::UnknownClaim {
+                claim_id: record.claim_id.clone(),
+            });
+        }
+        for existing in self.attestations().values() {
+            if existing.claim_id == record.claim_id && existing.attestor == record.attestor {
+                return Err(RuleViolation::DuplicateAttestation {
+                    claim_id: record.claim_id.clone(),
+                    attestor: record.attestor.clone(),
+                });
+            }
+        }
+        self.afford(&record.attestor, u128::from(VERIFICATION_BOND))?;
+
+        let id = record.id();
+        self.append(ATTESTATION, record.to_value(), ts)?;
+        Ok(id)
+    }
+
+    /// Bonds locked behind attestations that have not been settled.
+    ///
+    /// Live exactly as long as the attestation could still be challenged. An
+    /// attestor with one bond and a thousand attestations would be staking the
+    /// same units a thousand times, so the bond is counted **per attestation**:
+    /// standing behind more claims costs more, which is the property that makes
+    /// a stamper's volume its own limit.
+    fn attestation_bonds_within(&self, positions: usize) -> BTreeMap<String, u128> {
+        let settled: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(VERIFICATION_SLASH)
+            .into_iter()
+            .filter(|entry| (entry.seq as usize) < positions)
+            .filter_map(|entry| payload_str(&entry.payload, "attestation_id").map(str::to_string))
+            .collect();
+        let now = self.settled_epoch_within(positions);
+        let mut locked: BTreeMap<String, u128> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(ATTESTATION) {
+            if (entry.seq as usize) >= positions {
+                continue;
+            }
+            let Ok(record) = Attestation::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.verify_signature().is_err() || settled.contains(&record.id()) {
+                continue;
+            }
+            if !attestation_window_open(&record, now) {
+                continue;
+            }
+            let slot = locked.entry(record.attestor.clone()).or_insert(0);
+            *slot = slot.saturating_add(u128::from(VERIFICATION_BOND));
+        }
+        locked
+    }
+
+    /// The epoch this log has *settled up to*, reading only its first
+    /// `positions` entries. Zero if nothing has settled yet.
+    ///
+    /// The log's own clock, and the reason a window can close without anybody
+    /// consulting a machine. The two obvious alternatives are both wrong here,
+    /// and in opposite directions:
+    ///
+    /// - **an entry's `ts`** is operator-supplied advisory text that no rule
+    ///   constrains, so one forged future timestamp would release every live
+    ///   bond in the log at once and let their holders re-stake the same units;
+    /// - **log height** advances at whatever rate anybody appends, so stuffing
+    ///   the log with cheap records would run the window out on somebody who
+    ///   was about to bring evidence.
+    ///
+    /// A `batch` record's epoch is neither. It is written by settlement, the
+    /// audit already re-derives it, and moving it forward means actually
+    /// draining epochs — which is the thing that pays people.
+    fn settled_epoch_within(&self, positions: usize) -> u64 {
+        self.ledger
+            .entries_of_kind(BATCH)
+            .into_iter()
+            .filter(|entry| (entry.seq as usize) < positions)
+            .filter_map(|entry| entry.payload.get("epoch").and_then(Value::as_i128))
+            .filter(|epoch| *epoch >= 0)
+            .map(|epoch| epoch as u64)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// What slashed attestations have taken from each attestor.
+    fn slashed_within(&self, positions: usize) -> (BTreeMap<String, u128>, BTreeMap<String, u128>) {
+        let (mut credits, mut debits) = (BTreeMap::new(), BTreeMap::new());
+        for entry in self.ledger.entries_of_kind(VERIFICATION_SLASH) {
+            if (entry.seq as usize) >= positions {
+                continue;
+            }
+            let units = entry
+                .payload
+                .get("units")
+                .and_then(Value::as_i128)
+                .unwrap_or(0)
+                .max(0) as u128;
+            if let Some(catcher) = payload_str(&entry.payload, "catcher") {
+                let slot = credits.entry(catcher.to_string()).or_insert(0u128);
+                *slot = slot.saturating_add(units);
+            }
+            if let Some(attestor) = payload_str(&entry.payload, "attestor") {
+                let slot = debits.entry(attestor.to_string()).or_insert(0u128);
+                *slot = slot.saturating_add(units);
+            }
+        }
+        (credits, debits)
+    }
+
+    /// Attestation ids the log has already settled by slashing.
+    ///
+    /// Public because a reader needs it to say which bonds are still live, and
+    /// deriving it a second time at the caller is how two answers to one
+    /// question start disagreeing.
+    pub fn slashed_attestations(&self) -> BTreeSet<String> {
+        self.ledger
+            .entries_of_kind(VERIFICATION_SLASH)
+            .into_iter()
+            .filter_map(|entry| payload_str(&entry.payload, "attestation_id").map(str::to_string))
+            .collect()
+    }
+
+    /// What slashing has taken from each attestor, over the whole log.
+    ///
+    /// Public for the same reason [`Node::challenge_debits`] is: a loss is not
+    /// visible in holdings, because a slash credits the catcher and debits the
+    /// loser through the commitment side.
+    pub fn attestation_debits(&self) -> BTreeMap<String, u128> {
+        self.slashed_within(self.ledger.len()).1
+    }
+
+    /// Take an attestor's bond, on evidence.
+    ///
+    /// **The one expensive step, and it happens once.** The verifier is run
+    /// exactly once, on exactly the claim in question, and the attestation is
+    /// slashed only if what it said contradicts what the verifier actually
+    /// returns. Everything cheap about the mechanism is upstream of this:
+    /// a canary tells its issuer *which* attestation to point at without
+    /// running anything, so the expensive check is spent on a claim somebody
+    /// already has good reason to believe is wrong.
+    ///
+    /// A verifier that cannot run **slashes nothing**. The rule the whole
+    /// crate turns on: an absent toolchain is a fact about this node, and
+    /// taking somebody's bond because a machine broke would make breaking
+    /// machines profitable.
+    ///
+    /// The catcher is paid the bond. That is the catch bounty
+    /// `docs/node-incentives.md` prices, and it is what makes policing somebody
+    /// else's attestation worth the canary it took to find.
+    pub fn slash_attestation(
+        &mut self,
+        attestation_id: &str,
+        catcher: &str,
+        ts: &str,
+    ) -> Result<Value, RuleViolation> {
+        if let Some(existing) = self
+            .ledger
+            .entries_of_kind(VERIFICATION_SLASH)
+            .into_iter()
+            .find(|entry| payload_str(&entry.payload, "attestation_id") == Some(attestation_id))
+        {
+            return Ok(existing.payload.clone());
+        }
+        let record = self
+            .attestations()
+            .get(attestation_id)
+            .cloned()
+            .ok_or_else(|| RuleViolation::UnknownAttestation {
+                attestation_id: attestation_id.to_string(),
+            })?;
+
+        let claim = self
+            .ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .filter_map(|entry| Claim::from_value(&entry.payload).ok())
+            .find(|claim| claim.id() == record.claim_id)
+            .ok_or_else(|| RuleViolation::UnknownClaim {
+                claim_id: record.claim_id.clone(),
+            })?;
+        let objective = self
+            .objectives()
+            .get(&claim.objective_id)
+            .cloned()
+            .ok_or_else(|| RuleViolation::UnknownObjective {
+                objective_id: claim.objective_id.clone(),
+                referrer: Referrer::Claim,
+            })?;
+
+        // The window, checked before the expensive step. A bond that has
+        // already returned is not there to take, and taking it anyway would
+        // debit units the attestor may have re-staked somewhere else.
+        let now = self.settled_epoch_within(self.ledger.len());
+        if !attestation_window_open(&record, now) {
+            return Err(RuleViolation::AttestationWindowShut {
+                attestation_id: attestation_id.to_string(),
+                opened: epoch_of_timestamp(ATTESTATION, &record.created_at)?,
+                now,
+            });
+        }
+
+        let truth = self.registry.run(&objective.verifier, &claim.artifact);
+        if !truth.settles() {
+            return Err(RuleViolation::SlashUnavailable {
+                attestation_id: attestation_id.to_string(),
+                detail: truth.detail.clone(),
+            });
+        }
+        if truth.status.as_str() == record.status {
+            return Err(RuleViolation::AttestationStands {
+                attestation_id: attestation_id.to_string(),
+                status: record.status.clone(),
+            });
+        }
+
+        let out = Value::object([
+            ("attestation_id", Value::string(attestation_id)),
+            ("attestor", Value::string(record.attestor.clone())),
+            ("catcher", Value::string(catcher)),
+            ("claim_id", Value::string(record.claim_id.clone())),
+            (
+                "detail",
+                Value::string(format!(
+                    "attested {} where the verifier returns {}: {}",
+                    record.status,
+                    truth.status.as_str(),
+                    truth.detail
+                )),
+            ),
+            ("units", Value::Int(i128::from(VERIFICATION_BOND))),
+        ]);
+        self.append(VERIFICATION_SLASH, out.clone(), ts)?;
+        Ok(out)
     }
 
     /// Announce a peer identity, or move one to a new address.
@@ -3973,6 +4358,19 @@ impl Node {
             let slot = committed.entry(loser).or_insert(0);
             *slot = slot.saturating_add(lost);
         }
+        // Standing behind a verdict costs a bond per attestation, live until
+        // the attestation is settled. Per attestation rather than per attestor
+        // deliberately: one bond covering a thousand statements would be the
+        // same units staked a thousand times, and a rubber-stamper's advantage
+        // is volume.
+        for (attestor, bonded) in self.attestation_bonds_within(positions) {
+            let slot = committed.entry(attestor).or_insert(0);
+            *slot = slot.saturating_add(bonded);
+        }
+        for (attestor, lost) in self.slashed_within(positions).1 {
+            let slot = committed.entry(attestor).or_insert(0);
+            *slot = slot.saturating_add(lost);
+        }
         committed
     }
 
@@ -4159,6 +4557,12 @@ impl Node {
         for (winner, won) in self.challenge_flows_within(positions).0 {
             let slot = paid.entry(winner).or_insert(0u128);
             *slot = slot.saturating_add(won);
+        }
+        // A catch bounty: the slashed bond, moved rather than minted. The
+        // audit's conservation sum is what proves the two sides cancel.
+        for (catcher, caught) in self.slashed_within(positions).0 {
+            let slot = paid.entry(catcher).or_insert(0u128);
+            *slot = slot.saturating_add(caught);
         }
         let entries = self.ledger.entries();
         for entry in &entries[..positions.min(entries.len())] {
@@ -5975,6 +6379,7 @@ impl Node {
         problems.append(&mut self.audit_challenges());
         problems.append(&mut self.audit_sealed());
         problems.append(&mut self.audit_tiers());
+        problems.append(&mut self.audit_attestations(rerun));
 
         for (objective_id, objective) in &objectives {
             let block = match &objective.ratchet {
@@ -6059,6 +6464,172 @@ impl Node {
             ));
         }
 
+        problems
+    }
+
+    /// Every way an attestation or a slash can be wrong.
+    ///
+    /// Restated here rather than trusted from [`Node::post_attestation`], for
+    /// the reason every rule in this module is: a log can arrive from a peer,
+    /// and an audit that only re-checked what its own writer already checked
+    /// would verify nothing.
+    ///
+    /// The **expensive** half — whether an unslashed attestation is actually
+    /// true — runs only under `rerun`, and that is the whole shape of the
+    /// mechanism rather than a concession to speed. Re-verifying every
+    /// attestation on every audit is the cost the bond exists to avoid paying;
+    /// what an ordinary audit checks is that every *slash* is justified, which
+    /// needs one verifier run per slash and there are very few of those.
+    fn audit_attestations(&self, rerun: bool) -> Vec<String> {
+        let mut problems = Vec::new();
+        let claims: BTreeMap<String, Claim> = self
+            .ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .filter_map(|entry| Claim::from_value(&entry.payload).ok())
+            .map(|claim| (claim.id(), claim))
+            .collect();
+        let objectives = self.objectives();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let attestations = self.attestations();
+
+        for entry in self.ledger.entries_of_kind(ATTESTATION) {
+            let record = match Attestation::from_value(&entry.payload) {
+                Ok(record) => record,
+                Err(error) => {
+                    problems.push(format!(
+                        "attestation at entry {}: cannot be decoded ({error})",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            if record.verify_signature().is_err() {
+                problems.push(format!(
+                    "attestation at entry {}: signature does not verify",
+                    entry.seq
+                ));
+            }
+            if !seen.insert(format!("{}|{}", record.claim_id, record.attestor)) {
+                problems.push(format!(
+                    "attestation at entry {}: {} stood behind claim {} twice",
+                    entry.seq,
+                    short(&record.attestor),
+                    short(&record.claim_id)
+                ));
+            }
+            if !claims.contains_key(&record.claim_id) {
+                problems.push(format!(
+                    "attestation at entry {}: no claim {}",
+                    entry.seq,
+                    short(&record.claim_id)
+                ));
+            }
+        }
+
+        let mut slashed: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(VERIFICATION_SLASH) {
+            let Some(id) = payload_str(&entry.payload, "attestation_id") else {
+                problems.push(format!(
+                    "verification slash at entry {}: names no attestation",
+                    entry.seq
+                ));
+                continue;
+            };
+            if !slashed.insert(id.to_string()) {
+                problems.push(format!("attestation {}: slashed twice", short(id)));
+            }
+            let Some(record) = attestations.get(id) else {
+                problems.push(format!(
+                    "verification slash at entry {}: no attestation {}",
+                    entry.seq,
+                    short(id)
+                ));
+                continue;
+            };
+            if payload_str(&entry.payload, "attestor") != Some(record.attestor.as_str()) {
+                problems.push(format!(
+                    "verification slash at entry {}: names an attestor the \
+                     attestation does not",
+                    entry.seq
+                ));
+            }
+            let units = entry
+                .payload
+                .get("units")
+                .and_then(Value::as_i128)
+                .unwrap_or(-1);
+            if units != i128::from(VERIFICATION_BOND) {
+                problems.push(format!(
+                    "verification slash at entry {}: took {units} against a bond of {}",
+                    entry.seq, VERIFICATION_BOND
+                ));
+            }
+            // The window, re-derived at the point the slash was written. A
+            // taking after the bond returned is money the log had already given
+            // back, and admission checking it is not enough: this log may have
+            // arrived from a peer.
+            if !attestation_window_open(record, self.settled_epoch_within(entry.seq as usize)) {
+                problems.push(format!(
+                    "attestation {}: slashed after its window shut, when the bond \
+                     had already returned",
+                    short(id)
+                ));
+            }
+            // A slash is a taking, so it is re-derived even on the cheap path.
+            // One verifier run per slash, and there are as many slashes as
+            // there are people caught -- which is the point.
+            let Some(claim) = claims.get(&record.claim_id) else {
+                continue;
+            };
+            let Some(objective) = objectives.get(&claim.objective_id) else {
+                continue;
+            };
+            let truth = self.registry.run(&objective.verifier, &claim.artifact);
+            if !truth.settles() {
+                problems.push(format!(
+                    "attestation {}: slashed on a verdict this node cannot reach \
+                     ({}); a taking needs evidence",
+                    short(id),
+                    truth.detail
+                ));
+            } else if truth.status.as_str() == record.status {
+                problems.push(format!(
+                    "attestation {}: slashed for saying {}, which is what the \
+                     verifier returns",
+                    short(id),
+                    record.status
+                ));
+            }
+        }
+
+        if !rerun {
+            return problems;
+        }
+        // The expensive pass: is every *unslashed* attestation actually true?
+        // This is the cost the bond exists so that nobody has to pay routinely,
+        // and it is what `audit --rerun` is for.
+        for (id, record) in &attestations {
+            if slashed.contains(id) {
+                continue;
+            }
+            let Some(claim) = claims.get(&record.claim_id) else {
+                continue;
+            };
+            let Some(objective) = objectives.get(&claim.objective_id) else {
+                continue;
+            };
+            let truth = self.registry.run(&objective.verifier, &claim.artifact);
+            if truth.settles() && truth.status.as_str() != record.status {
+                problems.push(format!(
+                    "attestation {}: {} stood behind {} where the verifier returns {}",
+                    short(id),
+                    short(&record.attestor),
+                    record.status,
+                    truth.status.as_str()
+                ));
+            }
+        }
         problems
     }
 
@@ -6855,6 +7426,18 @@ fn epoch_of_timestamp(record: &'static str, ts: &str) -> Result<u64, RuleViolati
             record,
             value: ts.to_string(),
         }),
+    }
+}
+
+/// Whether an attestation is still open to a slash, as of settled epoch `now`.
+///
+/// A malformed `created_at` keeps the window **open**. The alternative would
+/// make an unparseable timestamp a way to release a bond early, which is a
+/// forgery the record's own author writes.
+fn attestation_window_open(record: &Attestation, now: u64) -> bool {
+    match epoch_of_timestamp(ATTESTATION, &record.created_at) {
+        Ok(opened) => now <= opened.saturating_add(ATTESTATION_WINDOW_EPOCHS),
+        Err(_) => true,
     }
 }
 

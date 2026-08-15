@@ -407,6 +407,34 @@ pub struct Discrepancy {
     pub detail: String,
 }
 
+/// A bonded attestation a docket knows to be false.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttestationFault {
+    pub attestation_id: String,
+    /// The key that signed it, and therefore the key a slash takes from.
+    pub attestor: String,
+    pub claim_id: String,
+    pub expected: Expectation,
+    /// What the attestor said, as the wire spelling of a status.
+    pub attested: String,
+    /// What the verifier said at mint time.
+    pub detail: String,
+}
+
+impl fmt::Display for AttestationFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} stood behind {} on claim {}, an artifact the verifier {}s ({})",
+            crate::canonical::short(&self.attestor),
+            self.attested,
+            crate::canonical::short(&self.claim_id),
+            self.expected,
+            self.detail
+        )
+    }
+}
+
 impl fmt::Display for Discrepancy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -492,6 +520,50 @@ impl Docket {
             }
         }
         (good, bad)
+    }
+
+    /// Bonded attestations this docket contradicts.
+    ///
+    /// The other half of [`Docket::discrepancies`], and the half that names a
+    /// party. That one asks what a node's own *verdict record* said, which at
+    /// Stage 0 has one writer and therefore names nobody; this one asks who put
+    /// a signature and a bond behind a statement the docket already knows is
+    /// false. Only the second kind of finding has anything to take.
+    ///
+    /// `verdicts` supplies the claim-to-artifact mapping and nothing else — the
+    /// status it carries is deliberately ignored, so an operator who writes an
+    /// honest verdict record and attests the opposite is caught exactly as
+    /// readily as one who writes both wrong.
+    pub fn contradicted(
+        &self,
+        verdicts: &[RecordedVerdict],
+        attestations: &BTreeMap<String, crate::records::Attestation>,
+    ) -> Vec<AttestationFault> {
+        let artifacts: BTreeMap<&str, &str> = verdicts
+            .iter()
+            .map(|verdict| (verdict.claim_id.as_str(), verdict.artifact_id.as_str()))
+            .collect();
+        let mut out = Vec::new();
+        for (id, record) in attestations {
+            let Some(artifact_id) = artifacts.get(record.claim_id.as_str()) else {
+                continue;
+            };
+            let Some((expected, detail)) = self.entries.get(*artifact_id) else {
+                continue;
+            };
+            if record.status == expected.status().as_str() {
+                continue;
+            }
+            out.push(AttestationFault {
+                attestation_id: id.clone(),
+                attestor: record.attestor.clone(),
+                claim_id: record.claim_id.clone(),
+                expected: *expected,
+                attested: record.status.clone(),
+                detail: detail.clone(),
+            });
+        }
+        out
     }
 
     /// The docket as a canonical value, for writing to the issuer's disk.

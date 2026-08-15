@@ -134,6 +134,17 @@ claim and you hand every submitter a free lottery ticket per restamp.
   re-running audit catches it for the price of every verifier in the log, and a
   docket catches it for the price of the cheap one. Change any of the three and
   the comparison is what tells you which
+- `./scripts/attestation-demo.sh` if you touched `src/canary.rs`, the
+  attestation records, `VERIFICATION_BOND`, or the window a bond returns after.
+  It is the only place the free half and the expensive half of the mechanism run
+  on one log with the money visible between them, and it hands the finished log
+  to `reference/rust` — which is what stops a second implementation certifying a
+  slash clean by not knowing the record kind exists. Read
+  `docs/bonded-verification.md` first, and note the trap the arena fell into: a
+  checker whose verdict turns on a **boolean** cannot be made to reject by any
+  canary the generator can mint, because every edit it makes is shape- and
+  length-preserving over numbers and strings. Ask `Docket::mix` before believing
+  a docket is whole
 - `git ls-files -s scripts/` if you **added** a script CI runs as
   `./scripts/x.sh`. It must be `100755`; two landed as `100644` in one week and
   CI died on `Permission denied`, because `core.filemode` is false in the

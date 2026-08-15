@@ -15,6 +15,7 @@ Every bond in this repository is drawn from a balance:
 | availability undertaking | the promiser's balance | a share of the storage pool |
 | dispute challenge | the challenger's balance | the right to object to a trace |
 | committee stake | a member's balance | seats, and how many the epoch needs |
+| verification bond | the attestor's balance | the right to be believed about a verdict |
 
 Until this landed, a balance had no provenance. A thousand units earned by
 passing certificate checks — milliseconds each — and a thousand earned by
@@ -107,12 +108,19 @@ log that has not claimed its units are scarce has not claimed this either.
 
 ## What is *not* typed yet
 
-**Service bonds.** An availability undertaking, a dispute challenge, and the
-stake a committee seat is measured by are all charged in universal. So cheap
-earnings still cannot buy them — universal units come only from genesis and
-from service payments — but neither can *expensive* earnings, which is a
-different limitation and a real one: a contributor with a large Lean balance
-cannot use it to back a committee seat.
+**Service bonds.** An availability undertaking, a dispute challenge, a
+verification bond, and the stake a committee seat is measured by are all charged
+in universal. So cheap earnings still cannot buy them — universal units come
+only from genesis and from service payments — but neither can *expensive*
+earnings, which is a different limitation and a real one: a contributor with a
+large Lean balance cannot use it to back a committee seat.
+
+The verification bond makes that sharper rather than softer, and worth stating
+plainly. Standing behind a Lean verdict and standing behind a certificate check
+cost the same 50,000 universal units, so the bond does not price the difference
+between checking a proof and checking an arithmetic identity. It prices being
+*wrong*, which is the same size of lie either way — that is defensible, and it
+is a choice rather than an oversight.
 
 Closing that means deciding which tier a committee seat is denominated in, and
 that is a question about what custody *is* rather than about arithmetic. It is
