@@ -589,6 +589,19 @@ More specifically:
 
 ## Status
 
+The committee sizing this section argues for is **built**: `COMMITTEE_SIZE` is
+a floor, and `Node::committee_size_at` adds seats while the drawn members'
+stakes do not cover the epoch's sealed value — `V ≤ t · d · S'`, with `S'` a
+member's ordinary spendable balance and the cartel priced at its cheapest `t`
+members rather than `t` times an average. Measured against 1000-unit stakes at
+`d = 1/2`: 5 seats guard 1500, 6 guard 2000, 8 guard 2500, 12 guard 3500, so a
+2200-unit bounty draws 8 seats. A strict-majority threshold means an odd
+committee guards exactly what the even one below it does, so a seventh seat
+buys liveness rather than collusion resistance — which is not obvious from the
+algebra above and only turned up when the numbers were run.
+
+## Status
+
 This is a mechanism and its evaluation, and one of its three pieces now ships.
 The **canary generator is built** (`src/canary.rs`, `proofwork canary`), so
 `D` is no longer an assumption about a pipeline that does not exist. Nothing in

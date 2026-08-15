@@ -548,15 +548,43 @@ downstream is unbacked.
 - [ ] Availability sampling: Merkle challenges against a published checkpoint
       root, which is the cheap half of node incentives and needs the signed
       checkpoints in Stage 0 first.
-- [ ] Bonded share custody, with the committee sized against the largest sealed
-      bounty rather than fixed. The *mechanism* now exists and runs
+- [x] **Bonded share custody, with the committee sized against the sealed value**
+      rather than fixed (`Node::committee_size_at`, `Node::custody_guard`,
+      `partition::threshold_for`). The *mechanism* now exists and runs
       (`records::CommitteeShare`, `Node::committee_for`, `Node::open_sealed`):
       seats are drawn per epoch from the log's peer records, a share published
       before the commitment's epoch closes is refused, and non-publication is
-      attributable because the draw names every seat. What is missing is the
-      money — nothing is staked, so nothing can be slashed — and the fixed
-      `COMMITTEE_SIZE` this ships with is the placeholder that sizing against
-      the sealed value would replace.
+      attributable because the draw names every seat.
+      The fixed `COMMITTEE_SIZE` is now a **floor**. Above it the committee
+      grows while `V > t · d · S'` — the condition under which opening early
+      pays, which [node-incentives.md](node-incentives.md) derives and says in
+      bold the committee must grow to satisfy. Stake is a member's ordinary
+      spendable balance, and a cartel is priced at the sum of its **cheapest**
+      `t` members rather than `t` times an average: with one rich member and
+      four poor ones the average reports a committee as safe that is not, and
+      the cartel that actually forms is the cheap one.
+      Measured against 1000-unit stakes at a detection rate of a half — 5 seats
+      guard 1500, 6 guard 2000, 8 guard 2500, 12 guard 3500 — so a 2200-unit
+      bounty draws 8 seats and not 5. A strict-majority threshold means an odd
+      committee guards exactly what the even one below it does, so the rule
+      always lands on an even size; a seventh seat buys liveness, not collusion
+      resistance.
+      The size comes from the epoch's **boundary prefix**, fixed before the
+      epoch's first record exists, because a submitter seals at commit time and
+      the committee opens an epoch later — a shape that moved in between would
+      leave a correctly sealed submission unopenable, at the expense of the one
+      party who sealed because they might not be able to come back. Both
+      implementations derive it, since a crate still drawing five while the
+      other drew eight would accuse an honest member of publishing from a seat
+      that does not exist.
+      A submission whose value outruns its already-fixed committee is **refused
+      at seal time**, when the submitter can still wait for a later epoch or
+      split the bounty, rather than handed a receipt for protection the
+      arithmetic says they did not get. Only on a log that declares a supply: a
+      log that has not claimed its units are scarce has not claimed this either.
+      What is still missing is a *dedicated* custody bond. The stake measured is
+      a member's whole balance, so it is not reserved against this duty and can
+      be spent elsewhere between the draw and the reveal.
 - [ ] Claim assets typed by verification tier, non-fungible across tiers.
 - [ ] The **agent market sub-game** in `src/incentive/`, and only build the market
       if it survives: candidates circulate through gossip because nothing prices

@@ -345,7 +345,13 @@ impl Node {
                     short(&claim_id)
                 ));
             }
-            if entry.payload.get("bond").and_then(Value::as_u64).unwrap_or(0) == 0 {
+            if entry
+                .payload
+                .get("bond")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                == 0
+            {
                 problems.push(format!(
                     "entry {}: a challenge with no bond is a free objection",
                     entry.seq
@@ -379,7 +385,11 @@ impl Node {
                     entry.seq
                 ));
             }
-            let challenged = entry.payload.get("states").and_then(Value::as_u64).unwrap_or(0);
+            let challenged = entry
+                .payload
+                .get("states")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             if states != challenged {
                 problems.push(format!(
                     "entry {}: claim commits to {states} states, challenge to {challenged}",
@@ -435,7 +445,11 @@ impl Node {
                 .get("trace_states")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as usize;
-            let index = entry.payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let index = entry
+                .payload
+                .get("index")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
             let siblings: Vec<String> = entry
                 .payload
                 .get("path")
@@ -470,7 +484,11 @@ impl Node {
         for entry in self.ledger.entries_of_kind(CHALLENGE_SETTLEMENT) {
             let id = text(&entry.payload, "challenge_id");
             if !decided.insert(id.clone()) {
-                problems.push(format!("entry {}: challenge {} settled twice", entry.seq, short(&id)));
+                problems.push(format!(
+                    "entry {}: challenge {} settled twice",
+                    entry.seq,
+                    short(&id)
+                ));
             }
             let Some(challenge) = challenges.get(&id) else {
                 problems.push(format!(
@@ -501,7 +519,11 @@ impl Node {
                 ));
                 continue;
             }
-            let units = entry.payload.get("units").and_then(Value::as_u64).unwrap_or(0);
+            let units = entry
+                .payload
+                .get("units")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let ceiling = if loser == challenger {
                 challenge.get("bond").and_then(Value::as_u64).unwrap_or(0)
             } else {
@@ -833,6 +855,17 @@ impl Node {
     /// reading a log that already exists, and reporting "seat not drawn" for
     /// every share is the same finding said more usefully.
     fn committee_for(&self, epoch: u64, positions: usize) -> Vec<(u8, String, String)> {
+        let size = self.committee_size_at(epoch, positions);
+        self.committee_of_size(epoch, size, positions)
+    }
+
+    /// The draw itself, for a size somebody else picked.
+    fn committee_of_size(
+        &self,
+        epoch: u64,
+        size: u8,
+        positions: usize,
+    ) -> Vec<(u8, String, String)> {
         // `EPOCH_SECONDS`, the constant, never `epoch_seconds()`: the override
         // is a demo affordance, the anchor moves with the epoch length, and a
         // consensus rule keyed on an environment variable is not one.
@@ -864,10 +897,136 @@ impl Node {
         ranked.sort_by(|(ra, a), (rb, b)| (ra, &a.transport).cmp(&(rb, &b.transport)));
         ranked
             .into_iter()
-            .take(usize::from(COMMITTEE_SIZE))
+            .take(usize::from(size))
             .enumerate()
             .map(|(i, (_, peer))| ((i as u8) + 1, peer.transport, peer.identity))
             .collect()
+    }
+
+    /// The committee size in force for `epoch`, derived independently.
+    ///
+    /// The primary's `Node::committee_size_at`, recomputed rather than trusted.
+    /// This is the sharpest reason for a second implementation to exist: the
+    /// draw is consensus, so a crate that kept using a fixed five while the
+    /// other grew the committee would disagree about which published shares came
+    /// from a seat that exists — and would say so about an honest member.
+    ///
+    /// Derived from the epoch's boundary prefix, so it is fixed before the
+    /// epoch's first record and every reader gets the same number.
+    fn committee_size_at(&self, epoch: u64, positions: usize) -> u8 {
+        let boundary = self.epoch_boundary(epoch, positions);
+        let peers = self.peers_within(boundary);
+        let floor = COMMITTEE_SIZE;
+        if peers <= usize::from(floor) {
+            return floor;
+        }
+        let carried = self.sealed_value_in(epoch.saturating_sub(1), boundary);
+        if carried == 0 {
+            return floor;
+        }
+        let ceiling = crate::partition::MAX_COMMITTEE_SIZE.min(peers.min(255) as u8);
+        let mut size = floor;
+        while size < ceiling {
+            if self.custody_guard(epoch, size, positions) >= carried {
+                return size;
+            }
+            size = size.saturating_add(1);
+        }
+        size
+    }
+
+    /// How many entries the log held strictly before `epoch` began.
+    fn epoch_boundary(&self, epoch: u64, positions: usize) -> usize {
+        let mut boundary = 0;
+        for (index, entry) in self.ledger.entries().iter().take(positions).enumerate() {
+            match crate::time::parse_rfc3339(&entry.ts) {
+                Some(seconds)
+                    if seconds >= 0
+                        && epoch_of(seconds as u64, crate::partition::EPOCH_SECONDS) < epoch =>
+                {
+                    boundary = index + 1;
+                }
+                _ => continue,
+            }
+        }
+        boundary
+    }
+
+    /// Distinct peer identities registered below `positions`.
+    fn peers_within(&self, positions: usize) -> usize {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != PEER {
+                continue;
+            }
+            let Ok(record) = PeerRecord::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.verify_signature().is_err() {
+                continue;
+            }
+            seen.insert(record.identity);
+        }
+        seen.len()
+    }
+
+    /// The value one epoch's committee could take by opening early: the sum
+    /// over every sealed commitment in it.
+    fn sealed_value_in(&self, epoch: u64, positions: usize) -> u128 {
+        let mut total = 0u128;
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != COMMITMENT || entry.payload.get("envelope").is_none() {
+                continue;
+            }
+            let Some(created) = entry.payload.get("created_at").and_then(Value::as_str) else {
+                continue;
+            };
+            let Ok(at) = self.epoch_of_ts("commitment", created) else {
+                continue;
+            };
+            if at != epoch {
+                continue;
+            }
+            let Some(wanted) = entry.payload.get("objective_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(reward) = self
+                .ledger
+                .entries_of_kind(OBJECTIVE)
+                .into_iter()
+                .find(|objective| objective.payload.digest() == wanted)
+                .and_then(|objective| objective.payload.get("reward").and_then(Value::as_u64))
+            {
+                total = total.saturating_add(u128::from(reward));
+            }
+        }
+        total
+    }
+
+    /// `d * (sum of the threshold smallest stakes among the drawn seats)`.
+    ///
+    /// A cartel forms out of the **cheapest** `t` members, so the sum of the `t`
+    /// smallest is what it risks — not `t` times an average, which with one rich
+    /// member and four poor ones reports a committee as safe that is not.
+    fn custody_guard(&self, epoch: u64, size: u8, positions: usize) -> u128 {
+        let boundary = self.epoch_boundary(epoch, positions) as u64;
+        let seats = self.committee_of_size(epoch, size, positions);
+        if seats.len() < usize::from(size) {
+            return 0;
+        }
+        let mut stakes: Vec<u128> = seats
+            .iter()
+            .map(|(_, _, identity)| self.spendable_within(identity, boundary))
+            .collect();
+        stakes.sort_unstable();
+        let threshold = usize::from(crate::partition::threshold_for(size));
+        let cheapest: u128 = stakes
+            .iter()
+            .take(threshold)
+            .fold(0u128, |sum, stake| sum.saturating_add(*stake));
+        cheapest
+            .saturating_mul(crate::partition::DETECTION_NUM)
+            .saturating_div(crate::partition::DETECTION_DEN)
     }
 
     /// Which entry this undertaking must produce in `epoch`.

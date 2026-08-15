@@ -227,6 +227,19 @@ impl fmt::Display for Referrer {
 /// throw away the OS-level detail that makes a failed append diagnosable.
 #[derive(Debug)]
 pub enum RuleViolation {
+    /// A sealed submission worth more than its epoch's committee puts at risk.
+    ///
+    /// `V > t * d * S'` — the condition under which opening early *pays*, from
+    /// `docs/node-incentives.md`. Refused at seal time rather than tolerated,
+    /// because the alternative is a submitter who believes a threshold
+    /// committee is protecting them while the arithmetic says the cheapest `t`
+    /// members are better off reading the artifact and taking the bounty.
+    SealedValueExceedsCustody {
+        epoch: u64,
+        exposure: u128,
+        guarded: u128,
+        seats: u8,
+    },
     /// A dispute names a claim the log does not carry.
     UnknownClaim { claim_id: String },
     /// A dispute names a challenge the log does not carry.
@@ -559,6 +572,18 @@ pub enum RuleViolation {
 impl fmt::Display for RuleViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RuleViolation::SealedValueExceedsCustody {
+                epoch,
+                exposure,
+                guarded,
+                seats,
+            } => write!(
+                f,
+                "epoch {epoch} would seal {exposure} units behind {seats} seats that \
+                 put only {guarded} at risk; the cheapest members of that committee \
+                 are better off opening it early. Seal a later epoch, or split the \
+                 bounty"
+            ),
             RuleViolation::UnknownClaim { claim_id } => {
                 write!(f, "no claim {claim_id} in this log")
             }
@@ -1938,6 +1963,205 @@ impl Node {
         (credits, debits)
     }
 
+    // -- sizing the committee against what it guards -------------------------
+
+    /// How many entries the log held strictly before `epoch` began.
+    ///
+    /// The prefix everything about an epoch's committee is derived from, and
+    /// the reason is a consistency requirement rather than a preference. A
+    /// submitter seals at commit time and the committee opens an epoch later;
+    /// if the committee's *shape* moved in between, the envelope would no
+    /// longer match the seats and the submission would be unopenable — by
+    /// nobody's fault, and at the expense of the one party who sealed precisely
+    /// because they might not be able to come back.
+    ///
+    /// Fixed the instant the epoch starts, so every reader computes the same
+    /// number from the same log whenever they ask.
+    ///
+    /// Uses [`partition::EPOCH_SECONDS`], never the override: same rule as
+    /// [`Node::committee_for`] and [`Node::sampled_index`].
+    pub fn epoch_boundary(&self, epoch: u64, positions: usize) -> usize {
+        let mut boundary = 0;
+        for (index, entry) in self.ledger.entries().iter().take(positions).enumerate() {
+            match crate::time::parse_rfc3339(&entry.ts) {
+                Some(seconds)
+                    if seconds >= 0
+                        && epoch_of(seconds as u64, partition::EPOCH_SECONDS) < epoch =>
+                {
+                    boundary = index + 1;
+                }
+                _ => continue,
+            }
+        }
+        boundary
+    }
+
+    /// The value one epoch's committee could take by opening early.
+    ///
+    /// The **sum** over every sealed commitment in the epoch, not the largest.
+    /// A cartel that reaches the threshold opens every envelope addressed to
+    /// that committee, not the one somebody had in mind, so the exposure is the
+    /// whole epoch's worth and pricing it as the maximum would understate it by
+    /// however many submissions arrived that epoch.
+    ///
+    /// A commitment whose objective this log does not carry contributes
+    /// nothing: it is not admissible, and counting it would let a stranger
+    /// inflate an epoch's apparent exposure with a record naming an objective
+    /// nobody funded.
+    pub fn sealed_value_in(&self, epoch: u64, positions: usize) -> u128 {
+        let objectives = self.objectives();
+        let mut total = 0u128;
+        for entry in self.ledger.entries_of_kind(COMMITMENT) {
+            if (entry.seq as usize) >= positions {
+                continue;
+            }
+            let Ok(commitment) = Commitment::from_value(&entry.payload) else {
+                continue;
+            };
+            if commitment.envelope.is_none() {
+                continue;
+            }
+            let Ok(at) = epoch_of_timestamp(COMMITMENT, &commitment.created_at) else {
+                continue;
+            };
+            if at != epoch {
+                continue;
+            }
+            if let Some(objective) = objectives.get(&commitment.objective_id) {
+                total = total.saturating_add(u128::from(objective.reward));
+            }
+        }
+        total
+    }
+
+    /// What a committee of `size` drawn for `epoch` actually puts at risk.
+    ///
+    /// `d * (sum of the threshold smallest stakes among the drawn seats)`, which
+    /// is `t * d * S'` from `docs/node-incentives.md` with the simplifying
+    /// assumption dropped: members do not hold equal stakes, and a cartel forms
+    /// out of the **cheapest** `t` of them, so the sum of the `t` smallest is
+    /// what a colluding group risks rather than `t` times an average.
+    ///
+    /// Stake is `spendable_within` at the epoch boundary: what the log says a
+    /// member holds and has not already committed elsewhere. Not a new record —
+    /// a member's balance is already derived, already scarce once a supply is
+    /// declared, and already the thing every other bond in this crate is drawn
+    /// from.
+    ///
+    /// **Zero when nothing is staked**, which is the honest answer at Stage 0
+    /// and is why [`Node::committee_size_at`] refuses to grow a committee into
+    /// a guarantee it cannot make. A log with no declared supply has no scarce
+    /// stake at all, and no committee size fixes that.
+    pub fn custody_guard(&self, epoch: u64, size: u8, positions: usize) -> u128 {
+        let boundary = self.epoch_boundary(epoch, positions);
+        let Ok(seats) = self.committee_of_size(epoch, size, positions) else {
+            return 0;
+        };
+        let mut stakes: Vec<u128> = seats
+            .iter()
+            .map(|seat| self.spendable_within(&seat.identity, boundary))
+            .collect();
+        stakes.sort_unstable();
+        let threshold = usize::from(partition::threshold_for(size));
+        let cheapest: u128 = stakes
+            .iter()
+            .take(threshold)
+            .fold(0u128, |sum, stake| sum.saturating_add(*stake));
+        cheapest
+            .saturating_mul(partition::DETECTION_NUM)
+            .saturating_div(partition::DETECTION_DEN)
+    }
+
+    /// The committee size in force for `epoch`.
+    ///
+    /// Grows from [`partition::COMMITTEE_SIZE`] while the seats already drawn
+    /// do not put enough at risk to deter a cartel from opening the epoch's
+    /// sealed submissions early — the `V <= t * d * S'` condition
+    /// `docs/node-incentives.md` derives, and the reason that document says in
+    /// bold that **the committee has to grow with the size of the bounties it
+    /// seals**. A fixed 3-of-5 that is right for a thousand-unit bounty is
+    /// corruptible for a million-unit one, and nothing about the code changes.
+    ///
+    /// Derived from the epoch's *boundary* prefix, so it is fixed before the
+    /// epoch's first record exists and every reader gets the same number. That
+    /// also means it prices the exposure carried into the epoch rather than the
+    /// exposure created during it — a submission sealed *this* epoch is checked
+    /// against the already-fixed committee by [`Node::commit`] and refused if it
+    /// would exceed what that committee guards, which is the only ordering in
+    /// which a submitter learns before sealing rather than after.
+    ///
+    /// Bounded by [`partition::MAX_COMMITTEE_SIZE`] and by the peers that
+    /// exist. Neither bound is a fix: when the value sealed outruns both, the
+    /// answer is the largest committee available *and a refusal to seal more
+    /// against it*, never a committee that quietly guarantees less than it
+    /// looks like it does.
+    pub fn committee_size_at(&self, epoch: u64, positions: usize) -> u8 {
+        let boundary = self.epoch_boundary(epoch, positions);
+        let peers = self.peers_within(boundary).len();
+        let floor = partition::COMMITTEE_SIZE;
+        if peers <= usize::from(floor) {
+            return floor;
+        }
+        // The exposure carried in: what the previous epoch's committee was
+        // already guarding. Zero on a quiet log, which is why every existing
+        // test that seals once still draws exactly `COMMITTEE_SIZE`.
+        let carried = self.sealed_value_in(epoch.saturating_sub(1), boundary);
+        if carried == 0 {
+            return floor;
+        }
+        let ceiling = partition::MAX_COMMITTEE_SIZE.min(peers.min(255) as u8);
+        let mut size = floor;
+        while size < ceiling {
+            if self.custody_guard(epoch, size, positions) >= carried {
+                return size;
+            }
+            size = size.saturating_add(1);
+        }
+        size
+    }
+
+    /// The `size` peers a committee draw would seat for `epoch`.
+    ///
+    /// Split out of [`Node::committee_for`] so the sizing rule can ask "what
+    /// would a committee of `n` be worth" without recursing into the rule that
+    /// picks `n`.
+    fn committee_of_size(
+        &self,
+        epoch: u64,
+        size: u8,
+        positions: usize,
+    ) -> Result<Vec<CommitteeSeat>, RuleViolation> {
+        let anchor = self.anchor_at(epoch, positions, partition::EPOCH_SECONDS);
+        let mut ranked: Vec<(String, PeerRecord)> = self
+            .peers_within(positions)
+            .into_values()
+            .map(|peer| (settlement_rank(epoch, &anchor, &peer.transport), peer))
+            .collect();
+        ranked.sort_by(|(ra, a), (rb, b)| (ra, &a.transport).cmp(&(rb, &b.transport)));
+
+        let size = usize::from(size);
+        if ranked.len() < size {
+            return Err(RuleViolation::CommitteeTooSmall {
+                epoch,
+                have: ranked.len(),
+                need: size,
+            });
+        }
+        Ok(ranked
+            .into_iter()
+            .take(size)
+            .enumerate()
+            .map(|(i, (_rank, peer))| CommitteeSeat {
+                // `i < size <= MAX_COMMITTEE_SIZE <= u8::MAX`, so this cannot
+                // truncate.
+                seat: (i as u8).saturating_add(1),
+                transport: peer.transport,
+                identity: peer.identity,
+                addr: peer.addr,
+            })
+            .collect())
+    }
+
     /// Announce a peer identity, or move one to a new address.
     ///
     /// See [`PeerRecord`] for why identity belongs in the log and location does
@@ -2499,33 +2723,22 @@ impl Node {
         // needs a SHA-256 preimage; "unreachable" is not a tie-break rule.
         ranked.sort_by(|(ra, a), (rb, b)| (ra, &a.transport).cmp(&(rb, &b.transport)));
 
-        let size = usize::from(partition::COMMITTEE_SIZE);
-        if ranked.len() < size {
-            // Refused, never shrunk to fit. A committee of two drawn because
-            // only two peers are registered would silently lower the collusion
-            // threshold below the number the whole scheme is relying on, and
-            // the submitter -- who is choosing to seal *because* they may not
-            // be able to come back -- would never learn that the protection
-            // they paid for was not the protection they got.
-            return Err(RuleViolation::CommitteeTooSmall {
-                epoch,
-                have: ranked.len(),
-                need: size,
-            });
-        }
-
-        Ok(ranked
-            .into_iter()
-            .take(size)
-            .enumerate()
-            .map(|(i, (_rank, peer))| CommitteeSeat {
-                // `i < COMMITTEE_SIZE <= u8::MAX`, so the cast cannot truncate.
-                seat: (i as u8).saturating_add(1),
-                transport: peer.transport,
-                identity: peer.identity,
-                addr: peer.addr,
-            })
-            .collect())
+        // Sized against what the committee guards rather than fixed. The draw
+        // itself is unchanged -- the same rank, the same tie-break, the same
+        // order -- and only how many of the ranked peers are seated moves.
+        // `ranked` above is recomputed inside `committee_of_size`, which is a
+        // second sort of the same list and is worth the duplication: the sizing
+        // rule has to be able to price a committee of `n` without the rule that
+        // picks `n` calling back into itself.
+        let _ = ranked;
+        let size = self.committee_size_at(epoch, positions);
+        // Refused, never shrunk to fit. A committee of two drawn because only
+        // two peers are registered would silently lower the collusion threshold
+        // below the number the whole scheme relies on, and the submitter -- who
+        // is choosing to seal *because* they may not be able to come back --
+        // would never learn that the protection they paid for was not the
+        // protection they got.
+        self.committee_of_size(epoch, size, positions)
     }
 
     /// The committee that holds shares of `commitment`, as drawn when it was
@@ -2949,15 +3162,21 @@ impl Node {
         // bounty and costs nobody else anything -- the same bound
         // `crate::crypto::kem` gives for a garbage committee key.
         if let Some(envelope) = &commitment.envelope {
+            let commit_epoch = epoch_of_timestamp("commitment", &commitment.created_at)?;
+            // The size in force for this epoch, fixed at its boundary and so
+            // known to the submitter before they sealed. Not the constant: a
+            // committee is sized against the value it guards, and pinning the
+            // envelope to a number that no longer matches the draw would make a
+            // correctly sealed submission unopenable.
+            let want_size = self.committee_size_at(commit_epoch, self.ledger.len());
+            let want_threshold = partition::threshold_for(want_size);
             let seats = envelope.sealed_shares().len();
-            if seats != usize::from(partition::COMMITTEE_SIZE)
-                || envelope.threshold() != partition::COMMITTEE_THRESHOLD
-            {
+            if seats != usize::from(want_size) || envelope.threshold() != want_threshold {
                 return Err(RuleViolation::WrongCommitteeShape {
                     threshold: envelope.threshold(),
                     seats,
-                    want_threshold: partition::COMMITTEE_THRESHOLD,
-                    want_seats: usize::from(partition::COMMITTEE_SIZE),
+                    want_threshold,
+                    want_seats: usize::from(want_size),
                 });
             }
             // Addressed at the seat numbers the draw hands out, `1..=n`, so a
@@ -2969,21 +3188,52 @@ impl Node {
                 .map(|share| share.index())
                 .collect();
             addressed.sort_unstable();
-            if addressed != (1..=partition::COMMITTEE_SIZE).collect::<Vec<u8>>() {
+            if addressed != (1..=want_size).collect::<Vec<u8>>() {
                 return Err(RuleViolation::WrongCommitteeShape {
                     threshold: envelope.threshold(),
                     seats,
-                    want_threshold: partition::COMMITTEE_THRESHOLD,
-                    want_seats: usize::from(partition::COMMITTEE_SIZE),
+                    want_threshold,
+                    want_seats: usize::from(want_size),
                 });
             }
             // Drawing here refuses a sealed commitment the network could never
             // open, at the moment the submitter can still do something about
             // it, rather than an epoch later when they may be gone.
-            self.committee_for(
-                epoch_of_timestamp("commitment", &commitment.created_at)?,
-                self.ledger.len(),
-            )?;
+            self.committee_for(commit_epoch, self.ledger.len())?;
+
+            // And the same argument one step further: a committee that *can*
+            // open this submission is not the same as one that can be trusted
+            // not to open it early. The epoch's committee is already fixed, so
+            // the only honest thing to do about a submission whose value
+            // outruns it is to refuse the seal now -- while the submitter can
+            // still wait for a later epoch, split the bounty, or decide the
+            // protection is not worth having -- rather than let them believe
+            // they bought something they did not.
+            //
+            // Only when a supply is declared. Without one there is no scarce
+            // stake to measure, so `custody_guard` is zero for every committee
+            // and this would refuse every sealed submission on a Stage-0 log.
+            // That is the correct arithmetic and the wrong behaviour: a log
+            // that has not claimed its units are scarce has not claimed this
+            // protection either, and `docs/censorship.md` says so.
+            if self.declares_supply() {
+                let reward = self
+                    .objectives()
+                    .get(&commitment.objective_id)
+                    .map(|objective| u128::from(objective.reward))
+                    .unwrap_or(0);
+                let already = self.sealed_value_in(commit_epoch, self.ledger.len());
+                let exposure = already.saturating_add(reward);
+                let guarded = self.custody_guard(commit_epoch, want_size, self.ledger.len());
+                if exposure > guarded {
+                    return Err(RuleViolation::SealedValueExceedsCustody {
+                        epoch: commit_epoch,
+                        exposure,
+                        guarded,
+                        seats: want_size,
+                    });
+                }
+            }
         }
         self.append(COMMITMENT, commitment.to_value(), ts)?;
         Ok(commitment.id())
@@ -5457,6 +5707,7 @@ impl Node {
         problems.append(&mut self.audit_batches());
         problems.append(&mut self.audit_beacons());
         problems.append(&mut self.audit_challenges());
+        problems.append(&mut self.audit_sealed());
 
         for (objective_id, objective) in &objectives {
             let block = match &objective.ratchet {
@@ -5541,6 +5792,71 @@ impl Node {
             ));
         }
 
+        problems
+    }
+
+    /// Every way a sealed commitment can be the wrong shape for its epoch.
+    ///
+    /// Restated here rather than trusted from [`Node::commit`], for the reason
+    /// every other rule in this module is: a log can arrive from a peer, a
+    /// queue, or a text editor, and an audit that only re-checked what its own
+    /// writer already checked would verify nothing.
+    ///
+    /// The value bound is checked **cumulatively, in log order** — the same way
+    /// admission applies it — because the question is not whether any single
+    /// submission fits behind the committee but whether the epoch's whole
+    /// exposure does. A cartel that reaches the threshold opens every envelope
+    /// addressed to that committee, not the one somebody had in mind.
+    fn audit_sealed(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.ledger.is_empty() {
+            return problems;
+        }
+        let objectives = self.objectives();
+        let positions = self.ledger.len();
+        let declares = self.declares_supply();
+        let mut exposure: BTreeMap<u64, u128> = BTreeMap::new();
+
+        for entry in self.ledger.entries_of_kind(COMMITMENT) {
+            let Ok(commitment) = Commitment::from_value(&entry.payload) else {
+                continue;
+            };
+            let Some(envelope) = &commitment.envelope else {
+                continue;
+            };
+            let Ok(epoch) = epoch_of_timestamp(COMMITMENT, &commitment.created_at) else {
+                continue;
+            };
+            let size = self.committee_size_at(epoch, positions);
+            let threshold = partition::threshold_for(size);
+            let seats = envelope.sealed_shares().len();
+            if seats != usize::from(size) || envelope.threshold() != threshold {
+                problems.push(format!(
+                    "entry {}: sealed to {seats} seats at threshold {}, but epoch \
+                     {epoch} draws {size} seats at threshold {threshold}",
+                    entry.seq,
+                    envelope.threshold()
+                ));
+            }
+            if !declares {
+                continue;
+            }
+            let reward = objectives
+                .get(&commitment.objective_id)
+                .map(|objective| u128::from(objective.reward))
+                .unwrap_or(0);
+            let slot = exposure.entry(epoch).or_insert(0);
+            *slot = slot.saturating_add(reward);
+            let guarded = self.custody_guard(epoch, size, positions);
+            if *slot > guarded {
+                problems.push(format!(
+                    "entry {}: epoch {epoch} now seals {} units behind {size} seats \
+                     that put only {guarded} at risk; the cheapest members of that \
+                     committee are better off opening it early",
+                    entry.seq, slot
+                ));
+            }
+        }
         problems
     }
 
