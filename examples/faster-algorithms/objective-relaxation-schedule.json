@@ -1,0 +1,36 @@
+{
+  "artifact_schema": {
+    "description": "An oblivious single-source shortest-path schedule on the complete digraph over 6 vertices, source 0, as an ordered list of directed edges. Each edge [u, v] is applied as d[v] = min(d[v], d[u] + w(u, v)), starting from d[0] = 0 with every other distance infinite. Order matters; the list is applied left to right and the weights are not known when it is written.",
+    "example": {
+      "relaxations": [[0, 1], [0, 2], [1, 2], [2, 1]]
+    },
+    "properties": {
+      "relaxations": {
+        "description": "Ordered directed edges. Each is [u, v] with 0 <= u, v < 6 and u != v. Repeats are allowed and are counted. At most 400 of them.",
+        "type": "array"
+      }
+    },
+    "required": ["relaxations"],
+    "type": "object"
+  },
+  "created_at": "2026-08-15T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-relaxation-schedule-6",
+  "ratchet": {
+    "baseline": 160,
+    "direction": "minimize",
+    "min_improvement": 1,
+    "reward": 1200000,
+    "target": 50
+  },
+  "reward": 1200000,
+  "statement": "Compute single-source shortest paths on 6 vertices with as few edge relaxations as possible, using a schedule fixed before the weights are known. Score is the number of relaxations, minimised, counting repeats. The schedule must be correct for every weight function that has no negative cycle -- which is checked completely rather than sampled, because a schedule is correct for all weightings exactly when the edges of every simple path out of the source appear in it, in path order, as a subsequence. A schedule that misses one path scores worse than any correct schedule rather than better. Baseline 160: textbook Bellman-Ford relaxes all 30 edges 5 times, for 150. Target 50 is a construction target and not a proved bound: no optimum is known here. Only 25 of the 30 edges can ever be needed, since no simple path out of the source uses an edge back into it, and even 25 is provably unreachable -- for any three non-source vertices u, v, x the paths through u,v,x then v,x,u then x,u,v force (u,v) before (v,x) before (x,u) before (u,v), so one of those three edges must appear twice. Payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move, and every submission must cite the frontier it beat.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/faster-algorithms/evaluators/relaxation_schedule.py",
+    "evaluator_sha256": "56d7a1ca858ac6b1ee9099c071277d3ff083b27bdf34d876cdd4f37e6c4815cd",
+    "kind": "evaluator",
+    "threshold": 160
+  }
+}

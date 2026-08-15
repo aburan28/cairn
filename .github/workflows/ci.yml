@@ -295,3 +295,13 @@ jobs:
       # that, and the resulting bounty would look identical. This re-runs the
       # derivation and fails on any drift between it and the checked-in files.
       - run: python3 scripts/derive-first-blood.py --check
+      # The faster-algorithms baselines are derived too, and `check-examples.sh`
+      # cannot catch an edit to one: an artifact is not pinned by anything, so a
+      # hand-edited bubble network still scores 55 and still verifies -- it is
+      # just no longer the algorithm its README names.
+      - run: python3 examples/faster-algorithms/tools/build_baselines.py --check
+      # And the property that decides whether those four bounties are safe to
+      # fund: on a minimise objective an evaluator that scored garbage as zero
+      # would hand the frontier and the whole pool to an empty list. That is not
+      # visible in a passing artifact, so it gets its own adversarial battery.
+      - run: python3 examples/faster-algorithms/tools/selftest.py
