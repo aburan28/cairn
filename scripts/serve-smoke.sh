@@ -232,7 +232,10 @@ rule "the log a stranger produced audits, and the frontier moved"
 # (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
 sleep 2.4
 "$RUST" --log "$LOG" --root . settle | sed 's/^/  /'
-"$RUST" --log "$LOG" --root . audit --no-rerun | grep -q "log verified" \
+# `chain intact` rather than `log verified`: under --no-rerun no verifier runs,
+# and the clean line now says so instead of claiming a re-verification that did
+# not happen. Both branches still say the chain and the rules re-derived.
+"$RUST" --log "$LOG" --root . audit --no-rerun | grep -q "chain intact" \
   || fail "the log does not audit"
 
 python3 - "$PORT" "$OID" <<'PY'

@@ -293,6 +293,84 @@ bounty, and the submitter — unlike every other party — is strictly motivated
 re-run the verifier and dispute it. **False rejections police themselves. False
 acceptances do not.** Everything above is downstream of that.
 
+## The generator
+
+`src/canary.rs` is the pipeline the numbers above assume. Everything in this
+section is arithmetic over `D`, the rate at which a rubber-stamper meets a
+canary *it cannot recognise*; a generator whose output is recognisable makes
+`D` zero and every result here vacuous. So the generator is built around one
+property and tested against it.
+
+**It never authors an artifact.** It takes one a real contributor submitted and
+applies a single edit from a fixed catalogue, where every edit is chosen to be
+shape-preserving *and* canonical-length-preserving. The canary and its parent
+agree on every key path, every type, every array length, every integer's decimal
+width, every string's character-class profile, and the total encoded size —
+`every_edit_in_the_catalogue_preserves_shape_and_length` asserts exactly that
+over thousands of mutations. Separating them requires running the verifier,
+which is the work we are trying to buy.
+
+**The label is earned by running the pinned verifier**, not reasoned about. The
+generator mutates, checks, and keeps the mutant only if the verdict landed on
+the side asked for. It therefore knows nothing about cap sets or Collatz
+trajectories and works on every verifier tier. A verifier that returns
+`unavailable` mints nothing at all — a canary manufactured against a broken
+toolchain would accuse honest nodes, which is the one failure worse than not
+having canaries.
+
+**Both sides get minted.** `mint_batch` takes the `canary_valid_share` fraction
+directly, and `Docket::mix` reports what you actually got, because a docket of
+only known-bad canaries is the trap a blind rejecter walks through untouched.
+
+Measured, on the shipped examples:
+
+| objective | canary | cost |
+|---|---|---|
+| collatz (`{"n": 626331}`) | known-bad | 1 verifier run |
+| collatz | known-good | **not mintable** in 64 |
+| capset (20 points) | known-good | 1 verifier run |
+| capset | known-bad | 7 verifier runs |
+
+The collatz row is not a gap in the generator, it is a fact about the
+objective. When the whole artifact is one integer, every edit to it is a
+different answer, and there is no cheap way to change the bytes without
+changing the claim. Known-good canaries are cheap exactly when an artifact
+contains an *unordered collection*, because reordering a set is the reliable
+validity-preserving edit. An objective whose artifacts are scalars can only be
+policed against rubber-stamping, not against blind rejection — worth knowing
+before setting `canary_valid_share` for a network of them.
+
+### Why this is affordable
+
+Minting costs verifier runs, once. Checking costs none, ever:
+
+```
+proofwork canary mint --objective ID --from artifact.json --count 4
+proofwork canary check --docket canaries/docket.json
+```
+
+`check` compares the docket against every verdict in the log and runs no
+verifier at all. Measured over 16 verdicts in `tests/canary_trap.rs`: **1.2 µs
+to check the docket, 547 ms for a re-verifying audit** — and the gap widens with
+the log, because the check is a map lookup per verdict while the audit spawns a
+jailed interpreter per claim. That asymmetry is the entire reason a canary rate
+of 1 in 1425 is a policy an operator can actually run.
+
+### What the generator deliberately does not do
+
+It does not submit. A canary submitted by an identity that only ever submits
+canaries is not a canary — it is a labelled sample, `canary_leak` is 1, and
+`minimum_canary_rate` reports that no rate works. Getting the artifact into the
+log under an identity drawn from the same distribution as real contributors is
+a deployment problem, and a library call cannot solve it.
+
+How easy it is to get wrong: the first run of
+`the_log_does_not_say_which_claims_were_canaries` failed, and it failed on its
+own test fixture. Every artifact-level property held perfectly, and the log
+still handed over a complete list of which claims were traps, because the
+submissions carried nonces spelled `canary-0`, `canary-1`. Twelve lines of
+setup, written by someone who had just spent a day on indistinguishability.
+
 ## Two knobs, two jobs
 
 The pool share appears identically in the verify, rubber-stamp and reject
@@ -511,9 +589,13 @@ More specifically:
 
 ## Status
 
-This is a mechanism and its evaluation, not shipped code paths. Nothing in
-`src/incentive/` runs at settlement time, no canary is generated, no bond is
-posted, and no Merkle challenge is issued. See [roadmap.md](roadmap.md) — the
+This is a mechanism and its evaluation, and one of its three pieces now ships.
+The **canary generator is built** (`src/canary.rs`, `proofwork canary`), so
+`D` is no longer an assumption about a pipeline that does not exist. Nothing in
+`src/incentive/` runs at settlement time, no bond is posted, and no Merkle
+challenge is issued — and the missing half of canaries is the money: a
+discrepancy is *named*, by the log the node wrote, but nothing is staked, so
+nothing is slashed. See [roadmap.md](roadmap.md) — the
 mechanism lands with Stage 2's permissionless verification, and the point of
 building the harness first is that the parameters it demands (a committee that
 scales with sealed value, a bond in the millions, a canary rate a real pipeline

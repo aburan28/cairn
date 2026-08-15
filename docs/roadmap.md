@@ -477,12 +477,35 @@ downstream is unbacked.
       Canaried bonded verification, availability sampling, and bonded share
       custody, with a harness that solves for the minimum canary rate, bond and
       committee shape. See [node-incentives.md](node-incentives.md).
-- [ ] Canary objectives with known-invalid artifacts, so checking is the
-      profitable strategy rather than the altruistic one. The mechanism and its
-      parameters exist; the generator, which must produce canaries a node cannot
-      tell from real submissions, does not. That indistinguishability is the
-      whole assumption -- at `canary_leak = 1` the harness reports that no
-      canary rate works at all.
+- [x] **Canary objectives with known-verdict artifacts** (`src/canary.rs`,
+      `proofwork canary mint|check`), so checking is the profitable strategy
+      rather than the altruistic one. The generator never authors an artifact:
+      it takes one a real contributor submitted and applies a single edit from a
+      catalogue where every edit preserves the shape *and* the canonical byte
+      length, so a canary and its parent agree on key paths, types, array
+      lengths, integer widths, string character-class profiles and total size.
+      Separating them requires running the verifier, which is the work being
+      bought. The label is earned rather than asserted -- the generator runs the
+      objective's own pinned verifier and keeps the mutant only if the verdict
+      landed where asked -- so it works on every tier and knows nothing about
+      cap sets or Collatz. A verifier that returns `unavailable` mints nothing,
+      because a canary made against a broken toolchain accuses honest nodes.
+      Both sides are minted, since only a known-*good* canary catches blind
+      rejection.
+      Measured: 1 verifier run for a bad collatz canary, 7 for a bad capset one,
+      1 for a good capset one -- and a good *collatz* canary is not mintable at
+      all, because when the whole artifact is one integer every edit to it is a
+      different answer. Known-good canaries are cheap exactly when an artifact
+      holds an unordered collection. Checking is free: 1.2 us for a docket
+      against 16 verdicts, against 547 ms for the re-verifying audit that
+      reaches the same conclusion, and the gap widens with the log.
+      What is *not* built is the money -- a discrepancy is named by the log the
+      node wrote, but nothing is staked, so nothing is slashed. That waits on
+      the same bonding as availability sampling.
+      Also fixed on the way past: `audit --no-rerun` printed "log verified:
+      chain intact, every settled claim re-verified" over a log where no
+      verifier had run, which was a false statement by the tool on exactly the
+      path a rubber-stamper survives.
 - [ ] Availability sampling: Merkle challenges against a published checkpoint
       root, which is the cheap half of node incentives and needs the signed
       checkpoints in Stage 0 first.

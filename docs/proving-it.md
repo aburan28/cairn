@@ -47,8 +47,11 @@ theory discharges none of them.
 ### 1. The model matches the code
 
 This is the largest hole and it is not subtle: **`src/incentive/` is not a code
-path.** No canary is generated, no bond is posted, no Merkle challenge is issued.
-The mechanism is written *beside* the implementation, not derived from it.
+path.** One of its three pieces now exists as running code -- canaries are
+generated, by `src/canary.rs`, against real objectives and real verifiers -- but
+no bond is posted, no Merkle challenge is issued, and no canary catch moves
+money. The mechanism is still written *beside* the implementation, not derived
+from it.
 
 So the honest reading of a passing report is: *if the network implemented this
 mechanism, honest play would be an equilibrium of the model of it.* Both
@@ -123,8 +126,10 @@ because pushing it far enough makes canaries plus fraud exceed the whole sample.
 
 **2. Make the model and the code the same object.** *(not built — the big one)*
 
-Discharges antecedent 1. Concretely: the canary generator, the bond, the
-availability challenge, wired into settlement, with the payoff functions in
+Discharges antecedent 1. Concretely: the bond and the availability challenge --
+the canary generator is now built and its measured cost is in
+[node-incentives.md](node-incentives.md) -- wired into settlement, with the
+payoff functions in
 `mechanism` derived from the same constants the runtime uses rather than typed in
 beside them.
 

@@ -2253,6 +2253,55 @@ impl Node {
         out
     }
 
+    /// Every verdict the log records, joined to the artifact it was about.
+    ///
+    /// The join is the point. A verdict record names a claim; a canary is known
+    /// by its *artifact*, because the docket is written before anybody knows
+    /// which key will submit it, under which nonce, in which epoch. Walking the
+    /// claims once turns one into the other.
+    ///
+    /// Later verdicts supersede earlier ones for the same claim, matching
+    /// `accepted_claim_ids` and the reference implementation. A node
+    /// that re-verified and corrected itself is judged on the correction.
+    ///
+    /// Read-only and cheap: no verifier runs here, which is the whole reason a
+    /// canary rate is affordable. See [`crate::canary`].
+    pub fn recorded_verdicts(&self) -> Vec<crate::canary::RecordedVerdict> {
+        let mut artifacts: BTreeMap<String, String> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            if let Ok(claim) = Claim::from_value(&entry.payload) {
+                artifacts.insert(claim.id(), claim.artifact.digest());
+            }
+        }
+        let mut latest: BTreeMap<String, Status> = BTreeMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for entry in self.ledger.entries_of_kind(VERDICT) {
+            let claim_id = match payload_str(&entry.payload, "claim_id") {
+                Some(claim_id) => claim_id.to_string(),
+                None => continue,
+            };
+            let status = match entry.payload.get("verdict").and_then(Verdict::from_value) {
+                Some(verdict) => verdict.status,
+                None => continue,
+            };
+            if latest.insert(claim_id.clone(), status).is_none() {
+                order.push(claim_id);
+            }
+        }
+        order
+            .into_iter()
+            .filter_map(|claim_id| {
+                let artifact_id = artifacts.get(&claim_id)?.clone();
+                let status = *latest.get(&claim_id)?;
+                Some(crate::canary::RecordedVerdict {
+                    claim_id,
+                    artifact_id,
+                    status,
+                })
+            })
+            .collect()
+    }
+
     /// Phase 2: reveal a committed artifact, verify it, and settle if accepted.
     ///
     /// The refusals, each answering a specific attack:
@@ -2590,7 +2639,7 @@ impl Node {
     }
 
     /// How many entries of this log are its genesis prefix: the run of
-    /// [`ISSUANCE`] records at the very front, before anything else.
+    /// `issuance` records at the very front, before anything else.
     ///
     /// The supply is defined by *position* rather than by a signature, because
     /// a signature would only say who wrote the record and in the opening bytes
@@ -2642,14 +2691,14 @@ impl Node {
     /// Of what each funder has been charged, how much is still owed to nobody
     /// in particular: rewards posted and not yet settled.
     ///
-    /// **Reporting only.** Balances subtract [`Node::charged_within`], which is
+    /// **Reporting only.** Balances subtract `charged_within`, which is
     /// the full commitment and never returns; this is the part of it that has
     /// not yet reached a submitter, and it exists so `balances` can show where
     /// the supply is sitting and so the audit can print a total that closes.
     /// Subtracting *this* instead would hand a funder back the units its
     /// settlement had already paid out.
     ///
-    /// Reads raw entries for the same reason [`Node::locked_within`] does.
+    /// Reads raw entries for the same reason `locked_within` does.
     pub fn escrowed_within(&self, positions: usize) -> BTreeMap<String, u128> {
         let entries = self.ledger.entries();
         let window = &entries[..positions.min(entries.len())];

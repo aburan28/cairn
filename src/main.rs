@@ -584,6 +584,11 @@ enum Command {
     Availability {
         action: AvailabilityAction,
     },
+    /// Mint submissions whose verdict is already known, and check what the log
+    /// said about them.
+    Canary {
+        action: CanaryAction,
+    },
     Attribute {
         params: FlowParams,
     },
@@ -819,6 +824,40 @@ impl Default for CodingChoice {
     }
 }
 
+/// `canary mint` and `canary check` — the two halves of the trap, and they are
+/// deliberately two commands rather than one.
+///
+/// Minting costs verifier runs and happens once. Checking costs nothing and
+/// happens continuously. A single command would tempt an operator into
+/// re-minting every time they wanted to check, which throws away the entire
+/// economic argument for canaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CanaryAction {
+    /// Mutate a real artifact until the objective's own verifier lands on the
+    /// wanted side, and write the results plus a private docket.
+    Mint(Minting),
+    /// Compare a docket against every verdict the log recorded. Runs no
+    /// verifier; exits non-zero if anything disagrees.
+    Check { docket: String },
+}
+
+/// One minting run's settings, in a struct so the command takes one argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Minting {
+    objective: String,
+    /// The seed. Should be an artifact the network really accepted — the whole
+    /// indistinguishability argument is that a canary is a real submission with
+    /// one edit in it.
+    from: String,
+    count: usize,
+    /// Fraction of the batch that should be known-*good*, as `num/den`.
+    valid_num: u32,
+    valid_den: u32,
+    /// Verifier runs to spend per canary before giving up.
+    budget: usize,
+    out: String,
+}
+
 /// The four steps of the availability mechanism.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AvailabilityAction {
@@ -1050,6 +1089,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "prove" => parse_prove(&mut cursor)?,
         "check" => parse_check(&mut cursor)?,
         "availability" => parse_availability(&mut cursor)?,
+        "canary" => parse_canary(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
         "knowledge" => parse_knowledge(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
@@ -1453,6 +1493,75 @@ fn parse_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
         audit,
         rerun,
     })
+}
+
+/// `canary mint --objective ID --from FILE [--count N] [--valid-share N/D]`
+/// `canary check --docket FILE`
+fn parse_canary(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = cursor
+        .take()
+        .ok_or_else(|| CliError::Usage(String::from("canary: mint or check")))?;
+    let mut objective: Option<String> = None;
+    let mut from: Option<String> = None;
+    let mut docket: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut count: usize = 4;
+    let mut budget: usize = proofwork::canary::DEFAULT_BUDGET;
+    let (mut valid_num, mut valid_den) = (1u32, 2u32);
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--objective" => objective = Some(cursor.value("--objective")?),
+            "--from" => from = Some(cursor.value("--from")?),
+            "--docket" => docket = Some(cursor.value("--docket")?),
+            "--out" => out = Some(cursor.value("--out")?),
+            "--count" => {
+                count = parse_u64(&cursor.value("--count")?, "--count")? as usize;
+            }
+            "--budget" => {
+                budget = parse_u64(&cursor.value("--budget")?, "--budget")? as usize;
+            }
+            "--valid-share" => {
+                let text = cursor.value("--valid-share")?;
+                let (num, den) = text.split_once('/').ok_or_else(|| {
+                    CliError::Usage(String::from(
+                        "canary: --valid-share takes NUM/DEN, e.g. 1/2",
+                    ))
+                })?;
+                valid_num = parse_u64(num, "--valid-share")? as u32;
+                valid_den = parse_u64(den, "--valid-share")? as u32;
+                if valid_den == 0 || valid_num > valid_den {
+                    return Err(CliError::Usage(String::from(
+                        "canary: --valid-share must be a fraction in [0, 1]",
+                    )));
+                }
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "canary {action}: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+    let action = match action.as_str() {
+        "mint" => CanaryAction::Mint(Minting {
+            objective: require(objective, "canary mint", "--objective")?,
+            from: require(from, "canary mint", "--from")?,
+            count: count.max(1),
+            valid_num,
+            valid_den,
+            budget: budget.max(1),
+            out: out.unwrap_or_else(|| String::from("canaries")),
+        }),
+        "check" => CanaryAction::Check {
+            docket: require(docket, "canary check", "--docket")?,
+        },
+        other => {
+            return Err(CliError::Usage(format!(
+                "canary: unknown action {other:?} (mint, check)"
+            )))
+        }
+    };
+    Ok(Command::Canary { action })
 }
 
 fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -2532,6 +2641,27 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      grind against it, later and you are picking who gets paid first",
+    );
+    say(
+        out,
+        "  canary mint --objective ID --from FILE [--count N] [--valid-share N/D]",
+    );
+    say(
+        out,
+        "      mutate a real artifact until the objective's own verifier lands on",
+    );
+    say(
+        out,
+        "      the wanted side. Costs verifier runs once so that checking is free",
+    );
+    say(out, "  canary check --docket FILE");
+    say(
+        out,
+        "      compare a docket against every verdict the log recorded. Runs no",
+    );
+    say(
+        out,
+        "      verifier at all; exits non-zero if a node said what it cannot mean",
     );
     say(out, "  checkpoint --root-key FILE [--out FILE]");
     say(
@@ -3741,9 +3871,21 @@ fn cmd_audit(out: &mut dyn Write, options: &Options, rerun: bool) -> Result<i32,
     }
 
     say(out, "");
+    // The clean line must say what was actually checked. Under `--no-rerun` no
+    // verifier ran, so a recorded verdict was taken at its word -- and a node
+    // that wrote `accept` without looking passes this audit with the word
+    // "verified" printed over it. Saying "every settled claim re-verified"
+    // there was a false statement by the tool, which is worse than a missing
+    // check: it tells an operator the log is sound when nothing established it.
     say(
         out,
-        "log verified: chain intact, every settled claim re-verified",
+        if rerun {
+            "log verified: chain intact, every settled claim re-verified"
+        } else {
+            "chain intact and every rule re-derived, but no verifier was run: \
+             recorded verdicts were taken at their word (drop --no-rerun, or \
+             see `canary check`)"
+        },
     );
     Ok(0)
 }
@@ -3846,6 +3988,177 @@ fn cmd_verify(
     }
     say(out, "  signed prefix re-derives cleanly");
     Ok(0)
+}
+
+/// `canary mint` — spend verifier runs now so that checking is free later.
+///
+/// The seed comes from `--from` and should be an artifact the network really
+/// accepted, because the generator's whole indistinguishability argument is
+/// that a canary is a real submission with one edit in it. Seeding from
+/// something you wrote for the purpose gets you a canary that looks like
+/// something somebody wrote for the purpose.
+fn cmd_canary_mint(
+    out: &mut dyn Write,
+    options: &Options,
+    minting: &Minting,
+) -> Result<i32, CliError> {
+    let Minting {
+        objective: objective_id,
+        from,
+        count,
+        valid_num,
+        valid_den,
+        budget,
+        out: dir,
+    } = minting;
+    let (count, valid_num, valid_den, budget) = (*count, *valid_num, *valid_den, *budget);
+    let node = open_node(options)?;
+    let objective = node
+        .objectives()
+        .get(objective_id)
+        .cloned()
+        .ok_or_else(|| CliError::Usage(format!("canary mint: no objective {objective_id}")))?;
+    let seed = read_json(from)?;
+
+    let generator =
+        proofwork::canary::Generator::new(node.registry(), &objective.verifier).with_budget(budget);
+    let verdict = generator.verdict(&seed);
+    if !verdict.settles() {
+        say(
+            out,
+            format!(
+                "the seed artifact reaches no settling verdict here ({}). A canary \
+                 minted against a verifier that cannot run would accuse honest nodes, \
+                 so nothing was minted.",
+                verdict.detail
+            ),
+        );
+        return Ok(1);
+    }
+    say(
+        out,
+        format!(
+            "seed verifies: {} ({})",
+            verdict.status.as_str(),
+            verdict.detail
+        ),
+    );
+
+    let (minted, failures) = generator.mint_batch(&seed, count, valid_num, valid_den);
+    if minted.is_empty() {
+        for failure in &failures {
+            say(out, format!("  {failure}"));
+        }
+        say(
+            out,
+            "nothing minted; raise --budget or seed from a different artifact",
+        );
+        return Ok(1);
+    }
+
+    fs::create_dir_all(dir).map_err(|source| CliError::Io {
+        context: format!("creating {dir}"),
+        source,
+    })?;
+    let mut runs = 0usize;
+    for canary in &minted {
+        runs += canary.attempts;
+        let id = canary.artifact_id();
+        // Named by digest, not by index or expectation. A directory listing
+        // that sorts the known-bad ones together is a docket anybody can read
+        // off `ls`.
+        let short = id.split(':').next_back().unwrap_or(&id);
+        let path = format!("{dir}/a-{}.json", &short[..short.len().min(16)]);
+        fs::write(&path, format!("{}\n", canary.artifact.canonical_string())).map_err(
+            |source| CliError::Io {
+                context: format!("writing {path}"),
+                source,
+            },
+        )?;
+        say(
+            out,
+            format!(
+                "  {path}  expect {}  ({} verifier run{})",
+                canary.expectation,
+                canary.attempts,
+                if canary.attempts == 1 { "" } else { "s" }
+            ),
+        );
+    }
+    for failure in &failures {
+        say(out, format!("  not minted: {failure}"));
+    }
+
+    let docket = proofwork::canary::Docket::from_canaries(&minted);
+    let path = format!("{dir}/docket.json");
+    fs::write(&path, format!("{}\n", docket.to_value().canonical_string())).map_err(|source| {
+        CliError::Io {
+            context: format!("writing {path}"),
+            source,
+        }
+    })?;
+    let (good, bad) = docket.mix();
+    say(
+        out,
+        format!(
+            "{} canaries in {runs} verifier runs: {good} known-good, {bad} known-bad",
+            minted.len()
+        ),
+    );
+    if good == 0 {
+        say(
+            out,
+            "no known-good canary: a node that rejects everything without looking \
+             passes this docket unharmed",
+        );
+    }
+    if bad == 0 {
+        say(
+            out,
+            "no known-bad canary: a node that accepts everything without looking \
+             passes this docket unharmed",
+        );
+    }
+    say(out, format!("docket written to {path} -- keep it private"));
+    say(
+        out,
+        "submit these the ordinary way, from identities that also submit real work. \
+         A canary is only a canary while nothing in the log separates it from one.",
+    );
+    Ok(0)
+}
+
+/// `canary check` — compare a docket against the log. No verifier runs.
+fn cmd_canary_check(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
+    let docket = proofwork::canary::Docket::from_value(&read_json(path)?)
+        .ok_or_else(|| CliError::Usage(format!("canary check: {path} is not a docket")))?;
+    let node = open_node(options)?;
+    let recorded = node.recorded_verdicts();
+    let seen = recorded
+        .iter()
+        .filter(|verdict| docket.expectation_of(&verdict.artifact_id).is_some())
+        .count();
+    let found = docket.discrepancies(&recorded);
+    say(
+        out,
+        format!(
+            "{} verdicts in the log, {seen} of them on canaries from a docket of {}",
+            recorded.len(),
+            docket.len()
+        ),
+    );
+    if found.is_empty() {
+        say(out, "no verdict contradicts what the docket knows");
+        return Ok(0);
+    }
+    for discrepancy in &found {
+        say(out, format!("  {discrepancy}"));
+    }
+    say(
+        out,
+        format!("{} verdict(s) the verifier disagrees with", found.len()),
+    );
+    Ok(1)
 }
 
 /// The availability mechanism, from the operator's side.
@@ -6926,6 +7239,10 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             root_key.as_deref(),
         ),
         Command::Availability { action } => cmd_availability(out, options, action),
+        Command::Canary { action } => match action {
+            CanaryAction::Mint(minting) => cmd_canary_mint(out, options, minting),
+            CanaryAction::Check { docket } => cmd_canary_check(out, options, docket),
+        },
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Knowledge { claim_id, policy } => {
             cmd_knowledge(out, options, claim_id.as_deref(), policy)

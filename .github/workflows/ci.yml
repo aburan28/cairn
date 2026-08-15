@@ -41,6 +41,12 @@ jobs:
       # boundary, and the generated challenge that has to be postable. Neither
       # can be checked from a fixture timestamp.
       - run: ./scripts/try-demo.sh
+      # The canary trap around the binary rather than around a `Node`. Proves
+      # the one thing that matters economically and that no unit test can show
+      # in one place: `audit --no-rerun` passes a rubber-stamper, `audit`
+      # catches it at the price of every verifier in the log, and a docket
+      # catches it at the price of the cheap one.
+      - run: ./scripts/canary-demo.sh
       # Runs the MCP server as a real process. The unit tests call handle_line
       # directly and structurally cannot catch a stray write to stdout, which is
       # the failure that breaks every MCP client and looks like their bug.

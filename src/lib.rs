@@ -20,6 +20,7 @@
 
 pub mod attribution;
 pub mod blobs;
+pub mod canary;
 pub mod canonical;
 pub mod checkpoint;
 pub mod corpus;

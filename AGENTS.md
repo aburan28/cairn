@@ -112,6 +112,12 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `./scripts/demo.sh`, `./scripts/ratchet-demo.sh` and `./scripts/try-demo.sh`
   if you touched the CLI or the rules; they are the only checks that exercise
   epoch boundaries against a real clock rather than a fixture timestamp
+- `./scripts/canary-demo.sh` if you touched `src/canary.rs`, the verifier
+  registry, or the audit's wording. It is the only place the three costs sit
+  side by side on one log: the cheap audit passes a rubber-stamper, the
+  re-running audit catches it for the price of every verifier in the log, and a
+  docket catches it for the price of the cheap one. Change any of the three and
+  the comparison is what tells you which
 - `git ls-files -s scripts/` if you **added** a script CI runs as
   `./scripts/x.sh`. It must be `100755`; two landed as `100644` in one week and
   CI died on `Permission denied`, because `core.filemode` is false in the

@@ -840,9 +840,12 @@ examples/            worked objectives with real artifacts
   because artifacts are checkable. If you tell me "try annealing on the third
   coordinate" and I win, nothing pays you.
 - **Not running the node mechanism.** `src/incentive/` is a mechanism and its
-  evaluation, not a code path. No canary is generated, no bond is posted, no
-  Merkle challenge is issued. It exists now because the parameters it demands
-  are expensive to discover after launch.
+  evaluation, not a code path. Canaries *are* now generated — `src/canary.rs`
+  mints submissions whose verdict it established by running the objective's own
+  pinned verifier, and `proofwork canary check` names a node that recorded
+  something else — but no bond is posted, no Merkle challenge is issued, and a
+  catch moves no money, because nothing is staked. It exists now because the
+  parameters it demands are expensive to discover after launch.
 
 ## Prior art
 
