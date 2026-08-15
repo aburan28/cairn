@@ -112,6 +112,11 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `./scripts/demo.sh`, `./scripts/ratchet-demo.sh` and `./scripts/try-demo.sh`
   if you touched the CLI or the rules; they are the only checks that exercise
   epoch boundaries against a real clock rather than a fixture timestamp
+- `./scripts/dispute-demo.sh` if you touched `src/challenge/`, the challenge
+  records, or the balance derivation. It is the only check that runs a bonded
+  dispute end to end *and* hands the finished log to `reference/rust` -- and
+  the money a dispute moves is exactly the kind of thing a second
+  implementation certifies clean by not knowing about it
 - `./scripts/canary-demo.sh` if you touched `src/canary.rs`, the verifier
   registry, or the audit's wording. It is the only place the three costs sit
   side by side on one log: the cheap audit passes a rubber-stamper, the

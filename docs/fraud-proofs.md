@@ -161,9 +161,29 @@ what silence means.
 Built: the game, the trace commitment, the stepper, the adjudication, and a
 worked example (`examples/collatz_bisectable/`).
 
-Not built: the money. A dispute names a winner and a loser and moves nothing,
-because nothing is staked. The bonded challenge window — a challenger's stake, a
-held payout, a slash to the winner — is the same missing piece as in
-[node-incentives.md](node-incentives.md), and it is missing for the same reason:
-it is a consensus rule about value, so it belongs in the rules engine, under
-both implementations, with the audit re-deriving it.
+Also built: **the bond**. `records::Challenge` stakes units behind an objection
+and `records::BisectionMove` carries one answer; `Node::post_challenge` and
+`Node::post_bisection` admit them; `Node::dispute` folds the game back out of
+the log; `Node::settle_challenge` decides it and moves the money. The
+challenger's bond is committed the moment the objection is, so one balance
+cannot fund two simultaneous objections, and `reference/rust` accounts for both
+sides of a slash — otherwise it would report the winner as overdrawn and certify
+the loser as solvent. `scripts/dispute-demo.sh` runs the whole thing through the
+CLI and hands the finished log to the reference.
+
+What the parties risk is asymmetric, and the asymmetry is stated rather than
+hidden. A challenger stakes a bond. A defender stakes the payout for the claim
+under dispute, **capped at what they still hold** — so a defender who spends the
+reward before the window shuts keeps the difference. Closing that means holding
+a bisectable claim's payout until its window closes, which is a change to the
+settlement path in both implementations and is the same missing piece as bonded
+availability custody.
+
+Two other limits worth naming. `CHALLENGE_WINDOW_EPOCHS` is a constant and not
+an environment variable, for the reason `EPOCH_SECONDS` is: a rule that depends
+on a process's environment is not a consensus rule, and two auditors reading one
+log would disagree about who forfeited. And the reference implementation checks
+everything the transcript decides on its own — who may object, to what, by when,
+with what staked, and that every move opens the root its author committed to —
+but it has no stepper, so whether the disputed *step* reproduces is checked by
+the primary's `audit --rerun` alone.

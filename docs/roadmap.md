@@ -470,9 +470,9 @@ downstream is unbacked.
 
 - [ ] Contributed inference verified with a TOPLOC-class scheme, for the
       objectives where effort must be bought rather than output.
-- [~] **Interactive fraud proofs over the replay trace**
-      (`src/challenge.rs`, [fraud-proofs.md](fraud-proofs.md)). The game is
-      built; the bond is not.
+- [x] **Bonded challenge windows and interactive fraud proofs over the replay
+      trace** (`src/challenge.rs`, `records::Challenge`, `Node::settle_challenge`,
+      `proofwork dispute`, [fraud-proofs.md](fraud-proofs.md)).
       Both parties commit to a Merkle root over the whole trace, then narrow
       their disagreement by binary search until it is one step wide, and one
       step of execution decides it. Every move opens a state against the
@@ -497,10 +497,21 @@ downstream is unbacked.
       rejoin end on the same state, so the search terminated on an interval
       whose endpoints both agree. The second is refused outright -- a challenger
       who reaches the same answer by another route has contradicted nothing.
-      Still missing: **the money.** A dispute names a winner and moves nothing,
-      because nothing is staked. Same gap as availability sampling, for the same
-      reason -- it is a consensus rule about value, so it belongs in the rules
-      engine under both implementations with the audit re-deriving it.
+      The money is wired: a challenger stakes a bond, which is committed the
+      moment the objection is, so one balance cannot fund two simultaneous
+      objections; the loser pays the winner; the audit re-derives every rule;
+      and `reference/rust` accounts for both sides of a slash, because a second
+      implementation that did not would report the winner as overdrawn and
+      certify the loser as solvent. `scripts/dispute-demo.sh` runs it through
+      the CLI and hands the finished log to the reference, which names an
+      inadmissible challenge independently.
+      What the two sides risk is asymmetric and stated rather than hidden: a
+      challenger stakes a bond, a defender stakes the disputed claim's payout
+      *capped at what they still hold*, so a defender who spends the reward
+      before the window shuts keeps the difference. Closing that means holding a
+      bisectable claim's payout until its window closes -- a settlement-path
+      change in both implementations, and the same missing piece as bonded
+      availability custody.
 - [x] **Node-operator incentives designed and evaluated** (`src/incentive/`).
       Canaried bonded verification, availability sampling, and bonded share
       custody, with a harness that solves for the minimum canary rate, bond and

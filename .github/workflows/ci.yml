@@ -47,6 +47,11 @@ jobs:
       # catches it at the price of every verifier in the log, and a docket
       # catches it at the price of the cheap one.
       - run: ./scripts/canary-demo.sh
+      # A bonded dispute through the CLI, then the *other* implementation
+      # auditing the finished log. A second opinion that has never seen a
+      # record kind reports "log verified" over money it did not look at,
+      # which is how availability settlements went unchecked for a while.
+      - run: ./scripts/dispute-demo.sh
       # Runs the MCP server as a real process. The unit tests call handle_line
       # directly and structurally cannot catch a stray write to stdout, which is
       # the failure that breaks every MCP client and looks like their bug.

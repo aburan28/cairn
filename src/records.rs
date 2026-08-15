@@ -2700,6 +2700,347 @@ fn required_u64(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Interactive fraud proofs
+// ---------------------------------------------------------------------------
+
+/// A bonded objection to a settled claim's committed trace.
+///
+/// The record that opens a dispute. It names the claim, commits the challenger
+/// to a trace root of their own, and stakes a bond behind the objection.
+///
+/// **The bond is the whole record.** Without it, opening a dispute is free, and
+/// a free dispute is a denial-of-service on every honest submitter: post one
+/// against every claim, answer nothing, and every payout is held for the length
+/// of the window. The bond makes losing cost something and makes stalling cost
+/// the same as losing, since a challenger who stops answering forfeits.
+///
+/// The challenger's root is committed **here**, before any bisection move, and
+/// that ordering is the security property rather than a convenience. A
+/// challenger who could choose their trace after seeing the defender's answers
+/// would win every dispute by construction: at each round, answer whatever the
+/// defender did not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Challenge {
+    /// The claim whose trace is disputed.
+    pub claim_id: String,
+    /// Ed25519 public key, hex. Who objects, and the record's authority.
+    pub challenger: String,
+    /// The challenger's own committed trace root.
+    pub root: String,
+    /// How many states both sides claim the trace has. Equal length is a rule:
+    /// two parties claiming different lengths have already stated their
+    /// disagreement in public and need no search to find it.
+    pub states: u64,
+    /// Units staked behind the objection, forfeit if it loses.
+    pub bond: u64,
+    pub created_at: String,
+    /// Ed25519 signature over [`Challenge::signing_payload`], hex. Required:
+    /// an unsigned objection is an objection by nobody, and there would be
+    /// nobody to slash.
+    pub signature: Option<String>,
+}
+
+impl Challenge {
+    pub fn new(
+        claim_id: impl Into<String>,
+        challenger: impl Into<String>,
+        root: impl Into<String>,
+        states: u64,
+        bond: u64,
+        created_at: impl Into<String>,
+    ) -> Challenge {
+        Challenge {
+            claim_id: claim_id.into(),
+            challenger: challenger.into(),
+            root: root.into(),
+            states,
+            bond,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("challenge")),
+            ("bond", Value::Int(i128::from(self.bond))),
+            ("challenger", Value::string(self.challenger.clone())),
+            ("claim_id", Value::string(self.claim_id.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("root", Value::string(self.root.clone())),
+            ("states", Value::Int(i128::from(self.states))),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Challenge {
+        self.challenger = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "challenge";
+        if signed_submitter(&self.challenger).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.challenger.clone(),
+            });
+        }
+        let signature = self.signature.as_deref().ok_or(SignatureError::Missing {
+            record: RECORD,
+            submitter: self.challenger.clone(),
+        })?;
+        verify_record_signature(
+            RECORD,
+            &self.challenger,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "challenge";
+        if self.claim_id.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "claim_id",
+                expected: "the id of the claim being disputed",
+            });
+        }
+        if !self.root.starts_with("sha256:") {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "root",
+                expected: "a sha256: Merkle root over the trace",
+            });
+        }
+        // Fewer than two states is not a trace, so there is no step to
+        // disagree about; more than the cap is a dispute no log can carry.
+        if self.states < 2 || self.states > crate::challenge::MAX_TRACE as u64 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "states",
+                expected: "between 2 and 2^24 states",
+            });
+        }
+        // A zero bond is the free objection the record exists to prevent.
+        if self.bond == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "bond",
+                expected: "a bond of at least one unit",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Challenge, RecordError> {
+        const RECORD: &str = "challenge";
+        let value = expect_object(value, RECORD)?;
+        let challenge = Challenge {
+            claim_id: required_string(value, RECORD, "claim_id")?,
+            challenger: required_string(value, RECORD, "challenger")?,
+            root: required_string(value, RECORD, "root")?,
+            states: required_u64(value, RECORD, "states")?,
+            bond: required_u64(value, RECORD, "bond")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        challenge.validate()?;
+        Ok(challenge)
+    }
+}
+
+/// One party's answer to one bisection query, as a record.
+///
+/// The wire form of [`crate::challenge::Move`]. Carries the state itself rather
+/// than only its digest, and the inclusion path proving that state is the one
+/// its author committed to before the game started. Both are checked at
+/// admission: a move that does not open its author's root is not a move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BisectionMove {
+    /// The [`Challenge::id`] this belongs to.
+    pub challenge_id: String,
+    /// Ed25519 public key, hex. Which party is answering. Whether that is the
+    /// defender or the challenger is derived from the log — the claim names its
+    /// submitter and the challenge names its challenger — so a mover cannot
+    /// answer for the other side by saying so.
+    pub mover: String,
+    /// Which state index the game asked about.
+    pub index: u64,
+    /// The state at that index.
+    pub state: Value,
+    /// The inclusion path, bottom up, against the mover's own root.
+    pub path: Vec<String>,
+    pub created_at: String,
+    /// Ed25519 signature over [`BisectionMove::signing_payload`], hex.
+    pub signature: Option<String>,
+}
+
+impl BisectionMove {
+    pub fn new(
+        challenge_id: impl Into<String>,
+        mover: impl Into<String>,
+        index: u64,
+        state: Value,
+        path: Vec<String>,
+        created_at: impl Into<String>,
+    ) -> BisectionMove {
+        BisectionMove {
+            challenge_id: challenge_id.into(),
+            mover: mover.into(),
+            index,
+            state,
+            path,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("bisection")),
+            ("challenge_id", Value::string(self.challenge_id.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("index", Value::Int(i128::from(self.index))),
+            ("mover", Value::string(self.mover.clone())),
+            (
+                "path",
+                Value::Array(self.path.iter().cloned().map(Value::String).collect()),
+            ),
+            ("state", self.state.clone()),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> BisectionMove {
+        self.mover = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "bisection";
+        if signed_submitter(&self.mover).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.mover.clone(),
+            });
+        }
+        let signature = self.signature.as_deref().ok_or(SignatureError::Missing {
+            record: RECORD,
+            submitter: self.mover.clone(),
+        })?;
+        verify_record_signature(
+            RECORD,
+            &self.mover,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "bisection";
+        if self.challenge_id.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "challenge_id",
+                expected: "the id of the challenge being played",
+            });
+        }
+        // The same bound the availability answer carries, for the same reason:
+        // a path longer than any tree needs is a record big enough to be a
+        // nuisance and proves nothing extra.
+        if self.path.len() > MAX_AVAILABILITY_PATH {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "path",
+                expected: "at most 32 sibling hashes",
+            });
+        }
+        if self.state.canonical_bytes().len() > crate::challenge::MAX_STATE_BYTES {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "state",
+                expected: "a state of at most 64 KiB",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<BisectionMove, RecordError> {
+        const RECORD: &str = "bisection";
+        let value = expect_object(value, RECORD)?;
+        let path = match value.get("path") {
+            Some(Value::Array(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    match item.as_str() {
+                        Some(hash) => out.push(hash.to_string()),
+                        None => {
+                            return Err(RecordError::InvalidField {
+                                record: RECORD,
+                                field: "path",
+                                expected: "a list of hash strings",
+                            })
+                        }
+                    }
+                }
+                out
+            }
+            _ => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "path",
+                    expected: "a list of hash strings",
+                })
+            }
+        };
+        let record = BisectionMove {
+            challenge_id: required_string(value, RECORD, "challenge_id")?,
+            mover: required_string(value, RECORD, "mover")?,
+            index: required_u64(value, RECORD, "index")?,
+            state: value
+                .get("state")
+                .cloned()
+                .ok_or(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "state",
+                    expected: "the state at that index",
+                })?,
+            path,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

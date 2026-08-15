@@ -589,6 +589,10 @@ enum Command {
     Canary {
         action: CanaryAction,
     },
+    /// Dispute a committed trace, play the bisection, and settle it.
+    Dispute {
+        action: DisputeAction,
+    },
     Attribute {
         params: FlowParams,
     },
@@ -841,6 +845,42 @@ enum CanaryAction {
     Check { docket: String },
 }
 
+/// `dispute trace|open|play|settle|status`.
+///
+/// Five verbs because a dispute is five distinct things a person does, at five
+/// different times, possibly on five different machines: build a trace, object
+/// to somebody else's, answer what the log asks you for, settle what the log
+/// has already decided, and look at where a dispute has got to. Collapsing them
+/// into one command would mean holding the whole dispute in one process, which
+/// is exactly the design this mechanism avoids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DisputeAction {
+    /// Run an objective's pinned stepper and write the trace it produces.
+    Trace {
+        objective: String,
+        from: String,
+        steps: usize,
+        out: String,
+    },
+    /// Object to a claim's committed trace, with a bond behind it.
+    Open {
+        claim: String,
+        trace: String,
+        bond: u64,
+        identity: String,
+    },
+    /// Answer whatever the log currently asks this party for.
+    Play {
+        id: String,
+        trace: String,
+        identity: String,
+    },
+    /// Decide a dispute that has narrowed, or one whose window has shut.
+    Settle { id: String },
+    /// Where every dispute has got to.
+    Status { id: Option<String> },
+}
+
 /// One minting run's settings, in a struct so the command takes one argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Minting {
@@ -1090,6 +1130,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "check" => parse_check(&mut cursor)?,
         "availability" => parse_availability(&mut cursor)?,
         "canary" => parse_canary(&mut cursor)?,
+        "dispute" => parse_dispute(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
         "knowledge" => parse_knowledge(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
@@ -1562,6 +1603,69 @@ fn parse_canary(cursor: &mut Cursor) -> Result<Command, CliError> {
         }
     };
     Ok(Command::Canary { action })
+}
+
+/// `dispute <verb> [...]`
+fn parse_dispute(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let verb = cursor.take().ok_or_else(|| {
+        CliError::Usage(String::from("dispute: trace, open, play, settle or status"))
+    })?;
+    let mut objective: Option<String> = None;
+    let mut from: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut claim: Option<String> = None;
+    let mut trace: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut id: Option<String> = None;
+    let mut steps: usize = 0;
+    let mut bond: u64 = 0;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--objective" => objective = Some(cursor.value("--objective")?),
+            "--from" => from = Some(cursor.value("--from")?),
+            "--out" => out = Some(cursor.value("--out")?),
+            "--claim" => claim = Some(cursor.value("--claim")?),
+            "--trace" => trace = Some(cursor.value("--trace")?),
+            "--identity" => identity = Some(cursor.value("--identity")?),
+            "--id" => id = Some(cursor.value("--id")?),
+            "--steps" => steps = parse_u64(&cursor.value("--steps")?, "--steps")? as usize,
+            "--bond" => bond = parse_u64(&cursor.value("--bond")?, "--bond")?,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "dispute {verb}: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+    let action = match verb.as_str() {
+        "trace" => DisputeAction::Trace {
+            objective: require(objective, "dispute trace", "--objective")?,
+            from: require(from, "dispute trace", "--from")?,
+            steps,
+            out: require(out, "dispute trace", "--out")?,
+        },
+        "open" => DisputeAction::Open {
+            claim: require(claim, "dispute open", "--claim")?,
+            trace: require(trace, "dispute open", "--trace")?,
+            bond,
+            identity: require(identity, "dispute open", "--identity")?,
+        },
+        "play" => DisputeAction::Play {
+            id: require(id, "dispute play", "--id")?,
+            trace: require(trace, "dispute play", "--trace")?,
+            identity: require(identity, "dispute play", "--identity")?,
+        },
+        "settle" => DisputeAction::Settle {
+            id: require(id, "dispute settle", "--id")?,
+        },
+        "status" => DisputeAction::Status { id },
+        other => {
+            return Err(CliError::Usage(format!(
+                "dispute: unknown action {other:?} (trace, open, play, settle, status)"
+            )))
+        }
+    };
+    Ok(Command::Dispute { action })
 }
 
 fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -4159,6 +4263,289 @@ fn cmd_canary_check(out: &mut dyn Write, options: &Options, path: &str) -> Resul
         format!("{} verdict(s) the verifier disagrees with", found.len()),
     );
     Ok(1)
+}
+
+/// `dispute` — the five things a person does around an interactive fraud proof.
+///
+/// Read `docs/fraud-proofs.md` before changing any of this. The verbs are
+/// separate because a dispute is carried by the *log*, not by a process: the
+/// defender and the challenger may never run on the same machine, and neither
+/// of them holds the other's trace.
+fn cmd_dispute(
+    out: &mut dyn Write,
+    options: &Options,
+    action: &DisputeAction,
+) -> Result<i32, CliError> {
+    match action {
+        DisputeAction::Trace {
+            objective,
+            from,
+            steps,
+            out: path,
+        } => {
+            let node = open_node(options)?;
+            let objective = node.objectives().get(objective).cloned().ok_or_else(|| {
+                CliError::Usage(format!("dispute trace: no objective {objective}"))
+            })?;
+            let stepper =
+                proofwork::challenge::Stepper::from_spec(node.registry(), &objective.verifier)
+                    .map_err(|why| CliError::Usage(format!("dispute trace: {why}")))?;
+            let start = read_json(from)?;
+            let trace = proofwork::challenge::Trace::run(&stepper, start, *steps)
+                .map_err(|why| CliError::Usage(format!("dispute trace: {why}")))?;
+            let states: Vec<Value> = (0..trace.len())
+                .map(|i| trace.state_at(i).cloned().unwrap_or(Value::Null))
+                .collect();
+            let body = Value::Array(states);
+            fs::write(path, format!("{}\n", body.canonical_string())).map_err(|source| {
+                CliError::Io {
+                    context: format!("writing {path}"),
+                    source,
+                }
+            })?;
+            say(
+                out,
+                format!(
+                    "{} states, root {}\nwritten to {path}",
+                    trace.len(),
+                    trace.root()
+                ),
+            );
+            // The two fields an artifact has to carry for this trace to be
+            // disputable. Printed rather than written into a file, because the
+            // artifact is the submitter's to assemble.
+            say(
+                out,
+                format!(
+                    "  \"trace_root\": {:?}, \"trace_states\": {}",
+                    trace.root(),
+                    trace.len()
+                ),
+            );
+            Ok(0)
+        }
+        DisputeAction::Open {
+            claim,
+            trace,
+            bond,
+            identity,
+        } => {
+            let who = load_identity(Some(identity))?.ok_or_else(|| {
+                CliError::Usage(String::from("dispute open: --identity is required"))
+            })?;
+            let committed = trace_from_file(trace)?;
+            let mut node = open_node_for_writing(options)?;
+            let record = proofwork::records::Challenge::new(
+                claim,
+                who.submitter_id(),
+                committed.root(),
+                committed.len() as u64,
+                *bond,
+                timestamp(),
+            )
+            .signed_with(&who);
+            let id = refused(node.post_challenge(&record, &timestamp()))?;
+            say(out, format!("challenge {id}"));
+            say(
+                out,
+                format!(
+                    "  {} states, root {}, {bond} staked",
+                    committed.len(),
+                    committed.root()
+                ),
+            );
+            say(
+                out,
+                "  both sides now open state 0 and the last state: `dispute play`",
+            );
+            Ok(0)
+        }
+        DisputeAction::Play {
+            id,
+            trace,
+            identity,
+        } => {
+            let who = load_identity(Some(identity))?.ok_or_else(|| {
+                CliError::Usage(String::from("dispute play: --identity is required"))
+            })?;
+            let committed = trace_from_file(trace)?;
+            let mut node = open_node_for_writing(options)?;
+            let mut played = 0usize;
+            // Loop, because the two endpoint moves and each subsequent round
+            // are separate records and a party owes whatever the log says it
+            // owes. Reading that out of the log each time is the whole design:
+            // nothing here remembers a dispute between calls.
+            loop {
+                let Some(state) = node.dispute(id) else {
+                    return Err(CliError::Usage(format!("dispute play: no challenge {id}")));
+                };
+                let side = match &state {
+                    proofwork::node::DisputeState::Void { .. } => break,
+                    _ => match node.side_for(id, &who.submitter_id()) {
+                        Some(side) => side,
+                        None => {
+                            return Err(CliError::Usage(format!(
+                                "dispute play: {} is not a party to {id}",
+                                who.submitter_id()
+                            )))
+                        }
+                    },
+                };
+                let index = match &state {
+                    proofwork::node::DisputeState::AwaitingEndpoints { missing, .. } => {
+                        match missing.iter().find(|(_, owed)| *owed == side) {
+                            Some((index, _)) => *index,
+                            None => break,
+                        }
+                    }
+                    proofwork::node::DisputeState::Live { dispute, .. } => match dispute.next() {
+                        proofwork::challenge::Next::Open { index, waiting_on }
+                            if waiting_on.contains(&side) =>
+                        {
+                            index
+                        }
+                        _ => break,
+                    },
+                    proofwork::node::DisputeState::Void { .. } => break,
+                };
+                let mv = committed.open(id, index).ok_or_else(|| {
+                    CliError::Usage(format!("dispute play: no state {index} in this trace"))
+                })?;
+                let record = proofwork::records::BisectionMove::new(
+                    id,
+                    who.submitter_id(),
+                    index as u64,
+                    mv.state.clone(),
+                    mv.path.siblings.clone(),
+                    timestamp(),
+                )
+                .signed_with(&who);
+                refused(node.post_bisection(&record, &timestamp()))?;
+                say(out, format!("  opened state {index}"));
+                played += 1;
+                if played > 128 {
+                    break;
+                }
+            }
+            if played == 0 {
+                say(out, "nothing owed: it is the other party's turn");
+            } else {
+                say(out, format!("{played} move(s) played"));
+            }
+            dispute_status(out, &node, id);
+            Ok(0)
+        }
+        DisputeAction::Settle { id } => {
+            let mut node = open_node_for_writing(options)?;
+            let record = refused(node.settle_challenge(id, &timestamp()))?;
+            say(
+                out,
+                format!(
+                    "{} wins: {}",
+                    record
+                        .get("winning_side")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?"),
+                    record.get("detail").and_then(Value::as_str).unwrap_or("")
+                ),
+            );
+            say(
+                out,
+                format!(
+                    "  {} units from {} to {}",
+                    record.get("units").and_then(Value::as_i128).unwrap_or(0),
+                    short(record.get("loser").and_then(Value::as_str).unwrap_or("?")),
+                    short(record.get("winner").and_then(Value::as_str).unwrap_or("?")),
+                ),
+            );
+            Ok(0)
+        }
+        DisputeAction::Status { id } => {
+            let node = open_node(options)?;
+            let ids: Vec<String> = match id {
+                Some(id) => vec![id.clone()],
+                None => node.challenges().keys().cloned().collect(),
+            };
+            if ids.is_empty() {
+                say(out, "no disputes in this log");
+                return Ok(0);
+            }
+            for id in ids {
+                say(out, format!("challenge {}", short(&id)));
+                dispute_status(out, &node, &id);
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// A trace read from a file of states, as `dispute trace` writes it.
+fn trace_from_file(path: &str) -> Result<proofwork::challenge::Trace, CliError> {
+    let body = read_json(path)?;
+    let states = match body {
+        Value::Array(states) => states,
+        _ => {
+            return Err(CliError::Usage(format!(
+                "{path}: a trace is a JSON array of states"
+            )))
+        }
+    };
+    proofwork::challenge::Trace::commit(states)
+        .map_err(|why| CliError::Usage(format!("{path}: {why}")))
+}
+
+/// Where a dispute has got to, in the words a party needs to act on.
+fn dispute_status(out: &mut dyn Write, node: &Node, id: &str) {
+    if let Some(record) = node.challenge_outcome(id) {
+        say(
+            out,
+            format!(
+                "  decided: {} wins, {} units -- {}",
+                record
+                    .get("winning_side")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?"),
+                record.get("units").and_then(Value::as_i128).unwrap_or(0),
+                record.get("detail").and_then(Value::as_str).unwrap_or("")
+            ),
+        );
+        return;
+    }
+    match node.dispute(id) {
+        None => say(out, "  no such challenge"),
+        Some(proofwork::node::DisputeState::Void { why, .. }) => say(out, format!("  void: {why}")),
+        Some(proofwork::node::DisputeState::AwaitingEndpoints { missing, .. }) => {
+            let owed: Vec<String> = missing
+                .iter()
+                .map(|(index, side)| format!("{side}@{index}"))
+                .collect();
+            say(out, format!("  awaiting endpoints: {}", owed.join(", ")));
+        }
+        Some(proofwork::node::DisputeState::Live { dispute, .. }) => {
+            let (lo, hi) = dispute.interval();
+            match dispute.next() {
+                proofwork::challenge::Next::Open { index, waiting_on } => {
+                    let owed: Vec<&str> = waiting_on.iter().map(|side| side.as_str()).collect();
+                    say(
+                        out,
+                        format!(
+                            "  disputed states {lo}..{hi}; state {index} owed by {}",
+                            owed.join(", ")
+                        ),
+                    );
+                }
+                proofwork::challenge::Next::Adjudicate { agreed } => say(
+                    out,
+                    format!(
+                        "  narrowed: agreed on state {agreed}, disputing {}. \
+                         Run `dispute settle`",
+                        agreed + 1
+                    ),
+                ),
+                proofwork::challenge::Next::Done(outcome) => say(out, format!("  {outcome}")),
+            }
+        }
+    }
 }
 
 /// The availability mechanism, from the operator's side.
@@ -7243,6 +7630,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             CanaryAction::Mint(minting) => cmd_canary_mint(out, options, minting),
             CanaryAction::Check { docket } => cmd_canary_check(out, options, docket),
         },
+        Command::Dispute { action } => cmd_dispute(out, options, action),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Knowledge { claim_id, policy } => {
             cmd_knowledge(out, options, claim_id.as_deref(), policy)

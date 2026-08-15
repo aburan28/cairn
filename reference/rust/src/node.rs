@@ -33,6 +33,15 @@ pub const AVAILABILITY_POOL: &str = "availability_pool";
 pub const AVAILABILITY_SETTLEMENT: &str = "availability_settlement";
 pub const COMMITTEE_SHARE: &str = "committee_share";
 pub const ISSUANCE: &str = "issuance";
+pub const CHALLENGE: &str = "challenge";
+pub const BISECTION: &str = "bisection";
+pub const CHALLENGE_SETTLEMENT: &str = "challenge_settlement";
+
+/// How long a claim's trace stays open to objection, and how long a party has
+/// to answer before silence decides against them. Mirrors the primary's
+/// `node::CHALLENGE_WINDOW_EPOCHS`; the two crates disagreeing about this
+/// number would mean disagreeing about who forfeited.
+pub const CHALLENGE_WINDOW_EPOCHS: u64 = 6;
 
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -187,6 +196,18 @@ impl Node {
                         }
                     }
                 }
+                // What a won dispute pays the winner. Not new money -- every
+                // unit is debited from the loser in `committed_within` -- but a
+                // second implementation that did not know about it would report
+                // the winner as overdrawn and certify the loser as solvent,
+                // which is worse than not looking at all.
+                CHALLENGE_SETTLEMENT => {
+                    if entry.payload.get("winner").and_then(Value::as_str) == Some(identity) {
+                        if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                            paid = paid.saturating_add(u128::from(units));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -213,6 +234,48 @@ impl Node {
             }
             committed = committed.saturating_add(u128::from(record.bond));
         }
+        // A bond behind a *live* dispute is spent-but-not-gone: it can be
+        // lost, so it must not also be staked elsewhere. Released once the
+        // dispute settles, because the settlement record then says where it
+        // went -- and the loser is debited by the same pass.
+        let decided: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(CHALLENGE_SETTLEMENT)
+            .into_iter()
+            .filter(|entry| entry.seq < positions)
+            .filter_map(|entry| {
+                entry
+                    .payload
+                    .get("challenge_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        for entry in self.ledger.entries_of_kind(CHALLENGE) {
+            if entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("challenger").and_then(Value::as_str) != Some(identity) {
+                continue;
+            }
+            if decided.contains(&entry.payload.digest()) {
+                continue;
+            }
+            if let Some(bond) = entry.payload.get("bond").and_then(Value::as_u64) {
+                committed = committed.saturating_add(u128::from(bond));
+            }
+        }
+        for entry in self.ledger.entries_of_kind(CHALLENGE_SETTLEMENT) {
+            if entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("loser").and_then(Value::as_str) != Some(identity) {
+                continue;
+            }
+            if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                committed = committed.saturating_add(u128::from(units));
+            }
+        }
         for entry in self.ledger.entries() {
             if entry.seq >= positions {
                 break;
@@ -236,6 +299,235 @@ impl Node {
             }
         }
         committed
+    }
+
+    /// Disputes, re-derived rather than trusted.
+    ///
+    /// Deliberately parsed field by field out of `Value` instead of through a
+    /// shared record type: this crate exists to be a second opinion on the
+    /// *rules*, and sharing the primary's decoder would make the two agree
+    /// about a malformed record by construction.
+    ///
+    /// No stepper runs here, and this crate has none. What it can check is
+    /// everything the transcript decides on its own -- who may object, to what,
+    /// by when, with what staked, and that every move opens the root its author
+    /// committed to. Whether the disputed *step* reproduces is the one question
+    /// that needs execution, and the primary's `audit --rerun` is where that
+    /// belongs.
+    fn audit_challenges(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let text = |value: &Value, key: &str| -> String {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+
+        // Claims by id, so a challenge can be checked against what it disputes.
+        let mut claims: BTreeMap<String, Value> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            claims.insert(entry.payload.digest(), entry.payload.clone());
+        }
+
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut challenges: BTreeMap<String, Value> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CHALLENGE) {
+            let id = entry.payload.digest();
+            challenges.insert(id.clone(), entry.payload.clone());
+            let claim_id = text(&entry.payload, "claim_id");
+            let challenger = text(&entry.payload, "challenger");
+            if !seen.insert(format!("{claim_id}|{challenger}")) {
+                problems.push(format!(
+                    "entry {}: {} already has a live objection to claim {}",
+                    entry.seq,
+                    short(&challenger),
+                    short(&claim_id)
+                ));
+            }
+            if entry.payload.get("bond").and_then(Value::as_u64).unwrap_or(0) == 0 {
+                problems.push(format!(
+                    "entry {}: a challenge with no bond is a free objection",
+                    entry.seq
+                ));
+            }
+            let Some(claim) = claims.get(&claim_id) else {
+                problems.push(format!(
+                    "entry {}: challenges claim {}, which is not in this log",
+                    entry.seq,
+                    short(&claim_id)
+                ));
+                continue;
+            };
+            let artifact = claim.get("artifact").cloned().unwrap_or(Value::Null);
+            let root = text(&artifact, "trace_root");
+            let states = artifact
+                .get("trace_states")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if root.is_empty() {
+                problems.push(format!(
+                    "entry {}: claim {} commits to no trace, so there is nothing to bisect",
+                    entry.seq,
+                    short(&claim_id)
+                ));
+                continue;
+            }
+            if root == text(&entry.payload, "root") {
+                problems.push(format!(
+                    "entry {}: the challenge agrees with the claim it disputes",
+                    entry.seq
+                ));
+            }
+            let challenged = entry.payload.get("states").and_then(Value::as_u64).unwrap_or(0);
+            if states != challenged {
+                problems.push(format!(
+                    "entry {}: claim commits to {states} states, challenge to {challenged}",
+                    entry.seq
+                ));
+            }
+            // The window, from the two records' own timestamps.
+            if let (Ok(opened), Ok(claimed)) = (
+                self.epoch_of_ts("challenge", &text(&entry.payload, "created_at")),
+                self.epoch_of_ts("claim", &text(claim, "created_at")),
+            ) {
+                let closes = claimed.saturating_add(CHALLENGE_WINDOW_EPOCHS);
+                if opened > closes {
+                    problems.push(format!(
+                        "entry {}: opened in epoch {opened}, after the window on claim {} shut at {closes}",
+                        entry.seq,
+                        short(&claim_id)
+                    ));
+                }
+            }
+        }
+
+        for entry in self.ledger.entries_of_kind(BISECTION) {
+            let challenge_id = text(&entry.payload, "challenge_id");
+            let Some(challenge) = challenges.get(&challenge_id) else {
+                problems.push(format!(
+                    "entry {}: no challenge {}",
+                    entry.seq,
+                    short(&challenge_id)
+                ));
+                continue;
+            };
+            let claim_id = text(challenge, "claim_id");
+            let Some(claim) = claims.get(&claim_id) else {
+                continue;
+            };
+            let mover = text(&entry.payload, "mover");
+            let artifact = claim.get("artifact").cloned().unwrap_or(Value::Null);
+            let root = if mover == text(claim, "submitter") {
+                text(&artifact, "trace_root")
+            } else if mover == text(challenge, "challenger") {
+                text(challenge, "root")
+            } else {
+                problems.push(format!(
+                    "entry {}: {} is not a party to {}",
+                    entry.seq,
+                    short(&mover),
+                    short(&challenge_id)
+                ));
+                continue;
+            };
+            let states = artifact
+                .get("trace_states")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let index = entry.payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let siblings: Vec<String> = entry
+                .payload
+                .get("path")
+                .and_then(Value::as_array)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect();
+            let leaf = entry
+                .payload
+                .get("state")
+                .cloned()
+                .unwrap_or(Value::Null)
+                .digest();
+            let path = crate::canonical::Inclusion {
+                index,
+                leaves: states,
+                siblings,
+            };
+            // The check the whole game rests on: a party that could answer with
+            // a state it never committed to would win every dispute by playing
+            // whatever beats the other side this round.
+            if !path.verify(&leaf, &root) {
+                problems.push(format!(
+                    "entry {}: the move at state {index} does not open the root its author committed to",
+                    entry.seq
+                ));
+            }
+        }
+
+        let mut decided: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(CHALLENGE_SETTLEMENT) {
+            let id = text(&entry.payload, "challenge_id");
+            if !decided.insert(id.clone()) {
+                problems.push(format!("entry {}: challenge {} settled twice", entry.seq, short(&id)));
+            }
+            let Some(challenge) = challenges.get(&id) else {
+                problems.push(format!(
+                    "entry {}: settles challenge {}, which is not in this log",
+                    entry.seq,
+                    short(&id)
+                ));
+                continue;
+            };
+            let claim_id = text(challenge, "claim_id");
+            let Some(claim) = claims.get(&claim_id) else {
+                continue;
+            };
+            let winner = text(&entry.payload, "winner");
+            let loser = text(&entry.payload, "loser");
+            let submitter = text(claim, "submitter");
+            let challenger = text(challenge, "challenger");
+            let parties = [submitter.as_str(), challenger.as_str()];
+            if !parties.contains(&winner.as_str())
+                || !parties.contains(&loser.as_str())
+                || winner == loser
+            {
+                problems.push(format!(
+                    "entry {}: settled between {} and {}, who are not the two parties",
+                    entry.seq,
+                    short(&winner),
+                    short(&loser)
+                ));
+                continue;
+            }
+            let units = entry.payload.get("units").and_then(Value::as_u64).unwrap_or(0);
+            let ceiling = if loser == challenger {
+                challenge.get("bond").and_then(Value::as_u64).unwrap_or(0)
+            } else {
+                self.objective_of_claim(claim)
+                    .and_then(|objective| objective.get("reward").and_then(Value::as_u64))
+                    .unwrap_or(0)
+            };
+            if units > ceiling {
+                problems.push(format!(
+                    "entry {}: moved {units} against a ceiling of {ceiling}",
+                    entry.seq
+                ));
+            }
+        }
+
+        problems
+    }
+
+    /// The objective record a claim names, as raw bytes.
+    fn objective_of_claim(&self, claim: &Value) -> Option<Value> {
+        let wanted = claim.get("objective_id").and_then(Value::as_str)?;
+        self.ledger
+            .entries_of_kind(OBJECTIVE)
+            .into_iter()
+            .find(|entry| entry.payload.digest() == wanted)
+            .map(|entry| entry.payload.clone())
     }
 
     /// What the genesis prefix issued `identity`.
@@ -1358,6 +1650,8 @@ impl Node {
                 }
             }
         }
+
+        problems.append(&mut self.audit_challenges());
 
         for entry in self.ledger.entries_of_kind(UNDERTAKING) {
             match Undertaking::from_value(&entry.payload) {

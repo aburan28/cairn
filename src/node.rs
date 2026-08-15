@@ -64,8 +64,8 @@ use crate::knowledge::{
 use crate::ledger::{Entry, Ledger, LedgerError, Proof};
 use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
 use crate::records::{
-    Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Issuance, Objective,
-    PeerRecord, Undertaking,
+    Availability, AvailabilityPool, BisectionMove, Challenge, Claim, Commitment, CommitteeShare,
+    Issuance, Objective, PeerRecord, Undertaking,
 };
 use crate::sealed::{OpenedSubmission, SealedSubmission};
 use crate::verifiers::{self, Kind, Status, Verdict, VerifierRegistry};
@@ -126,6 +126,65 @@ const COMMITTEE_SHARE: &str = "committee_share";
 /// A unit of money entering the log. Admissible only in the genesis prefix —
 /// see [`Node::issued_within`].
 const ISSUANCE: &str = "issuance";
+/// A bonded objection to a settled claim's committed trace.
+const CHALLENGE: &str = "challenge";
+/// One party's answer to one bisection query.
+const BISECTION: &str = "bisection";
+/// The end of a dispute: who won, and what the loser paid.
+const CHALLENGE_SETTLEMENT: &str = "challenge_settlement";
+
+/// How long a claim's trace stays open to objection, and how long a party has
+/// to answer a bisection query before silence decides against them.
+///
+/// One constant for both, deliberately. Two would let a challenger pick a claim
+/// whose objection window is long and whose answer window is short, and stall a
+/// defender who is telling the truth.
+///
+/// A constant and **not** an environment variable, for the reason
+/// `crate::partition::EPOCH_SECONDS` is: a rule that depends on a process's
+/// environment is not a consensus rule, and two auditors reading the same log
+/// would disagree about who forfeited.
+pub const CHALLENGE_WINDOW_EPOCHS: u64 = 6;
+
+/// A dispute as the log leaves it.
+///
+/// Three phases rather than two, because "the parties have not yet witnessed
+/// the invariant the search rests on" is a real state and not an error. See
+/// [`crate::challenge::Endpoints`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisputeState {
+    /// Waiting for one or more of the four opening moves.
+    AwaitingEndpoints {
+        challenge: Challenge,
+        /// `(index, side)` pairs still owed.
+        missing: Vec<(usize, crate::challenge::Side)>,
+    },
+    /// The bisection is under way, or finished and awaiting adjudication.
+    Live {
+        challenge: Challenge,
+        /// Boxed: a `Dispute` carries every state opened so far, and an enum
+        /// as large as its largest variant would make every `DisputeState`
+        /// that size.
+        dispute: Box<crate::challenge::Dispute>,
+    },
+    /// The endpoints could not found a dispute at all — the traces start
+    /// differently, or end the same. The objection was never well formed, and
+    /// the challenger staked on it.
+    Void {
+        challenge: Challenge,
+        why: crate::challenge::DisputeError,
+    },
+}
+
+impl DisputeState {
+    pub fn challenge(&self) -> &Challenge {
+        match self {
+            DisputeState::AwaitingEndpoints { challenge, .. }
+            | DisputeState::Live { challenge, .. }
+            | DisputeState::Void { challenge, .. } => challenge,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Rule violations
@@ -168,6 +227,60 @@ impl fmt::Display for Referrer {
 /// throw away the OS-level detail that makes a failed append diagnosable.
 #[derive(Debug)]
 pub enum RuleViolation {
+    /// A dispute names a claim the log does not carry.
+    UnknownClaim { claim_id: String },
+    /// A dispute names a challenge the log does not carry.
+    UnknownChallenge { challenge_id: String },
+    /// A challenge against a claim nobody accepted. Nothing is at stake, and
+    /// the bond would be locked over nothing.
+    ChallengeOfUnacceptedClaim { claim_id: String },
+    /// The objective declares no stepper, so a dispute over it could never be
+    /// adjudicated -- and an unadjudicable dispute that still holds a bond is a
+    /// griefing tool rather than a mechanism.
+    ObjectiveNotBisectable { objective_id: String },
+    /// The claim's artifact commits to no trace, so there is nothing to bisect.
+    NoTraceCommitment { claim_id: String },
+    /// The two parties claim different trace lengths. They have already stated
+    /// their disagreement in public; a search would be theatre.
+    TraceLengthMismatch { claimed: u64, challenged: u64 },
+    /// The challenger committed to the same root as the claim. Agreement is not
+    /// a dispute.
+    ChallengeAgrees { claim_id: String },
+    /// The objection arrived after the window shut. A claim has to become final
+    /// at some point or no payout is ever safe to spend.
+    ChallengeWindowClosed {
+        claim_id: String,
+        closed_at: u64,
+        opened_at: u64,
+    },
+    /// This challenger already has a live objection to this claim. Without the
+    /// rule, one challenger opens a hundred and an honest defender must answer
+    /// every one or forfeit each.
+    DuplicateChallenge {
+        claim_id: String,
+        challenger: String,
+    },
+    /// The mover is neither the claim's submitter nor the challenger.
+    NotAParty { challenge_id: String, mover: String },
+    /// A move against a dispute that already has an outcome.
+    ChallengeDecided { challenge_id: String },
+    /// The move does not open the root its author committed to. The single most
+    /// important check in the game: a party that could answer with a state it
+    /// never committed to would win every dispute by playing whatever beats the
+    /// other side this round.
+    MoveNotUnderRoot { challenge_id: String, index: u64 },
+    /// A well-formed answer to a question the game did not ask -- the stall
+    /// that looks like cooperation.
+    MoveOutOfTurn { challenge_id: String, index: u64 },
+    /// Somebody tried to settle a dispute that is still somebody's turn and
+    /// still inside its window.
+    ChallengeStillOpen { challenge_id: String },
+    /// The stepper could not be run here. Settles nothing, for the same reason
+    /// an unavailable verifier settles nothing.
+    AdjudicationUnavailable {
+        challenge_id: String,
+        detail: String,
+    },
     /// No verifier answers to this objective's `kind`.
     ///
     /// An objective whose verifier cannot run is an objective whose payout is
@@ -446,6 +559,88 @@ pub enum RuleViolation {
 impl fmt::Display for RuleViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RuleViolation::UnknownClaim { claim_id } => {
+                write!(f, "no claim {claim_id} in this log")
+            }
+            RuleViolation::UnknownChallenge { challenge_id } => {
+                write!(f, "no challenge {challenge_id} in this log")
+            }
+            RuleViolation::ChallengeOfUnacceptedClaim { claim_id } => write!(
+                f,
+                "claim {claim_id} was never accepted; there is nothing to dispute"
+            ),
+            RuleViolation::ObjectiveNotBisectable { objective_id } => write!(
+                f,
+                "objective {objective_id} declares no stepper, so a dispute over \
+                 it could never be adjudicated"
+            ),
+            RuleViolation::NoTraceCommitment { claim_id } => write!(
+                f,
+                "claim {claim_id} commits to no trace; there is nothing to bisect"
+            ),
+            RuleViolation::TraceLengthMismatch {
+                claimed,
+                challenged,
+            } => write!(
+                f,
+                "the claim commits to {claimed} states and the challenge to \
+                 {challenged}; that disagreement is already public"
+            ),
+            RuleViolation::ChallengeAgrees { claim_id } => write!(
+                f,
+                "the challenge commits to the same trace as claim {claim_id}"
+            ),
+            RuleViolation::ChallengeWindowClosed {
+                claim_id,
+                closed_at,
+                opened_at,
+            } => write!(
+                f,
+                "claim {claim_id} closed to objection after epoch {closed_at}; \
+                 this one arrived in {opened_at}"
+            ),
+            RuleViolation::DuplicateChallenge {
+                claim_id,
+                challenger,
+            } => write!(
+                f,
+                "{challenger} already has a live objection to claim {claim_id}"
+            ),
+            RuleViolation::NotAParty {
+                challenge_id,
+                mover,
+            } => write!(f, "{mover} is not a party to challenge {challenge_id}"),
+            RuleViolation::ChallengeDecided { challenge_id } => {
+                write!(f, "challenge {challenge_id} is already decided")
+            }
+            RuleViolation::MoveNotUnderRoot {
+                challenge_id,
+                index,
+            } => write!(
+                f,
+                "the move on challenge {challenge_id} at state {index} does not \
+                 open the root its author committed to"
+            ),
+            RuleViolation::MoveOutOfTurn {
+                challenge_id,
+                index,
+            } => write!(
+                f,
+                "challenge {challenge_id} did not ask about state {index}"
+            ),
+            RuleViolation::ChallengeStillOpen { challenge_id } => write!(
+                f,
+                "challenge {challenge_id} is still somebody's turn, and still \
+                 inside its window"
+            ),
+            RuleViolation::AdjudicationUnavailable {
+                challenge_id,
+                detail,
+            } => write!(
+                f,
+                "challenge {challenge_id} cannot be adjudicated here, so it \
+                 settles nothing: {detail}"
+            ),
             RuleViolation::UnknownVerifierKind { kind } => write!(
                 f,
                 "no verifier registered for kind {kind}; known: [{}]",
@@ -1095,6 +1290,652 @@ impl Node {
     /// referencing an unknown objective, and [`Node::audit`] names the entry.
     pub fn objectives(&self) -> BTreeMap<String, Objective> {
         self.decode_objectives().0
+    }
+
+    // -- interactive fraud proofs -------------------------------------------
+
+    /// Every challenge in the log, by id, in log order.
+    pub fn challenges(&self) -> BTreeMap<String, Challenge> {
+        let mut out = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CHALLENGE) {
+            if let Ok(record) = Challenge::from_value(&entry.payload) {
+                out.insert(record.id(), record);
+            }
+        }
+        out
+    }
+
+    /// The claim a challenge disputes, and the objective behind it.
+    fn disputed_claim(&self, challenge: &Challenge) -> Option<(Claim, Objective)> {
+        let claim = self
+            .ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .filter_map(|entry| Claim::from_value(&entry.payload).ok())
+            .find(|claim| claim.id() == challenge.claim_id)?;
+        let objective = self.objectives().get(&claim.objective_id).cloned()?;
+        Some((claim, objective))
+    }
+
+    /// The trace a claim committed to: `(root, states)`.
+    ///
+    /// Read off the artifact rather than a record of its own. The commitment
+    /// has to predate every bisection move or a defender could choose their
+    /// trace after seeing the challenger's — and the artifact is already sealed
+    /// by the commitment hash, epochs before any of this, which is a stronger
+    /// ordering guarantee than a separate record could offer.
+    pub fn committed_trace(claim: &Claim) -> Option<(String, u64)> {
+        let root = claim.artifact.get("trace_root")?.as_str()?.to_string();
+        let states = claim.artifact.get("trace_states")?.as_u64()?;
+        Some((root, states))
+    }
+
+    /// Open a bonded objection to a settled claim's committed trace.
+    ///
+    /// The refusals, each answering a specific attack:
+    ///
+    /// - **unsigned, or signed by somebody else.** An objection by nobody has
+    ///   nobody to slash, which makes it free, and a free objection is a denial
+    ///   of service on every honest submitter.
+    /// - **no such claim, or one nobody accepted.** A dispute over a claim the
+    ///   verifier already rejected settles nothing and locks a bond over
+    ///   nothing.
+    /// - **an objective with no stepper.** Not bisectable, so the dispute could
+    ///   never be adjudicated — and an unadjudicable dispute that still holds a
+    ///   bond is a griefing tool rather than a mechanism.
+    /// - **no trace commitment on the artifact.** Same reason: nothing to
+    ///   bisect against.
+    /// - **a different length.** Two parties claiming different lengths have
+    ///   already stated their disagreement in public; a search would be
+    ///   theatre.
+    /// - **the same root.** Agreement is not a dispute.
+    /// - **out of the window.** A claim has to become final at some point, or
+    ///   no payout is ever safe to spend.
+    /// - **a bond the challenger does not have.** The stake is the mechanism.
+    pub fn post_challenge(
+        &mut self,
+        challenge: &Challenge,
+        ts: &str,
+    ) -> Result<String, RuleViolation> {
+        challenge
+            .validate()
+            .map_err(RuleViolation::InadmissibleRecord)?;
+        challenge.verify_signature()?;
+
+        let (claim, objective) =
+            self.disputed_claim(challenge)
+                .ok_or_else(|| RuleViolation::UnknownClaim {
+                    claim_id: challenge.claim_id.clone(),
+                })?;
+        if !self.accepted_claim_ids().contains(&challenge.claim_id) {
+            return Err(RuleViolation::ChallengeOfUnacceptedClaim {
+                claim_id: challenge.claim_id.clone(),
+            });
+        }
+        if !crate::challenge::Stepper::declared(&objective.verifier) {
+            return Err(RuleViolation::ObjectiveNotBisectable {
+                objective_id: claim.objective_id.clone(),
+            });
+        }
+        let (root, states) =
+            Node::committed_trace(&claim).ok_or_else(|| RuleViolation::NoTraceCommitment {
+                claim_id: challenge.claim_id.clone(),
+            })?;
+        if states != challenge.states {
+            return Err(RuleViolation::TraceLengthMismatch {
+                claimed: states,
+                challenged: challenge.states,
+            });
+        }
+        if root == challenge.root {
+            return Err(RuleViolation::ChallengeAgrees {
+                claim_id: challenge.claim_id.clone(),
+            });
+        }
+
+        let opened_at = epoch_of_timestamp(CHALLENGE, ts)?;
+        let claim_epoch = epoch_of_timestamp(CLAIM, &claim.created_at)?;
+        let closes = claim_epoch.saturating_add(CHALLENGE_WINDOW_EPOCHS);
+        if opened_at > closes {
+            return Err(RuleViolation::ChallengeWindowClosed {
+                claim_id: challenge.claim_id.clone(),
+                closed_at: closes,
+                opened_at,
+            });
+        }
+
+        // One live objection per (claim, challenger). Without this a challenger
+        // opens a hundred against one claim, and the defender must answer all
+        // of them or forfeit each -- which turns a mechanism that costs a
+        // liar money into one that costs an honest submitter time.
+        for existing in self.challenges().values() {
+            if existing.claim_id == challenge.claim_id
+                && existing.challenger == challenge.challenger
+            {
+                return Err(RuleViolation::DuplicateChallenge {
+                    claim_id: challenge.claim_id.clone(),
+                    challenger: challenge.challenger.clone(),
+                });
+            }
+        }
+
+        self.afford(&challenge.challenger, u128::from(challenge.bond))?;
+        let id = challenge.id();
+        self.append(CHALLENGE, challenge.to_value(), ts)?;
+        Ok(id)
+    }
+
+    /// Which side of a dispute an identity is on, if either.
+    fn side_of(&self, challenge: &Challenge, mover: &str) -> Option<crate::challenge::Side> {
+        if mover == challenge.challenger {
+            return Some(crate::challenge::Side::Challenger);
+        }
+        let (claim, _) = self.disputed_claim(challenge)?;
+        (claim.submitter == mover).then_some(crate::challenge::Side::Defender)
+    }
+
+    /// Which side of a dispute an identity is on, by challenge id.
+    ///
+    /// Public because a party needs it to know whether the log is waiting on
+    /// *them*, and because nothing about the answer is private: the claim names
+    /// its submitter and the challenge names its challenger, both in the open.
+    pub fn side_for(&self, challenge_id: &str, identity: &str) -> Option<crate::challenge::Side> {
+        let challenge = self.challenges().get(challenge_id)?.clone();
+        self.side_of(&challenge, identity)
+    }
+
+    /// Every bisection move recorded against a challenge, in log order.
+    fn moves_of(&self, challenge_id: &str) -> Vec<BisectionMove> {
+        self.ledger
+            .entries_of_kind(BISECTION)
+            .into_iter()
+            .filter_map(|entry| BisectionMove::from_value(&entry.payload).ok())
+            .filter(|record| record.challenge_id == challenge_id)
+            .filter(|record| record.verify_signature().is_ok())
+            .collect()
+    }
+
+    /// A dispute as the log leaves it.
+    ///
+    /// Folded from the records every time, never cached. A node that kept
+    /// dispute state in memory would eventually disagree with a node that
+    /// rebuilt it, and the whole point of putting an interactive protocol on an
+    /// append-only log is that the transcript *is* the state.
+    pub fn dispute(&self, challenge_id: &str) -> Option<DisputeState> {
+        let challenge = self.challenges().get(challenge_id)?.clone();
+        let (claim, _) = self.disputed_claim(&challenge)?;
+        let (defender_root, states) = Node::committed_trace(&claim)?;
+        let last = states.saturating_sub(1) as usize;
+        let moves = self.moves_of(challenge_id);
+
+        // Phase one: the four endpoint moves. Until all four exist the
+        // invariant the search rests on -- agreed at the bottom, disagreed at
+        // the top -- is not witnessed, and `Dispute::open` refuses to pretend
+        // it is.
+        let mut endpoints: BTreeMap<(usize, crate::challenge::Side), crate::challenge::Move> =
+            BTreeMap::new();
+        let mut rest: Vec<(crate::challenge::Side, crate::challenge::Move)> = Vec::new();
+        for record in &moves {
+            let Some(side) = self.side_of(&challenge, &record.mover) else {
+                continue;
+            };
+            let index = record.index as usize;
+            let mv = crate::challenge::Move {
+                challenge: challenge_id.to_string(),
+                index,
+                state: record.state.clone(),
+                path: crate::canonical::Inclusion {
+                    index,
+                    leaves: states as usize,
+                    siblings: record.path.clone(),
+                },
+            };
+            if index == 0 || index == last {
+                endpoints.entry((index, side)).or_insert(mv);
+            } else {
+                rest.push((side, mv));
+            }
+        }
+        let need = [
+            (0, crate::challenge::Side::Defender),
+            (0, crate::challenge::Side::Challenger),
+            (last, crate::challenge::Side::Defender),
+            (last, crate::challenge::Side::Challenger),
+        ];
+        let missing: Vec<(usize, crate::challenge::Side)> = need
+            .into_iter()
+            .filter(|key| !endpoints.contains_key(key))
+            .collect();
+        if !missing.is_empty() {
+            return Some(DisputeState::AwaitingEndpoints {
+                challenge: challenge.clone(),
+                missing,
+            });
+        }
+
+        let ends = crate::challenge::Endpoints {
+            defender_start: endpoints[&(0, crate::challenge::Side::Defender)].clone(),
+            challenger_start: endpoints[&(0, crate::challenge::Side::Challenger)].clone(),
+            defender_final: endpoints[&(last, crate::challenge::Side::Defender)].clone(),
+            challenger_final: endpoints[&(last, crate::challenge::Side::Challenger)].clone(),
+        };
+        let mut dispute = match crate::challenge::Dispute::open(
+            challenge_id,
+            defender_root,
+            challenge.root.clone(),
+            states as usize,
+            ends,
+        ) {
+            Ok(dispute) => dispute,
+            // A challenge whose endpoints cannot found a dispute is void, and
+            // the challenger pays for it: they staked on an objection that was
+            // never well formed.
+            Err(why) => {
+                return Some(DisputeState::Void {
+                    challenge: challenge.clone(),
+                    why,
+                })
+            }
+        };
+        for (side, mv) in rest {
+            // A move the game did not ask for is skipped rather than fatal.
+            // `post_bisection` refuses it at admission; a log that somehow
+            // carries one must still be readable, and the audit is what says
+            // it should not be there.
+            let _ = dispute.play(side, &mv);
+        }
+        Some(DisputeState::Live {
+            challenge: challenge.clone(),
+            dispute: Box::new(dispute),
+        })
+    }
+
+    /// Answer one bisection query.
+    pub fn post_bisection(
+        &mut self,
+        record: &BisectionMove,
+        ts: &str,
+    ) -> Result<(), RuleViolation> {
+        record
+            .validate()
+            .map_err(RuleViolation::InadmissibleRecord)?;
+        record.verify_signature()?;
+
+        let challenge = self
+            .challenges()
+            .get(&record.challenge_id)
+            .cloned()
+            .ok_or_else(|| RuleViolation::UnknownChallenge {
+                challenge_id: record.challenge_id.clone(),
+            })?;
+        let side =
+            self.side_of(&challenge, &record.mover)
+                .ok_or_else(|| RuleViolation::NotAParty {
+                    challenge_id: record.challenge_id.clone(),
+                    mover: record.mover.clone(),
+                })?;
+        if self.challenge_outcome(&record.challenge_id).is_some() {
+            return Err(RuleViolation::ChallengeDecided {
+                challenge_id: record.challenge_id.clone(),
+            });
+        }
+
+        let (claim, _) =
+            self.disputed_claim(&challenge)
+                .ok_or_else(|| RuleViolation::UnknownClaim {
+                    claim_id: challenge.claim_id.clone(),
+                })?;
+        let (defender_root, states) =
+            Node::committed_trace(&claim).ok_or_else(|| RuleViolation::NoTraceCommitment {
+                claim_id: challenge.claim_id.clone(),
+            })?;
+        let root = match side {
+            crate::challenge::Side::Defender => defender_root,
+            crate::challenge::Side::Challenger => challenge.root.clone(),
+        };
+        let index = record.index as usize;
+        let mv = crate::challenge::Move {
+            challenge: record.challenge_id.clone(),
+            index,
+            state: record.state.clone(),
+            path: crate::canonical::Inclusion {
+                index,
+                leaves: states as usize,
+                siblings: record.path.clone(),
+            },
+        };
+        // Checked here, before anything else about the move is considered: a
+        // party that could answer with a state it never committed to would win
+        // every dispute by playing whatever beats the other side this round.
+        if !mv.opens(&root) {
+            return Err(RuleViolation::MoveNotUnderRoot {
+                challenge_id: record.challenge_id.clone(),
+                index: record.index,
+            });
+        }
+
+        let last = states.saturating_sub(1) as usize;
+        match self.dispute(&record.challenge_id) {
+            Some(DisputeState::AwaitingEndpoints { missing, .. }) => {
+                if !missing.contains(&(index, side)) {
+                    return Err(RuleViolation::MoveOutOfTurn {
+                        challenge_id: record.challenge_id.clone(),
+                        index: record.index,
+                    });
+                }
+                if index != 0 && index != last {
+                    return Err(RuleViolation::MoveOutOfTurn {
+                        challenge_id: record.challenge_id.clone(),
+                        index: record.index,
+                    });
+                }
+            }
+            Some(DisputeState::Live { dispute, .. }) => match dispute.next() {
+                crate::challenge::Next::Open {
+                    index: asked,
+                    waiting_on,
+                } => {
+                    if index != asked || !waiting_on.contains(&side) {
+                        return Err(RuleViolation::MoveOutOfTurn {
+                            challenge_id: record.challenge_id.clone(),
+                            index: record.index,
+                        });
+                    }
+                }
+                _ => {
+                    return Err(RuleViolation::MoveOutOfTurn {
+                        challenge_id: record.challenge_id.clone(),
+                        index: record.index,
+                    })
+                }
+            },
+            Some(DisputeState::Void { .. }) | None => {
+                return Err(RuleViolation::ChallengeDecided {
+                    challenge_id: record.challenge_id.clone(),
+                })
+            }
+        }
+
+        self.append(BISECTION, record.to_value(), ts)?;
+        Ok(())
+    }
+
+    /// The recorded outcome of a dispute, if it has one.
+    pub fn challenge_outcome(&self, challenge_id: &str) -> Option<Value> {
+        self.ledger
+            .entries_of_kind(CHALLENGE_SETTLEMENT)
+            .into_iter()
+            .find(|entry| payload_str(&entry.payload, "challenge_id") == Some(challenge_id))
+            .map(|entry| entry.payload.clone())
+    }
+
+    /// Decide a dispute and move the money.
+    ///
+    /// Two ways a dispute ends, and the record says which:
+    ///
+    /// - **adjudicated.** The search narrowed to one step, and running it
+    ///   decides who was right. One step, whatever the trace length; see
+    ///   [`crate::challenge`].
+    /// - **forfeited.** A party owed a move and let
+    ///   [`CHALLENGE_WINDOW_EPOCHS`] pass without making it. A liar's dominant
+    ///   strategy against any interactive protocol is to play until the search
+    ///   reaches the step where they lied and then stop, so silence has to
+    ///   lose.
+    ///
+    /// What moves:
+    ///
+    /// - the **challenger's bond**, to the defender, when the defence holds;
+    /// - the **defender's exposure**, to the challenger, when it does not.
+    ///
+    /// The defender posts no bond of their own, and what they risk instead is
+    /// the payout for the claim under dispute — capped at what they still hold,
+    /// because the log cannot take units that are not there. That cap is a real
+    /// residual and it is stated rather than hidden: a defender who spends the
+    /// reward before the window closes keeps the difference. Closing it means
+    /// holding a bisectable claim's payout until its window shuts, which is a
+    /// change to the settlement path in both implementations and is the same
+    /// missing piece as bonded availability.
+    ///
+    /// An adjudication that cannot run settles **nothing**. A stepper this node
+    /// cannot execute is a fact about this node, and a dispute decided against
+    /// whoever happens to be accused when a machine breaks is worse than a
+    /// dispute left open.
+    pub fn settle_challenge(
+        &mut self,
+        challenge_id: &str,
+        ts: &str,
+    ) -> Result<Value, RuleViolation> {
+        if let Some(existing) = self.challenge_outcome(challenge_id) {
+            return Ok(existing);
+        }
+        let state = self
+            .dispute(challenge_id)
+            .ok_or_else(|| RuleViolation::UnknownChallenge {
+                challenge_id: challenge_id.to_string(),
+            })?;
+
+        let (challenge, winner, why) = match state {
+            // A challenge whose endpoints never founded a dispute is void, and
+            // the challenger pays: they staked on an objection that was never
+            // well formed.
+            DisputeState::Void { challenge, why } => (
+                challenge,
+                crate::challenge::Side::Defender,
+                format!("the challenge was never well founded: {why}"),
+            ),
+            DisputeState::AwaitingEndpoints { challenge, missing } => {
+                let owes = self.overdue(challenge_id, ts)?;
+                let Some(side) = owes else {
+                    return Err(RuleViolation::ChallengeStillOpen {
+                        challenge_id: challenge_id.to_string(),
+                    });
+                };
+                // Whoever is still missing an endpoint *and* out of time.
+                if !missing.iter().any(|(_, who)| *who == side) {
+                    return Err(RuleViolation::ChallengeStillOpen {
+                        challenge_id: challenge_id.to_string(),
+                    });
+                }
+                (
+                    challenge,
+                    side.other(),
+                    format!("{side} did not open its endpoints in time"),
+                )
+            }
+            DisputeState::Live {
+                challenge,
+                mut dispute,
+            } => match dispute.next() {
+                crate::challenge::Next::Adjudicate { .. } => {
+                    let (_, objective) = self.disputed_claim(&challenge).ok_or_else(|| {
+                        RuleViolation::UnknownClaim {
+                            claim_id: challenge.claim_id.clone(),
+                        }
+                    })?;
+                    let stepper =
+                        crate::challenge::Stepper::from_spec(&self.registry, &objective.verifier)
+                            .map_err(|why| RuleViolation::AdjudicationUnavailable {
+                            challenge_id: challenge_id.to_string(),
+                            detail: why.to_string(),
+                        })?;
+                    let outcome = dispute.adjudicate(&stepper).map_err(|why| {
+                        RuleViolation::AdjudicationUnavailable {
+                            challenge_id: challenge_id.to_string(),
+                            detail: why.to_string(),
+                        }
+                    })?;
+                    (challenge, outcome.winner(), format!("{outcome}"))
+                }
+                crate::challenge::Next::Open { waiting_on, .. } => {
+                    let Some(side) = self.overdue(challenge_id, ts)? else {
+                        return Err(RuleViolation::ChallengeStillOpen {
+                            challenge_id: challenge_id.to_string(),
+                        });
+                    };
+                    if !waiting_on.contains(&side) {
+                        return Err(RuleViolation::ChallengeStillOpen {
+                            challenge_id: challenge_id.to_string(),
+                        });
+                    }
+                    (challenge, side.other(), format!("{side} stopped answering"))
+                }
+                crate::challenge::Next::Done(outcome) => {
+                    (challenge, outcome.winner(), format!("{outcome}"))
+                }
+            },
+        };
+
+        let (claim, objective) =
+            self.disputed_claim(&challenge)
+                .ok_or_else(|| RuleViolation::UnknownClaim {
+                    claim_id: challenge.claim_id.clone(),
+                })?;
+        let (winner_id, loser_id, units) = match winner {
+            crate::challenge::Side::Defender => (
+                claim.submitter.clone(),
+                challenge.challenger.clone(),
+                u128::from(challenge.bond),
+            ),
+            crate::challenge::Side::Challenger => {
+                // Capped at what the defender still holds, and at the reward
+                // the disputed claim paid. Taking more than the claim was worth
+                // would make a lost dispute cost more than the lie could ever
+                // have earned, which is a different mechanism with different
+                // incentives -- and one nobody would submit under.
+                let held = self
+                    .balances_within(self.ledger.len())
+                    .get(&claim.submitter)
+                    .copied()
+                    .unwrap_or(0);
+                (
+                    challenge.challenger.clone(),
+                    claim.submitter.clone(),
+                    held.min(u128::from(objective.reward)),
+                )
+            }
+        };
+
+        let record = Value::object([
+            ("challenge_id", Value::string(challenge_id)),
+            ("claim_id", Value::string(challenge.claim_id.clone())),
+            ("detail", Value::string(why)),
+            ("loser", Value::string(loser_id)),
+            ("units", Value::Int(units as i128)),
+            ("winner", Value::string(winner_id)),
+            ("winning_side", Value::string(winner.as_str())),
+        ]);
+        self.append(CHALLENGE_SETTLEMENT, record.clone(), ts)?;
+        Ok(record)
+    }
+
+    /// Which side, if either, owes a move and has run out of time.
+    ///
+    /// Time is measured from the last record written *about this dispute* — its
+    /// opening if nothing has been played yet — against `ts`, both converted to
+    /// epochs from the timestamps in the records. No clock is read, so two
+    /// auditors reading the same log agree about who forfeited.
+    fn overdue(
+        &self,
+        challenge_id: &str,
+        ts: &str,
+    ) -> Result<Option<crate::challenge::Side>, RuleViolation> {
+        let Some(state) = self.dispute(challenge_id) else {
+            return Ok(None);
+        };
+        let challenge = state.challenge().clone();
+        let owes: Vec<crate::challenge::Side> = match &state {
+            DisputeState::AwaitingEndpoints { missing, .. } => {
+                let mut sides: Vec<crate::challenge::Side> =
+                    missing.iter().map(|(_, side)| *side).collect();
+                sides.sort();
+                sides.dedup();
+                sides
+            }
+            DisputeState::Live { dispute, .. } => match dispute.next() {
+                crate::challenge::Next::Open { waiting_on, .. } => waiting_on,
+                _ => Vec::new(),
+            },
+            DisputeState::Void { .. } => Vec::new(),
+        };
+        if owes.len() != 1 {
+            // Nobody owes anything, or both do. Both owing is the opening of a
+            // round, where neither party has had a turn yet and neither can be
+            // said to be stalling the other.
+            return Ok(None);
+        }
+
+        let last_ts = self
+            .moves_of(challenge_id)
+            .iter()
+            .map(|record| record.created_at.clone())
+            .next_back()
+            .unwrap_or_else(|| challenge.created_at.clone());
+        let last = epoch_of_timestamp(BISECTION, &last_ts)?;
+        let now = epoch_of_timestamp(CHALLENGE_SETTLEMENT, ts)?;
+        if now > last.saturating_add(CHALLENGE_WINDOW_EPOCHS) {
+            Ok(Some(owes[0]))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Bonds locked behind live challenges, per identity.
+    ///
+    /// A live challenge's bond is spent-but-not-gone, exactly like an
+    /// undertaking's: it can be lost, so it cannot also be staked somewhere
+    /// else. Released when the dispute settles, because the settlement record
+    /// then says where it went.
+    fn challenge_bonds_within(&self, positions: usize) -> BTreeMap<String, u128> {
+        let decided: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(CHALLENGE_SETTLEMENT)
+            .into_iter()
+            .filter(|entry| (entry.seq as usize) < positions)
+            .filter_map(|entry| payload_str(&entry.payload, "challenge_id").map(str::to_string))
+            .collect();
+        let mut locked: BTreeMap<String, u128> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CHALLENGE) {
+            if (entry.seq as usize) >= positions {
+                continue;
+            }
+            let Ok(record) = Challenge::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.verify_signature().is_err() || decided.contains(&record.id()) {
+                continue;
+            }
+            let slot = locked.entry(record.challenger.clone()).or_insert(0);
+            *slot = slot.saturating_add(u128::from(record.bond));
+        }
+        locked
+    }
+
+    /// Net movement from decided disputes, per identity: `(credits, debits)`.
+    fn challenge_flows_within(
+        &self,
+        positions: usize,
+    ) -> (BTreeMap<String, u128>, BTreeMap<String, u128>) {
+        let (mut credits, mut debits) = (BTreeMap::new(), BTreeMap::new());
+        for entry in self.ledger.entries_of_kind(CHALLENGE_SETTLEMENT) {
+            if (entry.seq as usize) >= positions {
+                continue;
+            }
+            let units = entry
+                .payload
+                .get("units")
+                .and_then(Value::as_i128)
+                .unwrap_or(0)
+                .max(0) as u128;
+            if let Some(winner) = payload_str(&entry.payload, "winner") {
+                let slot = credits.entry(winner.to_string()).or_insert(0u128);
+                *slot = slot.saturating_add(units);
+            }
+            if let Some(loser) = payload_str(&entry.payload, "loser") {
+                let slot = debits.entry(loser.to_string()).or_insert(0u128);
+                *slot = slot.saturating_add(units);
+            }
+        }
+        (credits, debits)
     }
 
     /// Announce a peer identity, or move one to a new address.
@@ -2600,6 +3441,22 @@ impl Node {
             let slot = committed.entry(funder).or_insert(0);
             *slot = slot.saturating_add(charged);
         }
+        // A live challenge's bond is spent-but-not-gone in exactly the sense an
+        // undertaking's is: it can be lost, so it must not also be staked
+        // somewhere else. Released when the dispute settles, because the
+        // settlement record then says where it went.
+        for (challenger, bonded) in self.challenge_bonds_within(positions) {
+            let slot = committed.entry(challenger).or_insert(0);
+            *slot = slot.saturating_add(bonded);
+        }
+        // A dispute the log has already decided is a *debit* on the loser, and
+        // it is not a commitment -- it is spent. Balances subtract it here
+        // rather than in `gross_paid_within`, which only ever adds, so that
+        // "what came in" and "what went out" stay two readable halves.
+        for (loser, lost) in self.challenge_flows_within(positions).1 {
+            let slot = committed.entry(loser).or_insert(0);
+            *slot = slot.saturating_add(lost);
+        }
         committed
     }
 
@@ -2779,6 +3636,14 @@ impl Node {
     /// filtered list would recurse forever. Both halves here read raw entries.
     fn gross_paid_within(&self, positions: usize) -> BTreeMap<String, u128> {
         let mut paid: BTreeMap<String, u128> = self.issued_within(positions);
+        // What a won dispute pays the winner. Not new money: every unit of it
+        // was debited from the loser in `committed_within`, so the two sides of
+        // a slash sum to zero and the supply is unchanged. The audit's
+        // conservation check is what proves that rather than this comment.
+        for (winner, won) in self.challenge_flows_within(positions).0 {
+            let slot = paid.entry(winner).or_insert(0u128);
+            *slot = slot.saturating_add(won);
+        }
         let entries = self.ledger.entries();
         for entry in &entries[..positions.min(entries.len())] {
             match entry.kind.as_str() {
@@ -4591,6 +5456,7 @@ impl Node {
 
         problems.append(&mut self.audit_batches());
         problems.append(&mut self.audit_beacons());
+        problems.append(&mut self.audit_challenges());
 
         for (objective_id, objective) in &objectives {
             let block = match &objective.ratchet {
@@ -4673,6 +5539,225 @@ impl Node {
                     .join(", "),
                 crate::partition::finality_epochs()
             ));
+        }
+
+        problems
+    }
+
+    /// Every way a dispute record can be wrong.
+    ///
+    /// Restated here rather than trusted from [`Node::post_challenge`] and
+    /// [`Node::post_bisection`], because a log can be assembled by something
+    /// other than this code path -- imported from a peer, drained from a queue,
+    /// or written by hand -- and an audit that only re-checked what its own
+    /// writer already checked would verify nothing. This module has been caught
+    /// out by exactly that twice.
+    ///
+    /// No stepper runs here. Re-adjudicating every settled dispute would make
+    /// an audit cost a subprocess per dispute, and the *outcome* is checkable
+    /// without one: the bisection transcript decides which step was in dispute,
+    /// and `audit --rerun` is where re-execution belongs.
+    fn audit_challenges(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let accepted = self.accepted_claim_ids();
+        let objectives = self.objectives();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+
+        for entry in self.ledger.entries_of_kind(CHALLENGE) {
+            let record = match Challenge::from_value(&entry.payload) {
+                Ok(record) => record,
+                Err(error) => {
+                    problems.push(format!(
+                        "challenge at entry {}: cannot be decoded ({error})",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            let id = record.id();
+            if record.verify_signature().is_err() {
+                problems.push(format!("challenge {id}: signature does not verify"));
+            }
+            if !seen.insert(format!("{}|{}", record.claim_id, record.challenger)) {
+                problems.push(format!(
+                    "challenge {id}: {} already had a live objection to claim {}",
+                    record.challenger, record.claim_id
+                ));
+            }
+            if !accepted.contains(&record.claim_id) {
+                problems.push(format!(
+                    "challenge {id}: claim {} was never accepted",
+                    record.claim_id
+                ));
+                continue;
+            }
+            let Some((claim, _)) = self.disputed_claim(&record) else {
+                problems.push(format!(
+                    "challenge {id}: claim {} is not in this log",
+                    record.claim_id
+                ));
+                continue;
+            };
+            match objectives.get(&claim.objective_id) {
+                Some(objective) if crate::challenge::Stepper::declared(&objective.verifier) => {}
+                _ => problems.push(format!(
+                    "challenge {id}: objective {} declares no stepper, so this \
+                     dispute could never be adjudicated",
+                    claim.objective_id
+                )),
+            }
+            match Node::committed_trace(&claim) {
+                None => problems.push(format!(
+                    "challenge {id}: claim {} commits to no trace",
+                    record.claim_id
+                )),
+                Some((root, states)) => {
+                    if root == record.root {
+                        problems.push(format!("challenge {id}: agrees with the claim it disputes"));
+                    }
+                    if states != record.states {
+                        problems.push(format!(
+                            "challenge {id}: claim commits to {states} states, challenge to {}",
+                            record.states
+                        ));
+                    }
+                }
+            }
+            // The window, re-derived from the two records' own timestamps.
+            if let (Ok(opened), Ok(claimed)) = (
+                epoch_of_timestamp(CHALLENGE, &record.created_at),
+                epoch_of_timestamp(CLAIM, &claim.created_at),
+            ) {
+                let closes = claimed.saturating_add(CHALLENGE_WINDOW_EPOCHS);
+                if opened > closes {
+                    problems.push(format!(
+                        "challenge {id}: opened in epoch {opened}, after the window \
+                         on claim {} shut at {closes}",
+                        record.claim_id
+                    ));
+                }
+            }
+        }
+
+        // Every move opens the root its author committed to, and its author is
+        // a party. This is the check the whole game rests on.
+        let challenges = self.challenges();
+        for entry in self.ledger.entries_of_kind(BISECTION) {
+            let record = match BisectionMove::from_value(&entry.payload) {
+                Ok(record) => record,
+                Err(error) => {
+                    problems.push(format!(
+                        "bisection at entry {}: cannot be decoded ({error})",
+                        entry.seq
+                    ));
+                    continue;
+                }
+            };
+            if record.verify_signature().is_err() {
+                problems.push(format!(
+                    "bisection at entry {}: signature does not verify",
+                    entry.seq
+                ));
+                continue;
+            }
+            let Some(challenge) = challenges.get(&record.challenge_id) else {
+                problems.push(format!(
+                    "bisection at entry {}: no challenge {}",
+                    entry.seq, record.challenge_id
+                ));
+                continue;
+            };
+            let Some(side) = self.side_of(challenge, &record.mover) else {
+                problems.push(format!(
+                    "bisection at entry {}: {} is not a party to {}",
+                    entry.seq, record.mover, record.challenge_id
+                ));
+                continue;
+            };
+            let Some((claim, _)) = self.disputed_claim(challenge) else {
+                continue;
+            };
+            let Some((defender_root, states)) = Node::committed_trace(&claim) else {
+                continue;
+            };
+            let root = match side {
+                crate::challenge::Side::Defender => defender_root,
+                crate::challenge::Side::Challenger => challenge.root.clone(),
+            };
+            let index = record.index as usize;
+            let mv = crate::challenge::Move {
+                challenge: record.challenge_id.clone(),
+                index,
+                state: record.state.clone(),
+                path: crate::canonical::Inclusion {
+                    index,
+                    leaves: states as usize,
+                    siblings: record.path.clone(),
+                },
+            };
+            if !mv.opens(&root) {
+                problems.push(format!(
+                    "bisection at entry {}: the {side}'s move at state {index} does \
+                     not open the root it committed to",
+                    entry.seq
+                ));
+            }
+        }
+
+        // A settlement names a party, moves no more than was at stake, and does
+        // not decide the same dispute twice.
+        let mut decided: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(CHALLENGE_SETTLEMENT) {
+            let Some(id) = payload_str(&entry.payload, "challenge_id") else {
+                problems.push(format!(
+                    "challenge settlement at entry {}: names no challenge",
+                    entry.seq
+                ));
+                continue;
+            };
+            if !decided.insert(id.to_string()) {
+                problems.push(format!("challenge {id}: settled more than once"));
+            }
+            let Some(challenge) = challenges.get(id) else {
+                problems.push(format!(
+                    "challenge settlement at entry {}: no challenge {id}",
+                    entry.seq
+                ));
+                continue;
+            };
+            let units = entry
+                .payload
+                .get("units")
+                .and_then(Value::as_i128)
+                .unwrap_or(-1);
+            if units < 0 {
+                problems.push(format!("challenge {id}: settled a negative amount"));
+                continue;
+            }
+            let Some((claim, objective)) = self.disputed_claim(challenge) else {
+                continue;
+            };
+            let winner = payload_str(&entry.payload, "winner").unwrap_or_default();
+            let loser = payload_str(&entry.payload, "loser").unwrap_or_default();
+            let parties = [claim.submitter.as_str(), challenge.challenger.as_str()];
+            if !parties.contains(&winner) || !parties.contains(&loser) || winner == loser {
+                problems.push(format!(
+                    "challenge {id}: settled between {winner} and {loser}, who are \
+                     not the two parties"
+                ));
+            }
+            // The ceiling on either side: a challenger risks their bond, and a
+            // defender risks what the disputed claim paid them.
+            let ceiling = if loser == challenge.challenger {
+                u128::from(challenge.bond)
+            } else {
+                u128::from(objective.reward)
+            };
+            if units as u128 > ceiling {
+                problems.push(format!(
+                    "challenge {id}: moved {units} against a ceiling of {ceiling}"
+                ));
+            }
         }
 
         problems
