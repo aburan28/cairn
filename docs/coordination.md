@@ -18,7 +18,7 @@ results independently, and aggregate throughput collapses toward that of the
 single best solo participant. No amount of scheduling fixes this, because the
 participants are behaving correctly — the incentive is the bug.
 
-The fix is `cairn/frontier.py`: an objective carries a monotone best-known
+The fix is `src/frontier.rs`: an objective carries a monotone best-known
 score, and whoever moves it from `s0` to `s1` is paid in proportion to the
 distance moved.
 
@@ -64,7 +64,7 @@ throughput to buy a property the workload does not want. Divergence between
 nodes' populations is not a bug — it is the island model, and it preserves the
 search diversity the whole method depends on.
 
-### Population: `gossip.py`
+### Population: `src/gossip.rs`
 
 A bounded join-semilattice. Merge is commutative, associative, and idempotent,
 so any two nodes that have seen the same messages agree, with no rounds, no
@@ -98,7 +98,7 @@ record sync down to the AEAD context. Re-scoring happens on every arrival, and
 only for candidates this node actually asked for. See
 [p2p.md](p2p.md#population-anti-entropy).
 
-### Work split: `partition.py`
+### Work split: `src/partition.rs`
 
 No dispatcher, because assignment does not need agreement. Two nodes searching
 the same region is not an error — it is a little wasted compute, self-correcting

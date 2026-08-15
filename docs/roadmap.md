@@ -8,8 +8,8 @@ reverse of how these projects are usually built.
 One operator. Objectives with runnable pinned verifiers, commit–reveal,
 hash-linked append-only log, exact-conservation attribution, and an `audit` that
 re-derives every settled result from the artifacts. Plus the coordination layer:
-progressive bounties (`frontier.py`), a CRDT candidate population (`gossip.py`),
-and coordinator-free work assignment (`partition.py`).
+progressive bounties (`src/frontier.rs`), a CRDT candidate population
+(`src/gossip.rs`), and coordinator-free work assignment (`src/partition.rs`).
 
 The property this buys is not "no one is in charge". It is **anyone can check**
 — and that is most of the value of decentralization, at none of the cost.
@@ -486,7 +486,7 @@ downstream is unbacked.
 - [ ] Offers on the gossip transport, trades in the log — and purchased goods
       cited at submission, enforced the way the frontier citation already is.
 - [ ] A real randomness beacon (VDF or threshold signature) replacing the
-      ledger-head derivation in `partition.py`, which a sequencer can grind.
+      ledger-head derivation in `src/partition.rs`, which a sequencer can grind.
       This got more load-bearing when epoch-batched settlement started ordering
       a batch by that beacon: grinding the anchor now moves money, not just
       work assignment.
@@ -497,8 +497,8 @@ downstream is unbacked.
 
 Not an L1. A rollup on an established chain: the bootstrap circularity (stake
 value <- settled research <- chain) has no starting point, and the state
-transition is already the pure function in `node.py` with `audit()` as the
-re-derivation a fraud proof needs. See docs/consensus.md.
+transition is already the pure function in `src/node.rs` with `Node::audit` as
+the re-derivation a fraud proof needs. See docs/consensus.md.
 
 - [ ] Anchor commitments and settlement roots to a base layer.
 - [ ] Staked judgement layer for V4 questions, with disputes and slashing —
