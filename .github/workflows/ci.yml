@@ -278,7 +278,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      # v7. The inputs used here -- `node-version`, `cache`,
+      # `cache-dependency-path` -- are unchanged across v4..v7; what moved is the
+      # runner's bundled Node and the cache backend, neither of which this job
+      # pins. `actions/checkout` above is already on the same major line.
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
