@@ -109,6 +109,43 @@ the last three rows.
 | **the anchor is fixed before the epoch opens and outside anyone's choice** | **assumed** | and `not handled` in `docs/threat-model.md` under *beacon grinding*. The anchor is really the last entry of the previous epoch, so a submitter who lands the final append of their own commit epoch moves both halves of their rank at once. `src/node.rs` names this residual gap at `settle_due`; closing it needs a VDF or a threshold signature. A green run here is evidence about the **key**, not about the beacon it is hashed with |
 | restamping is free and unlimited | **assumed**, and modelled as such | the model gives a submitter two or three reachable claim ids rather than the thirty `test_settlement_order_cannot_be_ground_out_at_reveal_time` tries. The property is that the set of reachable *ranks* is a singleton, and a second element falsifies that no less than a thirtieth would |
 
+### `Sealed` — the envelope, the committee, and the submitter who never comes back
+
+Bound: 2 agents, 2 artifacts, a 2-of-3 committee with one liar seated, 2 epochs.
+3,506 distinct states.
+
+The only module here whose subject is a **composition of cryptographic
+primitives** rather than a rule about records. Hash commitment, AEAD, Shamir
+`t`-of-`n` and the KEM each carry their own assumption elsewhere on this page;
+what none of those assumptions covers is whether bolting them together in this
+order leaves a gap. That is what this checks.
+
+Every primitive is **assumed**, in the sense the table at the top gives the
+word — a hash is a tuple, an AEAD opens only under the key it was sealed with,
+`t-1` Shamir shares yield a well-formed wrong key indistinguishable from a
+forged one, and a share sealed to a seat is readable only by its holder. So a
+green run is evidence about the *protocol*, and none whatever about
+ChaCha20-Poly1305, Classic McEliece, or SHA-256.
+
+**There is no submitter action after `Seal`.** That absence is the property
+rather than an omission: if the liveness row below holds, it held with the
+submitter offline, jailed, or firewalled from the moment they committed, which
+is the attack `docs/censorship.md` §1 describes and the reason the module
+exists.
+
+| property | mark | note |
+|---|---|---|
+| **binding**: whatever opens is what its commitment bound | bounded-checked | `OpenedMatchesItsCommitment`. A sealer who seals something other than what they committed to is caught at the boundary for the price of one hash. Falsifiable two independent ways: `BindingChecked = FALSE` (the check omitted, or the nonce left out of the payload so it cannot be performed) and `AadBound = FALSE` (someone else's plaintext attributed to this commitment) |
+| nothing opens on fewer than `t` correct shares | bounded-checked | `NoOpenBelowThreshold`. Shamir's information-theoretic property carried through the composition: `t-1` shares do not open it slowly, they do not open it |
+| a share is only ever admitted from the identity the draw seated | bounded-checked | `NoSeatImpostor`. Without it a bystander fills `t` seats with noise and stalls every reveal they choose, because a Shamir point is not individually checkable. Falsifiable: `SeatBound = FALSE` |
+| no share lands in its commitment's own epoch | bounded-checked | `NoShareInCommitEpoch`. A committee that could publish immediately would open the artifact while the submission was still in flight. Falsifiable: `EpochGated = FALSE` |
+| reading early requires actually holding `t` seats | bounded-checked | `NoEarlyLeakWithoutCapture` — capture is the *only* route to an early read; not a bystander, not a liar, not the sequencer. Paired with `NothingLeaks`, which holds here and is falsified by the capture run |
+| **a sealed submission opens without the submitter** | bounded-checked | `EventuallyOpens`, under weak fairness on the epoch tick, on honest seats answering, and on opening. Conditional on `t` honest seats — with fewer the high side of the vice bites, which is the withholding run |
+| a lying member costs subsets to try, never the reveal | bounded-checked | inside `EventuallyOpens` rather than beside it: the shipped configuration **seats a liar**, and a liar's answer also consumes its seat, so a passing run is one where the two remaining seats carried the reveal with no margin |
+| the committee draw is honest | **assumed** | `Holder` is given. Whether the draw can be captured is `Partition`'s question and the beacon's, and `docs/threat-model.md` carries **committee capture** as **not handled**: the draw is over the log's peer records and is exactly as trustworthy as control of that set |
+| which member lied is identifiable | **not modelled, and false** | `open_sealed` routes around a liar by trying every `t`-subset; it never learns who. That is Shamir rather than an omission — attributing it needs a verifiable secret sharing scheme, and Feldman and Pedersen both need discrete log to be hard, which is the assumption this design declined to make. `docs/threat-model.md` marks the row *partial — routed around, not attributed* |
+| the economic window `V ≤ t·d·S′` and `V ≤ (n−t+1)·S′` | **not modelled** | numeric, and about what a seat is worth against what a bribe is worth. No model checker has an opinion. What *is* checked is the structural half that makes it a vice: `t` colluders suffice to read early, and `n−t+1` suffice to withhold forever |
+
 ### `Verification` — the four-status taxonomy
 
 Bound: 2 nodes, 2 artifacts, 2 seeds, 3 disruptions. 128,576 distinct states.
@@ -256,6 +293,12 @@ different depths — so those checks can be repeated in one line.
 | `EpochBatched = FALSE` — reveal permitted in the same epoch as the commitment | `NoFrontRunning` | 7 states |
 | `OrderKey = "claim"` — settlement keyed on the claim id, as §5 originally specified | `NothingToGrind` | 4 states |
 | `OrderKey = "claim"`, with `NothingToGrind` removed so the deeper trace surfaces | `OrderIsNotSubmitterChosen` | 7 states |
+| `BindingChecked = FALSE` — open accepts whatever came out of the envelope | `OpenedMatchesItsCommitment` | 6 states |
+| `AadBound = FALSE` — the envelope's associated data never compared to this submission's commitment | `OpenedMatchesItsCommitment` | 7 states |
+| `SeatBound = FALSE` — any peer may answer any seat | `NoSeatImpostor` | 4 states |
+| `EpochGated = FALSE` — a share may land in the commitment's own epoch | `NoShareInCommitEpoch` | 3 states |
+| `Colluders = {m1, m2}` — `t` members pool their shares | `NothingLeaks` | 3 states |
+| `Liars = {m2, m3}` — `n−t+1` seats withhold, checking `OpensRegardless` | temporal: the reveal stalls forever | 8 states |
 | `SeedPinned = FALSE` — each node draws its own seed | `HonestNodesAgree` | 3 states |
 | `RequireMaximal = FALSE` — the audit checks each settlement shown but never asks what was left out | `SettlementIsUniquelyDetermined` | 2 states |
 | the acyclicity guard applied to rewired graphs too | `HonestCitationsAreAcyclic` | 3 states |
@@ -409,6 +452,13 @@ Every result on this page is conditional on all of these.
    no module here can express a `u64` wrap. The money paths guard themselves in
    `u128` and are unit-tested.
 8. **The pinned verifier is a deterministic function of `(spec, artifact, seed)`.**
+8b. **ChaCha20-Poly1305 is a secure AEAD, Shamir sharing is information-theoretic
+   below its threshold, and a share sealed to a KEM public key is readable only
+   by its holder.** `Sealed` models all three by construction: no action
+   produces a plaintext from a wrong key, `t-1` shares yield nothing, and a
+   non-holder cannot emit a correct share. Forgery is unrepresentable rather
+   than hard, so nothing on this page is evidence about any of these primitives
+   — only about the protocol composing them.
 9. **Nodes agree about epoch boundaries.** `CAIRN_EPOCH_SECONDS` is a policy
    parameter; two nodes with different settings disagree about which reveals
    were legal, and that disagreement is outside every model here.

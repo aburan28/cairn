@@ -2,7 +2,7 @@
 
 The protocol, written down in a language a machine can disagree with.
 
-Ten modules, each with a `.cfg` naming the finite instance it is checked at.
+Eleven modules, each with a `.cfg` naming the finite instance it is checked at.
 `docs/formal-model.md` is the honest summary — which properties are **checked**,
 which are **bounded-checked**, and which are **assumed**. Read that before
 quoting anything from here.
@@ -55,6 +55,7 @@ Read them in this order; each uses vocabulary the previous one introduced.
 | `Ledger` | `src/ledger.rs` under an adversary who rewrites the file | a rewritten log is caught by re-hashing **or** by the published head; neither alone is enough, and the module says which attack each half misses |
 | `Checkpoint` | `src/checkpoint.rs`, and `verify --from` | `verify --from` accepts exactly when the reader's prefix at `height` is the prefix that was signed — both directions, including a reader holding *more* than the checkpoint covers |
 | `CommitReveal` | design §5 as shipped in `Node::settle_due`: commit in N, reveal in N+1, batch ordered by `H(beacon(epoch, anchor) ‖ commitment_hash)` | binding; **no in-flight front-running**; settlement order is a function of the beacon, so arrival-order permutations settle identically; and **the batch order is not influenced by anything a submitter chooses after the anchor is public**, which is why the key is the commitment hash and not the claim id |
+| `Sealed` | `src/sealed.rs` over `src/crypto/{envelope,shamir,kem}.rs`, plus `Node::committee_for` and `check_committee_share` | the composition of four primitives, which none of their individual assumptions covers: binding survives a dishonest sealer, nothing opens below the threshold, an envelope cannot be lifted between submissions, a bystander cannot fill a seat, a share cannot land in its commitment's own epoch — and the point of the whole design, that a sealed submission **opens without the submitter ever acting again** |
 | `Verification` | `src/verifiers/mod.rs` and the V3 statistical kind | `Unavailable` and `InvalidSpec` never settle; an outage never becomes a rejection; two honest nodes agree on any settling verdict; the objective reopens when the outage ends |
 | `Frontier` | `src/frontier.rs`, truncating integer arithmetic and all | the frontier is monotone; payouts telescope *exactly*; the pool is never overspent however finely the curve is chopped; a duplicate never pays twice |
 | `Attribution` | `src/attribution.rs`, on an attacker-supplied DAG | citations point backwards so honest graphs are acyclic; exact conservation on **every** graph, cycles included; decay is bounded |
@@ -65,16 +66,19 @@ Read them in this order; each uses vocabulary the previous one introduced.
 
 ## State-space bounds, and why these ones
 
-Every configuration is small on purpose. The whole suite runs in about
-**25 seconds** on a laptop; nothing here is near the two-minute budget, which
-leaves room for a future module without anyone having to re-tune the existing
-ones.
+Every configuration is small on purpose. At ten modules the whole suite ran in
+about **25 seconds** on a laptop, and that sentence used to end by saying the
+two-minute budget left room for a future module without re-tuning the existing
+ones. `Sealed` is that module, and it took the room as intended: about six
+seconds of its own, none of the other ten touched. Still nothing near the
+budget.
 
 | module | bound | states (distinct / generated) | depth |
 |---|---|---|---|
 | `Ledger` | 2 payloads, `MaxLen = 4` | 292,578 / 12,967,507 | 16 |
 | `Checkpoint` | 2 payloads, `MaxLen = 3` | 3,600 / 69,121 | 10 |
 | `CommitReveal` | 2 agents, 3 artifacts, 4 epochs, 6 ordering keys | 424 / 544 | 12 |
+| `Sealed` | 2 agents, 2 artifacts, 2-of-3 committee, 1 liar, 2 epochs | 3,506 / 11,630 | 12 |
 | `Verification` | 2 nodes, 2 artifacts, 2 seeds, 3 disruptions | 128,576 / 628,993 | 21 |
 | `Frontier` | 7 artifacts, span 6, reward 10, 6 submissions | 87 / 498 | 7 |
 | `Attribution` | 3 claims, δ = 1/2, depth 2, 2 rewires | 789 / 6,382 | 6 |

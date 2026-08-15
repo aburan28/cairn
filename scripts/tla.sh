@@ -34,6 +34,7 @@ MODULES=(
   Ledger
   Checkpoint
   CommitReveal
+  Sealed
   Verification
   Frontier
   Attribution

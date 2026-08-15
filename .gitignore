@@ -66,3 +66,8 @@ ui/.next/
 ui/out/
 ui/next-env.d.ts
 ui/tsconfig.tsbuildinfo
+
+# TLC's run directory. `scripts/tla.sh` cleans up after itself, but
+# spec/tla/README.md documents running one module by hand from the repo root,
+# and that leaves a timestamped `states/` behind every time.
+states/
