@@ -8,9 +8,14 @@ settled.
 # a node to read (from the repository root)
 make serve
 
-# the reader
-cd ui && npm install && npm run dev     # http://localhost:3000
+# the reader, in another terminal, also from the repository root
+make ui                                 # http://localhost:3000
 ```
+
+`make ui` installs from the committed lockfile with `npm ci` before starting the
+dev server. `cd ui && npm install && npm run dev` does the same thing by hand and
+resolves the lockfile rather than obeying it, which is the difference `npm ci`
+exists for. `make ui-check` runs what CI gates on: `tsc --noEmit` and a build.
 
 Point it elsewhere with `NEXT_PUBLIC_PROOFWORK_NODE`, or just edit the URL in
 the page — the whole value of this is comparing one node's head against a

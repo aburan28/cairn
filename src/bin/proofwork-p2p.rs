@@ -610,7 +610,22 @@ fn main() {
                     );
                 }
                 Err(error) => {
-                    log::warn!("outbound session: {error}");
+                    // The address, not just the error. With more than one
+                    // bootstrap file a bare "Connection refused" names neither
+                    // which peer is down nor which file to look at, and the
+                    // loop repeats it every five seconds forever.
+                    //
+                    // `Connection refused` in particular is worth telling apart
+                    // from the placeholder-key warning at startup: this one
+                    // comes from `transport::connect`, before a single
+                    // handshake byte, so it means nothing is listening there.
+                    // A wrong key gets *further* than this and fails in the
+                    // exchange.
+                    log::warn!(
+                        "outbound session to {} ({}): {error}",
+                        peer_id_string(&endpoint.peer.id()),
+                        endpoint.addr
+                    );
                     // Tell the DHT, or every lookup that chose this peer waits
                     // on it forever. `peers_for` hands out the next hop of each
                     // lookup in flight and expects exactly one answer per
