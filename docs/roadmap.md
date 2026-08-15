@@ -470,9 +470,37 @@ downstream is unbacked.
 
 - [ ] Contributed inference verified with a TOPLOC-class scheme, for the
       objectives where effort must be bought rather than output.
-- [ ] Bonded challenge windows and interactive fraud proofs over the replay
-      trace (the manifest already pins command, seed, and environment, which is
-      what makes a trace bisectable).
+- [~] **Interactive fraud proofs over the replay trace**
+      (`src/challenge.rs`, [fraud-proofs.md](fraud-proofs.md)). The game is
+      built; the bond is not.
+      Both parties commit to a Merkle root over the whole trace, then narrow
+      their disagreement by binary search until it is one step wide, and one
+      step of execution decides it. Every move opens a state against the
+      *mover's own* committed root, so the losing side cannot answer with
+      whatever state wins the current round -- which is the attack that would
+      make the whole thing worthless.
+      Measured on 256 states with the shipped Collatz stepper: 8 rounds of
+      search in 7.7ms, one step of adjudication in 31ms, full replay in 8.10s.
+      258x, and the ratio grows linearly with trace length because adjudication
+      is flat. A million states is 20 rounds; the 2^24 cap is 24 rounds, 48
+      records.
+      What makes an objective bisectable is a **stepper** -- a pinned entrypoint
+      from a state to the next one, since a command has an input and an output
+      and nothing in between two parties can point at. So bisectability is a
+      property an objective has or does not, and Collatz is the honest example
+      rather than a flattering one: `n -> n/2 or 3n+1` is already a step
+      function. `examples/collatz_bisectable/` pins one.
+      Two preconditions were found by tests failing rather than by review, and
+      both are now witnessed by the four moves a dispute opens with: a lie in
+      the *first* step left the interval's lower bound at a state nobody had
+      opened, so there was nothing to run; and two traces that diverge and
+      rejoin end on the same state, so the search terminated on an interval
+      whose endpoints both agree. The second is refused outright -- a challenger
+      who reaches the same answer by another route has contradicted nothing.
+      Still missing: **the money.** A dispute names a winner and moves nothing,
+      because nothing is staked. Same gap as availability sampling, for the same
+      reason -- it is a consensus rule about value, so it belongs in the rules
+      engine under both implementations with the audit re-deriving it.
 - [x] **Node-operator incentives designed and evaluated** (`src/incentive/`).
       Canaried bonded verification, availability sampling, and bonded share
       custody, with a harness that solves for the minimum canary rate, bond and
