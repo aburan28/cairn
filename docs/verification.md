@@ -78,7 +78,7 @@ the objective can be attacked with garbage.
 
 **4. Be pure.** Pinning source by hash is necessary and not sufficient. A
 checker that reads an unpinned file passes today and fails tomorrow at the same
-hash — `tests/test_node.py::test_audit_flags_a_settled_claim_that_now_fails_verification`
+hash — `src/node.rs::audit_reports_a_settled_claim_that_can_no_longer_be_re_verified`
 pins that hazard. Depend on the artifact and nothing else.
 
 ### Integers only

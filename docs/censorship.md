@@ -263,8 +263,9 @@ the limitation is explicit rather than discovered later.
 ### Status
 
 Implemented as `Objective.confidentiality` in both implementations
-(`records.rs`, `records.py`) and in `spec/objective.schema.json`. Three
-properties are worth stating because each is a decision rather than a detail:
+(`src/records.rs`, `reference/rust/src/records.rs`) and in
+`spec/objective.schema.json`. Three properties are worth stating because
+each is a decision rather than a detail:
 
 - **`sealed` is refused, not downgraded.** `validate` errors rather than
   quietly treating the request as `embargoed`. A funder who asked for "never
