@@ -68,6 +68,29 @@ export const SNAPSHOT = snapshot as unknown as Snapshot;
 /** The node this site reads. Same-origin unless told otherwise. */
 export const NODE_URL = process.env.NEXT_PUBLIC_CAIRN_NODE ?? "";
 
+/**
+ * The repository, which is the only external thing this site links to.
+ *
+ * One constant rather than the string typed into each page: the site links out
+ * dozens of times, and a moved repository should be one edit rather than a
+ * grep that misses two.
+ */
+export const REPO = "https://github.com/aburan28/distributed-researcher";
+
+/**
+ * A path inside the repository, on the default branch.
+ *
+ * Links rather than copies, and that is the point: every prose page here could
+ * restate what `docs/economics.md` says, and the restatement would be wrong
+ * within a month. The site is a way in, and the repository stays the source.
+ *
+ * A trailing slash means a directory, which GitHub serves under `tree` and not
+ * `blob`.
+ */
+export function repoLink(path: string): string {
+  return `${REPO}/${path.endsWith("/") ? "tree" : "blob"}/main/${path}`;
+}
+
 export type Feed = {
   objectives: Objective[];
   /** False when this came from the bundled log rather than a node. */

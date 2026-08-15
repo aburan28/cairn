@@ -7,8 +7,21 @@ A small Next.js app that is two things at once, from one build:
 * **the node's own reader**, embedded in the binary and served at `/ui/`, where
   the same pages read the node that served them.
 
-Routes: `/` the landing page, `/challenge?id=…` one objective, `/chain` the
-epoch chain, `/objectives`, `/peers`.
+Routes: `/` the landing page, `/how-it-works` the protocol, `/docs` an index of
+the design notes, `/challenge?id=…` one objective, `/chain` the epoch chain,
+`/objectives`, `/peers`.
+
+The first three are static prose and read no node; the rest are the reader. Both
+kinds ship in both mounts, which is the same "one app, not two" decision — an
+operator who followed a link to their own node's `/ui/` gets the explanation
+too, and the explanation cannot drift from the reader because there is only one
+of each.
+
+`/docs` links out to the repository rather than rendering `docs/*.md`. A
+markdown pipeline here would put a *copy* of every design note behind an
+official-looking URL, with no build step anywhere that could notice the copy
+going stale — and it would carry several hundred KB of prose into every node
+binary, since `build.rs` embeds this app whole.
 
 ## Nothing on it is simulated
 
