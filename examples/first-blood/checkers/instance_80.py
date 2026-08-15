@@ -46,7 +46,7 @@ N = 1175497345426922808444299
 GX = 431501422402526006168944
 GY = 165713249792560672976557
 BITS = 80
-SEED = b'cairn/first-blood/ecdlp/public-coin/v1'
+SEED = b'proofwork/first-blood/ecdlp/public-coin/v1'
 
 
 def _on_curve(x, y):

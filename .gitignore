@@ -39,6 +39,11 @@ venv/
 # never a source: committing one would put a second copy of a checker in the
 # repository, under a different path, that nothing checks against the first.
 .cairn/
+# The same directory under the name it had before the project was renamed.
+# `BlobStore::under` and `ShardStore::under` still read it when `.cairn/` is
+# absent, so a checkout that predates the rename keeps working -- and its
+# contents must stay untracked either way: a blob cache is derived data.
+.proofwork/
 
 # Written by setup.sh / `make mcp` with absolute paths for one machine.
 # Generated, not shared.

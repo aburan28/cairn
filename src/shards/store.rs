@@ -59,6 +59,14 @@ use crate::canonical::Value;
 /// for the same reason and against the same root.
 pub const STORE_DIR: &str = ".cairn/shards";
 
+/// Where shards lived when this project was called `proofwork`.
+///
+/// Read-only, and adopted only when [`STORE_DIR`] does not exist -- the same
+/// fallback [`crate::blobs::BlobStore::under`] carries, for the same reason: a
+/// rename should not make a node stop finding data it already holds. Removable
+/// once nobody is upgrading across the rename.
+pub const LEGACY_STORE_DIR: &str = ".proofwork/shards";
+
 /// The manifest's filename inside a blob's directory.
 ///
 /// Not a content address, and deliberately not one: it is the *only* entry in
@@ -141,9 +149,15 @@ pub struct ShardStore {
 impl ShardStore {
     /// The store belonging to a bundle root.
     pub fn under(root: impl AsRef<Path>) -> ShardStore {
-        ShardStore {
-            dir: root.as_ref().join(STORE_DIR),
+        let root = root.as_ref();
+        let current = root.join(STORE_DIR);
+        if !current.is_dir() {
+            let legacy = root.join(LEGACY_STORE_DIR);
+            if legacy.is_dir() {
+                return ShardStore { dir: legacy };
+            }
         }
+        ShardStore { dir: current }
     }
 
     /// A store at an explicit directory.

@@ -137,7 +137,11 @@ const HQC_SALT: usize = 16;
 // -- domain separation -----------------------------------------------------
 
 /// Domain separator for the hybrid combiner.
-const COMBINE_DOMAIN: &[u8] = b"cairn/kem/combine/v1";
+// Spelled `proofwork/` and not `cairn/`: this is a wire constant, not a
+// brand. It is mixed into a hash or a KDF, so changing it changes the
+// values every peer already computed -- the project rename left it alone
+// deliberately, exactly as it left the `pwenc1:` on-disk marker alone.
+const COMBINE_DOMAIN: &[u8] = b"proofwork/kem/combine/v1";
 
 /// Bytes in every shared secret this module produces, whatever the suite.
 pub const SHARED_SECRET_LEN: usize = 32;
@@ -1043,7 +1047,7 @@ fn absorb(hasher: &mut Sha256, field: &[u8]) {
 /// cosmetics.
 pub fn key_id(public: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(b"cairn/p2p/peer-id/v1");
+    h.update(b"proofwork/p2p/peer-id/v1");
     h.update(public);
     h.finalize().into()
 }

@@ -136,7 +136,11 @@ const VERSION: i128 = 2;
 /// a KEM encapsulation where it used to absorb two X25519 points. Leaving the
 /// string at `v1` would have meant one domain covering two different
 /// transcripts, which is exactly the collision the separator exists to stop.
-const SHARE_KDF_DOMAIN: &[u8] = b"cairn/censorship/envelope/share-key/v2";
+// Spelled `proofwork/` and not `cairn/`: this is a wire constant, not a
+// brand. It is mixed into a hash or a KDF, so changing it changes the
+// values every peer already computed -- the project rename left it alone
+// deliberately, exactly as it left the `pwenc1:` on-disk marker alone.
+const SHARE_KDF_DOMAIN: &[u8] = b"proofwork/censorship/envelope/share-key/v2";
 
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;

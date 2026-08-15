@@ -34,7 +34,11 @@ const VERSION: i128 = 1;
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const DIGEST_HEX_LEN: usize = 64;
-const REQUEST_KDF_DOMAIN: &[u8] = b"cairn/compute/request-key/v1";
+// Spelled `proofwork/` and not `cairn/`: this is a wire constant, not a
+// brand. It is mixed into a hash or a KDF, so changing it changes the
+// values every peer already computed -- the project rename left it alone
+// deliberately, exactly as it left the `pwenc1:` on-disk marker alone.
+const REQUEST_KDF_DOMAIN: &[u8] = b"proofwork/compute/request-key/v1";
 
 /// Trust signals a worker may advertise. A higher level satisfies a request
 /// that asks for a lower level, but none of these levels says that an inference

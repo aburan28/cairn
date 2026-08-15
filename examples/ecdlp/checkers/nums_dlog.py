@@ -40,7 +40,7 @@ graded ladder and the open Certicom frontier are in
 `examples/certicom-ecdlp/`.
 """
 
-SEED = "cairn ecdlp intro v1 45"
+SEED = "proofwork ecdlp intro v1 45"
 
 CURVE_P = 35184372088763
 CURVE_A = 17410361175639

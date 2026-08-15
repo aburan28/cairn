@@ -152,7 +152,11 @@ const SIG_LEN: usize = 64;
 /// `objective_id` and no length prefix is needed to stop two different objective
 /// ids deriving one key. If this constant ever becomes caller-controlled, that
 /// argument dies and a length prefix becomes mandatory.
-const PSEUDONYM_DOMAIN: &[u8] = b"cairn/censorship/identity/pseudonym/v1";
+// Spelled `proofwork/` and not `cairn/`: this is a wire constant, not a
+// brand. It is mixed into a hash or a KDF, so changing it changes the
+// values every peer already computed -- the project rename left it alone
+// deliberately, exactly as it left the `pwenc1:` on-disk marker alone.
+const PSEUDONYM_DOMAIN: &[u8] = b"proofwork/censorship/identity/pseudonym/v1";
 
 // -- errors ----------------------------------------------------------------
 

@@ -142,6 +142,13 @@ jobs:
           name: ui-out
           path: ui/out
 
+      # `build.rs` only warns when the export is missing, so that clippy, the
+      # test suite, rustdoc and the MSRV check keep working without a Node
+      # toolchain. A *release* is the one place that must not ship a binary
+      # whose /ui/ 404s, so the requirement is asserted here instead.
+      - name: the reader is present before the binaries are built
+        run: test -f ui/out/index.html
+
       - run: cargo build --release --locked --features ui --target ${{ matrix.target }}
 
       # All five binaries ship together: a node operator needs the CLI, the MCP

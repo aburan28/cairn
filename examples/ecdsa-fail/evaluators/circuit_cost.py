@@ -2,7 +2,7 @@
 
 Mirrors the launch benchmark's published score
 ``score = peak_qubits × avg_toffoli`` (lower is better), as a *cheap pinned
-fitness function* for the cairn proposer loop.
+fitness function* for the proofwork proposer loop.
 
 What this checks
 ----------------
@@ -47,7 +47,7 @@ def score(artifact: dict) -> int:
         return INVALID_SCORE
 
     product = qubits * toffoli
-    # i64 ceiling for cairn scores; refuse overflow as invalid rather than
+    # i64 ceiling for proofwork scores; refuse overflow as invalid rather than
     # wrapping (wrapping would invent a cheap score).
     if product > (2**63 - 1):
         return INVALID_SCORE
