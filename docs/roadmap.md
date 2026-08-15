@@ -466,6 +466,34 @@ downstream is unbacked.
       the break-even is a function of the objective's verifier tier and is
       computable before anything is funded.
 
+- [x] **An adversarial arena** (`src/arena/`, [arena.md](arena.md)): attack
+      strategies played *for money* against the real rules engine, with the
+      payoff read out of settled balances. Partly discharges the largest
+      antecedent in [proving-it.md](proving-it.md) -- that `src/incentive/` is a
+      model rather than a code path.
+      Every attack runs twice, with its defence and without, because a lone
+      number has no scale. Six verdicts rather than a bool: CLOSED, NEUTRAL
+      (the attacker earns no more than an honest player with the same
+      resources -- stronger than unprofitable), REFUSED (no admissible form at
+      all), PROTECTED (the victim is better off), OPEN, and INERT.
+      INERT is the one that keeps it honest: three of the first five scenarios
+      returned it, which correctly said *the scenario failed to set itself up*
+      rather than *the defence works*.
+      At seed 1: sybil splitting NEUTRAL (5,952 across eight keys against 5,994
+      for one, where a head count would have paid 10,608); availability
+      free-riding NEUTRAL (0 against 11,994); cheap-tier standing CLOSED (5,000
+      untyped, 0 spendable where it was wanted); bonded griefing PROTECTED (the
+      griefer forfeits 6,000 and its target ends 9,000 up instead of 3,000);
+      griefing a plain objective REFUSED. **Rubber-stamping is OPEN**, pinned
+      deliberately: a docket names the stamper and takes nothing, because
+      nothing is staked on verification, and the stamper ends ahead of an
+      identical honest operator by exactly the verification it skipped.
+      It found a real defect on its first run against a griefer that opened
+      objections and prosecuted none: at the start of a dispute both sides owe
+      their endpoints, so nobody was ever overdue and a challenge nobody played
+      stayed open forever with the bond locked. The burden of prosecution is now
+      the challenger's.
+
 ## Stage 2 — permissionless verification
 
 - [ ] Contributed inference verified with a TOPLOC-class scheme, for the

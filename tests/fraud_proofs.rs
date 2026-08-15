@@ -672,3 +672,51 @@ fn the_audit_names_a_dispute_that_should_never_have_been_admitted() {
         "the audit did not name the challenge: {problems:?}"
     );
 }
+
+/// A dispute nobody plays resolves against the challenger.
+///
+/// Found by `src/arena` playing a griefer that opened bonded objections and
+/// then did nothing at all. At the very start of a dispute *both* sides owe
+/// their opening endpoints, so `overdue` named nobody, no forfeit was ever due,
+/// and the challenge stayed open forever with the bond locked and no outcome —
+/// a defender who wanted the matter closed could not close it, and a griefer
+/// got an indefinite open case for the price of a bond it never actually lost.
+///
+/// The burden of prosecution is the challenger's: they opened the objection, so
+/// if they have made no move at all by the time the window has run, they
+/// forfeit whatever the defender has or has not done.
+#[test]
+fn a_dispute_neither_side_plays_resolves_against_the_challenger() {
+    if !have_python() {
+        eprintln!("skipping: no python3");
+        return;
+    }
+    let mut net = network("unplayed");
+    let (alice, bob) = (net.alice.clone(), net.bob.clone());
+    let truth = Trace::commit(honest()).expect("a trace");
+    let lie = Trace::commit(forged(11)).expect("a trace");
+    let claim = submit(&mut net, &alice, &artifact(&truth), "n-1");
+    let id = open_challenge(&mut net, &bob, &claim, &lie, 500);
+
+    // Nobody moves. Not one endpoint, from either side.
+    assert!(matches!(
+        net.node.settle_challenge(&id, MOVE_AT),
+        Err(RuleViolation::ChallengeStillOpen { .. })
+    ));
+
+    let outcome = net
+        .node
+        .settle_challenge(&id, LATE_AT)
+        .expect("an unprosecuted dispute closes once its window has run");
+    assert_eq!(
+        outcome.get("winning_side").and_then(Value::as_str),
+        Some("defender"),
+        "an objection nobody prosecuted was not decided against its author"
+    );
+    assert_eq!(outcome.get("units").and_then(Value::as_i128), Some(500));
+    assert!(
+        net.node.audit(true).is_empty(),
+        "{:?}",
+        net.node.audit(true)
+    );
+}

@@ -1917,15 +1917,34 @@ impl Node {
             },
             DisputeState::Void { .. } => Vec::new(),
         };
+        let moves = self.moves_of(challenge_id);
         if owes.len() != 1 {
-            // Nobody owes anything, or both do. Both owing is the opening of a
-            // round, where neither party has had a turn yet and neither can be
-            // said to be stalling the other.
+            // Nobody owes anything, or both do.
+            //
+            // Both owing is *usually* the opening of a round, where neither
+            // party has had a turn and neither can be said to be stalling the
+            // other. There is one exception, and the adversarial arena found it
+            // by playing a griefer that opened objections and then did nothing
+            // at all: at the very start of a dispute both sides owe their
+            // endpoints, so nobody was ever overdue, and a challenge nobody
+            // played stayed open forever with the bond locked and no outcome.
+            // A defender who wanted the matter closed could not close it.
+            //
+            // The burden of prosecution is the challenger's. They opened the
+            // objection; if they have made no move at all by the time the
+            // window has run, they forfeit, whatever the defender has or has
+            // not done.
+            if moves.is_empty() && owes.contains(&crate::challenge::Side::Challenger) {
+                let opened = epoch_of_timestamp(CHALLENGE, &challenge.created_at)?;
+                let now = epoch_of_timestamp(CHALLENGE_SETTLEMENT, ts)?;
+                if now > opened.saturating_add(CHALLENGE_WINDOW_EPOCHS) {
+                    return Ok(Some(crate::challenge::Side::Challenger));
+                }
+            }
             return Ok(None);
         }
 
-        let last_ts = self
-            .moves_of(challenge_id)
+        let last_ts = moves
             .iter()
             .map(|record| record.created_at.clone())
             .next_back()
@@ -1968,6 +1987,17 @@ impl Node {
             *slot = slot.saturating_add(u128::from(record.bond));
         }
         locked
+    }
+
+    /// What decided disputes have taken from each identity, permanently.
+    ///
+    /// Public because a *loss* is not visible in holdings: a slash credits the
+    /// winner and debits the loser through the commitment side, so a reader
+    /// summing what an identity holds sees the winner's gain and not the
+    /// loser's cost. The adversarial arena scored a griefer that forfeited
+    /// three bonds as having lost nothing until this existed.
+    pub fn challenge_debits(&self) -> BTreeMap<String, u128> {
+        self.challenge_flows_within(self.ledger.len()).1
     }
 
     /// Net movement from decided disputes, per identity: `(credits, debits)`.

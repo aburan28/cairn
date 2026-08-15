@@ -46,6 +46,14 @@ theory discharges none of them.
 
 ### 1. The model matches the code
 
+**Partly discharged since this was written.** `src/arena/` plays attack
+strategies for money against the real rules engine — real `Node`, real records,
+real settlement — and reads the payoff out of settled balances, with every
+attack run twice so the number is a difference rather than an assertion. It is
+not the whole of antecedent 1: it covers five attacks, one node, and simple
+timing, and it found a real defect in the challenge mechanism on its first run
+(`docs/arena.md`). What follows is still true of `src/incentive/` itself.
+
 This is the largest hole and it is not subtle: **`src/incentive/` is not a code
 path.** One of its three pieces now exists as running code -- canaries are
 generated, by `src/canary.rs`, against real objectives and real verifiers -- but

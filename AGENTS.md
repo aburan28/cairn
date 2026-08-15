@@ -112,6 +112,13 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `./scripts/demo.sh`, `./scripts/ratchet-demo.sh` and `./scripts/try-demo.sh`
   if you touched the CLI or the rules; they are the only checks that exercise
   epoch boundaries against a real clock rather than a fixture timestamp
+- `cargo run --release --bin arena` if you touched any *incentive*: a bond, a
+  pool split, a slash, a window, or what a settlement mints. It plays attack
+  strategies for money against the real rules engine and prints what each one
+  earned. A defence that stops working shows up as a verdict changing from
+  CLOSED/NEUTRAL/REFUSED/PROTECTED to OPEN, and `tests/arena.rs` pins them.
+  Read `docs/arena.md` before adding a scenario -- three of the first five
+  measured nothing, and the INERT verdict exists to say so out loud
 - Anything touching `src/tier.rs` or a balance: run `cargo test --test tiers`
   **and** revert the audit's copy of the rule to check the injection test still
   fails. A rule enforced only at admission is a rule a log imported from a peer

@@ -18,6 +18,7 @@
 //! 3. **Money arithmetic is checked.** Overflow returns an error rather than
 //!    wrapping, in debug and release alike.
 
+pub mod arena;
 pub mod attribution;
 pub mod blobs;
 pub mod canary;

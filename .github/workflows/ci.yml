@@ -52,6 +52,11 @@ jobs:
       # record kind reports "log verified" over money it did not look at,
       # which is how availability settlements went unchecked for a while.
       - run: ./scripts/dispute-demo.sh
+      # Adversarial strategies played for money against the real rules engine.
+      # The verdicts are asserted in `tests/arena.rs`; this run is the readable
+      # payoff table, and it exits non-zero if an attack that should be closed
+      # has re-opened.
+      - run: cargo run --release --bin arena
       # Runs the MCP server as a real process. The unit tests call handle_line
       # directly and structurally cannot catch a stray write to stdout, which is
       # the failure that breaks every MCP client and looks like their bug.
