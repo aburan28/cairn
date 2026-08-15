@@ -68,6 +68,7 @@ use crate::records::{
     Issuance, Objective, PeerRecord, Undertaking,
 };
 use crate::sealed::{OpenedSubmission, SealedSubmission};
+use crate::tier::{Ledger as TierLedger, Tier};
 use crate::verifiers::{self, Kind, Status, Verdict, VerifierRegistry};
 
 /// Log entry kinds this module writes and reads. Spelled once so a typo cannot
@@ -227,6 +228,18 @@ impl fmt::Display for Referrer {
 /// throw away the OS-level detail that makes a failed append diagnosable.
 #[derive(Debug)]
 pub enum RuleViolation {
+    /// A funder without enough units **of the right tier**.
+    ///
+    /// Distinct from [`RuleViolation::UnfundedReward`], which is about the
+    /// total. This one fires when the total is there and the *provenance* is
+    /// not: certificate earnings cannot fund Lean work, however many of them
+    /// there are. See [`crate::tier`].
+    UnfundedInTier {
+        funder: String,
+        tier: Tier,
+        reward: u128,
+        spendable: u128,
+    },
     /// A sealed submission worth more than its epoch's committee puts at risk.
     ///
     /// `V > t * d * S'` — the condition under which opening early *pays*, from
@@ -572,6 +585,16 @@ pub enum RuleViolation {
 impl fmt::Display for RuleViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RuleViolation::UnfundedInTier {
+                funder,
+                tier,
+                reward,
+                spendable,
+            } => write!(
+                f,
+                "{funder} offers {reward} units of {tier} work against {spendable} \
+                 spendable there; units earned in another tier do not convert"
+            ),
             RuleViolation::SealedValueExceedsCustody {
                 epoch,
                 exposure,
@@ -1240,7 +1263,19 @@ impl Node {
         // checks, because it is the only one that depends on the rest of the
         // log rather than on the record, and a record that is malformed should
         // be reported as malformed rather than as unaffordable.
+        //
+        // Twice, and the two say different things. `afford` asks whether the
+        // funder has the units at all; `afford_in` asks whether they have them
+        // in the tier this objective will pay out in. A funder with a fortune
+        // earned on millisecond certificate checks cannot post a Lean bounty
+        // with it, which is the entire point of `crate::tier` — the total is
+        // there and the provenance is not.
         self.afford(&objective.funder, u128::from(objective.reward))?;
+        self.afford_in(
+            &objective.funder,
+            u128::from(objective.reward),
+            Node::tier_of(objective),
+        )?;
 
         self.append(OBJECTIVE, objective.to_value(), ts)?;
         // How pinned code enters the network: the funder has the checker on
@@ -2160,6 +2195,207 @@ impl Node {
                 addr: peer.addr,
             })
             .collect())
+    }
+
+    // -- typed claim assets ---------------------------------------------------
+
+    /// The tier an objective settles in: the tier of its own verifier.
+    ///
+    /// Derived from the record rather than stored beside it. A stored field
+    /// would be a second place the tier could be written down, and two places
+    /// that must agree eventually will not — a settlement claiming a tier its
+    /// objective's verifier does not have is exactly the forgery this rule
+    /// exists to stop, and there is nothing to forge when the tier is the
+    /// verifier.
+    pub fn tier_of(objective: &Objective) -> Tier {
+        objective
+            .verifier
+            .get("kind")
+            .and_then(Value::as_str)
+            .and_then(Kind::parse)
+            .map(Tier::of_kind)
+            // Unreachable through `post_objective`, which refuses a kind no
+            // verifier answers to. A log assembled some other way can still
+            // carry one, and pricing it as universal would let a made-up
+            // verifier kind mint the fungible reserve. It mints nothing
+            // instead: the units land in a tier nothing can spend, which is the
+            // failure direction that costs the forger rather than everyone.
+            .unwrap_or(Tier::Earned(Kind::Certificate))
+    }
+
+    /// Every identity's holdings and promises, per tier.
+    ///
+    /// The typed version of [`Node::balances_within`], and the one the rules
+    /// consult. `balances_within` remains as the sum across tiers, because
+    /// "how much does this identity have" is still a question with an answer
+    /// and every existing caller asks it.
+    pub fn tiered_within(&self, positions: usize) -> BTreeMap<String, TierLedger> {
+        let mut out: BTreeMap<String, TierLedger> = BTreeMap::new();
+        let objectives = self.objectives();
+        let entries = self.ledger.entries();
+        let window = &entries[..positions.min(entries.len())];
+
+        // Genesis issuance: universal, and only in the genesis prefix. Reusing
+        // `issued_within` rather than re-walking, so a mint below the prefix is
+        // ignored here exactly as it is everywhere else.
+        for (holder, units) in self.issued_within(positions) {
+            out.entry(holder)
+                .or_default()
+                .credit(Tier::Universal, units);
+        }
+
+        for entry in window {
+            match entry.kind.as_str() {
+                // The one place a *typed* unit is minted.
+                SETTLEMENT => {
+                    let (Some(who), Some(reward)) = (
+                        payload_str(&entry.payload, "submitter"),
+                        entry.payload.get("reward").and_then(Value::as_u64),
+                    ) else {
+                        continue;
+                    };
+                    let tier = payload_str(&entry.payload, "objective_id")
+                        .and_then(|id| objectives.get(id))
+                        .map(Node::tier_of)
+                        // A settlement naming an objective this log does not
+                        // carry is a fault the audit reports; crediting it to
+                        // the universal reserve would turn that fault into
+                        // spendable money.
+                        .unwrap_or(Tier::Earned(Kind::Certificate));
+                    out.entry(who.to_string())
+                        .or_default()
+                        .credit(tier, u128::from(reward));
+                }
+                // Service payments. Universal, and deliberately: availability
+                // and custody are not verification, so there is no verifier
+                // whose tier they could carry, and typing them by the tier of
+                // whatever happened to be in the log that epoch would make a
+                // storage payment mean something about Lean.
+                AVAILABILITY_SETTLEMENT => {
+                    for row in entry
+                        .payload
+                        .get("paid")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                    {
+                        if let (Some(who), Some(reward)) = (
+                            payload_str(row, "identity"),
+                            row.get("reward").and_then(Value::as_u64),
+                        ) {
+                            out.entry(who.to_string())
+                                .or_default()
+                                .credit(Tier::Universal, u128::from(reward));
+                        }
+                    }
+                }
+                // A slash moves units that already existed, so the winner is
+                // credited in the same tier the loser is debited: universal,
+                // because a bond is posted from whatever covers it and the log
+                // does not record which units it drew on. Typing a slash by the
+                // disputed objective's tier would mint typed units out of a
+                // universal bond.
+                CHALLENGE_SETTLEMENT => {
+                    let units = entry
+                        .payload
+                        .get("units")
+                        .and_then(Value::as_i128)
+                        .unwrap_or(0)
+                        .max(0) as u128;
+                    if let Some(winner) = payload_str(&entry.payload, "winner") {
+                        out.entry(winner.to_string())
+                            .or_default()
+                            .credit(Tier::Universal, units);
+                    }
+                    if let Some(loser) = payload_str(&entry.payload, "loser") {
+                        out.entry(loser.to_string())
+                            .or_default()
+                            .commit(Tier::Universal, units);
+                    }
+                }
+                // An objective's whole reward is charged to its funder, in the
+                // tier the objective will pay out in. This is the rule with
+                // teeth: certificate earnings cannot fund Lean work.
+                OBJECTIVE => {
+                    if let Ok(objective) = Objective::from_value(&entry.payload) {
+                        out.entry(objective.funder.clone())
+                            .or_default()
+                            .commit(Node::tier_of(&objective), u128::from(objective.reward));
+                    }
+                }
+                // Everything below is a *service* bond rather than a purchase
+                // of verification, so it is charged in universal. See the
+                // residual in `docs/tiers.md`: a bond that could be posted from
+                // any tier would let cheap earnings back expensive duties,
+                // which is half the attack this module is about. Closing it
+                // means deciding which tier a committee seat is denominated in,
+                // and that is a question about what custody *is* rather than
+                // about arithmetic.
+                AVAILABILITY_POOL => {
+                    if let Ok(pool) = AvailabilityPool::from_value(&entry.payload) {
+                        out.entry(pool.funder.clone())
+                            .or_default()
+                            .commit(Tier::Universal, pool.ceiling());
+                    }
+                }
+                UNDERTAKING => {
+                    if let Ok(record) = Undertaking::from_value(&entry.payload) {
+                        if record.verify_signature().is_ok() {
+                            out.entry(record.identity.clone())
+                                .or_default()
+                                .commit(Tier::Universal, u128::from(record.bond));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Live challenge bonds, which `challenge_bonds_within` already resolves
+        // against the settlements that released them.
+        for (challenger, bonded) in self.challenge_bonds_within(positions) {
+            out.entry(challenger)
+                .or_default()
+                .commit(Tier::Universal, bonded);
+        }
+        out
+    }
+
+    /// [`Node::tiered_within`] over the whole log.
+    pub fn tiered(&self) -> BTreeMap<String, TierLedger> {
+        self.tiered_within(self.ledger.len())
+    }
+
+    /// What `identity` can still spend on work in `tier`.
+    ///
+    /// Its own uncommitted units of that tier, plus whatever of the universal
+    /// reserve no other tier's shortfall has already claimed. The second term
+    /// is why this cannot be answered from one column: a promise made in some
+    /// *other* tier may already be leaning on the reserve both were counting on.
+    pub fn spendable_in(&self, identity: &str, tier: Tier, positions: usize) -> u128 {
+        self.tiered_within(positions)
+            .get(identity)
+            .map(|ledger| ledger.spendable_in(tier))
+            .unwrap_or(0)
+    }
+
+    /// Can `funder` cover `amount` of work in `tier`?
+    ///
+    /// Gated on a declared supply for the same reason [`Node::afford`] is: a log
+    /// that has not said its units are scarce has not claimed this either.
+    fn afford_in(&self, funder: &str, amount: u128, tier: Tier) -> Result<(), RuleViolation> {
+        if !self.declares_supply() {
+            return Ok(());
+        }
+        let spendable = self.spendable_in(funder, tier, self.ledger.len());
+        if amount > spendable {
+            return Err(RuleViolation::UnfundedInTier {
+                funder: funder.to_string(),
+                tier,
+                reward: amount,
+                spendable,
+            });
+        }
+        Ok(())
     }
 
     /// Announce a peer identity, or move one to a new address.
@@ -5708,6 +5944,7 @@ impl Node {
         problems.append(&mut self.audit_beacons());
         problems.append(&mut self.audit_challenges());
         problems.append(&mut self.audit_sealed());
+        problems.append(&mut self.audit_tiers());
 
         for (objective_id, objective) in &objectives {
             let block = match &objective.ratchet {
@@ -5792,6 +6029,48 @@ impl Node {
             ));
         }
 
+        problems
+    }
+
+    /// Conservation, per identity **and per tier**.
+    ///
+    /// The whole-balance version already lives in [`Node::audit`] and it is not
+    /// enough on its own: an identity can hold exactly what it has promised in
+    /// total while having promised Lean units it earned on certificates. That
+    /// log balances and is still a forgery, because the promise it makes is one
+    /// the units behind it cannot keep.
+    ///
+    /// Silent on a log with no declared supply, like every other scarcity rule
+    /// here.
+    fn audit_tiers(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if !self.declares_supply() {
+            return problems;
+        }
+        for (identity, ledger) in self.tiered() {
+            if ledger.solvent() {
+                continue;
+            }
+            let short = |name: &str| -> String { name.chars().take(12).collect::<String>() };
+            let owed: Vec<String> = ledger
+                .tiers()
+                .into_iter()
+                .filter(|tier| ledger.committed(*tier) > ledger.held(*tier))
+                .map(|tier| {
+                    format!(
+                        "{tier}: promised {} against {} held",
+                        ledger.committed(tier),
+                        ledger.held(tier)
+                    )
+                })
+                .collect();
+            problems.push(format!(
+                "{}: promises exceed holdings once tiers are kept apart ({}); \
+                 units earned in one tier do not convert into another",
+                short(&identity),
+                owed.join("; ")
+            ));
+        }
         problems
     }
 

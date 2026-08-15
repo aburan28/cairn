@@ -45,6 +45,7 @@ pub mod serve;
 pub mod shards;
 pub mod store;
 pub mod swarm;
+pub mod tier;
 pub mod time;
 pub mod vdf;
 pub mod verifiers;

@@ -3161,6 +3161,7 @@ fn cmd_balances(out: &mut dyn Write, options: &Options) -> Result<i32, CliError>
     let issued = node.issued();
     let escrowed = node.escrowed();
     let balances = node.balances();
+    let tiered = node.tiered();
 
     if !node.declares_supply() {
         say(
@@ -3191,6 +3192,44 @@ fn cmd_balances(out: &mut dyn Write, options: &Options) -> Result<i32, CliError>
                 short(name)
             ),
         );
+        // Then the provenance, because the total is the number that hides the
+        // interesting fact: a thousand units earned on millisecond certificate
+        // checks and a thousand earned on Lean proofs print identically above
+        // and are not interchangeable below.
+        //
+        // Shown whenever anything is *earned*, not only when there are two or
+        // more tiers. An identity holding nothing but certificate units has one
+        // tier and is exactly the case worth printing -- "spendable 100000" is
+        // true and says nothing about what that hundred thousand can buy. Only
+        // a purely universal holder has nothing to add.
+        if let Some(ledger) = tiered.get(name) {
+            let tiers = ledger.tiers();
+            let earned = tiers
+                .iter()
+                .any(|tier| *tier != proofwork::tier::Tier::Universal);
+            if earned {
+                for tier in tiers {
+                    let has = ledger.held(tier);
+                    let owes = ledger.committed(tier);
+                    if has == 0 && owes == 0 {
+                        continue;
+                    }
+                    say(
+                        out,
+                        format!(
+                            "      {:<16} held {has:>12}   promised {owes:>12}",
+                            tier.to_string()
+                        ),
+                    );
+                }
+            }
+            if !ledger.solvent() {
+                say(
+                    out,
+                    String::from("      ! promises exceed holdings once tiers are kept apart"),
+                );
+            }
+        }
     }
     Ok(0)
 }

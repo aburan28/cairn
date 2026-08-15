@@ -585,7 +585,40 @@ downstream is unbacked.
       What is still missing is a *dedicated* custody bond. The stake measured is
       a member's whole balance, so it is not reserved against this duty and can
       be spent elsewhere between the draw and the reveal.
-- [ ] Claim assets typed by verification tier, non-fungible across tiers.
+- [x] **Claim assets typed by verification tier, non-fungible across tiers**
+      (`src/tier.rs`, [tiers.md](tiers.md)). A unit minted by settling a claim
+      carries the tier of the objective's verifier and cannot be spent in
+      another. Five kinds, five tiers, **no ordering and no exchange rate** -- a
+      conversion however priced is a route by which the cheapest tier ends up
+      valuing every other one, which is the thing being prevented.
+      The attack it closes: run a cheap certificate mill, then spend the
+      proceeds where expensive work is priced. Every bond here is drawn from a
+      balance -- an availability undertaking, a dispute challenge, and the stake
+      a committee is now *sized against* -- and until this landed a balance had
+      no provenance. Sizing the committee against members' stakes made the
+      attack more valuable rather than less.
+      The tier is derived from the objective record rather than stored beside
+      it: a stored field is a second place it could be wrong, and a settlement
+      claiming a tier its verifier does not have is exactly the forgery. There
+      is nothing to forge when the tier *is* the verifier.
+      Genesis issuance stays **universal** and spends anywhere, which is a
+      necessity rather than an exemption: a network whose founding supply were
+      typed could never fund its first Lean objective, because the units to fund
+      it could only come from settling a Lean objective nobody could fund.
+      A commitment draws from its own tier first and the reserve after, so the
+      reserve is shared and a per-tier balance cannot be independent columns:
+      promising it to one tier has to move every other tier's column, or the
+      same hundred units get offered five times. `tier::Ledger` is that
+      arithmetic and `solvent()` is the per-identity statement.
+      The whole-balance conservation check does not catch this -- an identity
+      can hold exactly what it promised *in total* while having promised Lean
+      units it earned on certificates. That log balances and is still a forgery,
+      so `audit_tiers` walks it per tier in **both** crates.
+      Not typed yet, and named rather than left to be discovered: service bonds
+      are charged in universal, so a contributor with a large Lean balance
+      cannot back a committee seat with it either. Closing that means deciding
+      which tier a committee seat is denominated in, which is a question about
+      what custody is rather than about arithmetic.
 - [ ] The **agent market sub-game** in `src/incentive/`, and only build the market
       if it survives: candidates circulate through gossip because nothing prices
       them, so pricing them may starve the population the island model runs on.

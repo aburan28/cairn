@@ -552,6 +552,196 @@ impl Node {
             .map(|entry| entry.payload.clone())
     }
 
+    /// Conservation per identity **and per tier**, re-derived.
+    ///
+    /// The whole-balance check above is not enough on its own: an identity can
+    /// hold exactly what it has promised in total while having promised units
+    /// of a tier it never earned. That log balances and is still a forgery,
+    /// because the promise it makes is one the units behind it cannot keep.
+    ///
+    /// Tiers are computed here from the objective records rather than read from
+    /// a field, for the reason the primary does the same: a tier written down
+    /// beside the verifier is a second place it can be wrong.
+    ///
+    /// Universal units — the genesis reserve, availability payouts, and both
+    /// sides of a dispute slash — cover any tier. Everything a *settlement*
+    /// mints is typed by its objective's verifier kind.
+    fn audit_tiers(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if !self.declares_supply() {
+            return problems;
+        }
+        let positions = self.ledger.entries().len() as u64;
+
+        // Objective id -> (verifier kind, funder, reward).
+        let mut objectives: BTreeMap<String, (String, String, u64)> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(OBJECTIVE) {
+            let kind = entry
+                .payload
+                .get("verifier")
+                .and_then(|verifier| verifier.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("certificate")
+                .to_string();
+            let funder = entry
+                .payload
+                .get("funder")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let reward = entry
+                .payload
+                .get("reward")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            objectives.insert(entry.payload.digest(), (kind, funder, reward));
+        }
+
+        // (identity, tier) -> held, and the same for committed. "universal" is
+        // spelled out rather than being a variant, because this crate's job is
+        // to agree with the other one's *answers*, not to share its types.
+        let mut held: BTreeMap<(String, String), u128> = BTreeMap::new();
+        let mut committed: BTreeMap<(String, String), u128> = BTreeMap::new();
+        let mut credit = |who: &str, tier: &str, units: u128| {
+            let slot = held.entry((who.to_string(), tier.to_string())).or_insert(0);
+            *slot = slot.saturating_add(units);
+        };
+
+        let genesis = self.genesis_prefix();
+        for entry in self.ledger.entries_of_kind(ISSUANCE) {
+            if entry.seq >= genesis {
+                continue;
+            }
+            if let (Some(holder), Some(units)) = (
+                entry.payload.get("holder").and_then(Value::as_str),
+                entry.payload.get("units").and_then(Value::as_u64),
+            ) {
+                credit(holder, "universal", u128::from(units));
+            }
+        }
+        for entry in self.ledger.entries() {
+            match entry.kind.as_str() {
+                SETTLEMENT => {
+                    let (Some(who), Some(reward)) = (
+                        entry.payload.get("submitter").and_then(Value::as_str),
+                        entry.payload.get("reward").and_then(Value::as_u64),
+                    ) else {
+                        continue;
+                    };
+                    let tier = entry
+                        .payload
+                        .get("objective_id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| objectives.get(id))
+                        .map(|(kind, _, _)| kind.clone())
+                        .unwrap_or_else(|| "certificate".to_string());
+                    credit(who, &tier, u128::from(reward));
+                }
+                AVAILABILITY_SETTLEMENT => {
+                    for row in entry
+                        .payload
+                        .get("paid")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                    {
+                        if let (Some(who), Some(reward)) = (
+                            row.get("identity").and_then(Value::as_str),
+                            row.get("reward").and_then(Value::as_u64),
+                        ) {
+                            credit(who, "universal", u128::from(reward));
+                        }
+                    }
+                }
+                CHALLENGE_SETTLEMENT => {
+                    let units = u128::from(
+                        entry
+                            .payload
+                            .get("units")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                    );
+                    if let Some(winner) = entry.payload.get("winner").and_then(Value::as_str) {
+                        credit(winner, "universal", units);
+                    }
+                    if let Some(loser) = entry.payload.get("loser").and_then(Value::as_str) {
+                        let slot = committed
+                            .entry((loser.to_string(), "universal".to_string()))
+                            .or_insert(0);
+                        *slot = slot.saturating_add(units);
+                    }
+                }
+                OBJECTIVE => {
+                    if let Some((kind, funder, reward)) = objectives.get(&entry.payload.digest()) {
+                        let slot = committed.entry((funder.clone(), kind.clone())).or_insert(0);
+                        *slot = slot.saturating_add(u128::from(*reward));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Service bonds are universal. `committed_within` already resolves live
+        // challenge bonds against the settlements that released them, so the
+        // whole of it is reused rather than re-walked -- minus the objective
+        // rewards, which are typed above.
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for (name, _) in held.keys() {
+            names.insert(name.clone());
+        }
+        for (name, _) in committed.keys() {
+            names.insert(name.clone());
+        }
+        for name in &names {
+            let typed_rewards: u128 = objectives
+                .values()
+                .filter(|(_, funder, _)| funder == name)
+                .map(|(_, _, reward)| u128::from(*reward))
+                .fold(0u128, |sum, reward| sum.saturating_add(reward));
+            let service = self
+                .committed_within(name, positions)
+                .saturating_sub(typed_rewards);
+            let slot = committed
+                .entry((name.clone(), "universal".to_string()))
+                .or_insert(0);
+            *slot = slot.saturating_add(service);
+        }
+
+        for name in names {
+            let universal_held = held
+                .get(&(name.clone(), "universal".to_string()))
+                .copied()
+                .unwrap_or(0);
+            // Every tier's shortfall falls on the one pool that can cover it.
+            let mut drawn = committed
+                .get(&(name.clone(), "universal".to_string()))
+                .copied()
+                .unwrap_or(0);
+            let mut shortfalls: Vec<String> = Vec::new();
+            for tier in ["certificate", "evaluator", "lean", "replay", "statistical"] {
+                let owes = committed
+                    .get(&(name.clone(), tier.to_string()))
+                    .copied()
+                    .unwrap_or(0);
+                let has = held
+                    .get(&(name.clone(), tier.to_string()))
+                    .copied()
+                    .unwrap_or(0);
+                if owes > has {
+                    drawn = drawn.saturating_add(owes - has);
+                    shortfalls.push(format!("{tier}: promised {owes} against {has} held"));
+                }
+            }
+            if drawn > universal_held {
+                problems.push(format!(
+                    "{}: promises exceed holdings once tiers are kept apart ({}); \
+                     units earned in one tier do not convert into another",
+                    short(&name),
+                    shortfalls.join("; ")
+                ));
+            }
+        }
+        problems
+    }
+
     /// What the genesis prefix issued `identity`.
     ///
     /// Only the run of issuance records at the very front of the log counts. An
@@ -1811,6 +2001,7 @@ impl Node {
         }
 
         problems.append(&mut self.audit_challenges());
+        problems.append(&mut self.audit_tiers());
 
         for entry in self.ledger.entries_of_kind(UNDERTAKING) {
             match Undertaking::from_value(&entry.payload) {

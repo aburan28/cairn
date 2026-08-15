@@ -836,6 +836,12 @@ examples/            worked objectives with real artifacts
   result is novel against the literature — no mechanism settles these.
 - **Not able to pay fairly for effort that produced nothing**, which is most of
   real research. The deepest limitation, and not solved here.
+- **Not able to make service bonds carry provenance.** A unit minted by
+  settling a claim is typed by the objective's verifier tier and cannot be
+  spent in another — so a cheap certificate mill cannot fund Lean work (see
+  [docs/tiers.md](docs/tiers.md)). But availability undertakings, dispute
+  challenges and the stake a committee is sized against are all charged in
+  universal units, so a *bond* carries no provenance either way.
 - **Not able to price a shared technique.** Citation flow tracks artifacts,
   because artifacts are checkable. If you tell me "try annealing on the third
   coordinate" and I win, nothing pays you.

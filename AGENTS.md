@@ -112,6 +112,10 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `./scripts/demo.sh`, `./scripts/ratchet-demo.sh` and `./scripts/try-demo.sh`
   if you touched the CLI or the rules; they are the only checks that exercise
   epoch boundaries against a real clock rather than a fixture timestamp
+- Anything touching `src/tier.rs` or a balance: run `cargo test --test tiers`
+  **and** revert the audit's copy of the rule to check the injection test still
+  fails. A rule enforced only at admission is a rule a log imported from a peer
+  does not have, and this repository has shipped that bug twice
 - `./scripts/dispute-demo.sh` if you touched `src/challenge/`, the challenge
   records, or the balance derivation. It is the only check that runs a bonded
   dispute end to end *and* hands the finished log to `reference/rust` -- and
