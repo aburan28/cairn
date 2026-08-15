@@ -192,7 +192,12 @@ impl fmt::Display for RecordError {
             ),
             RecordError::SealedNotImplemented => f.write_str(
                 "confidentiality \"sealed\" requires zero-knowledge verification, \
-                 which is not implemented; use \"embargoed\" for delayed disclosure",
+                 which is not implemented; use \"embargoed\" for delayed disclosure. \
+                 Building it is gated on docs/verification.md \"The rule for any \
+                 proof-system verifier\": every verifier kind here re-executes, so \
+                 no Fiat-Shamir transform exists in the settlement path to attack, \
+                 and a proof-system kind must not reintroduce one over a circuit \
+                 the funder chose",
             ),
             RecordError::MalformedEnvelope { reason } => {
                 write!(f, "sealed envelope cannot be decoded: {reason}")

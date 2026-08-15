@@ -164,6 +164,54 @@ because each buys a weaker guarantee than those above:
 - **zkML.** Cryptographic, and in 2026 running 30 seconds to several minutes per
   inference. Fine for high-stakes settlement, too slow for the hot path.
 
+## The rule for any proof-system verifier, before anyone builds one
+
+Every kind above re-executes. `certificate`, `evaluator`, `lean`, `replay` and
+`statistical` all run the pinned code and compare, and `audit --rerun` does it
+again from the artifacts. That is why soundness here is *reproducibility* and
+not the soundness of an argument system — and it is why nothing in this
+repository is exposed to the class of attack below. That immunity is a property
+of the ladder, not a law, and it ends the moment somebody adds a verifier kind
+that checks a proof instead of re-running a computation.
+
+[Khovratovich, Rothblum and Soukhanov](https://eprint.iacr.org/2025/118) build
+circuits for which a GKR-based succinct argument, made non-interactive by the
+Fiat–Shamir transform, **proves false statements**. Fiat–Shamir is sound in the
+random oracle model; instantiate the oracle with a concrete hash function whose
+description the statement can reference, and a prover can construct a statement
+that diagonalises against it. This is not a broken hash function and not an
+implementation bug. It is the transform's soundness proof failing to transfer
+from the model to the world.
+
+Three rules follow, and the third is the one specific to this design:
+
+1. **Do not Fiat–Shamir an interactive argument over a circuit the prover
+   chose.** Either keep it interactive, or draw the challenge from a beacon the
+   prover cannot influence. Stage 2's *interactive* fraud proofs are already the
+   right shape; the word is load-bearing and should not be optimised away for a
+   round trip.
+2. **A derived challenge is only as unpredictable as the part of its input the
+   adversary cannot choose.** `partition::beacon` derives challenges by hashing
+   public log state, which is the same shape one rung down. The epoch-chain
+   anchor made it *convergent* — every node derives the same value — and
+   convergence is not unpredictability. A sequencer choosing what enters an
+   epoch still influences it, which is why the roadmap wants a VDF or threshold
+   signature there.
+3. **Verifiers here are attacker-authored.** A funder writes the verifier spec
+   and it is pinned by hash. So a proof-system kind would let *the party who
+   benefits from the proof verifying* choose the circuit — strictly worse than
+   the setting the attack was written against, where the circuit family is fixed
+   by an honest protocol designer. Any proof-system kind must therefore pin the
+   circuit family in the protocol, not in the objective.
+
+This is the gate on [`Confidentiality::Sealed`](../src/records.rs), which is
+declared, refused, and documented as needing zero-knowledge verification. It is
+the one class in the schema that cannot be built by re-execution, so it is the
+one place these rules will first be load-bearing.
+
+`tests/verification_ladder.rs` fails if a verifier kind is added, so this
+section gets read rather than rediscovered.
+
 ## Sandboxing
 
 Objective-authored code — pinned checkers, evaluators and statistics, `replay`
