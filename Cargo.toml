@@ -73,7 +73,7 @@ hmac = "0.13"
 # "nonce reuse is fatal" is one rule to enforce rather than one per site.
 # `tests/cipher_policy.rs` fails the build if an AES or TLS crate enters the
 # dependency tree, so the claim is checked and not merely written down.
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 
 # Confidentiality layer. Censorship resistance needs unlinkable, sealed
 # submissions that can be revealed WITHOUT the submitter being online -- see
@@ -86,7 +86,7 @@ chacha20poly1305 = "0.10"
 # whose transport is quantum-resistant and whose submissions were sealed with
 # X25519 had moved the weakness rather than removed it, and a dependency still
 # in the tree is one the next person can reach for. See `src/crypto/kem.rs`.
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "3", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
 ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
