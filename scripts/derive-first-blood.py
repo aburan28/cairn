@@ -58,7 +58,7 @@ SIZES = (80, 88, 96, 112, 128)
 
 # Published, fixed, and re-derivable by anyone. See the module docstring for
 # why this does not need to be unpredictable.
-SEED = b"cairn/first-blood/ecdlp/public-coin/v1"
+SEED = b"proofwork/first-blood/ecdlp/public-coin/v1"
 
 
 def curve_of(bits):
