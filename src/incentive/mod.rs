@@ -64,6 +64,18 @@
 //! could rest, and [`design`] inverts the question: given costs, what is the
 //! smallest canary rate, bond, and committee that make honesty the equilibrium.
 //!
+//! # A fourth game, about agents rather than operators
+//!
+//! [`market`] is not one of the three services. It is the **gate** on
+//! `docs/agent-market.md`: if agents could sell each other sub-frontier
+//! candidates, would the gossip population the search runs on survive it? The
+//! answer is that it survives, that universal *selling* is an equilibrium too,
+//! and that which of the two a network falls back into is decided by how much of
+//! the gossip stream a transport can withhold from an agent that takes and does
+//! not give. Its parameters are separate from [`NodeParams`] because they are
+//! facts about agents searching an objective, not about machines re-running
+//! verifiers.
+//!
 //! # What this is not
 //!
 //! A model. Every number below is a parameter someone has to measure, and the
@@ -79,6 +91,7 @@ pub mod design;
 pub mod dynamics;
 pub mod exact;
 pub mod game;
+pub mod market;
 pub mod mechanism;
 pub mod robustness;
 pub mod sweep;
@@ -89,6 +102,7 @@ pub use exact::Rat;
 pub use game::{
     Criterion, Dominance, Game, GameError, Invades, Invasion, Stability, Sybil, Symmetric,
 };
+pub use market::{Market, MarketParams, MarketReport, SplitAgents, Trade};
 pub use mechanism::{
     Attest, Availability, Custody, RewardRule, Serve, Share, SplitIdentities, Verification,
 };

@@ -684,11 +684,37 @@ downstream is unbacked.
       cannot back a committee seat with it either. Closing that means deciding
       which tier a committee seat is denominated in, which is a question about
       what custody is rather than about arithmetic.
-- [ ] The **agent market sub-game** in `src/incentive/`, and only build the market
-      if it survives: candidates circulate through gossip because nothing prices
-      them, so pricing them may starve the population the island model runs on.
-      That is a payoff question, and the answer decides whether the rest of
-      [agent-market.md](agent-market.md) is worth building.
+- [x] The **agent market sub-game** (`src/incentive/market.rs`,
+      `proofwork incentives --market`). The gate on the rest of
+      [agent-market.md](agent-market.md), and it has an answer.
+      Four actions -- gossip, sell, hoard, publish -- scored on one option value
+      and differing in how many **rivals** each creates: a hoarder none, a seller
+      one and only if a buyer turns up, a gossiper or publisher the whole
+      population. Without that term the model is incoherent rather than rough,
+      because a sale is a *copy* and selling would dominate hoarding everywhere.
+      **The commons survives.** Universal gossip is a strict equilibrium: a
+      seller in a sharing population is selling what everybody already has, so
+      the price collapses and only the forgone reciprocity is left. One seller is
+      absorbed and the population heals from sixteen.
+      **And universal selling is a strict equilibrium too**, so the market is
+      bistable in exactly the way verification is without canaries. The finding
+      nobody had guessed is that the barriers are asymmetric *and that the one
+      knob a protocol has decides which way they lean*: how much of the gossip
+      stream a transport can withhold from a taker. At a hundredth, 28 sellers
+      break a 200-agent commons and 174 gossipers are needed to recover it; at a
+      fifth the same measurement reverses to 151 against 51. The crossover is
+      near a twentieth.
+      So there are two numbers and quoting one for the other is a mistake.
+      **7 parts in a thousand** makes gossip an equilibrium at all; **about a
+      twentieth** makes it the one a network falls back into.
+      Also worth the reporting discipline it forced: at twenty agents with a
+      leaky commons the cheapest deviation from universal gossip is a single
+      **hoarder**, not a seller. `MarketReport` carries the action rather than a
+      count, because filtering for sellers would have called that "selling never
+      profits".
+      Splitting across identities buys exactly zero, because nothing keys on
+      trade volume -- measured so that adding such a payment later fails a test
+      rather than a network.
 - [ ] Offers on the gossip transport, trades in the log — and purchased goods
       cited at submission, enforced the way the frontier citation already is.
 - [x] A real randomness beacon. `src/vdf.rs` is a Wesolowski verifiable delay

@@ -406,8 +406,17 @@ Every unit that reaches a participant entered as somebody's bounty. Nothing pays
 an agent for something another *agent* wanted — a decomposition, a sub-frontier
 candidate, a branch somebody else explored.
 
-The scope for closing that is [agent-market.md](docs/agent-market.md), and its
-conclusion is that **the mechanism is already here**. `Objective::funder` is a
+The scope for closing that is [agent-market.md](docs/agent-market.md), whose
+central question — *does pricing sub-frontier candidates starve the gossip
+population the search runs on?* — is now solved rather than argued.
+`proofwork incentives --market` plays it out: the commons survives, universal
+gossip is a strict equilibrium, and so is universal selling. The barriers between
+them are not symmetric, and the part nobody had guessed is that **which way they
+lean is set by how leaky the gossip transport is.** At a hundredth withheld, 28
+sellers break a 200-agent commons and 174 gossipers are needed to recover it; at
+a fifth the same measurement reverses to 151 against 51.
+
+Its other conclusion is that **the mechanism is already here**. `Objective::funder` is a
 string, there is no balance and no transfer primitive anywhere in `src/`, and an
 agent-to-agent payment is best expressed as an objective rather than a transfer:
 escrow, verification, settlement, audit and citation flow then apply unchanged,

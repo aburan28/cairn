@@ -620,6 +620,12 @@ enum Command {
     /// whole input from flags and is safe to run anywhere.
     Incentives {
         params: Box<NodeParams>,
+        /// The agent-market sub-game instead of the node game, when asked for.
+        ///
+        /// `Option` rather than a bool beside `params`, because the two are
+        /// different parameter sets and a caller that sets `--agents` has said
+        /// which report it wants without also having to say `--market`.
+        market: Option<Box<proofwork::incentive::MarketParams>>,
         /// Also report how far each parameter can move before the mechanism
         /// breaks. Opt-in because it is hundreds of full solver runs.
         robustness: bool,
@@ -2136,6 +2142,8 @@ fn parse_scaffold(cursor: &mut Cursor) -> Result<Command, CliError> {
 /// throwing that away at the first threshold comparison.
 fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut params = NodeParams::reference();
+    let mut market = proofwork::incentive::MarketParams::reference();
+    let mut want_market = false;
     let mut robustness = false;
     let mut sweep_axes: Vec<sweep::Axis> = Vec::new();
     let mut out: Option<String> = None;
@@ -2144,6 +2152,38 @@ fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
     while let Some(token) = cursor.take() {
         match token.as_str() {
             "--robustness" => robustness = true,
+            // The agent market is a separate parameter set, and separate on
+            // purpose: these are facts about agents searching an objective, not
+            // about operators running machines. See `src/incentive/market.rs`.
+            "--market" => want_market = true,
+            "--agents" => {
+                want_market = true;
+                market.agents = parse_u32(&cursor.value("--agents")?, "--agents")?;
+            }
+            "--candidate-value" => {
+                want_market = true;
+                market.candidate_value =
+                    parse_u64(&cursor.value("--candidate-value")?, "--candidate-value")?;
+            }
+            "--commons-value" => {
+                want_market = true;
+                market.population_value =
+                    parse_u64(&cursor.value("--commons-value")?, "--commons-value")?;
+            }
+            "--buyer-share" => {
+                want_market = true;
+                market.buyer_share = parse_rate(&cursor.value("--buyer-share")?, "--buyer-share")?;
+            }
+            "--exclusion" => {
+                want_market = true;
+                market.reciprocity_exclusion =
+                    parse_rate(&cursor.value("--exclusion")?, "--exclusion")?;
+            }
+            "--advance-rate" => {
+                want_market = true;
+                market.advance_rate =
+                    parse_rate(&cursor.value("--advance-rate")?, "--advance-rate")?;
+            }
             "--sweep" => {
                 let spec = cursor.value("--sweep")?;
                 let axis = sweep::Axis::parse(&spec)
@@ -2245,8 +2285,15 @@ fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
             "incentives --out/--format describe a sweep's table: add --sweep NAME=LO..HI[:STEPS]",
         )));
     }
+    if want_market && (robustness || !sweep_axes.is_empty()) {
+        return Err(CliError::Usage(String::from(
+            "incentives --market: the sweep and robustness ladders walk the node \
+             parameters, which the market does not share",
+        )));
+    }
     Ok(Command::Incentives {
         params: Box::new(params),
+        market: want_market.then(|| Box::new(market)),
         robustness,
         sweep: sweep_axes,
         out,
@@ -3031,6 +3078,22 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      e.g. --sweep canary-rate=1/20..1/5:5 --sweep stake=1000..10000:4",
+    );
+    say(
+        out,
+        "  incentives --market [--agents N] [--candidate-value N] [--exclusion N/D]",
+    );
+    say(
+        out,
+        "      the agent-to-agent market instead: does a price for sub-frontier",
+    );
+    say(
+        out,
+        "      candidates destroy the gossip population that feeds the search?",
+    );
+    say(
+        out,
+        "      exits non-zero when universal gossip is not a strict equilibrium",
     );
     say(
         out,
@@ -6082,6 +6145,27 @@ fn cmd_scaffold(
 /// The table goes to `--out` or to standard output, and progress goes to
 /// standard error, so `incentives --sweep .. > grid.csv` writes exactly the
 /// table -- the same split `--robustness` already makes.
+/// `incentives --market` -- the gate on `docs/agent-market.md`'s Stage 2.
+///
+/// Separate from [`cmd_incentives`] rather than a section of it, because the two
+/// answer different questions from different parameters. Merging them would mean
+/// a node report carrying seven numbers about agent search, and a market report
+/// validating against a committee threshold it does not have.
+fn cmd_incentives_market(
+    out: &mut dyn Write,
+    params: &proofwork::incentive::MarketParams,
+) -> Result<i32, CliError> {
+    let report = proofwork::incentive::MarketReport::of(params)
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    for line in report.to_string().lines() {
+        say(out, line);
+    }
+    // Exit non-zero when the commons does not survive contact with a market.
+    // The scope note in `docs/agent-market.md` gates Stage 2 on this answer, so
+    // it is worth being scriptable rather than only readable.
+    Ok(i32::from(!report.commons_survives()))
+}
+
 fn cmd_incentives_sweep(
     out: &mut dyn Write,
     params: &NodeParams,
@@ -8036,12 +8120,15 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Scaffold { request, force } => cmd_scaffold(out, options, request, *force),
         Command::Incentives {
             params,
+            market,
             robustness,
             sweep,
             out: destination,
             format,
         } => {
-            if sweep.is_empty() {
+            if let Some(market) = market {
+                cmd_incentives_market(out, market)
+            } else if sweep.is_empty() {
                 cmd_incentives(out, params, *robustness)
             } else {
                 cmd_incentives_sweep(
@@ -9444,6 +9531,7 @@ mod tests {
             parsed.command,
             Command::Incentives {
                 params: Box::new(NodeParams::reference()),
+                market: None,
                 robustness: false,
                 sweep: Vec::new(),
                 out: None,
@@ -9457,12 +9545,34 @@ mod tests {
                 .command,
             Command::Incentives {
                 params: Box::new(NodeParams::reference()),
+                market: None,
                 robustness: true,
                 sweep: Vec::new(),
                 out: None,
                 format: TableFormat::Csv,
             }
         );
+        // A market knob selects the market report without also needing
+        // `--market`: naming a parameter is saying which question you asked.
+        assert_eq!(
+            parse(argv(&["incentives", "--agents", "12"]))
+                .expect("parses")
+                .command,
+            Command::Incentives {
+                params: Box::new(NodeParams::reference()),
+                market: Some(Box::new(proofwork::incentive::MarketParams {
+                    agents: 12,
+                    ..proofwork::incentive::MarketParams::reference()
+                })),
+                robustness: false,
+                sweep: Vec::new(),
+                out: None,
+                format: TableFormat::Csv,
+            }
+        );
+        // And the two ladders are refused rather than silently ignored: they
+        // walk the node parameters, which the market does not share.
+        assert!(parse(argv(&["incentives", "--market", "--robustness"])).is_err());
     }
 
     /// The flags are `commit`'s and `reveal`'s, deliberately: a flag that meant
