@@ -131,7 +131,16 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - Anything touching `src/tier.rs` or a balance: run `cargo test --test tiers`
   **and** revert the audit's copy of the rule to check the injection test still
   fails. A rule enforced only at admission is a rule a log imported from a peer
-  does not have, and this repository has shipped that bug twice
+  does not have, and this repository has shipped that bug **three times** — most
+  recently in `audit_attestations`, which re-derived the signature, the
+  duplicate rule, the claim and every slash, and not whether the attestor could
+  cover the bond it staked.
+  A bond needs the *timed* version of the check, `spendable_within(who,
+  entry.seq)`, not the whole-log one. Both conservation sums are totals, so an
+  identity that was broke at entry `n` and paid at entry `n + k` balances
+  exactly — and the bond it staked in between was money it did not have. The
+  typed sum catches that only when the payout landed in a different tier, which
+  is a property of the fixture rather than a rule
 - `./scripts/dispute-demo.sh` if you touched `src/challenge/`, the challenge
   records, or the balance derivation. It is the only check that runs a bonded
   dispute end to end *and* hands the finished log to `reference/rust` -- and

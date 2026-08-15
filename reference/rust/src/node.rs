@@ -747,6 +747,19 @@ impl Node {
                     short(&claim_id)
                 ));
             }
+            // Affordable at *this* point in the log, the way an undertaking's
+            // bond is checked above. Neither conservation sum covers it: both
+            // are whole-log totals, so an attestor that was broke here and paid
+            // later balances exactly, and the bond it staked in between was
+            // money it did not have.
+            let spendable = self.spendable_within(&attestor, entry.seq);
+            if u128::from(VERIFICATION_BOND) > spendable {
+                problems.push(format!(
+                    "entry {}: attestation bonds {VERIFICATION_BOND} units against a \
+                     balance of {spendable}",
+                    entry.seq
+                ));
+            }
         }
 
         let mut slashed: BTreeSet<String> = BTreeSet::new();

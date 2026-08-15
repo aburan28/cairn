@@ -23,6 +23,7 @@
 //! | a slash needs an attestation to point at | [`a_slash_needs_an_attestation_to_point_at`] |
 //! | the bond comes back when the window shuts | [`a_bond_returns_once_the_window_shuts`] |
 //! | and a slash after that takes nothing | [`a_slash_after_the_window_takes_nothing`] |
+//! | a bond must be affordable when posted | [`a_bond_posted_against_nothing_is_named_even_when_a_later_payout_covers_it`] |
 //! | the audit re-derives every slash, cheaply | [`the_audit_names_a_slash_the_verifier_does_not_support`] |
 //! | including whether the bond was still there | [`the_audit_names_a_slash_written_after_the_bond_returned`] |
 //! | and finds a false attestation only when it reruns | [`a_false_attestation_is_found_by_the_rerunning_audit`] |
@@ -52,6 +53,7 @@ const COMMIT_AT: &str = "2026-07-28T00:10:00+00:00";
 const REVEAL_AT: &str = "2026-07-28T00:30:00+00:00";
 const ATTEST_AT: &str = "2026-07-28T00:40:00+00:00";
 const SLASH_AT: &str = "2026-07-28T00:50:00+00:00";
+const SETTLE_AT: &str = "2026-07-28T01:30:00+00:00";
 // Past `ATTEST_AT` plus the six-epoch window, at ten minutes to the epoch.
 const LATE_COMMIT: &str = "2026-07-28T02:00:00+00:00";
 const LATE_REVEAL: &str = "2026-07-28T02:10:00+00:00";
@@ -803,5 +805,119 @@ fn the_audit_names_a_slash_written_after_the_bond_returned() {
             .iter()
             .any(|problem| problem.contains("after its window shut")),
         "the audit did not re-derive the window: {problems:?}"
+    );
+}
+
+/// **A bond has to be affordable when it is posted, and the audit has to say so.**
+///
+/// The repository's characteristic bug, and this file shipped it. `audit_attestations`
+/// re-derived the signature, the duplicate rule, the claim and every slash --
+/// and not whether the attestor could cover the bond at the point it staked it.
+/// The undertaking audit has checked exactly this since it was written, with a
+/// comment saying why: *a later payout must not retroactively justify a bond
+/// that was unfunded at the time.*
+///
+/// The whole-log conservation sum does not catch it, and the log below is built
+/// to show that rather than to assert it. The attestor is broke when the
+/// attestation lands and is paid afterwards, so by the last entry `committed`
+/// and `held` agree exactly — the forgery balances, and is still a bond nobody
+/// could have made.
+#[test]
+fn a_bond_posted_against_nothing_is_named_even_when_a_later_payout_covers_it() {
+    if !have_python() {
+        eprintln!("skipping: no python3");
+        return;
+    }
+    let stamper = identity(26);
+    let key = stamper.submitter_id();
+    // Deliberately unfunded at genesis: everything this identity ever holds it
+    // has to earn, and it earns it *after* the attestation.
+    let mut fixture = fixture("retroactive", &[]);
+
+    // A bounty big enough to cover the bond, so the log ends balanced.
+    let objective = Objective::new(
+        "G",
+        "attestation fixture: pays more than a bond",
+        Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("c.py")),
+            ("checker_sha256", Value::string(sha(CHECKER))),
+            ("entrypoint", Value::string("check")),
+        ]),
+        VERIFICATION_BOND,
+        "treasury",
+        GENESIS,
+        None,
+        None,
+    )
+    .expect("valid objective");
+    fixture
+        .node
+        .post_objective(&objective, GENESIS)
+        .expect("post");
+    let id = objective.id();
+
+    let artifact = Value::object([("n", Value::Int(2))]);
+    let hash = proofwork::records::commitment_hash(&id, &key, &artifact, "n1");
+    fixture
+        .node
+        .commit(
+            &Commitment::new(&id, &key, hash, COMMIT_AT).signed_with(&stamper),
+            COMMIT_AT,
+        )
+        .expect("commit");
+    let claim = Claim::new(&id, &key, artifact, "n1", REVEAL_AT, Vec::new())
+        .expect("valid claim")
+        .signed_with(&stamper);
+    fixture.node.reveal(&claim, REVEAL_AT).expect("reveal");
+    let claim_id = claim.id();
+
+    // Posted here, before the settlement, and appended straight in because
+    // `post_attestation` refuses it -- which is the point.
+    let record = Attestation::new(&claim_id, "", "accept", REVEAL_AT).signed_with(&stamper);
+    assert!(
+        matches!(
+            fixture.node.post_attestation(&record, REVEAL_AT),
+            Err(RuleViolation::UnfundedReward { .. })
+        ),
+        "admission let an unfunded bond through, so this test is checking the \
+         wrong half of the rule"
+    );
+    fixture
+        .node
+        .ledger_mut()
+        .append("attestation", record.to_value(), REVEAL_AT)
+        .expect("the log accepts an appended record");
+
+    // And now the payout that makes the arithmetic work out.
+    let now = {
+        let seconds = proofwork::time::parse_rfc3339(SETTLE_AT).expect("an instant");
+        proofwork::partition::epoch_of(seconds as u64, proofwork::partition::epoch_seconds())
+    };
+    let paid = fixture
+        .node
+        .settle_due(now, SETTLE_AT)
+        .expect("settlement runs");
+    assert!(
+        !paid.is_empty(),
+        "nothing settled, so nothing covers the bond"
+    );
+
+    let problems = fixture.node.audit(false);
+    // First: the forgery really does balance, or the conservation sum would be
+    // catching it and this test would prove nothing about the new rule.
+    assert!(
+        !problems
+            .iter()
+            .any(|problem| problem.contains("money made by naming it")),
+        "the whole-log conservation check fired, so the fixture is not \
+         exercising the affordability rule: {problems:?}"
+    );
+    assert!(
+        problems.iter().any(|problem| {
+            problem.contains("attestation at entry") && problem.contains("against a balance of 0")
+        }),
+        "the audit did not name a bond that was unfunded when it was posted: \
+         {problems:?}"
     );
 }

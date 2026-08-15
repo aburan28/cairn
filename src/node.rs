@@ -6525,6 +6525,26 @@ impl Node {
                     short(&record.claim_id)
                 ));
             }
+            // Affordable **at this point in the log**, not over the whole of
+            // it. A later payout must not retroactively justify a bond that was
+            // unfunded when it was staked, which is the same rule the
+            // undertaking audit above applies and for the same reason.
+            //
+            // The conservation sums do not cover this. Both of them are
+            // whole-log totals, so an attestor that was broke at entry `n` and
+            // paid at entry `n + k` balances exactly -- and the bond it staked
+            // in between was money it did not have. The typed sum catches the
+            // case where the payout landed in a *different* tier and misses the
+            // case where it landed in the same one, which is not a rule, it is
+            // a coincidence of the fixture.
+            let spendable = self.spendable_within(&record.attestor, entry.seq as usize);
+            if u128::from(VERIFICATION_BOND) > spendable {
+                problems.push(format!(
+                    "attestation at entry {}: bonds {VERIFICATION_BOND} units against \
+                     a balance of {spendable}",
+                    entry.seq
+                ));
+            }
         }
 
         let mut slashed: BTreeSet<String> = BTreeSet::new();
