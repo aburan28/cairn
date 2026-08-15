@@ -1,7 +1,7 @@
 # Verification
 
 A currency is exactly as sound as the cheapest check that mints it. This
-document is the ladder of checks `cairn` supports, what each one actually
+document is the ladder of checks `proofwork` supports, what each one actually
 proves, and how to author a verifier that cannot be gamed.
 
 ## The ladder
@@ -180,38 +180,31 @@ Enforced by the kernel:
 - **No writes outside a scratch directory** that is deleted when the check
   finishes.
 - A wall-clock deadline, and best-effort `RLIMIT_CPU` / `RLIMIT_AS`.
-- A **scrubbed environment** for pinned pure functions, so a checker cannot read
-  the operator's credentials out of it.
+- A **scrubbed environment** for pinned pure functions. With
+  `PROOFWORK_REQUIRE_SANDBOX=1`, replay and Lean are scrubbed too, so strict
+  mode cannot return the operator's credentials in verdict evidence.
+- On macOS, reads are limited to declared bundle/toolchain paths and standard
+  system runtime paths. Objective-selected directories are resolved through
+  symlinks before the profile is built.
 
 A jail that cannot start is `UNAVAILABLE`, never `REJECT` — the rule at the top
 of this document applies to the sandbox exactly as it applies to a missing
 toolchain. When a jailed run fails, the verdict's evidence names the mechanism,
 so an operator can tell a broken jail from a broken checker.
 
-Four gaps are real and none of them are hypothetical:
+Two gaps remain real and neither is hypothetical:
 
 1. **It is not a VM boundary.** A kernel or policy bug is still an escape.
    gVisor, Firecracker or WASM would bound that; none is implemented.
-2. **macOS reads are not confined.** The seatbelt profile denies writes and
-   network, not reads. Objective code can read any file the operator can — it
-   simply cannot transmit or persist what it read.
-3. **`replay` and `lean` inherit the operator's environment**, because their
-   toolchains are configured through it. A pinned checker's environment is
-   scrubbed; theirs is not.
-4. **A host with neither mechanism runs the child unconfined.** Set
-   `CAIRN_REQUIRE_SANDBOX=1` to make that `UNAVAILABLE` instead of a silent
+2. **A host with neither mechanism runs the child unconfined.** Set
+   `PROOFWORK_REQUIRE_SANDBOX=1` to make that `UNAVAILABLE` instead of a silent
    downgrade. Any node running third-party objectives should set it. The
    switch fails closed: any value other than an explicit `0`/`false`/`no`/`off`
    counts as on, so a typo cannot silently mean "unjailed".
 
 One thing that is *not* a gap, because it is checked: directories a spec can
 name — replay's `cwd`, lean's `project_root` — resolve against the objective
-root and are refused when they escape it. A record cannot choose which host
-paths are bound into its own jail.
-
-One thing that is *not* a gap, because it is checked: directories a spec can
-name — replay's `cwd`, lean's `project_root` — resolve against the objective
-root and are refused when they escape it. A record cannot choose which host
+root and are refused when they escape it, including through a symlink. A record cannot choose which host
 paths are bound into its own jail.
 
 **The reference implementation does not jail at all.** It spawns the
@@ -264,7 +257,7 @@ checking is how an exit code maps to a verdict, and that does not need a kernel.
 
 ## What an audit actually re-derives
 
-`cairn audit` prints one line — *chain intact, every settled claim
+`proofwork audit` prints one line — *chain intact, every settled claim
 re-verified* — and the value of the whole project rests on that sentence being
 literally true. What follows is what it did not check, found by asking what a
 log could carry that the line would still be printed over, and then by running
@@ -346,7 +339,7 @@ anyone can make the audit accuse an identity of replaying its own records by
 appending an unsigned forgery — a finding manufactured out of nothing.
 
 **A `peer` record its own decoder would refuse.** Found by running the command
-rather than reading it. `cairn peer --transport <a libp2p-style id>`
+rather than reading it. `proofwork peer --transport <a libp2p-style id>`
 appended happily, and every subsequent audit in both implementations reported
 the record as undecodable: one command, no error, and a log that can no longer
 be audited. Every other record kind reaches the rules engine already decoded, so
@@ -355,14 +348,14 @@ constructor that takes what it is handed, which left `peer` as the only kind
 that could enter the log without meeting its own decoder. `post_peer` now
 validates first.
 
-**A tripwire nobody would read.** `cairn store status` listed every
+**A tripwire nobody would read.** `proofwork store status` listed every
 unaccounted file it found. Pointed at a working directory that is seven hundred
 lines, and the `KEY INSIDE THE STORE` finding — the one that means everything
 beside it is readable — was somewhere in the middle of them. Keys are now said
 first and never elided; the rest is capped with a count of what was left out.
 The alarm was always the exit code and the total, not the list.
 
-**`--help` exiting 2.** `cairn-serve` and `cairn-p2p` shared one usage
+**`--help` exiting 2.** `proofwork-serve` and `proofwork-p2p` shared one usage
 function between "you asked for help" and "you used me wrong", so asking a
 question correctly returned a failure. `cmd --help >/dev/null || fail` is how a
 packaging check or a container healthcheck asks whether a binary runs at all.
@@ -374,7 +367,7 @@ hash — and the reference had no content-addressed fallback at all: it read the
 pin from the bundle path and stopped. So on every peer that learned an objective
 over the wire, the independent auditor reported *"was settled but can no longer
 be re-verified"* for claims that re-verify perfectly. Found by running two
-`cairn-p2p` daemons and auditing the one that synced, which nothing had ever
+`proofwork-p2p` daemons and auditing the one that synced, which nothing had ever
 done — the daemon is the largest surface in the repository and `--help` was all
 CI touched. `scripts/p2p-demo.sh` now runs both sides.
 
@@ -400,7 +393,7 @@ ignored.
 And the corollary the last one earned: an independent implementation drifts
 where nothing compares it. The two are checked against each other on ids, roots
 and verdicts, so those stayed honest; the *arithmetic* and the output plumbing
-had no cross-check, and both had quietly diverged. `cairn-reference` was
+had no cross-check, and both had quietly diverged. `proofwork-reference` was
 still using `println!`, which panics when the reader closes the pipe —
 `… post | head -1`, which `scripts/interop.sh` itself does. The primary fixed
 that before this crate existed and wrote a paragraph about it. It never crossed
@@ -414,8 +407,8 @@ somebody re-deriving the whole network's history, and the wrong one for
 somebody who wants to know whether a single settlement happened.
 
 ```sh
-cairn prove 12 --height 25 --out proof.json
-cairn check proof.json --from checkpoint.json --root-key operator.pub
+proofwork prove 12 --height 25 --out proof.json
+proofwork check proof.json --from checkpoint.json --root-key operator.pub
 ```
 
 `check` opens no log, no bundle, and no socket. Its whole input is the proof

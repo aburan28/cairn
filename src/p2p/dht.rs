@@ -260,7 +260,7 @@ pub struct PeerContact {
 }
 
 impl PeerContact {
-    /// A contact for a peer whose id the handshake derived.
+    /// A contact for a peer id derived from a public key.
     ///
     /// Takes a [`PeerId`] rather than a [`NodeId`] so a caller cannot invent a
     /// keyspace position: the only [`PeerId`] values in circulation come from
@@ -855,10 +855,11 @@ impl Directory {
 
     /// Record a **first-hand** claim of holdership.
     ///
-    /// `from` is the session's peer id, which the handshake derived from a key
-    /// the peer had to hold. That is the whole authentication story, and it is
-    /// why this takes a [`PeerId`] and an address separately rather than a
-    /// [`Holder`] a caller might have decoded from a message body.
+    /// `from` must be the authenticated responder id of a dialled session;
+    /// [`super::session::exchange_dht`] enforces that before calling here. An
+    /// accepted session's claimed initiator id must never reach this method.
+    /// That is why it takes a [`PeerId`] and an address separately rather than
+    /// a [`Holder`] a caller might have decoded from a message body.
     ///
     /// `asked` is what this node actually requested. An address outside it is
     /// **discarded**, which is the enforcement half of "no inventory message":

@@ -286,7 +286,17 @@ impl BlobStore {
                 actual,
             });
         }
-        if path.is_file() {
+        if path.exists() {
+            // The store is persistent operator state, not trusted memory. Do
+            // not let a stale, corrupted, or symlinked entry shadow verified
+            // bundle bytes and become the path the verifier executes.
+            let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+            if !metadata.file_type().is_file() {
+                return Err(BlobError::Io {
+                    detail: format!("{} is not a regular blob file", path.display()),
+                });
+            }
+            self.read(declared)?;
             return Ok(path);
         }
         create_dir(&self.dir)?;
@@ -519,6 +529,21 @@ mod tests {
         // Idempotent: storing the same bytes twice is one blob.
         store.put(&a, CODE).expect("re-put");
         assert_eq!(store.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cannot_masquerade_as_an_existing_blob() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch("symlink-entry");
+        let outside = scratch("symlink-entry-outside").join("payload");
+        fs::write(&outside, CODE).expect("outside payload");
+        let a = address(CODE);
+        symlink(&outside, dir.join(&a)).expect("symlink");
+
+        let store = BlobStore::at(&dir);
+        assert!(matches!(store.put(&a, CODE), Err(BlobError::Io { .. })));
     }
 
     #[test]

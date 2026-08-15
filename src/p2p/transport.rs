@@ -4,7 +4,7 @@ use super::handshake::{Channel, HandshakeError, Opener, PeerId, PeerIdentity, Pe
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CIPHERTEXT_BYTES: usize = 96;
 const HANDSHAKE_BYTES: usize = 32 + CIPHERTEXT_BYTES;
@@ -81,12 +81,17 @@ impl From<HandshakeError> for TransportError {
     }
 }
 
-/// A connected, authenticated (responder) or expected (initiator) stream.
+/// A connected encrypted stream.
+///
+/// The initiator authenticates the responder because it encapsulates to a
+/// preselected public key. The responder only receives the initiator's claimed
+/// id in cleartext; callers must not attribute state to that id.
 pub struct Connection {
     stream: TcpStream,
     channel: Channel,
     local: PeerId,
     remote: PeerId,
+    remote_authenticated: bool,
     max_frame: u32,
 }
 
@@ -94,6 +99,7 @@ impl fmt::Debug for Connection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Connection")
             .field("remote", &self.remote)
+            .field("remote_authenticated", &self.remote_authenticated)
             .finish()
     }
 }
@@ -105,6 +111,15 @@ impl Connection {
 
     pub fn local(&self) -> PeerId {
         self.local
+    }
+
+    /// Whether the remote id was authenticated by the handshake.
+    ///
+    /// `true` on a dialled connection, where successful channel use proves the
+    /// endpoint held the expected private key. `false` on an accepted
+    /// connection, whose initiator id is only a self-asserted routing hint.
+    pub fn remote_authenticated(&self) -> bool {
+        self.remote_authenticated
     }
 
     pub fn send(&mut self, plaintext: &[u8], context: &[u8]) -> Result<(), TransportError> {
@@ -120,7 +135,7 @@ impl Connection {
 
     pub fn receive(&mut self, context: &[u8]) -> Result<Vec<u8>, TransportError> {
         let mut size_bytes = [0u8; 4];
-        self.stream.read_exact(&mut size_bytes).map_err(|e| {
+        read_exact_resilient(&mut self.stream, &mut size_bytes).map_err(|e| {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 TransportError::FrameTruncated
             } else {
@@ -132,7 +147,7 @@ impl Connection {
             return Err(TransportError::FrameTooLarge { size });
         }
         let mut frame = vec![0u8; size as usize];
-        self.stream.read_exact(&mut frame).map_err(|e| {
+        read_exact_resilient(&mut self.stream, &mut frame).map_err(|e| {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 TransportError::FrameTruncated
             } else {
@@ -248,7 +263,7 @@ impl Receiver {
     /// As [`Connection::receive`].
     pub fn receive(&mut self, context: &[u8]) -> Result<Vec<u8>, TransportError> {
         let mut size_bytes = [0u8; 4];
-        self.stream.read_exact(&mut size_bytes).map_err(|e| {
+        read_exact_resilient(&mut self.stream, &mut size_bytes).map_err(|e| {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 TransportError::FrameTruncated
             } else {
@@ -260,7 +275,7 @@ impl Receiver {
             return Err(TransportError::FrameTooLarge { size });
         }
         let mut frame = vec![0u8; size as usize];
-        self.stream.read_exact(&mut frame).map_err(|e| {
+        read_exact_resilient(&mut self.stream, &mut frame).map_err(|e| {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 TransportError::FrameTruncated
             } else {
@@ -278,6 +293,48 @@ impl Receiver {
 /// before invoking the expensive McEliece decapsulation in `accept`.
 pub fn listen(addr: SocketAddr) -> Result<TcpListener, TransportError> {
     Ok(TcpListener::bind(addr)?)
+}
+
+/// Read one exact transport field while tolerating a spurious timed-read wake.
+///
+/// On macOS/BSD a blocking `TcpStream` with `SO_RCVTIMEO` can occasionally
+/// return `WouldBlock` immediately when another thread owns a cloned write half.
+/// Treating that single wake as a disconnect made every real swarm transfer
+/// lose its peer before the first piece. Retry only within the configured
+/// timeout, measured since the last byte of progress, so a genuinely silent
+/// peer remains bounded exactly as before.
+fn read_exact_resilient(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<()> {
+    let timeout = stream.read_timeout()?;
+    let mut offset = 0usize;
+    let mut last_progress = Instant::now();
+    while offset < buffer.len() {
+        match stream.read(&mut buffer[offset..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "transport field ended early",
+                ))
+            }
+            Ok(read) => {
+                offset += read;
+                last_progress = Instant::now();
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) && timeout.is_some_and(|bound| last_progress.elapsed() < bound) =>
+            {
+                // Avoid a busy loop on a host that repeatedly reports the
+                // spurious readiness state. One millisecond is negligible
+                // beside even the handshake's ten-second timeout.
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// Dial a known endpoint and complete the initiator side of the handshake.
@@ -303,6 +360,7 @@ pub fn connect(
         channel,
         local: local.id(),
         remote: endpoint.id(),
+        remote_authenticated: true,
         max_frame: MAX_FRAME,
     })
 }
@@ -318,7 +376,7 @@ pub fn accept(mut stream: TcpStream, local: &PeerIdentity) -> Result<Connection,
     // for the rest of the session.
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    stream.read_exact(&mut hello).map_err(|e| {
+    read_exact_resilient(&mut stream, &mut hello).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
             TransportError::FrameTruncated
         } else {
@@ -334,6 +392,7 @@ pub fn accept(mut stream: TcpStream, local: &PeerIdentity) -> Result<Connection,
         channel,
         local: local.id(),
         remote,
+        remote_authenticated: false,
         max_frame: MAX_FRAME,
     })
 }
@@ -380,6 +439,16 @@ mod tests {
                 "{side} would block forever on a peer that stops reading"
             );
         }
+    }
+
+    #[test]
+    fn only_the_dialled_responder_identity_is_authenticated() {
+        let (dialed, accepted) = pair();
+        assert!(dialed.remote_authenticated());
+        assert!(
+            !accepted.remote_authenticated(),
+            "the inbound hello contains only a claimed initiator id"
+        );
     }
 
     /// A stranger that connects and says nothing must not hold the accept path.

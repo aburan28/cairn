@@ -397,9 +397,10 @@ fn serve_one(mut connection: Connection, ctx: Serving) -> io::Result<()> {
     // this node's memory. An authenticated peer is not a trusted one.
     connection.set_max_frame(super::wire::MAX_FRAME as u32);
 
-    // The transport handshake already ran, so the peer is authenticated before
-    // a swarm byte moves. What is exchanged here is only *which blob* the
-    // session is about.
+    // The transport handshake already ran, so the channel is encrypted before
+    // a swarm byte moves. The inbound initiator id is only claimed and is never
+    // used here: `next_peer` assigns a local, connection-scoped number instead.
+    // What is exchanged here is only *which blob* the session is about.
     let Ok(head) = connection.receive(CONTEXT) else {
         return Ok(());
     };
@@ -1069,8 +1070,9 @@ pub fn describe(dropped: &Dropped) -> String {
     dropped.to_string()
 }
 
-// A known-open flake in the real-socket tests below, so the next person to
-// hit it does not re-derive this from nothing.
+// A macOS real-socket failure that is now closed in `p2p::transport`, retained
+// here because the symptom appears in this module and otherwise looks like a
+// swarm state-machine bug.
 //
 // On at least one heavily-loaded macOS sandbox, several of the tests that
 // drive `serve`/`fetch` over real loopback sockets (`a_blob_moves_between_-
@@ -1094,15 +1096,11 @@ pub fn describe(dropped: &Dropped) -> String {
 //   -1 -- src/p2p/transport.rs`): it reproduces identically on the commit
 //   before that one.
 //
-// What is still open is why *this* module's heavier orchestration --
-// multiple ticker threads per node, each taking the `Swarm` and outbox
-// mutexes on a 200ms tick, two such nodes in one test process -- produces the
-// early `WouldBlock` when two isolated `Connection`s under the same
-// read/write pattern do not. CI only runs `cargo test` on `ubuntu-latest`, so
-// whether this is Linux-portable or a macOS/BSD-scheduling artifact of a
-// contended sandbox is untested. The pure `Swarm` state machine (`swarm::mod`
-// tests) drives choking, rarest-first and endgame directly with no socket in
-// the loop and is not implicated.
+// The transport now retries `WouldBlock`/`TimedOut` only until the socket's
+// configured deadline, measured from the last byte of progress. A spurious
+// early wake therefore no longer drops a live peer, while a genuinely silent
+// one remains bounded. The pure `Swarm` state machine (`swarm::mod` tests) was
+// never implicated.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -653,8 +653,10 @@ impl Service {
     ) -> Result<(), ServiceError> {
         let held: BTreeSet<String> = node.registry().blobs().addresses().into_iter().collect();
         let now = crate::time::unix_seconds();
-        if let Some(addr) = dialable {
-            self.note_contact(connection.remote(), addr);
+        if connection.remote_authenticated() {
+            if let Some(addr) = dialable {
+                self.note_contact(connection.remote(), addr);
+            }
         }
         // Serving a key means handing out somebody else's public key, which is
         // public by construction — it is what every dialer needs and what the

@@ -500,10 +500,12 @@ fn a_dialling_node_learns_who_holds_a_blob_and_asks_that_peer_next() {
         empty_root,
     );
     alice.post_objective(&objective, TS).expect("post");
+    let wanted = alice.missing_code();
     assert!(
-        !alice.missing_code().is_empty(),
+        !wanted.is_empty(),
         "alice already holds the checker, so the ask would be empty"
     );
+    let wanted_address = wanted.iter().next().expect("non-empty want set").clone();
     let alice_service = Service::new(Arc::new(PeerIdentity::generate()));
     alice_service
         .dial_node_once(&endpoint, &mut alice)
@@ -511,15 +513,15 @@ fn a_dialling_node_learns_who_holds_a_blob_and_asks_that_peer_next() {
 
     let bob_holds = bob_thread.join().expect("bob's thread");
     assert!(
-        !bob_holds.is_empty(),
-        "bob holds no blobs to tell alice about"
+        bob_holds.contains(&wanted_address),
+        "bob does not hold the blob alice asked about"
     );
 
     // Alice heard the announcement, and attributed it to the peer she was
     // actually talking to.
     let now = cairn::time::unix_seconds();
     let (holders, _) =
-        alice_service.with_directory(|directory| directory.lookup_providers(&bob_holds[0], now));
+        alice_service.with_directory(|directory| directory.lookup_providers(&wanted_address, now));
     assert_eq!(
         holders.len(),
         1,
