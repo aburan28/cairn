@@ -232,11 +232,28 @@ still shows nothing, the problem is the client's config, not this binary.
 process, each holds its own `Ledger`, and [`Ledger`](../src/ledger.rs) is not
 `Clone` for exactly this reason: two handles compute `prev` from their own view
 of the tail, so concurrent appends produce two entries claiming the same
-predecessor and the same `seq`. There is **no file lock**, so nothing stops it
-happening at write time.
+predecessor and the same `seq`.
 
-It is at least loud afterwards. `cairn audit` names both symptoms and exits
-non-zero, so a scheduled audit catches a fork even though the write did not:
+**The second one is refused rather than allowed to do it.**
+[`Ledger::open_exclusive`](../src/ledger.rs) takes an advisory lock, and every
+path that appends goes through it — the CLI's writing commands, `cairn-mcp`,
+and the p2p daemon. A second server on a held log exits non-zero before it
+serves anything:
+
+```
+cairn-mcp: cannot open ledger /abs/path/cairn.jsonl: another process is
+already writing /abs/path/cairn.jsonl. Two writers fork a hash-linked log --
+both would append entries claiming the same predecessor. Stop the other
+process, or give this one its own --log
+```
+
+Two things this does not do, both deliberate. **Reading takes no lock**, so
+`cairn audit` and `cairn log` work fine against a log a server is appending to
+— an append never rewrites a line already written. And an *advisory* lock binds
+the processes that ask for it, which is every cairn writer and nothing else: a
+log forked some other way — two copies merged by hand, or a filesystem whose
+locks do not hold — is still possible. `cairn audit` remains the backstop, and
+still names both symptoms and exits non-zero:
 
 ```
 2 problem(s):
@@ -315,10 +332,11 @@ heterogeneous fleet needs no scheduler.
 
 ## Known limits
 
-- **One writer per log, unenforced at write time.** The server opens the ledger
-  once and holds it. Two servers over one file will fork it and no lock stops
-  them; `audit` does catch it afterwards and exits non-zero. See *Running more
-  than one client at once* for the two arrangements that work.
+- **One log per writer, enforced by an advisory lock.** A second writer on a
+  held log is refused at startup rather than allowed to fork it. The limit that
+  remains is that the lock is advisory — it binds cairn's own writers, not an
+  unrelated program appending to the same file — so `audit` is still the
+  backstop. See *Running more than one client at once*.
 - **Candidate gossip is opt-in.** A daemon started without `--population`
   reconciles records but not the candidate population, so agents on separate
   logs will not see each other's unsettled work — only what has settled.
@@ -326,9 +344,14 @@ heterogeneous fleet needs no scheduler.
   an ed25519 public key, and the network refuses a record naming one unless it
   carries a signature from that key — so an identity you sign for cannot be
   worn by anyone else. Anything else is a nickname, unauthenticated exactly as
-  before. Generate one with `cairn identity --out alice.json` and submit
-  with `--identity alice.json`. The MCP server does not sign yet: use the CLI
-  when the name needs to be provably yours.
+  before. Generate one with `cairn identity --out alice.json` and submit with
+  `--identity alice.json`, on the CLI or on the server — `cairn-mcp --identity
+  alice.json` signs both halves of every submission, and the key's name
+  *replaces* the `submitter` an agent sends rather than being checked against
+  it. Letting the agent's name win would build a record whose name disagreed
+  with its signature, which the rules engine refuses for a reason the agent can
+  neither see nor fix. Without `--identity` nothing signs and a nickname
+  behaves exactly as it always did; the server says which it is at startup.
 - **Failed search still pays zero.** Threat-model #25 bites hardest here — an
   agent can burn a night of tokens and earn nothing. Progressive objectives
   soften it because partial progress pays; pass/fail objectives do not.
