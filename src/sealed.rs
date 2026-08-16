@@ -49,7 +49,7 @@
 //!
 //! # Sealing moves *when*, never *whether*
 //!
-//! proofwork's guarantee is that anyone can independently re-derive every settled
+//! cairn's guarantee is that anyone can independently re-derive every settled
 //! result. Once [`open`] returns, the artifact is public and anyone re-runs the
 //! pinned verifier exactly as they would have in the plain flow — same artifact,
 //! same commitment, same verdict path. This module changes the moment an artifact

@@ -627,7 +627,7 @@ fn checker_sha(root: &std::path::Path) -> String {
 /// Print a set of trials the way an operator wants to read them.
 pub fn report(trials: &[Trial], costs: Costs) -> String {
     let mut out = String::new();
-    out.push_str("proofwork arena -- strategies played against the real rules engine\n");
+    out.push_str("cairn arena -- strategies played against the real rules engine\n");
     out.push_str(&format!(
         "modelled costs: verify {} answer {} mint {} solve {}\n",
         costs.verify, costs.answer, costs.mint_canary, costs.solve

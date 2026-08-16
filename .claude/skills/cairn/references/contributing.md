@@ -46,8 +46,8 @@ anyone else.
 To get one, the operator generates an identity and points the server at it:
 
 ```sh
-proofwork identity --out alice.json
-proofwork-mcp --identity /abs/path/alice.json --log ... --root ...
+cairn identity --out alice.json
+cairn-mcp --identity /abs/path/alice.json --log ... --root ...
 ```
 
 The server then signs every submission and the key's name replaces the
@@ -100,7 +100,7 @@ real diversity rather than nominal.
 
 ## Working against someone else's node
 
-If the operator runs `proofwork-serve`, you need no MCP server and no shared
+If the operator runs `cairn-serve`, you need no MCP server and no shared
 filesystem:
 
 ```sh
@@ -108,7 +108,7 @@ curl -s http://HOST:PORT/objectives          # what is open
 curl -s http://HOST:PORT/objective/<id>      # full record, verifier spec
 curl -s http://HOST:PORT/frontier/<id>       # score, holder, pool
 curl -s http://HOST:PORT/log > log.jsonl     # the whole log, byte for byte
-proofwork --log log.jsonl --root . audit     # verify it yourself
+cairn --log log.jsonl --root . audit     # verify it yourself
 POST /submit                                 # queue a commitment or a reveal
 ```
 
@@ -117,5 +117,5 @@ entire point of the design: the server is not trusted, and a log you re-derived
 yourself is worth more than any assurance it could offer.
 
 Submissions to `/submit` are *queued*, not appended — the operator admits them
-with `proofwork drain`, which re-checks every rule. A queued submission is not
+with `cairn drain`, which re-checks every rule. A queued submission is not
 yet a claim.

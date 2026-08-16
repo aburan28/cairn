@@ -41,12 +41,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use proofwork::canonical::Value;
-use proofwork::crypto::identity::Identity;
-use proofwork::ledger::Ledger;
-use proofwork::node::{Node, RuleViolation, VERIFICATION_BOND};
-use proofwork::records::{Attestation, Claim, Commitment, Issuance, Objective};
-use proofwork::verifiers::VerifierRegistry;
+use cairn::canonical::Value;
+use cairn::crypto::identity::Identity;
+use cairn::ledger::Ledger;
+use cairn::node::{Node, RuleViolation, VERIFICATION_BOND};
+use cairn::records::{Attestation, Claim, Commitment, Issuance, Objective};
+use cairn::verifiers::VerifierRegistry;
 
 const GENESIS: &str = "2026-07-28T00:00:00+00:00";
 const COMMIT_AT: &str = "2026-07-28T00:10:00+00:00";
@@ -104,7 +104,7 @@ fn have_python() -> bool {
 fn sha(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
-    proofwork::hex::encode(&hasher.finalize())
+    cairn::hex::encode(&hasher.finalize())
 }
 
 struct Fixture {
@@ -172,7 +172,7 @@ fn claim_against(
     artifact: Value,
     nonce: &str,
 ) -> String {
-    let hash = proofwork::records::commitment_hash(objective_id, who, &artifact, nonce);
+    let hash = cairn::records::commitment_hash(objective_id, who, &artifact, nonce);
     let commitment = Commitment::new(objective_id, who, hash, COMMIT_AT);
     fixture.node.commit(&commitment, COMMIT_AT).expect("commit");
     let record =
@@ -231,7 +231,7 @@ fn unrunnable_claim(fixture: &mut Fixture, who: &str, nonce: &str) -> String {
 fn settle_past_the_window(fixture: &mut Fixture) {
     let id = fresh_objective(fixture, "something to settle later", LATE_COMMIT);
     let artifact = Value::object([("n", Value::Int(8))]);
-    let hash = proofwork::records::commitment_hash(&id, "later", &artifact, "late");
+    let hash = cairn::records::commitment_hash(&id, "later", &artifact, "late");
     fixture
         .node
         .commit(
@@ -244,8 +244,8 @@ fn settle_past_the_window(fixture: &mut Fixture) {
     fixture.node.reveal(&record, LATE_REVEAL).expect("reveal");
 
     let now = {
-        let seconds = proofwork::time::parse_rfc3339(LATE_SETTLE).expect("an instant");
-        proofwork::partition::epoch_of(seconds as u64, proofwork::partition::epoch_seconds())
+        let seconds = cairn::time::parse_rfc3339(LATE_SETTLE).expect("an instant");
+        cairn::partition::epoch_of(seconds as u64, cairn::partition::epoch_seconds())
     };
     let paid = fixture
         .node
@@ -708,7 +708,7 @@ fn a_bond_returns_once_the_window_shuts() {
     // in is shut.
     let objective_id = fresh_objective(&mut fixture, "after the window", LATE_SETTLE);
     let artifact = Value::object([("n", Value::Int(6))]);
-    let hash = proofwork::records::commitment_hash(&objective_id, "bob", &artifact, "n2");
+    let hash = cairn::records::commitment_hash(&objective_id, "bob", &artifact, "n2");
     fixture
         .node
         .commit(
@@ -858,7 +858,7 @@ fn a_bond_posted_against_nothing_is_named_even_when_a_later_payout_covers_it() {
     let id = objective.id();
 
     let artifact = Value::object([("n", Value::Int(2))]);
-    let hash = proofwork::records::commitment_hash(&id, &key, &artifact, "n1");
+    let hash = cairn::records::commitment_hash(&id, &key, &artifact, "n1");
     fixture
         .node
         .commit(
@@ -891,8 +891,8 @@ fn a_bond_posted_against_nothing_is_named_even_when_a_later_payout_covers_it() {
 
     // And now the payout that makes the arithmetic work out.
     let now = {
-        let seconds = proofwork::time::parse_rfc3339(SETTLE_AT).expect("an instant");
-        proofwork::partition::epoch_of(seconds as u64, proofwork::partition::epoch_seconds())
+        let seconds = cairn::time::parse_rfc3339(SETTLE_AT).expect("an instant");
+        cairn::partition::epoch_of(seconds as u64, cairn::partition::epoch_seconds())
     };
     let paid = fixture
         .node

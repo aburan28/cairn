@@ -16,7 +16,7 @@
  * adding a TypeScript verifier would make that three.
  *
  * So this displays *that a signature is present and what it covers*, and points
- * at `proofwork verify --from`, which is the thing that actually checks it. A
+ * at `cairn verify --from`, which is the thing that actually checks it. A
  * reader who wants assurance runs that. A page claiming to have verified
  * something it merely rendered would be worse than one that says plainly it did
  * not.
@@ -39,14 +39,15 @@ export type CheckpointResponse = {
   signature?: string;
 };
 
-export const NODE_URL =
-  process.env.NEXT_PUBLIC_PROOFWORK_NODE ?? "http://127.0.0.1:8080";
+/** Same-origin by default; see the note in `chain.ts`. The daemon serves
+ *  this build at /ui/, so relative fetches reach the node that served it. */
+export const NODE_URL = process.env.NEXT_PUBLIC_CAIRN_NODE ?? "";
 
 /**
  * Fetch the checkpoint, or `null` when the node has none.
  *
  * A node that has never been checkpointed is an ordinary state, not an error —
- * `proofwork checkpoint` is a thing an operator chooses to run — so this
+ * `cairn checkpoint` is a thing an operator chooses to run — so this
  * resolves to `null` rather than throwing and making the caller special-case a
  * message.
  */

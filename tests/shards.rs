@@ -13,9 +13,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use proofwork::blobs::{address, BlobStore};
-use proofwork::canonical::{digest_bytes, Value};
-use proofwork::shards::{
+use cairn::blobs::{address, BlobStore};
+use cairn::canonical::{digest_bytes, Value};
+use cairn::shards::{
     encode, reconstruct, Coding, Manifest, Shard, ShardError, ShardStore, ShardStoreError,
     DEFAULT_CHUNK_LEN, MIN_CHUNK_LEN,
 };
@@ -29,7 +29,7 @@ fn scratch(tag: &str) -> PathBuf {
         .unwrap_or(0);
     let mut path = std::env::temp_dir();
     path.push(format!(
-        "proofwork-shards-{}-{nanos}-{n}-{tag}",
+        "cairn-shards-{}-{nanos}-{n}-{tag}",
         std::process::id()
     ));
     fs::create_dir_all(&path).expect("create scratch dir");
@@ -224,7 +224,7 @@ fn a_holder_proves_one_chunk_to_a_reader_who_has_nothing_but_a_root() {
         // Over the wire, and back, because a proof nobody can write down is
         // not a proof anybody can be sent.
         let wire = proof.to_value().canonical_string();
-        let decoded = proofwork::shards::ChunkProof::from_value(
+        let decoded = cairn::shards::ChunkProof::from_value(
             &Value::from_json(&wire).expect("canonical JSON"),
         )
         .expect("decodes");
@@ -319,7 +319,7 @@ fn a_shard_directory_is_accounted_for_by_the_exposure_survey() {
     // `store::exposure` is a tripwire: anything a node writes into a data
     // directory in the clear has to be either sealed or on the list with a
     // reason. Shards are on the list, and this is what keeps that true.
-    use proofwork::store::{exposure, Store};
+    use cairn::store::{exposure, Store};
 
     let dir = scratch("exposure");
     let store = Store::new(&dir);

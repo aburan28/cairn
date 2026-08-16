@@ -25,11 +25,19 @@ export type Chain = {
   note: string;
 };
 
-/** The node this UI reads. Same-origin is useless here — the node is a
- *  separate process — so it is configuration, with the CLI default as the
- *  fallback so `npm run dev` works against `make serve` with no setup. */
-export const NODE_URL =
-  process.env.NEXT_PUBLIC_PROOFWORK_NODE ?? "http://127.0.0.1:8080";
+/** The node this UI reads.
+ *
+ *  Same-origin by default, which it was not when this app could only run as a
+ *  separate `next` process. The daemon now serves this build at `/ui/`, so the
+ *  node answering `/chain` is the one that served the page — and an empty base
+ *  makes every fetch relative, which is also what keeps it working behind an
+ *  SSH tunnel or a reverse proxy on a path nobody told the build about.
+ *
+ *  `NEXT_PUBLIC_CAIRN_NODE` still overrides it, baked in at build time, for
+ *  `npm run dev` against a node on another port. Neither is load-bearing: the
+ *  page has a URL box, and retargeting it is the entire point of the app —
+ *  comparing one node's head against a peer's. */
+export const NODE_URL = process.env.NEXT_PUBLIC_CAIRN_NODE ?? "";
 
 export class NodeUnreachable extends Error {}
 
@@ -47,7 +55,7 @@ export async function fetchChain(base: string = NODE_URL): Promise<Chain> {
   } catch (cause) {
     throw new NodeUnreachable(
       `No node answered at ${base}. Start one with \`make serve\`, or set ` +
-        `NEXT_PUBLIC_PROOFWORK_NODE to where yours is listening.`,
+        `NEXT_PUBLIC_CAIRN_NODE to where yours is listening.`,
       { cause },
     );
   }
@@ -87,14 +95,14 @@ export function short(hash: string): string {
 /**
  * Epoch lengths this chain appears to have been settled under, largest first.
  *
- * An epoch is `unix_seconds / PROOFWORK_EPOCH_SECONDS`, floor-divided, and that
+ * An epoch is `unix_seconds / CAIRN_EPOCH_SECONDS`, floor-divided, and that
  * divisor is **not stored** — `src/partition.rs` derives it and says so. So a
  * chain settled at one length and then another carries epoch numbers that differ
  * by roughly the ratio of the two, and nothing in the log records why.
  *
  * This groups the epochs by order of magnitude and reports how many distinct
  * groups there are. More than one is worth showing an operator: `docs` calls
- * `PROOFWORK_EPOCH_SECONDS` a *policy* parameter, and two settings disagree
+ * `CAIRN_EPOCH_SECONDS` a *policy* parameter, and two settings disagree
  * about which epoch a record falls in and therefore about which reveals were
  * legal. A log holding both was settled under two different rules.
  *

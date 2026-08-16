@@ -125,8 +125,8 @@ impl Report {
         if self.plaintext {
             lines.push(String::from(
                 "warning: this store is NOT encrypted, so the mirror is readable \
-                 by anyone who can read the destination. Run `proofwork keygen` \
-                 and `proofwork store encrypt` first if that is not what you want.",
+                 by anyone who can read the destination. Run `cairn keygen` \
+                 and `cairn store encrypt` first if that is not what you want.",
             ));
         }
         lines.join("\n")
@@ -396,7 +396,7 @@ mod tests {
         let first = mirror(&store, &destination, Options::default()).expect("mirrors");
         assert_eq!(first.copied.len(), 2);
         assert_eq!(first.unchanged, 0);
-        assert!(destination.join("log/proofwork.jsonl").exists());
+        assert!(destination.join("log/cairn.jsonl").exists());
         assert!(destination.join("cache/blob").exists());
 
         let second = mirror(&store, &destination, Options::default()).expect("mirrors again");
@@ -414,7 +414,7 @@ mod tests {
         let (dir, store) = sealed_store("ciphertext");
         let destination = dir.join("mirror");
         mirror(&store, &destination, Options::default()).expect("mirrors");
-        let copied = fs::read_to_string(destination.join("log/proofwork.jsonl")).expect("read");
+        let copied = fs::read_to_string(destination.join("log/cairn.jsonl")).expect("read");
         assert!(copied.starts_with("pwenc1:"));
         assert_eq!(copied, "pwenc1:00:11\n", "bytes, not a re-encryption");
         let _ = fs::remove_dir_all(&dir);
@@ -461,7 +461,7 @@ mod tests {
         let backup = store
             .root()
             .join("log")
-            .join(format!("proofwork.jsonl{PLAINTEXT_BACKUP_SUFFIX}"));
+            .join(format!("cairn.jsonl{PLAINTEXT_BACKUP_SUFFIX}"));
         fs::write(
             &backup,
             "{\"hash\":\"sha256:00\",\"kind\":\"note\",\"seq\":0}\n",
@@ -473,13 +473,13 @@ mod tests {
         assert_eq!(report.skipped_plaintext, vec![backup]);
         assert!(
             !destination
-                .join(format!("log/proofwork.jsonl{PLAINTEXT_BACKUP_SUFFIX}"))
+                .join(format!("log/cairn.jsonl{PLAINTEXT_BACKUP_SUFFIX}"))
                 .exists(),
             "the plaintext backup reached the mirror"
         );
         assert!(report.summary().contains("plaintext backup"));
         // The sealed log itself still goes.
-        assert!(destination.join("log/proofwork.jsonl").exists());
+        assert!(destination.join("log/cairn.jsonl").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -516,10 +516,7 @@ mod tests {
         let report = mirror(&store, &destination, Options::default()).expect("mirrors");
         assert!(report.plaintext);
         assert!(report.summary().contains("NOT encrypted"));
-        assert!(
-            destination.join("log/proofwork.jsonl").exists(),
-            "still copied"
-        );
+        assert!(destination.join("log/cairn.jsonl").exists(), "still copied");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -611,7 +608,7 @@ mod tests {
         let report = mirror(&store, &destination, Options::default()).expect("mirrors");
         assert_eq!(report.undated, 0, "the platform refused to set a timestamp");
 
-        for relative in ["log/proofwork.jsonl", "cache/blob"] {
+        for relative in ["log/cairn.jsonl", "cache/blob"] {
             let source = store.root().join(relative);
             let target = destination.join(relative);
             let left = fs::metadata(&source)

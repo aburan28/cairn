@@ -50,7 +50,7 @@
 //! which blobs a node holds, on the grounds that the set of objectives a node
 //! works on is nobody's business; a beacon that helpfully listed them would
 //! reintroduce exactly that leak, unauthenticated and broadcast to a whole
-//! office. What a listener learns is that *a* proofwork node exists here.
+//! office. What a listener learns is that *a* cairn node exists here.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};

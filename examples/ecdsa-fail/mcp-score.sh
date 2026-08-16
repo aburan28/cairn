@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Smoke the existing proofwork-mcp tools against the ecdsa-fail MVP objective.
+# Smoke the existing cairn-mcp tools against the ecdsa-fail MVP objective.
 # No new MCP tools — documents the natural wiring from docs/agents.md.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-LOG="${1:-/tmp/proofwork-ecdsa-mcp.jsonl}"
+LOG="${1:-/tmp/cairn-ecdsa-mcp.jsonl}"
 rm -f "$LOG"
 OUT=$(mktemp /tmp/pw-ecdsa-mcp-out-XXXXXX.jsonl)
 trap 'rm -f "$OUT"' EXIT
 
-MCP="${PROOFWORK_MCP_BIN:-./target/release/proofwork-mcp}"
-PW="${PROOFWORK_BIN:-./target/release/proofwork}"
+MCP="${CAIRN_MCP_BIN:-./target/release/cairn-mcp}"
+PW="${CAIRN_BIN:-./target/release/cairn}"
 [ -x "$PW" ] || cargo build --release
-[ -x "$MCP" ] || cargo build --release --bin proofwork-mcp
+[ -x "$MCP" ] || cargo build --release --bin cairn-mcp
 
 OID=$("$PW" --log "$LOG" --root . post examples/ecdsa-fail/objective.json | head -1 | awk '{print $2}')
 echo "objective $OID" >&2

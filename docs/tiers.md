@@ -126,7 +126,7 @@ Closing that means deciding which tier a committee seat is denominated in, and
 that is a question about what custody *is* rather than about arithmetic. It is
 named here rather than left to be discovered.
 
-**The `balances` total.** `proofwork balances` still prints one spendable
+**The `balances` total.** `cairn balances` still prints one spendable
 number per identity, because "how much does this identity have" remains a
 question with an answer. The per-tier breakdown prints underneath it whenever
 anything was *earned* — including when there is only one tier, which is the case

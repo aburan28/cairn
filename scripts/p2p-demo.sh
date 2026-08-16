@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Two `proofwork-p2p` daemons: one with a settled log, one with nothing.
+# Two `cairn-p2p` daemons: one with a settled log, one with nothing.
 #
 # The daemon is the largest surface in the repository -- service, sync, code
 # transfer, DHT, multicast, populations -- and until this script nothing ran it.
@@ -33,10 +33,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
-DAEMON="${P2P_BIN:-./target/release/proofwork-p2p}"
-SERVE="${SERVE_BIN:-./target/release/proofwork-serve}"
-REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+RUST="${RUST_BIN:-./target/release/cairn}"
+DAEMON="${P2P_BIN:-./target/release/cairn-p2p}"
+SERVE="${SERVE_BIN:-./target/release/cairn-serve}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 if [ ! -x "$RUST" ] || [ ! -x "$DAEMON" ] || [ ! -x "$SERVE" ]; then
   echo "building release binaries..." >&2
   cargo build --release
@@ -62,8 +62,8 @@ trap cleanup EXIT
 # Exported so both daemons and every audit below slice the log at the same
 # boundaries. Epochs are derived from record timestamps and never stored, so an
 # auditor using a different length reports an honest batch as mis-ordered --
-# `proofwork audit` says so itself when every batch faults at once.
-export PROOFWORK_EPOCH_SECONDS=1
+# `cairn audit` says so itself when every batch faults at once.
+export CAIRN_EPOCH_SECONDS=1
 # Two free ports, taken by binding and releasing rather than guessed: a fixed
 # port makes this script fail for whoever is already using it.
 free_port() {
@@ -263,12 +263,12 @@ echo "$SECOND" | grep -q "already writing" \
   || fail "a daemon that could not start still wrote an identity file"
 
 rule "the whole documented topology, on one log"
-# `proofwork-serve` beside the daemon, both on A's log. This is the deployment
+# `cairn-serve` beside the daemon, both on A's log. This is the deployment
 # `docs/serving.md` describes and nothing ran until now: the server is a reader
 # and a spooler, the daemon is the single writer, and a submission crosses from
 # one to the other through the queue.
 #
-# It did not compose. `proofwork drain` wants the write lock the daemon holds,
+# It did not compose. `cairn drain` wants the write lock the daemon holds,
 # so for as long as the daemon was the only thing that could run alongside the
 # server, an *online* node could not accept a submission at all.
 SERVE_PORT=$(free_port)
@@ -279,7 +279,7 @@ for _ in $(seq 1 100); do
   grep -q "listening on" "$A/serve.log" 2>/dev/null && break
   sleep 0.2
 done
-grep -q "listening on" "$A/serve.log" || fail "proofwork-serve never bound"
+grep -q "listening on" "$A/serve.log" || fail "cairn-serve never bound"
 sed 's/^/  /' "$A/serve.log"
 
 rule "A's main loop is still running, several ticks in"

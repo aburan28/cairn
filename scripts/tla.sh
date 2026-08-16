@@ -40,7 +40,7 @@ MODULES=(
   Gossip
   Sync
   Partition
-  Proofwork
+  Cairn
 )
 
 SKIP=3
@@ -121,7 +121,7 @@ say "tla.sh: jar    ${JAR}"
 say "tla.sh: specs  ${SPEC_DIR}"
 
 # TLC writes states/ and metadata next to the spec; keep that out of the tree.
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/proofwork-tlc.XXXXXX")"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cairn-tlc.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 failed=()

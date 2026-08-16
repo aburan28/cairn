@@ -44,16 +44,16 @@ nobody.
 ## Run it
 
 ```sh
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 LOG=/tmp/pw-ramsey.jsonl
 
-OID=$(./target/release/proofwork --log $LOG --root . \
+OID=$(./target/release/cairn --log $LOG --root . \
         post examples/ramsey/objective.json | head -1 | awk '{print $2}')
 
-./target/release/proofwork --log $LOG --root . try "$OID" \
+./target/release/cairn --log $LOG --root . try "$OID" \
   --submitter you --artifact examples/ramsey/artifacts/paley-17.json --settle
 
-sleep 3 && ./target/release/proofwork --log $LOG --root . settle
+sleep 3 && ./target/release/cairn --log $LOG --root . settle
 ```
 
 **The second call is not redundant.** A batch is not eligible until it has been

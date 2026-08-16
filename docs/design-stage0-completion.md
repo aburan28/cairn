@@ -49,7 +49,7 @@ identically; the gate only rejects more inputs.
 
 ---
 
-## 2. `proofwork verify --from <checkpoint>`
+## 2. `cairn verify --from <checkpoint>`
 
 **Today.** ML-DSA-65 checkpoints bind `(height, head, merkle_root)`. Daemon
 writes them. No reader CLI.
@@ -57,7 +57,7 @@ writes them. No reader CLI.
 **Design.**
 
 ```text
-proofwork verify --from checkpoint.json [--root-key pubkey.hex|file] [--log …] [--audit]
+cairn verify --from checkpoint.json [--root-key pubkey.hex|file] [--log …] [--audit]
 ```
 
 Semantics for a reader who may hold only a fragment or a longer log:
@@ -97,7 +97,7 @@ interpreter + objective bundle + `/usr`/`/lib` as needed, tmpfs workdir, clear
 env except `PATH`/`LANG`, soft output already capped by harvest parser |
 | macOS | `sandbox-exec` seatbelt profile: deny network, restrict writes to the
 workdir |
-| Fallback | Current subprocess. If `PROOFWORK_REQUIRE_SANDBOX=1` (or the objective
+| Fallback | Current subprocess. If `CAIRN_REQUIRE_SANDBOX=1` (or the objective
 is treated as untrusted), missing jail → `Unavailable`, never `Reject` |
 
 Also:
@@ -180,7 +180,7 @@ auditable.
 
 **Demo / test impact.** Same-second commit+reveal fails. Tests and scripts must
 commit in epoch N and reveal in N+1 (e.g. `created_at` at `t` and reveal `ts` at
-`t + EPOCH_SECONDS`). Optional `PROOFWORK_EPOCH_SECONDS` overrides the constant
+`t + EPOCH_SECONDS`). Optional `CAIRN_EPOCH_SECONDS` overrides the constant
 for local demos only; production default remains 600. Override does not change
 canonical record bytes.
 
@@ -254,7 +254,7 @@ spec/tla/
   Ledger.tla         Checkpoint.tla     CommitReveal.tla
   Verification.tla   Frontier.tla       Attribution.tla
   Gossip.tla         Sync.tla           Partition.tla
-  Proofwork.tla      *.cfg              README.md
+  Cairn.tla      *.cfg              README.md
 ```
 
 ### What each module must state and check
@@ -270,7 +270,7 @@ spec/tla/
 | `Gossip` | population CRDT with top-K pruning | merge commutative, associative, idempotent; pruning is confluent (dropping a candidate outside the top K never changes the union's top K); convergence under fair pairwise merge (item 6) |
 | `Sync` | record anti-entropy over bucket digests | honest peers converge; **derived records never cross the wire**; unsolicited records are refused; a colliding digest costs the liar its own gossip and hides nothing from a re-verifying peer |
 | `Partition` | coordinator-free assignment | assignment is a pure function of `(beacon, node, objective)`; slices cover the space; epoch rotation bounds squatting |
-| `Proofwork` | composition of the above | the Stage 0 guarantee: **every settled result is re-derivable from the log alone**, and the objective pool is exactly conserved |
+| `Cairn` | composition of the above | the Stage 0 guarantee: **every settled result is re-derivable from the log alone**, and the objective pool is exactly conserved |
 
 ### Tooling
 

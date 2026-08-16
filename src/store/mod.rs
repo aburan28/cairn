@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! <data-dir>/
-//!   log/proofwork.jsonl    the hash-linked log        PINNED       never evicted
+//!   log/cairn.jsonl    the hash-linked log        PINNED       never evicted
 //!   cache/                 re-fetchable content       RECLAIMABLE  evicted under pressure
 //!   tmp/                   scratch                    RECLAIMABLE  always safe to drop
 //! ```
@@ -50,15 +50,85 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Decide how to read and write a log, given a key that may or may not be there.
+///
+/// The ledger deliberately refuses to guess ([`crate::ledger::Ledger::open_with`]);
+/// this is where the guessing is allowed to happen, because it is a
+/// user-experience decision rather than an integrity one. The rule:
+///
+/// * a log whose first line is sealed needs the key, and says so if it is
+///   missing rather than reporting the file as corrupt;
+/// * a log that is already plaintext stays plaintext, even if a key exists --
+///   converting somebody's log as a side effect of an unrelated command would
+///   be indefensible, and `store encrypt` is the command that does it on
+///   purpose;
+/// * a log that does not exist yet is created sealed **if a key is there**, so
+///   `keygen` followed by ordinary use encrypts without further ceremony.
+///
+/// # Why this is in the library
+///
+/// It was a private function in `main.rs`, which meant the CLI could open a
+/// sealed log and the two daemons could not. On a machine with a key file --
+/// the arrangement `cairn store keygen` leaves behind -- every log the CLI
+/// wrote was sealed, and `cairn-serve` answered 500 to every request that
+/// touched it, reporting the operator's own log as altered or spliced. Two
+/// answers to "how is this log encoded" is one answer too many.
+pub fn resolve_codec(
+    log: &Path,
+    key_path: &Path,
+    passphrase: Option<&str>,
+) -> Result<crate::ledger::Codec, atrest::AtRestError> {
+    let sealed_on_disk = first_line_is_sealed(log)?;
+    let exists = key_path.exists();
+
+    match (sealed_on_disk, exists) {
+        (Some(true), false) => Err(atrest::AtRestError::NoKeyFile {
+            path: key_path.to_path_buf(),
+        }),
+        (Some(true), true) | (None, true) => {
+            let cipher = atrest::Cipher::read_key_file(key_path, passphrase)?;
+            Ok(crate::ledger::Codec::Sealed(Box::new(cipher)))
+        }
+        // Plaintext log, or no log and no key.
+        (Some(false), _) | (None, false) => Ok(crate::ledger::Codec::Plain),
+    }
+}
+
+/// `Some(true)` sealed, `Some(false)` plaintext, `None` for an absent or empty log.
+///
+/// Reads only as far as the first non-blank line: this runs per request in
+/// [`crate::serve`], and a sealed log is exactly as large as a plaintext one.
+pub fn first_line_is_sealed(path: &Path) -> Result<Option<bool>, atrest::AtRestError> {
+    use std::io::BufRead as _;
+
+    if !path.exists() {
+        return Ok(None);
+    }
+    let file = fs::File::open(path).map_err(|error| atrest::AtRestError::Io {
+        context: format!("reading {}", path.display()),
+        reason: error.to_string(),
+    })?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.map_err(|error| atrest::AtRestError::Io {
+            context: format!("reading {}", path.display()),
+            reason: error.to_string(),
+        })?;
+        if !line.trim().is_empty() {
+            return Ok(Some(atrest::is_sealed_line(&line)));
+        }
+    }
+    Ok(None)
+}
+
 /// Environment variable naming the data directory.
-pub const DATA_ENV: &str = "PROOFWORK_DATA";
+pub const DATA_ENV: &str = "CAIRN_DATA";
 /// Environment variable naming the key file.
-pub const KEY_ENV: &str = "PROOFWORK_KEY";
+pub const KEY_ENV: &str = "CAIRN_KEY";
 
 /// Subdirectory holding the log.
 pub const LOG_DIR: &str = "log";
 /// The log file's name inside [`LOG_DIR`].
-pub const LOG_FILE: &str = "proofwork.jsonl";
+pub const LOG_FILE: &str = "cairn.jsonl";
 /// Subdirectory holding re-fetchable content.
 pub const CACHE_DIR: &str = "cache";
 /// Subdirectory holding scratch files.
@@ -90,7 +160,7 @@ impl fmt::Display for StoreError {
                 f,
                 "store limit of {} cannot hold {} of data that must not be \
                  deleted (the log and anything beside it). Raise the limit or \
-                 move the store; proofwork will not prune a hash-linked log to fit",
+                 move the store; cairn will not prune a hash-linked log to fit",
                 format_size(*limit),
                 format_size(*pinned)
             ),
@@ -150,10 +220,10 @@ impl Store {
         }
     }
 
-    /// The store named by `$PROOFWORK_DATA`, if it is set.
+    /// The store named by `$CAIRN_DATA`, if it is set.
     ///
     /// Returns `None` rather than inventing a default. There is a perfectly good
-    /// pre-existing behaviour -- a bare `proofwork.jsonl` in the working
+    /// pre-existing behaviour -- a bare `cairn.jsonl` in the working
     /// directory -- and quietly relocating an existing operator's log the first
     /// time they upgrade would be the worst possible way to introduce this.
     pub fn from_env() -> Option<Store> {
@@ -190,8 +260,8 @@ impl Store {
         self.root.join(TMP_DIR)
     }
 
-    /// Where a key file lives when nobody says otherwise: `$PROOFWORK_KEY`, else
-    /// `~/.proofwork/key`.
+    /// Where a key file lives when nobody says otherwise: `$CAIRN_KEY`, else
+    /// `~/.cairn/key`.
     ///
     /// Deliberately **not** inside the data directory. The default has to be the
     /// safe one, because the unsafe one is invisible: a key beside its
@@ -199,6 +269,20 @@ impl Store {
     /// else, and then it was never encryption at all. Falls back to
     /// `<data-dir>/key` only when there is no home directory to use, and
     /// [`mirror`] refuses to copy it when that happens.
+    /// # The `.proofwork` fallback
+    ///
+    /// This project was called `proofwork` and kept its key in `~/.proofwork`.
+    /// A key is not a preference: it is the only thing that can read a sealed
+    /// log, and a rename that quietly looked somewhere else would have turned
+    /// every existing operator's log into ciphertext nobody could open —
+    /// reported, because `Codec` cannot tell a missing key from a wrong one, as
+    /// "altered, reordered, or spliced".
+    ///
+    /// So the old path wins when it exists and the new one does not. It is a
+    /// read-only fallback: nothing writes there, `keygen` creates `~/.cairn`,
+    /// and an operator who moves the file themselves gets the new path with no
+    /// further ceremony. It can be deleted once nobody is upgrading across the
+    /// rename, and not before.
     pub fn default_key_path(&self) -> PathBuf {
         if let Ok(explicit) = std::env::var(KEY_ENV) {
             if !explicit.is_empty() {
@@ -206,7 +290,17 @@ impl Store {
             }
         }
         match home_dir() {
-            Some(home) => home.join(".proofwork").join("key"),
+            Some(home) => {
+                let current = home.join(".cairn").join("key");
+                if current.exists() {
+                    return current;
+                }
+                let legacy = home.join(".proofwork").join("key");
+                if legacy.exists() {
+                    return legacy;
+                }
+                current
+            }
             None => self.root.join("key"),
         }
     }
@@ -425,7 +519,7 @@ mod tests {
             .unwrap_or(0);
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "proofwork-store-{}-{nanos}-{n}-{tag}",
+            "cairn-store-{}-{nanos}-{n}-{tag}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create scratch dir");
@@ -472,7 +566,7 @@ mod tests {
             Class::Reclaimable
         );
         assert_eq!(
-            store.classify(Path::new("/store/log/proofwork.jsonl")),
+            store.classify(Path::new("/store/log/cairn.jsonl")),
             Class::Pinned
         );
         assert_eq!(store.classify(Path::new("/store/key")), Class::Pinned);

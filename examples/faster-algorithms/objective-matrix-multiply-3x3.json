@@ -1,0 +1,42 @@
+{
+  "artifact_schema": {
+    "description": "A bilinear algorithm for multiplying two 3x3 matrices, as a list of products. Product r computes m_r = (sum over entries of a_r[x] * A[x]) * (sum over entries of b_r[y] * B[y]), and entry z of the result is the sum over r of c_r[z] * m_r. All three index vectors are row-major over the nine entries: index 3*i + j is row i, column j. The number of products is the multiplication count and is the score.",
+    "example": {
+      "products": [
+        {
+          "a": [1, 0, 0, 0, 0, 0, 0, 0, 0],
+          "b": [1, 0, 0, 0, 0, 0, 0, 0, 0],
+          "c": [1, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ]
+    },
+    "properties": {
+      "products": {
+        "description": "At most 40 products. Each is an object with keys a, b and c, every one a list of exactly 9 integers in [-2, 2].",
+        "type": "array"
+      }
+    },
+    "required": ["products"],
+    "type": "object"
+  },
+  "created_at": "2026-08-15T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-matrix-multiply-3x3",
+  "ratchet": {
+    "baseline": 30,
+    "direction": "minimize",
+    "min_improvement": 1,
+    "reward": 2000000,
+    "target": 19
+  },
+  "reward": 2000000,
+  "statement": "Multiply two 3x3 matrices with as few multiplications as possible. Score is the number of products, minimised. The pinned evaluator checks the Brent equations over all 3^6 index tuples in exact integer arithmetic, so correctness is decided over every pair of input matrices at once and an algorithm that is right on sampled matrices but wrong in general is refused. Coefficients are integers in [-2, 2]: this network has no float type anywhere near identity or money, so a numerically approximate decomposition scores as invalid until it is rounded to exact integers and re-checked, and the discretisation is part of the problem. Baseline 30, above the schoolbook 27. Target 19, the best published lower bound; the best published algorithm is Laderman's 23, from 1976, and the gap of four has survived half a century of attention including several machine searches. Payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move, and every submission must cite the frontier it beat.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/faster-algorithms/evaluators/matrix_multiply_3x3.py",
+    "evaluator_sha256": "0cea0213adc7d183d4f47e0bceca816accf575b10c53ea22a708f8360b7d2db2",
+    "kind": "evaluator",
+    "threshold": 30
+  }
+}

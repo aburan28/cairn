@@ -10,8 +10,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
-REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+RUST="${RUST_BIN:-./target/release/cairn}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 if [ ! -x "$REF" ]; then
   echo "building the reference implementation..." >&2
   cargo build --release --locked --manifest-path reference/rust/Cargo.toml
@@ -31,12 +31,25 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 # different boundaries and report an honest batch as mis-ordered. Epoch length
 # is a policy parameter every participant must share -- which is exactly why the
 # production default is not configurable per node in any other way.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
+
+# The reference implementation reads plain JSONL and nothing else -- sealing is
+# a storage concern of the primary crate, deliberately outside the format the
+# two implementations have to agree on. But the CLI seals every log it creates
+# whenever a key file exists, so on any machine that has run `cairn keygen`
+# this script handed the reference ciphertext and got "malformed JSON: unexpected
+# character at byte 0". It failed there and passed in CI, which is the worst
+# place for a check to be wrong.
+#
+# Pointing CAIRN_KEY at a path that does not exist makes `resolve_codec` choose
+# plaintext, which is what this script means: it compares the two
+# implementations on the format they share.
+export CAIRN_KEY=/nonexistent/cairn-interop-forces-plaintext
 
 # Likewise exported rather than left to the default, and for the same reason:
 # both implementations must agree on when an epoch becomes eligible, not just
 # on how long one is.
-export PROOFWORK_FINALITY_EPOCHS=1
+export CAIRN_FINALITY_EPOCHS=1
 
 tick() { sleep 1.1; }
 
@@ -54,7 +67,7 @@ tick() { sleep 1.1; }
 # delay existed; the delay only made the window wide enough to notice.
 settle_tick() {
   local i
-  for ((i = 0; i <= PROOFWORK_FINALITY_EPOCHS; i++)); do tick; done
+  for ((i = 0; i <= CAIRN_FINALITY_EPOCHS; i++)); do tick; done
 }
 
 # Suffix appended after the call, not inside the template: BSD mktemp (macOS)

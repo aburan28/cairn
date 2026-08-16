@@ -6,9 +6,15 @@ Anyone contributes compute toward shared objectives, AI agents do the work, and
 payment is settled by a checker that anyone can re-run. No trust in the operator,
 no trust in the contributor, no trust in the model that produced the answer.
 
-This repository contains **proofwork**, the protocol implementation: a Rust
+This repository contains **cairn**, the protocol implementation: a Rust
 library and CLI, a second and deliberately independent Rust implementation in
 `reference/`, and the conformance vectors that bind them to the same answers.
+
+**Site: <https://aburan28.github.io/distributed-researcher/>** — what it is, how
+it works, and the challenges a node is paying for. It is the same app a node
+serves at `/ui/` (see [ui/README.md](ui/README.md)), so nothing on it is
+simulated: the numbers come from a node when one answers and from
+`launch/cairn.jsonl` when none does, and the page says which.
 
 Stage 0 — one operator, no token, no consensus. What it does provide is the
 property that actually matters: *anyone can independently re-derive every result
@@ -57,11 +63,39 @@ The corollary is the whole engineering constraint: **the network can only work o
 tasks whose outputs are cheap to check.** That is a specification for what to
 build, not a limitation to route around.
 
-## Quick start
+## Install
+
+```sh
+curl -fsSL https://github.com/aburan28/distributed-researcher/releases/latest/download/install.sh | sh
+```
+
+Detects the platform, downloads the matching tarball, checks it against the
+published `.sha256`, and installs all five binaries to `~/.local/bin`.
+`--version` pins a release, `--bin-dir` picks somewhere else, and on Linux
+`--libc gnu` takes the dynamically-linked build instead of the static musl one.
+Linux amd64/arm64 and macOS Intel/Apple Silicon; no Windows, because the
+verifier sandbox is seatbelt and bubblewrap.
+
+**What that checksum does and does not prove.** It comes from the same server as
+the tarball, so it detects a corrupted download and nothing else — there is no
+signing key here yet, and saying otherwise would be worse than saying this. The
+check that means something is the one this project exists for, and it runs
+against bytes that ship in the repository:
+
+```sh
+cairn --log launch/cairn.jsonl --root . audit
+```
+
+From source instead:
 
 ```sh
 cargo build --release
-cargo install --path .        # puts `proofwork` and the other binaries on PATH
+cargo install --path .        # puts `cairn` and the other binaries on PATH
+```
+
+## Quick start
+
+```sh
 cargo test                    # the full suite, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
@@ -70,12 +104,12 @@ cargo test                    # the full suite, loopback only
 ./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
 ./scripts/blob-demo.sh        # a node with only the log fetches its verifier and uses it
 ./scripts/p2p-demo.sh         # two daemons: an empty node syncs, then audits under both
-proofwork incentives          # evaluate the node-operator game (~2s)
-proofwork incentives --sweep canary-rate=1/20..1/5:5 --out grid.csv
+cairn incentives          # evaluate the node-operator game (~2s)
+cairn incentives --sweep canary-rate=1/20..1/5:5 --out grid.csv
                               # ...across a grid instead of at one point, one row per
                               # point, so a threshold is visible without re-reading
                               # a hundred reports by eye
-proofwork incentives --robustness   # ...and how far each parameter can move before it
+cairn incentives --robustness   # ...and how far each parameter can move before it
                                     # breaks. Seventeen parameters walked out along a
                                     # twelve-rung ladder in both directions, the whole
                                     # mechanism re-evaluated at every rung: ~6 minutes,
@@ -84,7 +118,7 @@ proofwork incentives --robustness   # ...and how far each parameter can move bef
 
 On Linux, install [bubblewrap](https://github.com/containers/bubblewrap)
 (`apt install bubblewrap`) so objective-authored verifier code runs inside an
-OS jail, and set `PROOFWORK_REQUIRE_SANDBOX=1` on any node that verifies
+OS jail, and set `CAIRN_REQUIRE_SANDBOX=1` on any node that verifies
 objectives it did not write — without a jail mechanism the code runs
 unconfined, and that variable turns "unconfined" into `Unavailable` instead.
 
@@ -94,13 +128,13 @@ unconfined, and that variable turns "unconfined" into `Unavailable` instead.
 key — so the claim above can be tested before you build anything of your own:
 
 ```sh
-proofwork --log launch/proofwork.jsonl --root . audit
-proofwork --log launch/proofwork.jsonl --root . verify \
+cairn --log launch/cairn.jsonl --root . audit
+cairn --log launch/cairn.jsonl --root . verify \
     --from launch/checkpoint.json --root-key launch/root-key.pub --audit
 
 # and the check that matters: the independent implementation re-deriving it
-./reference/rust/target/release/proofwork-reference \
-    --log launch/proofwork.jsonl --root . audit
+./reference/rust/target/release/cairn-reference \
+    --log launch/cairn.jsonl --root . audit
 ```
 
 Both print the same Merkle root. See [launch/README.md](launch/README.md) for
@@ -109,8 +143,8 @@ what is in it and the two caveats that come with a sample artifact.
 Checking one entry does not need the log at all:
 
 ```sh
-proofwork --log launch/proofwork.jsonl prove 12 --out proof.json
-proofwork check proof.json --from launch/checkpoint.json \
+cairn --log launch/cairn.jsonl prove 12 --out proof.json
+cairn check proof.json --from launch/checkpoint.json \
     --root-key launch/root-key.pub
 ```
 
@@ -121,20 +155,45 @@ a log of twenty thousand.
 ### Publish your log so others can check it
 
 ```sh
-proofwork-serve --log proofwork.jsonl --root . --listen 0.0.0.0:8080
+cairn-serve --log cairn.jsonl --root . --listen 0.0.0.0:8080
 ```
 
 `GET /log` returns the log byte for byte; `GET /objectives` and
 `GET /frontier/{id}` are conveniences over it. A contributor fetches it and
-re-derives everything themselves with `proofwork verify --from`, which is the
+re-derives everything themselves with `cairn verify --from`, which is the
 whole point — they need not trust the server that served it.
 
 Add `--queue ./queue` to accept `POST /submit`. Submissions are *queued*, never
 appended: the operator's node admits them, re-checking every rule against the
-whole log. That is `proofwork-p2p --queue ./queue` if a daemon is running — it
-holds the ledger's single write lock, so nothing else can — or
-`proofwork drain --queue ./queue` if one is not. See
-[serving.md](docs/serving.md).
+whole log. See [serving.md](docs/serving.md).
+
+Which raises the question of who admits them — a `Ledger` has one writer, so a
+publisher on its own can only ever queue. The answer is usually not a second
+process:
+
+### One node, one process
+
+```sh
+cairn-p2p --identity id.json --root-key root.key --checkpoint cp.json \
+    --listen 0.0.0.0:9000 --log cairn.jsonl --root . \
+    --queue ./queue --serve 0.0.0.0:8080
+```
+
+`--serve` puts the HTTP server on a thread beside the sync loop, against the
+same log. Because that process is the one holding the write lock, it drains the
+queue it fills: a submission arriving over HTTP is admitted on the next tick,
+with nobody running `cairn drain` at all.
+
+`cairn-serve --p2p-listen 0.0.0.0:9000 --identity … --root-key … --checkpoint …`
+is the same daemon entered from the other side — both call
+`cairn::daemon::run`, so there is one implementation of "be a node" rather
+than one per binary. `make node` runs it with the repository's defaults, and
+`./scripts/node-smoke.sh` is the test that a submission really does get admitted
+by the process that received it.
+
+The split topology still works and is still right for a read-only mirror:
+`cairn-serve` alone takes no lock and holds no `Node`, so it is safe to
+point at a log something else is writing. What it cannot do is admit anything.
 
 ### Start a p2p node
 
@@ -144,28 +203,17 @@ first.
 **Joining — dial out, serve nobody.**
 
 ```sh
-make node                 # peers on :5000, reader on http://127.0.0.1:5001/chain.html
-make node UI=1            # ...and the richer Next.js reader on :5002
-make node PORT=6000       # every port derived from one number
+make p2p
 ```
 
-One command and one knob. `PORT` is the peer-to-peer port; HTTP is the next one
-and the UI the one after. Three processes speaking three protocols cannot share
-a TCP port, so what they share is a single number to set — before this there
-were four independently-editable defaults, three of which had to agree, and they
-drifted.
-
-`UI=1` is optional because `proofwork-serve` renders the chain at `/chain.html`
-itself with no build step: the default is one command, two processes and no Node
-toolchain at all. `ui/` is the richer client, not the only one.
-
-`make p2p` is still the daemon on its own, for when a peer-to-peer problem is
-easier to read without two other processes logging into the same terminal.
-
-It binds `127.0.0.1:5000` (nothing needs to dial you), writes
-`.local/proofwork-p2p.jsonl`, and on first run creates
+Binds `127.0.0.1:9000` (nothing needs to dial you), writes
+`.local/cairn-p2p.jsonl`, and on first run creates
 `.local/node.identity.json`, `.local/root.key`, and `.local/checkpoint.json`.
 The first two are private keys; `.local/` is gitignored, keep it that way.
+
+`make node` runs the same daemon with `--serve` also on, so peers, the HTTP
+publisher and (if built with the `ui` feature) the reader all come up from one
+process against one log, as described above.
 
 **One thing will stop this working, and it is not the network.** With no
 explicit `BOOTSTRAP_ARGS`, the first run generates `.local/seed.json` for
@@ -215,8 +263,8 @@ seed that is simply down:
 **Is it actually connected?** Successful sessions are logged, not just failures:
 
 ```
-2026-08-08T00:33:42+00:00 INFO  proofwork inbound session:  <peer id> ok, 12 entries now
-2026-08-08T00:33:42+00:00 INFO  proofwork outbound session: <peer id> ok, 12 entries now
+2026-08-08T00:33:42+00:00 INFO  cairn inbound session:  <peer id> ok, 12 entries now
+2026-08-08T00:33:42+00:00 INFO  cairn outbound session: <peer id> ok, 12 entries now
 ```
 
 Silence with neither those nor an error means nothing has been dialled yet;
@@ -226,21 +274,21 @@ network symptom.
 
 ### Turning up the logs
 
-`PROOFWORK_LOG` sets the level — `error`, `warn`, `info` (default), `debug`,
+`CAIRN_LOG` sets the level — `error`, `warn`, `info` (default), `debug`,
 `trace`, or `off`. Everything goes to **stderr**, always, which is what makes it
-safe to raise on `proofwork-mcp`, whose *stdout* is the JSON-RPC protocol.
+safe to raise on `cairn-mcp`, whose *stdout* is the JSON-RPC protocol.
 
 `debug` adds every p2p protocol message, in both directions, with the peer it
 was exchanged with:
 
 ```
-$ PROOFWORK_LOG=debug make p2p
-… DEBUG proofwork::p2p 59758322… -> Hello peer=083e078e… records=0
-… DEBUG proofwork::p2p 59758322… <- Inventory records=1
-… DEBUG proofwork::p2p 59758322… -> Want ids=1
-… DEBUG proofwork::p2p 59758322… <- Records n=1
-… DEBUG proofwork::p2p 59758322… -> code.Want addresses=1
-… DEBUG proofwork::p2p 59758322… -> dht.Ask addresses=1
+$ CAIRN_LOG=debug make p2p
+… DEBUG cairn::p2p 59758322… -> Hello peer=083e078e… records=0
+… DEBUG cairn::p2p 59758322… <- Inventory records=1
+… DEBUG cairn::p2p 59758322… -> Want ids=1
+… DEBUG cairn::p2p 59758322… <- Records n=1
+… DEBUG cairn::p2p 59758322… -> code.Want addresses=1
+… DEBUG cairn::p2p 59758322… -> dht.Ask addresses=1
 ```
 
 That is a whole anti-entropy round: records, then verifier code, then the DHT,
@@ -250,8 +298,8 @@ whole claims, and a population round would otherwise print other people's
 candidate artifacts into your terminal.
 
 Use separate `LOCAL_DIR`, `IDENTITY`, `ROOT_KEY`, and `CHECKPOINT` paths for each
-node. `make mcp` uses `.local/proofwork-mcp.jsonl` by default, and `make p2p`
-uses `.local/proofwork-p2p.jsonl`, so the two commands can run together without
+node. `make mcp` uses `.local/cairn-mcp.jsonl` by default, and `make p2p`
+uses `.local/cairn-p2p.jsonl`, so the two commands can run together without
 contention over a single hash-linked ledger. Use `P2P_LOG` and `MCP_LOG` to
 override these paths directly.
 
@@ -303,19 +351,19 @@ resolving. Mid-bounty rule changes aren't guarded against; they're
 unrepresentable.
 
 ```sh
-proofwork post   examples/capset/objective.json
-proofwork commit <objective-id> --submitter bob --artifact solution.json --nonce s3cret
-proofwork reveal <objective-id> --submitter bob --artifact solution.json --nonce s3cret
-proofwork try    examples/capset/objective.json --submitter bob --artifact solution.json
+cairn post   examples/capset/objective.json
+cairn commit <objective-id> --submitter bob --artifact solution.json --nonce s3cret
+cairn reveal <objective-id> --submitter bob --artifact solution.json --nonce s3cret
+cairn try    examples/capset/objective.json --submitter bob --artifact solution.json
                                                  # the three lines above in one, waiting out
                                                  # the epoch between commit and reveal
-proofwork scaffold my-challenge --kind certificate  # the files a new objective starts from
-proofwork audit
-proofwork attribute
-proofwork checkpoint --root-key key.json --out checkpoint.json   # sign it
-proofwork prove 12 --out proof.json                              # one entry, provably
-proofwork check proof.json --from checkpoint.json                # ... checked without the log
-proofwork drain --queue ./queue                                  # admit what arrived over HTTP
+cairn scaffold my-challenge --kind certificate  # the files a new objective starts from
+cairn audit
+cairn attribute
+cairn checkpoint --root-key key.json --out checkpoint.json   # sign it
+cairn prove 12 --out proof.json                              # one entry, provably
+cairn check proof.json --from checkpoint.json                # ... checked without the log
+cairn drain --queue ./queue                                  # admit what arrived over HTTP
 ```
 
 ### Four verifiers, four trust assumptions
@@ -424,7 +472,7 @@ candidate, a branch somebody else explored.
 The scope for closing that is [agent-market.md](docs/agent-market.md), whose
 central question — *does pricing sub-frontier candidates starve the gossip
 population the search runs on?* — is now solved rather than argued.
-`proofwork incentives --market` plays it out: the commons survives, universal
+`cairn incentives --market` plays it out: the commons survives, universal
 gossip is a strict equilibrium, and so is universal selling. The barriers between
 them are not symmetric, and the part nobody had guessed is that **which way they
 lean is set by how leaky the gossip transport is.** At a hundredth withheld, 28
@@ -515,7 +563,7 @@ would have said so. See [proving-it.md](docs/proving-it.md) for what that does
 and does not establish.
 
 ```
-$ proofwork incentives --canary-rate 0
+$ cairn incentives --canary-rate 0
 
 verification -- honest action: verify
   honest profile                 strict Nash  ok
@@ -552,12 +600,12 @@ Where a node's data lives is the operator's choice, and what leaks off their dis
 is their risk. Four things, one command each:
 
 ```sh
-proofwork keygen                                   # 32-byte key at ~/.proofwork/key, 0600
-proofwork --data-dir /Volumes/ext/pw audit         # data wherever you want it
-proofwork --data-dir /Volumes/ext/pw --max-size 20GB store gc
-proofwork --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
-proofwork --data-dir /Volumes/ext/pw store rekey   # new key, same root, no plaintext on disk
-proofwork --data-dir /Volumes/ext/pw store export --out public.jsonl
+cairn keygen                                   # 32-byte key at ~/.cairn/key, 0600
+cairn --data-dir /Volumes/ext/pw audit         # data wherever you want it
+cairn --data-dir /Volumes/ext/pw --max-size 20GB store gc
+cairn --data-dir /Volumes/ext/pw sync ~/Dropbox/pw-backup
+cairn --data-dir /Volumes/ext/pw store rekey   # new key, same root, no plaintext on disk
+cairn --data-dir /Volumes/ext/pw store export --out public.jsonl
 ```
 
 `rekey` is the one worth a sentence. It re-seals every line under a fresh key and
@@ -645,7 +693,7 @@ Neither claim is asserted in a comment: `tests/wire_encryption.rs` and
 `a_transfer_puts_no_plaintext_on_the_wire` each put a recording relay between
 two real nodes and check the captured bytes.
 
-`swarm::tcp` is now driven by `proofwork blob serve` and `proofwork blob fetch`,
+`swarm::tcp` is now driven by `cairn blob serve` and `cairn blob fetch`,
 and `scripts/blob-demo.sh` runs both sides in CI: a node holding only the log
 fetches its pinned verifier from a stranger and settles a claim with it. That
 was worth doing for its own sake and it also found two bugs that no unit test on
@@ -707,7 +755,7 @@ that used the other one.
 
 No record kind and no transfer path, both deliberately: a manifest is derived
 from bytes and is checked against the digest the log already pinned, and
-`proofwork shard` is the caller that keeps the module honest until `swarm` grows
+`cairn shard` is the caller that keeps the module honest until `swarm` grows
 one. See [shards.md](docs/shards.md).
 
 
@@ -790,7 +838,7 @@ keep this from becoming the vote the section above refuses:
 
 - **The reader picks the policy.** There is no network-agreed confidence number.
   Two readers with different weights get different answers from identical bytes,
-  and neither is authoritative. `proofwork knowledge <claim>` exposes every knob.
+  and neither is authoritative. `cairn knowledge <claim>` exposes every knob.
 - **The machine outranks the assertions.** A claim the pinned verifier rejected
   is `refuted`, and no quantity of claims saying otherwise moves it.
 - **Being heard costs a verified result.** A relation counts only from a claim
@@ -848,7 +896,7 @@ examples/            worked objectives with real artifacts
 - [launch-review.md](docs/launch-review.md) — the pre-launch pass: what was fixed, and the gaps that remain, in priority order
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
 - [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
-- [.claude/skills/proofwork/](.claude/skills/proofwork/) — the Claude Code skill: ask Claude to start the network and it builds, wires MCP, and posts objectives
+- [.claude/skills/cairn/](.claude/skills/cairn/) — the Claude Code skill: ask Claude to start the network and it builds, wires MCP, and posts objectives
 - [AGENTS.md](AGENTS.md) — instructions agents read: contributing here, and contributing *to* the network
 - [CONTRIBUTING.md](CONTRIBUTING.md) — the two different things "contributing" means here, and the gate for each
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
@@ -863,7 +911,7 @@ examples/            worked objectives with real artifacts
 - **Sandboxed, not virtualized.** Pinned verifier code runs in an OS jail
   (bubblewrap / seatbelt): no network, confined writes, a deadline. A kernel
   bug is still an escape, macOS does not confine reads, and a host with no
-  jail mechanism runs unconfined unless `PROOFWORK_REQUIRE_SANDBOX=1` is set.
+  jail mechanism runs unconfined unless `CAIRN_REQUIRE_SANDBOX=1` is set.
   VM-class isolation is Stage 2; see the threat model before opening
   objective authorship to strangers.
 - **Not able to verify judgement.** Whether a direction is promising, whether a
@@ -884,7 +932,7 @@ examples/            worked objectives with real artifacts
   `src/canary.rs` mints submissions whose verdict it established by running the
   objective's own pinned verifier, `records::Attestation` puts a signed 50,000-
   unit bond behind what an operator says a verifier returned, and
-  `proofwork attest slash --docket` takes that bond — the naming costs a map
+  `cairn attest slash --docket` takes that bond — the naming costs a map
   lookup, the taking costs one verifier run, and `docs/bonded-verification.md`
   has the numbers. What is still only a model is the rest: no Merkle
   availability challenge is issued, no committee seat is bonded, and **nothing

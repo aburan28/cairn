@@ -9,9 +9,16 @@
 # The rule needs no registry: a submitter that is 64 lowercase hex characters
 # IS an ed25519 public key, so the name and the key are the same fact.
 set -euo pipefail
+
+# Forces a plaintext log. This script reads the log as text -- it greps for a
+# field, or parses it as JSON -- and the CLI seals every log it creates whenever
+# a key file exists, so on a machine that has run `cairn keygen` the assertion
+# was made against ciphertext. What is under test here is the *record*, not how
+# it is stored; the sealed path is covered by serve-smoke and node-smoke.
+export CAIRN_KEY=/nonexistent/cairn-forces-plaintext
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
+RUST="${RUST_BIN:-./target/release/cairn}"
 [ -x "$RUST" ] || { echo "building..." >&2; cargo build --release --locked; }
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
@@ -23,7 +30,7 @@ LOG="$WORK/log.jsonl"
 
 # One second per epoch: this script crosses two epoch boundaries and the
 # assertions do not race, so the short length is safe here.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
 rule "create two identities"
 "$RUST" identity --out "$WORK/alice.json" | sed 's/^/  /'
@@ -118,7 +125,7 @@ if "$RUST" --log "$LOG" --root . commit "$STRICT" --submitter alice \
   fail "a nickname was accepted by a signed-identity-only objective"
 fi
 grep -q "only signed identities" "$WORK/out" || fail "wrong refusal: $(cat "$WORK/out")"
-grep -q "proofwork identity" "$WORK/out" \
+grep -q "cairn identity" "$WORK/out" \
   || fail "the refusal does not tell a contributor how to get an identity"
 sed 's/^/  /' "$WORK/out"
 
@@ -128,12 +135,12 @@ echo "  a signed identity is admitted"
 
 rule "the log audits, and both implementations agree"
 # Two waits, not one: an epoch must close *and* wait out the finality delay
-# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
+# (CAIRN_FINALITY_EPOCHS, default 1) before anything settles.
 sleep 2.2
 "$RUST" --log "$LOG" --root . settle >/dev/null 2>&1 || true
 "$RUST" --log "$LOG" --root . audit | tail -2 | sed 's/^/  /'
 "$RUST" --log "$LOG" --root . audit | grep -q "log verified" || fail "the log does not audit"
-REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 [ -x "$REF" ] || cargo build --release --locked --manifest-path reference/rust/Cargo.toml
 "$REF" --log "$LOG" --root . audit | grep -q "log verified" \
   || fail "the reference implementation does not verify this log"

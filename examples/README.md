@@ -1,6 +1,6 @@
 # Worked objectives and open bounties
 
-Writing a new one starts with `proofwork scaffold <name> --kind <kind>`, which
+Writing a new one starts with `cairn scaffold <name> --kind <kind>`, which
 writes an `objective.json` with the fields that kind's verifier actually reads,
 a stub already pinned by its own hash, and a placeholder artifact — in the
 shape everything below uses. It posts nothing: funding a statement is a
@@ -28,14 +28,24 @@ top-level README.
 | [`ecdlp`](ecdlp/) | certificate | 250000 | **open bounty** | python3 | none — that is the point |
 | [`lean`](lean/) | lean | 50000 | **open bounty** | a Lean 4 toolchain on PATH | none |
 | [`first-blood`](first-blood/) | certificate | 100000 – 409600000 | **open bounty** ×5 | python3 | none |
+| [`faster-algorithms`](faster-algorithms/) | evaluator (minimize) + ratchet | 1200000 – 2000000 | **open bounty** ×4 | python3 | `artifacts/`, baselines only |
 
 - **worked** — a passing artifact is committed, so the whole loop
   (`post → commit → reveal → audit`) can be exercised end to end. Start here.
-  `proofwork try <objective.json> --submitter you --artifact <artifact.json>`
+  `cairn try <objective.json> --submitter you --artifact <artifact.json>`
   runs that loop in one command, waiting out the epoch between the commit and
   the reveal rather than making you sleep past it by hand. A real round takes a
-  real epoch — 600s — so set `PROOFWORK_EPOCH_SECONDS` for a local trial, and
+  real epoch — 600s — so set `CAIRN_EPOCH_SECONDS` for a local trial, and
   only against a log used for nothing else.
+- **[`faster-algorithms`](faster-algorithms/) is four bounties for doing the
+  same work with fewer operations** — sorting, graph search, matrix
+  multiplication, MixColumns — and its README is where the rule that makes any
+  of them settleable is written down: *"faster" is a count of operations under a
+  stated cost model, derived by simulating the artifact, and never a
+  measurement of time.* Wall-clock seconds are a property of the machine, so two
+  honest nodes disagree about them by construction; `TIME_LIKE` in
+  `src/verifiers/mod.rs` already refuses that class of claim. Read it before
+  writing an objective about performance.
 - **`reversible-adder` is the one to read if you are judging the design.** It
   is the only example whose score is *derived by simulating the artifact*
   rather than read off a field the submitter filled in, which is what makes an
@@ -66,5 +76,5 @@ that is not an ed25519 public key with a matching signature — so every claim o
 that bounty is attributable to a key nobody else holds. The cost is real and is
 the funder's to weigh: it turns away contributors who have not made an
 identity, which is why it is per-objective and off by default. Contributors
-make one with `proofwork identity --out alice.json` and submit with
+make one with `cairn identity --out alice.json` and submit with
 `--identity alice.json`.

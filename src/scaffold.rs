@@ -10,7 +10,7 @@
 //! deliberate in two directions:
 //!
 //! **It never posts.** The output is files on disk and a printed
-//! `proofwork post` line. An objective's statement is untrusted text funded by
+//! `cairn post` line. An objective's statement is untrusted text funded by
 //! a human decision, and a tool that both writes and funds one removes the step
 //! where that decision happens.
 //!
@@ -24,7 +24,7 @@
 //!
 //! The generated stub is not a syntax skeleton. It has the fields its kind's
 //! verifier actually reads (see [`crate::verifiers`] and
-//! `spec/objective.schema.json`) already wired up, so `proofwork post` accepts
+//! `spec/objective.schema.json`) already wired up, so `cairn post` accepts
 //! it and a submission against it returns a real `reject` -- which means the
 //! first thing an author does is change a decision, not debug a spec.
 
@@ -571,7 +571,7 @@ fn todo_for(request: &Request) -> Vec<String> {
     match request.kind {
         Kind::Certificate => todo.push(String::from(
             "checkers/*.py -- the stub rejects everything; re-derive the property and \
-             re-pin with `proofwork canon` after editing (the hash is part of the id)",
+             re-pin with `cairn canon` after editing (the hash is part of the id)",
         )),
         Kind::Evaluator => todo.push(String::from(
             "evaluators/*.py and threshold/direction -- the stub scores 0; re-pin after editing",
@@ -685,7 +685,7 @@ mod tests {
     }
 
     /// The contract third parties implement against. A scaffold that emitted
-    /// something `proofwork post` refuses would be worse than no scaffold.
+    /// something `cairn post` refuses would be worse than no scaffold.
     #[test]
     fn every_kind_produces_an_objective_the_published_schema_accepts() {
         for kind in KINDS {

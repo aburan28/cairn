@@ -1,4 +1,4 @@
-//! proofwork -- a research network where verified results are the unit of account.
+//! cairn -- a research network where verified results are the unit of account.
 //!
 //! Stage 0: one operator, no token, no consensus. What it does provide is the
 //! property that actually matters -- **anyone can independently re-derive every
@@ -27,6 +27,7 @@ pub mod challenge;
 pub mod checkpoint;
 pub mod corpus;
 pub mod crypto;
+pub mod daemon;
 pub mod dht;
 pub mod frontier;
 pub mod gossip;

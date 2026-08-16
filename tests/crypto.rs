@@ -1,6 +1,6 @@
 //! Adversarial tests for the confidentiality primitives (`docs/censorship.md`).
 //!
-//! These exercise `proofwork::crypto::{shamir, envelope, identity}` through the
+//! These exercise `cairn::crypto::{shamir, envelope, identity}` through the
 //! public API only, from the position of an attacker rather than a user. The
 //! happy path is covered because a primitive that does not work cannot defend
 //! anything; everything else here is an attempt to break one of the properties
@@ -20,16 +20,16 @@
 
 use std::collections::BTreeMap;
 
-use proofwork::canonical::Value;
-use proofwork::crypto::envelope::{
+use cairn::canonical::Value;
+use cairn::crypto::envelope::{
     CommitteeKey, CommitteeMember, EnvelopeError, SealedEnvelope, SealedShare, Secret32,
 };
-use proofwork::crypto::identity::{
+use cairn::crypto::identity::{
     verify_bytes, verify_value, Identity, IdentityError, MasterSeed, Signature, SignedRecord,
     VerifyingKeyBytes,
 };
-use proofwork::crypto::kem::{Bundle, PublicKey, Suite};
-use proofwork::crypto::shamir::{combine, split, ShamirError, Share};
+use cairn::crypto::kem::{Bundle, PublicKey, Suite};
+use cairn::crypto::shamir::{combine, split, ShamirError, Share};
 use rand_core::{CryptoRng, Error as RngError, OsRng, RngCore};
 
 // -- helpers ---------------------------------------------------------------
@@ -1479,7 +1479,7 @@ fn independently_generated_identities_are_unrelated_to_any_seed() {
 }
 
 /// Regenerate `conformance/signatures.json`, which the reference
-/// implementation verifies against via `proofwork-reference signatures`.
+/// implementation verifies against via `cairn-reference signatures`.
 ///
 /// The other conformance vectors flow Python -> Rust. These flow the other
 /// way, and they have to: Python verifies signatures with a hand-written
@@ -1490,13 +1490,13 @@ fn independently_generated_identities_are_unrelated_to_any_seed() {
 /// implementations differ, which is exactly where a consensus split would
 /// live.
 ///
-/// Set `PROOFWORK_WRITE_VECTORS=1` to rewrite the file; otherwise this
+/// Set `CAIRN_WRITE_VECTORS=1` to rewrite the file; otherwise this
 /// asserts the committed vectors still verify, so a change to signing or to
 /// canonical encoding fails here rather than in a peer's log.
 #[test]
 fn signature_vectors_match_the_committed_file() {
-    use proofwork::canonical::Value;
-    use proofwork::crypto::identity::{verify_value, Identity, Signature, VerifyingKeyBytes};
+    use cairn::canonical::Value;
+    use cairn::crypto::identity::{verify_value, Identity, Signature, VerifyingKeyBytes};
 
     let mut vectors = Vec::new();
     for seed in 0u8..6 {
@@ -1525,7 +1525,7 @@ fn signature_vectors_match_the_committed_file() {
     let produced = Value::Array(vectors).canonical_string();
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/conformance/signatures.json");
 
-    if std::env::var("PROOFWORK_WRITE_VECTORS").is_ok() {
+    if std::env::var("CAIRN_WRITE_VECTORS").is_ok() {
         std::fs::write(path, format!("{produced}\n")).expect("write vectors");
         return;
     }

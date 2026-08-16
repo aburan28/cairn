@@ -10,7 +10,7 @@ model output authoritative:
 
 The implementation is in `src/compute.rs`. It is intentionally outside the
 ledger record and verifier state machines. A model response is a candidate
-artifact. It becomes a research result only after a pinned proofwork verifier
+artifact. It becomes a research result only after a pinned cairn verifier
 accepts it and the ordinary immutable log rules settle it.
 
 ## Routing contract

@@ -83,9 +83,9 @@ const KEY_PREFIX: &str = "pwkey1:";
 const WRAPPED_PREFIX: &str = "pwkey1a:";
 
 /// Associated data for a wrapped key file.
-const KEY_AAD: &[u8] = b"proofwork-keyfile-v1";
+const KEY_AAD: &[u8] = b"cairn-keyfile-v1";
 /// Associated data prefix for a log line; the line index is appended.
-const LINE_AAD: &str = "proofwork-log-v1:";
+const LINE_AAD: &str = "cairn-log-v1:";
 
 /// Argon2id cost parameters.
 ///
@@ -134,11 +134,11 @@ impl fmt::Display for AtRestError {
         match self {
             AtRestError::NoKeyFile { path } => write!(
                 f,
-                "no key file at {}; create one with `proofwork keygen`",
+                "no key file at {}; create one with `cairn keygen`",
                 path.display()
             ),
             AtRestError::MalformedKeyFile { path, reason } => {
-                write!(f, "{}: not a proofwork key file: {reason}", path.display())
+                write!(f, "{}: not a cairn key file: {reason}", path.display())
             }
             AtRestError::Passphrase { path } => write!(
                 f,
@@ -148,7 +148,7 @@ impl fmt::Display for AtRestError {
             AtRestError::NotEncrypted { line } => write!(
                 f,
                 "line {line} is not encrypted, but a key was supplied; this log \
-                 is in plaintext -- open it without a key, or run `proofwork \
+                 is in plaintext -- open it without a key, or run `cairn \
                  store encrypt` to convert it"
             ),
             AtRestError::Undecryptable { line } => write!(
@@ -560,7 +560,7 @@ mod tests {
     fn scratch(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "proofwork-atrest-{name}-{}-{}",
+            "cairn-atrest-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

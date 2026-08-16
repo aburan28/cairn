@@ -31,19 +31,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 
-use proofwork::canonical::Value;
-use proofwork::crypto::envelope::CommitteeKey;
-use proofwork::crypto::identity::Identity;
-use proofwork::crypto::CommitteeMember;
-use proofwork::ledger::Ledger;
-use proofwork::node::{CommitteeSeat, Node, RuleViolation};
-use proofwork::partition::{COMMITTEE_SIZE, COMMITTEE_THRESHOLD};
-use proofwork::records::{Claim, Commitment, CommitteeShare, Objective, PeerRecord};
-use proofwork::sealed::SealedSubmission;
-use proofwork::verifiers::{Status, VerifierRegistry};
+use cairn::canonical::Value;
+use cairn::crypto::envelope::CommitteeKey;
+use cairn::crypto::identity::Identity;
+use cairn::crypto::CommitteeMember;
+use cairn::ledger::Ledger;
+use cairn::node::{CommitteeSeat, Node, RuleViolation};
+use cairn::partition::{COMMITTEE_SIZE, COMMITTEE_THRESHOLD};
+use cairn::records::{Claim, Commitment, CommitteeShare, Objective, PeerRecord};
+use cairn::sealed::SealedSubmission;
+use cairn::verifiers::{Status, VerifierRegistry};
 
 /// A Lean binary guaranteed absent, so no verdict here depends on a toolchain.
-const NO_LEAN: &str = "proofwork-committee-definitely-no-such-lean-binary";
+const NO_LEAN: &str = "cairn-committee-definitely-no-such-lean-binary";
 
 /// Epoch boundaries. `EPOCH_SECONDS` is 600, so these are three whole epochs
 /// apart and every "strictly later" rule below is unambiguous.
@@ -70,7 +70,7 @@ impl TempDir {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "proofwork-committee-{label}-{unique}-{}",
+            "cairn-committee-{label}-{unique}-{}",
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).expect("temp dir is creatable");
@@ -108,7 +108,7 @@ impl Member {
     }
 
     fn transport(&self) -> String {
-        proofwork::hex::encode(&self.committee.id())
+        cairn::hex::encode(&self.committee.id())
     }
 
     fn peer_record(&self, port: u16) -> PeerRecord {
@@ -142,7 +142,7 @@ fn network_with(label: &str, embargo: Option<u64>) -> (TempDir, Node, Objective,
     fs::write(dir.file("c.py"), CHECKER).expect("pinned checker is writable");
     let mut hasher = Sha256::new();
     hasher.update(CHECKER.as_bytes());
-    let sha = proofwork::hex::encode(&hasher.finalize());
+    let sha = cairn::hex::encode(&hasher.finalize());
 
     let ledger = Ledger::open(dir.file("log.jsonl")).expect("a missing file is an empty log");
     let mut node = Node::with_registry(
@@ -247,8 +247,8 @@ fn commit_sealed(
 }
 
 fn epoch_of(ts: &str) -> u64 {
-    let seconds = proofwork::time::parse_rfc3339(ts).expect("a well-formed instant");
-    proofwork::partition::epoch_of(seconds as u64, proofwork::partition::EPOCH_SECONDS)
+    let seconds = cairn::time::parse_rfc3339(ts).expect("a well-formed instant");
+    cairn::partition::epoch_of(seconds as u64, cairn::partition::EPOCH_SECONDS)
 }
 
 /// One member's share of a commitment, signed and ready to post.
@@ -272,7 +272,7 @@ fn share_for(
         commitment_id,
         seat.seat,
         share.index,
-        proofwork::hex::encode(&share.data),
+        cairn::hex::encode(&share.data),
         ts,
     )
     .signed_with(&member.identity)
@@ -577,7 +577,7 @@ fn a_member_who_publishes_garbage_does_not_stop_the_reveal() {
 
     // Seat 1 lies: a well-formed share of the right length that is not its own.
     let real = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
-    let mut bytes = proofwork::hex::encode(&[0xa5u8; 32]);
+    let mut bytes = cairn::hex::encode(&[0xa5u8; 32]);
     bytes.truncate(real.share.len());
     let lie = CommitteeShare::new(&commitment_id, seats[0].seat, real.x, bytes, REVEAL_AT)
         .signed_with(&holder(&members, &seats[0]).identity);
@@ -616,7 +616,7 @@ fn a_share_set_with_no_working_subset_fails_without_accusing_anyone() {
         .expect("committee");
 
     let real = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
-    let mut bytes = proofwork::hex::encode(&[0x5au8; 32]);
+    let mut bytes = cairn::hex::encode(&[0x5au8; 32]);
     bytes.truncate(real.share.len());
     let lie = CommitteeShare::new(&commitment_id, seats[0].seat, real.x, bytes, REVEAL_AT)
         .signed_with(&holder(&members, &seats[0]).identity);
@@ -874,7 +874,7 @@ fn shortening_an_embargo_makes_a_different_objective() {
     // And a length on an objective that is not embargoed is refused rather
     // than ignored: a funder who thinks they asked for delay and did not is
     // the failure they cannot see.
-    let public = proofwork::records::Objective::new(
+    let public = cairn::records::Objective::new(
         "G",
         "public",
         Value::object([("kind", Value::string("certificate"))]),
@@ -888,7 +888,7 @@ fn shortening_an_embargo_makes_a_different_objective() {
     assert!(public.with_embargo_epochs(3).is_err());
 
     // An embargo of zero epochs is `public` wearing a longer name.
-    let zero = proofwork::records::Objective::new(
+    let zero = cairn::records::Objective::new(
         "G",
         "zero",
         Value::object([("kind", Value::string("certificate"))]),
@@ -902,8 +902,8 @@ fn shortening_an_embargo_makes_a_different_objective() {
     assert!(zero.with_embargo(0).is_err());
 }
 
-fn objective_embargoed_for(epochs: u64) -> proofwork::records::Objective {
-    proofwork::records::Objective::new(
+fn objective_embargoed_for(epochs: u64) -> cairn::records::Objective {
+    cairn::records::Objective::new(
         "G",
         "dual use",
         Value::object([("kind", Value::string("certificate"))]),

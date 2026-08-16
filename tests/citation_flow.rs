@@ -22,9 +22,9 @@
 
 use std::collections::BTreeMap;
 
-use proofwork::attribution::{payouts_over, FlowParams};
-use proofwork::canonical::Value;
-use proofwork::records::Claim;
+use cairn::attribution::{payouts_over, FlowParams};
+use cairn::canonical::Value;
+use cairn::records::Claim;
 
 const TS: &str = "2026-07-29T00:00:00+00:00";
 const OBJ: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -252,7 +252,7 @@ fn weighted(steps: &[(&str, u64)]) -> BTreeMap<String, u64> {
         settlements.push((id.clone(), *reward));
         previous = Some(id);
     }
-    proofwork::attribution::payouts_weighted(&settlements, &claims, &default_params())
+    cairn::attribution::payouts_weighted(&settlements, &claims, &default_params())
         .expect("no overflow at this size")
 }
 
@@ -420,7 +420,7 @@ fn diluted(fanout: usize, params: &FlowParams) -> BTreeMap<String, u64> {
     settlements.push((final_id.clone(), 400_000));
 
     let enforced: BTreeMap<String, String> = [(final_id, alice_id)].into_iter().collect();
-    proofwork::attribution::payouts_with_enforced(&settlements, &claims, &enforced, params)
+    cairn::attribution::payouts_with_enforced(&settlements, &claims, &enforced, params)
         .expect("flow succeeds")
 }
 
@@ -514,7 +514,7 @@ fn a_reserve_moves_nothing_when_the_enforced_citation_is_not_an_ancestor() {
     let stranger = claim("stranger", 77, Vec::new()).id();
     let enforced: BTreeMap<String, String> = [(bob_id, stranger)].into_iter().collect();
     let with_bogus =
-        proofwork::attribution::payouts_with_enforced(&settlements, &claims, &enforced, &params)
+        cairn::attribution::payouts_with_enforced(&settlements, &claims, &enforced, &params)
             .expect("flow succeeds");
     let without = payouts_over(&settlements, &claims, &params);
     assert_eq!(with_bogus, without.expect("flow succeeds"));

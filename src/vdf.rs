@@ -44,7 +44,7 @@
 //! settles under the documented fallback with `epochs_without_beacon` naming it.
 //! Refusing to settle instead would strand every claim in the epoch, which
 //! hands a censor a better weapon than the one being taken away. See
-//! `PROOFWORK_REQUIRE_BEACON` for the reader-side policy that makes the absence
+//! `CAIRN_REQUIRE_BEACON` for the reader-side policy that makes the absence
 //! refusable rather than invisible.
 
 use sha2::{Digest, Sha256};

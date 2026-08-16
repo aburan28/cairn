@@ -365,8 +365,8 @@ payoffs, `Symmetric`.
 Built, as `src/incentive/market.rs`, and runnable:
 
 ```sh
-proofwork incentives --market
-proofwork incentives --agents 200 --exclusion 1/100
+cairn incentives --market
+cairn incentives --agents 200 --exclusion 1/100
 ```
 
 A fourth sub-game beside `Verification`, `Availability` and `Custody`. An agent
@@ -495,7 +495,7 @@ retrofitted onto settled claims.
 survives it. It does, with the one-way-door caveat above.
 
 - [x] The `Market` sub-game in `src/incentive/market.rs`, with the four questions
-      above answered and pinned. `proofwork incentives --market` exits non-zero
+      above answered and pinned. `cairn incentives --market` exits non-zero
       when universal gossip stops being a strict equilibrium, so the gate is
       scriptable rather than only readable.
 - [ ] Offers on the gossip transport (which does not exist yet — the merge law

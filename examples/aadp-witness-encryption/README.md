@@ -10,7 +10,7 @@ for breaking the m=8/16/32 instances. This objective pins **their real m=8
 instance** and settles the same arithmetic criterion their rules state.
 
 ```sh
-proofwork post examples/aadp-witness-encryption/objective.json
+cairn post examples/aadp-witness-encryption/objective.json
 python3 examples/aadp-witness-encryption/tools/selftest.py
 ```
 

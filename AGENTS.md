@@ -32,7 +32,7 @@ orphan every claim posted against a live bounty. See the module docs in
 
 **Both implementations change together.** `src/` and `reference/rust/` must
 agree. If you touch a record, a hash, or an encoding: change both, and check
-that `proofwork-reference conformance conformance/vectors.json` still passes.
+that `cairn-reference conformance conformance/vectors.json` still passes.
 
 `conformance/vectors.json` is **frozen**. Nothing regenerates it, and nothing
 should: it was produced by a Python reference implementation that no longer
@@ -68,7 +68,7 @@ both of which are in the log. Stamp a replayed record with the local clock
 instead and every commitment and its claim land in the same epoch, so every
 replayed reveal is refused and record sync silently stops importing work. That
 bug is invisible: sync succeeds, the log just stops growing.
-`PROOFWORK_EPOCH_SECONDS` changes the epoch length for demos and changes no
+`CAIRN_EPOCH_SECONDS` changes the epoch length for demos and changes no
 record bytes — epochs are derived, never stored.
 
 **`cites` pays and `relations` does not, and nothing may blur that.**
@@ -93,7 +93,7 @@ claim and you hand every submitter a free lottery ticket per restamp.
 
 - `cargo test --all-targets`
 - `cargo test --manifest-path reference/rust/Cargo.toml` and
-  `proofwork-reference conformance conformance/vectors.json`.
+  `cairn-reference conformance conformance/vectors.json`.
   Run it a few times if you touched anything that spawns a process. The Lean
   stand-in writes a script and execs it, and a `fork` from any other test thread
   in that window hands the child a duplicate of the still-open write descriptor,
@@ -193,7 +193,7 @@ defended is the one thing this repository cannot afford.
 
 # B. Working *for* the network as a contributor
 
-You have the `proofwork` MCP tools (`score_candidate`, `submit_claim`, …). Full
+You have the `cairn` MCP tools (`score_candidate`, `submit_claim`, …). Full
 detail in [docs/agents.md](docs/agents.md).
 
 ## The loop

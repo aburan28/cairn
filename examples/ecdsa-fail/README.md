@@ -1,7 +1,7 @@
-# ecdsa.fail MVP harness (proofwork)
+# ecdsa.fail MVP harness (cairn)
 
 Runs an **ecdsa.fail-shaped** progressive minimize objective on a local
-proofwork log: pull objective → score candidates against a pinned evaluator →
+cairn log: pull objective → score candidates against a pinned evaluator →
 commit–reveal → settle. Aligns the *agent loop* with
 [`ecdsafail` CLI](https://ecdsa.fail) without claiming API settlement.
 
@@ -15,7 +15,7 @@ cargo build --release
 ecdsafail version   # login already configured if you use pull/benchmark
 ```
 
-## Quick demo (proofwork only)
+## Quick demo (cairn only)
 
 ```bash
 ./examples/ecdsa-fail/demo.sh
@@ -28,7 +28,7 @@ then ratchets baseline → mid → best with required frontier citations.
 
 ```bash
 LOG=$(mktemp -u /tmp/pw-ecdsa-XXXXXX.jsonl)
-OID=$(./target/release/proofwork --log "$LOG" --root . post examples/ecdsa-fail/objective.json | awk '{print $2}')
+OID=$(./target/release/cairn --log "$LOG" --root . post examples/ecdsa-fail/objective.json | awk '{print $2}')
 ```
 
 The CLI has no free-scoring subcommand — its verifier runs at reveal time.
@@ -40,13 +40,13 @@ Free local scoring without writing the log: use MCP (below) or the adapter:
 
 ## MCP (natural wiring — no new tools)
 
-Point `proofwork-mcp` at a log that already has this objective posted:
+Point `cairn-mcp` at a log that already has this objective posted:
 
 ```json
 {
   "mcpServers": {
-    "proofwork": {
-      "command": "/ABS/distributed-researcher/target/release/proofwork-mcp",
+    "cairn": {
+      "command": "/ABS/distributed-researcher/target/release/cairn-mcp",
       "args": ["--log", "/tmp/pw-ecdsa.jsonl", "--root", "/ABS/distributed-researcher"]
     }
   }
@@ -70,7 +70,7 @@ Smoke without an agent UI:
 
 | You want | Use |
 |---|---|
-| Local proofwork ratchet demo | `./examples/ecdsa-fail/demo.sh` |
+| Local cairn ratchet demo | `./examples/ecdsa-fail/demo.sh` |
 | Map CLI concepts / import `score.json` shape | `./examples/ecdsa-fail/adapter.sh …` |
 | Real benchmark + leaderboard | `ecdsafail clone` → edit → `run` → `submit` (see skill) |
 

@@ -8,8 +8,8 @@ reverse of how these projects are usually built.
 One operator. Objectives with runnable pinned verifiers, commit–reveal,
 hash-linked append-only log, exact-conservation attribution, and an `audit` that
 re-derives every settled result from the artifacts. Plus the coordination layer:
-progressive bounties (`frontier.py`), a CRDT candidate population (`gossip.py`),
-and coordinator-free work assignment (`partition.py`).
+progressive bounties (`src/frontier.rs`), a CRDT candidate population
+(`src/gossip.rs`), and coordinator-free work assignment (`src/partition.rs`).
 
 The property this buys is not "no one is in charge". It is **anyone can check**
 — and that is most of the value of decentralization, at none of the cost.
@@ -26,7 +26,7 @@ behaviour ships and is tested, not that TLC has checked it.
       with no network, writes confined to a scratch directory, a wall-clock
       deadline, and best-effort `RLIMIT_CPU`/`RLIMIT_AS`. This is not the
       container/WASM boundary this line originally asked for: a kernel bug is
-      still an escape, and on macOS reads are not confined. `PROOFWORK_REQUIRE_SANDBOX=1`
+      still an escape, and on macOS reads are not confined. `CAIRN_REQUIRE_SANDBOX=1`
       turns a host with no jail mechanism into `UNAVAILABLE` rather than a
       silent unconfined run. [verification.md](verification.md#sandboxing) and
       the threat-model row name the four remaining gaps; VM-class isolation is
@@ -36,7 +36,7 @@ behaviour ships and is tested, not that TLC has checked it.
       the key defaults to outside the data directory, `sync` mirrors ciphertext
       without ever carrying the key, and the cap refuses rather than pruning a
       hash-linked log. See [storage.md](storage.md).
-- [x] Key rotation: `proofwork store rekey` re-seals every line under a fresh
+- [x] Key rotation: `cairn store rekey` re-seals every line under a fresh
       key and proves the new file re-derives the same entries and the same root
       *before* anything is swapped. The old key is kept at `<key>.previous`,
       because copies made earlier — a `sync` mirror, a backup — are still sealed
@@ -49,7 +49,7 @@ behaviour ships and is tested, not that TLC has checked it.
       separate FIPS 204 ML-DSA-65 root key so a reader can pin what the operator
       claimed at a point in time and detect a rewrite. The daemon writes one
       after each successful p2p synchronization.
-- [x] `proofwork verify --from <checkpoint>` for readers who only have a log
+- [x] `cairn verify --from <checkpoint>` for readers who only have a log
       fragment: verifies the signature against a pinned root key, then recomputes
       head and Merkle root over the prefix of length `height`. A longer local log
       passes, a shorter one fails, and `--audit` re-derives the settlements in
@@ -98,7 +98,7 @@ behaviour ships and is tested, not that TLC has checked it.
       Deliberately **no record kind**: a manifest is derived from bytes, so
       signing one would sign an arithmetic fact, and it is connected to the
       network the way a piece manifest is — by describing a digest the log
-      already pinned. Deliberately **no transfer**: `proofwork shard` is the
+      already pinned. Deliberately **no transfer**: `cairn shard` is the
       caller that keeps the module honest until `swarm` grows one, because a
       subsystem with no entry point is how the two `swarm`/`blobs` seam bugs
       survived, and `scripts/shard-demo.sh` drives six stores that share nothing
@@ -235,8 +235,8 @@ behaviour ships and is tested, not that TLC has checked it.
       transport id, same `seq`-supersedes rule), and keeping both means two
       places to change one rule. It is a scope decision rather than an
       engineering one, which is why it is still open — the liability that made
-      it urgent, an unencrypted socket, is long gone.
-- [x] **Peer identities in the log** (`records::PeerRecord`, `proofwork peer`).
+      it urgent, an unencrypted socket, is gone.
+- [x] **Peer identities in the log** (`records::PeerRecord`, `cairn peer`).
       A fourth record kind binding a permanent ed25519 identity to the transport
       id it answers on, plus an address hint and a `seq` that supersedes — so
       obtaining the log *is* obtaining the address book, and finding the network
@@ -325,7 +325,7 @@ behaviour ships and is tested, not that TLC has checked it.
       nobody issues it and nobody can decline to; an `availability` record
       answers it with an inclusion path; and an `availability_pool` funds a
       settlement that pays the answers in equal integer shares and names every
-      promise that stayed silent. `proofwork availability
+      promise that stayed silent. `cairn availability
       [undertake|answer|fund|settle|status]`. Both implementations audit the
       same log to the same root and refuse the same forged promise, checked by
       `scripts/differential.sh`.
@@ -338,7 +338,7 @@ behaviour ships and is tested, not that TLC has checked it.
       byte. A promise now covers the log as it stood, the share is weighted by
       the **bond** the promiser locked, and the answer carries the entry.
       Two consensus defects came out of the same review: the sampled index moved
-      whenever the log grew, and it read `PROOFWORK_EPOCH_SECONDS`, so the same
+      whenever the log grew, and it read `CAIRN_EPOCH_SECONDS`, so the same
       log audited clean or dirty depending on the auditor's environment — six
       times in ten. Both are pinned by injection and by a cross-configuration
       run in `scripts/differential.sh`.
@@ -381,14 +381,14 @@ behaviour ships and is tested, not that TLC has checked it.
 
 ### Added in the launch pass
 
-- [x] **A remote surface** (`src/serve.rs`, `proofwork-serve`). `GET /log`
+- [x] **A remote surface** (`src/serve.rs`, `cairn-serve`). `GET /log`
       returns the log byte for byte, with `/objectives`, `/objective/{id}`,
       `/frontier/{id}`, `/checkpoint` and `/health` as conveniences over it.
       This is what makes "anyone can re-derive every settled result from the
       log" reachable by somebody who is not the operator, and it was the item
       standing between Stage 0 and anyone outside using it. See
       [serving.md](serving.md).
-- [x] **A submission queue** (`POST /submit`, `proofwork drain`). Records
+- [x] **A submission queue** (`POST /submit`, `cairn drain`). Records
       arriving over the network are spooled, not appended: a Ledger has one
       writer, and admission is decided against the whole log by the rules
       engine rather than in a request handler. This is the honest version of
@@ -398,14 +398,14 @@ behaviour ships and is tested, not that TLC has checked it.
       always said it; an advisory lock now means a second *process* cannot
       quietly fork the log either.
 - [x] **A published log** (`launch/`), with the signed checkpoint and the key,
-      built by `scripts/make-launch-log.sh`. `proofwork checkpoint` signs one
+      built by `scripts/make-launch-log.sh`. `cairn checkpoint` signs one
       from the CLI, which previously only the p2p daemon could do.
 - [x] **Objective-declared artifact shape** (`artifact_schema`). Documentation
       rather than a rule -- the pinned verifier stays the only authority -- so
       an agent has a source for the shape that is not the attacker-authored
       statement.
 - [x] **Typed claim relations and a derived knowledge view**
-      (`Claim::relations`, `src/knowledge.rs`, `proofwork knowledge`). A
+      (`Claim::relations`, `src/knowledge.rs`, `cairn knowledge`). A
       verified artifact is not the end of a claim's life: it gets replicated,
       superseded, narrowed, retracted. The log now records those assertions as
       typed edges and anyone derives `Standing` and a confidence number from
@@ -428,7 +428,7 @@ This is the stage that answers the only question that matters: **will strangers
 point compute at these objectives.** If demand is zero, stop here — everything
 downstream is unbacked.
 
-- [x] Agent proposer loop. `proofwork propose <objective> --artifact F
+- [x] Agent proposer loop. `cairn propose <objective> --artifact F
       [--artifact G ...]` runs the pinned verifier locally on each candidate,
       reports what each scored, and submits only the best one that already
       passes — and on a ratchet, only one that actually beats the frontier,
@@ -437,9 +437,9 @@ downstream is unbacked.
       submission removed, which is what an agent iterating actually wants; it
       needs no identity, because scoring writes nothing. Exit code 2 when
       nothing passed, so a script can tell "not ready yet" from a crash.
-- [x] Objective discovery API and a work queue. `proofwork-serve` publishes
+- [x] Objective discovery API and a work queue. `cairn-serve` publishes
       the log and the open objectives; `POST /submit` queues proposals that
-      `proofwork drain` admits through the same rules engine. See
+      `cairn drain` admits through the same rules engine. See
       [serving.md](serving.md).
 - [~] Rate limiting and submission bonds against spam. The queue is bounded
       (`--max-queue`, 429 past it), body size, request time and concurrency are
@@ -449,6 +449,20 @@ downstream is unbacked.
       adversary.
 - [ ] Sensitive-objective classes and an embargo path, **before** anything is
       published. This cannot be retrofitted.
+- [ ] **Repository-shaped objectives** — a `workspace` verifier kind whose
+      artifact is a manifest of blob addresses over a pinned base tree, so a
+      submission can be a source subtree rather than a JSON blob. This is the
+      shape every optimization benchmark anyone actually runs already has, and
+      `examples/ecdsa-fail/` cannot be honest without it. It brings a per-claim
+      **note** and a self-declared **model** with it — swarm memory, and the
+      reason a leaderboard is worth reading — both of which must be wired into
+      the MCP taint path in the same commit, because unlike a browser
+      leaderboard ours is read by agents. The verification cost is the catch:
+      a full build per submission per verifying node, against which
+      `Ratchet::min_improvement` is the only defence, so
+      [threat-model.md](threat-model.md) moves with it. See
+      [design/workspace-benchmarks.md](design/workspace-benchmarks.md), which
+      also says which half of Yukon must not be copied.
 - [ ] **Agent as funder** — bind `funder` to a submitter identity, prepay escrow
       from a settled balance, and size the posting bond against the verification
       the objective will cost. This is the whole of agent-to-agent payment: a
@@ -510,7 +524,7 @@ downstream is unbacked.
       objectives where effort must be bought rather than output.
 - [x] **Bonded challenge windows and interactive fraud proofs over the replay
       trace** (`src/challenge.rs`, `records::Challenge`, `Node::settle_challenge`,
-      `proofwork dispute`, [fraud-proofs.md](fraud-proofs.md)).
+      `cairn dispute`, [fraud-proofs.md](fraud-proofs.md)).
       Both parties commit to a Merkle root over the whole trace, then narrow
       their disagreement by binary search until it is one step wide, and one
       step of execution decides it. Every move opens a state against the
@@ -555,7 +569,7 @@ downstream is unbacked.
       custody, with a harness that solves for the minimum canary rate, bond and
       committee shape. See [node-incentives.md](node-incentives.md).
 - [x] **Canary objectives with known-verdict artifacts** (`src/canary.rs`,
-      `proofwork canary mint|check`), so checking is the profitable strategy
+      `cairn canary mint|check`), so checking is the profitable strategy
       rather than the altruistic one. The generator never authors an artifact:
       it takes one a real contributor submitted and applies a single edit from a
       catalogue where every edit preserves the shape *and* the canonical byte
@@ -685,7 +699,7 @@ downstream is unbacked.
       which tier a committee seat is denominated in, which is a question about
       what custody is rather than about arithmetic.
 - [x] The **agent market sub-game** (`src/incentive/market.rs`,
-      `proofwork incentives --market`). The gate on the rest of
+      `cairn incentives --market`). The gate on the rest of
       [agent-market.md](agent-market.md), and it has an answer.
       Four actions -- gossip, sell, hoard, publish -- scored on one option value
       and differing in how many **rivals** each creates: a hoarder none, a seller
@@ -723,7 +737,7 @@ downstream is unbacked.
       of is not a delay at all: the holder of `phi(N)` reduces the exponent and
       answers instantly.
 
-      `proofwork beacon --orders E --delay T` computes `x^(2^T) mod N` over a
+      `cairn beacon --orders E --delay T` computes `x^(2^T) mod N` over a
       seed derived from the log's own Merkle root, and records the answer with
       its proof. Grinding the anchor used to cost a hash per candidate ordering;
       it now costs `T` sequential squarings per candidate, and they cannot be
@@ -748,7 +762,7 @@ downstream is unbacked.
       What it does not do: bound *withholding*. A sequencer that dislikes the
       beacon it computed can still publish none, and the epoch settles under the
       documented fallback with `epochs_without_beacon` naming it —
-      `PROOFWORK_REQUIRE_BEACON` makes that refusable rather than invisible.
+      `CAIRN_REQUIRE_BEACON` makes that refusable rather than invisible.
       Refusing to settle instead would strand every claim in the epoch, which
       hands a censor a better weapon than the one being taken away.
 - [ ] Forced inclusion via a base layer. Censorship is the primary threat --
@@ -758,8 +772,8 @@ downstream is unbacked.
 
 Not an L1. A rollup on an established chain: the bootstrap circularity (stake
 value <- settled research <- chain) has no starting point, and the state
-transition is already the pure function in `node.py` with `audit()` as the
-re-derivation a fraud proof needs. See docs/consensus.md.
+transition is already the pure function in `src/node.rs` with `Node::audit` as
+the re-derivation a fraud proof needs. See docs/consensus.md.
 
 - [ ] Anchor commitments and settlement roots to a base layer.
 - [ ] Staked judgement layer for V4 questions, with disputes and slashing —

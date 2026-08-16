@@ -1,7 +1,7 @@
 # Architecture
 
 *The design this repository implements a first stage of. Sections 1-4 are what
-`proofwork/` enforces today; sections 5-10 are what it is a step toward.*
+`cairn/` enforces today; sections 5-10 are what it is a step toward.*
 
 *For the same thing as pictures — module dependencies, the settlement sequence,
 the objective state machine, and where trust and sybil boundaries fall — see

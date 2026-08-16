@@ -14,6 +14,10 @@ use ml_dsa::{Signer, Verifier};
 use rand_core::RngCore;
 use std::fmt;
 
+// Spelled `proofwork/` and not `cairn/`: this is a wire constant, not a
+// brand. It is mixed into a hash or a KDF, so changing it changes the
+// values every peer already computed -- the project rename left it alone
+// deliberately, exactly as it left the `pwenc1:` on-disk marker alone.
 const DOMAIN: &str = "proofwork/knowledge-checkpoint/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

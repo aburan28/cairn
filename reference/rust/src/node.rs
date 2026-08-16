@@ -1163,7 +1163,7 @@ impl Node {
     /// steering it steers the settlement order; a beacon drawn somewhere the
     /// sequencer does not control is the point of the record. The chain
     /// remains the fallback, so every log written before beacons existed --
-    /// including `launch/proofwork.jsonl` -- derives exactly what it always
+    /// including `launch/cairn.jsonl` -- derives exactly what it always
     /// did.
     ///
     /// `epoch` was unused when the head covered every batch written before
@@ -1515,7 +1515,7 @@ impl Node {
         if undertaking.height == 0 || undertaking.height > MAX_UNDERTAKING_HEIGHT {
             return None;
         }
-        // `EPOCH_SECONDS`, the constant, never the `PROOFWORK_EPOCH_SECONDS`
+        // `EPOCH_SECONDS`, the constant, never the `CAIRN_EPOCH_SECONDS`
         // override: that is a demo affordance, and a demo affordance must not
         // decide whether a record is admissible. Reading it here made the same
         // log audit clean or dirty depending on an environment variable --
@@ -2892,7 +2892,7 @@ impl Node {
         // Every batch faulting at once usually means the auditor and the writer
         // disagree about how long an epoch is, not that anybody was paid out of
         // turn. Epochs are derived from timestamps and never stored, so a log
-        // written under `PROOFWORK_EPOCH_SECONDS=1` audits as thoroughly broken
+        // written under `CAIRN_EPOCH_SECONDS=1` audits as thoroughly broken
         // under the default 600 -- both implementations agree, and both are
         // right.
         //
@@ -2907,7 +2907,7 @@ impl Node {
                 "note: every batch in this log looks wrong, which is more often a mismatched \
                  epoch length than a dishonest operator. Epochs are derived from record \
                  timestamps and never stored, so a log written with a different \
-                 PROOFWORK_EPOCH_SECONDS (this audit used {}) cannot be re-derived without it.",
+                 CAIRN_EPOCH_SECONDS (this audit used {}) cannot be re-derived without it.",
                 crate::partition::epoch_seconds()
             ));
         }
@@ -2920,7 +2920,7 @@ impl Node {
         if !late.is_empty() {
             problems.push(format!(
                 "note: {} epoch(s) hold accepted claims that can never settle, because a later \
-                 epoch was paid first: {}. Records for them arrived more than PROOFWORK_\
+                 epoch was paid first: {}. Records for them arrived more than CAIRN_\
                  FINALITY_EPOCHS (this audit used {}) after their epoch closed. Every batch in \
                  this log is correctly derived; what is wrong is that a peer which received \
                  those records on time has paid claims this node never will.",

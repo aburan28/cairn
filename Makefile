@@ -6,7 +6,7 @@ PYTHON ?= python3
 
 ROOT := $(abspath .)
 LOCAL_DIR ?= .local
-LOG ?= $(abspath $(LOCAL_DIR)/proofwork.jsonl)
+LOG ?= $(abspath $(LOCAL_DIR)/cairn.jsonl)
 # `make mcp` and `make p2p` each get their own log so they can run together in
 # one workspace. Both binaries append and both take the ledger's exclusive lock
 # (Ledger::open_exclusive) -- two writers over one hash-linked file each compute
@@ -19,62 +19,41 @@ LOG ?= $(abspath $(LOCAL_DIR)/proofwork.jsonl)
 # get that reconciliation, run a second daemon over this log:
 #
 #   make p2p LOG=$(MCP_LOG) LISTEN=127.0.0.1:9001 CHECKPOINT=... IDENTITY=...
-P2P_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-p2p.jsonl)
-MCP_LOG ?= $(abspath $(LOCAL_DIR)/proofwork-mcp.jsonl)
+P2P_LOG ?= $(abspath $(LOCAL_DIR)/cairn-p2p.jsonl)
+MCP_LOG ?= $(abspath $(LOCAL_DIR)/cairn-mcp.jsonl)
 RELEASE_DIR ?= target/release
-CLI := $(RELEASE_DIR)/proofwork
-MCP := $(RELEASE_DIR)/proofwork-mcp
-P2P := $(RELEASE_DIR)/proofwork-p2p
-SERVE := $(RELEASE_DIR)/proofwork-serve
+CLI := $(RELEASE_DIR)/cairn
+MCP := $(RELEASE_DIR)/cairn-mcp
+P2P := $(RELEASE_DIR)/cairn-p2p
+SERVE := $(RELEASE_DIR)/cairn-serve
 FUZZ_CASES ?= 2000
 IDENTITY ?= $(abspath $(LOCAL_DIR)/node.identity.json)
 ROOT_KEY ?= $(abspath $(LOCAL_DIR)/root.key)
 CHECKPOINT ?= $(abspath $(LOCAL_DIR)/checkpoint.json)
-# ---------------------------------------------------------------------------
-# One port number, and everything derived from it
-# ---------------------------------------------------------------------------
-#
-# There used to be four independently-editable defaults -- p2p on 9000, HTTP on
-# 8080, the UI on 3000, the seed on 5000 -- three of which had to agree about
-# something and none of which were derived from each other. They drifted, and
-# the drift was invisible: a seed operator running `make p2p` bound :9000 on
-# loopback while every client dialled :5000, which fails as `Connection refused`
-# with no hint that the number is the problem. Binding loopback succeeds, so
-# nothing complains at the end that is doing the wrong thing.
-#
-# So: one knob. `PORT` is this node's peer-to-peer port; HTTP is the next one
-# and the UI the one after, because three processes speaking three protocols
-# cannot share a TCP port and pretending otherwise would be a lie in a Makefile.
-# What they *can* share is a single number to set.
-PORT ?= 5000
-P2P_PORT := $(PORT)
-HTTP_PORT := $(shell expr $(PORT) + 1)
-UI_PORT ?= $(shell expr $(PORT) + 2)
-
 # Loopback, because the common case is a *client*: it dials out and nothing
-# needs to dial it. `make node BIND=0.0.0.0` is the seed, and it is the same
-# command rather than a second one -- see the `node` target.
-BIND ?= 127.0.0.1
-LISTEN ?= $(BIND):$(P2P_PORT)
-SERVE_LISTEN ?= $(BIND):$(HTTP_PORT)
-
-GEN_BOOTSTRAP := $(RELEASE_DIR)/proofwork-gen-bootstrap
-# The *remote* seed to dial, which is a different thing from the ports above --
-# but its port is derived from the same knob, because a network whose members
-# disagree about the port is a network with no members. Override the host alone
-# with SEED_HOST, or the whole address with SEED_ADDR.
-SEED_HOST ?= 44.229.170.164
-SEED_ADDR ?= $(SEED_HOST):$(PORT)
+# needs to dial it. Serving strangers is `make seed`, which binds the wildcard
+# deliberately rather than by having everyone edit this.
+LISTEN ?= 127.0.0.1:9000
+GEN_BOOTSTRAP := $(RELEASE_DIR)/cairn-gen-bootstrap
+SEED_ADDR ?= 44.229.170.164:5000
 SEED_BOOTSTRAP ?= $(abspath $(LOCAL_DIR)/seed.json)
 BOOTSTRAP_ARGS ?= --bootstrap $(SEED_BOOTSTRAP)
+# Derived from SEED_ADDR, never written twice. `LISTEN` and `SEED_ADDR` are two
+# independently-editable defaults that have to agree about a port, and they did
+# not: clients dialled :5000 while a seed operator running `make p2p` bound
+# :9000 on loopback -- reachable by nobody, on the wrong port, with no error
+# because binding loopback succeeds. Deriving the port removes the class of
+# mistake rather than re-syncing two numbers that will drift again.
+#
+# `subst` then `lastword` also survives an IPv6 SEED_ADDR: `[::1]:5000` becomes
+# `[  1] 5000`, whose last word is still the port.
+SEED_PORT = $(lastword $(subst :, ,$(SEED_ADDR)))
+SEED_LISTEN ?= 0.0.0.0:$(SEED_PORT)
 # A seed does not bootstrap against itself. Set it to peer with other seeds.
 SEED_BOOTSTRAP_ARGS ?=
+SERVE_LISTEN ?= 127.0.0.1:8080
 SERVE_ARGS ?=
-# The spool `proofwork-serve` writes POST /submit into and the daemon drains
-# each round. One directory, shared by the two halves of one node: the daemon
-# holds the log's exclusive lock, so an accepting HTTP server cannot write the
-# log itself and queues instead. See docs/serving.md.
-QUEUE ?= $(abspath $(LOCAL_DIR)/queue)
+UI_PORT ?= 3000
 P2P_ARGS ?=
 # Which MCP client `make mcp-setup` writes a stanza for.
 CLIENT ?= claude
@@ -83,19 +62,14 @@ CLIENT ?= claude
 
 # `ui/node_modules` is deliberately absent: it is a real directory whose
 # freshness against the lockfile is the whole point of the rule.
-.PHONY: help build debug cli mcp mcp-setup node p2p seed serve ui ui-check demo ratchet shard-demo identity \
-	interop differential fuzz mcp-smoke serve-smoke canary dispute attest arena blob rekey p2p-demo try examples \
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity \
+	interop differential fuzz mcp-smoke serve-smoke node-smoke canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
 	test-reference fmt clippy docs tla check
 
 help:
 	@printf '%s\n' \
-	  'proofwork local commands:' \
-	  '  make node                The whole node, one command: peers + HTTP reader.' \
-	  '  make node UI=1           ...and the Next.js reader as well.' \
-	  '  make node PORT=6000      Every port derives from PORT (peers, HTTP+1, UI+2).' \
-	  '  make node BIND=0.0.0.0   Serve strangers. `make seed` is exactly this.' \
-	  '  make seed                Run as a public seed. One line: it delegates to node.' \
+	  'cairn local commands:' \
 	  '  make mcp                 Build, write opencode.json, and run the MCP server (stdio).' \
 	  '  make mcp-setup           Wire an MCP client to this checkout (default: Claude Code).' \
 	  '  make mcp-setup CLIENT=opencode   ...or opencode / codex.' \
@@ -104,8 +78,12 @@ help:
 	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
 	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
-	  '  make ui                  Run the Next.js UI against a node already running.' \
+	  '  make node                One process: p2p sync AND HTTP, sharing a log.' \
+	  '  make install             Install the released binaries from GitHub.' \
+	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
 	  '  make ui-check            Typecheck and build the UI, as CI does.' \
+	  '  make ui-build            Export the site and build it INTO the binaries.' \
+	  '  make site-snapshot       Regenerate the site fallback from launch/.' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
 	  '  make build               Build every release binary.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
@@ -119,24 +97,19 @@ help:
 	  '                           (Everything AGENTS.md lists except ui-check,' \
 	  '                            which needs a Node toolchain.)' \
 	  '' \
-	  'Logs: serve and cli share LOG=.local/proofwork.jsonl; mcp uses' \
-	  '      MCP_LOG=.local/proofwork-mcp.jsonl; p2p uses' \
-	  '      P2P_LOG=.local/proofwork-p2p.jsonl. mcp and p2p both append and' \
+	  'Logs: serve and cli share LOG=.local/cairn.jsonl; mcp uses' \
+	  '      MCP_LOG=.local/cairn-mcp.jsonl; p2p uses' \
+	  '      P2P_LOG=.local/cairn-p2p.jsonl. mcp and p2p both append and' \
 	  '      take an exclusive lock, so aiming them at one file makes whichever' \
 	  '      starts second refuse. See docs/agents.md.' \
 	  '' \
-	  'Ports: PORT=5000 is the only number to set. Peers bind PORT, HTTP binds' \
-	  '       PORT+1, the Next.js reader binds PORT+2. Three protocols cannot' \
-	  '       share one TCP port; they share one knob instead.' \
-	  '' \
-	  'P2P overrides: BIND=127.0.0.1 BOOTSTRAP_ARGS="--bootstrap peer.json"' \
+	  'P2P overrides: LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS="--bootstrap peer.json"' \
 	  '             IDENTITY=.local/node.identity.json ROOT_KEY=.local/root.key' \
-	  '             CHECKPOINT=.local/checkpoint.json QUEUE=.local/queue' \
-	  '             SEED_HOST=44.229.170.164  the seed to dial; its port is PORT,' \
-	  '                                     so the two cannot drift apart.' \
+	  '             CHECKPOINT=.local/checkpoint.json' \
+	  '             SEED_ADDR=44.229.170.164:5000  default bootstrap peer address;' \
 	  '                                     .local/seed.json is generated on first' \
-	  '                                     run with a placeholder key -- see' \
-	  '                                     proofwork-gen-bootstrap and docs/p2p.md'
+	  '                                     `make p2p` with a placeholder key -- see' \
+	  '                                     cairn-gen-bootstrap and docs/p2p.md'
 
 build:
 	$(CARGO) build --release --bins
@@ -174,7 +147,7 @@ mcp-setup: build | $(LOCAL_DIR)
 # A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
 # inside is freshly generated, not the real seed's. It authenticates nobody
 # until "public" is replaced with the seed's actual key -- see
-# proofwork-gen-bootstrap.rs. Regenerated only if missing, so a real key
+# cairn-gen-bootstrap.rs. Regenerated only if missing, so a real key
 # dropped in by hand is never overwritten.
 #
 # Never overwriting is right and it has a cost: change `SEED_ADDR` after the
@@ -204,69 +177,24 @@ p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
 	  --log "$(P2P_LOG)" --root "$(ROOT)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
 
-# ---------------------------------------------------------------------------
-# `make node` -- the whole node, one command
-# ---------------------------------------------------------------------------
-#
-# The daemon and the HTTP publisher over one log, plus the reader if you ask for
-# it. They compose rather than conflict, and the reason is worth knowing before
-# changing any of it: `proofwork-p2p` opens the ledger with
-# `Ledger::open_exclusive` because it is the writer, and `proofwork-serve` opens
-# it read-only. So the HTTP half cannot admit a submission itself -- it queues
-# into `QUEUE`, and the daemon drains that spool each round through the same
-# `serve::drain_into` the CLI uses. One copy of admission, two processes.
-#
-# **`UI=1` is optional and that is the point.** `proofwork-serve` renders the
-# chain at `/chain.html` with no build step, so the default is one command, two
-# processes and no Node toolchain at all. `ui/` is the richer client, not the
-# only one.
-#
-# `make node BIND=0.0.0.0` is the seed. Not a second target: an instance's
-# public address is NAT'd to it and is on no local interface, so `--listen
-# <public ip>` cannot bind -- you bind the wildcard and publish the public
-# address in the bootstrap file you hand out. The peer id is the hash of the
-# key, so an address is only ever a dial hint. See docs/p2p.md.
-ifeq ($(UI),1)
-NODE_UI_DEP := $(ROOT)/ui/node_modules
-else
-NODE_UI_DEP :=
-endif
-
-node: build $(SEED_BOOTSTRAP) $(NODE_UI_DEP) | $(LOCAL_DIR)
-	@printf '\n  peers   %s\n  reader  http://%s:%s/chain.html\n' \
-	  "$(LISTEN)" "$(if $(filter 0.0.0.0,$(BIND)),127.0.0.1,$(BIND))" "$(HTTP_PORT)"
-	@$(if $(filter 1,$(UI)),printf '  ui      http://127.0.0.1:%s\n' "$(UI_PORT)";,true)
-	@printf '  log     %s\n  queue   %s\n\n' "$(P2P_LOG)" "$(QUEUE)"
-	@mkdir -p "$(QUEUE)"
-	@# `kill 0` signals the whole process group, so one Ctrl-C stops all of
-	@# them. Deliberately no `set -m`: job control would put each background
-	@# job in its own group and `kill 0` would then reach none of them.
-	@trap 'kill 0' INT TERM EXIT; \
-	  "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
-	    --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
-	    --log "$(P2P_LOG)" --root "$(ROOT)" --queue "$(QUEUE)" \
-	    $(BOOTSTRAP_ARGS) $(P2P_ARGS) & \
-	  "$(SERVE)" --log "$(P2P_LOG)" --root "$(ROOT)" \
-	    --listen "$(SERVE_LISTEN)" --queue "$(QUEUE)" \
-	    --checkpoint "$(CHECKPOINT)" $(SERVE_ARGS) & \
-	  $(if $(filter 1,$(UI)),( cd "$(ROOT)/ui" \
-	    && NEXT_PUBLIC_PROOFWORK_NODE="http://127.0.0.1:$(HTTP_PORT)" \
-	       npm run dev -- -p $(UI_PORT) ) & ,) \
-	  wait
-
 # Run *as* the seed everyone else's default bootstrap points at.
 #
-# One line, because a seed is `make node` with a different bind address and
-# nothing else. It used to be a second copy of the daemon invocation, which is
-# how it came to bind a port the clients were not dialling.
+# Binds the wildcard, which is the counterintuitive part and the one that
+# matters on a cloud host: an instance's public address is NAT'd to it and is
+# on no local interface, so `--listen <public ip>` cannot bind at all. Bind
+# 0.0.0.0 and publish the public address in the bootstrap file you hand out --
+# an address is only ever a dial hint, because the peer id is the hash of the
+# key and the key is what decides who answered. See docs/p2p.md.
 #
 # Two things this cannot do for you: open the port inbound (a security group
 # that drops rather than refuses looks exactly like silence on both ends), and
-# put your real public key in the bootstrap files other people hold. Print
-# yours from the "public" field of $(IDENTITY).
-seed:
-	@$(MAKE) --no-print-directory node BIND=0.0.0.0 \
-	  BOOTSTRAP_ARGS="$(SEED_BOOTSTRAP_ARGS)"
+# put your real public key in the bootstrap files other people hold.
+seed: build | $(LOCAL_DIR)
+	@printf 'seeding on %s -- hand out this "public" key, not .local/seed.json:\n  %s\n' \
+	  "$(SEED_LISTEN)" "$(IDENTITY)"
+	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
+	  --checkpoint "$(CHECKPOINT)" --listen "$(SEED_LISTEN)" \
+	  --log "$(P2P_LOG)" --root "$(ROOT)" $(SEED_BOOTSTRAP_ARGS) $(P2P_ARGS)
 
 cli: build | $(LOCAL_DIR)
 	"$(CLI)" --log "$(LOG)" --root "$(ROOT)" $(ARGS)
@@ -275,10 +203,10 @@ identity: build
 	./scripts/identity-demo.sh
 
 demo: build
-	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/demo.sh
+	CAIRN_BIN="$(abspath $(CLI))" ./scripts/demo.sh
 
 ratchet: build
-	PROOFWORK_BIN="$(abspath $(CLI))" ./scripts/ratchet-demo.sh
+	CAIRN_BIN="$(abspath $(CLI))" ./scripts/ratchet-demo.sh
 
 shard-demo: build
 	RUST_BIN="$(abspath $(CLI))" ./scripts/shard-demo.sh
@@ -329,10 +257,40 @@ mcp-smoke: build
 serve-smoke: build
 	RUST_BIN="$(abspath $(CLI))" SERVE_BIN="$(abspath $(SERVE))" ./scripts/serve-smoke.sh
 
+# The seam for `daemon::run`: one process that queues a submission over HTTP
+# and admits it itself. `serve-smoke` cannot cover that -- it drains with a
+# separate command, which is the topology this replaces.
+node-smoke: build
+	RUST_BIN="$(abspath $(CLI))" P2P_BIN="$(abspath $(P2P))" SERVE_BIN="$(abspath $(SERVE))" \
+	  ./scripts/node-smoke.sh
+
 # Publish this node's log over HTTP. Read-only unless QUEUE is set, because
 # publishing is safe for anyone and accepting is a decision.
+#
+# Takes no lock and holds no Node: safe to point at a log something else is
+# writing. It can only ever *queue* a submission -- see `node` for the half
+# that can admit one.
 serve: build
 	$(SERVE) --log "$(LOG)" --root "$(ROOT)" --listen "$(SERVE_LISTEN)" $(SERVE_ARGS)
+
+# The whole node in one process: p2p sync, HTTP publishing, and the queue
+# drained by the process that holds the write lock.
+#
+# This is `make p2p` and `make serve` at once, against one log, which is the
+# only arrangement in which a submission arriving over HTTP can actually be
+# admitted -- a Ledger has one writer. Uses the p2p log and identity, since
+# that is the half that needs them.
+node: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
+	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
+	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
+	  --log "$(P2P_LOG)" --root "$(ROOT)" \
+	  --serve "$(SERVE_LISTEN)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
+
+# Install the *released* binaries, not this checkout's. The script resolves the
+# latest tag, checks the tarball against its published sha256, and installs to
+# ~/.local/bin unless CAIRN_BIN says otherwise.
+install:
+	./scripts/install.sh
 
 # `npm ci` from the committed lockfile, not `npm install`: it installs exactly
 # what the lockfile says and fails if the two disagree, which is the same
@@ -348,12 +306,29 @@ $(ROOT)/ui/node_modules: $(ROOT)/ui/package-lock.json
 	cd "$(ROOT)/ui" && npm ci
 	@touch "$(ROOT)/ui/node_modules"
 
-# Run the Next.js UI that reads from the serve endpoint.
-#
-# It reads from `make serve`, which is a separate process: the UI on its own
-# renders an empty network rather than an error, so start both.
+# Run the Next.js reader against a dev server, for working *on* the reader.
+# Reading a node does not need this -- see `ui-build`.
 ui: $(ROOT)/ui/node_modules
 	cd "$(ROOT)/ui" && npm run dev -- -p $(UI_PORT)
+
+# Export the reader and build it into the binaries.
+#
+# Two steps because they need two toolchains, and separating them is what keeps
+# `cargo build` working for somebody with no Node installed: the `ui` feature is
+# off by default, and this is the target that turns it on. Afterwards
+# `cairn-p2p --serve ADDR` answers the reader at /ui/.
+ui-build: site-snapshot
+	cd "$(ROOT)/ui" && npm ci && npm run build
+	$(CARGO) build --release --features ui --bins
+
+# Regenerate the site's fallback snapshot from the settled log in launch/.
+#
+# Committed output, so building the site needs Node and nothing else -- but it
+# is produced by the *node*, over HTTP, because relating a ledger entry to an
+# objective's record id means canonical hashing, and a third implementation of
+# that in JavaScript is a third place for a consensus rule to drift.
+site-snapshot: build
+	./scripts/site-snapshot.sh
 
 # What CI's ui job actually gates on. `make ui` is the dev server and proves
 # nothing about whether the thing compiles.
@@ -368,9 +343,9 @@ test-reference:
 	$(CARGO) fmt --check --manifest-path reference/rust/Cargo.toml
 	$(CARGO) clippy --manifest-path reference/rust/Cargo.toml --all-targets -- -D warnings
 	$(CARGO) build --release --locked --manifest-path reference/rust/Cargo.toml
-	./reference/rust/target/release/proofwork-reference conformance conformance/vectors.json
-	./reference/rust/target/release/proofwork-reference signed-records conformance/signed-records.json
-	./reference/rust/target/release/proofwork-reference signatures conformance/signatures.json
+	./reference/rust/target/release/cairn-reference conformance conformance/vectors.json
+	./reference/rust/target/release/cairn-reference signed-records conformance/signed-records.json
+	./reference/rust/target/release/cairn-reference signatures conformance/signatures.json
 
 # `--locked` and `--all-features`, because that is what CI runs. Without the
 # first, a stale lockfile passes here and fails there; without the second, gated
@@ -419,4 +394,4 @@ check: test fmt clippy docs \
 	demo ratchet try identity examples \
 	canary dispute attest arena \
 	shard-demo blob rekey p2p-demo \
-	interop differential fuzz mcp-smoke serve-smoke tla
+	interop differential fuzz mcp-smoke serve-smoke node-smoke tla

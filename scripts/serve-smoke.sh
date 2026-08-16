@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test of proofwork-serve as a real process.
+# End-to-end smoke test of cairn-serve as a real process.
 #
 # The unit tests cover the spool. What they structurally cannot cover is the
 # thing this service exists for: a *stranger* -- a process that shares no
@@ -13,8 +13,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
-SERVE="${SERVE_BIN:-./target/release/proofwork-serve}"
+RUST="${RUST_BIN:-./target/release/cairn}"
+SERVE="${SERVE_BIN:-./target/release/cairn-serve}"
 
 if [ ! -x "$RUST" ] || [ ! -x "$SERVE" ]; then
   echo "building release binaries..." >&2
@@ -23,9 +23,12 @@ fi
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
+# Ask the *served* log, not the file: on a machine carrying `~/.cairn/key`
+# the file is ciphertext and grep finds nothing however well the drain worked.
+served_has() { curl -s "http://127.0.0.1:$PORT/log" | grep -q "\"kind\": *\"$1\""; }
 
 WORK=$(mktemp -d /tmp/pw-serve-XXXXXX)
-LOG="$WORK/proofwork.jsonl"
+LOG="$WORK/cairn.jsonl"
 QUEUE="$WORK/queue"
 SERVER_PID=""
 cleanup() {
@@ -36,7 +39,7 @@ trap cleanup EXIT
 
 # One-second epochs: a reveal must land in a strictly later epoch than its
 # commitment, and this script would otherwise take ten minutes.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
 rule "post an objective, then serve the log"
 OID=$("$RUST" --log "$LOG" --root . post examples/capset_progressive/objective.json \
@@ -45,7 +48,7 @@ echo "  $OID"
 
 # Port 0 would be ideal, but the client needs to know the number, so pick a
 # high one and let the bind fail loudly if it is taken.
-PORT=${PROOFWORK_SERVE_PORT:-38080}
+PORT=${CAIRN_SERVE_PORT:-38080}
 ADDR="127.0.0.1:$PORT"
 "$SERVE" --log "$LOG" --root . --listen "$ADDR" --queue "$QUEUE" >"$WORK/serve.out" 2>&1 &
 SERVER_PID=$!
@@ -121,11 +124,22 @@ print("  GET /objective/{id} -> full record with its pinned verifier")
 
 # The whole point of the service: the bytes, unmodified. A re-encode that
 # differed by one byte would fail the client's chain check and look like a lie.
+#
+# Unless the operator's log is sealed at rest, in which case the bytes on disk
+# are ciphertext and handing them over would give a stranger nothing they can
+# audit. Sealing is a storage concern -- `Codec`'s own docs say so -- so the
+# server unseals on the way out and the check becomes "is this usable JSONL".
+# Machines with `~/.cairn/key` take this branch; CI takes the other.
 status, body = get("/log")
 assert status == 200, status
 on_disk = open(logpath, "rb").read()
-assert body == on_disk, "the served log is not byte-identical to the log on disk"
-print(f"  GET /log -> {len(body)} bytes, byte-identical to the operator's file")
+if on_disk.startswith(b"pwenc1:"):
+    for line in body.decode().splitlines():
+        json.loads(line)
+    print(f"  GET /log -> {len(body)} bytes, a sealed log unsealed into plain JSONL")
+else:
+    assert body == on_disk, "the served log is not byte-identical to the log on disk"
+    print(f"  GET /log -> {len(body)} bytes, byte-identical to the operator's file")
 
 status, body = get("/frontier/" + oid)
 assert status == 200, status
@@ -196,7 +210,7 @@ PY
 
 rule "the operator drains the queue through the rules engine"
 "$RUST" --log "$LOG" --root . drain --queue "$QUEUE" | sed 's/^/  /'
-grep -q '"kind": *"commitment"' "$LOG" || fail "the commitment never reached the log"
+served_has commitment || fail "the commitment never reached the log"
 [ -z "$(ls -A "$QUEUE" 2>/dev/null)" ] || fail "the queue was not emptied"
 
 rule "reveal in a later epoch, through the queue again"
@@ -225,11 +239,11 @@ print("  POST /submit (claim) -> 202 queued")
 PY
 
 "$RUST" --log "$LOG" --root . drain --queue "$QUEUE" | sed 's/^/  /'
-grep -q '"kind": *"claim"' "$LOG" || fail "the claim never reached the log"
+served_has claim || fail "the claim never reached the log"
 
 rule "the log a stranger produced audits, and the frontier moved"
 # Two waits, not one: an epoch must close *and* wait out the finality delay
-# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
+# (CAIRN_FINALITY_EPOCHS, default 1) before anything settles.
 sleep 2.4
 "$RUST" --log "$LOG" --root . settle | sed 's/^/  /'
 # `chain intact` rather than `log verified`: under --no-rerun no verifier runs,

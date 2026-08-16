@@ -37,8 +37,9 @@ export type Objective = {
 
 export type Objectives = { objectives: Objective[] };
 
-export const NODE_URL =
-  process.env.NEXT_PUBLIC_PROOFWORK_NODE ?? "http://127.0.0.1:8080";
+/** Same-origin by default; see the note in `chain.ts`. The daemon serves
+ *  this build at /ui/, so relative fetches reach the node that served it. */
+export const NODE_URL = process.env.NEXT_PUBLIC_CAIRN_NODE ?? "";
 
 export class NodeUnreachable extends Error {}
 
@@ -58,7 +59,7 @@ export async function fetchObjectives(
   } catch (cause) {
     throw new NodeUnreachable(
       `No node answered at ${base}. Start one with \`make serve\`, or set ` +
-        `NEXT_PUBLIC_PROOFWORK_NODE to where yours is listening.`,
+        `NEXT_PUBLIC_CAIRN_NODE to where yours is listening.`,
       { cause },
     );
   }

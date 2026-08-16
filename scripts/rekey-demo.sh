@@ -16,7 +16,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
+RUST="${RUST_BIN:-./target/release/cairn}"
 [ -x "$RUST" ] || { echo "building..." >&2; cargo build --release --locked; }
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
@@ -26,14 +26,14 @@ WORK=$(mktemp -d /tmp/pw-rekey-XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
 DATA="$WORK/data"
-LOG="$DATA/log/proofwork.jsonl"
+LOG="$DATA/log/cairn.jsonl"
 KEY="$WORK/key"                       # outside the data directory, as the docs ask
 mkdir -p "$DATA"
 
 # One second per epoch: a commit and its reveal have to land in different
 # epochs, and this script does not race on the boundary because it sleeps past
 # one deliberately.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
 rule "a sealed store with real work in it"
 "$RUST" --key-file "$KEY" keygen >/dev/null
@@ -48,7 +48,7 @@ sleep 1.1
   --submitter alice --artifact examples/reversible-adder/artifact-cuccaro.json \
   --nonce n1 | sed 's/^/  /'
 # Two waits, not one: an epoch must close *and* wait out the finality delay
-# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
+# (CAIRN_FINALITY_EPOCHS, default 1) before anything settles.
 sleep 2.2
 "$RUST" --data-dir "$DATA" --key-file "$KEY" --root . settle >/dev/null 2>&1 || true
 
@@ -92,7 +92,7 @@ echo "  refused: $(head -1 "$WORK/out" | cut -c1-72)..."
 
 rule "4. it still opens the backup, which is why it is kept"
 [ -f "$KEY.previous" ] || fail "the old key was destroyed"
-MIRRORED=$(find "$WORK/mirror" -name 'proofwork.jsonl' | head -1)
+MIRRORED=$(find "$WORK/mirror" -name 'cairn.jsonl' | head -1)
 [ -n "$MIRRORED" ] || fail "the mirror has no log in it"
 "$RUST" --log "$MIRRORED" --key-file "$KEY.previous" --root . audit | grep -q "log verified" \
   || fail "the old key does not open the backup taken before the rotation"
@@ -105,7 +105,7 @@ rule "the independent reference reaches the same verdicts on the rotated store"
 # encryption is a storage concern and the hash chain covers plaintext, which is
 # exactly the separation that let a rotation change every byte on disk without
 # moving the root.
-REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 [ -x "$REF" ] || cargo build --release --locked --manifest-path reference/rust/Cargo.toml
 "$RUST" --data-dir "$DATA" --key-file "$KEY" store export --out "$WORK/public.jsonl" \
   | head -1 | sed 's/^/  /'

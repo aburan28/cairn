@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="cairn">
+  <title>cairn</title>
+  <!-- Three stacked stones: a cairn, which is the whole metaphor. Flat colours
+       and no gradient because this is read at 16 px in a tab strip, and one
+       accent-on-solid shape survives that where a drawing does not. The green
+       is --accent from globals.css, hard-coded here because a favicon is not
+       served with the stylesheet. -->
+  <rect width="32" height="32" rx="6" fill="#0b6"/>
+  <g fill="#fff">
+    <ellipse cx="16" cy="23.5" rx="10" ry="4"/>
+    <ellipse cx="16" cy="16" rx="7" ry="3.4"/>
+    <ellipse cx="16" cy="9.5" rx="4.4" ry="2.8"/>
+  </g>
+</svg>

@@ -115,7 +115,7 @@ impl Verdict {
 /// The same relative location the primary uses, because it is the same
 /// directory on the same disk -- this crate is a second reader of one node's
 /// state, not a second node.
-const BLOB_STORE: &str = ".proofwork/blobs";
+const BLOB_STORE: &str = ".cairn/blobs";
 
 /// Resolve a pinned path against the bundle root and check its hash.
 ///
@@ -136,7 +136,7 @@ const BLOB_STORE: &str = ".proofwork/blobs";
 /// objective. Without this, auditing such a node reported *"was settled but can
 /// no longer be re-verified"* for claims that re-verify perfectly, which is the
 /// independent check failing on exactly the nodes that most need one. Found by
-/// running two `proofwork-p2p` daemons and auditing the one that synced.
+/// running two `cairn-p2p` daemons and auditing the one that synced.
 ///
 /// Containment does not apply to the store: its filenames are hashes, not
 /// paths, and the hash check below is what makes a fetched blob admissible.
@@ -456,7 +456,7 @@ fn contains_word(text: &str, token: &str) -> bool {
 /// exit is not sufficient -- Lean warns rather than errors when a declaration
 /// depends on `sorryAx`, so the output is searched for it.
 fn lean(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
-    let binary = std::env::var("PROOFWORK_LEAN").unwrap_or_else(|_| String::from("lean"));
+    let binary = std::env::var("CAIRN_LEAN").unwrap_or_else(|_| String::from("lean"));
     lean_using(&binary, root, spec, artifact)
 }
 
@@ -522,7 +522,7 @@ fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verd
     let source = format!("{preamble}\n{statement} {proof}\n");
 
     let dir = std::env::temp_dir().join(format!(
-        "proofwork-reference-lean-{}-{}",
+        "cairn-reference-lean-{}-{}",
         std::process::id(),
         next_scratch()
     ));
@@ -1046,7 +1046,7 @@ mod tests {
             ("kind", Value::string("replay")),
             (
                 "command",
-                Value::Array(vec![Value::string("proofwork-no-such-program-anywhere")]),
+                Value::Array(vec![Value::string("cairn-no-such-program-anywhere")]),
             ),
             (
                 "reproducible_fields",
@@ -1105,7 +1105,7 @@ mod tests {
     /// Every screen that must fire *before* the toolchain is consulted is
     /// tested against this: if the check moved below the lookup, the verdict
     /// would come back `Unavailable` instead, and the assertion fails.
-    const NO_LEAN: &str = "proofwork-no-such-lean-anywhere";
+    const NO_LEAN: &str = "cairn-no-such-lean-anywhere";
 
     fn lean_spec(pairs: Vec<(&'static str, Value)>) -> Value {
         let mut all = vec![
@@ -1251,7 +1251,7 @@ mod tests {
     fn fake_lean(tag: &str, code: i32, says: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!(
-            "proofwork-reference-fakelean-{}-{tag}",
+            "cairn-reference-fakelean-{}-{tag}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("scratch dir");

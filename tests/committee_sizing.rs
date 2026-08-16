@@ -29,14 +29,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 
-use proofwork::canonical::Value;
-use proofwork::crypto::envelope::CommitteeKey;
-use proofwork::crypto::identity::Identity;
-use proofwork::ledger::Ledger;
-use proofwork::node::Node;
-use proofwork::partition::{threshold_for, COMMITTEE_SIZE, COMMITTEE_THRESHOLD};
-use proofwork::records::{Claim, Commitment, Issuance, Objective, PeerRecord};
-use proofwork::verifiers::VerifierRegistry;
+use cairn::canonical::Value;
+use cairn::crypto::envelope::CommitteeKey;
+use cairn::crypto::identity::Identity;
+use cairn::ledger::Ledger;
+use cairn::node::Node;
+use cairn::partition::{threshold_for, COMMITTEE_SIZE, COMMITTEE_THRESHOLD};
+use cairn::records::{Claim, Commitment, Issuance, Objective, PeerRecord};
+use cairn::verifiers::VerifierRegistry;
 
 /// Epoch boundaries. `EPOCH_SECONDS` is 600.
 const EPOCH_0: &str = "2026-07-28T00:00:00+00:00";
@@ -56,8 +56,8 @@ def check(artifact):
 /// boundary prefix is empty and whose committee therefore has nothing staked
 /// behind it. Every failure in the first run of this file was that.
 fn epoch_of(ts: &str) -> u64 {
-    let seconds = proofwork::time::parse_rfc3339(ts).expect("a well-formed instant");
-    proofwork::partition::epoch_of(seconds as u64, proofwork::partition::EPOCH_SECONDS)
+    let seconds = cairn::time::parse_rfc3339(ts).expect("a well-formed instant");
+    cairn::partition::epoch_of(seconds as u64, cairn::partition::EPOCH_SECONDS)
 }
 
 struct TempDir {
@@ -103,7 +103,7 @@ impl Member {
     fn peer_record(&self, port: u16, ts: &str) -> PeerRecord {
         PeerRecord::new(
             self.identity.submitter_id(),
-            proofwork::hex::encode(&self.committee.id()),
+            cairn::hex::encode(&self.committee.id()),
             format!("127.0.0.1:{port}"),
             1,
             ts,
@@ -131,7 +131,7 @@ fn fixture(label: &str, peers: u8, stake: u64, reward: u64) -> Fixture {
     fs::write(dir.path.join("c.py"), CHECKER).expect("writable");
     let mut hasher = Sha256::new();
     hasher.update(CHECKER.as_bytes());
-    let sha = proofwork::hex::encode(&hasher.finalize());
+    let sha = cairn::hex::encode(&hasher.finalize());
 
     let ledger = Ledger::open(dir.path.join("log.jsonl")).expect("an empty log");
     let mut node = Node::with_registry(ledger, VerifierRegistry::new(&dir.path));
@@ -183,7 +183,7 @@ fn fixture_without_supply(label: &str, peers: u8, reward: u64) -> Fixture {
     fs::write(dir.path.join("c.py"), CHECKER).expect("writable");
     let mut hasher = Sha256::new();
     hasher.update(CHECKER.as_bytes());
-    let sha = proofwork::hex::encode(&hasher.finalize());
+    let sha = cairn::hex::encode(&hasher.finalize());
     let ledger = Ledger::open(dir.path.join("log.jsonl")).expect("an empty log");
     let mut node = Node::with_registry(ledger, VerifierRegistry::new(&dir.path));
     let members: Vec<Member> = (1..=peers).map(Member::new).collect();
@@ -232,7 +232,7 @@ fn seal_raw(fixture: &mut Fixture, who: &str, ts: &str) {
         .node
         .committee_for(epoch, fixture.node.ledger().len())
         .expect("a committee");
-    let committee: Vec<proofwork::crypto::CommitteeMember> = seats
+    let committee: Vec<cairn::crypto::CommitteeMember> = seats
         .iter()
         .map(|seat| {
             fixture
@@ -253,7 +253,7 @@ fn seal_raw(fixture: &mut Fixture, who: &str, ts: &str) {
         Vec::new(),
     )
     .expect("a valid claim");
-    let submission = proofwork::sealed::SealedSubmission::seal_claim(
+    let submission = cairn::sealed::SealedSubmission::seal_claim(
         &claim,
         epoch,
         ts,
@@ -278,16 +278,16 @@ fn seal_raw(fixture: &mut Fixture, who: &str, ts: &str) {
 
 /// Seal a real submission through the ordinary path, so the check under test is
 /// the *value* one rather than the shape one.
-fn seal_real(fixture: &mut Fixture, ts: &str) -> Result<String, proofwork::node::RuleViolation> {
+fn seal_real(fixture: &mut Fixture, ts: &str) -> Result<String, cairn::node::RuleViolation> {
     let epoch = {
-        let seconds = proofwork::time::parse_rfc3339(ts).expect("a well-formed instant");
-        proofwork::partition::epoch_of(seconds as u64, proofwork::partition::EPOCH_SECONDS)
+        let seconds = cairn::time::parse_rfc3339(ts).expect("a well-formed instant");
+        cairn::partition::epoch_of(seconds as u64, cairn::partition::EPOCH_SECONDS)
     };
     let seats = fixture
         .node
         .committee_for(epoch, fixture.node.ledger().len())
         .expect("a committee");
-    let committee: Vec<proofwork::crypto::CommitteeMember> = seats
+    let committee: Vec<cairn::crypto::CommitteeMember> = seats
         .iter()
         .map(|seat| {
             let member = fixture
@@ -307,7 +307,7 @@ fn seal_real(fixture: &mut Fixture, ts: &str) -> Result<String, proofwork::node:
         Vec::new(),
     )
     .expect("a valid claim");
-    let submission = proofwork::sealed::SealedSubmission::seal_claim(
+    let submission = cairn::sealed::SealedSubmission::seal_claim(
         &claim,
         epoch,
         ts,

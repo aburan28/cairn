@@ -509,7 +509,7 @@ pub enum Codec {
     /// JSONL, one record per line. The format every existing log is in, and the
     /// only one the reference implementation reads -- sealing is a storage
     /// concern of this crate, not part of the format two implementations have
-    /// to agree on. `proofwork store export` is how a sealed log reaches it.
+    /// to agree on. `cairn store export` is how a sealed log reaches it.
     #[default]
     Plain,
     /// Each line sealed with ChaCha20-Poly1305 under a local key.
@@ -1054,7 +1054,7 @@ mod tests {
                 .unwrap_or(0);
             let mut path = std::env::temp_dir();
             path.push(format!(
-                "proofwork-ledger-{}-{nanos}-{n}-{tag}",
+                "cairn-ledger-{}-{nanos}-{n}-{tag}",
                 std::process::id()
             ));
             fs::create_dir_all(&path).expect("create temp dir");

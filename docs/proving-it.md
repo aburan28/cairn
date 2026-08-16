@@ -127,7 +127,7 @@ directions, because `fraud_rate` breaks the mechanism by getting *smaller* and a
 one-directional search would call it safe.
 
 ```sh
-proofwork incentives --robustness
+cairn incentives --robustness
 ```
 
 Two design notes, since they are the difference between a useful number and a
@@ -164,7 +164,7 @@ pointed at valuable problems should expect.
 ## What the margin table says about this design
 
 ```
-$ proofwork incentives --robustness            # ~2.5 minutes at 100 nodes
+$ cairn incentives --robustness            # ~2.5 minutes at 100 nodes
 
 robustness -- how far each parameter moves before honesty stops holding
   stake: 4000000 survives 1.25x, breaks lowering to 3200000

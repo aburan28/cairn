@@ -341,3 +341,203 @@ h2 {
   border-top: 1px solid var(--line);
   word-break: break-all;
 }
+
+/* --- the site: landing and challenge pages ------------------------------- */
+
+h2 {
+  font-size: 1rem;
+  margin: 2rem 0 0.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+pre {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  /* A curl one-liner is longer than any sensible column. Wrapping beats a
+     horizontal scrollbar on the one element a visitor is meant to copy. */
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+
+.row.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.25rem 0;
+}
+
+.stat {
+  flex: 1 1 7rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.statValue {
+  font-size: 1.15rem;
+  color: var(--accent);
+}
+
+.statLabel {
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+
+ul.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.card {
+  padding: 0.75rem;
+  margin-bottom: 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.card a {
+  color: inherit;
+}
+
+.tag.open {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* A ratchet is a distance travelled between two known ends, so it gets a bar.
+   Display only -- the payout is integer arithmetic in frontier.rs. */
+.bar {
+  display: inline-block;
+  vertical-align: middle;
+  width: 6rem;
+  height: 0.45rem;
+  margin-left: 0.5rem;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+/* --- prose pages: how it works, docs --------------------------------------- */
+
+/* Three roles, three cards, side by side where there is room. `.cards` is two
+   columns because an objective card is dense; these are short, so a third fits
+   and the reader sees all three roles without scrolling past one. */
+@media (min-width: 60rem) {
+  .cards.ways {
+    grid-template-columns: repeat(3, 1fr);
+    /* Stretched, unlike the objective cards above -- these three are written
+       to a similar length and a ragged bottom edge on a row of three reads as
+       a layout fault rather than as three different amounts of content. */
+    align-items: stretch;
+  }
+}
+
+.ways .card b {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+/* `pre` breaks anywhere by default, which is right for the curl one-liner on
+   the landing page and wrong here: these are two-word commands, and mid-word
+   breaks turned `certificate` into `certi ficate`. Wrap at the spaces. */
+.ways .card pre {
+  font-size: 0.85em;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+/* A table wide enough to need a scrollbar gets its own, rather than making the
+   page scroll sideways -- on a phone that is the difference between a readable
+   column and a page that drifts every time you swipe. */
+.tableWrap {
+  overflow-x: auto;
+  margin: 0.5rem 0 1rem;
+}
+
+table.grid {
+  border-collapse: collapse;
+  min-width: 34rem;
+  width: 100%;
+}
+
+table.grid th,
+table.grid td {
+  border: 1px solid var(--line);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+table.grid th {
+  color: var(--dim);
+  font-weight: 400;
+  font-size: 0.85em;
+  background: var(--panel);
+}
+
+/* A list of statements, not a list of bullets: each item is a sentence or two,
+   and the marker adds nothing a line break does not. */
+ul.plain {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  max-width: 52rem;
+}
+
+ul.plain li {
+  margin-bottom: 0.6rem;
+}
+
+.docList li {
+  padding-left: 1rem;
+  text-indent: -1rem; /* wrapped blurbs hang under the filename, not level with it */
+}
+
+/* --- footer ---------------------------------------------------------------- */
+
+.foot {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 1.25rem 1.25rem 3rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.9em;
+}
+
+.footLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin-bottom: 0.6rem;
+}
+
+.foot .dim {
+  max-width: 52rem;
+  margin-top: 0.4rem;
+}
+
+/* The nav wraps on a phone rather than pushing the last link off the edge. */
+.nav {
+  flex-wrap: wrap;
+  row-gap: 0.4rem;
+}
+
+.bar.wide {
+  display: block;
+  width: 100%;
+  margin: 0.5rem 0;
+  height: 0.6rem;
+}
+
+.bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}

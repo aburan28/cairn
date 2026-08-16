@@ -8,9 +8,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LOG="${1:-/tmp/proofwork-demo.jsonl}"
+LOG="${1:-/tmp/cairn-demo.jsonl}"
 rm -f "$LOG"
-PW="${PROOFWORK_BIN:-./target/release/proofwork}"
+PW="${CAIRN_BIN:-./target/release/cairn}"
 [ -x "$PW" ] || { echo "building release binary..." >&2; cargo build --release; }
 pw() { "$PW" --log "$LOG" --root . "$@"; }
 
@@ -19,12 +19,12 @@ pw() { "$PW" --log "$LOG" --root . "$@"; }
 # would take twenty minutes to show one payout. One-second epochs let the same
 # rules play out in a script that finishes. The override changes no canonical
 # bytes: nothing derived from it enters a record.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 tick() { sleep 1.1; }
 
 # Two waits, not one: an epoch must close *and* wait out the finality delay
-# (PROOFWORK_FINALITY_EPOCHS, default 1) before anything settles.
-settle_tick() { tick; local i; for ((i = 0; i < ${PROOFWORK_FINALITY_EPOCHS:-1}; i++)); do tick; done; }
+# (CAIRN_FINALITY_EPOCHS, default 1) before anything settles.
+settle_tick() { tick; local i; for ((i = 0; i < ${CAIRN_FINALITY_EPOCHS:-1}; i++)); do tick; done; }
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 

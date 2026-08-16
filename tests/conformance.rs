@@ -1,6 +1,6 @@
 //! The cross-implementation contract. If these fail, this crate cannot
 //! interoperate with any other implementation and nothing else matters.
-use proofwork::canonical::{merkle_root, Value};
+use cairn::canonical::{merkle_root, Value};
 
 fn vectors() -> Value {
     let text = std::fs::read_to_string(concat!(
@@ -80,19 +80,19 @@ fn oversized_integers_are_refused_rather_than_becoming_floats() {
 
 /// Regenerate `conformance/signed-records.json`, which the reference
 /// implementation reproduces field for field via
-/// `proofwork-reference signed-records`.
+/// `cairn-reference signed-records`.
 ///
 /// A signature is part of the record, so it is part of the id. Two
 /// implementations that disagreed about how a signed record digests would give
 /// every signed claim two ids, and citation would break at the first one --
 /// so this pins the canonical bytes, not just the signature.
 ///
-/// `PROOFWORK_WRITE_VECTORS=1` rewrites the file.
+/// `CAIRN_WRITE_VECTORS=1` rewrites the file.
 #[test]
 fn signed_record_vectors_match_the_committed_file() {
-    use proofwork::canonical::Value;
-    use proofwork::crypto::identity::Identity;
-    use proofwork::records::{Claim, Commitment};
+    use cairn::canonical::Value;
+    use cairn::crypto::identity::Identity;
+    use cairn::records::{Claim, Commitment};
 
     let alice = Identity::from_secret_bytes([23u8; 32]);
     let ts = "2026-07-28T00:00:00+00:00";
@@ -145,7 +145,7 @@ fn signed_record_vectors_match_the_committed_file() {
         env!("CARGO_MANIFEST_DIR"),
         "/conformance/signed-records.json"
     );
-    if std::env::var("PROOFWORK_WRITE_VECTORS").is_ok() {
+    if std::env::var("CAIRN_WRITE_VECTORS").is_ok() {
         std::fs::write(path, format!("{produced}\n")).expect("write vectors");
         return;
     }

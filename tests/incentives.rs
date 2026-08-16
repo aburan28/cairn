@@ -10,18 +10,18 @@
 //! Every test here is a sentence somebody could write in a paper, restated so a
 //! machine can refuse it.
 
-use proofwork::incentive::design::{
+use cairn::incentive::design::{
     committee_window, minimum_audit_rate, minimum_canary_rate, minimum_stake_for_custody,
     participation, Report,
 };
-use proofwork::incentive::dynamics::tipping_point;
-use proofwork::incentive::game::{
+use cairn::incentive::dynamics::tipping_point;
+use cairn::incentive::game::{
     everyone, invasion, sybil_gain, symmetric_stability, Invades, Stability,
 };
-use proofwork::incentive::mechanism::{
+use cairn::incentive::mechanism::{
     Attest, Availability, Custody, RewardRule, Serve, Share, SplitIdentities, Verification,
 };
-use proofwork::incentive::{NodeParams, ParamError, Rat};
+use cairn::incentive::{NodeParams, ParamError, Rat};
 
 fn reference() -> NodeParams {
     NodeParams::reference()

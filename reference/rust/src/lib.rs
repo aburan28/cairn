@@ -1,10 +1,10 @@
-//! An independent reference implementation of the proofwork protocol.
+//! An independent reference implementation of the cairn protocol.
 //!
 //! Its job is to disagree. The primary implementation and this one are checked
 //! against each other by `scripts/interop.sh` and against a frozen set of
 //! conformance vectors, and the whole value of that is that neither was
 //! written from the other's source. This crate depends on nothing from
-//! `proofwork` -- it is even its own cargo workspace, so a shared helper
+//! `cairn` -- it is even its own cargo workspace, so a shared helper
 //! cannot leak across by accident.
 //!
 //! What it covers is the consensus surface: canonical encoding, record

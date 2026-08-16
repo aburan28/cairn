@@ -28,14 +28,14 @@ cd "$(dirname "$0")/.."
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-PW="${PROOFWORK_BIN:-./target/release/proofwork}"
+PW="${CAIRN_BIN:-./target/release/cairn}"
 [ -x "$PW" ] || { echo "building release binary..." >&2; cargo build --release; }
 LOG="$WORK/log.jsonl"
 pw() { "$PW" --log "$LOG" --root . "$@"; }
 
 # One-second epochs, so the same rules play out in a script that finishes.
 # Changes no canonical bytes: nothing derived from this enters a record.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }

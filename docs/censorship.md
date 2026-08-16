@@ -19,7 +19,7 @@ actually need against a censor, and two of them need the opposite of secrecy.
 
 ## The tension, stated plainly
 
-proofwork's entire guarantee is **anyone can independently re-derive every result
+cairn's entire guarantee is **anyone can independently re-derive every result
 the network has settled**. That requires settled artifacts to be public. Encrypt
 them and nobody can re-verify anything; you are left trusting an operator's word,
 which is precisely the thing the project exists to avoid.
@@ -263,8 +263,9 @@ the limitation is explicit rather than discovered later.
 ### Status
 
 Implemented as `Objective.confidentiality` in both implementations
-(`records.rs`, `records.py`) and in `spec/objective.schema.json`. Three
-properties are worth stating because each is a decision rather than a detail:
+(`src/records.rs`, `reference/rust/src/records.rs`) and in
+`spec/objective.schema.json`. Three properties are worth stating because
+each is a decision rather than a detail:
 
 - **`sealed` is refused, not downgraded.** `validate` errors rather than
   quietly treating the request as `embargoed`. A funder who asked for "never
@@ -315,6 +316,11 @@ What remains: the embargo binds the *committee*, which is what holds the key.
 It does not bind a submitter who publishes their own artifact elsewhere, and
 nothing can — the point of the class is coordinated disclosure among people who
 want it, not a gag.
+
+[`design/embargo-release.md`](design/embargo-release.md) designs that wiring.
+Its main finding is that §2's committee cannot be reused as-is: shares are
+sealed to the peers drawn at *commit* time, so a multi-epoch embargo freezes the
+membership this section requires to be "diverse and rotated per epoch".
 
 ## 7. What encryption cannot fix
 

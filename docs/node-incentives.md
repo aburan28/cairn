@@ -17,16 +17,16 @@ every result"* — the one property Stage 0 claims — becomes a sentence in a
 README rather than a fact about the world.
 
 ```sh
-proofwork incentives                          # the reference network
-proofwork incentives --canary-rate 0           # what breaks without canaries
-proofwork incentives --settled 500000          # what breaks at bootstrap
+cairn incentives                          # the reference network
+cairn incentives --canary-rate 0           # what breaks without canaries
+cairn incentives --settled 500000          # what breaks at bootstrap
 ```
 
 Tuning a parameter means asking where it *stops* holding, not whether it holds
 at one point, and that is a grid rather than a report:
 
 ```sh
-proofwork incentives --sweep canary-rate=1/20..1/5:5 --sweep stake=1000..10000:4 \
+cairn incentives --sweep canary-rate=1/20..1/5:5 --sweep stake=1000..10000:4 \
                      --out sweep.csv
 ```
 
@@ -56,8 +56,8 @@ a Merkle root and no way to prove anything against it, so a challenge had no
 answer shorter than the whole log. It has one now.
 
 ```
-proofwork prove 12 --height 25 --out proof.json     # the holder answers
-proofwork check proof.json --from checkpoint.json \
+cairn prove 12 --height 25 --out proof.json     # the holder answers
+cairn check proof.json --from checkpoint.json \
   --root-key operator.pub                           # the challenger checks
 ```
 
@@ -79,11 +79,11 @@ The payment is in the log too, because a challenge nobody is paid to answer is
 a challenge nobody answers:
 
 ```
-proofwork availability fund --funder treasury --per-epoch 7 \
+cairn availability fund --funder treasury --per-epoch 7 \
     --from-epoch 0 --to-epoch 4000
-proofwork availability undertake --identity node.json --bond 1000   # the promise
-proofwork availability answer    --identity node.json   # this epoch's sample
-proofwork availability settle                           # pay it, name the silent
+cairn availability undertake --identity node.json --bond 1000   # the promise
+cairn availability answer    --identity node.json   # this epoch's sample
+cairn availability settle                           # pay it, name the silent
 ```
 
 The `--bond` is not decoration. It is locked against units the log says this
@@ -167,8 +167,8 @@ rule, the rule was missing. Once per key, and you had forty funded sybils.
 The rule is the **issuance** record:
 
 ```
-proofwork issue --holder treasury --units 1000000   # genesis prefix only
-proofwork balances                                  # who holds what, what is escrowed
+cairn issue --holder treasury --units 1000000   # genesis prefix only
+cairn balances                                  # who holds what, what is escrowed
 ```
 
 Three properties, and each is the answer to a way of making money for free.
@@ -200,7 +200,7 @@ reported and never to be subtracted.
 
 **A log with no issuance is still legal**, and that is the whole backward
 compatibility story. Such a log has not claimed its units are scarce, so escrow
-is not enforced and `proofwork balances` says so in as many words. The moment a
+is not enforced and `cairn balances` says so in as many words. The moment a
 supply is declared, every unit has to trace to it.
 
 So the claim about sybils can finally be stated without a caveat attached:
@@ -375,8 +375,8 @@ to bear.
 Minting costs verifier runs, once. Checking costs none, ever:
 
 ```
-proofwork canary mint --objective ID --from artifact.json --count 4
-proofwork canary check --docket canaries/docket.json
+cairn canary mint --objective ID --from artifact.json --count 4
+cairn canary check --docket canaries/docket.json
 ```
 
 `check` compares the docket against every verdict in the log and runs no
@@ -425,7 +425,7 @@ on settlement**, split three ways across the services.
 
 That choice has a cost and the harness reports it rather than burying it:
 security spend is proportional to settled value, which is right in the limit and
-**zero at launch**. `proofwork incentives --settled 0` prints `fee pool supports
+**zero at launch**. `cairn incentives --settled 0` prints `fee pool supports
 no nodes`. The bootstrap problem is stated, not solved.
 
 ## The committee sits in a vice
@@ -490,7 +490,7 @@ sybil resistance -- identities one operator would run
 |---|---|
 | `exact` | rational payoffs over `i128`. No floats, so "is this an equilibrium" is decidable |
 | `game` | the solvers: best response, Nash, strict Nash, dominance, k-resilience, invasion, sybil |
-| `mechanism` | proofwork's three sub-games, with the payoff algebra and where each term comes from |
+| `mechanism` | cairn's three sub-games, with the payoff algebra and where each term comes from |
 | `dynamics` | better-reply dynamics: where a population *lands*, not where it could rest |
 | `design` | the inverse question — smallest canary rate, bond, committee that close the gap |
 
@@ -517,7 +517,7 @@ Each rung is strictly stronger than the one below, and the mechanism earns a
 different rung in each sub-game — which is the useful output, not a single
 pass/fail.
 
-| rung | predicate | what it rules out | proofwork |
+| rung | predicate | what it rules out | cairn |
 |---|---|---|---|
 | individual rationality | payoff ≥ outside option | operators not showing up | verification ✓ (fee-funded) |
 | Nash | no profitable unilateral deviation | one operator defecting alone | all three ✓ |
@@ -550,7 +550,7 @@ reference parameters is equally consistent with "the mechanism is sound" and
 "the reference parameters were chosen -- consciously or not -- to be a point
 where it passes." Nothing in the verdict distinguishes those.
 
-`proofwork incentives --robustness` distinguishes them. For each parameter it
+`cairn incentives --robustness` distinguishes them. For each parameter it
 walks outward on a geometric ladder and reports the first rung at which the
 report stops passing, in *both* directions -- because `fraud_rate` breaks the
 mechanism by getting smaller, and a one-directional search would call it safe.
@@ -633,7 +633,7 @@ algebra above and only turned up when the numbers were run.
 ## Status
 
 This is a mechanism and its evaluation, and one of its three pieces now ships.
-The **canary generator is built** (`src/canary.rs`, `proofwork canary`), so
+The **canary generator is built** (`src/canary.rs`, `cairn canary`), so
 `D` is no longer an assumption about a pipeline that does not exist. Nothing in
 `src/incentive/` runs at settlement time, no bond is posted, and no Merkle
 challenge is issued — and the missing half of canaries is the money: a

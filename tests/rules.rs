@@ -46,14 +46,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use proofwork::canonical::Value;
-use proofwork::frontier::{Direction, Ratchet, RatchetError};
-use proofwork::ledger::Ledger;
-use proofwork::node::{Node, Outcome, RuleViolation};
-use proofwork::partition::epoch_seconds;
-use proofwork::records::{commitment_hash, Claim, Commitment, Objective};
-use proofwork::time::format_iso8601_utc;
-use proofwork::verifiers::{Status, VerifierRegistry};
+use cairn::canonical::Value;
+use cairn::frontier::{Direction, Ratchet, RatchetError};
+use cairn::ledger::Ledger;
+use cairn::node::{Node, Outcome, RuleViolation};
+use cairn::partition::epoch_seconds;
+use cairn::records::{commitment_hash, Claim, Commitment, Objective};
+use cairn::time::format_iso8601_utc;
+use cairn::verifiers::{Status, VerifierRegistry};
 
 /// Frozen timestamp. Nothing in the rules depends on wall-clock time, and a
 /// fixed stamp keeps record ids reproducible across runs.
@@ -64,7 +64,7 @@ const TS: &str = "2026-07-28T00:00:00+00:00";
 const BASE: i64 = 1_785_196_800;
 
 /// One epoch, as an offset. Read from the crate rather than restated here: a
-/// `PROOFWORK_EPOCH_SECONDS` override that this file did not follow would put
+/// `CAIRN_EPOCH_SECONDS` override that this file did not follow would put
 /// commit and reveal back in the same epoch and fail every submission.
 fn epoch() -> i64 {
     epoch_seconds() as i64
@@ -76,7 +76,7 @@ fn epoch() -> i64 {
 /// hard-codes the delay does not fail when the delay changes, it silently
 /// starts asserting that nothing settled.
 fn finality() -> i64 {
-    proofwork::partition::finality_epochs() as i64
+    cairn::partition::finality_epochs() as i64
 }
 
 /// [`TS`] plus `offset` seconds.
@@ -87,7 +87,7 @@ fn stamp(offset: i64) -> String {
 /// A Lean binary name guaranteed not to exist, so `lean` verification is
 /// deterministically `Unavailable` without touching (or depending on) whatever
 /// toolchain the host happens to have installed.
-const NO_LEAN: &str = "proofwork-rules-definitely-no-such-lean-binary";
+const NO_LEAN: &str = "cairn-rules-definitely-no-such-lean-binary";
 
 /// The repository root, which is the objective bundle root the shipped
 /// `examples/*/objective.json` files pin their checkers against.
@@ -138,7 +138,7 @@ impl TempDir {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "proofwork-rules-{label}-{}-{nanos}-{n}",
+            "cairn-rules-{label}-{}-{nanos}-{n}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("scratch directory is creatable");
@@ -161,7 +161,7 @@ impl Drop for TempDir {
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    proofwork::hex::encode(&hasher.finalize())
+    cairn::hex::encode(&hasher.finalize())
 }
 
 /// Write pinned source into the bundle root and return the hash the objective
@@ -1535,8 +1535,8 @@ fn the_shipped_progressive_example_runs_end_to_end() {
 /// matter, and the last two are the ones an attacker actually tries.
 #[test]
 fn a_key_shaped_submitter_cannot_be_worn_by_anyone_else() {
-    use proofwork::crypto::identity::Identity;
-    use proofwork::records::{signed_submitter, Commitment};
+    use cairn::crypto::identity::Identity;
+    use cairn::records::{signed_submitter, Commitment};
 
     let alice = Identity::from_secret_bytes([7u8; 32]);
     let mallory = Identity::from_secret_bytes([9u8; 32]);
@@ -1586,8 +1586,8 @@ fn a_key_shaped_submitter_cannot_be_worn_by_anyone_else() {
 /// The rules engine refuses a forged identity before writing anything.
 #[test]
 fn the_node_refuses_an_unsigned_key_shaped_submitter() {
-    use proofwork::crypto::identity::Identity;
-    use proofwork::records::Commitment;
+    use cairn::crypto::identity::Identity;
+    use cairn::records::Commitment;
 
     let alice = Identity::from_secret_bytes([11u8; 32]);
     let ts = TS;
@@ -1620,9 +1620,9 @@ fn the_node_refuses_an_unsigned_key_shaped_submitter() {
 /// claim somebody already cited.
 #[test]
 fn a_signature_is_covered_by_the_record_id() {
-    use proofwork::canonical::Value;
-    use proofwork::crypto::identity::Identity;
-    use proofwork::records::Claim;
+    use cairn::canonical::Value;
+    use cairn::crypto::identity::Identity;
+    use cairn::records::Claim;
 
     let alice = Identity::from_secret_bytes([13u8; 32]);
     let unsigned = Claim::new(
@@ -1651,8 +1651,8 @@ fn a_signature_is_covered_by_the_record_id() {
 /// halves of a submission.
 #[test]
 fn an_objective_can_refuse_nickname_submitters() {
-    use proofwork::crypto::identity::Identity;
-    use proofwork::records::Commitment;
+    use cairn::crypto::identity::Identity;
+    use cairn::records::Commitment;
 
     let dir = TempDir::new("requires-signed");
     let sha = write_pinned(&dir, "c.py", CHECKER);
@@ -1679,7 +1679,7 @@ fn an_objective_can_refuse_nickname_submitters() {
     let refused = node.commit(&nickname, TS).expect_err("nickname refused");
     let message = refused.to_string();
     assert!(message.contains("only signed identities"), "{message}");
-    assert!(message.contains("proofwork identity"), "{message}");
+    assert!(message.contains("cairn identity"), "{message}");
 
     // A signed identity goes through.
     let alice = Identity::from_secret_bytes([17u8; 32]);
@@ -1712,7 +1712,7 @@ fn requiring_signed_submitters_is_off_by_default_and_omitted() {
     assert_ne!(plain.id(), strict.id());
     assert_eq!(
         strict.to_value().get("require_signed_submitter"),
-        Some(&proofwork::canonical::Value::Bool(true))
+        Some(&cairn::canonical::Value::Bool(true))
     );
 
     // And it round-trips.
@@ -1723,12 +1723,12 @@ fn requiring_signed_submitters_is_off_by_default_and_omitted() {
     // A non-boolean is refused rather than coerced: "yes" meaning true here
     // and false in the reference is a split over what is admissible.
     let mut body = match plain.to_value() {
-        proofwork::canonical::Value::Object(map) => map,
+        cairn::canonical::Value::Object(map) => map,
         _ => unreachable!(),
     };
     body.insert(
         "require_signed_submitter".to_string(),
-        proofwork::canonical::Value::string("yes"),
+        cairn::canonical::Value::string("yes"),
     );
-    assert!(Objective::from_value(&proofwork::canonical::Value::Object(body)).is_err());
+    assert!(Objective::from_value(&cairn::canonical::Value::Object(body)).is_err());
 }

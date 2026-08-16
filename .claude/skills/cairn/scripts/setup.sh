@@ -16,7 +16,7 @@ cd "$REPO"
 
 SERVE=0
 PORT=8787
-LOG="$REPO/proofwork.jsonl"
+LOG="$REPO/cairn.jsonl"
 DEMO_EPOCHS=0
 
 while [ $# -gt 0 ]; do
@@ -34,10 +34,10 @@ rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 say()  { printf '  %s\n' "$1"; }
 
 rule "build"
-if [ ! -x target/release/proofwork ] || [ ! -x target/release/proofwork-mcp ]; then
+if [ ! -x target/release/cairn ] || [ ! -x target/release/cairn-mcp ]; then
   cargo build --release --locked
 fi
-say "proofwork, proofwork-mcp, proofwork-serve"
+say "cairn, cairn-mcp, cairn-serve"
 
 # The jail matters more than it looks: objectives carry code somebody else
 # wrote, and this node runs it. Say plainly whether there is one rather than
@@ -45,7 +45,7 @@ say "proofwork, proofwork-mcp, proofwork-serve"
 rule "sandbox"
 if command -v bwrap >/dev/null 2>&1; then
   say "bubblewrap present -- verifier code runs jailed"
-  say "set PROOFWORK_REQUIRE_SANDBOX=1 to refuse to run unjailed at all"
+  say "set CAIRN_REQUIRE_SANDBOX=1 to refuse to run unjailed at all"
 elif [ "$(uname)" = "Darwin" ] && command -v sandbox-exec >/dev/null 2>&1; then
   say "seatbelt present -- verifier code runs jailed (reads are NOT confined on macOS)"
 else
@@ -78,7 +78,7 @@ for objective in \
 do
   # Already-posted objectives are refused as duplicates -- ids are content
   # addresses, so re-running this script is idempotent rather than additive.
-  if out=$(./target/release/proofwork --log "$LOG" --root . post "$objective" 2>&1); then
+  if out=$(./target/release/cairn --log "$LOG" --root . post "$objective" 2>&1); then
     say "$(printf '%s' "$out" | head -1)  <- $(basename "$(dirname "$objective")")"
     POSTED=$((POSTED + 1))
   else
@@ -92,21 +92,21 @@ say "$POSTED newly posted"
 
 if [ "$DEMO_EPOCHS" = "1" ]; then
   rule "demo epochs"
-  say "export PROOFWORK_EPOCH_SECONDS=1 in every shell that touches this log,"
+  say "export CAIRN_EPOCH_SECONDS=1 in every shell that touches this log,"
   say "including the one running the MCP server -- epochs are derived from"
   say "record timestamps, so a log written at 1s audits as broken at 600s."
 fi
 
 rule "next"
-say "Ask Claude: \"list the proofwork objectives and improve the frontier on one\""
-say "Verify anything the node claims:  ./target/release/proofwork --log $LOG --root . audit"
+say "Ask Claude: \"list the cairn objectives and improve the frontier on one\""
+say "Verify anything the node claims:  ./target/release/cairn --log $LOG --root . audit"
 
 if [ "$SERVE" = "1" ]; then
   rule "serve"
   mkdir -p "$REPO/queue"
   say "http://127.0.0.1:$PORT/objectives   (queue at $REPO/queue)"
-  say "admit submissions with: proofwork drain --queue $REPO/queue"
+  say "admit submissions with: cairn drain --queue $REPO/queue"
   say "Ctrl-C to stop"
-  exec ./target/release/proofwork-serve \
+  exec ./target/release/cairn-serve \
     --log "$LOG" --root "$REPO" --listen "127.0.0.1:$PORT" --queue "$REPO/queue"
 fi

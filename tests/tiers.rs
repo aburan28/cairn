@@ -28,12 +28,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use proofwork::canonical::Value;
-use proofwork::ledger::Ledger;
-use proofwork::node::{Node, RuleViolation};
-use proofwork::records::{Claim, Commitment, Issuance, Objective};
-use proofwork::tier::Tier;
-use proofwork::verifiers::VerifierRegistry;
+use cairn::canonical::Value;
+use cairn::ledger::Ledger;
+use cairn::node::{Node, RuleViolation};
+use cairn::records::{Claim, Commitment, Issuance, Objective};
+use cairn::tier::Tier;
+use cairn::verifiers::VerifierRegistry;
 
 const GENESIS: &str = "2026-07-28T00:00:00+00:00";
 const COMMIT_AT: &str = "2026-07-28T00:10:00+00:00";
@@ -90,7 +90,7 @@ fn have_python() -> bool {
 fn sha(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
-    proofwork::hex::encode(&hasher.finalize())
+    cairn::hex::encode(&hasher.finalize())
 }
 
 struct Fixture {
@@ -156,7 +156,7 @@ fn earn(fixture: &mut Fixture, objective: &Objective, who: &str, nonce: &str) {
     let commitment = Commitment::new(
         &id,
         who,
-        proofwork::records::commitment_hash(&id, who, &artifact, nonce),
+        cairn::records::commitment_hash(&id, who, &artifact, nonce),
         COMMIT_AT,
     );
     fixture.node.commit(&commitment, COMMIT_AT).expect("commit");
@@ -164,8 +164,8 @@ fn earn(fixture: &mut Fixture, objective: &Objective, who: &str, nonce: &str) {
     fixture.node.reveal(&claim, REVEAL_AT).expect("reveal");
 
     let now = {
-        let seconds = proofwork::time::parse_rfc3339(SETTLE_AT).expect("an instant");
-        proofwork::partition::epoch_of(seconds as u64, proofwork::partition::epoch_seconds())
+        let seconds = cairn::time::parse_rfc3339(SETTLE_AT).expect("an instant");
+        cairn::partition::epoch_of(seconds as u64, cairn::partition::epoch_seconds())
     };
     let paid = fixture
         .node

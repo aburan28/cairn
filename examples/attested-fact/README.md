@@ -67,15 +67,15 @@ hash to one of these.
 ```sh
 cargo build --release
 LOG=/tmp/pw-attest.jsonl
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
-OID=$(./target/release/proofwork --log $LOG --root . \
+OID=$(./target/release/cairn --log $LOG --root . \
         post examples/attested-fact/objective.json | head -1 | awk '{print $2}')
 
-./target/release/proofwork --log $LOG --root . commit "$OID" \
+./target/release/cairn --log $LOG --root . commit "$OID" \
   --submitter you --artifact examples/attested-fact/artifacts/sourced.json --nonce n1
 sleep 1.1
-./target/release/proofwork --log $LOG --root . reveal "$OID" \
+./target/release/cairn --log $LOG --root . reveal "$OID" \
   --submitter you --artifact examples/attested-fact/artifacts/sourced.json --nonce n1
 ```
 

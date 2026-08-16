@@ -389,7 +389,7 @@ so on macOS objective code can read any file the operator can -- it just cannot 
 transmit or persist what it read. (3) replay and Lean keep the operator's \
 environment, because their toolchains are configured through it; a checker's \
 environment is scrubbed but theirs is not. (4) On a host with no jail mechanism \
-the child runs as before, unconfined; set PROOFWORK_REQUIRE_SANDBOX=1 to make \
+the child runs as before, unconfined; set CAIRN_REQUIRE_SANDBOX=1 to make \
 that Unavailable instead. When a jailed run fails, the verdict's evidence names \
 the mechanism, so an operator can tell a broken jail from a broken checker.";
 
@@ -724,7 +724,7 @@ impl VerifierRegistry {
     /// For a caller that answers a human or an agent while it waits. An
     /// objective may declare a timeout of up to a day, which is a reasonable
     /// bound for a batch audit and a liveness attack on a single-threaded
-    /// server: one hostile objective would make `proofwork-mcp` stop answering
+    /// server: one hostile objective would make `cairn-mcp` stop answering
     /// `ping` and look dead to its client.
     ///
     /// Deliberately not the default. Settlement and `audit` must honour the
@@ -1215,7 +1215,7 @@ impl VerifierRegistry {
         let preamble = spec.get("preamble").and_then(Value::as_str).unwrap_or("");
         let source = format!("{preamble}\n{statement} {proof}\n");
 
-        let workdir = match TempDir::new("proofwork-lean") {
+        let workdir = match TempDir::new("cairn-lean") {
             Ok(workdir) => workdir,
             Err(error) => {
                 return Verdict::unavailable(format!("cannot create a working directory: {error}"))
@@ -1390,7 +1390,7 @@ impl VerifierRegistry {
             }
         };
 
-        let workdir = match TempDir::new("proofwork-replay") {
+        let workdir = match TempDir::new("cairn-replay") {
             Ok(workdir) => workdir,
             Err(error) => {
                 return Verdict::unavailable(format!("cannot create a working directory: {error}"))
@@ -1736,7 +1736,7 @@ impl VerifierRegistry {
                 )))
             }
         };
-        let workdir = match TempDir::new("proofwork-pinned") {
+        let workdir = match TempDir::new("cairn-pinned") {
             Ok(workdir) => workdir,
             Err(error) => {
                 return Err(Verdict::unavailable(format!(
@@ -2908,7 +2908,7 @@ mod tests {
 
     #[test]
     fn a_sibling_directory_does_not_count_as_inside_the_root() {
-        let root = tmpdir("proofwork-root-test");
+        let root = tmpdir("cairn-root-test");
         let sibling = root.path().with_extension("evil");
         let registry = VerifierRegistry::new(root.path());
         let escape = registry.pinned("checker", "../", "0".repeat(64).as_str());
@@ -2919,7 +2919,7 @@ mod tests {
 
     #[test]
     fn a_missing_checker_is_unavailable_not_a_rejection() {
-        let root = tmpdir("proofwork-missing");
+        let root = tmpdir("cairn-missing");
         let registry = VerifierRegistry::new(root.path());
         let spec = Value::object([
             ("kind", Value::string("certificate")),
@@ -2934,7 +2934,7 @@ mod tests {
 
     #[test]
     fn an_edited_checker_invalidates_the_spec_rather_than_rescoring() {
-        let root = tmpdir("proofwork-edited");
+        let root = tmpdir("cairn-edited");
         let sha = write_pinned(&root, "c.py", CHECKER);
         // Same pin, different code: the objective's identity no longer matches.
         fs::write(
@@ -3056,7 +3056,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-statistical");
+        let root = tmpdir("cairn-statistical");
         let sha = write_pinned(&root, "s.py", STATISTIC);
         let registry = VerifierRegistry::new(root.path());
         // Two data points, so the statistic is `seed * 10 + 2`.
@@ -3102,7 +3102,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-statistical-stable");
+        let root = tmpdir("cairn-statistical-stable");
         let sha = write_pinned(&root, "s.py", STATISTIC);
         let registry = VerifierRegistry::new(root.path());
         let spec = statistical_spec(&sha, vec![("threshold", Value::Int(50))]);
@@ -3190,7 +3190,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-statistical-float");
+        let root = tmpdir("cairn-statistical-float");
         let sha = write_pinned(
             &root,
             "s.py",
@@ -3212,7 +3212,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-statistical-edited");
+        let root = tmpdir("cairn-statistical-edited");
         let sha = write_pinned(&root, "s.py", STATISTIC);
         fs::write(
             root.path().join("s.py"),
@@ -3257,7 +3257,7 @@ mod tests {
         if !have("sleep") {
             return;
         }
-        let workdir = tmpdir("proofwork-timeout");
+        let workdir = tmpdir("cairn-timeout");
         let mut command = Command::new("sleep");
         command.arg("30");
         let started = Instant::now();
@@ -3276,8 +3276,8 @@ mod tests {
 
     #[test]
     fn a_missing_binary_is_a_spawn_failure_not_a_hang() {
-        let workdir = tmpdir("proofwork-spawn");
-        let mut command = Command::new("proofwork-nonexistent-binary-xyz");
+        let workdir = tmpdir("cairn-spawn");
+        let mut command = Command::new("cairn-nonexistent-binary-xyz");
         let outcome = run_bounded(&mut command, workdir.path(), None, Duration::from_secs(5));
         assert!(matches!(outcome, Err(RunFailure::Spawn(_))));
     }
@@ -3355,7 +3355,7 @@ mod tests {
         // jail; before the containment check an objective could name any host
         // directory -- `/home/<op>/.ssh` included -- and have its own command
         // read it, with declared fields as the exfiltration channel.
-        let root = tmpdir("proofwork-replay-escape");
+        let root = tmpdir("cairn-replay-escape");
         let registry = VerifierRegistry::new(root.path());
         for escape in ["/", "/etc", "..", "../..", "a/../../.."] {
             let spec = Value::object([
@@ -3385,7 +3385,7 @@ mod tests {
         // the jail *writable*; "/" used to turn the sandbox into a
         // pass-through of the operator's whole filesystem. Screened before
         // the toolchain lookup, so the refusal is testable without Lean.
-        let root = tmpdir("proofwork-lean-escape");
+        let root = tmpdir("cairn-lean-escape");
         let registry = VerifierRegistry::new(root.path());
         for escape in ["/", "/etc", "..", "../.."] {
             let spec = Value::object([
@@ -3410,7 +3410,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-replay-ok");
+        let root = tmpdir("cairn-replay-ok");
         fs::write(
             root.path().join("run.py"),
             b"import json\nprint(json.dumps({'count': 7, 'seconds': 1.5}))\n",
@@ -3510,7 +3510,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-cert");
+        let root = tmpdir("cairn-cert");
         let sha = write_pinned(&root, "c.py", CHECKER);
         let registry = VerifierRegistry::new(root.path());
         let spec = Value::object([
@@ -3538,7 +3538,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-crash");
+        let root = tmpdir("cairn-crash");
         let source = "def check(artifact):\n    raise RuntimeError('x')\n";
         let sha = write_pinned(&root, "boom.py", source);
         let registry = VerifierRegistry::new(root.path());
@@ -3559,7 +3559,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-chatty");
+        let root = tmpdir("cairn-chatty");
         let source = "def check(artifact):\n    print('progress')\n    return True, 'fine'\n";
         let sha = write_pinned(&root, "chatty.py", source);
         let registry = VerifierRegistry::new(root.path());
@@ -3579,7 +3579,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-entry");
+        let root = tmpdir("cairn-entry");
         let sha = write_pinned(&root, "c.py", CHECKER);
         let registry = VerifierRegistry::new(root.path());
         let spec = Value::object([
@@ -3599,7 +3599,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-eval");
+        let root = tmpdir("cairn-eval");
         let sha = write_pinned(&root, "e.py", EVALUATOR);
         let registry = VerifierRegistry::new(root.path());
         let spec = Value::object([
@@ -3624,7 +3624,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-float");
+        let root = tmpdir("cairn-float");
         let source = "def score(artifact):\n    return 3.5\n";
         let sha = write_pinned(&root, "f.py", source);
         let registry = VerifierRegistry::new(root.path());
@@ -3646,7 +3646,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-loop");
+        let root = tmpdir("cairn-loop");
         let source = "import time\n\n\ndef check(artifact):\n    time.sleep(30)\n    return True\n";
         let sha = write_pinned(&root, "slow.py", source);
         let registry = VerifierRegistry::new(root.path());
@@ -3672,7 +3672,7 @@ mod tests {
         // `ping`. The clamp is opt-in: settlement must honour the objective's
         // own bound, or a slow verifier would settle differently depending on
         // who ran it.
-        let root = tmpdir("proofwork-clamp");
+        let root = tmpdir("cairn-clamp");
         // Settlement and audit honour whatever the objective declared, up to
         // the format's own day-long maximum.
         let batch = VerifierRegistry::new(root.path());
@@ -3698,7 +3698,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("proofwork-flood");
+        let root = tmpdir("cairn-flood");
         // Writes well past the cap, as fast as it can.
         let source = "import sys\n\n\ndef check(artifact):\n    \
                       block = 'x' * 65536\n    \
@@ -3798,9 +3798,9 @@ mod tests {
 
     #[test]
     fn which_finds_a_real_binary_and_not_an_imaginary_one() {
-        assert!(which("proofwork-nonexistent-binary-xyz").is_none());
+        assert!(which("cairn-nonexistent-binary-xyz").is_none());
         assert!(which("").is_none());
-        assert!(which("/proofwork/does/not/exist").is_none());
+        assert!(which("/cairn/does/not/exist").is_none());
         if have("sh") {
             let found = which("sh").expect("sh");
             assert!(is_executable_file(&found));
@@ -3821,7 +3821,7 @@ mod tests {
     #[test]
     fn a_temp_dir_is_removed_when_it_drops() {
         let path = {
-            let dir = tmpdir("proofwork-drop");
+            let dir = tmpdir("cairn-drop");
             let path = dir.path().to_path_buf();
             fs::write(path.join("scratch"), b"x").expect("write");
             assert!(path.exists());
@@ -3832,8 +3832,8 @@ mod tests {
 
     #[test]
     fn temp_dirs_do_not_collide() {
-        let first = tmpdir("proofwork-unique");
-        let second = tmpdir("proofwork-unique");
+        let first = tmpdir("cairn-unique");
+        let second = tmpdir("cairn-unique");
         assert_ne!(first.path(), second.path());
     }
 
@@ -3879,7 +3879,7 @@ mod tests {
         if !have("python3") || !sandbox::mechanism().is_jail() {
             return;
         }
-        let root = tmpdir("proofwork-jail-network");
+        let root = tmpdir("cairn-jail-network");
         // Opening a socket is the single capability the jail must remove.
         let source = "import socket\n\
                       def check(artifact):\n\
@@ -3911,7 +3911,7 @@ mod tests {
         if !have("python3") || !sandbox::mechanism().is_jail() {
             return;
         }
-        let root = tmpdir("proofwork-jail-write");
+        let root = tmpdir("cairn-jail-write");
         let target = root.path().join("escaped.txt");
         let source = format!(
             "def check(artifact):\n    open({:?}, \"w\").write(\"x\")\n    return True\n",
@@ -3936,7 +3936,7 @@ mod tests {
         // cached process-wide and tests share a process -- so the decision
         // function is checked directly. The invariant is the one that matters:
         // no configuration of this module produces a settling verdict.
-        let dir = tmpdir("proofwork-require");
+        let dir = tmpdir("cairn-require");
         let plan = sandbox::Confinement::new(dir.path(), dir.path(), 1);
         if let sandbox::Mechanism::None(_) = sandbox::mechanism() {
             // Only reachable on a host with no jail; the error type carries no

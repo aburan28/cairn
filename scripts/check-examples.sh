@@ -8,7 +8,7 @@
 #      exists and hashes to the pinned value. A stale pin is worse than a
 #      missing example -- it is an open bounty nobody can ever satisfy,
 #      because the id covers the pin and the artifact can never verify.
-#   2. `proofwork post` accepts it, so every example passes the published
+#   2. `cairn post` accepts it, so every example passes the published
 #      schema -- the contract third parties implement against -- and not only
 #      the three objectives the demo scripts happen to exercise.
 #
@@ -19,7 +19,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
+RUST="${RUST_BIN:-./target/release/cairn}"
 
 if [ ! -x "$RUST" ]; then
   echo "building release binary..." >&2

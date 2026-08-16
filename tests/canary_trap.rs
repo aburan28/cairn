@@ -25,12 +25,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use proofwork::canary::{fingerprint, Canary, Docket, Expectation, Generator};
-use proofwork::canonical::Value;
-use proofwork::ledger::Ledger;
-use proofwork::node::Node;
-use proofwork::records::{Claim, Commitment, Objective};
-use proofwork::verifiers::{Status, VerifierRegistry};
+use cairn::canary::{fingerprint, Canary, Docket, Expectation, Generator};
+use cairn::canonical::Value;
+use cairn::ledger::Ledger;
+use cairn::node::Node;
+use cairn::records::{Claim, Commitment, Objective};
+use cairn::verifiers::{Status, VerifierRegistry};
 
 const COMMIT_AT: &str = "2026-07-28T00:00:00+00:00";
 const REVEAL_AT: &str = "2026-07-28T00:20:00+00:00";
@@ -97,7 +97,7 @@ fn network(label: &str) -> (TempDir, Node, Objective) {
     fs::write(dir.path.join("c.py"), CHECKER).expect("pinned checker is writable");
     let mut hasher = Sha256::new();
     hasher.update(CHECKER.as_bytes());
-    let sha = proofwork::hex::encode(&hasher.finalize());
+    let sha = cairn::hex::encode(&hasher.finalize());
 
     let ledger = Ledger::open(dir.path.join("log.jsonl")).expect("an empty log");
     let mut node = Node::with_registry(ledger, VerifierRegistry::new(&dir.path));
@@ -128,7 +128,7 @@ fn submit(node: &mut Node, objective: &Objective, who: &str, artifact: &Value, n
     let commitment = Commitment::new(
         objective.id(),
         who,
-        proofwork::records::commitment_hash(&objective.id(), who, artifact, nonce),
+        cairn::records::commitment_hash(&objective.id(), who, artifact, nonce),
         COMMIT_AT,
     );
     node.commit(&commitment, COMMIT_AT).expect("commit");

@@ -1,17 +1,17 @@
-//! `proofwork-arena` — run the adversarial scenarios and print the payoffs.
+//! `arena` — run the adversarial scenarios and print the payoffs.
 //!
-//! A separate binary rather than a `proofwork` subcommand, for the same reason
-//! `proofwork-serve` is one: this drives dozens of nodes through hundreds of
+//! A separate binary rather than a `cairn` subcommand, for the same reason
+//! `cairn-serve` is one: this drives dozens of nodes through hundreds of
 //! epochs and takes seconds to minutes, which is not a shape the record CLI
 //! should grow.
 //!
-//!   proofwork-arena              # every scenario, seed 1
-//!   proofwork-arena --seed 7     # a different draw
+//!   cargo run --release --bin arena              # every scenario, seed 1
+//!   cargo run --release --bin arena -- --seed 7  # a different draw
 //!
 //! Every number it prints except the modelled costs is read out of balances a
 //! real `Node` settled.
 
-use proofwork::arena::{scenarios, Costs};
+use cairn::arena::{scenarios, Costs};
 
 fn main() {
     let mut seed = 1u64;
@@ -25,7 +25,7 @@ fn main() {
                     .unwrap_or(seed);
             }
             "-h" | "--help" => {
-                println!("usage: proofwork-arena [--seed N]");
+                println!("usage: arena [--seed N]");
                 return;
             }
             other => {
@@ -39,12 +39,12 @@ fn main() {
 
     let open: Vec<&str> = trials
         .iter()
-        .filter(|trial| matches!(trial.verdict(), proofwork::arena::Verdict::StillPays { .. }))
+        .filter(|trial| matches!(trial.verdict(), cairn::arena::Verdict::StillPays { .. }))
         .map(|trial| trial.attack.as_str())
         .collect();
     let inert: Vec<&str> = trials
         .iter()
-        .filter(|trial| matches!(trial.verdict(), proofwork::arena::Verdict::NeverPaid { .. }))
+        .filter(|trial| matches!(trial.verdict(), cairn::arena::Verdict::NeverPaid { .. }))
         .map(|trial| trial.attack.as_str())
         .collect();
     if !inert.is_empty() {

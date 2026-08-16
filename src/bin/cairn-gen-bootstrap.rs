@@ -1,4 +1,4 @@
-//! Generate a `--bootstrap` file for `proofwork-p2p`.
+//! Generate a `--bootstrap` file for `cairn-p2p`.
 //!
 //! A bootstrap file is canonical JSON of the form
 //! `{"addr":"host:port","public":"<hex McEliece public key>"}` (see
@@ -13,8 +13,8 @@
 //! identity (e.g. for a second local node acting as a seed), not a public key
 //! with no secret anywhere.
 
-use proofwork::canonical::Value;
-use proofwork::p2p::handshake::PeerIdentity;
+use cairn::canonical::Value;
+use cairn::p2p::handshake::PeerIdentity;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -22,12 +22,12 @@ use std::path::Path;
 /// Print the usage and exit with `code`.
 ///
 /// `--help` exits 0 and a bad or missing argument exits 2, matching
-/// `proofwork-p2p`. This binary answered 2 to everything including `--help`,
+/// `cairn-p2p`. This binary answered 2 to everything including `--help`,
 /// and nothing noticed because the packaging check in `.github/workflows/ci.yml`
 /// listed the other binaries and not this one. The release workflow now runs
 /// `--help` on every binary it ships, which is what caught it.
 fn usage(code: i32) -> ! {
-    eprintln!("usage: proofwork-gen-bootstrap --addr HOST:PORT --out FILE [--identity-out FILE]");
+    eprintln!("usage: cairn-gen-bootstrap --addr HOST:PORT --out FILE [--identity-out FILE]");
     std::process::exit(code);
 }
 
@@ -83,7 +83,7 @@ fn main() {
     // `placeholder_peer_id` is what lets the *daemon* say this file is not
     // finished yet, rather than only this program saying it once at generation
     // time and scrolling away in build output. A peer id is
-    // `sha256(public key)`, so `proofwork-p2p` recomputes it from whatever
+    // `sha256(public key)`, so `cairn-p2p` recomputes it from whatever
     // `public` currently holds and warns only while the two still match --
     // which means the warning **clears itself** the moment somebody pastes the
     // real key in, with nothing to remember to delete. Extra fields are
@@ -95,7 +95,7 @@ fn main() {
         ("public", Value::string(public_hex.clone())),
         (
             "placeholder_peer_id",
-            Value::string(proofwork::p2p::discovery::peer_id_string(
+            Value::string(cairn::p2p::discovery::peer_id_string(
                 &identity.to_public().id(),
             )),
         ),
@@ -123,7 +123,7 @@ fn main() {
     eprintln!(
         "note: this key is freshly generated, not the real seed peer's -- \
          replace \"public\" in {out} with the seed's actual public key once you have it, \
-         or run the seed's own proofwork-p2p with --identity {out} pointed here if you \
+         or run the seed's own cairn-p2p with --identity {out} pointed here if you \
          control that host."
     );
 }

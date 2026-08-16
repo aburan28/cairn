@@ -42,7 +42,7 @@
 //!
 //! # Where the money comes from
 //!
-//! Not from a new mint. [`docs/economics.md`](https://github.com/aburan28/proofwork/blob/main/docs/economics.md)
+//! Not from a new mint. [`docs/economics.md`](https://github.com/aburan28/cairn/blob/main/docs/economics.md)
 //! makes the case that issuance not gated on funded demand is the grinding
 //! attack wearing a different hat, and a per-block subsidy for node operators is
 //! exactly that -- unbounded supply against unbounded claimed effort. So node
@@ -59,7 +59,7 @@
 //! [`game`] implements the ladder -- individual rationality, Nash, strict Nash,
 //! dominance, k-resilience, invasion resistance, sybil-proofness -- over exact
 //! rationals ([`exact`]), so every verdict is a decidable comparison rather than
-//! a float artifact. [`mechanism`] expresses proofwork's node game in that
+//! a float artifact. [`mechanism`] expresses cairn's node game in that
 //! vocabulary, [`dynamics`] asks where a population *lands* rather than where it
 //! could rest, and [`design`] inverts the question: given costs, what is the
 //! smallest canary rate, bond, and committee that make honesty the equilibrium.

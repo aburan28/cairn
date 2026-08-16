@@ -26,8 +26,8 @@ cd "$(dirname "$0")/.."
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-PW="${PROOFWORK_BIN:-./target/release/proofwork}"
-REF="${REFERENCE_BIN:-./reference/rust/target/release/proofwork-reference}"
+PW="${CAIRN_BIN:-./target/release/cairn}"
+REF="${REFERENCE_BIN:-./reference/rust/target/release/cairn-reference}"
 [ -x "$PW" ] || { echo "building release binary..." >&2; cargo build --release; }
 [ -x "$REF" ] || {
   echo "building reference..." >&2
@@ -42,7 +42,7 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 required for the pinned stepper" >&2; exit 0; }
 
 # One-second epochs so the challenge window is something a script can wait out.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
 rule "an objective whose computation has a step function"
 mkdir -p "$WORK/code"

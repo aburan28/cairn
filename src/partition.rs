@@ -110,7 +110,7 @@ pub const FINALITY_EPOCHS: u64 = 1;
 /// production, and never set it to a *different* value than a peer: two nodes
 /// disagreeing about the delay disagree about which epochs are eligible, which
 /// is precisely the fork the constant exists to prevent.
-pub const FINALITY_EPOCHS_ENV: &str = "PROOFWORK_FINALITY_EPOCHS";
+pub const FINALITY_EPOCHS_ENV: &str = "CAIRN_FINALITY_EPOCHS";
 
 /// How many peers hold a share of a sealed submission's content key.
 ///
@@ -316,7 +316,7 @@ pub fn epoch_of(timestamp_seconds: u64, epoch_seconds: u64) -> u64 {
 }
 
 /// Overrides [`EPOCH_SECONDS`] for a local demo. Never set this in production.
-pub const EPOCH_SECONDS_ENV: &str = "PROOFWORK_EPOCH_SECONDS";
+pub const EPOCH_SECONDS_ENV: &str = "CAIRN_EPOCH_SECONDS";
 
 /// The epoch length in force for this process.
 ///
@@ -730,7 +730,17 @@ mod tests {
         // midpoint 2^31, so it lands in the lower half.
         assert_eq!(position("item-0"), 1_773_558_718);
         assert_eq!(position("item-1"), 1_502_645_749);
-        assert_eq!(position("proofwork"), 1_115_412_704);
+        // A third sample, deliberately not `item-N`, so this pins the hash
+        // extraction rather than a pattern in the sample names.
+        //
+        // It used to be the project's own name, which broke the moment the
+        // project was renamed: the rename rewrote the *input* and left the
+        // expected digest, and the failure read like a consensus change in
+        // settlement ordering. It is not one -- `position` takes an item id and
+        // has never seen the project name outside this line -- but a test that
+        // cries wolf about consensus is worse than no test. Hence a string
+        // nothing will ever rename.
+        assert_eq!(position("a string that is not item-shaped"), 1_202_234_766);
 
         let lower = Assignment::new("n", "obj", 1, 0, 2).expect("valid");
         let upper = Assignment::new("n", "obj", 1, 1, 2).expect("valid");

@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
+RUST="${RUST_BIN:-./target/release/cairn}"
 OUT="${OUT_DIR:-launch}"
 
 if [ ! -x "$RUST" ]; then
@@ -33,7 +33,7 @@ rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 # copy of the log is enough to re-derive every settled result. Destroying it to
 # regenerate it is the one operation that must not be able to fail halfway.
 STAGE=$(mktemp -d /tmp/pw-launch-stage-XXXXXX)
-LOG="$STAGE/proofwork.jsonl"
+LOG="$STAGE/cairn.jsonl"
 CHECKPOINT="$STAGE/checkpoint.json"
 PUBKEY="$STAGE/root-key.pub"
 KEY="$STAGE/secret.json"
@@ -43,21 +43,21 @@ trap 'rm -rf "$STAGE"' EXIT
 # take the better part of an hour.
 #
 # Epochs are derived from record timestamps rather than stored, so a log built
-# with PROOFWORK_EPOCH_SECONDS=1 can only be audited by somebody who sets the
+# with CAIRN_EPOCH_SECONDS=1 can only be audited by somebody who sets the
 # same value: with the default 600 the batch records name epochs the auditor
-# recomputes differently, and `proofwork audit` reports anchor and ordering
+# recomputes differently, and `cairn audit` reports anchor and ordering
 # faults on a log that is perfectly sound. Both implementations do this, and
 # they agree -- it is not a bug, it is what "derived, never stored" means.
 #
 # For a published artifact that is fatal. A contributor's first act is to run
-# `proofwork audit` with no configuration, and seeing it fail would tell them
+# `cairn audit` with no configuration, and seeing it fail would tell them
 # the project's central claim is false. So the published log uses the epoch
 # length its readers will use.
-EPOCH_SECONDS=${PROOFWORK_EPOCH_SECONDS:-600}
-export PROOFWORK_EPOCH_SECONDS="$EPOCH_SECONDS"
+EPOCH_SECONDS=${CAIRN_EPOCH_SECONDS:-600}
+export CAIRN_EPOCH_SECONDS="$EPOCH_SECONDS"
 
-FINALITY_EPOCHS=${PROOFWORK_FINALITY_EPOCHS:-1}
-export PROOFWORK_FINALITY_EPOCHS="$FINALITY_EPOCHS"
+FINALITY_EPOCHS=${CAIRN_FINALITY_EPOCHS:-1}
+export CAIRN_FINALITY_EPOCHS="$FINALITY_EPOCHS"
 
 # Sleep until the epoch's work is eligible to settle: to the next boundary,
 # plus one whole epoch per FINALITY_EPOCHS, plus a small margin. Waiting a
@@ -153,10 +153,10 @@ rule "check what was produced"
 # Only now is the published copy touched.
 rule "publish"
 mkdir -p "$OUT"
-mv "$LOG" "$OUT/proofwork.jsonl"
+mv "$LOG" "$OUT/cairn.jsonl"
 mv "$CHECKPOINT" "$OUT/checkpoint.json"
 mv "$PUBKEY" "$OUT/root-key.pub"
-echo "  $OUT/proofwork.jsonl, checkpoint.json, root-key.pub"
+echo "  $OUT/cairn.jsonl, checkpoint.json, root-key.pub"
 
 printf '\n\033[32mLAUNCH LOG OK: %s (%s entries)\033[0m\n' \
-  "$OUT/proofwork.jsonl" "$(grep -c . "$OUT/proofwork.jsonl")"
+  "$OUT/cairn.jsonl" "$(grep -c . "$OUT/cairn.jsonl")"

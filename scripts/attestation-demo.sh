@@ -26,8 +26,8 @@ cd "$(dirname "$0")/.."
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-PW="${PROOFWORK_BIN:-./target/release/proofwork}"
-REF="${REFERENCE_BIN:-./reference/rust/target/release/proofwork-reference}"
+PW="${CAIRN_BIN:-./target/release/cairn}"
+REF="${REFERENCE_BIN:-./reference/rust/target/release/cairn-reference}"
 [ -x "$PW" ] || { echo "building release binary..." >&2; cargo build --release; }
 [ -x "$REF" ] || {
   echo "building reference..." >&2
@@ -43,7 +43,7 @@ command -v python3 >/dev/null || { echo "python3 required for the pinned checker
 
 # One-second epochs, so a commit and its reveal fit in a script that finishes.
 # Changes no canonical bytes: nothing derived from this enters a record.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
 rule "a declared supply, so a bond costs something"
 # Without an issuance record the escrow rules are off and a bond is free, which

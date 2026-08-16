@@ -1,9 +1,9 @@
 ---
-name: proofwork
-description: Launch a proofwork research network and work its objectives for pay. Use this whenever the user wants to start, serve, or demo proofwork; wire it into Claude Code over MCP; post or fund an objective; contribute compute to one; solve or improve a bounty on it; check what a node has settled; or asks how to earn on the network. Also use it for anything mentioning proofwork-mcp, proofwork-serve, score_candidate, submit_claim, the frontier, or a verified-results bounty — including when the user only says "run the network" or "let's try that research thing" in a repo that has a proofwork.jsonl.
+name: cairn
+description: Launch a cairn research network and work its objectives for pay. Use this whenever the user wants to start, serve, or demo cairn; wire it into Claude Code over MCP; post or fund an objective; contribute compute to one; solve or improve a bounty on it; check what a node has settled; or asks how to earn on the network. Also use it for anything mentioning cairn-mcp, cairn-serve, score_candidate, submit_claim, the frontier, or a verified-results bounty — including when the user only says "run the network" or "let's try that research thing" in a repo that has a cairn.jsonl.
 ---
 
-# proofwork
+# cairn
 
 A research network where verified results are the unit of account. Objectives
 are funded questions carrying a runnable verifier pinned by hash; you submit
@@ -23,13 +23,13 @@ wire MCP, post starter objectives, start serving. Run it rather than
 reconstructing the steps:
 
 ```sh
-.claude/skills/proofwork/scripts/setup.sh          # build + wire + post
-.claude/skills/proofwork/scripts/setup.sh --serve  # ...and start the server
+.claude/skills/cairn/scripts/setup.sh          # build + wire + post
+.claude/skills/cairn/scripts/setup.sh --serve  # ...and start the server
 ```
 
 ## The two things that surprise people
 
-Almost every confused proofwork session traces to one of these. Read them once
+Almost every confused cairn session traces to one of these. Read them once
 and you will not lose an hour.
 
 **Submitting takes two calls.** A reveal must land in a *strictly later epoch*
@@ -38,7 +38,7 @@ second — same objective, same submitter, byte-identical artifact, after the
 epoch turns. This is not a retry and not a bug; it is what stops anyone
 front-running a submission they can still see. The server tells you which
 epoch it is waiting for and roughly how long that is. Epochs default to 600
-seconds, so **use `PROOFWORK_EPOCH_SECONDS=1` for any demo** or you will wait
+seconds, so **use `CAIRN_EPOCH_SECONDS=1` for any demo** or you will wait
 ten minutes between the two halves of one submission.
 
 Calling once and walking away leaves a commitment nobody ever opened. You are
@@ -119,7 +119,7 @@ first submission rather than guessing at shapes.
 subprocesses from a working directory you did not choose.
 
 **An audit says every batch settled in the wrong order** — the log was almost
-certainly written under a different `PROOFWORK_EPOCH_SECONDS` than you are
+certainly written under a different `CAIRN_EPOCH_SECONDS` than you are
 reading it under. Epochs are derived from record timestamps and never stored,
 so an auditor who does not know the length cannot re-derive them. `audit` says
 so when every batch faults at once. Re-run with the length the log was built

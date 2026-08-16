@@ -19,10 +19,23 @@
 # `conformance/adversarial.jsonl` is the corpus: one case per line, each with
 # a note saying what would break if the two disagreed about it.
 set -euo pipefail
+
+# The reference implementation reads plain JSONL and nothing else -- sealing is
+# a storage concern of the primary crate, deliberately outside the format the
+# two implementations have to agree on. But the CLI seals every log it creates
+# whenever a key file exists, so on any machine that has run `cairn keygen`
+# this script handed the reference ciphertext and got "malformed JSON: unexpected
+# character at byte 0". It failed there and passed in CI, which is the worst
+# place for a check to be wrong.
+#
+# Pointing CAIRN_KEY at a path that does not exist makes `resolve_codec` choose
+# plaintext, which is what this script means: it compares the two
+# implementations on the format they share.
+export CAIRN_KEY=/nonexistent/cairn-interop-forces-plaintext
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/proofwork}"
-REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+RUST="${RUST_BIN:-./target/release/cairn}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 CORPUS="${CORPUS:-conformance/adversarial.jsonl}"
 
 [ -x "$RUST" ] || { echo "building the primary..." >&2; cargo build --release --locked; }
@@ -122,10 +135,10 @@ rule "inclusion proofs"
 # own -- an implementation that is wrong in a self-consistent way passes the
 # second arrangement and fails this one.
 #
-# `launch/proofwork.jsonl` is the corpus because it is a real settled log with
+# `launch/cairn.jsonl` is the corpus because it is a real settled log with
 # a published root: 25 entries covers both shapes of the promotion rule at
 # every level, and the root is one somebody else already signed.
-PROOF_LOG="${PROOF_LOG:-launch/proofwork.jsonl}"
+PROOF_LOG="${PROOF_LOG:-launch/cairn.jsonl}"
 PROOF_ROOT=$(python3 -c '
 import json, sys
 print(json.load(open(sys.argv[1]))["checkpoint"]["root"])
@@ -190,7 +203,7 @@ mkdir -p "$AVAIL"
 # the working tree it is testing.
 mkdir -p "$AVAIL/examples"
 cp -r examples/collatz examples/capset "$AVAIL/examples/"
-export PROOFWORK_EPOCH_SECONDS=2
+export CAIRN_EPOCH_SECONDS=2
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" identity --out "$AVAIL/alice.json" >/dev/null
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" identity --out "$AVAIL/bob.json" >/dev/null
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" availability fund \
@@ -201,7 +214,7 @@ export PROOFWORK_EPOCH_SECONDS=2
 # shape as `demo.sh`, and read from the environment for the same reason: a
 # hard-coded count is a second copy of a rule that can move.
 tick() { sleep 3; }
-settle_tick() { tick; local i; for ((i = 0; i < ${PROOFWORK_FINALITY_EPOCHS:-1}; i++)); do tick; done; }
+settle_tick() { tick; local i; for ((i = 0; i < ${CAIRN_FINALITY_EPOCHS:-1}; i++)); do tick; done; }
 
 # A bond has to be backed by units the log says the identity *earned*, so both
 # nodes run a real objective/commit/reveal/settle cycle before they can promise
@@ -259,12 +272,17 @@ esac
 # answer that was right when written became wrong two entries later.
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" post examples/collatz/objective.json \
   >/dev/null 2>&1 || true
-# Audited at the epoch length it was *built* with, and not at the default.
-# A bond has to be earned, so this log now carries settled batches, and batch
-# membership is derived from record timestamps -- a reader using a different
-# epoch length correctly reports every batch as mis-ordered and says so in a
-# note. That is a property of commit-reveal, not of availability sampling, and
-# demanding a clean audit at every length would be demanding the wrong thing.
+
+# The whole-log audit, still at the length this log was actually written under.
+# Ordinary claim settlement batches are not epoch-length-portable the way
+# availability records are meant to be: a batch's recorded `epoch` is
+# `timestamp / epoch_seconds` at write time, so re-deriving it at a different
+# length asks whether some claim's `timestamp / other_length` happens to equal
+# a number computed at a different scale entirely -- it never does, for any
+# log with more than one write-time length in play. That is not a bug in the
+# batching rule; it is the reason `avail_findings` below narrows to the
+# *availability* records rather than asserting the whole audit is stable
+# across lengths.
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit >/dev/null \
   || fail "the primary does not audit its own availability log"
 "$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit >/dev/null \
@@ -279,7 +297,7 @@ REFERENCE_ROOT=$("$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit | awk '/m
 echo "  both audit it clean and agree on $PRIMARY_ROOT"
 
 # What the *availability* records say must not move with the reader's epoch
-# length, in either implementation. `PROOFWORK_EPOCH_SECONDS` is a demo
+# length, in either implementation. `CAIRN_EPOCH_SECONDS` is a demo
 # affordance -- it exists so a shell script can cross an epoch boundary -- and
 # `partition`'s own documentation promises that "nothing derived from it enters
 # a record". Availability sampling broke that promise by reaching for it to
@@ -295,7 +313,7 @@ echo "  both audit it clean and agree on $PRIMARY_ROOT"
 # lengths: a value that moved identically in both would still be a consensus
 # rule that reads the environment.
 avail_findings() {
-  PROOFWORK_EPOCH_SECONDS="$2" "$1" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit 2>&1 \
+  CAIRN_EPOCH_SECONDS="$2" "$1" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit 2>&1 \
     | grep -E 'availability|undertaking' | sort || true
 }
 BASELINE=$(avail_findings "$RUST" 2)
@@ -308,7 +326,7 @@ for LENGTH in 2 600 3600; do
     || fail "the reference's availability findings move at epoch length $LENGTH"
 done
 echo "  both read the same availability records at epoch lengths 2, 600 and 3600"
-unset PROOFWORK_EPOCH_SECONDS
+unset CAIRN_EPOCH_SECONDS
 
 # And the refuse path: a promise about a root this log never had must be
 # reported by both. Appended by hand-rolling the entry so it never meets

@@ -26,13 +26,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use proofwork::canonical::Value;
-use proofwork::challenge::{Side, Trace};
-use proofwork::crypto::identity::Identity;
-use proofwork::ledger::Ledger;
-use proofwork::node::{DisputeState, Node, RuleViolation};
-use proofwork::records::{BisectionMove, Challenge, Claim, Commitment, Issuance, Objective};
-use proofwork::verifiers::VerifierRegistry;
+use cairn::canonical::Value;
+use cairn::challenge::{Side, Trace};
+use cairn::crypto::identity::Identity;
+use cairn::ledger::Ledger;
+use cairn::node::{DisputeState, Node, RuleViolation};
+use cairn::records::{BisectionMove, Challenge, Claim, Commitment, Issuance, Objective};
+use cairn::verifiers::VerifierRegistry;
 
 const START: i128 = 27;
 const STATES: usize = 33;
@@ -158,7 +158,7 @@ fn network(label: &str) -> Network {
     let sha = |text: &str| {
         let mut hasher = Sha256::new();
         hasher.update(text.as_bytes());
-        proofwork::hex::encode(&hasher.finalize())
+        cairn::hex::encode(&hasher.finalize())
     };
 
     let ledger = Ledger::open(dir.path.join("log.jsonl")).expect("an empty log");
@@ -217,7 +217,7 @@ fn submit(net: &mut Network, who: &Identity, artifact: &Value, nonce: &str) -> S
     let commitment = Commitment::new(
         &id,
         &submitter,
-        proofwork::records::commitment_hash(&id, &submitter, artifact, nonce),
+        cairn::records::commitment_hash(&id, &submitter, artifact, nonce),
         COMMIT_AT,
     )
     .signed_with(who);
@@ -289,7 +289,7 @@ fn play_out(net: &mut Network, id: &str, defence: &Trace, objection: &Trace) {
         let Some(DisputeState::Live { dispute, .. }) = net.node.dispute(id) else {
             break;
         };
-        let proofwork::challenge::Next::Open { index, waiting_on } = dispute.next() else {
+        let cairn::challenge::Next::Open { index, waiting_on } = dispute.next() else {
             break;
         };
         for side in waiting_on {
@@ -416,7 +416,7 @@ fn a_challenger_who_stops_answering_forfeits() {
     let Some(DisputeState::Live { dispute, .. }) = net.node.dispute(&id) else {
         panic!("expected a live dispute");
     };
-    let proofwork::challenge::Next::Open { index, .. } = dispute.next() else {
+    let cairn::challenge::Next::Open { index, .. } = dispute.next() else {
         panic!("expected a query");
     };
     play(&mut net, &alice, &id, &truth, index, MOVE_AT);

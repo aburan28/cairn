@@ -108,10 +108,10 @@ pub const VDF_SOURCE: &str = "vdf";
 /// log that does not have it, which is the check that makes the requirement
 /// mean something.
 ///
-/// Not the default, for the same reason `PROOFWORK_REQUIRE_SANDBOX` is not:
+/// Not the default, for the same reason `CAIRN_REQUIRE_SANDBOX` is not:
 /// it would fail every log written before this record existed, including the
 /// published one, and an audit that cries wolf is an audit nobody reads.
-pub const REQUIRE_BEACON_ENV: &str = "PROOFWORK_REQUIRE_BEACON";
+pub const REQUIRE_BEACON_ENV: &str = "CAIRN_REQUIRE_BEACON";
 
 fn beacon_required() -> bool {
     matches!(std::env::var(REQUIRE_BEACON_ENV), Ok(value) if value.trim() == "1")
@@ -968,7 +968,7 @@ impl fmt::Display for RuleViolation {
             } => write!(
                 f,
                 "objective {} accepts only signed identities, and {submitter:?} is not one. \
-                 Create one with `proofwork identity --out <file>` and submit with \
+                 Create one with `cairn identity --out <file>` and submit with \
                  --identity; the public key it prints becomes your submitter name",
                 crate::canonical::short(objective_id)
             ),
@@ -1386,7 +1386,7 @@ impl Node {
     /// Every content address of pinned verifier code the log's objectives name.
     ///
     /// The reachable set: a blob outside it is pinned by no objective this node
-    /// knows of, which is what `proofwork blob gc` collects. Computed from the
+    /// knows of, which is what `cairn blob gc` collects. Computed from the
     /// log rather than remembered, so it cannot drift out of date, and so an
     /// objective learned a second ago is protected without a bookkeeping step.
     pub fn pinned_code(&self) -> BTreeSet<String> {
@@ -2830,7 +2830,7 @@ impl Node {
         // `from_value` has run and the fields are known good. `PeerRecord::new`
         // is a plain constructor -- it takes whatever it is handed -- so a
         // `peer` record was the one kind that could enter the log without ever
-        // meeting its own decoder. `proofwork peer --transport <a libp2p-style
+        // meeting its own decoder. `cairn peer --transport <a libp2p-style
         // id>` wrote a record every audit then rejected, in both
         // implementations: a log made unauditable by the tool that maintains
         // it, in a single command, with no error.
@@ -3054,7 +3054,7 @@ impl Node {
         let partitions =
             u32::try_from(undertaking.height).map_err(|_| PartitionError::Unrepresentable)?;
         // `EPOCH_SECONDS`, the constant -- never `epoch_seconds()`, which reads
-        // `PROOFWORK_EPOCH_SECONDS`.
+        // `CAIRN_EPOCH_SECONDS`.
         //
         // That override is a demo affordance: ten-minute epochs make the
         // commit-in-N/reveal-in-N+1 rule impossible to show in a shell script.
@@ -5039,7 +5039,7 @@ impl Node {
     ///   wrong length, and the note names the right one.
     /// - **Mixed.** No single length explains every batch, so no reader will
     ///   ever re-derive all of it. That is damage rather than misconfiguration,
-    ///   and choosing a better `PROOFWORK_EPOCH_SECONDS` cannot fix it. The
+    ///   and choosing a better `CAIRN_EPOCH_SECONDS` cannot fix it. The
     ///   note says where the log splits, because "this log is broken" without a
     ///   location is not something anyone can act on.
     fn epoch_length_report(&self) -> Vec<String> {
@@ -5064,7 +5064,7 @@ impl Node {
                  {written_at}, and this audit used {in_force}. That is a reader setting, not \
                  evidence about the operator -- epochs are derived from record timestamps and \
                  never stored, so a log built by a demo script audits as thoroughly broken under \
-                 the default. Re-run with PROOFWORK_EPOCH_SECONDS={written_at}."
+                 the default. Re-run with CAIRN_EPOCH_SECONDS={written_at}."
             )];
         }
 
@@ -5077,7 +5077,7 @@ impl Node {
             .collect();
         vec![format!(
             "note: this log was written under MORE THAN ONE epoch length -- {}. No single value \
-             of PROOFWORK_EPOCH_SECONDS re-derives all of its batches, so choosing a better one \
+             of CAIRN_EPOCH_SECONDS re-derives all of its batches, so choosing a better one \
              will not fix it and no reader can independently re-derive its whole settlement \
              history. This happens when a demo or a test is pointed at a log that is also used \
              for real settlement.",
@@ -5395,7 +5395,7 @@ impl Node {
     /// Every link of this log's epoch chain, oldest first.
     ///
     /// The chain the settlement anchor is the head of, exposed whole so it can
-    /// be read rather than only trusted — `proofwork chain`, `GET /chain`, and
+    /// be read rather than only trusted — `cairn chain`, `GET /chain`, and
     /// the page at `GET /chain.html` all render this. Comparing two nodes'
     /// chains is how you find *where* they diverged rather than only that they
     /// did, which is the question the head alone cannot answer.
@@ -6425,7 +6425,7 @@ impl Node {
         // Batch faults are usually the auditor and the writer disagreeing about
         // how long an epoch is, not anybody being paid out of turn. Epochs are
         // derived from timestamps and never stored, so a log written under
-        // `PROOFWORK_EPOCH_SECONDS=1` audits as thoroughly broken under the
+        // `CAIRN_EPOCH_SECONDS=1` audits as thoroughly broken under the
         // default 600 -- both implementations agree, and both are right.
         //
         // This used to be a *guess*: printed only when every batch faulted, and
@@ -6451,7 +6451,7 @@ impl Node {
         if !late.is_empty() {
             problems.push(format!(
                 "note: {} epoch(s) hold accepted claims that can never settle, because a later \
-                 epoch was paid first: {}. Records for them arrived more than PROOFWORK_\
+                 epoch was paid first: {}. Records for them arrived more than CAIRN_\
                  FINALITY_EPOCHS (this audit used {}) after their epoch closed. Every batch in \
                  this log is correctly derived; what is wrong is that a peer which received \
                  those records on time has paid claims this node never will.",
@@ -7050,7 +7050,7 @@ impl Node {
     /// the fallback is legal, is what every log written before beacon records
     /// existed did, and is what an honest node does when its chain source is
     /// unreachable. Reporting it as a fault would fail the audit of
-    /// `launch/proofwork.jsonl`, which is published precisely so that readers
+    /// `launch/cairn.jsonl`, which is published precisely so that readers
     /// can check it, and would train operators to ignore audit output.
     ///
     /// It is still worth asking, because an epoch ordered against the chain
@@ -7563,7 +7563,7 @@ mod tests {
     const TS: &str = "2026-07-28T00:00:00+00:00";
     /// A Lean binary name guaranteed not to exist, so `lean` verification is
     /// deterministically Unavailable without touching the host toolchain.
-    const NO_LEAN: &str = "proofwork-definitely-no-such-lean-binary";
+    const NO_LEAN: &str = "cairn-definitely-no-such-lean-binary";
 
     struct TempDir {
         path: PathBuf,
@@ -7579,7 +7579,7 @@ mod tests {
                 .unwrap_or(0);
             let mut path = std::env::temp_dir();
             path.push(format!(
-                "proofwork-node-{}-{nanos}-{n}-{tag}",
+                "cairn-node-{}-{nanos}-{n}-{tag}",
                 std::process::id()
             ));
             fs::create_dir_all(&path).expect("create temp dir");
@@ -8646,10 +8646,10 @@ mod tests {
     #[test]
     fn an_audit_at_the_wrong_epoch_length_names_the_right_one() {
         // Found while building the published log: a log written under
-        // PROOFWORK_EPOCH_SECONDS=1 audits as thoroughly broken under the
+        // CAIRN_EPOCH_SECONDS=1 audits as thoroughly broken under the
         // default 600, in both implementations, and both are right -- epochs
         // are derived, never stored. Without the note a contributor's first
-        // `proofwork audit` on a demo-built log says the operator paid people
+        // `cairn audit` on a demo-built log says the operator paid people
         // out of turn, which is the worst possible false accusation for this
         // project to make.
         //
@@ -8681,7 +8681,7 @@ mod tests {
         assert!(note.contains("this audit used 7"), "{note}");
         assert!(
             note.contains(&format!(
-                "PROOFWORK_EPOCH_SECONDS={}",
+                "CAIRN_EPOCH_SECONDS={}",
                 crate::partition::EPOCH_SECONDS
             )),
             "the note must name the length that actually works: {note}"
@@ -8741,7 +8741,7 @@ mod tests {
         );
     }
 
-    /// Sets `PROOFWORK_EPOCH_SECONDS` for as long as it lives.
+    /// Sets `CAIRN_EPOCH_SECONDS` for as long as it lives.
     ///
     /// Tests share a process, so the variable has to go back; a leaked value
     /// would silently re-epoch every test that ran afterwards.
@@ -9618,7 +9618,7 @@ mod tests {
 
     #[test]
     fn a_peer_record_the_decoder_would_refuse_never_reaches_the_log() {
-        // Found by running `proofwork peer --transport <a libp2p-style id>`:
+        // Found by running `cairn peer --transport <a libp2p-style id>`:
         // it appended happily, and every subsequent audit -- in *both*
         // implementations -- reported the record as undecodable. One command
         // with no error left a log that cannot be audited.
@@ -10486,7 +10486,7 @@ mod tests {
     /// The anchor used to be taken over the whole log, so every later append
     /// moved it, moved the beacon, and moved the sampled index — an answer that
     /// was right when written became wrong two entries later. And the epoch
-    /// length came from `PROOFWORK_EPOCH_SECONDS`, an environment variable, so
+    /// length came from `CAIRN_EPOCH_SECONDS`, an environment variable, so
     /// the same log audited clean or dirty depending on how the auditor was
     /// configured: six failures in ten across a dozen logs.
     ///
@@ -11472,7 +11472,7 @@ mod tests {
     #[test]
     fn settling_without_a_beacon_is_reportable_but_not_an_audit_fault() {
         // Both halves matter. Every log written before beacon records existed
-        // settled this way -- including the published `launch/proofwork.jsonl`
+        // settled this way -- including the published `launch/cairn.jsonl`
         // -- so failing the audit would be a false alarm on the one artifact
         // the project offers as checkable. But the weaker ordering must still
         // be *askable*, or a mixed log reads as uniformly strong.

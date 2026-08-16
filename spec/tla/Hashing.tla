@@ -1,7 +1,7 @@
 -------------------------------- MODULE Hashing --------------------------------
 (***************************************************************************)
 (* The hash-linked log, as vocabulary. No variables and no behaviour: this  *)
-(* module exists so that `Ledger`, `Checkpoint`, `Sync` and `Proofwork`     *)
+(* module exists so that `Ledger`, `Checkpoint`, `Sync` and `Cairn`     *)
 (* agree about what an entry hash *is*, rather than each carrying its own   *)
 (* copy of the definition. Two copies of a rule become two different rules. *)
 (*                                                                         *)

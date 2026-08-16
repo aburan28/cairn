@@ -449,7 +449,7 @@ pub struct Rng {
 impl Rng {
     pub fn seeded(seed: u64) -> Rng {
         let mut hasher = Sha256::new();
-        hasher.update(b"proofwork/arena/v1");
+        hasher.update(b"cairn/arena/v1");
         hasher.update(seed.to_be_bytes());
         let mut key = [0u8; 32];
         key.copy_from_slice(&hasher.finalize());
@@ -512,7 +512,7 @@ impl Scratch {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "proofwork-arena-{label}-{seed}-{}-{unique}",
+            "cairn-arena-{label}-{seed}-{}-{unique}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&path);
@@ -580,7 +580,7 @@ impl Arena {
         let mut identities = BTreeMap::new();
         for (name, _) in players {
             let mut hasher = Sha256::new();
-            hasher.update(b"proofwork/arena/identity/v1");
+            hasher.update(b"cairn/arena/identity/v1");
             hasher.update(name.as_bytes());
             let mut secret = [0u8; 32];
             secret.copy_from_slice(&hasher.finalize());

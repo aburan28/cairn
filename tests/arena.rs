@@ -1,6 +1,6 @@
 //! The adversarial arena, asserted.
 //!
-//! `proofwork-arena` prints the payoff tables for a human. This file is the
+//! `arena` prints the payoff tables for a human. This file is the
 //! machine's copy: the same scenarios, with the verdicts pinned, so a change to
 //! a mechanism that quietly re-opens an attack fails a named test rather than
 //! changing a number nobody reads.
@@ -10,7 +10,7 @@
 //! closed one cannot silently regress into being open without something else
 //! failing first, and an open one can silently be believed fixed.
 
-use proofwork::arena::{scenarios, Verdict};
+use cairn::arena::{scenarios, Verdict};
 
 const SEED: u64 = 1;
 
@@ -163,7 +163,7 @@ fn rubber_stamping_costs_more_than_it_saves() {
             // impression.
             let stamper = trial.attacker.clone();
             let swing = without - with;
-            let bond = i128::from(proofwork::node::VERIFICATION_BOND);
+            let bond = i128::from(cairn::node::VERIFICATION_BOND);
             assert_eq!(
                 swing % bond,
                 0,

@@ -578,7 +578,7 @@ impl Service {
     /// `listener.accept()` blocks. A caller that holds a lock over its node
     /// while calling [`Service::accept_node_once`] therefore holds it until an
     /// inbound connection arrives — which, on a node nobody is dialling, is
-    /// forever. `proofwork-p2p` did exactly that, and the effect was that its
+    /// forever. `cairn-p2p` did exactly that, and the effect was that its
     /// main loop ran **once** and then waited on a mutex for the rest of the
     /// process's life: no dialling, no peer seeding, no beacons, no DHT, no
     /// fetching of missing verifier code. It looked healthy because the single

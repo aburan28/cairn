@@ -146,6 +146,10 @@ pub use crate::dht::{Distance, Insertion, NodeId, ALPHA, ID_BITS, K, MAX_KEYS, M
 /// Its own context for the same mechanical reason as populations and code: a
 /// DHT frame cannot be opened as a record frame, so no confusion attack reaches
 /// a decoder that was expecting something settlement is derived from.
+// Spelled `proofwork/` and not `cairn/`: this is a wire constant, not a
+// brand. It is mixed into a hash or a KDF, so changing it changes the
+// values every peer already computed -- the project rename left it alone
+// deliberately, exactly as it left the `pwenc1:` on-disk marker alone.
 pub const CONTEXT: &[u8] = b"proofwork/p2p/dht/v1";
 
 /// How long a first-hand announcement is trusted, in seconds.

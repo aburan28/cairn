@@ -30,7 +30,7 @@ Supply is then bounded by what someone was willing to pay to know. That is a
 market clearing, not mining. It also gives the unit a demand side from day one,
 which is the only thing that ever gives one value.
 
-`proofwork` enforces the mechanical half of this:
+`cairn` enforces the mechanical half of this:
 
 - An artifact cannot be revealed against an objective that does not exist.
 - An objective settles exactly once (`test_objective_settles_only_once`).
@@ -53,7 +53,7 @@ Only the first is mechanical.
 instant for V0/evaluator objectives, no judgement involved. This should be the
 overwhelming majority of value flow.
 
-**2. Recursive citation flow.** Implemented in `proofwork/attribution.py`. A
+**2. Recursive citation flow.** Implemented in `src/attribution.rs`. A
 settled claim keeps `1 − δ` and sends δ upstream along the claims it cites,
 recursively, to `max_depth` hops.
 
@@ -95,7 +95,7 @@ stays bounded by what someone was willing to pay to know, and the security
 budget scales with the value being secured.
 
 The honest cost of that choice: at launch, nothing has settled, so the fee pool
-is zero and the network can support no operators. `proofwork incentives
+is zero and the network can support no operators. `cairn incentives
 --settled 0` prints exactly that. The bootstrap problem is stated rather than
 assumed away, and [node-incentives.md](node-incentives.md) has the rest --
 including the result that the size of the pool decides *how many* nodes there
