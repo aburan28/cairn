@@ -1,8 +1,8 @@
 name: release-please
 
 # Owns the *version* and the *changelog*. It owns no binaries: merging the PR
-# it opens creates a `v*` tag, and this workflow then asks `release.yml` to
-# build and publish the artifacts for it. Two workflows because deciding "what
+# it opens creates a `v*` tag, and that tag triggers `release.yml`, which
+# builds and publishes the artifacts. Two workflows because deciding "what
 # version is this" and "what bytes ship" are different jobs — a tool that does
 # both tends to do one of them badly, and this repository already has strong
 # opinions about what goes into a release tarball.
@@ -34,9 +34,7 @@ name: release-please
 # the PR from it, so nothing is lost and nothing needs re-running by hand.
 #
 # Recorded here rather than in a runbook because this is where somebody will
-# be looking when it happens. It is ticked on this repository as of v1.0.0 --
-# five consecutive runs had failed on it, which is what "off by default" costs
-# when nothing surfaces the reason. A fork starts with it off again.
+# be looking when it happens.
 on:
   push:
     branches: [main]
@@ -45,41 +43,12 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  # To dispatch `release.yml` at the tag, below. Without it that step 403s and
-  # the release publishes with no binaries attached.
-  actions: write
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v5
-        id: release
         with:
           config-file: .github/release-please-config.json
           manifest-file: .release-please-manifest.json
-
-      # Hand the tag to `release.yml`, which owns the binaries.
-      #
-      # This step looks redundant -- `release.yml` triggers on `push: tags`, and
-      # the step above just pushed a tag. It is not. GitHub does not start a
-      # workflow run for events created with `GITHUB_TOKEN`, so that push fires
-      # nothing. The failure is silent and the shape of it is nasty: the release
-      # is published, `/releases/latest` resolves, and `install.sh` gets all the
-      # way past "no published release found" before 404ing on a tarball that
-      # was never built. v1.0.0 shipped that way and needed a manual dispatch.
-      #
-      # `workflow_dispatch` and `repository_dispatch` are the documented
-      # exceptions to that suppression, which is why this works where the tag
-      # push does not, and why it needs no PAT. Dispatching at `--ref <tag>`
-      # rather than at a branch is load-bearing twice over: `release.yml` gates
-      # publishing on `startsWith(github.ref, 'refs/tags/')`, and takes its
-      # VERSION from `github.ref_name` only when `ref_type` is `tag`. From a
-      # branch it would build, name everything `0.0.0-dispatch.<run_id>`, and
-      # upload nothing.
-      - name: build the binaries for the tag just created
-        if: ${{ steps.release.outputs.releases_created == 'true' }}
-        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release.outputs.tag_name }}
