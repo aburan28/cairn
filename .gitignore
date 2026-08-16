@@ -48,6 +48,7 @@ venv/
 # Written by setup.sh / `make mcp` with absolute paths for one machine.
 # Generated, not shared.
 .mcp.json
+.mcp.json.bak
 opencode.json
 
 # Bootstrap addresses are local configuration, never repository content.
