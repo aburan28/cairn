@@ -51,7 +51,7 @@ SEED_PORT = $(lastword $(subst :, ,$(SEED_ADDR)))
 SEED_LISTEN ?= 0.0.0.0:$(SEED_PORT)
 # A seed does not bootstrap against itself. Set it to peer with other seeds.
 SEED_BOOTSTRAP_ARGS ?=
- SERVE_LISTEN ?= 127.0.0.1:8080
+SERVE_LISTEN ?= 127.0.0.1:8080
 SERVE_ARGS ?=
 UI_PORT ?= 3000
 P2P_ARGS ?=
@@ -60,9 +60,12 @@ CLIENT ?= claude
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-build site-snapshot install demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke node-smoke \
+# `ui/node_modules` is deliberately absent: it is a real directory whose
+# freshness against the lockfile is the whole point of the rule.
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity \
+	interop differential fuzz mcp-smoke serve-smoke node-smoke canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
-	test-reference fmt clippy tla check
+	test-reference fmt clippy docs tla check
 
 help:
 	@printf '%s\n' \
@@ -70,8 +73,7 @@ help:
 	  '  make mcp                 Build, write opencode.json, and run the MCP server (stdio).' \
 	  '  make mcp-setup           Wire an MCP client to this checkout (default: Claude Code).' \
 	  '  make mcp-setup CLIENT=opencode   ...or opencode / codex.' \
-	  '  make p2p                 Build and run a local p2p node (dials out; binds loopback).' \
-	  '  make seed                Run as a public seed: binds 0.0.0.0 on SEED_ADDR'"'"'s port.' \
+	  '  make p2p                 The daemon alone, with no HTTP and no reader.' \
 	  '  make mcp MCP_LOG=my-path  Use a custom MCP ledger path.' \
 	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
 	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
@@ -79,14 +81,21 @@ help:
 	  '  make node                One process: p2p sync AND HTTP, sharing a log.' \
 	  '  make install             Install the released binaries from GitHub.' \
 	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
+	  '  make ui-check            Typecheck and build the UI, as CI does.' \
 	  '  make ui-build            Export the site and build it INTO the binaries.' \
 	  '  make site-snapshot       Regenerate the site fallback from launch/.' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
-	  '  make build               Build both release binaries.' \
+	  '  make build               Build every release binary.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
+	  '  make canary              Mint canaries and catch a rubber-stamper.' \
+	  '  make attest              Bonded verification, end to end, both implementations.' \
+	  '  make dispute             A bonded dispute settled by trace bisection.' \
+	  '  make arena               Play attack strategies for money against the rules.' \
 	  '  make shard-demo          Six holders, one shard each, one of them lying.' \
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
+	  '                           (Everything AGENTS.md lists except ui-check,' \
+	  '                            which needs a Node toolchain.)' \
 	  '' \
 	  'Logs: serve and cli share LOG=.local/cairn.jsonl; mcp uses' \
 	  '      MCP_LOG=.local/cairn-mcp.jsonl; p2p uses' \
@@ -140,12 +149,29 @@ mcp-setup: build | $(LOCAL_DIR)
 # until "public" is replaced with the seed's actual key -- see
 # cairn-gen-bootstrap.rs. Regenerated only if missing, so a real key
 # dropped in by hand is never overwritten.
+#
+# Never overwriting is right and it has a cost: change `SEED_ADDR` after the
+# file exists and the daemon keeps dialling the old address, because the address
+# it dials comes from the file and not from the variable. That fails as
+# `Connection refused`, which reads as "the seed is down" rather than "you are
+# calling the wrong number". Said here rather than left to be worked out from a
+# retry loop.
 $(SEED_BOOTSTRAP): build | $(LOCAL_DIR)
 	@test -f "$(SEED_BOOTSTRAP)" || "$(GEN_BOOTSTRAP)" --addr "$(SEED_ADDR)" --out "$(SEED_BOOTSTRAP)"
+	@have=$$(sed -n 's/.*"addr"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$(SEED_BOOTSTRAP)"); \
+	  if [ -n "$$have" ] && [ "$$have" != "$(SEED_ADDR)" ]; then \
+	    printf 'make: %s says addr %s, but SEED_ADDR is %s -- the file wins.\n' \
+	      "$(SEED_BOOTSTRAP)" "$$have" "$(SEED_ADDR)" >&2; \
+	    printf '      rm %s to regenerate it for the new address.\n' "$(SEED_BOOTSTRAP)" >&2; \
+	  fi
 
 # The daemon creates the identity, root key, and signed checkpoint files on the
 # first run. Keep them under .local by default; these files contain secrets and
 # must not be committed.
+#
+# The daemon alone, with no HTTP and no reader. `make node` is the one to run;
+# this stays because a peer-to-peer problem is easier to read without two other
+# processes logging into the same terminal.
 p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
 	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
@@ -187,6 +213,37 @@ shard-demo: build
 
 differential: build
 	./scripts/differential.sh
+
+# The scripts AGENTS.md requires before claiming a change works, each with the
+# same name as the thing it guards. They were reachable only by typing the path,
+# which is how `make check` came to run a smaller suite than CI while calling
+# itself "the full required verification suite".
+canary: build
+	./scripts/canary-demo.sh
+
+dispute: build
+	./scripts/dispute-demo.sh
+
+attest: build
+	./scripts/attestation-demo.sh
+
+arena: build
+	$(CARGO) run --release --bin arena
+
+blob: build
+	./scripts/blob-demo.sh
+
+rekey: build
+	./scripts/rekey-demo.sh
+
+p2p-demo: build
+	./scripts/p2p-demo.sh
+
+try: build
+	./scripts/try-demo.sh
+
+examples: build
+	./scripts/check-examples.sh
 
 fuzz: build
 	./scripts/fuzz-differential.sh $(FUZZ_CASES)
@@ -235,9 +292,23 @@ node: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 install:
 	./scripts/install.sh
 
+# `npm ci` from the committed lockfile, not `npm install`: it installs exactly
+# what the lockfile says and fails if the two disagree, which is the same
+# argument `--locked` makes on the Rust side and what CI's ui job runs.
+#
+# A directory target, so it re-runs when the lockfile is newer and does nothing
+# otherwise. Without it, `make ui` on a fresh checkout ran `next` before
+# anything had installed it and stopped at `sh: next: command not found` --
+# a build step missing from a Makefile, reported as a missing binary.
+$(ROOT)/ui/node_modules: $(ROOT)/ui/package-lock.json
+	@command -v npm >/dev/null || { \
+	  echo "make: ui needs npm (Node 22 or newer); see ui/README.md" >&2; exit 1; }
+	cd "$(ROOT)/ui" && npm ci
+	@touch "$(ROOT)/ui/node_modules"
+
 # Run the Next.js reader against a dev server, for working *on* the reader.
 # Reading a node does not need this -- see `ui-build`.
-ui:
+ui: $(ROOT)/ui/node_modules
 	cd "$(ROOT)/ui" && npm run dev -- -p $(UI_PORT)
 
 # Export the reader and build it into the binaries.
@@ -259,13 +330,29 @@ ui-build: site-snapshot
 site-snapshot: build
 	./scripts/site-snapshot.sh
 
-test-reference:
-	cargo test --manifest-path reference/rust/Cargo.toml
-	cargo build --release --locked --manifest-path reference/rust/Cargo.toml
-	./reference/rust/target/release/cairn-reference conformance conformance/vectors.json
+# What CI's ui job actually gates on. `make ui` is the dev server and proves
+# nothing about whether the thing compiles.
+ui-check: $(ROOT)/ui/node_modules
+	cd "$(ROOT)/ui" && npx tsc --noEmit
+	cd "$(ROOT)/ui" && npm run build
 
+# `--locked`, `fmt` and `clippy` here as well as on the primary: CI gates the
+# reference on all four and this target claimed to stand in for it.
+test-reference:
+	$(CARGO) test --manifest-path reference/rust/Cargo.toml
+	$(CARGO) fmt --check --manifest-path reference/rust/Cargo.toml
+	$(CARGO) clippy --manifest-path reference/rust/Cargo.toml --all-targets -- -D warnings
+	$(CARGO) build --release --locked --manifest-path reference/rust/Cargo.toml
+	./reference/rust/target/release/cairn-reference conformance conformance/vectors.json
+	./reference/rust/target/release/cairn-reference signed-records conformance/signed-records.json
+	./reference/rust/target/release/cairn-reference signatures conformance/signatures.json
+
+# `--locked` and `--all-features`, because that is what CI runs. Without the
+# first, a stale lockfile passes here and fails there; without the second, gated
+# code is never compiled and the doc gate below never sees it.
 test-rust:
-	$(CARGO) test --all-targets
+	$(CARGO) test --locked --all-targets
+	$(CARGO) test --locked --all-targets --all-features
 
 test: test-rust test-reference
 
@@ -273,7 +360,15 @@ fmt:
 	$(CARGO) fmt --check
 
 clippy:
-	$(CARGO) clippy --all-targets -- -D warnings
+	$(CARGO) clippy --locked --all-targets -- -D warnings
+	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings
+
+# Neither `clippy` nor `test` can see these: a public item linking to a private
+# one, and a redundant explicit link target. Both have turned a branch red after
+# it built, tested and linted clean -- twice in one week, which is why AGENTS.md
+# names it and why it is in `check` rather than left to CI.
+docs:
+	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --no-deps --locked --all-features
 
 # scripts/tla.sh exits 3 when it could not check anything -- no JDK and no
 # cached jar. Tolerated here so `make check` still works on a machine without a
@@ -286,4 +381,17 @@ tla:
 	  fi; \
 	  exit $$status
 
-check: test fmt clippy demo ratchet shard-demo identity interop differential fuzz mcp-smoke serve-smoke node-smoke tla
+# The suite AGENTS.md actually requires, in roughly ascending cost. It was five
+# scripts short of that while calling itself the full one -- canaries, disputes,
+# bonded verification, the arena and the examples were all reachable only by
+# typing their paths, so a change to any of those mechanisms passed `make check`
+# without ever being exercised.
+#
+# `ui-check` is not here and that is deliberate: it needs a Node toolchain, and
+# a Rust contributor who has never installed one should not be told the suite
+# failed. CI runs it on a machine that has one.
+check: test fmt clippy docs \
+	demo ratchet try identity examples \
+	canary dispute attest arena \
+	shard-demo blob rekey p2p-demo \
+	interop differential fuzz mcp-smoke serve-smoke node-smoke tla

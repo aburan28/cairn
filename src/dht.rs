@@ -1,7 +1,7 @@
 //! Kademlia, once: the metric, the routing table, the lookup, the provider store.
 //!
 //! Two stacks in this repo need to answer *who holds digest `D` right now* --
-//! [`crate::p2p`], which is what the daemon runs, and [`crate::swarm`], which is
+//! [`crate::p2p`], which is what the daemon runs, and [`crate::p2p::swarm`], which is
 //! the piece-level transfer built beside it. They disagree about almost
 //! everything below the question: different identities, different key sizes,
 //! different transports, different provenance rules for an answer.
@@ -21,7 +21,7 @@
 //!
 //! | stack | identity | bytes to carry a key |
 //! |---|---|---|
-//! | [`crate::swarm`] | ed25519, signed peer record | 32 |
+//! | [`crate::p2p::swarm`] | ed25519, signed peer record | 32 |
 //! | [`crate::p2p`] | Classic McEliece KEM public key | **261,120** |
 //!
 //! A routing table is `K` contacts across up to [`ID_BITS`] buckets. Inlining a

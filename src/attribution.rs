@@ -106,10 +106,38 @@ pub struct FlowParams {
     delta_den: u64,
     /// How many citation hops value travels before it stops.
     max_depth: u32,
+    /// What fraction *of delta* is reserved for the citation the protocol
+    /// forced, before the rest is split among everything the submitter chose
+    /// to cite.
+    ///
+    /// # Why any of delta is reserved
+    ///
+    /// The discretionary split weights ancestors by settled reward, which is
+    /// slicing-invariant and identity-blind and is the right rule while citable
+    /// claims are *scarce*. Agent funding makes them cheap: fund your own
+    /// objective, settle it yourself, and the units come back to you having
+    /// bought a high-weight ancestor. Cite five of those and the frontier
+    /// holder's share falls by the ratio of weights, not because anybody
+    /// disputed its contribution.
+    ///
+    /// A reserved share is the part of that the submitter cannot dilute,
+    /// because the recipient is not its choice: on a ratchet an improvement
+    /// *must* cite the frontier claim it beat, and this fraction goes there
+    /// whatever else is cited. It bounds the loss rather than closing the
+    /// attack -- manufacturing ancestors still dilutes the discretionary
+    /// remainder -- and `docs/agent-market.md` asks for the smallest reserved
+    /// share that makes dilution unprofitable at a given fanout, which is a
+    /// question for the harness rather than a constant to guess.
+    reserved_num: u64,
+    reserved_den: u64,
 }
 
 impl FlowParams {
     /// Validated constructor. `delta` must lie in `[0, 1]`.
+    ///
+    /// Reserves nothing. [`FlowParams::with_reserved`] is the way to ask for a
+    /// reserved share, so a caller that has not thought about it gets the
+    /// behaviour that existed before the field did.
     pub fn new(delta_num: u64, delta_den: u64, max_depth: u32) -> Result<FlowParams, FlowError> {
         if delta_den == 0 {
             return Err(FlowError::ZeroDenominator);
@@ -124,6 +152,37 @@ impl FlowParams {
             delta_num,
             delta_den,
             max_depth,
+            reserved_num: 0,
+            reserved_den: 1,
+        })
+    }
+
+    /// The same parameters, reserving `reserved_num / reserved_den` **of
+    /// delta** for the protocol-enforced citation.
+    ///
+    /// A fraction of delta rather than of the reward, so raising the reserve
+    /// never takes anything from the submitter: delta is what leaves, and this
+    /// only decides how it is divided. A caller that reserves the whole of
+    /// delta has said "citation flow pays the frontier and nobody else", which
+    /// is a coherent policy and is why one is permitted.
+    pub fn with_reserved(
+        self,
+        reserved_num: u64,
+        reserved_den: u64,
+    ) -> Result<FlowParams, FlowError> {
+        if reserved_den == 0 {
+            return Err(FlowError::ZeroDenominator);
+        }
+        if reserved_num > reserved_den {
+            return Err(FlowError::DeltaAboveOne {
+                num: reserved_num,
+                den: reserved_den,
+            });
+        }
+        Ok(FlowParams {
+            reserved_num,
+            reserved_den,
+            ..self
         })
     }
 
@@ -139,15 +198,43 @@ impl FlowParams {
     pub fn max_depth(&self) -> u32 {
         self.max_depth
     }
+
+    pub fn reserved_num(&self) -> u64 {
+        self.reserved_num
+    }
+
+    /// Always non-zero.
+    pub fn reserved_den(&self) -> u64 {
+        self.reserved_den
+    }
+
+    /// Of `upstream` units leaving a claim, how many are reserved.
+    ///
+    /// `u128` in the middle for the same reason every other product here is:
+    /// both factors are `u64` and their product is not, and a wrapped reserve
+    /// would silently pay the frontier holder a rounding error.
+    fn reserved_of(&self, upstream: u64) -> u64 {
+        let numerator = u128::from(upstream) * u128::from(self.reserved_num);
+        u64::try_from(numerator / u128::from(self.reserved_den)).unwrap_or(u64::MAX)
+    }
 }
 
 impl Default for FlowParams {
-    /// One quarter, six hops -- the reference implementation's defaults.
+    /// One quarter, six hops, nothing reserved -- the reference
+    /// implementation's defaults.
+    ///
+    /// Reserving nothing by default is deliberate: a reserve moves settled
+    /// money, so it is a policy the caller states rather than one that arrives
+    /// with a version bump. `docs/agent-market.md` asks the harness for the
+    /// smallest reserve that makes dilution unprofitable; until that has an
+    /// answer, guessing one here would be a constant nobody could defend.
     fn default() -> FlowParams {
         FlowParams {
             delta_num: DEFAULT_DELTA_NUM,
             delta_den: DEFAULT_DELTA_DEN,
             max_depth: DEFAULT_MAX_DEPTH,
+            reserved_num: 0,
+            reserved_den: 1,
         }
     }
 }
@@ -311,13 +398,30 @@ pub fn payouts_over(
     payouts_weighted(settlements, claims, params)
 }
 
+/// [`payouts_over`], told which citation the protocol forced on each claim.
+///
+/// `enforced` maps a settled claim's id to the ancestor it was *required* to
+/// cite -- on a ratchet, the frontier claim it beat. That recipient is not the
+/// submitter's choice, which is the entire reason a share can be reserved for
+/// it: everything else in the citation list is chosen, and anything chosen can
+/// be manufactured once funding an objective is something an agent can do.
+///
+/// A claim absent from `enforced` reserves nothing and splits the whole of
+/// delta discretionarily, which is what every claim did before this existed.
+pub fn payouts_with_enforced(
+    settlements: &[(String, u64)],
+    claims: &BTreeMap<String, Claim>,
+    enforced: &BTreeMap<String, String>,
+    params: &FlowParams,
+) -> Result<BTreeMap<String, u64>, FlowError> {
+    payouts_inner(settlements, claims, enforced, params)
+}
+
 /// Reward-weighted attribution: `delta` split among **all transitive
 /// ancestors**, weighted by each ancestor's own settled reward.
 ///
-/// The replacement for [`payouts_over`]'s per-hop decay, implemented and
-/// proven here but **not yet the default** -- switching it moves settled money
-/// and therefore the conformance vectors, which has to happen in one piece
-/// across both implementations. See `docs/design/citation-flow-dilution.md`.
+/// The rule that replaced per-hop decay, and the money path since. See
+/// `docs/design/citation-flow-dilution.md`.
 ///
 /// # Why weight by settled reward
 ///
@@ -343,6 +447,15 @@ pub fn payouts_over(
 pub fn payouts_weighted(
     settlements: &[(String, u64)],
     claims: &BTreeMap<String, Claim>,
+    params: &FlowParams,
+) -> Result<BTreeMap<String, u64>, FlowError> {
+    payouts_inner(settlements, claims, &BTreeMap::new(), params)
+}
+
+fn payouts_inner(
+    settlements: &[(String, u64)],
+    claims: &BTreeMap<String, Claim>,
+    enforced: &BTreeMap<String, String>,
     params: &FlowParams,
 ) -> Result<BTreeMap<String, u64>, FlowError> {
     let weights: BTreeMap<&str, u64> = settlements
@@ -381,6 +494,33 @@ pub fn payouts_weighted(
             &claim.submitter,
             reward.saturating_sub(upstream),
         )?;
+        if upstream == 0 {
+            continue;
+        }
+
+        // The reserved share, off the top and before any weighting. Its
+        // recipient is the citation the *protocol* forced -- on a ratchet, the
+        // frontier claim this one beat -- so it is the one share a submitter
+        // cannot dilute by manufacturing ancestors, because it did not choose
+        // who receives it.
+        //
+        // Paid only if that ancestor actually carries weight and is actually
+        // an ancestor. A reserve pointed at a claim this one never cited would
+        // be paying for a relationship the log does not record, and silently
+        // dropping it back into the discretionary pool is the conservative
+        // reading: the units still leave, and they still go upstream.
+        let mut upstream = upstream;
+        if let Some(target) = enforced.get(claim_id) {
+            if weighted.iter().any(|(id, _)| id == target) {
+                let reserved = params.reserved_of(upstream).min(upstream);
+                if reserved > 0 {
+                    if let Some(ancestor) = claims.get(target.as_str()) {
+                        add(&mut totals, &ancestor.submitter, reserved)?;
+                        upstream -= reserved;
+                    }
+                }
+            }
+        }
         if upstream == 0 {
             continue;
         }

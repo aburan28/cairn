@@ -81,10 +81,16 @@ a challenge nobody answers:
 ```
 cairn availability fund --funder treasury --per-epoch 7 \
     --from-epoch 0 --to-epoch 4000
-cairn availability undertake --identity node.json   # the promise
+cairn availability undertake --identity node.json --bond 1000   # the promise
 cairn availability answer    --identity node.json   # this epoch's sample
 cairn availability settle                           # pay it, name the silent
 ```
+
+The `--bond` is not decoration. It is locked against units the log says this
+identity was *paid*, `post_undertaking` refuses more than the identity can
+afford, and the audit re-derives affordability from the prefix below the record
+so a later payout cannot retroactively justify a bond that was unfunded when it
+was written.
 
 The sample is drawn `assign(identity, undertaking, beacon(epoch, anchor),
 height)` — a pure function of the log, so nobody issues the challenge and
@@ -93,11 +99,10 @@ pool one stored entry; the undertaking id is in it so a node that promised
 twice answers two questions; the beacon is in it so the answer is not knowable
 in advance.
 
-Settlement divides the epoch's pot **by weight** — floor-divided in proportion
-to how much each identity promised — records the remainder it could not divide,
-and names every promise that was samplable and said nothing. The silence is the half a slash would attach to. Writing it down
-before a bond exists is what makes the record worth having: the accusation is
-permanent and checkable, even while the penalty is not yet money.
+Settlement divides the epoch's pot **by stake** — floor-divided in proportion to
+what each identity bonded, summed across its promises — records the remainder it
+could not divide, and names every promise that was samplable and said nothing.
+The silence is the half a slash attaches to; the bond is what a slash would take.
 
 The answer carries the sampled **entry** as well as its path, and that is the
 difference between proving storage and proving arithmetic. It did not, at first:
@@ -109,21 +114,124 @@ tree.
 The promise is not the promiser's to size, either. With the height free,
 promising *one* entry drew index 0 every epoch, answered with an empty path, and
 collected exactly what promising the whole log collected. An undertaking now
-covers the log as it stood, the share is weighted by that height, and one
-identity is paid once however many promises it made.
+covers the log as it stood, checked against its own `seq` so the rule survives
+the log growing under it.
 
-**One bound remains, stated plainly.** The answer proves a node *produced* the
-challenged entry, not that it *stored* it — fetching it from a peer the moment
-the epoch opens is not ruled out, and ruling it out needs a time bound or
-sequential work this stage does not have. So it excludes a node that stored
-nothing and has no source, which is the population the payment exists to
-exclude, and it does not catch a cache. And a fixed pot bounds a funder's cost
-however many nodes appear, but it does not price **identity**: ten identities
-behind one disk answer ten samples from one copy and take ten shares. Weighting
-by height stops one identity multiplying itself through extra promises; nothing
-here stops ten identities. That is what `stake` above is for, and why the
-roadmap lists availability sampling as *bonded* at Stage 2 — **so a pool should
-not carry real money until it exists.**
+### Why the share follows the bond and not the promise
+
+Weighting by height was the obvious rule and it was the wrong one, because
+**height is not scarce**. Promising the whole log costs a signature. Forty keys
+each promising the whole log is the sybil attack with nothing spent, and no rule
+reading only the promise can tell those forty from forty real disks.
+
+A bond can be told apart, because the log knows what each identity was paid.
+So the share is `offered * bond / total_bond`, and the property that buys is an
+equation rather than an intuition:
+
+> An operator splitting a fixed stake `S` across `n` identities earns exactly
+> what it earns holding `S` under one, because **stake is conserved when it is
+> divided and a head count is not.**
+
+That is
+`splitting_a_stake_across_many_identities_earns_what_one_identity_earns`, which
+runs the same epoch twice — once with the stake whole, once split sixteen ways —
+and compares the attacker's total *and* the honest operator's share unit for
+unit. Both ways round, because a rule that only ever sees the fixed number
+proves nothing: reverting the weighting to a head count pays the splitter
+**30,112 against 16,000**, an 88% premium for making fifteen extra keys, and the
+honest operator's share collapses from half the pot to a seventeenth of it.
+`incentive::mechanism::SplitIdentities` is the same statement in the model,
+holding real resources constant and varying only the identity count: `PerNode`
+grows with `n`, `PerStake` is flat.
+
+Sixteen keys rather than forty only because each one has to *earn* its stake
+through a real objective/commit/reveal/settle cycle. The equation does not care
+about the count.
+
+Summed rather than maxed, for the same reason. The height rule had to take the
+largest promise, since two full-height promises from one disk would otherwise be
+twice the weight. Bonds need no such patch — two promises share one balance —
+and `splitting_one_balance_across_two_promises_earns_what_one_promise_earns`
+pins it, ending with a third promise of a *single* unit being refused because
+the balance is spent.
+
+### What makes the stake scarce: a declared supply
+
+A weighting by stake is worth exactly what the stake costs, and for one change
+it cost nothing. `post_objective` took no deposit: a funder named a reward and
+the settlement paid it, so the sequence was *post a bounty for an arbitrary sum
+against a verifier you chose, answer your own question, collect, stake.* Four
+commands, one key, and the log audited clean afterwards — nothing there broke a
+rule, the rule was missing. Once per key, and you had forty funded sybils.
+
+The rule is the **issuance** record:
+
+```
+cairn issue --holder treasury --units 1000000   # genesis prefix only
+cairn balances                                  # who holds what, what is escrowed
+```
+
+Three properties, and each is the answer to a way of making money for free.
+
+**It is only admissible in the genesis prefix** — the run of issuance records at
+the very front, before anything else is written. So the supply is a property of
+the log's opening bytes: fixed at creation, readable by anyone starting from
+line one, and an issuance below it is a fault rather than a balance. This is the
+"initial common knowledge" the consensus literature assumes and never gets to
+skip; here it is a few lines of JSON you can read.
+
+**Position authorises it, not a signature.** A signature would prove who wrote
+the record, and in a log's first entries there is nobody else it could be.
+
+**Every commitment is charged against it.** Posting an objective charges its
+whole `reward`; funding an availability pool charges its whole ceiling; an
+undertaking charges its bond. `spendable = issued + settled − committed`, and
+`post_objective` refuses what the funder cannot cover — so a bounty for a sum
+nobody issued is refused at the door, and one appended past the door is named by
+the audit, in both implementations, from their own arithmetic.
+
+Charged *in full and permanently*, which is the part that is easy to get wrong:
+the first version released a reward from escrow as settlements drew it down,
+which is the natural reading of the word and wrong by a whole supply — the units
+went to the submitter, so returning them to the funder credited the same money
+twice. `a_settled_reward_moves_escrow_and_mints_nothing` found 2000 held against
+1000 issued. What draws down is the *outstanding* escrow, which exists to be
+reported and never to be subtracted.
+
+**A log with no issuance is still legal**, and that is the whole backward
+compatibility story. Such a log has not claimed its units are scarce, so escrow
+is not enforced and `cairn balances` says so in as many words. The moment a
+supply is declared, every unit has to trace to it.
+
+So the claim about sybils can finally be stated without a caveat attached:
+splitting an identity is exactly neutral, *and* the stake it splits is scarce.
+Which leaves the bounds below, none of which is about money.
+
+### Three further bounds, stated plainly
+
+1. The answer proves a node *produced* the challenged entry, not that it
+   *stored* it. Fetching it from a peer the moment the epoch opens is not ruled
+   out; ruling it out needs a time bound or sequential work this stage does not
+   have. So it excludes a node that stored nothing and has no source, which is
+   the population the payment exists to exclude, and it does not catch a cache.
+   Closing it needs proof of replication.
+2. This bounds sybil *profit*, not sybil *existence*. Forty keys still appear in
+   the log, still answer, still occupy rows, and still consume an auditor's
+   time. What they no longer do is earn more than one key holding the same
+   stake.
+3. The bond is not yet *slashed*. Silence is recorded and the units are locked,
+   so the penalty has something to attach to and the accusation is permanent and
+   checkable — but nothing takes them yet. Until it does, an unanswered promise
+   costs its holder liquidity and not money.
+
+And one consequence that is a cost rather than a bound, worth naming because it
+is easy to hit and looks like a bug: **a fresh key cannot promise anything.**
+Spendable balance is what the genesis prefix issued you plus what settlements
+paid you, minus what you have committed — so on a log with a declared supply the
+only way in is to have been issued units or to have been paid for something.
+It does mean the first storage node on a new log has to do research before it
+can serve. `scripts/differential.sh` runs the full objective/commit/reveal/settle
+cycle for each node before it undertakes, for exactly this reason.
 
 ## The verifier's dilemma is structural, not quantitative
 
@@ -184,6 +292,114 @@ asymmetry in the whole design: a wrongful rejection denies a submitter their
 bounty, and the submitter — unlike every other party — is strictly motivated to
 re-run the verifier and dispute it. **False rejections police themselves. False
 acceptances do not.** Everything above is downstream of that.
+
+## The generator
+
+`src/canary.rs` is the pipeline the numbers above assume. Everything in this
+section is arithmetic over `D`, the rate at which a rubber-stamper meets a
+canary *it cannot recognise*; a generator whose output is recognisable makes
+`D` zero and every result here vacuous. So the generator is built around one
+property and tested against it.
+
+**It never authors an artifact.** It takes one a real contributor submitted and
+applies a single edit from a fixed catalogue, where every edit is chosen to be
+shape-preserving *and* canonical-length-preserving. The canary and its parent
+agree on every key path, every type, every array length, every integer's decimal
+width, every string's character-class profile, and the total encoded size —
+`every_edit_in_the_catalogue_preserves_shape_and_length` asserts exactly that
+over thousands of mutations. Separating them requires running the verifier,
+which is the work we are trying to buy.
+
+**The label is earned by running the pinned verifier**, not reasoned about. The
+generator mutates, checks, and keeps the mutant only if the verdict landed on
+the side asked for. It therefore knows nothing about cap sets or Collatz
+trajectories and works on every verifier tier. A verifier that returns
+`unavailable` mints nothing at all — a canary manufactured against a broken
+toolchain would accuse honest nodes, which is the one failure worse than not
+having canaries.
+
+**Both sides get minted.** `mint_batch` takes the `canary_valid_share` fraction
+directly, and `Docket::mix` reports what you actually got, because a docket of
+only known-bad canaries is the trap a blind rejecter walks through untouched.
+
+Ask it, though. There is a whole class of objective where one side is not
+mintable at all and nothing warns you: every edit in the catalogue is
+shape- and length-preserving over **numbers and strings**, so a checker whose
+verdict turns on a *boolean* cannot be made to reject by any canary the
+generator can produce. `src/arena`'s own pinned checker was
+`artifact.get("ok") is True`, and its rubber-stamping trial ran against a docket
+with two known-good canaries and zero known-bad ones — the half that catches
+blind *rejection*, pointed at an attacker that blindly accepts — until something
+finally asked `mix`.
+
+Measured, on the shipped examples:
+
+| objective | canary | cost |
+|---|---|---|
+| collatz (`{"n": 626331}`) | known-bad | 1 verifier run |
+| collatz | known-good | **not mintable** in 64 |
+| capset (20 points) | known-good | 1 verifier run |
+| capset | known-bad | 7 verifier runs |
+
+The collatz row is not a gap in the generator, it is a fact about the
+objective. When the whole artifact is one integer, every edit to it is a
+different answer, and there is no cheap way to change the bytes without
+changing the claim. Known-good canaries are cheap exactly when an artifact
+contains an *unordered collection*, because reordering a set is the reliable
+validity-preserving edit. An objective whose artifacts are scalars can only be
+policed against rubber-stamping, not against blind rejection — worth knowing
+before setting `canary_valid_share` for a network of them.
+
+### And what the catch takes
+
+A docket names a wrong verdict. Until `records::Attestation` landed it could not
+name a **party**, because a Stage-0 log has one writer and no record said who
+ran the checker — so `β`, the catch bounty in the two constraints above, had no
+counterpart in the code and every canary result was a statement about a model.
+
+An attestation is a signed, bonded statement of what a verifier returned, and
+`VERIFICATION_BOND` is 50,000 — this section's `catch_bounty`, because the
+catcher is paid the bond and the two have to be the same number. Nothing checks
+at admission whether an attestation is true; the expensive question is asked
+once, by whoever brings a docket, and a verifier that cannot run takes nothing.
+[bonded-verification.md](bonded-verification.md) is the full account, including
+why the bond has to *return* and what the window closes on.
+
+The term still missing is the other one: **nothing requires an attestation.**
+What is priced is lying, not silence, so an operator that stands behind nothing
+risks nothing — and `c`, the cost of one check, is still a cost nobody is paid
+to bear.
+
+### Why this is affordable
+
+Minting costs verifier runs, once. Checking costs none, ever:
+
+```
+cairn canary mint --objective ID --from artifact.json --count 4
+cairn canary check --docket canaries/docket.json
+```
+
+`check` compares the docket against every verdict in the log and runs no
+verifier at all. Measured over 16 verdicts in `tests/canary_trap.rs`: **1.2 µs
+to check the docket, 547 ms for a re-verifying audit** — and the gap widens with
+the log, because the check is a map lookup per verdict while the audit spawns a
+jailed interpreter per claim. That asymmetry is the entire reason a canary rate
+of 1 in 1425 is a policy an operator can actually run.
+
+### What the generator deliberately does not do
+
+It does not submit. A canary submitted by an identity that only ever submits
+canaries is not a canary — it is a labelled sample, `canary_leak` is 1, and
+`minimum_canary_rate` reports that no rate works. Getting the artifact into the
+log under an identity drawn from the same distribution as real contributors is
+a deployment problem, and a library call cannot solve it.
+
+How easy it is to get wrong: the first run of
+`the_log_does_not_say_which_claims_were_canaries` failed, and it failed on its
+own test fixture. Every artifact-level property held perfectly, and the log
+still handed over a complete list of which claims were traps, because the
+submissions carried nonces spelled `canary-0`, `canary-1`. Twelve lines of
+setup, written by someone who had just spent a day on indistinguishability.
 
 ## Two knobs, two jobs
 
@@ -403,9 +619,26 @@ More specifically:
 
 ## Status
 
-This is a mechanism and its evaluation, not shipped code paths. Nothing in
-`src/incentive/` runs at settlement time, no canary is generated, no bond is
-posted, and no Merkle challenge is issued. See [roadmap.md](roadmap.md) — the
+The committee sizing this section argues for is **built**: `COMMITTEE_SIZE` is
+a floor, and `Node::committee_size_at` adds seats while the drawn members'
+stakes do not cover the epoch's sealed value — `V ≤ t · d · S'`, with `S'` a
+member's ordinary spendable balance and the cartel priced at its cheapest `t`
+members rather than `t` times an average. Measured against 1000-unit stakes at
+`d = 1/2`: 5 seats guard 1500, 6 guard 2000, 8 guard 2500, 12 guard 3500, so a
+2200-unit bounty draws 8 seats. A strict-majority threshold means an odd
+committee guards exactly what the even one below it does, so a seventh seat
+buys liveness rather than collusion resistance — which is not obvious from the
+algebra above and only turned up when the numbers were run.
+
+## Status
+
+This is a mechanism and its evaluation, and one of its three pieces now ships.
+The **canary generator is built** (`src/canary.rs`, `cairn canary`), so
+`D` is no longer an assumption about a pipeline that does not exist. Nothing in
+`src/incentive/` runs at settlement time, no bond is posted, and no Merkle
+challenge is issued — and the missing half of canaries is the money: a
+discrepancy is *named*, by the log the node wrote, but nothing is staked, so
+nothing is slashed. See [roadmap.md](roadmap.md) — the
 mechanism lands with Stage 2's permissionless verification, and the point of
 building the harness first is that the parameters it demands (a committee that
 scales with sealed value, a bond in the millions, a canary rate a real pipeline

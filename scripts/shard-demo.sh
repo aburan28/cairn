@@ -21,6 +21,15 @@ if [ ! -x "$RUST" ]; then
   echo "building release binary..." >&2
   cargo build --release
 fi
+# Absolute, once, here. The reader below runs from a directory with no store,
+# so it needs a path that survives a `cd` -- and the version that built one on
+# the spot (`"$OLDPWD/$RUST"`) was correct only for the *relative* default.
+# Handed an absolute `RUST_BIN`, which is exactly what the Makefile passes, it
+# produced `/repo//repo/target/release/proofwork` and the script died on
+# "an honest proof did not check" -- a path bug wearing a cryptography failure's
+# error message. `make shard-demo` was broken the whole time the script itself
+# passed, because CI runs the script and nobody ran the target.
+RUST="$(cd "$(dirname "$RUST")" && pwd)/$(basename "$RUST")"
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
@@ -74,7 +83,7 @@ sed 's/^/  /' "$WORK/prove.out"
 ROOT=$(grep -o -- '--merkle-root sha256:[0-9a-f]\{64\}' "$WORK/prove.out" | awk '{print $2}')
 [ -n "$ROOT" ] || fail "no root printed for a reader to check against"
 # Run from a directory with no store at all: the reader is not a node.
-(cd "$WORK" && "$OLDPWD/$RUST" shard check proof.json --merkle-root "$ROOT") | sed 's/^/  /' \
+(cd "$WORK" && "$RUST" shard check proof.json --merkle-root "$ROOT") | sed 's/^/  /' \
   || fail "an honest proof did not check"
 
 rule "and the same proof does not check against a different root"

@@ -299,7 +299,7 @@ There are two paths, against the same store, and they overlap:
 - `p2p::code` moves a pinned blob **whole** over the existing McEliece session.
   This is what the daemon uses, and at `blobs::MAX_BLOB_BYTES` — 1 MiB — it is
   adequate.
-- [`src/swarm/`](../src/swarm/) moves one in the BitTorrent shape: pieces, a
+- [`src/p2p/swarm/`](../src/p2p/swarm/) moves one in the BitTorrent shape: pieces, a
   manifest of piece hashes, bitfields, rarest-first, choking, endgame. Sized for
   artifacts the 1 MiB cap does not currently allow.
 

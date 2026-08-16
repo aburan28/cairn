@@ -167,7 +167,7 @@ impl Connection {
     /// this is for a subsystem that wants a *different* bound rather than for
     /// one that wants any bound at all — a long-lived transfer, where a peer
     /// that goes quiet mid-piece must not hold a thread and its reservations,
-    /// is the case that asks; see [`crate::swarm::tcp`]. Set before
+    /// is the case that asks; see [`crate::p2p::swarm::tcp`]. Set before
     /// [`Connection::split`] so both halves inherit it.
     ///
     /// `None` restores blocking-forever behaviour and is almost never what a
@@ -181,7 +181,7 @@ impl Connection {
 
     /// Split into halves that can live on different threads.
     ///
-    /// The reason this exists is [`crate::swarm`]: a blob transfer needs a
+    /// The reason this exists is [`crate::p2p::swarm`]: a blob transfer needs a
     /// writer thread, so a peer that stops reading blocks its own socket rather
     /// than the state machine every other peer is waiting on. `&mut self` on
     /// both `send` and `receive` makes that impossible on one `Connection`, and

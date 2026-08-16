@@ -41,6 +41,28 @@ jobs:
       # boundary, and the generated challenge that has to be postable. Neither
       # can be checked from a fixture timestamp.
       - run: ./scripts/try-demo.sh
+      # The canary trap around the binary rather than around a `Node`. Proves
+      # the one thing that matters economically and that no unit test can show
+      # in one place: `audit --no-rerun` passes a rubber-stamper, `audit`
+      # catches it at the price of every verifier in the log, and a docket
+      # catches it at the price of the cheap one.
+      - run: ./scripts/canary-demo.sh
+      # A bonded dispute through the CLI, then the *other* implementation
+      # auditing the finished log. A second opinion that has never seen a
+      # record kind reports "log verified" over money it did not look at,
+      # which is how availability settlements went unchecked for a while.
+      - run: ./scripts/dispute-demo.sh
+      # Bonded verification the whole way through: two operators standing behind
+      # the same verdicts, a docket naming the one that did not look, a slash
+      # moving the bond, and the reference agreeing about where it went. It is
+      # the only place the free half and the expensive half of the mechanism sit
+      # on one log with the money visible between them.
+      - run: ./scripts/attestation-demo.sh
+      # Adversarial strategies played for money against the real rules engine.
+      # The verdicts are asserted in `tests/arena.rs`; this run is the readable
+      # payoff table, and it exits non-zero if an attack that should be closed
+      # has re-opened.
+      - run: cargo run --release --bin arena
       # Runs the MCP server as a real process. The unit tests call handle_line
       # directly and structurally cannot catch a stray write to stdout, which is
       # the failure that breaks every MCP client and looks like their bug.
@@ -262,7 +284,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      # v7. The inputs used here -- `node-version`, `cache`,
+      # `cache-dependency-path` -- are unchanged across v4..v7; what moved is the
+      # runner's bundled Node and the cache backend, neither of which this job
+      # pins. `actions/checkout` above is already on the same major line.
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm

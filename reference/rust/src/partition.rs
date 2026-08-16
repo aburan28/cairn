@@ -57,6 +57,17 @@ pub fn finality_epochs() -> u64 {
 /// wrong about.
 pub const COMMITTEE_SIZE: u8 = 5;
 pub const COMMITTEE_THRESHOLD: u8 = 3;
+pub const MAX_COMMITTEE_SIZE: u8 = 64;
+
+/// A strict majority. Mirrors the primary's `partition::threshold_for`: two
+/// crates disagreeing about the threshold disagree about what "sealed" bought.
+pub const fn threshold_for(size: u8) -> u8 {
+    size / 2 + 1
+}
+
+/// The `d` in `V <= t * d * S'`, as `num/den`. Mirrors the primary.
+pub const DETECTION_NUM: u128 = 1;
+pub const DETECTION_DEN: u128 = 2;
 
 pub fn epoch_of(timestamp_seconds: u64, epoch_seconds: u64) -> u64 {
     timestamp_seconds / epoch_seconds
