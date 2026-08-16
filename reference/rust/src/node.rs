@@ -225,11 +225,11 @@ impl Node {
                 break;
             }
             match entry.kind.as_str() {
-                SETTLEMENT => {
-                    if entry.payload.get("submitter").and_then(Value::as_str) == Some(identity) {
-                        if let Some(reward) = entry.payload.get("reward").and_then(Value::as_u64) {
-                            paid = paid.saturating_add(u128::from(reward));
-                        }
+                SETTLEMENT
+                    if entry.payload.get("submitter").and_then(Value::as_str) == Some(identity) =>
+                {
+                    if let Some(reward) = entry.payload.get("reward").and_then(Value::as_u64) {
+                        paid = paid.saturating_add(u128::from(reward));
                     }
                 }
                 AVAILABILITY_SETTLEMENT => {
@@ -251,22 +251,22 @@ impl Node {
                 // second implementation that did not know about it would report
                 // the winner as overdrawn and certify the loser as solvent,
                 // which is worse than not looking at all.
-                CHALLENGE_SETTLEMENT => {
-                    if entry.payload.get("winner").and_then(Value::as_str) == Some(identity) {
-                        if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
-                            paid = paid.saturating_add(u128::from(units));
-                        }
+                CHALLENGE_SETTLEMENT
+                    if entry.payload.get("winner").and_then(Value::as_str) == Some(identity) =>
+                {
+                    if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                        paid = paid.saturating_add(u128::from(units));
                     }
                 }
                 // The catch bounty: a slashed verification bond goes to
                 // whoever produced the evidence. Same shape as a won dispute
                 // and not new money either -- the attestor is debited for it
                 // in `committed_within`.
-                VERIFICATION_SLASH => {
-                    if entry.payload.get("catcher").and_then(Value::as_str) == Some(identity) {
-                        if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
-                            paid = paid.saturating_add(u128::from(units));
-                        }
+                VERIFICATION_SLASH
+                    if entry.payload.get("catcher").and_then(Value::as_str) == Some(identity) =>
+                {
+                    if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                        paid = paid.saturating_add(u128::from(units));
                     }
                 }
                 _ => {}

@@ -287,10 +287,7 @@ fn the_order_of_the_two_answers_does_not_matter() {
     let play = |first: Side| {
         let mut dispute =
             Dispute::between("d1", &defender, &challenger).expect("a well-founded dispute");
-        loop {
-            let Next::Open { index, .. } = dispute.next() else {
-                break;
-            };
+        while let Next::Open { index, .. } = dispute.next() {
             let moves = [
                 (
                     Side::Defender,
