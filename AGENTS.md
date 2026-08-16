@@ -93,7 +93,12 @@ claim and you hand every submitter a free lottery ticket per restamp.
 
 - `cargo test --all-targets`
 - `cargo test --manifest-path reference/rust/Cargo.toml` and
-  `proofwork-reference conformance conformance/vectors.json`
+  `proofwork-reference conformance conformance/vectors.json`.
+  Run it a few times if you touched anything that spawns a process. The Lean
+  stand-in writes a script and execs it, and a `fork` from any other test thread
+  in that window hands the child a duplicate of the still-open write descriptor,
+  so the exec gets `ETXTBSY`. It fired one run in five under load and went
+  unnoticed for months, because nobody ran that suite twice in a row
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --all-features`.
   CI has always run this and this list did not say so, which is a good way to

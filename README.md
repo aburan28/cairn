@@ -144,10 +144,25 @@ first.
 **Joining — dial out, serve nobody.**
 
 ```sh
-make p2p
+make node                 # peers on :5000, reader on http://127.0.0.1:5001/chain.html
+make node UI=1            # ...and the richer Next.js reader on :5002
+make node PORT=6000       # every port derived from one number
 ```
 
-Binds `127.0.0.1:9000` (nothing needs to dial you), writes
+One command and one knob. `PORT` is the peer-to-peer port; HTTP is the next one
+and the UI the one after. Three processes speaking three protocols cannot share
+a TCP port, so what they share is a single number to set — before this there
+were four independently-editable defaults, three of which had to agree, and they
+drifted.
+
+`UI=1` is optional because `proofwork-serve` renders the chain at `/chain.html`
+itself with no build step: the default is one command, two processes and no Node
+toolchain at all. `ui/` is the richer client, not the only one.
+
+`make p2p` is still the daemon on its own, for when a peer-to-peer problem is
+easier to read without two other processes logging into the same terminal.
+
+It binds `127.0.0.1:5000` (nothing needs to dial you), writes
 `.local/proofwork-p2p.jsonl`, and on first run creates
 `.local/node.identity.json`, `.local/root.key`, and `.local/checkpoint.json`.
 The first two are private keys; `.local/` is gitignored, keep it that way.

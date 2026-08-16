@@ -5,17 +5,29 @@ draws it as a chain: each link, the link it commits to, and the claims it
 settled.
 
 ```sh
-# a node to read (from the repository root)
-make serve
-
-# the reader, in another terminal, also from the repository root
-make ui                                 # http://localhost:3000
+# the whole node plus this reader, one command, from the repository root
+make node UI=1                          # http://127.0.0.1:5002
 ```
 
-`make ui` installs from the committed lockfile with `npm ci` before starting the
-dev server. `cd ui && npm install && npm run dev` does the same thing by hand and
-resolves the lockfile rather than obeying it, which is the difference `npm ci`
-exists for. `make ui-check` runs what CI gates on: `tsc --noEmit` and a build.
+That starts the daemon, the HTTP publisher and this app together, and points
+`NEXT_PUBLIC_PROOFWORK_NODE` at the node's own HTTP port so there is nothing to
+configure. Every port derives from `PORT` (default 5000): peers on `PORT`, HTTP
+on `PORT + 1`, this reader on `PORT + 2`.
+
+To run it against a node that is already up:
+
+```sh
+make ui                                 # http://127.0.0.1:5002
+```
+
+Both install from the committed lockfile with `npm ci` first.
+`cd ui && npm install && npm run dev` does the same thing by hand and *resolves*
+the lockfile rather than obeying it, which is the difference `npm ci` exists for.
+`make ui-check` runs what CI gates on: `tsc --noEmit` and a build.
+
+You may not need this at all. `proofwork-serve` renders the chain at
+`/chain.html` with no build step and no Node toolchain, which is what `make node`
+prints on startup.
 
 Point it elsewhere with `NEXT_PUBLIC_PROOFWORK_NODE`, or just edit the URL in
 the page — the whole value of this is comparing one node's head against a
