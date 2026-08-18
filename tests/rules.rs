@@ -828,6 +828,13 @@ fn audit_catches_a_settled_claim_that_can_no_longer_be_re_verified() {
 
 #[test]
 fn sandbox_blocks_a_checker_from_reading_unpinned_external_state() {
+    // This asserts what an actual jail confines. Hosts with no usable jail run
+    // in the documented unconfined fallback unless CAIRN_REQUIRE_SANDBOX is
+    // set, so they cannot prove a filesystem-denial property. The verifier
+    // module's separate require-mode test pins the fail-closed behavior there.
+    if !cairn::verifiers::sandbox::mechanism().is_jail() {
+        return;
+    }
     // The checker file is declared readable; its sibling is not. A verifier
     // must not smuggle mutable host state into a verdict merely because it sits
     // next to the pinned source.
