@@ -67,8 +67,9 @@ impl Ratchet {
             direction,
             min_improvement: match value.get("min_improvement") {
                 None => 1,
-                Some(Value::Int(n)) if *n >= 1 => u64::try_from(*n)
-                    .map_err(|_| "ratchet min_improvement does not fit in u64")?,
+                Some(Value::Int(n)) if *n >= 1 => {
+                    u64::try_from(*n).map_err(|_| "ratchet min_improvement does not fit in u64")?
+                }
                 Some(Value::Int(_)) => {
                     return Err("ratchet min_improvement must be at least 1".into())
                 }
