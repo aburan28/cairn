@@ -111,12 +111,14 @@ fn main() {
             ("public", Value::string(public_hex)),
             ("secret", Value::string(hex_encode(identity.secret_key()))),
         ]);
-        fs::write(Path::new(&identity_out), identity_value.canonical_string()).unwrap_or_else(
-            |e| {
-                eprintln!("{identity_out}: {e}");
-                std::process::exit(2)
-            },
-        );
+        cairn::secret_file::write_new(
+            Path::new(&identity_out),
+            identity_value.canonical_string().as_bytes(),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("{identity_out}: {e}");
+            std::process::exit(2)
+        });
         eprintln!("wrote matching identity file: {identity_out}");
     }
 

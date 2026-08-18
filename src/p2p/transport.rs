@@ -301,13 +301,20 @@ pub fn listen(addr: SocketAddr) -> Result<TcpListener, TransportError> {
 /// return `WouldBlock` immediately when another thread owns a cloned write half.
 /// Treating that single wake as a disconnect made every real swarm transfer
 /// lose its peer before the first piece. Retry only within the configured
-/// timeout, measured since the last byte of progress, so a genuinely silent
-/// peer remains bounded exactly as before.
+/// timeout, measured from the start of the field. Progress does not reset the
+/// deadline: otherwise a peer that drips one byte per timeout can hold the
+/// daemon's session lock indefinitely.
 fn read_exact_resilient(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<()> {
     let timeout = stream.read_timeout()?;
     let mut offset = 0usize;
-    let mut last_progress = Instant::now();
+    let started = Instant::now();
     while offset < buffer.len() {
+        if timeout.is_some_and(|bound| started.elapsed() >= bound) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "transport field exceeded its absolute read deadline",
+            ));
+        }
         match stream.read(&mut buffer[offset..]) {
             Ok(0) => {
                 return Err(io::Error::new(
@@ -317,14 +324,13 @@ fn read_exact_resilient(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result
             }
             Ok(read) => {
                 offset += read;
-                last_progress = Instant::now();
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) && timeout.is_some_and(|bound| last_progress.elapsed() < bound) =>
+                ) && timeout.is_some_and(|bound| started.elapsed() < bound) =>
             {
                 // Avoid a busy loop on a host that repeatedly reports the
                 // spurious readiness state. One millisecond is negligible

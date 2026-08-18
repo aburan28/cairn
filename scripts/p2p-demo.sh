@@ -240,7 +240,7 @@ rule "and the independent implementation audits the node that synced"
 # The case that matters: no bundle, no authored objective, verifier code
 # obtained by hash. It was broken -- the reference had no content-addressed
 # fallback and called a re-verifiable claim unverifiable.
-REF_VIEW=$("$REF" --log "$B/log.jsonl" --root "$B" audit)
+REF_VIEW=$("$REF" --log "$B/log.jsonl" --root "$B" audit --rerun)
 echo "$REF_VIEW" | sed 's/^/  /'
 echo "$REF_VIEW" | grep -q "log verified" \
   || fail "the reference cannot audit a node that got its verifier over the wire"

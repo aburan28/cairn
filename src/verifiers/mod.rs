@@ -387,7 +387,7 @@ own jail. \
 It is NOT a VM boundary, and two gaps are real. (1) A kernel or policy bug is \
 still an escape; gVisor/Firecracker/WASM would bound that and are not \
 implemented. (2) On a host with no jail mechanism \
-the child runs as before, unconfined; set PROOFWORK_REQUIRE_SANDBOX=1 to make \
+the child runs as before, unconfined; set CAIRN_REQUIRE_SANDBOX=1 to make \
 that Unavailable instead. When a jailed run fails, the verdict's evidence names \
 the mechanism, so an operator can tell a broken jail from a broken checker.";
 

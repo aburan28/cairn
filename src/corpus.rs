@@ -333,8 +333,15 @@ impl Document {
         let envelope = value.get("envelope").ok_or(CorpusError::Malformed {
             reason: "envelope missing".into(),
         })?;
+        let envelope = SealedEnvelope::from_value(envelope)?;
+        let expected_aad = aad_for(release_epoch);
+        if envelope.aad() != expected_aad {
+            return Err(CorpusError::Malformed {
+                reason: "release_epoch does not match the envelope's authenticated metadata".into(),
+            });
+        }
         Ok(Document {
-            envelope: SealedEnvelope::from_value(envelope)?,
+            envelope,
             release_epoch,
         })
     }
@@ -525,5 +532,18 @@ mod tests {
         let shares = shares_from(&document, &keys, &members, 2);
         assert_eq!(document.open(&shares, 0).expect("opens"), b"");
         assert!(document.availability_root().is_some());
+    }
+
+    #[test]
+    fn decoded_release_epoch_must_match_authenticated_envelope_metadata() {
+        let (members, _) = committee(3);
+        let document = Document::seal(b"embargoed", 200, &members, 2, &mut OsRng).expect("seals");
+        let mut fields = document.to_value().as_object().unwrap().clone();
+        fields.insert("release_epoch".into(), Value::Int(10));
+        let rewritten = Value::Object(fields);
+        assert!(matches!(
+            Document::from_value(&rewritten),
+            Err(CorpusError::Malformed { .. })
+        ));
     }
 }

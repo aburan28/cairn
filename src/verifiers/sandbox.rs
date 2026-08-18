@@ -405,8 +405,16 @@ fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]
     // A Homebrew, rustup, pyenv, or elan executable normally loads libraries
     // and adjacent resources from the version root two levels above `bin`.
     // Allow that version root, not the whole package manager or home directory.
-    for executable in [resolve(program), resolve(Path::new("/bin/sh"))] {
+    for executable in [resolve(program)] {
         if let Some(runtime_root) = executable.parent().and_then(Path::parent) {
+            // A runtime root is an installation prefix such as
+            // `/opt/homebrew/Cellar/python@3.13/3.13.2`, never the filesystem
+            // root. In particular, the grandparent of `/bin/sh` is `/`; adding
+            // it here turns the deny-by-default profile into a read-everything
+            // profile.
+            if runtime_root == Path::new("/") {
+                continue;
+            }
             readable.push(runtime_root.to_path_buf());
         }
     }
@@ -602,6 +610,7 @@ mod tests {
         assert!(profile.contains("/Volumes/objectives/example"));
         assert!(profile.contains("/private/tmp/proofwork-seatbelt-work"));
         assert!(!profile.contains("/Users/"));
+        assert!(!profile.contains("(subpath \"/\")"));
     }
 
     #[test]

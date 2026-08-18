@@ -69,6 +69,7 @@ use cairn::attribution::{payouts_over, FlowError, FlowParams};
 use cairn::canonical::{short, CanonicalError, Value};
 use cairn::checkpoint::{RootKey, SignedCheckpoint};
 use cairn::crypto::identity::Identity;
+use cairn::frontier::Ratchet;
 use cairn::incentive::design::Report as IncentiveReport;
 use cairn::incentive::{sweep, NodeParams, ParamError, Rat};
 use cairn::knowledge::ConfidencePolicy;
@@ -2740,7 +2741,10 @@ fn load_identity(path: Option<&str>) -> Result<Option<Identity>, CliError> {
     let Some(path) = path else {
         return Ok(None);
     };
-    let value = read_json(path)?;
+    let text = cairn::secret_file::read_to_string(std::path::Path::new(path))
+        .map_err(|error| CliError::Usage(format!("{path}: {error}")))?;
+    let value =
+        Value::from_json(&text).map_err(|error| CliError::Usage(format!("{path}: {error}")))?;
     let field = |name: &'static str| -> Result<String, CliError> {
         value
             .get(name)
@@ -2812,8 +2816,13 @@ fn cmd_decode(out: &mut dyn Write, kind: &str, record_path: &str) -> Result<i32,
     let value = read_json(record_path)?;
     let decoded = match kind {
         "objective" => Objective::from_value(&value)
-            .map(|record| record.id())
-            .map_err(|error| error.to_string()),
+            .map_err(|error| error.to_string())
+            .and_then(|record| {
+                if let Some(block) = &record.ratchet {
+                    Ratchet::from_value(block).map_err(|error| error.to_string())?;
+                }
+                Ok(record.id())
+            }),
         "commitment" => Commitment::from_value(&value)
             .map_err(|error| error.to_string())
             .and_then(|record| {
@@ -2965,21 +2974,7 @@ fn cmd_identity(out: &mut dyn Write, path: &str) -> Result<i32, CliError> {
 /// Write a file only the owner can read, via a temporary so a crash cannot
 /// leave a half-written key behind.
 fn write_private_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    let tmp = path.with_file_name(name);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&tmp)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, path)
+    cairn::secret_file::write_new(path, text.as_bytes())
 }
 
 fn cmd_commit(
@@ -5977,8 +5972,8 @@ fn load_transport_identity(path: &str) -> Result<cairn::p2p::handshake::PeerIden
             .map_err(|error| CliError::Usage(format!("{path}: {error}")))?;
         return Ok(identity);
     }
-    let text =
-        std::fs::read_to_string(file).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
+    let text = cairn::secret_file::read_to_string(file)
+        .map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
     let value = Value::from_json(&text).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
     let field = |name: &str| -> Result<Vec<u8>, CliError> {
         let hex = value

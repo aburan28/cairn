@@ -827,21 +827,17 @@ fn audit_catches_a_settled_claim_that_can_no_longer_be_re_verified() {
 }
 
 #[test]
-fn audit_flags_a_settled_claim_that_now_fails_verification() {
-    // A verifier whose behaviour depends on unpinned external state passes today
-    // and fails tomorrow at the same hash. Pinning source is necessary and not
-    // sufficient: a verifier must also be pure. The audit is what surfaces it.
+fn sandbox_blocks_a_checker_from_reading_unpinned_external_state() {
+    // The checker file is declared readable; its sibling is not. A verifier
+    // must not smuggle mutable host state into a verdict merely because it sits
+    // next to the pinned source.
     let (dir, mut node, objective) = certificate_env("impure", IMPURE_CHECKER);
     fs::write(dir.file("threshold.txt"), "42").expect("write the unpinned state");
 
     let outcome = submit(&mut node, &objective, "alice", n(42), "n1", vec![]).expect("reveal");
-    assert!(outcome.settled, "{:?}", outcome.verdict);
+    assert_eq!(outcome.verdict.status, Status::Unavailable);
+    assert!(!outcome.settled, "{:?}", outcome.verdict);
     assert_clean(&node.audit(true));
-
-    fs::write(dir.file("threshold.txt"), "43").expect("move the goalposts");
-
-    let problems = node.audit(true);
-    assert_reports(&problems, "re-verification says reject");
 }
 
 #[test]

@@ -181,7 +181,7 @@ Enforced by the kernel:
   finishes.
 - A wall-clock deadline, and best-effort `RLIMIT_CPU` / `RLIMIT_AS`.
 - A **scrubbed environment** for pinned pure functions. With
-  `PROOFWORK_REQUIRE_SANDBOX=1`, replay and Lean are scrubbed too, so strict
+  `CAIRN_REQUIRE_SANDBOX=1`, replay and Lean are scrubbed too, so strict
   mode cannot return the operator's credentials in verdict evidence.
 - On macOS, reads are limited to declared bundle/toolchain paths and standard
   system runtime paths. Objective-selected directories are resolved through
@@ -197,7 +197,7 @@ Two gaps remain real and neither is hypothetical:
 1. **It is not a VM boundary.** A kernel or policy bug is still an escape.
    gVisor, Firecracker or WASM would bound that; none is implemented.
 2. **A host with neither mechanism runs the child unconfined.** Set
-   `PROOFWORK_REQUIRE_SANDBOX=1` to make that `UNAVAILABLE` instead of a silent
+   `CAIRN_REQUIRE_SANDBOX=1` to make that `UNAVAILABLE` instead of a silent
    downgrade. Any node running third-party objectives should set it. The
    switch fails closed: any value other than an explicit `0`/`false`/`no`/`off`
    counts as on, so a typo cannot silently mean "unjailed".
@@ -257,9 +257,11 @@ checking is how an exit code maps to a verdict, and that does not need a kernel.
 
 ## What an audit actually re-derives
 
-`proofwork audit` prints one line — *chain intact, every settled claim
+`proofwork audit --rerun` prints one line — *chain intact, every settled claim
 re-verified* — and the value of the whole project rests on that sentence being
-literally true. What follows is what it did not check, found by asking what a
+literally true. The independent reference requires the explicit `--rerun`
+opt-in because it has no confinement backend; with `CAIRN_REQUIRE_SANDBOX` it
+refuses objective-authored execution. What follows is what the audit did not check, found by asking what a
 log could carry that the line would still be printed over, and then by running
 the tools rather than reading them.
 
@@ -268,7 +270,7 @@ not only the paid ones.
 
 **A verdict with a status nobody recognises.** A `"probably"` in the status
 field used to surface only as a *disagreement* with a re-run, so on a node
-without the relevant toolchain it was silent, and under `--no-rerun` it was
+without the relevant toolchain it was silent, and without `--rerun` it was
 silent everywhere. It is a malformed record, which makes it exactly the kind of
 defect the cheap structural pass exists for, so both implementations now report
 it there.

@@ -18,8 +18,8 @@ if [ -z "${RUST_BIN:-}" ]; then
   echo "building the current primary implementation..." >&2
   cargo build --release --locked
 fi
-RUST="${RUST_BIN:-./target/release/proofwork}"
-REF="${REF_BIN:-./reference/rust/target/release/proofwork-reference}"
+RUST="${RUST_BIN:-./target/release/cairn}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
@@ -30,12 +30,12 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 # different boundaries and report an honest batch as mis-ordered. Epoch length
 # is a policy parameter every participant must share -- which is exactly why the
 # production default is not configurable per node in any other way.
-export PROOFWORK_EPOCH_SECONDS=1
+export CAIRN_EPOCH_SECONDS=1
 
 # Likewise exported rather than left to the default, and for the same reason:
 # both implementations must agree on when an epoch becomes eligible, not just
 # on how long one is.
-export PROOFWORK_FINALITY_EPOCHS=1
+export CAIRN_FINALITY_EPOCHS=1
 
 tick() { sleep 1.1; }
 
@@ -53,7 +53,7 @@ tick() { sleep 1.1; }
 # delay existed; the delay only made the window wide enough to notice.
 settle_tick() {
   local i
-  for ((i = 0; i <= PROOFWORK_FINALITY_EPOCHS; i++)); do tick; done
+  for ((i = 0; i <= CAIRN_FINALITY_EPOCHS; i++)); do tick; done
 }
 
 # Suffix appended after the call, not inside the template: BSD mktemp (macOS)
@@ -74,8 +74,8 @@ I="$(mktemp -u /tmp/pw-interop-dang2-XXXXXX).jsonl"
 # which the deliberately independent reference implementation cannot read. The
 # interop fixture is public test data, so force a unique absent key path and
 # therefore a plaintext log regardless of operator configuration.
-export PROOFWORK_KEY="${A}.absent-key"
-trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$PROOFWORK_KEY"' EXIT
+export CAIRN_KEY="${A}.absent-key"
+trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$CAIRN_KEY"' EXIT
 
 # --- the primary writes, the reference reads ------------------------------
 rule "Rust produces a log"
@@ -91,7 +91,7 @@ $RUST --log "$A" --root . settle
 rule "the reference implementation audits the primary log"
 # Includes the settlement batch: the reference re-derives the anchor and the beacon
 # order Rust recorded. A disagreement here is a disagreement about who got paid.
-REF_VIEW=$("$REF" --log "$A" --root . audit)
+REF_VIEW=$("$REF" --log "$A" --root . audit --rerun)
 echo "$REF_VIEW"
 echo "$REF_VIEW" | grep -q "log verified" || fail "the reference could not verify the primary log"
 
@@ -185,7 +185,7 @@ rule "typed claim relations survive a round trip through both implementations"
 # *pass*; a decoy shipped alongside them would eventually be mistaken for one.
 DECOY="$(mktemp -u /tmp/pw-interop-decoy-XXXXXX).json"
 printf '{"n": 1}\n' > "$DECOY"
-trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$DECOY" "$PROOFWORK_KEY"' EXIT
+trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$DECOY" "$CAIRN_KEY"' EXIT
 
 for pair in "$RUST|$REF|the reference|$F" "$REF|$RUST|the primary|$G"; do
   IFS='|' read -r WRITER READER WHO LOG <<< "$pair"

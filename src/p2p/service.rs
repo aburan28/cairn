@@ -899,6 +899,30 @@ fn decode_record(record: &super::sync::Record) -> Result<(), SyncError> {
 /// `tests/simulation.rs`, which constructs the adverse order rather than
 /// hoping for it, and which was verified to fail when this sort is removed.
 pub fn replay_records(node: &mut Node, records: &[(String, crate::canonical::Value)]) {
+    replay_records_with_horizon(node, records, None);
+}
+
+/// Replay records without allowing their author-controlled timestamps to move
+/// this node's wall clock into a later epoch.
+fn replay_records_at(node: &mut Node, records: &[(String, crate::canonical::Value)], now: &str) {
+    let now_epoch = crate::time::parse_rfc3339(now)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .map(|seconds| crate::partition::epoch_of(seconds, crate::partition::epoch_seconds()));
+    replay_records_with_horizon(node, records, now_epoch);
+}
+
+/// Shared replay machinery.
+///
+/// `now_epoch` is present only at the live network boundary.  The public
+/// deterministic replay helper deliberately has no wall-clock horizon: it is
+/// used for cold sync, historical reconstruction, and virtual-clock tests,
+/// none of which may depend on the machine's current time.  Live sessions go
+/// through `apply_records` and always supply a trusted local horizon.
+fn replay_records_with_horizon(
+    node: &mut Node,
+    records: &[(String, crate::canonical::Value)],
+    now_epoch: Option<u64>,
+) {
     let held = |payload: &crate::canonical::Value| -> String {
         payload
             .get("created_at")
@@ -923,6 +947,17 @@ pub fn replay_records(node: &mut Node, records: &[(String, crate::canonical::Val
                 continue;
             }
             let stamp = held(payload);
+            let record_epoch = crate::time::parse_rfc3339(&stamp)
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .map(|seconds| {
+                    crate::partition::epoch_of(seconds, crate::partition::epoch_seconds())
+                });
+            // Future records are retained by the peer and will be offered on a
+            // later sync. Admitting one now would pass its timestamp into
+            // `settle_due` and let an untrusted peer manufacture finality.
+            if matches!((record_epoch, now_epoch), (Some(record), Some(local)) if record > local) {
+                continue;
+            }
             match kind {
                 "objective" => {
                     if let Ok(value) = Objective::from_value(payload) {
@@ -960,11 +995,12 @@ fn apply_records(node: &mut Node, peer: &Peer) {
         .into_iter()
         .filter_map(|id| peer.get(&id).map(|r| (r.kind.clone(), r.payload.clone())))
         .collect();
-    replay_records(node, &records);
+    let now = timestamp();
+    replay_records_at(node, &records, &now);
     // Replaying the inputs is only half of re-deriving the state: settlement is
     // deferred to the close of the reveal epoch, so a node that never drains
     // holds a log full of accepted claims that nobody was ever paid for.
-    let _ = node.settle_at(&timestamp());
+    let _ = node.settle_at(&now);
 }
 
 /// `Service` is the key source `swarm` needs.
@@ -975,5 +1011,45 @@ fn apply_records(node: &mut Node, peer: &Peer) {
 impl crate::swarm::tcp::KeySource for Service {
     fn key_for(&self, peer: &PeerId) -> Option<PeerPublic> {
         Service::key_for(self, peer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canonical::Value;
+    use crate::ledger::Ledger;
+
+    #[test]
+    fn a_future_record_cannot_advance_the_local_settlement_clock() {
+        let root =
+            std::env::temp_dir().join(format!("cairn-p2p-future-clock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ledger = Ledger::open(root.join("log.jsonl")).unwrap();
+        let mut node = Node::new(ledger, &root);
+        let objective = Objective::new(
+            "GOAL-future",
+            "must wait for its epoch",
+            Value::object([
+                ("kind", Value::string("certificate")),
+                ("checker", Value::string("checker.py")),
+                ("checker_sha256", Value::string("aa".repeat(32))),
+                ("entrypoint", Value::string("check")),
+            ]),
+            1,
+            "treasury",
+            "9999-01-01T00:00:00+00:00",
+            None,
+            None,
+        )
+        .unwrap();
+        replay_records_at(
+            &mut node,
+            &[("objective".into(), objective.to_value())],
+            "2026-08-18T00:00:00+00:00",
+        );
+        assert!(node.ledger().is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
