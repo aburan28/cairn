@@ -291,8 +291,8 @@ rule "A's main loop is still running, several ticks in"
 #
 # It looked healthy, because one startup pass is all a two-node sync needs --
 # which is precisely what the rest of this script exercises. Queueing a
-# submission *after* startup is what tells the difference: it can only be
-# admitted by a loop that is still going round.
+# proposal *after* startup is what tells the difference: it can only disappear
+# from the spool after a loop that is still going round drains it.
 BEFORE=$(entries "$A/log.jsonl")
 # Submitted the way a stranger would, over HTTP, rather than by writing the
 # spool file directly: that exercises the boundary shape check and the 202 as
@@ -314,16 +314,25 @@ print(f"  POST /submit -> {status} (queued, explicitly not admitted)")
 raise SystemExit(0 if status == 202 else 1)
 PY
 for _ in $(seq 1 40); do
-  [ "$(entries "$A/log.jsonl")" -gt "$BEFORE" ] && break
+  [ "$(find "$A/queue" -maxdepth 1 -type f -name '*.json' | wc -l)" -eq 0 ] && break
   sleep 0.5
 done
 AFTER=$(entries "$A/log.jsonl")
 echo "  log went from $BEFORE to $AFTER entries"
-[ "$AFTER" -gt "$BEFORE" ] || {
+[ "$(find "$A/queue" -maxdepth 1 -type f -name '*.json' | wc -l)" -eq 0 ] || {
   sed 's/^/  /' "$A/daemon.log"
-  fail "the daemon never drained: its main loop stopped after the first tick"
+  fail "the daemon never drained the queue: its main loop stopped after the first tick"
 }
-[ "$(ls "$A/queue" | wc -l)" -eq 0 ] || fail "the drained record was left in the spool"
+LATE_COMMITMENTS=$(python3 -c "
+import json
+print(sum(1 for line in open('$A/log.jsonl')
+          if (entry := json.loads(line)).get('kind') == 'commitment'
+          and entry.get('payload', {}).get('submitter') == 'late'))")
+[ "$LATE_COMMITMENTS" -eq 0 ] \
+  || fail "the stale queued commitment entered the log despite its false admission epoch"
+grep -q "commitment declares epoch .* but was admitted in epoch" "$A/daemon.log" \
+  || fail "the stale queued commitment disappeared without a recorded refusal"
+echo "  stale commitment refused and removed; unrelated P2P writes remain allowed"
 
 rule "the roots differ, and that is the design"
 A_ROOT=$("$RUST" --log "$A/log.jsonl" --root "$A" audit | awk '/^merkle/ {print $2}')
