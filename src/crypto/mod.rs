@@ -135,6 +135,7 @@
 //!   operator. Encryption does not change who can be served a subpoena; only
 //!   decentralized inclusion does (§7).
 
+pub mod bignum;
 pub mod envelope;
 pub mod gf;
 pub mod identity;

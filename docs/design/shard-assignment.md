@@ -3,11 +3,18 @@
 **Status: analysis only. Nothing here is built, and the headline result is
 weaker than it first looks — the arithmetic in §2 is the point of the note.**
 
-[`threat-model.md`](../threat-model.md) carries **availability sybils** as *not
-handled*: a fixed pot bounds a funder's cost however many nodes appear, but
-nothing prices identity, so ten keys behind one disk answer ten samples from one
-copy and take ten shares. The answer on the roadmap is a bond
-(`incentive::NodeParams::stake`), parked at Stage 2.
+[`threat-model.md`](../threat-model.md) carried **availability sybils** as *not
+handled* when this note was written: a fixed pot bounded a funder's cost however
+many nodes appeared, but nothing priced identity, so ten keys behind one disk
+answered ten samples from one copy and took ten shares.
+
+**That has since changed at the whole-log level.** An undertaking carries a
+`bond` backed by units the log says the identity earned, and the pool is split
+in proportion to it, which makes the payout invariant to splitting one operator
+into many. The row now reads *profit handled, existence not*. What is below
+still stands: it is about pricing identity at *shard* granularity, and about the
+harder half neither mechanism closes — that an answer proves the entry was
+**produced**, not **stored**.
 
 [`shards.md`](../shards.md) landed for unrelated reasons — durability per byte,
 and blame at chunk granularity. This note records something it happens to buy
@@ -67,7 +74,10 @@ a sybil's take stops growing the moment it stops adding shards.
 
 This is the cheap half of the whole note. It needs no bond, no proof system, and
 no new cryptography: it is a change to how a settlement divides, in the same
-place `AvailabilityPool` already divides equally among answers.
+place `AvailabilityPool` already divides — which now divides by bond rather than
+equally among answers, so the two rules compose rather than compete: the bond
+bounds a sybil's take across the whole log, and per-shard settlement would bound
+it per blob.
 
 It also fixes something the equal-split rule gets wrong for honest nodes.
 Three holders all keeping shard 0 and nobody keeping shard 5 is a blob one
@@ -147,9 +157,14 @@ adding it yet rather than for adding it carefully.
 
 ## 6. Recommendation
 
-1. **Nothing now.** The availability pool should not carry real money before the
-   bond exists, which `threat-model.md` already says, and until it does, every
-   improvement here is to the pricing of a currency nobody is spending.
+1. **Nothing now.** The bond has since landed — `records::Undertaking` carries
+   one, backed by units the log says the identity earned, and the pool is split
+   in proportion to it — so the sybil *take* is already bounded at the whole-log
+   level: splitting a stake across `n` keys earns what holding it under one
+   earns. What is still missing is the shard-level version of the same idea, and
+   the harder half either way is that an answer proves the entry was *produced*
+   rather than *stored*. Until that is closed, every improvement here is to the
+   pricing of a currency nobody is spending.
 2. **When it does carry money, pay per shard covered before doing anything
    else.** It is a settlement rule, it bounds the sybil take by construction,
    and it corrects an honest-case error — paying three holders of shard 0 in

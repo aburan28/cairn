@@ -50,6 +50,15 @@ honest submission by taking verifiers offline.
 **No floats anywhere near money or identity.** `canonical::Value` has no float
 variant, deliberately. Do not add one.
 
+**A cipher bump needs a known-answer test, not a round-trip.** Every round-trip
+test in this crate seals and opens in one process with one build, so it passes
+for any construction that is merely self-consistent -- including one that has
+quietly changed. A sealed store and a recorded transport frame both outlive the
+binary that wrote them. `the_aead_matches_the_rfc_8439_vector` in
+`src/crypto/envelope.rs` pins the bytes against the IETF vector; the conformance
+vectors do the same job for signatures, which is how `ed25519-dalek 2 -> 3` was
+taken without regenerating anything.
+
 **Money arithmetic is checked.** `overflow-checks` is on in release too. Use
 `u128` intermediates and return errors rather than wrapping.
 
@@ -84,7 +93,12 @@ claim and you hand every submitter a free lottery ticket per restamp.
 
 - `cargo test --all-targets`
 - `cargo test --manifest-path reference/rust/Cargo.toml` and
-  `cairn-reference conformance conformance/vectors.json`
+  `cairn-reference conformance conformance/vectors.json`.
+  Run it a few times if you touched anything that spawns a process. The Lean
+  stand-in writes a script and execs it, and a `fork` from any other test thread
+  in that window hands the child a duplicate of the still-open write descriptor,
+  so the exec gets `ETXTBSY`. It fired one run in five under load and went
+  unnoticed for months, because nobody ran that suite twice in a row
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --all-features`.
   CI has always run this and this list did not say so, which is a good way to
@@ -112,6 +126,48 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `./scripts/demo.sh`, `./scripts/ratchet-demo.sh` and `./scripts/try-demo.sh`
   if you touched the CLI or the rules; they are the only checks that exercise
   epoch boundaries against a real clock rather than a fixture timestamp
+- `cargo run --release --bin arena` if you touched any *incentive*: a bond, a
+  pool split, a slash, a window, or what a settlement mints. It plays attack
+  strategies for money against the real rules engine and prints what each one
+  earned. A defence that stops working shows up as a verdict changing from
+  CLOSED/NEUTRAL/REFUSED/PROTECTED to OPEN, and `tests/arena.rs` pins them.
+  Read `docs/arena.md` before adding a scenario -- three of the first five
+  measured nothing, and the INERT verdict exists to say so out loud
+- Anything touching `src/tier.rs` or a balance: run `cargo test --test tiers`
+  **and** revert the audit's copy of the rule to check the injection test still
+  fails. A rule enforced only at admission is a rule a log imported from a peer
+  does not have, and this repository has shipped that bug **three times** — most
+  recently in `audit_attestations`, which re-derived the signature, the
+  duplicate rule, the claim and every slash, and not whether the attestor could
+  cover the bond it staked.
+  A bond needs the *timed* version of the check, `spendable_within(who,
+  entry.seq)`, not the whole-log one. Both conservation sums are totals, so an
+  identity that was broke at entry `n` and paid at entry `n + k` balances
+  exactly — and the bond it staked in between was money it did not have. The
+  typed sum catches that only when the payout landed in a different tier, which
+  is a property of the fixture rather than a rule
+- `./scripts/dispute-demo.sh` if you touched `src/challenge/`, the challenge
+  records, or the balance derivation. It is the only check that runs a bonded
+  dispute end to end *and* hands the finished log to `reference/rust` -- and
+  the money a dispute moves is exactly the kind of thing a second
+  implementation certifies clean by not knowing about it
+- `./scripts/canary-demo.sh` if you touched `src/canary.rs`, the verifier
+  registry, or the audit's wording. It is the only place the three costs sit
+  side by side on one log: the cheap audit passes a rubber-stamper, the
+  re-running audit catches it for the price of every verifier in the log, and a
+  docket catches it for the price of the cheap one. Change any of the three and
+  the comparison is what tells you which
+- `./scripts/attestation-demo.sh` if you touched `src/canary.rs`, the
+  attestation records, `VERIFICATION_BOND`, or the window a bond returns after.
+  It is the only place the free half and the expensive half of the mechanism run
+  on one log with the money visible between them, and it hands the finished log
+  to `reference/rust` — which is what stops a second implementation certifying a
+  slash clean by not knowing the record kind exists. Read
+  `docs/bonded-verification.md` first, and note the trap the arena fell into: a
+  checker whose verdict turns on a **boolean** cannot be made to reject by any
+  canary the generator can mint, because every edit it makes is shape- and
+  length-preserving over numbers and strings. Ask `Docket::mix` before believing
+  a docket is whole
 - `git ls-files -s scripts/` if you **added** a script CI runs as
   `./scripts/x.sh`. It must be `100755`; two landed as `100644` in one week and
   CI died on `Permission denied`, because `core.filemode` is false in the

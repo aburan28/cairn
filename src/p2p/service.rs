@@ -405,7 +405,7 @@ impl Service {
     /// The address book is already the cache: an endpoint is an address *and* a
     /// key, and `p2p::dht`'s `GetKey` is what fills it. This exposes that cache
     /// so a subsystem holding only an id can complete it -- see
-    /// [`crate::swarm::tcp::KeySource`], which `Service` implements over this.
+    /// [`crate::p2p::swarm::tcp::KeySource`], which `Service` implements over this.
     pub fn key_for(&self, peer: &PeerId) -> Option<PeerPublic> {
         self.with_book(|book| book.for_peer(peer).first().map(|e| e.peer.clone()))
     }
@@ -1008,7 +1008,7 @@ fn apply_records(node: &mut Node, peer: &Peer) {
 /// This is the fold arriving as an interface rather than a deletion: `swarm`
 /// stops having its own answer to "where does a transport key come from" and
 /// consumes `p2p`'s, which is the direction `docs/roadmap.md` asks for.
-impl crate::swarm::tcp::KeySource for Service {
+impl crate::p2p::swarm::tcp::KeySource for Service {
     fn key_for(&self, peer: &PeerId) -> Option<PeerPublic> {
         Service::key_for(self, peer)
     }

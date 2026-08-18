@@ -355,52 +355,132 @@ peer-to-peer good.
 somebody else's compute should post an objective, which is the same transaction
 with the verification attached.
 
-## The sub-game `src/incentive/` needs
+## The sub-game, solved
 
 Everything above is an argument. The house style is that arguments about
-equilibria get solved rather than asserted, and this one has a shape the harness
-already supports: interchangeable players, a small action set, exact rational
+equilibria get solved rather than asserted, and this one had a shape the harness
+already supported: interchangeable players, a small action set, exact rational
 payoffs, `Symmetric`.
 
+Built, as `src/incentive/market.rs`, and runnable:
+
+```sh
+cairn incentives --market
+cairn incentives --agents 200 --exclusion 1/100
+```
+
 A fourth sub-game beside `Verification`, `Availability` and `Custody`. An agent
-holds a sub-frontier candidate and chooses:
+holds a sub-frontier candidate and chooses `Gossip`, `Sell`, `Hoard` or
+`Publish`. Every action is scored on the same option value and they differ in how
+many **rivals** each creates — a hoarder none, a seller one and only if a buyer
+turns up, a gossiper or publisher the whole population. That term is what makes
+the model coherent rather than merely rough: a sale is a *copy*, so without it
+selling would strictly dominate hoarding at every profile and the game would have
+nothing to say.
 
-| action | payoff sketch |
+### What it reports
+
+At the reference market — 50 agents, a candidate worth 2,000, a commons worth
+6,000, a fifth of agents able to buy, a fifth of the commons withholdable:
+
+| | |
 |---|---|
-| `Gossip` | 0, plus the reciprocity value of everyone else's gossip |
-| `Sell` | π, minus the reciprocity forgone, where π falls as more agents gossip |
-| `Hoard` | option value of finishing alone, times the chance nobody beats you |
-| `Publish` | Δ + φ when the candidate advances the frontier; zero when it does not |
+| equilibria | `gossip ×50` **strict**, `sell ×50` **strict** |
+| to break universal gossip | **18** (sell) |
+| to leave universal selling | **34** (gossip) |
+| tipping point | **17 sellers** |
+| exclusion needed | **7/1000** |
+| sybil gain | **0** |
 
-New parameters, all of them things somebody has to measure: the value of a
-candidate to its holder, the value of the population to a searcher, the market
-fee, the fraction of agents with the capital to buy, and the rate at which
-candidates advance the frontier.
+**1. Is `Gossip` still a best response once `Sell` exists?** Yes, and strictly.
+A seller in a sharing population is selling something everybody already has, so
+the price collapses to nothing and all that is left is the reciprocity it gave
+up. One seller is absorbed; the population heals from sixteen.
 
-The questions worth solving for, in the order they should be answered:
+**2. Is there a rival equilibrium where everybody sells?** Yes, and it is strict
+too. The market is **bistable**, exactly as this document guessed — the same
+shape as verification without canaries.
 
-1. **Is `Gossip` still a best response once `Sell` exists**, and at what fraction
-   of sellers does the population stop being worth having? The tipping-point
-   machinery in `dynamics` answers exactly this shape of question, and the answer
-   decides whether to build any of it.
-2. **Is there a rival equilibrium** where everybody sells and nobody gossips? If
-   there is, this is bistable in the same way verification is without canaries,
-   and a shared client default gets there in one step.
-3. **What is the smallest reserved citation share** that makes dilution
-   unprofitable at a given fanout — the inverse question `design` is for.
-4. **Is the market sybil-proof** under a per-identity reward rule? It is not, for
-   the reason `RewardRule` already documents; the report should price the rejected
-   alternative rather than assume it away.
+**3. The smallest reserved citation share** is a question about citation flow,
+not about this game, and `FlowParams::with_reserved` is where it is answered.
+Modelling it here would mean two models of one mechanism.
+
+**4. Is the market sybil-proof?** Under the mechanism as specified — where no
+protocol payment keys off trade volume — splitting buys exactly zero, over
+sixteen identity counts. That is not the mechanism being clever; it is the
+absence of a volume-keyed payment doing what this document said it would, and it
+is worth measuring so that adding one later fails a test rather than a network.
+
+### The finding that was not guessed
+
+**The barriers are asymmetric, and which way they lean is set by the one knob a
+protocol actually has.**
+
+At fifty agents and the reference parameters, eighteen sellers break the commons
+and thirty-four gossipers are needed to bring it back — a one-way door into the
+market. But vary the *exclusion*, the share of the gossip stream a transport can
+withhold from an agent that takes and does not give, and the door swings the
+other way:
+
+| exclusion | agents | to break gossip | to leave selling |
+|---|---|---|---|
+| 1/100 | 200 | 28 | 174 |
+| 1/20 | 200 | 88 | 114 |
+| 1/5 | 200 | 151 | 51 |
+
+A leaky commons makes *selling* the sticky equilibrium, and stickier as the
+population grows. A commons that can withhold a fifth makes *gossip* the sticky
+one, and that gets stickier with population too. The crossover sits near a
+twentieth.
+
+So there are two different numbers about exclusion and quoting one for the other
+would be a mistake:
+
+- **7 parts in a thousand** is what makes universal gossip an equilibrium *at
+  all*. Almost any exclusion clears it. At exactly zero it is not an equilibrium;
+  at 0.7% it is strict.
+- **Somewhere near a twentieth** is what makes it the equilibrium a network falls
+  back into. That is a much larger number, and it is the one a transport has to
+  hit.
+
+A related trap, and the reason `MarketReport` carries an *action* rather than a
+count: at twenty agents with a leaky commons, the cheapest way out of universal
+gossip is not selling at all — it is a single **hoarder**. A report that filtered
+for sellers would have said "selling is never profitable here", which is true and
+the opposite of reassuring.
+
+### What that means for scope
+
+Stage 2 stays gated, and now for a stated reason rather than an unanswered
+question. The commons survives contact with a market — but *only where the
+commons already exists and can withhold something*. A market that arrives before
+the gossip transport does not have a population to survive, and every number
+above assumes fifty agents already sharing.
+
+The honest ordering is therefore: the transport first, exclusion measured on the
+real thing second, offers third. The transport is the piece that does not exist
+yet, and its leakiness is now a design parameter with a target rather than an
+afterthought.
 
 ## Scope, in order
 
 **Before any of it — the gates.** These change how money moves and cannot be
 retrofitted onto settled claims.
 
-- [ ] Reserved citation share for protocol-enforced citations, so the ratchet's
-      guarantee survives a free supply of citable claims.
-- [ ] Reward-weighted discretionary split, with the conformance vectors and the
-      reference implementation moved together.
+- [x] Reserved citation share for protocol-enforced citations, so the ratchet's
+      guarantee survives a free supply of citable claims. `FlowParams::with_reserved`
+      holds a fraction *of delta* for the citation the rules forced -- on a
+      ratchet, the frontier claim the improvement beat, re-derived from the log
+      by `Node::enforced_citations` rather than stored on the record. Measured
+      at both ends: with nothing reserved, 200 manufactured ancestors leave the
+      frontier holder **498 of the 100,000** she was owed; with half of delta
+      reserved she floors at 50,000 whatever the fanout, and with all of it
+      reserved the flow does not move at all. Default is zero, because a
+      reserve moves settled money and question 3 above has not been answered
+      yet -- the mechanism is there for the number the harness will produce.
+- [x] Reward-weighted discretionary split. Shipped: `payouts_over` delegates to
+      `payouts_weighted`, which splits delta among all transitive ancestors by
+      settled reward.
 
 **Stage 1 — agent as funder.** Everything here is enabling an existing field.
 
@@ -412,9 +492,12 @@ retrofitted onto settled claims.
       network before it funds it.
 
 **Stage 2 — the market proper**, and only if the harness says the population
-survives it.
+survives it. It does, with the one-way-door caveat above.
 
-- [ ] The `Market` sub-game in `src/incentive/`, with the four questions above.
+- [x] The `Market` sub-game in `src/incentive/market.rs`, with the four questions
+      above answered and pinned. `cairn incentives --market` exits non-zero
+      when universal gossip stops being a strict equilibrium, so the gate is
+      scriptable rather than only readable.
 - [ ] Offers on the gossip transport (which does not exist yet — the merge law
       does, the wire protocol does not).
 - [ ] Purchased-good citation enforced at submission.

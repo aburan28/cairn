@@ -69,6 +69,12 @@ page. Served from the node, the default is same-origin and there is nothing to
 configure — and the URL box still retargets it, which is the whole value here:
 comparing one node's head against a peer's must not need a redeploy.
 
+`make ui` and `make ui-build` both install from the committed lockfile with
+`npm ci` first. `cd ui && npm install && npm run dev` does the same thing by
+hand and *resolves* the lockfile rather than obeying it, which is the
+difference `npm ci` exists for. `make ui-check` runs what CI gates on:
+`tsc --noEmit` and a build.
+
 ## How the public site gets there
 
 `.github/workflows/pages.yml` builds this app at whatever base path Pages

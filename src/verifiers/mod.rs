@@ -578,6 +578,13 @@ def main():
         out = {"ok": result, "detail": ""}
     elif isinstance(result, int):
         out = {"score": result}
+    elif isinstance(result, (dict, list)):
+        # A structured return. No verifier kind accepts one -- a checker owes a
+        # bool and an evaluator an int -- so for those this is still an error,
+        # and `value_type` is carried so the diagnostic can name the type
+        # exactly as `bad_return` used to. What it is *for* is the stepper in
+        # `crate::challenge`, whose whole job is to return the next state.
+        out = {"value": result, "value_type": type(result).__name__}
     else:
         out = {"bad_return": type(result).__name__}
     json.dump(out, sys.stdout)
@@ -778,6 +785,61 @@ impl VerifierRegistry {
         Kind::parse(kind).is_some()
     }
 
+    /// Run a pinned entrypoint that maps one value to another, under the same
+    /// hash pin and the same jail as a checker.
+    ///
+    /// Not a verifier and deliberately not reachable from [`VerifierRegistry::run`]:
+    /// it returns a value rather than a verdict, and nothing it produces
+    /// settles anything by itself. It exists for [`crate::challenge::Stepper`],
+    /// where a *step* of a computation is exactly a value-to-value function and
+    /// the adjudication that follows is what settles.
+    ///
+    /// It shares the whole spawn path with the verifiers — hash checked before
+    /// the subprocess exists, scrubbed environment, memory cap, wall-clock
+    /// bound — because the code being run is a stranger's either way, and a
+    /// second, laxer path to executing pinned code would be the weakest one an
+    /// attacker has to find.
+    ///
+    /// Failures come back as a non-settling [`Verdict`] for the same reason
+    /// they do everywhere else: an absent interpreter is a fact about this
+    /// node, and a dispute it cannot adjudicate must stay open rather than
+    /// resolve against whoever happens to be accused.
+    pub fn transform(
+        &self,
+        role: &str,
+        pinned: &str,
+        declared_sha256: &str,
+        entrypoint: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, Verdict> {
+        let path = self.pinned(role, pinned, declared_sha256)?;
+        let harvest =
+            self.run_pinned(role, &path, entrypoint, input, self.bounded(timeout), None)?;
+        match harvest {
+            Harvest::Json { raw, type_name } => Value::from_json(&raw).map_err(|error| {
+                // A float in a state is not a bad node, it is a spec that
+                // cannot be adjudicated: two honest machines can disagree about
+                // its bytes, so no dispute over it can ever be settled. Naming
+                // it `invalid_spec` rather than `unavailable` says which party
+                // has to fix it.
+                Verdict::invalid_spec(format!(
+                    "{role} returned a {type_name} that is not canonically \
+                     representable: {error}"
+                ))
+            }),
+            Harvest::Boolean { .. } => Err(Verdict::invalid_spec(format!(
+                "{role} returned bool, expected an object or a list"
+            ))),
+            Harvest::Score(_) | Harvest::ScoreOutOfRange(_) => Err(Verdict::invalid_spec(format!(
+                "{role} returned int, expected an object or a list"
+            ))),
+            Harvest::BadReturn(kind) => Err(Verdict::invalid_spec(format!(
+                "{role} returned {kind}, expected an object or a list"
+            ))),
+        }
+    }
+
     /// Verify `artifact` against `spec`.
     ///
     /// Total: every path returns a [`Verdict`], and every failure path returns a
@@ -874,9 +936,10 @@ impl VerifierRegistry {
             Harvest::Score(_) | Harvest::ScoreOutOfRange(_) => {
                 Verdict::invalid_spec("checker returned int, expected bool")
             }
-            Harvest::BadReturn(kind) => {
-                Verdict::invalid_spec(format!("checker returned {kind}, expected bool"))
-            }
+            Harvest::BadReturn(kind)
+            | Harvest::Json {
+                type_name: kind, ..
+            } => Verdict::invalid_spec(format!("checker returned {kind}, expected bool")),
         }
     }
 
@@ -1802,6 +1865,16 @@ enum Harvest {
     /// The entrypoint returned something of the wrong type; carries the Python
     /// type name so the verdict can say which.
     BadReturn(String),
+    /// The entrypoint returned a dict or a list.
+    ///
+    /// Still an error for all five verifier kinds, and `type_name` exists so
+    /// the diagnostic reads exactly as [`Harvest::BadReturn`]'s used to. It has
+    /// a variant of its own because a *stepper* returns one on purpose, and
+    /// re-parsing a discarded type name out of an error string would be the
+    /// worse of the two designs. `raw` is the JSON text, unparsed: a state
+    /// containing a float is refusable rather than silently rounded, and the
+    /// refusal belongs at the call site that knows what it asked for.
+    Json { raw: String, type_name: String },
 }
 
 fn parse_harvest(stdout: &str) -> Option<Harvest> {
@@ -1809,6 +1882,17 @@ fn parse_harvest(stdout: &str) -> Option<Harvest> {
     let map = parsed.as_object()?;
     if let Some(name) = map.get("bad_return").and_then(|value| value.as_str()) {
         return Some(Harvest::BadReturn(name.to_string()));
+    }
+    if let Some(value) = map.get("value") {
+        let type_name = map
+            .get("value_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("object")
+            .to_string();
+        return Some(Harvest::Json {
+            raw: value.to_string(),
+            type_name,
+        });
     }
     if let Some(ok) = map.get("ok").and_then(|value| value.as_bool()) {
         let detail = map
@@ -1876,7 +1960,10 @@ fn score_verdict(
                  the comparison"
             ))
         }
-        Harvest::BadReturn(kind) => {
+        Harvest::BadReturn(kind)
+        | Harvest::Json {
+            type_name: kind, ..
+        } => {
             return Verdict::invalid_spec(format!(
                 "{role} returned {kind}; scores must be int so every node agrees on \
                  the comparison"

@@ -8,8 +8,8 @@ reverse of how these projects are usually built.
 One operator. Objectives with runnable pinned verifiers, commit–reveal,
 hash-linked append-only log, exact-conservation attribution, and an `audit` that
 re-derives every settled result from the artifacts. Plus the coordination layer:
-progressive bounties (`frontier.py`), a CRDT candidate population (`gossip.py`),
-and coordinator-free work assignment (`partition.py`).
+progressive bounties (`src/frontier.rs`), a CRDT candidate population
+(`src/gossip.rs`), and coordinator-free work assignment (`src/partition.rs`).
 
 The property this buys is not "no one is in charge". It is **anyone can check**
 — and that is most of the value of decentralization, at none of the cost.
@@ -57,7 +57,7 @@ behaviour ships and is tested, not that TLC has checked it.
 - [x] Objective schemas in `spec/` wired into `post` as a hard validation gate.
       The schema documents are the validator: both implementations interpret
       `spec/*.json` rather than reimplementing them, so the two cannot drift.
-- [x] **Piece-level blob transfer** (`src/swarm/`), in the BitTorrent shape:
+- [x] **Piece-level blob transfer** (`src/p2p/swarm/`), in the BitTorrent shape:
       pieces, a manifest of piece hashes, bitfields, rarest-first, bounded
       pipelining, tit-for-tat choking, endgame with cancels, and a TCP driver.
       Library-only. The driver ran plaintext behind an off-by-default feature
@@ -103,14 +103,14 @@ behaviour ships and is tested, not that TLC has checked it.
       subsystem with no entry point is how the two `swarm`/`blobs` seam bugs
       survived, and `scripts/shard-demo.sh` drives six stores that share nothing
       in CI. See [shards.md](shards.md).
-- [x] **Signed peer records** (`src/swarm/discovery.rs`) in the ENR shape --
+- [x] **Signed peer records** (`src/p2p/swarm/discovery.rs`) in the ENR shape --
       identity is an ed25519 key, location is a hint signed by it, `seq`
       supersedes -- plus peer exchange, so one address given once accumulates the
       rest. This is the answer to "learning new peers is bootstrap-file only" in
       the gossip entry above, and it is not yet wired into `p2p`'s address book.
       Every hint source is equal because none is trusted, which is what makes DNS
       optional rather than load-bearing. See [discovery.md](discovery.md).
-- [x] **A Kademlia DHT** (`src/swarm/dht.rs`) for the question a fetch actually
+- [x] **A Kademlia DHT** (`src/p2p/swarm/dht.rs`) for the question a fetch actually
       asks -- who holds digest `D` right now. Peer exchange answers which peers
       exist; without provider lookup a fetch floods everyone it knows. XOR
       metric, k-buckets with oldest-live-wins, provider store with expiry, and
@@ -155,7 +155,7 @@ behaviour ships and is tested, not that TLC has checked it.
       nobody is asking for that blob any more.
 - [x] **One Kademlia, not two** (`src/dht.rs`). The metric, the k-buckets, the
       iterative lookup and the provider store are generic over a contact type;
-      `swarm::dht` and `p2p::dht` are instantiations. Written twice they would
+      `p2p::swarm::dht` and `p2p::dht` are instantiations. Written twice they would
       have drifted, and the one part of a DHT that is genuinely subtle is the
       part that must not.
 - [x] **Provider lookup in the daemon** (`src/p2p/dht.rs`). `p2p::code` is
@@ -217,13 +217,21 @@ behaviour ships and is tested, not that TLC has checked it.
       there, or **unaccounted for**, and `store status` reports the last two and
       exits 1. A future feature that writes plaintext state into a data
       directory trips it instead of slipping past.
-- [ ] Fold the rest of `src/swarm/` into `src/p2p/`. Substantially narrowed:
-      the DHT is shared, the transport is shared, and `tcp::KeySource` makes
-      `swarm` consume `p2p`'s key distribution rather than grow its own — so
-      what is left is one *discovery* stack instead of two, not one network
-      stack instead of two.
-      That last step deletes public API: `swarm::discovery`'s signed records
-      overlap `records::PeerRecord` almost exactly now (same shape, same
+- [x] **`swarm` moved under `p2p`** (`src/p2p/swarm/`). The DHT was already
+      shared, the transport was already shared, and `tcp::KeySource` already made
+      blob transfer consume `p2p`'s key distribution rather than grow its own.
+      What the move settles is the *graph*: `KeySource` is declared in the blob
+      module and implemented by `p2p::service::Service`, so as siblings the two
+      each named the other and which way the dependency really ran was something
+      a reader had to reconstruct. It runs one way, and the tree says so.
+      Nothing was deleted and no behaviour changed — every path is
+      `crate::p2p::swarm::…` and `docs/discovery.md` had been claiming
+      "library-only, no CLI subcommand drives it" for a while after
+      `blob serve | fetch` shipped, which is a doc understating what is built
+      rather than the usual failure of overstating it. Both are wrong.
+- [ ] One *discovery* stack instead of two. What is genuinely left, and it
+      deletes public API rather than moving it: `p2p::swarm::discovery`'s signed
+      records overlap `records::PeerRecord` almost exactly (same shape, same
       transport id, same `seq`-supersedes rule), and keeping both means two
       places to change one rule. It is a scope decision rather than an
       engineering one, which is why it is still open — the liability that made
@@ -328,19 +336,38 @@ behaviour ships and is tested, not that TLC has checked it.
       the answer carried only a path, so an answerer needed the entry hashes and
       no payloads at all — 10% of a log reproduced the honest answer byte for
       byte. A promise now covers the log as it stood, the share is weighted by
-      that height, one identity is paid once, and the answer carries the entry.
+      the **bond** the promiser locked, and the answer carries the entry.
       Two consensus defects came out of the same review: the sampled index moved
       whenever the log grew, and it read `CAIRN_EPOCH_SECONDS`, so the same
       log audited clean or dirty depending on the auditor's environment — six
       times in ten. Both are pinned by injection and by a cross-configuration
       run in `scripts/differential.sh`.
 
-      One bound remains and is not fixable at this stage. The answer proves a
-      node **produced** the challenged entry, not that it **stored** it, and a
-      fixed pot does not price identity: ten identities behind one disk take ten
-      shares. That is the bond in [node-incentives.md](node-incentives.md), and
-      why Stage 2 lists availability sampling as *bonded* — **an availability
-      pool should not carry real money until it exists.**
+      Identity is now *priced*, and not yet priced at anything. An undertaking
+      carries a `bond` backed by units the log says the identity was **paid**;
+      unaffordable bonds are refused on admission, filtered out of the list
+      settlement divides by, and re-derived by the audit from the prefix below
+      the record. The pot follows the bond rather than the head count, so an
+      operator splitting a fixed stake across sixteen keys earns exactly what it
+      earns holding it under one — measured both ways round in
+      `splitting_a_stake_across_many_identities_earns_what_one_identity_earns`,
+      where the old rule paid the splitter an 88% premium.
+
+      **Three bounds remain, and the first is the one that matters.**
+      `post_objective` takes no deposit, so a balance can be minted: post a
+      bounty for any sum against a verifier you chose, answer it yourself,
+      stake the proceeds, repeat per key.
+      `minting_a_bond_is_free_because_an_objective_needs_no_deposit` does it for
+      10^12 units and the log audits clean. Splitting is exactly neutral, which
+      is the property a scarce stake needs and is not by itself resistance;
+      closing it means debiting a reward from its funder's balance, which needs
+      a genesis rule and moves both implementations. Second, the answer proves
+      a node **produced** the challenged entry, not that it **stored** it —
+      closing that needs proof of replication. Third, the bond is locked but
+      never **slashed**: silence is recorded and the units are held, so a
+      penalty has something to attach to, but nothing takes them. Stage 2
+      finishes all three; **until then an availability pool should not carry
+      real money.**
 - [x] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [x] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while
@@ -401,9 +428,15 @@ This is the stage that answers the only question that matters: **will strangers
 point compute at these objectives.** If demand is zero, stop here — everything
 downstream is unbacked.
 
-- [ ] Agent proposer loop (propose → self-check against the pinned verifier →
-      submit only what already passes locally). Free verification means the
-      proposer can filter before it spends the network's time.
+- [x] Agent proposer loop. `cairn propose <objective> --artifact F
+      [--artifact G ...]` runs the pinned verifier locally on each candidate,
+      reports what each scored, and submits only the best one that already
+      passes — and on a ratchet, only one that actually beats the frontier,
+      since a claim that verifies without improving mints nothing and still
+      costs the network a verification. `--dry-run` is the same loop with the
+      submission removed, which is what an agent iterating actually wants; it
+      needs no identity, because scoring writes nothing. Exit code 2 when
+      nothing passed, so a script can tell "not ready yet" from a crash.
 - [x] Objective discovery API and a work queue. `cairn-serve` publishes
       the log and the open objectives; `POST /submit` queues proposals that
       `cairn drain` admits through the same rules engine. See
@@ -436,60 +469,302 @@ downstream is unbacked.
       trade expressed as an objective reuses escrow, settlement, audit and
       citation flow, and needs no transfer primitive. See
       [agent-market.md](agent-market.md).
-- [ ] **Reserved citation share**, and a discretionary split weighted by settled
-      reward. Citation flow divides δ evenly, which is safe only while citable
-      claims are scarce; agent funding makes them free to manufacture, and five
-      citations recover four fifths of what the ratchet promised the frontier
-      holder. A change to how settled money splits, so it lands *before* the
-      first agent-funded objective, not after — and it moves the conformance
-      vectors and the reference implementation with it.
+- [x] **Reserved citation share**, and a discretionary split weighted by settled
+      reward. The discretionary half was already shipped — δ splits among all
+      transitive ancestors by settled reward, which is slicing-invariant and
+      identity-blind. The reserve is the half that survives *manufactured*
+      ancestors, which agent funding makes cheap: `FlowParams::with_reserved`
+      holds a fraction of δ for the citation the protocol forced, and
+      `Node::enforced_citations` re-derives which that was by reading the
+      frontier as it stood below each claim's own entry — no new record, so no
+      conformance vector moves. Measured both ways: with nothing reserved, 200
+      manufactured ancestors leave the frontier holder **498 units of the
+      100,000** she was owed; with half of δ reserved the floor is 50,000 at
+      any fanout. Default zero, because a reserve moves settled money and
+      `agent-market.md`'s question 3 — the smallest reserve that makes dilution
+      unprofitable — is a question for the harness, not a constant to guess.
 - [ ] Surface the **decomposition floor** at post time. A sub-objective the
       network verifies for more than it settles is subsidized by everything else;
       the break-even is a function of the objective's verifier tier and is
       computable before anything is funded.
 
+- [x] **An adversarial arena** (`src/arena/`, [arena.md](arena.md)): attack
+      strategies played *for money* against the real rules engine, with the
+      payoff read out of settled balances. Partly discharges the largest
+      antecedent in [proving-it.md](proving-it.md) -- that `src/incentive/` is a
+      model rather than a code path.
+      Every attack runs twice, with its defence and without, because a lone
+      number has no scale. Six verdicts rather than a bool: CLOSED, NEUTRAL
+      (the attacker earns no more than an honest player with the same
+      resources -- stronger than unprofitable), REFUSED (no admissible form at
+      all), PROTECTED (the victim is better off), OPEN, and INERT.
+      INERT is the one that keeps it honest: three of the first five scenarios
+      returned it, which correctly said *the scenario failed to set itself up*
+      rather than *the defence works*.
+      At seed 1: sybil splitting NEUTRAL (5,952 across eight keys against 5,994
+      for one, where a head count would have paid 10,608); availability
+      free-riding NEUTRAL (0 against 11,994); cheap-tier standing CLOSED (5,000
+      untyped, 0 spendable where it was wanted); bonded griefing PROTECTED (the
+      griefer forfeits 6,000 and its target ends 9,000 up instead of 3,000);
+      griefing a plain objective REFUSED. Rubber-stamping was **OPEN** and pinned
+      deliberately -- a docket named the stamper and took nothing, because
+      nothing was staked on verification -- until bonded attestations landed;
+      it now reports CLOSED at 8,000 undefended against -92,000 defended, the
+      swing exactly two verification bonds. **No attack in the set is
+      profitable against its defence.**
+      It found a real defect on its first run against a griefer that opened
+      objections and prosecuted none: at the start of a dispute both sides owe
+      their endpoints, so nobody was ever overdue and a challenge nobody played
+      stayed open forever with the bond locked. The burden of prosecution is now
+      the challenger's.
+
 ## Stage 2 — permissionless verification
 
 - [ ] Contributed inference verified with a TOPLOC-class scheme, for the
       objectives where effort must be bought rather than output.
-- [ ] Bonded challenge windows and interactive fraud proofs over the replay
-      trace (the manifest already pins command, seed, and environment, which is
-      what makes a trace bisectable).
+- [x] **Bonded challenge windows and interactive fraud proofs over the replay
+      trace** (`src/challenge.rs`, `records::Challenge`, `Node::settle_challenge`,
+      `cairn dispute`, [fraud-proofs.md](fraud-proofs.md)).
+      Both parties commit to a Merkle root over the whole trace, then narrow
+      their disagreement by binary search until it is one step wide, and one
+      step of execution decides it. Every move opens a state against the
+      *mover's own* committed root, so the losing side cannot answer with
+      whatever state wins the current round -- which is the attack that would
+      make the whole thing worthless.
+      Measured on 256 states with the shipped Collatz stepper: 8 rounds of
+      search in 7.7ms, one step of adjudication in 31ms, full replay in 8.10s.
+      258x, and the ratio grows linearly with trace length because adjudication
+      is flat. A million states is 20 rounds; the 2^24 cap is 24 rounds, 48
+      records.
+      What makes an objective bisectable is a **stepper** -- a pinned entrypoint
+      from a state to the next one, since a command has an input and an output
+      and nothing in between two parties can point at. So bisectability is a
+      property an objective has or does not, and Collatz is the honest example
+      rather than a flattering one: `n -> n/2 or 3n+1` is already a step
+      function. `examples/collatz_bisectable/` pins one.
+      Two preconditions were found by tests failing rather than by review, and
+      both are now witnessed by the four moves a dispute opens with: a lie in
+      the *first* step left the interval's lower bound at a state nobody had
+      opened, so there was nothing to run; and two traces that diverge and
+      rejoin end on the same state, so the search terminated on an interval
+      whose endpoints both agree. The second is refused outright -- a challenger
+      who reaches the same answer by another route has contradicted nothing.
+      The money is wired: a challenger stakes a bond, which is committed the
+      moment the objection is, so one balance cannot fund two simultaneous
+      objections; the loser pays the winner; the audit re-derives every rule;
+      and `reference/rust` accounts for both sides of a slash, because a second
+      implementation that did not would report the winner as overdrawn and
+      certify the loser as solvent. `scripts/dispute-demo.sh` runs it through
+      the CLI and hands the finished log to the reference, which names an
+      inadmissible challenge independently.
+      What the two sides risk is asymmetric and stated rather than hidden: a
+      challenger stakes a bond, a defender stakes the disputed claim's payout
+      *capped at what they still hold*, so a defender who spends the reward
+      before the window shuts keeps the difference. Closing that means holding a
+      bisectable claim's payout until its window closes -- a settlement-path
+      change in both implementations, and the same missing piece as bonded
+      availability custody.
 - [x] **Node-operator incentives designed and evaluated** (`src/incentive/`).
       Canaried bonded verification, availability sampling, and bonded share
       custody, with a harness that solves for the minimum canary rate, bond and
       committee shape. See [node-incentives.md](node-incentives.md).
-- [ ] Canary objectives with known-invalid artifacts, so checking is the
-      profitable strategy rather than the altruistic one. The mechanism and its
-      parameters exist; the generator, which must produce canaries a node cannot
-      tell from real submissions, does not. That indistinguishability is the
-      whole assumption -- at `canary_leak = 1` the harness reports that no
-      canary rate works at all.
+- [x] **Canary objectives with known-verdict artifacts** (`src/canary.rs`,
+      `cairn canary mint|check`), so checking is the profitable strategy
+      rather than the altruistic one. The generator never authors an artifact:
+      it takes one a real contributor submitted and applies a single edit from a
+      catalogue where every edit preserves the shape *and* the canonical byte
+      length, so a canary and its parent agree on key paths, types, array
+      lengths, integer widths, string character-class profiles and total size.
+      Separating them requires running the verifier, which is the work being
+      bought. The label is earned rather than asserted -- the generator runs the
+      objective's own pinned verifier and keeps the mutant only if the verdict
+      landed where asked -- so it works on every tier and knows nothing about
+      cap sets or Collatz. A verifier that returns `unavailable` mints nothing,
+      because a canary made against a broken toolchain accuses honest nodes.
+      Both sides are minted, since only a known-*good* canary catches blind
+      rejection.
+      Measured: 1 verifier run for a bad collatz canary, 7 for a bad capset one,
+      1 for a good capset one -- and a good *collatz* canary is not mintable at
+      all, because when the whole artifact is one integer every edit to it is a
+      different answer. Known-good canaries are cheap exactly when an artifact
+      holds an unordered collection. Checking is free: 1.2 us for a docket
+      against 16 verdicts, against 547 ms for the re-verifying audit that
+      reaches the same conclusion, and the gap widens with the log.
+      The money is now built too, in the entry below.
+      Also fixed on the way past: `audit --no-rerun` printed "log verified:
+      chain intact, every settled claim re-verified" over a log where no
+      verifier had run, which was a false statement by the tool on exactly the
+      path a rubber-stamper survives.
+- [x] **Bonded verification: a signed statement of what a verifier returned,
+      slashable on a canary catch** (`records::Attestation`,
+      `Node::post_attestation`, `Node::slash_attestation`,
+      `Docket::contradicted`, `pw attest`, `scripts/attestation-demo.sh`).
+      The half the canary generator was missing. A docket always knew *which*
+      verdicts were wrong for the price of a map lookup; it could not name a
+      *party*, because a Stage-0 log has one writer and no record said who ran
+      the checker. An attestation is that record: one identity, one claim, one
+      status, signed, with 50,000 units behind it -- the reference network's
+      catch bounty, since the catcher is paid the bond.
+      Nothing at admission checks whether it is true, deliberately: asking would
+      put the verification cost back exactly where the mechanism took it out of.
+      The expensive question is asked once, by somebody who already has
+      evidence, and a verifier that cannot run slashes nothing.
+      The bond **returns** when its window shuts, and the first draft did not:
+      a permanent lock would fix the network's whole verification capacity at
+      `supply / bond` forever, which is a capital sink rather than a service
+      market. The window closes on the highest epoch any `batch` record names --
+      not on an entry's `ts`, which its own author writes, and not on log
+      height, which anybody can advance for the price of an append.
+      Both implementations re-derive every *slash* on the cheap audit path;
+      whether an unslashed attestation is true is asked only under `--rerun`,
+      which is the cost the bond exists so that nobody pays routinely. Two
+      injection tests pin that split.
+      The arena's rubber-stamping trial moved from OPEN to CLOSED, and on the
+      way found that its own pinned checker turned on a *boolean* -- which the
+      generator's shape-preserving edits cannot flip -- so the trial had been
+      running against a docket with zero known-bad canaries. `Docket::mix`
+      existed and said so; nothing was asking it.
 - [ ] Availability sampling: Merkle challenges against a published checkpoint
       root, which is the cheap half of node incentives and needs the signed
       checkpoints in Stage 0 first.
-- [ ] Bonded share custody, with the committee sized against the largest sealed
-      bounty rather than fixed. The *mechanism* now exists and runs
+- [x] **Bonded share custody, with the committee sized against the sealed value**
+      rather than fixed (`Node::committee_size_at`, `Node::custody_guard`,
+      `partition::threshold_for`). The *mechanism* now exists and runs
       (`records::CommitteeShare`, `Node::committee_for`, `Node::open_sealed`):
       seats are drawn per epoch from the log's peer records, a share published
       before the commitment's epoch closes is refused, and non-publication is
-      attributable because the draw names every seat. What is missing is the
-      money — nothing is staked, so nothing can be slashed — and the fixed
-      `COMMITTEE_SIZE` this ships with is the placeholder that sizing against
-      the sealed value would replace.
-- [ ] Claim assets typed by verification tier, non-fungible across tiers.
-- [ ] The **agent market sub-game** in `src/incentive/`, and only build the market
-      if it survives: candidates circulate through gossip because nothing prices
-      them, so pricing them may starve the population the island model runs on.
-      That is a payoff question, and the answer decides whether the rest of
-      [agent-market.md](agent-market.md) is worth building.
+      attributable because the draw names every seat.
+      The fixed `COMMITTEE_SIZE` is now a **floor**. Above it the committee
+      grows while `V > t · d · S'` — the condition under which opening early
+      pays, which [node-incentives.md](node-incentives.md) derives and says in
+      bold the committee must grow to satisfy. Stake is a member's ordinary
+      spendable balance, and a cartel is priced at the sum of its **cheapest**
+      `t` members rather than `t` times an average: with one rich member and
+      four poor ones the average reports a committee as safe that is not, and
+      the cartel that actually forms is the cheap one.
+      Measured against 1000-unit stakes at a detection rate of a half — 5 seats
+      guard 1500, 6 guard 2000, 8 guard 2500, 12 guard 3500 — so a 2200-unit
+      bounty draws 8 seats and not 5. A strict-majority threshold means an odd
+      committee guards exactly what the even one below it does, so the rule
+      always lands on an even size; a seventh seat buys liveness, not collusion
+      resistance.
+      The size comes from the epoch's **boundary prefix**, fixed before the
+      epoch's first record exists, because a submitter seals at commit time and
+      the committee opens an epoch later — a shape that moved in between would
+      leave a correctly sealed submission unopenable, at the expense of the one
+      party who sealed because they might not be able to come back. Both
+      implementations derive it, since a crate still drawing five while the
+      other drew eight would accuse an honest member of publishing from a seat
+      that does not exist.
+      A submission whose value outruns its already-fixed committee is **refused
+      at seal time**, when the submitter can still wait for a later epoch or
+      split the bounty, rather than handed a receipt for protection the
+      arithmetic says they did not get. Only on a log that declares a supply: a
+      log that has not claimed its units are scarce has not claimed this either.
+      What is still missing is a *dedicated* custody bond. The stake measured is
+      a member's whole balance, so it is not reserved against this duty and can
+      be spent elsewhere between the draw and the reveal.
+- [x] **Claim assets typed by verification tier, non-fungible across tiers**
+      (`src/tier.rs`, [tiers.md](tiers.md)). A unit minted by settling a claim
+      carries the tier of the objective's verifier and cannot be spent in
+      another. Five kinds, five tiers, **no ordering and no exchange rate** -- a
+      conversion however priced is a route by which the cheapest tier ends up
+      valuing every other one, which is the thing being prevented.
+      The attack it closes: run a cheap certificate mill, then spend the
+      proceeds where expensive work is priced. Every bond here is drawn from a
+      balance -- an availability undertaking, a dispute challenge, and the stake
+      a committee is now *sized against* -- and until this landed a balance had
+      no provenance. Sizing the committee against members' stakes made the
+      attack more valuable rather than less.
+      The tier is derived from the objective record rather than stored beside
+      it: a stored field is a second place it could be wrong, and a settlement
+      claiming a tier its verifier does not have is exactly the forgery. There
+      is nothing to forge when the tier *is* the verifier.
+      Genesis issuance stays **universal** and spends anywhere, which is a
+      necessity rather than an exemption: a network whose founding supply were
+      typed could never fund its first Lean objective, because the units to fund
+      it could only come from settling a Lean objective nobody could fund.
+      A commitment draws from its own tier first and the reserve after, so the
+      reserve is shared and a per-tier balance cannot be independent columns:
+      promising it to one tier has to move every other tier's column, or the
+      same hundred units get offered five times. `tier::Ledger` is that
+      arithmetic and `solvent()` is the per-identity statement.
+      The whole-balance conservation check does not catch this -- an identity
+      can hold exactly what it promised *in total* while having promised Lean
+      units it earned on certificates. That log balances and is still a forgery,
+      so `audit_tiers` walks it per tier in **both** crates.
+      Not typed yet, and named rather than left to be discovered: service bonds
+      are charged in universal, so a contributor with a large Lean balance
+      cannot back a committee seat with it either. Closing that means deciding
+      which tier a committee seat is denominated in, which is a question about
+      what custody is rather than about arithmetic.
+- [x] The **agent market sub-game** (`src/incentive/market.rs`,
+      `cairn incentives --market`). The gate on the rest of
+      [agent-market.md](agent-market.md), and it has an answer.
+      Four actions -- gossip, sell, hoard, publish -- scored on one option value
+      and differing in how many **rivals** each creates: a hoarder none, a seller
+      one and only if a buyer turns up, a gossiper or publisher the whole
+      population. Without that term the model is incoherent rather than rough,
+      because a sale is a *copy* and selling would dominate hoarding everywhere.
+      **The commons survives.** Universal gossip is a strict equilibrium: a
+      seller in a sharing population is selling what everybody already has, so
+      the price collapses and only the forgone reciprocity is left. One seller is
+      absorbed and the population heals from sixteen.
+      **And universal selling is a strict equilibrium too**, so the market is
+      bistable in exactly the way verification is without canaries. The finding
+      nobody had guessed is that the barriers are asymmetric *and that the one
+      knob a protocol has decides which way they lean*: how much of the gossip
+      stream a transport can withhold from a taker. At a hundredth, 28 sellers
+      break a 200-agent commons and 174 gossipers are needed to recover it; at a
+      fifth the same measurement reverses to 151 against 51. The crossover is
+      near a twentieth.
+      So there are two numbers and quoting one for the other is a mistake.
+      **7 parts in a thousand** makes gossip an equilibrium at all; **about a
+      twentieth** makes it the one a network falls back into.
+      Also worth the reporting discipline it forced: at twenty agents with a
+      leaky commons the cheapest deviation from universal gossip is a single
+      **hoarder**, not a seller. `MarketReport` carries the action rather than a
+      count, because filtering for sellers would have called that "selling never
+      profits".
+      Splitting across identities buys exactly zero, because nothing keys on
+      trade volume -- measured so that adding such a payment later fails a test
+      rather than a network.
 - [ ] Offers on the gossip transport, trades in the log — and purchased goods
       cited at submission, enforced the way the frontier citation already is.
-- [ ] A real randomness beacon (VDF or threshold signature) replacing the
-      ledger-head derivation in `partition.py`, which a sequencer can grind.
-      This got more load-bearing when epoch-batched settlement started ordering
-      a batch by that beacon: grinding the anchor now moves money, not just
-      work assignment.
+- [x] A real randomness beacon. `src/vdf.rs` is a Wesolowski verifiable delay
+      function over the RSA-2048 challenge modulus — a **nothing-up-my-sleeve**
+      parameter, because a VDF over a modulus somebody knows the factorisation
+      of is not a delay at all: the holder of `phi(N)` reduces the exponent and
+      answers instantly.
+
+      `cairn beacon --orders E --delay T` computes `x^(2^T) mod N` over a
+      seed derived from the log's own Merkle root, and records the answer with
+      its proof. Grinding the anchor used to cost a hash per candidate ordering;
+      it now costs `T` sequential squarings per candidate, and they cannot be
+      parallelised. Better than the chain beacon in one further respect: a chain
+      beacon is *provenance* — "this is what block N held" — and checking it
+      needs an RPC endpoint, while a delay proof is checked against the log
+      alone, which is the one guarantee this project spends everything else to
+      keep.
+
+      Verification is constant in `T`: two exponentiations by a 127-bit
+      Fiat–Shamir prime, about 5ms whatever the difficulty, against 741ms to
+      *produce* a beacon at T = 100,000. The first version of `verify` computed
+      `2^T mod l` by doubling `T` times and so cost the same order as proving,
+      which is the one thing a verifiable *delay* function must not do;
+      `verifying_costs_the_same_at_any_difficulty` pins it.
+
+      Underneath is `src/crypto/bignum.rs` — the crate's only arbitrary-precision
+      arithmetic, Montgomery form, every operation pinned against vectors from
+      Python's integers so a carry bug cannot agree with the test that checks
+      it.
+
+      What it does not do: bound *withholding*. A sequencer that dislikes the
+      beacon it computed can still publish none, and the epoch settles under the
+      documented fallback with `epochs_without_beacon` naming it —
+      `CAIRN_REQUIRE_BEACON` makes that refusable rather than invisible.
+      Refusing to settle instead would strand every claim in the epoch, which
+      hands a censor a better weapon than the one being taken away.
 - [ ] Forced inclusion via a base layer. Censorship is the primary threat --
       withholding a reveal steals a bounty -- and Stage 0 has no defence.
 
@@ -497,8 +772,8 @@ downstream is unbacked.
 
 Not an L1. A rollup on an established chain: the bootstrap circularity (stake
 value <- settled research <- chain) has no starting point, and the state
-transition is already the pure function in `node.py` with `audit()` as the
-re-derivation a fraud proof needs. See docs/consensus.md.
+transition is already the pure function in `src/node.rs` with `Node::audit` as
+the re-derivation a fraud proof needs. See docs/consensus.md.
 
 - [ ] Anchor commitments and settlement roots to a base layer.
 - [ ] Staked judgement layer for V4 questions, with disputes and slashing —

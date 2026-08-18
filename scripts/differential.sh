@@ -189,15 +189,64 @@ rule "availability"
 # result from one that is not looking gets quoted as agreement.
 AVAIL="$WORK/availability"
 mkdir -p "$AVAIL"
+# The verifier resolves an objective's pinned code relative to `--root`, and the
+# funding cycle below actually *runs* it -- the rest of this section only posts
+# records. So the examples have to exist under the work root, and copying them
+# is better than pointing `--root` at the repository: `post` publishes pinned
+# code into the root's blob store, and a differential run must not write into
+# the working tree it is testing.
+mkdir -p "$AVAIL/examples"
+cp -r examples/collatz examples/capset "$AVAIL/examples/"
 export CAIRN_EPOCH_SECONDS=2
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" identity --out "$AVAIL/alice.json" >/dev/null
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" identity --out "$AVAIL/bob.json" >/dev/null
-"$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" post examples/collatz/objective.json >/dev/null
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" availability fund \
   --funder treasury --per-epoch 7 --from-epoch 0 --to-epoch 4000000000 >/dev/null
+
+# A reveal must land a strictly later epoch than its commitment, and a batch
+# may not settle until the finality window has passed on top of that. Same
+# shape as `demo.sh`, and read from the environment for the same reason: a
+# hard-coded count is a second copy of a rule that can move.
+tick() { sleep 3; }
+settle_tick() { tick; local i; for ((i = 0; i < ${CAIRN_FINALITY_EPOCHS:-1}; i++)); do tick; done; }
+
+# A bond has to be backed by units the log says the identity *earned*, so both
+# nodes run a real objective/commit/reveal/settle cycle before they can promise
+# anything. That is a property worth seeing in a shell script rather than only
+# in a unit test: a fresh key cannot stake, which is exactly what makes the
+# stake scarce and the sybil weighting worth having. One objective each,
+# because a non-ratcheted objective settles once and pays one submitter.
+for who in alice bob; do
+  case "$who" in
+    alice) EXAMPLE=collatz ;;
+    bob)   EXAMPLE=capset ;;
+  esac
+  OBJ=$("$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" \
+    post "examples/$EXAMPLE/objective.json" | head -1 | awk '{print $2}')
+  "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" commit "$OBJ" \
+    --identity "$AVAIL/$who.json" \
+    --artifact "examples/$EXAMPLE/artifact.json" --nonce "n-$who" >/dev/null
+  tick
+  "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" reveal "$OBJ" \
+    --identity "$AVAIL/$who.json" \
+    --artifact "examples/$EXAMPLE/artifact.json" --nonce "n-$who" >/dev/null
+  settle_tick
+  "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" settle >/dev/null
+  # The bond below is only as real as this payout, so a cycle that silently
+  # failed to settle stops the script here rather than fifty lines later at
+  # `bonds N units against a balance of 0`, which reads like a bug in the rule
+  # rather than a fixture that did not earn.
+  KEY=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["public"])' \
+    "$AVAIL/$who.json")
+  grep -q "\"kind\":\"settlement\".*\"submitter\":\"$KEY\"" "$AVAIL/log.jsonl" \
+    || fail "$who was never paid, so its bond would have nothing behind it"
+done
+
+# Equal bonds, so the settlement below splits evenly and the two implementations
+# are compared on the same arithmetic they would face with unequal ones.
 for who in alice bob; do
   "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" availability undertake \
-    --identity "$AVAIL/$who.json" >/dev/null
+    --identity "$AVAIL/$who.json" --bond 1000 >/dev/null
 done
 EPOCH=$("$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" availability status \
   | head -1 | sed 's/epoch \([0-9]*\).*/\1/')
@@ -217,27 +266,17 @@ esac
 # answer that was right when written became wrong two entries later.
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" post examples/collatz/objective.json \
   >/dev/null 2>&1 || true
-unset CAIRN_EPOCH_SECONDS
 
-# The same log, audited under three different epoch lengths, must give the same
-# answer. `CAIRN_EPOCH_SECONDS` is a demo affordance -- it exists so a shell
-# script can cross an epoch boundary -- and `partition`'s own documentation
-# promises that "nothing derived from it enters a record". Availability sampling
-# broke that promise by reaching for it to place the anchor in time: the same
-# log then audited clean or dirty depending on how the auditor happened to be
-# configured, six times out of ten. A rule that depends on an environment
-# variable is not a consensus rule, and one that fails six times in ten reads as
-# flakiness rather than as a bug, which is the worst shape it could have.
-for LENGTH in 2 600 3600; do
-  CAIRN_EPOCH_SECONDS=$LENGTH "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" \
-    audit >/dev/null \
-    || fail "the primary rejects its own availability log at epoch length $LENGTH"
-  CAIRN_EPOCH_SECONDS=$LENGTH "$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" \
-    audit >/dev/null \
-    || fail "the reference rejects the availability log at epoch length $LENGTH"
-done
-echo "  both audit it clean at epoch lengths 2, 600 and 3600"
-
+# The whole-log audit, still at the length this log was actually written under.
+# Ordinary claim settlement batches are not epoch-length-portable the way
+# availability records are meant to be: a batch's recorded `epoch` is
+# `timestamp / epoch_seconds` at write time, so re-deriving it at a different
+# length asks whether some claim's `timestamp / other_length` happens to equal
+# a number computed at a different scale entirely -- it never does, for any
+# log with more than one write-time length in play. That is not a bug in the
+# batching rule; it is the reason `avail_findings` below narrows to the
+# *availability* records rather than asserting the whole audit is stable
+# across lengths.
 "$RUST" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit >/dev/null \
   || fail "the primary does not audit its own availability log"
 "$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit >/dev/null \
@@ -250,6 +289,38 @@ REFERENCE_ROOT=$("$REF" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit | awk '/m
 [ "$PRIMARY_ROOT" = "$REFERENCE_ROOT" ] \
   || fail "roots differ: $PRIMARY_ROOT vs $REFERENCE_ROOT"
 echo "  both audit it clean and agree on $PRIMARY_ROOT"
+
+# What the *availability* records say must not move with the reader's epoch
+# length, in either implementation. `CAIRN_EPOCH_SECONDS` is a demo
+# affordance -- it exists so a shell script can cross an epoch boundary -- and
+# `partition`'s own documentation promises that "nothing derived from it enters
+# a record". Availability sampling broke that promise by reaching for it to
+# place the anchor in time: the same log then audited clean or dirty depending
+# on how the auditor happened to be configured, six times out of ten. A rule
+# that depends on an environment variable is not a consensus rule, and one that
+# fails six times in ten reads as flakiness rather than as a bug, which is the
+# worst shape it could have.
+#
+# Stated as "the findings about these kinds are identical" rather than "the
+# whole audit passes", so it keeps testing the anchor rather than the batching
+# it sits next to. Compared across both implementations as well as across
+# lengths: a value that moved identically in both would still be a consensus
+# rule that reads the environment.
+avail_findings() {
+  CAIRN_EPOCH_SECONDS="$2" "$1" --log "$AVAIL/log.jsonl" --root "$AVAIL" audit 2>&1 \
+    | grep -E 'availability|undertaking' | sort || true
+}
+BASELINE=$(avail_findings "$RUST" 2)
+[ -z "$BASELINE" ] \
+  || fail "the availability records are not clean to begin with: $BASELINE"
+for LENGTH in 2 600 3600; do
+  [ "$(avail_findings "$RUST" "$LENGTH")" = "$BASELINE" ] \
+    || fail "the primary's availability findings move at epoch length $LENGTH"
+  [ "$(avail_findings "$REF" "$LENGTH")" = "$BASELINE" ] \
+    || fail "the reference's availability findings move at epoch length $LENGTH"
+done
+echo "  both read the same availability records at epoch lengths 2, 600 and 3600"
+unset CAIRN_EPOCH_SECONDS
 
 # And the refuse path: a promise about a root this log never had must be
 # reported by both. Appended by hand-rolling the entry so it never meets

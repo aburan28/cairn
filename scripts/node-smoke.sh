@@ -207,7 +207,13 @@ else
     || fail "the served log is not byte-identical to the operator's file"
   echo "  GET /log is byte-identical to the file on disk"
 fi
-"$RUST" --log "$WORK/fetched.jsonl" --root . audit --no-rerun | grep -q "log verified" \
+# `--no-rerun` is the cheap audit: it re-derives every rule but takes recorded
+# verdicts at their word, so it prints "chain intact and every rule
+# re-derived, but no verifier was run" rather than "log verified" -- the
+# phrase the *expensive* path uses once it has actually re-run one. Matching
+# on "chain intact", which both share, checks the audit passed without
+# assuming which of the two ran.
+"$RUST" --log "$WORK/fetched.jsonl" --root . audit --no-rerun | grep -q "chain intact" \
   || fail "the log a stranger fetched does not audit"
 echo "  a stranger's copy re-derives"
 

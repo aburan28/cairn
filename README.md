@@ -211,6 +211,10 @@ Binds `127.0.0.1:9000` (nothing needs to dial you), writes
 `.local/node.identity.json`, `.local/root.key`, and `.local/checkpoint.json`.
 The first two are private keys; `.local/` is gitignored, keep it that way.
 
+`make node` runs the same daemon with `--serve` also on, so peers, the HTTP
+publisher and (if built with the `ui` feature) the reader all come up from one
+process against one log, as described above.
+
 **One thing will stop this working, and it is not the network.** With no
 explicit `BOOTSTRAP_ARGS`, the first run generates `.local/seed.json` for
 `SEED_ADDR` with a **placeholder** public key — a real key, freshly minted, that
@@ -465,8 +469,17 @@ Every unit that reaches a participant entered as somebody's bounty. Nothing pays
 an agent for something another *agent* wanted — a decomposition, a sub-frontier
 candidate, a branch somebody else explored.
 
-The scope for closing that is [agent-market.md](docs/agent-market.md), and its
-conclusion is that **the mechanism is already here**. `Objective::funder` is a
+The scope for closing that is [agent-market.md](docs/agent-market.md), whose
+central question — *does pricing sub-frontier candidates starve the gossip
+population the search runs on?* — is now solved rather than argued.
+`cairn incentives --market` plays it out: the commons survives, universal
+gossip is a strict equilibrium, and so is universal selling. The barriers between
+them are not symmetric, and the part nobody had guessed is that **which way they
+lean is set by how leaky the gossip transport is.** At a hundredth withheld, 28
+sellers break a 200-agent commons and 174 gossipers are needed to recover it; at
+a fifth the same measurement reverses to 151 against 51.
+
+Its other conclusion is that **the mechanism is already here**. `Objective::funder` is a
 string, there is no balance and no transfer primitive anywhere in `src/`, and an
 agent-to-agent payment is best expressed as an objective rather than a transfer:
 escrow, verification, settlement, audit and citation flow then apply unchanged,
@@ -606,11 +619,19 @@ must not be a one-way door out of the claim at the top of this file. Without it,
 an operator who encrypted their own copy could no longer produce the readable log
 anyone else would audit.
 
-### `src/swarm/`: piece-level transfer and a DHT, alongside `p2p`
+### `src/p2p/swarm/`: piece-level transfer and a DHT
 
-Two things here that `src/p2p/` does not have, and one honest overlap.
+Two things here that the rest of `src/p2p/` does not have, and one honest
+overlap.
 
-**A Kademlia DHT** (`src/swarm/dht.rs`) for the question a fetch actually asks:
+It sat at `src/swarm/`, beside `p2p` rather than inside it, for most of its
+life. The move settles a cycle rather than a matter of taste: `tcp::KeySource`
+is declared here and implemented by `p2p::service::Service`, so as siblings each
+module named the other and which way the dependency ran was something a reader
+had to reconstruct. Blob transfer consumes the transport, the sessions and the
+key distribution, and nothing there consumes it back.
+
+**A Kademlia DHT** (`src/p2p/swarm/dht.rs`) for the question a fetch actually asks:
 *who holds digest `D` right now*. `p2p::discovery` answers which peers exist;
 without a provider lookup, finding a blob means asking everyone. XOR metric,
 k-buckets, provider records with expiry, and the α-parallel iterative lookup as a
@@ -864,6 +885,8 @@ examples/            worked objectives with real artifacts
 - [knowledge.md](docs/knowledge.md) — typed relations, derived standing, and reader-chosen confidence: revising knowledge without rewriting history
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
+- [bonded-verification.md](docs/bonded-verification.md) — who ran the checker, and what it costs them to lie: canaries name it for free, a bond is what a slash takes
+- [arena.md](docs/arena.md) — attack strategies played for money against the real rules engine, and what each one earned
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
 - [storage.md](docs/storage.md) — encryption at rest, the data directory, the size cap, sync
@@ -895,13 +918,25 @@ examples/            worked objectives with real artifacts
   result is novel against the literature — no mechanism settles these.
 - **Not able to pay fairly for effort that produced nothing**, which is most of
   real research. The deepest limitation, and not solved here.
+- **Not able to make service bonds carry provenance.** A unit minted by
+  settling a claim is typed by the objective's verifier tier and cannot be
+  spent in another — so a cheap certificate mill cannot fund Lean work (see
+  [docs/tiers.md](docs/tiers.md)). But availability undertakings, dispute
+  challenges and the stake a committee is sized against are all charged in
+  universal units, so a *bond* carries no provenance either way.
 - **Not able to price a shared technique.** Citation flow tracks artifacts,
   because artifacts are checkable. If you tell me "try annealing on the third
   coordinate" and I win, nothing pays you.
-- **Not running the node mechanism.** `src/incentive/` is a mechanism and its
-  evaluation, not a code path. No canary is generated, no bond is posted, no
-  Merkle challenge is issued. It exists now because the parameters it demands
-  are expensive to discover after launch.
+- **Not running the whole node mechanism.** `src/incentive/` is a mechanism and
+  its evaluation, not a code path. The verification half of it now *is* one:
+  `src/canary.rs` mints submissions whose verdict it established by running the
+  objective's own pinned verifier, `records::Attestation` puts a signed 50,000-
+  unit bond behind what an operator says a verifier returned, and
+  `cairn attest slash --docket` takes that bond — the naming costs a map
+  lookup, the taking costs one verifier run, and `docs/bonded-verification.md`
+  has the numbers. What is still only a model is the rest: no Merkle
+  availability challenge is issued, no committee seat is bonded, and **nothing
+  requires an attestation at all** — what is priced is lying, not silence.
 
 ## Prior art
 

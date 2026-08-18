@@ -128,6 +128,14 @@ pub struct Objective {
     pub deadline: Option<String>,
     pub ratchet: Option<Value>,
     pub confidentiality: String,
+    /// Epochs an embargoed artifact stays shut after its commitment's epoch.
+    ///
+    /// Inside the id when present, so a funder cannot shorten an embargo after
+    /// work has started; absent on every objective written before the field
+    /// existed, so no id moved. The *presence* of the number is what turns
+    /// enforcement on -- an embargoed objective without one is the shape the
+    /// class had when it was a label nothing checked.
+    pub embargo_epochs: Option<u64>,
     pub artifact_schema: Option<Value>,
     pub require_signed_submitter: bool,
 }
@@ -154,6 +162,9 @@ impl Objective {
                 "confidentiality",
                 Value::string(self.confidentiality.clone()),
             ));
+        }
+        if let Some(epochs) = self.embargo_epochs {
+            body.push(("embargo_epochs", Value::Int(i128::from(epochs))));
         }
         if let Some(schema) = &self.artifact_schema {
             body.push(("artifact_schema", schema.clone()));
@@ -228,6 +239,23 @@ impl Objective {
                 Some(other) => Some(other.clone()),
             },
             confidentiality,
+            // Read independently rather than trusted: an embargo the two
+            // implementations disagreed about is a committee opening an
+            // artifact one of them thinks is still shut.
+            embargo_epochs: match value.get("embargo_epochs") {
+                None | Some(Value::Null) => None,
+                Some(Value::Int(epochs)) if *epochs > 0 && *epochs <= MAX_UNITS => {
+                    Some(*epochs as u64)
+                }
+                Some(Value::Int(_)) => {
+                    return Err(RecordError(
+                        "embargo_epochs must be at least one epoch; zero is what \"public\" \
+                         already means"
+                            .into(),
+                    ))
+                }
+                Some(_) => return Err(RecordError("embargo_epochs must be an integer".into())),
+            },
             artifact_schema: match value.get("artifact_schema") {
                 None | Some(Value::Null) => None,
                 Some(other) => Some(other.clone()),
@@ -256,6 +284,13 @@ impl Objective {
             if schema.as_object().is_none() {
                 return Err(RecordError("artifact_schema must be an object".into()));
             }
+        }
+        // A length on an objective that is not embargoed is a funder who
+        // thinks they asked for delay and did not.
+        if self.embargo_epochs.is_some() && self.confidentiality != "embargoed" {
+            return Err(RecordError(
+                "embargo_epochs has no meaning without confidentiality \"embargoed\"".into(),
+            ));
         }
         Ok(())
     }
@@ -877,6 +912,7 @@ mod tests {
             deadline: None,
             ratchet: None,
             confidentiality: DEFAULT_CONFIDENTIALITY.into(),
+            embargo_epochs: None,
             artifact_schema: None,
             require_signed_submitter: false,
         }
@@ -1079,6 +1115,15 @@ pub struct Undertaking {
     pub identity: String,
     pub root: String,
     pub height: u64,
+    /// Units staked behind this promise, and the whole of its sybil resistance.
+    ///
+    /// The availability pool is split in proportion to this rather than evenly
+    /// or by height, because a stake-weighted split is the one rule that is
+    /// exactly invariant to an operator wearing forty identities instead of
+    /// one. Read independently of the primary implementation, from
+    /// `docs/node-incentives.md`; the two agreeing about it is the point of
+    /// there being two.
+    pub bond: u64,
     pub created_at: String,
     pub signature: Option<String>,
 }
@@ -1087,6 +1132,7 @@ impl Undertaking {
     pub fn signing_payload(&self) -> Value {
         Value::object([
             ("type", Value::string("undertaking")),
+            ("bond", Value::Int(i128::from(self.bond))),
             ("created_at", Value::string(self.created_at.clone())),
             ("height", Value::Int(i128::from(self.height))),
             ("identity", Value::string(self.identity.clone())),
@@ -1141,6 +1187,14 @@ impl Undertaking {
                 "undertaking height must be between 1 and 2^32 - 1".into(),
             ));
         }
+        // A promise backed by nothing earns nothing, so it is refused on
+        // admission rather than admitted at zero weight and paid nothing in
+        // silence.
+        if self.bond == 0 {
+            return Err(RecordError(
+                "undertaking bond must be at least one unit".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1149,6 +1203,7 @@ impl Undertaking {
             identity: text(value, "identity")?,
             root: text(value, "root")?,
             height: count(value, "height")?,
+            bond: count(value, "bond")?,
             created_at: text(value, "created_at")?,
             signature: optional_text(value, "signature")?,
         };

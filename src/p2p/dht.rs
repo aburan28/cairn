@@ -21,7 +21,7 @@
 //!
 //! - **Self-certifying, without a signature.** Completing a session *is* the
 //!   proof of identity: the responder decapsulates with the secret key or the
-//!   channel does not key up. [`super::super::swarm::dht`] needs a signature on
+//!   channel does not key up. [`super::swarm::dht`] needs a signature on
 //!   every contact for the same guarantee.
 //! - **A Sybil costs a McEliece keypair.** Grinding node ids to surround a key
 //!   means generating keys, and `mceliece348864` keygen is orders of magnitude

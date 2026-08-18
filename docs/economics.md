@@ -53,7 +53,7 @@ Only the first is mechanical.
 instant for V0/evaluator objectives, no judgement involved. This should be the
 overwhelming majority of value flow.
 
-**2. Recursive citation flow.** Implemented in `cairn/attribution.py`. A
+**2. Recursive citation flow.** Implemented in `src/attribution.rs`. A
 settled claim keeps `1 − δ` and sends δ upstream along the claims it cites,
 recursively, to `max_depth` hops.
 
