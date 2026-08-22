@@ -106,6 +106,32 @@ classic-mceliece-rust = { version = "3.1.0", default-features = false, features 
 ml-kem = { version = "0.3.2", features = ["zeroize"] }
 hqc-kem = "0.1.0-rc.0"
 
+# The pairing check on a drand beacon, and **the one non-post-quantum
+# primitive in this crate**. That is a decision, argued out in
+# `docs/design/drand-beacon.md`, not an oversight:
+#
+# every KEM above is post-quantum because an adversary who records a sealed
+# submission today and factors later reads it, and "later" is the only resource
+# that attack needs. BLS12-381 here verifies a *signature over a value that is
+# already public* -- a drand round number and the randomness it published. There
+# is no secret with a tail. An adversary who can forge a 2026 round in 2035
+# cannot change what a 2026 epoch settled, because that epoch's batch is in the
+# hash chain and closed years earlier. The argument does not extend to timelock
+# encryption over the same curve, and that is why tlock is not here.
+#
+# `default-features = false` drops `bits`, and with it `bitvec`: nothing in the
+# verification path iterates scalar bits. `experimental` is the gate on
+# hash-to-curve and there is no way to reach it without also pulling `digest`
+# 0.9, which **nothing in this crate calls** -- `crate::drand` supplies its own
+# `expand_message_xmd` over the `sha2` already above, so that this crate has one
+# SHA-256 implementation and not two. A third `digest` compiled and unused is a
+# real cost of that gate, stated here rather than discovered in `cargo tree`.
+#
+# Pure Rust, and that is load-bearing rather than aesthetic: `blst` is the
+# faster option and compiles C, which would put a `cc` in the graph and end the
+# static musl build that `release.yml` ships.
+bls12_381 = { version = "0.8", default-features = false, features = ["groups", "pairings", "alloc", "experimental"] }
+
 # At-rest encryption of the local store. Argon2id is used only to wrap the key
 # file with a passphrase -- the data itself is sealed with the ChaCha20-Poly1305
 # already pulled in above. A memory-hard KDF is not optional for that job: a key

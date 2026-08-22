@@ -485,11 +485,19 @@ downstream is unbacked.
       [agent-market.md](agent-market.md) is worth building.
 - [ ] Offers on the gossip transport, trades in the log — and purchased goods
       cited at submission, enforced the way the frontier citation already is.
-- [ ] A real randomness beacon (VDF or threshold signature) replacing the
-      ledger-head derivation in `partition.py`, which a sequencer can grind.
-      This got more load-bearing when epoch-batched settlement started ordering
-      a batch by that beacon: grinding the anchor now moves money, not just
-      work assignment.
+- [~] A real randomness beacon (VDF or threshold signature) replacing the
+      ledger-head derivation, which a sequencer can grind. This got more
+      load-bearing when epoch-batched settlement started ordering a batch by
+      that beacon: grinding the anchor now moves money, not just work
+      assignment. **Built, and undecided.**
+      [design/drand-beacon.md](design/drand-beacon.md) pins drand's quicknet,
+      derives the round from the epoch so nobody chooses it, and verifies the
+      threshold signature against a pinned key — in both implementations, on two
+      different BLS libraries. What is not *decided* is whether to adopt an
+      external beacon at all:
+      [design/anchored-time.md](design/anchored-time.md) recommendation 3, still
+      open. A VDF remains the answer if the network ever wants to settle with no
+      outside dependency at all.
 - [ ] Forced inclusion via a base layer. Censorship is the primary threat --
       withholding a reveal steals a bounty -- and Stage 0 has no defence.
 

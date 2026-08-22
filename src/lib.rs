@@ -26,6 +26,7 @@ pub mod corpus;
 pub mod crypto;
 pub mod daemon;
 pub mod dht;
+pub mod drand;
 pub mod frontier;
 pub mod gossip;
 pub mod hex;
