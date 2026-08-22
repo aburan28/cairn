@@ -159,6 +159,12 @@ pub fn confine(
 ) -> Result<Jailed, Unavailable> {
     let mechanism = mechanism();
     let required = require_sandbox(std::env::var(REQUIRE_ENV).ok().as_deref());
+    // Strict mode is a promise about the whole host boundary, not only the
+    // availability of a kernel jail. Replay and Lean normally inherit the
+    // operator's environment for toolchain discovery, but an objective can
+    // print those values into verdict evidence without using the network.
+    // Requiring the sandbox therefore also requires a scrubbed environment.
+    let scrub_env = effective_scrub_env(plan, required);
 
     match mechanism {
         Mechanism::None(why) if required => Err(Unavailable(format!(
@@ -166,15 +172,19 @@ pub fn confine(
              refusing to run objective-authored code unjailed"
         ))),
         Mechanism::None(_) => Ok(Jailed {
-            command: bare(program, args, plan),
+            command: bare(program, args, plan, scrub_env),
             mechanism: "none",
         }),
         Mechanism::Bubblewrap(bwrap) => Ok(Jailed {
-            command: bubblewrap(bwrap, program, args, plan),
+            command: bubblewrap(bwrap, program, args, plan, scrub_env),
             mechanism: "bwrap",
         }),
-        Mechanism::Seatbelt(sandbox_exec) => seatbelt(sandbox_exec, program, args, plan),
+        Mechanism::Seatbelt(sandbox_exec) => seatbelt(sandbox_exec, program, args, plan, scrub_env),
     }
+}
+
+fn effective_scrub_env(plan: &Confinement<'_>, required: bool) -> bool {
+    plan.scrub_env || required
 }
 
 /// Whether [`REQUIRE_ENV`] asks for a mandatory jail.
@@ -250,11 +260,11 @@ fn configured_memory_mb() -> u64 {
 }
 
 /// Unjailed fallback: still resource-limited, still on a scratch cwd.
-fn bare(program: &Path, args: &[OsString], plan: &Confinement<'_>) -> Command {
+fn bare(program: &Path, args: &[OsString], plan: &Confinement<'_>, scrub_env: bool) -> Command {
     let (bin, argv) = with_limits(program, args, plan);
     let mut command = Command::new(bin);
     command.args(argv).current_dir(plan.cwd);
-    apply_env(&mut command, plan);
+    apply_env(&mut command, plan, scrub_env);
     command
 }
 
@@ -263,6 +273,7 @@ fn bubblewrap(
     program: &Path,
     args: &[OsString],
     plan: &Confinement<'_>,
+    scrub_env: bool,
 ) -> Command {
     let mut command = Command::new(bwrap);
     command.args([
@@ -318,7 +329,7 @@ fn bubblewrap(
     }
     command.arg("--chdir").arg(plan.cwd);
 
-    if plan.scrub_env {
+    if scrub_env {
         command.arg("--clearenv");
         for (key, value) in minimal_env(plan) {
             command.arg("--setenv").arg(key).arg(value);
@@ -331,7 +342,7 @@ fn bubblewrap(
     command.arg("--").arg(bin).args(argv);
     // bwrap itself must start in a directory that exists outside the jail.
     command.current_dir(plan.workdir);
-    apply_env(&mut command, plan);
+    apply_env(&mut command, plan, scrub_env);
     command
 }
 
@@ -340,6 +351,7 @@ fn seatbelt(
     program: &Path,
     args: &[OsString],
     plan: &Confinement<'_>,
+    scrub_env: bool,
 ) -> Result<Jailed, Unavailable> {
     // Seatbelt matches on fully resolved paths. `/tmp` is a symlink to
     // `/private/tmp` on macOS and `$TMPDIR` lives under `/var/folders`, which
@@ -351,19 +363,7 @@ fn seatbelt(
         writable.push(resolve(path));
     }
 
-    let mut profile = String::from("(version 1)\n(allow default)\n(deny network*)\n");
-    profile.push_str("(deny file-write*)\n");
-    for path in &writable {
-        let text = path.to_string_lossy();
-        profile.push_str(&format!(
-            "(allow file-write* (subpath \"{}\"))\n",
-            escape(&text)
-        ));
-    }
-    // A child that cannot write to /dev/null fails in ways that look like the
-    // artifact's fault rather than the jail's.
-    profile.push_str("(allow file-write-data (literal \"/dev/null\"))\n");
-    profile.push_str("(allow file-write-data (literal \"/dev/dtracehelper\"))\n");
+    let profile = seatbelt_profile(program, plan, &writable);
 
     if profile.contains('\0') {
         return Err(Unavailable(
@@ -376,11 +376,75 @@ fn seatbelt(
     let (bin, argv) = with_limits(program, args, plan);
     command.arg(bin).args(argv);
     command.current_dir(plan.cwd);
-    apply_env(&mut command, plan);
+    apply_env(&mut command, plan, scrub_env);
     Ok(Jailed {
         command,
         mechanism: "sandbox-exec",
     })
+}
+
+/// A deny-by-default Seatbelt profile with an explicit filesystem allow-list.
+///
+/// The previous profile used `(allow default)` and denied only writes and the
+/// network. On macOS that let objective code read the operator's SSH keys and
+/// return them in verdict output. System/runtime files and declared bundle
+/// paths remain readable; operator data outside those paths does not.
+fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]) -> String {
+    let mut readable = vec![
+        PathBuf::from("/System"),
+        PathBuf::from("/Library"),
+        PathBuf::from("/usr"),
+        resolve(Path::new("/bin/sh")),
+        resolve(program),
+        resolve(plan.workdir),
+        resolve(plan.cwd),
+    ];
+    readable.extend(plan.readable.iter().map(|path| resolve(path)));
+    readable.extend(writable.iter().cloned());
+
+    // A Homebrew, rustup, pyenv, or elan executable normally loads libraries
+    // and adjacent resources from the version root two levels above `bin`.
+    // Allow that version root, not the whole package manager or home directory.
+    for executable in [resolve(program)] {
+        if let Some(runtime_root) = executable.parent().and_then(Path::parent) {
+            // A runtime root is an installation prefix such as
+            // `/opt/homebrew/Cellar/python@3.13/3.13.2`, never the filesystem
+            // root. In particular, the grandparent of `/bin/sh` is `/`; adding
+            // it here turns the deny-by-default profile into a read-everything
+            // profile.
+            if runtime_root == Path::new("/") {
+                continue;
+            }
+            readable.push(runtime_root.to_path_buf());
+        }
+    }
+    readable.sort();
+    readable.dedup();
+
+    let mut profile = String::from(
+        "(version 1)\n(deny default)\n(import \"system.sb\")\n(deny network*)\n\
+         (allow process-fork)\n(allow process-exec)\n(allow signal (target self))\n\
+         (allow file-read-metadata)\n",
+    );
+    for path in &readable {
+        let text = path.to_string_lossy();
+        profile.push_str(&format!(
+            "(allow file-read* file-map-executable (subpath \"{}\"))\n",
+            escape(&text)
+        ));
+    }
+    for path in writable {
+        let text = path.to_string_lossy();
+        profile.push_str(&format!(
+            "(allow file-write* (subpath \"{}\"))\n",
+            escape(&text)
+        ));
+    }
+    // A child that cannot write to /dev/null fails in ways that look like the
+    // artifact's fault rather than the jail's.
+    profile.push_str("(allow file-write-data (literal \"/dev/null\"))\n");
+    profile.push_str("(allow file-write-data (literal \"/dev/dtracehelper\"))\n");
+    profile
 }
 
 /// Prefix the child with a shell that sets `ulimit`s, when a shell exists.
@@ -427,8 +491,8 @@ fn with_limits(
     (shell.as_os_str().to_os_string(), argv)
 }
 
-fn apply_env(command: &mut Command, plan: &Confinement<'_>) {
-    if plan.scrub_env {
+fn apply_env(command: &mut Command, plan: &Confinement<'_>, scrub_env: bool) {
+    if scrub_env {
         command.env_clear();
         for (key, value) in minimal_env(plan) {
             command.env(key, value);
@@ -521,6 +585,32 @@ mod tests {
         assert!(!keys
             .iter()
             .any(|k| k.contains("TOKEN") || k.contains("KEY")));
+    }
+
+    #[test]
+    fn strict_mode_scrubs_replay_and_lean_even_when_the_plan_does_not() {
+        let dir = PathBuf::from("/tmp/proofwork-strict-env-test");
+        let inherited = Confinement::new(&dir, &dir, 1);
+        assert!(!effective_scrub_env(&inherited, false));
+        assert!(effective_scrub_env(&inherited, true));
+    }
+
+    #[test]
+    fn seatbelt_is_deny_by_default_and_allows_only_declared_reads() {
+        let work = PathBuf::from("/private/tmp/proofwork-seatbelt-work");
+        let bundle = PathBuf::from("/Volumes/objectives/example");
+        let plan = Confinement::new(&work, &bundle, 1).reading(bundle.join("checker.py"));
+        let profile = seatbelt_profile(
+            Path::new("/usr/bin/python3"),
+            &plan,
+            std::slice::from_ref(&work),
+        );
+        assert!(profile.contains("(deny default)"));
+        assert!(!profile.contains("(allow default)"));
+        assert!(profile.contains("/Volumes/objectives/example"));
+        assert!(profile.contains("/private/tmp/proofwork-seatbelt-work"));
+        assert!(!profile.contains("/Users/"));
+        assert!(!profile.contains("(subpath \"/\")"));
     }
 
     #[test]

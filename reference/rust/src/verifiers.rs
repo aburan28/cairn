@@ -310,6 +310,19 @@ pub fn implements(kind: &str) -> bool {
 }
 
 pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
+    if std::env::var_os("CAIRN_REQUIRE_SANDBOX").is_some_and(|value| {
+        let value = value.to_string_lossy();
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    }) {
+        return Verdict::plain(
+            Status::Unavailable,
+            "CAIRN_REQUIRE_SANDBOX is set, but the independent reference has no \
+             confinement backend; refusing to execute objective-authored code",
+        );
+    }
     match spec.get("kind").and_then(Value::as_str) {
         Some("certificate") => certificate(root, spec, artifact),
         Some("evaluator") => evaluator(root, spec, artifact),

@@ -421,6 +421,9 @@ pub enum RuleViolation {
     /// placed in a settlement batch, and guessing one -- "treat it as now" --
     /// would hand a submitter a free choice of batch by writing garbage.
     MalformedTimestamp { record: &'static str, value: String },
+    /// A commitment's submitter-authored timestamp disagrees with the epoch in
+    /// which the ledger actually admitted it.
+    CommitmentEpochMismatch { declared: u64, admitted: u64 },
     /// A submitter that names an ed25519 public key did not prove it holds
     /// that key.
     ///
@@ -847,6 +850,11 @@ impl fmt::Display for RuleViolation {
                 f,
                 "{record} timestamp {value:?} is not an RFC-3339 instant, so the \
                  epoch it settles in cannot be derived"
+            ),
+            RuleViolation::CommitmentEpochMismatch { declared, admitted } => write!(
+                f,
+                "commitment declares epoch {declared} but was admitted in epoch {admitted}; \
+                 commit-reveal ordering uses the admission epoch"
             ),
             RuleViolation::UnsignedIdentity(error) => write!(f, "{error}"),
             RuleViolation::InadmissibleRecord(error) => {
@@ -3768,11 +3776,18 @@ impl Node {
         // what fixes the epoch a reveal must beat, so a commitment whose
         // timestamp cannot be read is a commitment that can never be opened --
         // better to say so now than to accept it and strand the submitter.
-        epoch_of_timestamp("commitment", &commitment.created_at)?;
+        let declared_epoch = epoch_of_timestamp("commitment", &commitment.created_at)?;
         // Draining on the way in keeps `already settled` honest: a commitment
         // against an objective whose winner is sitting in an unsettled batch
         // would otherwise be admitted as though the objective were still open.
-        self.settle_due(epoch_of_timestamp("commit", ts)?, ts)?;
+        let admitted_epoch = epoch_of_timestamp("commit", ts)?;
+        if declared_epoch != admitted_epoch {
+            return Err(RuleViolation::CommitmentEpochMismatch {
+                declared: declared_epoch,
+                admitted: admitted_epoch,
+            });
+        }
+        self.settle_due(admitted_epoch, ts)?;
 
         let objectives = self.objectives();
         let objective = objectives.get(&commitment.objective_id).ok_or_else(|| {
@@ -4113,12 +4128,21 @@ impl Node {
             });
         }
 
-        let commitment = match self.matching_commitment(claim) {
+        let commitment_entry = match self.matching_commitment_entry(claim) {
             Some(commitment) => commitment.clone(),
             None => return Err(RuleViolation::NoMatchingCommitment),
         };
-        let created_at = payload_str(&commitment, "created_at").unwrap_or_default();
-        let commit_epoch = epoch_of_timestamp("commitment", created_at)?;
+        let declared_commit_epoch = epoch_of_timestamp(
+            "commitment",
+            payload_str(&commitment_entry.payload, "created_at").unwrap_or_default(),
+        )?;
+        let commit_epoch = epoch_of_timestamp("commitment admission", &commitment_entry.ts)?;
+        if declared_commit_epoch != commit_epoch {
+            return Err(RuleViolation::CommitmentEpochMismatch {
+                declared: declared_commit_epoch,
+                admitted: commit_epoch,
+            });
+        }
         if reveal_epoch <= commit_epoch {
             return Err(RuleViolation::RevealBeforeEpoch {
                 commit_epoch,
@@ -6199,8 +6223,23 @@ impl Node {
             if !seen_claims.insert(claim_id.clone()) {
                 continue;
             }
-            if self.matching_commitment(&claim).is_none() {
-                problems.push(format!("claim {claim_id}: no matching commitment"));
+            match self.matching_commitment_entry(&claim) {
+                None => problems.push(format!("claim {claim_id}: no matching commitment")),
+                Some(commitment) => {
+                    let declared_commit = payload_str(&commitment.payload, "created_at")
+                        .and_then(crate::time::parse_rfc3339)
+                        .filter(|seconds| *seconds >= 0)
+                        .map(|seconds| epoch_of(seconds as u64, epoch_seconds()));
+                    let admitted_commit = crate::time::parse_rfc3339(&commitment.ts)
+                        .filter(|seconds| *seconds >= 0)
+                        .map(|seconds| epoch_of(seconds as u64, epoch_seconds()));
+                    if declared_commit != admitted_commit {
+                        problems.push(format!(
+                            "claim {claim_id}: matching commitment's declared epoch \
+                             disagrees with its ledger admission epoch"
+                        ));
+                    }
+                }
             }
             let recorded_verdict = match recorded.get(claim_id.as_str()) {
                 Some(verdict) => *verdict,
@@ -7241,7 +7280,7 @@ impl Node {
     /// binds the submitter, so the explicit submitter comparison is redundant
     /// arithmetic and deliberate defence in depth: it is the field an attacker
     /// would have to forge, and comparing it costs nothing.
-    fn matching_commitment(&self, claim: &Claim) -> Option<&Value> {
+    fn matching_commitment_entry(&self, claim: &Claim) -> Option<&crate::ledger::Entry> {
         let target = claim.commitment_hash();
         for entry in self.ledger.entries_of_kind(COMMITMENT) {
             let payload = &entry.payload;
@@ -7249,7 +7288,7 @@ impl Node {
                 && payload_str(payload, "submitter") == Some(claim.submitter.as_str())
                 && payload_str(payload, "hash") == Some(target.as_str())
             {
-                return Some(payload);
+                return Some(entry);
             }
         }
         None
@@ -8366,6 +8405,29 @@ mod tests {
             matches!(refused, Err(RuleViolation::MalformedTimestamp { .. })),
             "{refused:?}"
         );
+    }
+
+    #[test]
+    fn a_backdated_commitment_is_not_admitted_in_a_later_epoch() {
+        let dir = TempDir::new("backdated-commitment");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        let artifact = results(1);
+        let commitment = Commitment::new(
+            objective.id(),
+            "alice",
+            commitment_hash(&objective.id(), "alice", &artifact, "nonce"),
+            stamp(0),
+        );
+        assert!(matches!(
+            node.commit(&commitment, &stamp(EPOCH)),
+            Err(RuleViolation::CommitmentEpochMismatch { .. })
+        ));
+        assert!(node.ledger().entries_of_kind(COMMITMENT).is_empty());
     }
 
     #[test]

@@ -1672,8 +1672,14 @@ impl Node {
 
     pub fn commit(&mut self, commitment: &Commitment, ts: &str) -> Result<String, String> {
         commitment.verify_signature().map_err(|e| e.to_string())?;
-        self.epoch_of_ts("commitment", &commitment.created_at)?;
+        let declared = self.epoch_of_ts("commitment", &commitment.created_at)?;
         let now = self.epoch_of_ts("commit", ts)?;
+        if declared != now {
+            return Err(format!(
+                "commitment declares epoch {declared} but was admitted in epoch {now}; \
+                 commit-reveal ordering uses the admission epoch"
+            ));
+        }
         self.settle_due(now, ts)?;
 
         let objectives = self.objectives();

@@ -1059,6 +1059,20 @@ mod tests {
         // which is the only way it could be produced.
         assert_eq!(claim.signing_payload(), signed.signing_payload());
     }
+
+    #[test]
+    fn a_claim_with_a_relation_reencodes_to_its_own_bytes() {
+        let original = Value::from_json(
+            r#"{"artifact":{"n":626331},"cites":[],"created_at":"2026-08-14T17:18:10+00:00","nonce":"r2","objective_id":"sha256:978beb308f77c4bd1520d474b92dd23c310c6adee774716bf4c39f31fd3ed075","relations":[{"kind":"refutes","target":"sha256:87884297fb898248f46ff16e264ebacd8ebb44c43e21b169ecee4151d141a278"}],"submitter":"bob","type":"claim"}"#,
+        )
+        .expect("claim JSON");
+        let claim = Claim::from_value(&original).expect("valid claim");
+        assert_eq!(claim.to_value(), original);
+        assert_eq!(
+            claim.id(),
+            "sha256:a62c9907a976e904e1479d400fa14c73afae289cfce85ae940ffd5b9e7ef0cf3"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

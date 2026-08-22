@@ -213,10 +213,12 @@ languages the two are written in.
    beacon that orders work assignment now orders *money*, so grinding the
    anchor is a payout attack rather than a scheduling nuisance. A VDF or
    threshold signature is the Stage 2 answer.
-4. **No sandbox on the Python reference.** It `exec`s pinned code in-process
-   by design — it is the readable specification of the rules, not a hardened
-   node — and says so. Fine as long as nobody points it at an objective they
-   have not read, which is a rule enforced by documentation alone.
+4. **No sandbox on the Python reference.** It is the readable specification of
+   the rules, not a hardened node. Verifier reruns are therefore opt-in with
+   `audit --rerun`, and `CAIRN_REQUIRE_SANDBOX` makes every reference verifier
+   answer `Unavailable` rather than executing objective-authored code. Use
+   `--rerun` only for objectives whose code the auditor has independently
+   trusted.
 5. **NAT traversal, and peer identities in the log.** A node behind a home
    router can fetch and cannot seed, which makes the p2p half more centralised
    than the protocol suggests; and identity discovery is still a separate

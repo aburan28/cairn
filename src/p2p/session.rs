@@ -25,10 +25,6 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 /// AEAD context for record frames.
-// Spelled `proofwork/` and not `cairn/`: this is a wire constant, not a
-// brand. It is mixed into a hash or a KDF, so changing it changes the
-// values every peer already computed -- the project rename left it alone
-// deliberately, exactly as it left the `pwenc1:` on-disk marker alone.
 pub const RECORD_CONTEXT: &[u8] = b"proofwork/p2p/sync/v1";
 
 // -- protocol tracing --------------------------------------------------------
@@ -135,13 +131,14 @@ fn receive_dht(connection: &mut Connection) -> Result<DhtMessage, SessionError> 
     Ok(message)
 }
 
-/// One protocol line. `remote` is the authenticated peer id, so a line can be
-/// attributed to a peer rather than to a socket.
+/// One protocol line. Inbound connections carry only a claimed initiator id,
+/// so the trace labels whether attribution is authenticated.
 fn trace(connection: &Connection, dir: Dir, described: String) {
     log::debug!(
-        target: "cairn::p2p",
-        "{} {dir} {described}",
-        crate::p2p::discovery::peer_id_string(&connection.remote())
+        target: "proofwork::p2p",
+        "{} auth={} {dir} {described}",
+        crate::p2p::discovery::peer_id_string(&connection.remote()),
+        connection.remote_authenticated()
     );
 }
 
@@ -393,10 +390,11 @@ pub fn reconcile_code(
 ///
 /// # Why the answer is not believed about anybody else
 ///
-/// The peer's identity comes from `connection.remote()`, which the handshake
-/// derived from a key the peer had to hold to key the channel up. A `Tell` has
-/// no sender field, so there is nothing to forge and no way to claim holdership
-/// on a third party's behalf.
+/// A first-hand `Tell` is stored only when `connection.remote_authenticated()`
+/// is true. On a dialled connection the handshake derived that id from the
+/// responder key this node selected. On an accepted connection the initiator
+/// id is merely claimed, so its answer is read to keep the symmetric protocol
+/// moving but is not attributed or re-served.
 ///
 /// # `dialable` is not the socket's peer address
 ///
@@ -541,10 +539,31 @@ where
     directory.on_providers(remote_id, &their_answers);
     round.finished = directory.take_finished();
 
-    if let Some(addr) = dialable {
-        round.stored = directory.record_tell(remote, addr, &asked, &their_tell, now);
-    }
+    round.stored = record_authenticated_tell(
+        directory,
+        connection.remote_authenticated(),
+        remote,
+        dialable,
+        &asked,
+        &their_tell,
+        now,
+    );
     Ok(round)
+}
+
+fn record_authenticated_tell(
+    directory: &mut Directory,
+    remote_authenticated: bool,
+    remote: super::handshake::PeerId,
+    dialable: Option<std::net::SocketAddr>,
+    asked: &BTreeSet<String>,
+    told: &[String],
+    now: u64,
+) -> usize {
+    match (remote_authenticated, dialable) {
+        (true, Some(addr)) => directory.record_tell(remote, addr, asked, told, now),
+        _ => 0,
+    }
 }
 
 /// What one DHT round learned.
@@ -649,6 +668,30 @@ mod tests {
 
     fn claim(n: i128) -> Record {
         Record::new("claim", Value::object([("n", Value::Int(n))]))
+    }
+
+    #[test]
+    fn an_unauthenticated_inbound_claim_cannot_seed_provider_state() {
+        let local = PeerIdentity::generate().id();
+        let claimed = PeerIdentity::generate().id();
+        let address = crate::blobs::address(b"checker");
+        let asked: BTreeSet<String> = [address.clone()].into_iter().collect();
+        let told = vec![address.clone()];
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let mut directory = Directory::new(local);
+
+        assert_eq!(
+            record_authenticated_tell(&mut directory, false, claimed, Some(addr), &asked, &told, 1,),
+            0
+        );
+        let key = NodeId::of_digest(&address).unwrap();
+        assert!(directory.providers_store().providers(key, 1).is_empty());
+
+        assert_eq!(
+            record_authenticated_tell(&mut directory, true, claimed, Some(addr), &asked, &told, 1,),
+            1
+        );
+        assert_eq!(directory.providers_store().providers(key, 1).len(), 1);
     }
 
     #[test]

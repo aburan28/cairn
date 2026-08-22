@@ -173,11 +173,13 @@ fn load_identity(path: &Path) -> Result<PeerIdentity, String> {
             ("public", Value::string(hex_encode(identity.public_key()))),
             ("secret", Value::string(hex_encode(identity.secret_key()))),
         ]);
-        fs::write(path, value.canonical_string()).map_err(|e| e.to_string())?;
+        crate::secret_file::write_new(path, value.canonical_string().as_bytes())
+            .map_err(|e| e.to_string())?;
         return Ok(identity);
     }
-    let value = Value::from_json(&fs::read_to_string(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let value =
+        Value::from_json(&crate::secret_file::read_to_string(path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     let public = hex_decode(
         value
             .get("public")
@@ -248,11 +250,13 @@ fn load_root_key(path: &Path) -> Result<RootKey, String> {
                 Value::string(hex_encode(&key.to_secret_bytes()[..])),
             ),
         ]);
-        fs::write(path, value.canonical_string()).map_err(|e| e.to_string())?;
+        crate::secret_file::write_new(path, value.canonical_string().as_bytes())
+            .map_err(|e| e.to_string())?;
         return Ok(key);
     }
-    let value = Value::from_json(&fs::read_to_string(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let value =
+        Value::from_json(&crate::secret_file::read_to_string(path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     let secret = hex_decode(
         value
             .get("secret")

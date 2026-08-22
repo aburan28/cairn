@@ -23,7 +23,7 @@ the network has settled*, from nothing but a copy of the log.
 ```
 $ ./scripts/interop.sh
 
-== the reference implementation audits the primary log
+== the reference implementation audits the primary log (--rerun on trusted fixtures)
 log verified: chain intact, every settled claim re-verified
 
 == the primary implementation audits the reference log

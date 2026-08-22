@@ -50,10 +50,11 @@ impl Ratchet {
                 .and_then(Value::as_i64)
                 .ok_or_else(|| format!("ratchet needs an integer {name:?}"))
         };
-        let direction = match value.get("direction").and_then(Value::as_str) {
+        let direction = match value.get("direction") {
             None => Direction::Maximize,
-            Some(text) => Direction::parse(text)
+            Some(Value::String(text)) => Direction::parse(text)
                 .ok_or_else(|| format!("unknown ratchet direction {text:?}"))?,
+            Some(_) => return Err("ratchet direction must be a string".into()),
         };
         let reward = value
             .get("reward")
@@ -64,10 +65,16 @@ impl Ratchet {
             target: int("target")?,
             reward,
             direction,
-            min_improvement: value
-                .get("min_improvement")
-                .and_then(Value::as_u64)
-                .unwrap_or(1),
+            min_improvement: match value.get("min_improvement") {
+                None => 1,
+                Some(Value::Int(n)) if *n >= 1 => {
+                    u64::try_from(*n).map_err(|_| "ratchet min_improvement does not fit in u64")?
+                }
+                Some(Value::Int(_)) => {
+                    return Err("ratchet min_improvement must be at least 1".into())
+                }
+                Some(_) => return Err("ratchet min_improvement must be an integer".into()),
+            },
         };
         if ratchet.span() == 0 {
             return Err("ratchet target must differ from baseline".into());

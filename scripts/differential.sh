@@ -19,36 +19,30 @@
 # `conformance/adversarial.jsonl` is the corpus: one case per line, each with
 # a note saying what would break if the two disagreed about it.
 set -euo pipefail
-
-# The reference implementation reads plain JSONL and nothing else -- sealing is
-# a storage concern of the primary crate, deliberately outside the format the
-# two implementations have to agree on. But the CLI seals every log it creates
-# whenever a key file exists, so on any machine that has run `cairn keygen`
-# this script handed the reference ciphertext and got "malformed JSON: unexpected
-# character at byte 0". It failed there and passed in CI, which is the worst
-# place for a check to be wrong.
-#
-# Pointing CAIRN_KEY at a path that does not exist makes `resolve_codec` choose
-# plaintext, which is what this script means: it compares the two
-# implementations on the format they share.
-export CAIRN_KEY=/nonexistent/cairn-interop-forces-plaintext
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/cairn}"
-REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 CORPUS="${CORPUS:-conformance/adversarial.jsonl}"
 
-[ -x "$RUST" ] || { echo "building the primary..." >&2; cargo build --release --locked; }
-[ -x "$REF" ] || {
-  echo "building the reference..." >&2
+if [ -z "${RUST_BIN:-}" ]; then
+  echo "building the current primary..." >&2
+  cargo build --release --locked
+fi
+if [ -z "${REF_BIN:-}" ]; then
+  echo "building the current reference..." >&2
   cargo build --release --locked --manifest-path reference/rust/Cargo.toml
-}
+fi
+RUST="${RUST_BIN:-./target/release/cairn}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 
 WORK=$(mktemp -d /tmp/pw-differential-XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
+# These are public conformance fixtures. An operator's default
+# ~/.proofwork/key must not silently seal newly-created primary logs and make
+# the independent reference parser reject byte zero before comparing rules.
+export CAIRN_KEY="$WORK/absent.key"
 
 rule "$CORPUS"
 

@@ -662,13 +662,12 @@ fn percent_decode(text: &str) -> String {
     while i < bytes.len() {
         match bytes[i] {
             b'%' if i + 2 < bytes.len() => {
-                let hex = &text[i + 1..i + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => {
-                        out.push(byte);
+                match (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                    (Some(high), Some(low)) => {
+                        out.push((high << 4) | low);
                         i += 3;
                     }
-                    Err(_) => {
+                    _ => {
                         out.push(b'%');
                         i += 1;
                     }
@@ -685,6 +684,15 @@ fn percent_decode(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 // -- handlers ---------------------------------------------------------------
@@ -1522,6 +1530,9 @@ mod tests {
         assert_eq!(percent_decode("plain"), "plain");
         // A stray `%` is not an escape and must not eat the rest of the value.
         assert_eq!(percent_decode("100%"), "100%");
+        // Indexing the UTF-8 string at byte offsets used to panic when the
+        // would-be hex pair ended in the middle of a multi-byte character.
+        assert_eq!(percent_decode("%aé"), "%aé");
     }
     #[test]
     fn a_full_queue_refuses_new_records_but_still_accepts_resends() {

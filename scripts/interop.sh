@@ -10,17 +10,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUST="${RUST_BIN:-./target/release/cairn}"
-REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
-if [ ! -x "$REF" ]; then
-  echo "building the reference implementation..." >&2
+if [ -z "${REF_BIN:-}" ]; then
+  echo "building the current reference implementation..." >&2
   cargo build --release --locked --manifest-path reference/rust/Cargo.toml
 fi
-
-if [ ! -x "$RUST" ]; then
-  echo "building release binary..." >&2
-  cargo build --release
+if [ -z "${RUST_BIN:-}" ]; then
+  echo "building the current primary implementation..." >&2
+  cargo build --release --locked
 fi
+RUST="${RUST_BIN:-./target/release/cairn}"
+REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
@@ -32,19 +31,6 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 # is a policy parameter every participant must share -- which is exactly why the
 # production default is not configurable per node in any other way.
 export CAIRN_EPOCH_SECONDS=1
-
-# The reference implementation reads plain JSONL and nothing else -- sealing is
-# a storage concern of the primary crate, deliberately outside the format the
-# two implementations have to agree on. But the CLI seals every log it creates
-# whenever a key file exists, so on any machine that has run `cairn keygen`
-# this script handed the reference ciphertext and got "malformed JSON: unexpected
-# character at byte 0". It failed there and passed in CI, which is the worst
-# place for a check to be wrong.
-#
-# Pointing CAIRN_KEY at a path that does not exist makes `resolve_codec` choose
-# plaintext, which is what this script means: it compares the two
-# implementations on the format they share.
-export CAIRN_KEY=/nonexistent/cairn-interop-forces-plaintext
 
 # Likewise exported rather than left to the default, and for the same reason:
 # both implementations must agree on when an epoch becomes eligible, not just
@@ -84,7 +70,12 @@ F="$(mktemp -u /tmp/pw-interop-rel1-XXXXXX).jsonl"
 G="$(mktemp -u /tmp/pw-interop-rel2-XXXXXX).jsonl"
 H="$(mktemp -u /tmp/pw-interop-dang1-XXXXXX).jsonl"
 I="$(mktemp -u /tmp/pw-interop-dang2-XXXXXX).jsonl"
-trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I"' EXIT
+# A user's default ~/.proofwork/key would make every new primary log sealed,
+# which the deliberately independent reference implementation cannot read. The
+# interop fixture is public test data, so force a unique absent key path and
+# therefore a plaintext log regardless of operator configuration.
+export CAIRN_KEY="${A}.absent-key"
+trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$CAIRN_KEY"' EXIT
 
 # --- the primary writes, the reference reads ------------------------------
 rule "Rust produces a log"
@@ -100,7 +91,7 @@ $RUST --log "$A" --root . settle
 rule "the reference implementation audits the primary log"
 # Includes the settlement batch: the reference re-derives the anchor and the beacon
 # order Rust recorded. A disagreement here is a disagreement about who got paid.
-REF_VIEW=$("$REF" --log "$A" --root . audit)
+REF_VIEW=$("$REF" --log "$A" --root . audit --rerun)
 echo "$REF_VIEW"
 echo "$REF_VIEW" | grep -q "log verified" || fail "the reference could not verify the primary log"
 
@@ -194,7 +185,7 @@ rule "typed claim relations survive a round trip through both implementations"
 # *pass*; a decoy shipped alongside them would eventually be mistaken for one.
 DECOY="$(mktemp -u /tmp/pw-interop-decoy-XXXXXX).json"
 printf '{"n": 1}\n' > "$DECOY"
-trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$DECOY"' EXIT
+trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$DECOY" "$CAIRN_KEY"' EXIT
 
 for pair in "$RUST|$REF|the reference|$F" "$REF|$RUST|the primary|$G"; do
   IFS='|' read -r WRITER READER WHO LOG <<< "$pair"

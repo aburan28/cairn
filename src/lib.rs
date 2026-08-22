@@ -43,6 +43,7 @@ pub mod records;
 pub mod scaffold;
 pub mod schema;
 pub mod sealed;
+pub mod secret_file;
 pub mod serve;
 pub mod shards;
 pub mod store;

@@ -254,6 +254,13 @@ impl SignedCheckpoint {
         expected_key: &[u8],
     ) -> Result<(), CheckpointError> {
         self.verify(expected_key)?;
+        let problems = ledger.verify_chain();
+        if !problems.is_empty() {
+            return Err(CheckpointError::Invalid(format!(
+                "ledger prefix failed chain verification: {}",
+                problems.join("; ")
+            )));
+        }
         let actual = Checkpoint::from_ledger(ledger, self.checkpoint.issued_at.clone());
         for (field, expected, got) in [
             (
@@ -363,5 +370,34 @@ mod tests {
             forged.verify(&key.public_key()),
             Err(CheckpointError::BadSignature)
         );
+    }
+
+    #[test]
+    fn checkpoint_verification_recomputes_entry_hashes() {
+        let path = PathBuf::from("target/checkpoint-tamper-test.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let mut ledger = Ledger::open(&path).unwrap();
+        ledger
+            .append(
+                "objective",
+                Value::object([("x", Value::Int(1))]),
+                "2026-08-18T00:00:00+00:00",
+            )
+            .unwrap();
+        let key = RootKey::generate();
+        let signed = key.sign_ledger(&ledger, "2026-08-18T00:01:00+00:00");
+        drop(ledger);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut stored: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        stored["payload"]["x"] = serde_json::json!(9);
+        // Deliberately preserve `hash`: this is the exact tampering that used
+        // to pass because checkpoints Merkle-hashed the stored string.
+        std::fs::write(&path, format!("{}\n", stored)).unwrap();
+        let tampered = Ledger::open(&path).unwrap();
+        assert!(matches!(
+            signed.verify_prefix(&tampered, &key.public_key()),
+            Err(CheckpointError::Invalid(_))
+        ));
     }
 }
