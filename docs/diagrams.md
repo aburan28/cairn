@@ -108,9 +108,17 @@ storage concern; the hash chain is an integrity one. Sealing changes no entry
 hash, no `prev` link, no Merkle root and no audit result, which is why
 `verify_chain` needed no changes at all.
 
-**`incentive` calls nothing.** It is a model of the node game, not a code path —
-no canary is generated, no bond posted, no challenge issued. Drawing it
+**`incentive` calls nothing.** It is a model of the node game, not a code path.
+`canary` reads a verifier and a log and writes neither: it is a tool an auditor
+points at the network, not an edge in the settlement path. Drawing either
 connected would be a lie about what runs.
+
+One term the model prices does now move money, and it moves it through `node`
+rather than through either of those boxes: a canary catch, pointed at a bonded
+`attestation`, slashes to the catcher. The docket names the target for free and
+`Node::slash_attestation` runs the pinned verifier once — so the edge that
+exists is `canary → node`, and it is a read. The bonds `incentive` models for
+*availability* and *custody* are still unposted.
 
 ---
 
@@ -460,9 +468,11 @@ flowchart LR
 
 ## What these diagrams are not
 
-They describe Stage 0 plus the two design modules built on top of it. Three
-boxes above are drawn but not implemented — committee selection, the canary
-generator, and forced inclusion — and each is labelled rather than quietly
-rendered as though it ships. See [roadmap.md](roadmap.md) for the order worth
+They describe Stage 0 plus the two design modules built on top of it. Two boxes
+above are drawn but not implemented — bonded custody and forced inclusion — and
+each is labelled rather than quietly rendered as though it ships. Committee
+selection, the canary generator and bonded verification have since been built,
+and the boxes that remain drawn-not-built are the ones that need *money* rather
+than code. See [roadmap.md](roadmap.md) for the order worth
 doing them in and [threat-model.md](threat-model.md) for what each one leaves
 open until then.

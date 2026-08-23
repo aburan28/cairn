@@ -29,7 +29,7 @@
 //! others. Feed one corrupt shard into that combination and **every** output
 //! byte is wrong — the linear algebra spreads the lie across the whole
 //! reconstruction. The whole-blob digest then reports that *somebody* lied,
-//! which is exactly the useless answer [`crate::swarm::piece`] was written to
+//! which is exactly the useless answer [`crate::p2p::swarm::piece`] was written to
 //! avoid during a transfer, except worse: with `n` holders and one liar there
 //! are `n choose k` subsets to try, and each retry costs a full decode.
 //!
@@ -69,7 +69,7 @@
 //! uses it — no decode, no other holder.
 //!
 //! **The manifest is `O(n)`, not `O(chunks)`.** It carries one root per shard,
-//! so a 1 GiB blob at (4, 2) has a six-entry manifest. [`crate::swarm::piece`]'s
+//! so a 1 GiB blob at (4, 2) has a six-entry manifest. [`crate::p2p::swarm::piece`]'s
 //! manifest carries one digest per piece and grows with the blob; this one does
 //! not, because the per-chunk hashes are recomputed from the shard by whoever
 //! holds it.
@@ -91,7 +91,7 @@
 //! move canonical bytes and both implementations (`AGENTS.md`) to gain nothing.
 //!
 //! **No network transfer.** Shards are produced, stored, proved and
-//! reconstructed here; moving one between peers is [`crate::swarm`]'s job and is
+//! reconstructed here; moving one between peers is [`crate::p2p::swarm`]'s job and is
 //! not wired up. Said plainly because this crate has been bitten before by a
 //! subsystem tested only against itself — see `docs/storage.md` on the two bugs
 //! that sat in the `swarm`/`blobs` seam. `cairn shard` is the caller that
@@ -359,7 +359,7 @@ impl fmt::Display for Coding {
 
 /// How a blob of a given size divides into shards and chunks.
 ///
-/// Arithmetic only, like [`crate::swarm::piece::Layout`], which is what lets a
+/// Arithmetic only, like [`crate::p2p::swarm::piece::Layout`], which is what lets a
 /// holder reason about a shard it does not have.
 ///
 /// **Every shard has the same length**, including the parity shards, which is
@@ -379,7 +379,7 @@ impl Layout {
     ///
     /// A zero-length blob is a real thing — the empty file has a digest like
     /// anything else — and every shard of it has *one* chunk of length zero
-    /// rather than none, for the reason [`crate::swarm::piece::Layout::new`]
+    /// rather than none, for the reason [`crate::p2p::swarm::piece::Layout::new`]
     /// gives: a tree with no leaves has no root, and a shard with no root
     /// cannot be committed to or proved.
     pub fn new(total: u64, coding: Coding, chunk_len: u32) -> Result<Layout, ShardError> {
@@ -755,7 +755,7 @@ impl Manifest {
     }
 
     /// The whole-blob digest. **The ground truth**, exactly as in
-    /// [`crate::swarm::piece`]: everything else here localises a lie, and this
+    /// [`crate::p2p::swarm::piece`]: everything else here localises a lie, and this
     /// is what says a lie was told.
     pub fn digest(&self) -> &str {
         &self.digest

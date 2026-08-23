@@ -33,6 +33,66 @@ pub const AVAILABILITY: &str = "availability";
 pub const AVAILABILITY_POOL: &str = "availability_pool";
 pub const AVAILABILITY_SETTLEMENT: &str = "availability_settlement";
 pub const COMMITTEE_SHARE: &str = "committee_share";
+pub const ISSUANCE: &str = "issuance";
+pub const CHALLENGE: &str = "challenge";
+pub const BISECTION: &str = "bisection";
+pub const CHALLENGE_SETTLEMENT: &str = "challenge_settlement";
+pub const ATTESTATION: &str = "attestation";
+pub const VERIFICATION_SLASH: &str = "verification_slash";
+
+/// What standing behind one verdict costs. Mirrors the primary's
+/// `node::VERIFICATION_BOND`, and per *attestation* rather than per attestor
+/// for the reason stated there: one bond covering a thousand statements would
+/// be the same units staked a thousand times.
+///
+/// The number is duplicated rather than shared, like every other consensus
+/// constant in this crate. Two implementations that read the same file agree
+/// about it by construction, which is the one thing a second opinion must not
+/// do.
+pub const VERIFICATION_BOND: u64 = 50_000;
+
+/// How long an attestation stays open to a slash, after which its bond returns.
+/// Mirrors the primary's `node::ATTESTATION_WINDOW_EPOCHS`.
+///
+/// The clock is the log's own: the highest epoch any `batch` record below the
+/// point in question names. Not an entry's `ts`, which is advisory text its own
+/// author writes, and not log height, which anybody can advance for the price
+/// of an append.
+pub const ATTESTATION_WINDOW_EPOCHS: u64 = 6;
+
+/// Whether an attestation record in the log is signed by the identity it names.
+///
+/// The signing payload is rebuilt field by field from the record's own bytes
+/// rather than round-tripped through a decoder shared with the primary. That is
+/// the discipline the whole crate is for: two implementations that agree
+/// because they run the same code agree about nothing, and the one question
+/// worth asking here is whether the *format* is what both believe it is.
+///
+/// An unsigned attestation is not merely irregular, it is free — there is
+/// nobody to take a bond from — so this answer decides money as well as
+/// admissibility.
+fn attestation_is_signed(payload: &Value) -> bool {
+    let field = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default();
+    let attestor = field("attestor");
+    if signed_submitter(attestor).is_none() {
+        return false;
+    }
+    let signing = Value::object([
+        ("type", Value::string("attestation")),
+        ("attestor", Value::string(attestor)),
+        ("claim_id", Value::string(field("claim_id"))),
+        ("created_at", Value::string(field("created_at"))),
+        ("status", Value::string(field("status"))),
+    ]);
+    let signature = payload.get("signature").and_then(Value::as_str);
+    crate::records::verify_record_signature("attestation", attestor, &signing, signature).is_ok()
+}
+
+/// How long a claim's trace stays open to objection, and how long a party has
+/// to answer before silence decides against them. Mirrors the primary's
+/// `node::CHALLENGE_WINDOW_EPOCHS`; the two crates disagreeing about this
+/// number would mean disagreeing about who forfeited.
+pub const CHALLENGE_WINDOW_EPOCHS: u64 = 6;
 
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -126,6 +186,874 @@ impl Node {
                 entry.payload.get("objective_id").and_then(Value::as_str) == Some(objective_id)
             })
             .map(|entry| &entry.payload)
+    }
+
+    /// What `identity` could still bond, reading only the first `positions`
+    /// entries of the log.
+    ///
+    /// Held minus committed. *Held* is what the genesis prefix issued this
+    /// identity, plus settlements naming it as submitter, plus availability
+    /// payouts naming it. *Committed* is every bond it has staked and every
+    /// reward it has offered by funding an objective or a pool.
+    ///
+    /// The issuance half is what makes any of it scarce. Without it a funder
+    /// named a reward and the settlement paid it, so units were free to make
+    /// and weighing anything by them bought nothing.
+    ///
+    /// Bounded by position rather than taken over the whole log, because the
+    /// rule this feeds is about what a record could afford *when it was
+    /// written*. Reading the whole log would let a later payout retroactively
+    /// justify a bond that was unfunded at the time, and let a later bond
+    /// retroactively bankrupt one that was funded.
+    ///
+    /// Locked reads the raw undertaking entries -- decodable and signed,
+    /// nothing more -- precisely because the affordability rule is what it
+    /// feeds. Filtering on affordability here would be circular, and counting
+    /// an unaffordable bond against its own author is self-correcting: a forged
+    /// `u64::MAX` drives that identity's balance to zero and every promise it
+    /// makes, that one included, fails the check.
+    pub fn spendable_within(&self, identity: &str, positions: u64) -> u128 {
+        self.held_within(identity, positions)
+            .saturating_sub(self.committed_within(identity, positions))
+    }
+
+    /// What the log says `identity` holds, before its commitments: issued at
+    /// genesis, plus settled, plus availability payouts.
+    fn held_within(&self, identity: &str, positions: u64) -> u128 {
+        let mut paid = self.issued_within(identity, positions);
+        for entry in self.ledger.entries() {
+            if entry.seq >= positions {
+                break;
+            }
+            match entry.kind.as_str() {
+                SETTLEMENT
+                    if entry.payload.get("submitter").and_then(Value::as_str) == Some(identity) =>
+                {
+                    if let Some(reward) = entry.payload.get("reward").and_then(Value::as_u64) {
+                        paid = paid.saturating_add(u128::from(reward));
+                    }
+                }
+                AVAILABILITY_SETTLEMENT => {
+                    for row in entry
+                        .payload
+                        .get("paid")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                    {
+                        if row.get("identity").and_then(Value::as_str) == Some(identity) {
+                            if let Some(reward) = row.get("reward").and_then(Value::as_u64) {
+                                paid = paid.saturating_add(u128::from(reward));
+                            }
+                        }
+                    }
+                }
+                // What a won dispute pays the winner. Not new money -- every
+                // unit is debited from the loser in `committed_within` -- but a
+                // second implementation that did not know about it would report
+                // the winner as overdrawn and certify the loser as solvent,
+                // which is worse than not looking at all.
+                CHALLENGE_SETTLEMENT
+                    if entry.payload.get("winner").and_then(Value::as_str) == Some(identity) =>
+                {
+                    if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                        paid = paid.saturating_add(u128::from(units));
+                    }
+                }
+                // The catch bounty: a slashed verification bond goes to
+                // whoever produced the evidence. Same shape as a won dispute
+                // and not new money either -- the attestor is debited for it
+                // in `committed_within`.
+                VERIFICATION_SLASH
+                    if entry.payload.get("catcher").and_then(Value::as_str) == Some(identity) =>
+                {
+                    if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                        paid = paid.saturating_add(u128::from(units));
+                    }
+                }
+                _ => {}
+            }
+        }
+        paid
+    }
+
+    /// What `identity` has put at risk or parted with: bonds staked, plus
+    /// rewards offered by funding an objective or an availability pool.
+    ///
+    /// Rewards are charged in full at post time and never returned: the units
+    /// go to whoever settles the objective, so releasing them back as the
+    /// settlement lands would credit the same money twice.
+    fn committed_within(&self, identity: &str, positions: u64) -> u128 {
+        let mut committed = 0u128;
+        for entry in self.ledger.entries_of_kind(UNDERTAKING) {
+            if entry.seq >= positions {
+                break;
+            }
+            let Ok(record) = Undertaking::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.identity != identity || record.verify_signature().is_err() {
+                continue;
+            }
+            committed = committed.saturating_add(u128::from(record.bond));
+        }
+        // A bond behind a *live* dispute is spent-but-not-gone: it can be
+        // lost, so it must not also be staked elsewhere. Released once the
+        // dispute settles, because the settlement record then says where it
+        // went -- and the loser is debited by the same pass.
+        let decided: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(CHALLENGE_SETTLEMENT)
+            .into_iter()
+            .filter(|entry| entry.seq < positions)
+            .filter_map(|entry| {
+                entry
+                    .payload
+                    .get("challenge_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        for entry in self.ledger.entries_of_kind(CHALLENGE) {
+            if entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("challenger").and_then(Value::as_str) != Some(identity) {
+                continue;
+            }
+            if decided.contains(&entry.payload.digest()) {
+                continue;
+            }
+            if let Some(bond) = entry.payload.get("bond").and_then(Value::as_u64) {
+                committed = committed.saturating_add(u128::from(bond));
+            }
+        }
+        for entry in self.ledger.entries_of_kind(CHALLENGE_SETTLEMENT) {
+            if entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("loser").and_then(Value::as_str) != Some(identity) {
+                continue;
+            }
+            if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                committed = committed.saturating_add(u128::from(units));
+            }
+        }
+        // A verification bond, live until the attestation it stands behind is
+        // slashed. Counted per attestation, and an attestation whose signature
+        // does not verify is skipped: it stakes nothing because there is nobody
+        // to take it from, and the audit reports it separately.
+        let slashed: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(VERIFICATION_SLASH)
+            .into_iter()
+            .filter(|entry| entry.seq < positions)
+            .filter_map(|entry| {
+                entry
+                    .payload
+                    .get("attestation_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        let settled_to = self.settled_epoch_within(positions);
+        for entry in self.ledger.entries_of_kind(ATTESTATION) {
+            if entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("attestor").and_then(Value::as_str) != Some(identity) {
+                continue;
+            }
+            if !attestation_is_signed(&entry.payload) || slashed.contains(&entry.payload.digest()) {
+                continue;
+            }
+            // Released once the window has shut, or verification would be a
+            // one-shot: an operator could stand behind `S / bond` verdicts in
+            // its whole life and then never verify again.
+            if !self.attestation_window_open(&entry.payload, settled_to) {
+                continue;
+            }
+            committed = committed.saturating_add(u128::from(VERIFICATION_BOND));
+        }
+        for entry in self.ledger.entries_of_kind(VERIFICATION_SLASH) {
+            if entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("attestor").and_then(Value::as_str) != Some(identity) {
+                continue;
+            }
+            if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                committed = committed.saturating_add(u128::from(units));
+            }
+        }
+        for entry in self.ledger.entries() {
+            if entry.seq >= positions {
+                break;
+            }
+            let offered = match entry.kind.as_str() {
+                OBJECTIVE => entry
+                    .payload
+                    .get("funder")
+                    .and_then(Value::as_str)
+                    .filter(|funder| *funder == identity)
+                    .and_then(|_| entry.payload.get("reward").and_then(Value::as_u64))
+                    .map(u128::from),
+                AVAILABILITY_POOL => AvailabilityPool::from_value(&entry.payload)
+                    .ok()
+                    .filter(|pool| pool.funder == identity)
+                    .map(|pool| pool.ceiling()),
+                _ => None,
+            };
+            if let Some(offered) = offered {
+                committed = committed.saturating_add(offered);
+            }
+        }
+        committed
+    }
+
+    /// Disputes, re-derived rather than trusted.
+    ///
+    /// Deliberately parsed field by field out of `Value` instead of through a
+    /// shared record type: this crate exists to be a second opinion on the
+    /// *rules*, and sharing the primary's decoder would make the two agree
+    /// about a malformed record by construction.
+    ///
+    /// No stepper runs here, and this crate has none. What it can check is
+    /// everything the transcript decides on its own -- who may object, to what,
+    /// by when, with what staked, and that every move opens the root its author
+    /// committed to. Whether the disputed *step* reproduces is the one question
+    /// that needs execution, and the primary's `audit --rerun` is where that
+    /// belongs.
+    fn audit_challenges(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let text = |value: &Value, key: &str| -> String {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+
+        // Claims by id, so a challenge can be checked against what it disputes.
+        let mut claims: BTreeMap<String, Value> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            claims.insert(entry.payload.digest(), entry.payload.clone());
+        }
+
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut challenges: BTreeMap<String, Value> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CHALLENGE) {
+            let id = entry.payload.digest();
+            challenges.insert(id.clone(), entry.payload.clone());
+            let claim_id = text(&entry.payload, "claim_id");
+            let challenger = text(&entry.payload, "challenger");
+            if !seen.insert(format!("{claim_id}|{challenger}")) {
+                problems.push(format!(
+                    "entry {}: {} already has a live objection to claim {}",
+                    entry.seq,
+                    short(&challenger),
+                    short(&claim_id)
+                ));
+            }
+            if entry
+                .payload
+                .get("bond")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                == 0
+            {
+                problems.push(format!(
+                    "entry {}: a challenge with no bond is a free objection",
+                    entry.seq
+                ));
+            }
+            let Some(claim) = claims.get(&claim_id) else {
+                problems.push(format!(
+                    "entry {}: challenges claim {}, which is not in this log",
+                    entry.seq,
+                    short(&claim_id)
+                ));
+                continue;
+            };
+            let artifact = claim.get("artifact").cloned().unwrap_or(Value::Null);
+            let root = text(&artifact, "trace_root");
+            let states = artifact
+                .get("trace_states")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if root.is_empty() {
+                problems.push(format!(
+                    "entry {}: claim {} commits to no trace, so there is nothing to bisect",
+                    entry.seq,
+                    short(&claim_id)
+                ));
+                continue;
+            }
+            if root == text(&entry.payload, "root") {
+                problems.push(format!(
+                    "entry {}: the challenge agrees with the claim it disputes",
+                    entry.seq
+                ));
+            }
+            let challenged = entry
+                .payload
+                .get("states")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if states != challenged {
+                problems.push(format!(
+                    "entry {}: claim commits to {states} states, challenge to {challenged}",
+                    entry.seq
+                ));
+            }
+            // The window, from the two records' own timestamps.
+            if let (Ok(opened), Ok(claimed)) = (
+                self.epoch_of_ts("challenge", &text(&entry.payload, "created_at")),
+                self.epoch_of_ts("claim", &text(claim, "created_at")),
+            ) {
+                let closes = claimed.saturating_add(CHALLENGE_WINDOW_EPOCHS);
+                if opened > closes {
+                    problems.push(format!(
+                        "entry {}: opened in epoch {opened}, after the window on claim {} shut at {closes}",
+                        entry.seq,
+                        short(&claim_id)
+                    ));
+                }
+            }
+        }
+
+        for entry in self.ledger.entries_of_kind(BISECTION) {
+            let challenge_id = text(&entry.payload, "challenge_id");
+            let Some(challenge) = challenges.get(&challenge_id) else {
+                problems.push(format!(
+                    "entry {}: no challenge {}",
+                    entry.seq,
+                    short(&challenge_id)
+                ));
+                continue;
+            };
+            let claim_id = text(challenge, "claim_id");
+            let Some(claim) = claims.get(&claim_id) else {
+                continue;
+            };
+            let mover = text(&entry.payload, "mover");
+            let artifact = claim.get("artifact").cloned().unwrap_or(Value::Null);
+            let root = if mover == text(claim, "submitter") {
+                text(&artifact, "trace_root")
+            } else if mover == text(challenge, "challenger") {
+                text(challenge, "root")
+            } else {
+                problems.push(format!(
+                    "entry {}: {} is not a party to {}",
+                    entry.seq,
+                    short(&mover),
+                    short(&challenge_id)
+                ));
+                continue;
+            };
+            let states = artifact
+                .get("trace_states")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let index = entry
+                .payload
+                .get("index")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let siblings: Vec<String> = entry
+                .payload
+                .get("path")
+                .and_then(Value::as_array)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect();
+            let leaf = entry
+                .payload
+                .get("state")
+                .cloned()
+                .unwrap_or(Value::Null)
+                .digest();
+            let path = crate::canonical::Inclusion {
+                index,
+                leaves: states,
+                siblings,
+            };
+            // The check the whole game rests on: a party that could answer with
+            // a state it never committed to would win every dispute by playing
+            // whatever beats the other side this round.
+            if !path.verify(&leaf, &root) {
+                problems.push(format!(
+                    "entry {}: the move at state {index} does not open the root its author committed to",
+                    entry.seq
+                ));
+            }
+        }
+
+        let mut decided: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(CHALLENGE_SETTLEMENT) {
+            let id = text(&entry.payload, "challenge_id");
+            if !decided.insert(id.clone()) {
+                problems.push(format!(
+                    "entry {}: challenge {} settled twice",
+                    entry.seq,
+                    short(&id)
+                ));
+            }
+            let Some(challenge) = challenges.get(&id) else {
+                problems.push(format!(
+                    "entry {}: settles challenge {}, which is not in this log",
+                    entry.seq,
+                    short(&id)
+                ));
+                continue;
+            };
+            let claim_id = text(challenge, "claim_id");
+            let Some(claim) = claims.get(&claim_id) else {
+                continue;
+            };
+            let winner = text(&entry.payload, "winner");
+            let loser = text(&entry.payload, "loser");
+            let submitter = text(claim, "submitter");
+            let challenger = text(challenge, "challenger");
+            let parties = [submitter.as_str(), challenger.as_str()];
+            if !parties.contains(&winner.as_str())
+                || !parties.contains(&loser.as_str())
+                || winner == loser
+            {
+                problems.push(format!(
+                    "entry {}: settled between {} and {}, who are not the two parties",
+                    entry.seq,
+                    short(&winner),
+                    short(&loser)
+                ));
+                continue;
+            }
+            let units = entry
+                .payload
+                .get("units")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let ceiling = if loser == challenger {
+                challenge.get("bond").and_then(Value::as_u64).unwrap_or(0)
+            } else {
+                self.objective_of_claim(claim)
+                    .and_then(|objective| objective.get("reward").and_then(Value::as_u64))
+                    .unwrap_or(0)
+            };
+            if units > ceiling {
+                problems.push(format!(
+                    "entry {}: moved {units} against a ceiling of {ceiling}",
+                    entry.seq
+                ));
+            }
+        }
+
+        problems
+    }
+
+    /// The epoch this log has settled up to, reading its first `positions`
+    /// entries. Zero if nothing has settled yet, which keeps every bond live —
+    /// the safe direction.
+    fn settled_epoch_within(&self, positions: u64) -> u64 {
+        self.ledger
+            .entries_of_kind(BATCH)
+            .into_iter()
+            .filter(|entry| entry.seq < positions)
+            .filter_map(|entry| entry.payload.get("epoch").and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Whether an attestation record is still open to a slash at settled epoch
+    /// `now`. A `created_at` this crate cannot parse keeps the window open, so
+    /// a malformed timestamp is never a way to release a bond early.
+    fn attestation_window_open(&self, payload: &Value, now: u64) -> bool {
+        let created = payload
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match self.epoch_of_ts("attestation", created) {
+            Ok(opened) => now <= opened.saturating_add(ATTESTATION_WINDOW_EPOCHS),
+            Err(_) => true,
+        }
+    }
+
+    /// Bonded attestations, re-derived rather than trusted.
+    ///
+    /// **What this crate can and cannot check, stated rather than implied.**
+    /// No verifier runs here and this crate has none, so whether an attestation
+    /// is *true* is not a question it can ask — that is the primary's
+    /// `audit --rerun`, and the run of the pinned checker is the whole of the
+    /// evidence.
+    ///
+    /// Everything else the transcript decides on its own: who may stand behind
+    /// what, once, under signature; that a slash names an attestation the log
+    /// actually carries, and takes from the identity that made it, and takes
+    /// exactly the bond. That last one matters most here. A slash moves fifty
+    /// thousand units out of somebody's balance on a record anybody can append,
+    /// and a second implementation that certified the log clean by not knowing
+    /// about the record kind would be worse than one that never looked.
+    fn audit_attestations(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let text = |value: &Value, key: &str| -> String {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let claims: BTreeSet<String> = self
+            .ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .map(|entry| entry.payload.digest())
+            .collect();
+
+        let mut attestations: BTreeMap<String, Value> = BTreeMap::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(ATTESTATION) {
+            let claim_id = text(&entry.payload, "claim_id");
+            let attestor = text(&entry.payload, "attestor");
+            let status = text(&entry.payload, "status");
+            attestations.insert(entry.payload.digest(), entry.payload.clone());
+
+            if !attestation_is_signed(&entry.payload) {
+                problems.push(format!(
+                    "entry {}: attestation by {} is not signed by the identity it names;                      an attestation nobody signed has nobody to slash, which makes it free",
+                    entry.seq,
+                    short(&attestor)
+                ));
+            }
+            // `unavailable` says the attestor's machine could not run the
+            // check, which is a fact about the attestor. Bonding it would put a
+            // price on admitting a broken toolchain.
+            if status != "accept" && status != "reject" {
+                problems.push(format!(
+                    "entry {}: attestation stands behind {status:?}, which is not a                      settling status and is not bondable",
+                    entry.seq
+                ));
+            }
+            if !seen.insert(format!("{claim_id}|{attestor}")) {
+                problems.push(format!(
+                    "entry {}: {} stood behind claim {} twice",
+                    entry.seq,
+                    short(&attestor),
+                    short(&claim_id)
+                ));
+            }
+            if !claims.contains(&claim_id) {
+                problems.push(format!(
+                    "entry {}: attests to claim {}, which is not in this log",
+                    entry.seq,
+                    short(&claim_id)
+                ));
+            }
+            // Affordable at *this* point in the log, the way an undertaking's
+            // bond is checked above. Neither conservation sum covers it: both
+            // are whole-log totals, so an attestor that was broke here and paid
+            // later balances exactly, and the bond it staked in between was
+            // money it did not have.
+            let spendable = self.spendable_within(&attestor, entry.seq);
+            if u128::from(VERIFICATION_BOND) > spendable {
+                problems.push(format!(
+                    "entry {}: attestation bonds {VERIFICATION_BOND} units against a \
+                     balance of {spendable}",
+                    entry.seq
+                ));
+            }
+        }
+
+        let mut slashed: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(VERIFICATION_SLASH) {
+            let id = text(&entry.payload, "attestation_id");
+            if !slashed.insert(id.clone()) {
+                problems.push(format!(
+                    "entry {}: attestation {} slashed twice",
+                    entry.seq,
+                    short(&id)
+                ));
+            }
+            let Some(record) = attestations.get(&id) else {
+                problems.push(format!(
+                    "entry {}: slashes attestation {}, which is not in this log",
+                    entry.seq,
+                    short(&id)
+                ));
+                continue;
+            };
+            if text(&entry.payload, "attestor") != text(record, "attestor") {
+                problems.push(format!(
+                    "entry {}: takes a bond from an identity the attestation does not name",
+                    entry.seq
+                ));
+            }
+            if text(&entry.payload, "claim_id") != text(record, "claim_id") {
+                problems.push(format!(
+                    "entry {}: slashes an attestation about a different claim",
+                    entry.seq
+                ));
+            }
+            let units = entry
+                .payload
+                .get("units")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if units != VERIFICATION_BOND {
+                problems.push(format!(
+                    "entry {}: took {units} against a verification bond of {}",
+                    entry.seq, VERIFICATION_BOND
+                ));
+            }
+            if !self.attestation_window_open(record, self.settled_epoch_within(entry.seq)) {
+                problems.push(format!(
+                    "entry {}: slashes attestation {} after its window shut, when the \
+                     bond had already returned",
+                    entry.seq,
+                    short(&id)
+                ));
+            }
+        }
+        problems
+    }
+
+    /// The objective record a claim names, as raw bytes.
+    fn objective_of_claim(&self, claim: &Value) -> Option<Value> {
+        let wanted = claim.get("objective_id").and_then(Value::as_str)?;
+        self.ledger
+            .entries_of_kind(OBJECTIVE)
+            .into_iter()
+            .find(|entry| entry.payload.digest() == wanted)
+            .map(|entry| entry.payload.clone())
+    }
+
+    /// Conservation per identity **and per tier**, re-derived.
+    ///
+    /// The whole-balance check above is not enough on its own: an identity can
+    /// hold exactly what it has promised in total while having promised units
+    /// of a tier it never earned. That log balances and is still a forgery,
+    /// because the promise it makes is one the units behind it cannot keep.
+    ///
+    /// Tiers are computed here from the objective records rather than read from
+    /// a field, for the reason the primary does the same: a tier written down
+    /// beside the verifier is a second place it can be wrong.
+    ///
+    /// Universal units — the genesis reserve, availability payouts, and both
+    /// sides of a dispute slash — cover any tier. Everything a *settlement*
+    /// mints is typed by its objective's verifier kind.
+    fn audit_tiers(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if !self.declares_supply() {
+            return problems;
+        }
+        let positions = self.ledger.entries().len() as u64;
+
+        // Objective id -> (verifier kind, funder, reward).
+        let mut objectives: BTreeMap<String, (String, String, u64)> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(OBJECTIVE) {
+            let kind = entry
+                .payload
+                .get("verifier")
+                .and_then(|verifier| verifier.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("certificate")
+                .to_string();
+            let funder = entry
+                .payload
+                .get("funder")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let reward = entry
+                .payload
+                .get("reward")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            objectives.insert(entry.payload.digest(), (kind, funder, reward));
+        }
+
+        // (identity, tier) -> held, and the same for committed. "universal" is
+        // spelled out rather than being a variant, because this crate's job is
+        // to agree with the other one's *answers*, not to share its types.
+        let mut held: BTreeMap<(String, String), u128> = BTreeMap::new();
+        let mut committed: BTreeMap<(String, String), u128> = BTreeMap::new();
+        let mut credit = |who: &str, tier: &str, units: u128| {
+            let slot = held.entry((who.to_string(), tier.to_string())).or_insert(0);
+            *slot = slot.saturating_add(units);
+        };
+
+        let genesis = self.genesis_prefix();
+        for entry in self.ledger.entries_of_kind(ISSUANCE) {
+            if entry.seq >= genesis {
+                continue;
+            }
+            if let (Some(holder), Some(units)) = (
+                entry.payload.get("holder").and_then(Value::as_str),
+                entry.payload.get("units").and_then(Value::as_u64),
+            ) {
+                credit(holder, "universal", u128::from(units));
+            }
+        }
+        for entry in self.ledger.entries() {
+            match entry.kind.as_str() {
+                SETTLEMENT => {
+                    let (Some(who), Some(reward)) = (
+                        entry.payload.get("submitter").and_then(Value::as_str),
+                        entry.payload.get("reward").and_then(Value::as_u64),
+                    ) else {
+                        continue;
+                    };
+                    let tier = entry
+                        .payload
+                        .get("objective_id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| objectives.get(id))
+                        .map(|(kind, _, _)| kind.clone())
+                        .unwrap_or_else(|| "certificate".to_string());
+                    credit(who, &tier, u128::from(reward));
+                }
+                AVAILABILITY_SETTLEMENT => {
+                    for row in entry
+                        .payload
+                        .get("paid")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                    {
+                        if let (Some(who), Some(reward)) = (
+                            row.get("identity").and_then(Value::as_str),
+                            row.get("reward").and_then(Value::as_u64),
+                        ) {
+                            credit(who, "universal", u128::from(reward));
+                        }
+                    }
+                }
+                CHALLENGE_SETTLEMENT => {
+                    let units = u128::from(
+                        entry
+                            .payload
+                            .get("units")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                    );
+                    if let Some(winner) = entry.payload.get("winner").and_then(Value::as_str) {
+                        credit(winner, "universal", units);
+                    }
+                    if let Some(loser) = entry.payload.get("loser").and_then(Value::as_str) {
+                        let slot = committed
+                            .entry((loser.to_string(), "universal".to_string()))
+                            .or_insert(0);
+                        *slot = slot.saturating_add(units);
+                    }
+                }
+                OBJECTIVE => {
+                    if let Some((kind, funder, reward)) = objectives.get(&entry.payload.digest()) {
+                        let slot = committed.entry((funder.clone(), kind.clone())).or_insert(0);
+                        *slot = slot.saturating_add(u128::from(*reward));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Service bonds are universal. `committed_within` already resolves live
+        // challenge bonds against the settlements that released them, so the
+        // whole of it is reused rather than re-walked -- minus the objective
+        // rewards, which are typed above.
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for (name, _) in held.keys() {
+            names.insert(name.clone());
+        }
+        for (name, _) in committed.keys() {
+            names.insert(name.clone());
+        }
+        for name in &names {
+            let typed_rewards: u128 = objectives
+                .values()
+                .filter(|(_, funder, _)| funder == name)
+                .map(|(_, _, reward)| u128::from(*reward))
+                .fold(0u128, |sum, reward| sum.saturating_add(reward));
+            let service = self
+                .committed_within(name, positions)
+                .saturating_sub(typed_rewards);
+            let slot = committed
+                .entry((name.clone(), "universal".to_string()))
+                .or_insert(0);
+            *slot = slot.saturating_add(service);
+        }
+
+        for name in names {
+            let universal_held = held
+                .get(&(name.clone(), "universal".to_string()))
+                .copied()
+                .unwrap_or(0);
+            // Every tier's shortfall falls on the one pool that can cover it.
+            let mut drawn = committed
+                .get(&(name.clone(), "universal".to_string()))
+                .copied()
+                .unwrap_or(0);
+            let mut shortfalls: Vec<String> = Vec::new();
+            for tier in ["certificate", "evaluator", "lean", "replay", "statistical"] {
+                let owes = committed
+                    .get(&(name.clone(), tier.to_string()))
+                    .copied()
+                    .unwrap_or(0);
+                let has = held
+                    .get(&(name.clone(), tier.to_string()))
+                    .copied()
+                    .unwrap_or(0);
+                if owes > has {
+                    drawn = drawn.saturating_add(owes - has);
+                    shortfalls.push(format!("{tier}: promised {owes} against {has} held"));
+                }
+            }
+            if drawn > universal_held {
+                problems.push(format!(
+                    "{}: promises exceed holdings once tiers are kept apart ({}); \
+                     units earned in one tier do not convert into another",
+                    short(&name),
+                    shortfalls.join("; ")
+                ));
+            }
+        }
+        problems
+    }
+
+    /// What the genesis prefix issued `identity`.
+    ///
+    /// Only the run of issuance records at the very front of the log counts. An
+    /// issuance below it is a mint and is reported by [`Node::audit`] rather
+    /// than credited, or the record that exists to make money scarce would be
+    /// the cheapest way to make more. Position rather than a signature is what
+    /// authorises it: in a log's opening bytes there is nobody else it could
+    /// be.
+    fn issued_within(&self, identity: &str, positions: u64) -> u128 {
+        let mut issued = 0u128;
+        for entry in self.ledger.entries() {
+            if entry.kind != ISSUANCE || entry.seq >= positions {
+                break;
+            }
+            if entry.payload.get("holder").and_then(Value::as_str) == Some(identity) {
+                if let Some(units) = entry.payload.get("units").and_then(Value::as_u64) {
+                    issued = issued.saturating_add(u128::from(units));
+                }
+            }
+        }
+        issued
+    }
+
+    /// Does this log declare a money supply? See [`Node::issued_within`].
+    pub fn declares_supply(&self) -> bool {
+        self.ledger
+            .entries()
+            .first()
+            .is_some_and(|entry| entry.kind == ISSUANCE)
+    }
+
+    /// How many entries of this log are its genesis prefix.
+    fn genesis_prefix(&self) -> u64 {
+        self.ledger
+            .entries()
+            .iter()
+            .take_while(|entry| entry.kind == ISSUANCE)
+            .count() as u64
     }
 
     pub fn frontier_of(&self, objective_id: &str) -> Option<FrontierEntry> {
@@ -391,6 +1319,17 @@ impl Node {
     /// reading a log that already exists, and reporting "seat not drawn" for
     /// every share is the same finding said more usefully.
     fn committee_for(&self, epoch: u64, positions: usize) -> Vec<(u8, String, String)> {
+        let size = self.committee_size_at(epoch, positions);
+        self.committee_of_size(epoch, size, positions)
+    }
+
+    /// The draw itself, for a size somebody else picked.
+    fn committee_of_size(
+        &self,
+        epoch: u64,
+        size: u8,
+        positions: usize,
+    ) -> Vec<(u8, String, String)> {
         // `EPOCH_SECONDS`, the constant, never `epoch_seconds()`: the override
         // is a demo affordance, the anchor moves with the epoch length, and a
         // consensus rule keyed on an environment variable is not one.
@@ -422,10 +1361,136 @@ impl Node {
         ranked.sort_by(|(ra, a), (rb, b)| (ra, &a.transport).cmp(&(rb, &b.transport)));
         ranked
             .into_iter()
-            .take(usize::from(COMMITTEE_SIZE))
+            .take(usize::from(size))
             .enumerate()
             .map(|(i, (_, peer))| ((i as u8) + 1, peer.transport, peer.identity))
             .collect()
+    }
+
+    /// The committee size in force for `epoch`, derived independently.
+    ///
+    /// The primary's `Node::committee_size_at`, recomputed rather than trusted.
+    /// This is the sharpest reason for a second implementation to exist: the
+    /// draw is consensus, so a crate that kept using a fixed five while the
+    /// other grew the committee would disagree about which published shares came
+    /// from a seat that exists — and would say so about an honest member.
+    ///
+    /// Derived from the epoch's boundary prefix, so it is fixed before the
+    /// epoch's first record and every reader gets the same number.
+    fn committee_size_at(&self, epoch: u64, positions: usize) -> u8 {
+        let boundary = self.epoch_boundary(epoch, positions);
+        let peers = self.peers_within(boundary);
+        let floor = COMMITTEE_SIZE;
+        if peers <= usize::from(floor) {
+            return floor;
+        }
+        let carried = self.sealed_value_in(epoch.saturating_sub(1), boundary);
+        if carried == 0 {
+            return floor;
+        }
+        let ceiling = crate::partition::MAX_COMMITTEE_SIZE.min(peers.min(255) as u8);
+        let mut size = floor;
+        while size < ceiling {
+            if self.custody_guard(epoch, size, positions) >= carried {
+                return size;
+            }
+            size = size.saturating_add(1);
+        }
+        size
+    }
+
+    /// How many entries the log held strictly before `epoch` began.
+    fn epoch_boundary(&self, epoch: u64, positions: usize) -> usize {
+        let mut boundary = 0;
+        for (index, entry) in self.ledger.entries().iter().take(positions).enumerate() {
+            match crate::time::parse_rfc3339(&entry.ts) {
+                Some(seconds)
+                    if seconds >= 0
+                        && epoch_of(seconds as u64, crate::partition::EPOCH_SECONDS) < epoch =>
+                {
+                    boundary = index + 1;
+                }
+                _ => continue,
+            }
+        }
+        boundary
+    }
+
+    /// Distinct peer identities registered below `positions`.
+    fn peers_within(&self, positions: usize) -> usize {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != PEER {
+                continue;
+            }
+            let Ok(record) = PeerRecord::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.verify_signature().is_err() {
+                continue;
+            }
+            seen.insert(record.identity);
+        }
+        seen.len()
+    }
+
+    /// The value one epoch's committee could take by opening early: the sum
+    /// over every sealed commitment in it.
+    fn sealed_value_in(&self, epoch: u64, positions: usize) -> u128 {
+        let mut total = 0u128;
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != COMMITMENT || entry.payload.get("envelope").is_none() {
+                continue;
+            }
+            let Some(created) = entry.payload.get("created_at").and_then(Value::as_str) else {
+                continue;
+            };
+            let Ok(at) = self.epoch_of_ts("commitment", created) else {
+                continue;
+            };
+            if at != epoch {
+                continue;
+            }
+            let Some(wanted) = entry.payload.get("objective_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(reward) = self
+                .ledger
+                .entries_of_kind(OBJECTIVE)
+                .into_iter()
+                .find(|objective| objective.payload.digest() == wanted)
+                .and_then(|objective| objective.payload.get("reward").and_then(Value::as_u64))
+            {
+                total = total.saturating_add(u128::from(reward));
+            }
+        }
+        total
+    }
+
+    /// `d * (sum of the threshold smallest stakes among the drawn seats)`.
+    ///
+    /// A cartel forms out of the **cheapest** `t` members, so the sum of the `t`
+    /// smallest is what it risks — not `t` times an average, which with one rich
+    /// member and four poor ones reports a committee as safe that is not.
+    fn custody_guard(&self, epoch: u64, size: u8, positions: usize) -> u128 {
+        let boundary = self.epoch_boundary(epoch, positions) as u64;
+        let seats = self.committee_of_size(epoch, size, positions);
+        if seats.len() < usize::from(size) {
+            return 0;
+        }
+        let mut stakes: Vec<u128> = seats
+            .iter()
+            .map(|(_, _, identity)| self.spendable_within(identity, boundary))
+            .collect();
+        stakes.sort_unstable();
+        let threshold = usize::from(crate::partition::threshold_for(size));
+        let cheapest: u128 = stakes
+            .iter()
+            .take(threshold)
+            .fold(0u128, |sum, stake| sum.saturating_add(*stake));
+        cheapest
+            .saturating_mul(crate::partition::DETECTION_NUM)
+            .saturating_div(crate::partition::DETECTION_DEN)
     }
 
     /// Which entry this undertaking must produce in `epoch`.
@@ -608,8 +1673,14 @@ impl Node {
 
     pub fn commit(&mut self, commitment: &Commitment, ts: &str) -> Result<String, String> {
         commitment.verify_signature().map_err(|e| e.to_string())?;
-        self.epoch_of_ts("commitment", &commitment.created_at)?;
+        let declared = self.epoch_of_ts("commitment", &commitment.created_at)?;
         let now = self.epoch_of_ts("commit", ts)?;
+        if declared != now {
+            return Err(format!(
+                "commitment declares epoch {declared} but was admitted in epoch {now}; \
+                 commit-reveal ordering uses the admission epoch"
+            ));
+        }
         self.settle_due(now, ts)?;
 
         let objectives = self.objectives();
@@ -1081,10 +2152,24 @@ impl Node {
             };
             let commit_epoch = epoch_of(commit_seconds, epoch_seconds());
             let share_epoch = epoch_of(share_seconds, epoch_seconds());
-            if share_epoch <= commit_epoch {
+            // An embargo is this rule with a longer arm. A committee share is
+            // what opens a sealed artifact, so an objective that declared
+            // "revealed after N epochs" is enforced here or nowhere -- and
+            // derived here independently, because an embargo the two
+            // implementations disagreed about is a committee opening an
+            // artifact one of them still thinks is shut.
+            let embargo = self
+                .objectives()
+                .get(&commitment.objective_id)
+                .filter(|objective| objective.confidentiality == "embargoed")
+                .and_then(|objective| objective.embargo_epochs)
+                .unwrap_or(0);
+            let opens_at = commit_epoch.saturating_add(embargo);
+            if share_epoch <= opens_at {
                 problems.push(format!(
-                    "entry {}: committee_share is in epoch {share_epoch} but its commitment is \
-                     in epoch {commit_epoch}; a committee must wait for a strictly later epoch",
+                    "entry {}: committee_share is in epoch {share_epoch} but its commitment \
+                     opens at epoch {opens_at}; a committee must wait for a strictly later \
+                     epoch, and longer still under an embargo",
                     entry.seq
                 ));
                 continue;
@@ -1150,6 +2235,55 @@ impl Node {
             .map(|record| (record.id(), record))
             .collect();
 
+        // The money supply, derived here rather than taken from the primary's
+        // word. Two faults: a mint below the genesis prefix, and an identity
+        // that has committed more than the log says it holds. Together they are
+        // the statement that no unit exists which the supply did not issue —
+        // and without them every other number here is weighed in a currency
+        // anyone can make.
+        let genesis = self.genesis_prefix();
+        for entry in self.ledger.entries_of_kind(ISSUANCE) {
+            if entry.seq < genesis {
+                continue;
+            }
+            problems.push(format!(
+                "entry {}: issues units after the genesis prefix ended at entry \
+                 {genesis}; a supply is declared in a log's opening entries or it is \
+                 not a supply",
+                entry.seq
+            ));
+        }
+        if self.declares_supply() {
+            let positions = self.ledger.entries().len() as u64;
+            let mut names: BTreeSet<String> = BTreeSet::new();
+            for entry in self.ledger.entries() {
+                for key in ["holder", "funder", "submitter", "identity"] {
+                    if let Some(name) = entry.payload.get(key).and_then(Value::as_str) {
+                        names.insert(name.to_string());
+                    }
+                }
+            }
+            // `spendable_within` saturates at zero, so it cannot report an
+            // overdraft on its own. Recomputing the two sides here is the point
+            // of a second implementation: the primary reports the same fault
+            // from its own arithmetic, and the two agreeing is evidence.
+            for name in names {
+                let holds = self.held_within(&name, positions);
+                let owes = self.committed_within(&name, positions);
+                if owes > holds {
+                    problems.push(format!(
+                        "{} has committed {owes} units against {holds} issued or paid; \
+                         a unit nobody issued is money made by naming it",
+                        short(&name)
+                    ));
+                }
+            }
+        }
+
+        problems.append(&mut self.audit_challenges());
+        problems.append(&mut self.audit_attestations());
+        problems.append(&mut self.audit_tiers());
+
         for entry in self.ledger.entries_of_kind(UNDERTAKING) {
             match Undertaking::from_value(&entry.payload) {
                 Err(error) => problems.push(format!("entry {}: {error}", entry.seq)),
@@ -1161,6 +2295,15 @@ impl Node {
                             "entry {}: undertaking promises {} entries where the log below \
                              it had {}; the size of a promise is not the promiser's to choose",
                             entry.seq, record.height, entry.seq
+                        ));
+                    } else if u128::from(record.bond)
+                        > self.spendable_within(&record.identity, entry.seq)
+                    {
+                        problems.push(format!(
+                            "entry {}: undertaking bonds {} units against a balance of {}",
+                            entry.seq,
+                            record.bond,
+                            self.spendable_within(&record.identity, entry.seq)
                         ));
                     } else if !promises.contains_key(&record.id()) {
                         problems.push(format!(
@@ -1992,10 +3135,31 @@ mod tests {
         ledger
             .append("note", Value::string("one"), TS)
             .expect("append");
+        // A settlement paying the fixture's identity, so its bond is
+        // affordable. Without it the audit reports the *bond* and stops, and
+        // the root check below -- the branch this test exists for -- would
+        // never run while the test still looked like it was exercising it.
+        ledger
+            .append(
+                SETTLEMENT,
+                Value::object([
+                    ("claim_id", Value::string("00".repeat(32))),
+                    ("objective_id", Value::string("11".repeat(32))),
+                    ("reward", Value::Int(1000)),
+                    (
+                        "submitter",
+                        Value::string(
+                            "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+                        ),
+                    ),
+                ]),
+                TS,
+            )
+            .expect("append");
         ledger
             .append("note", Value::string("two"), TS)
             .expect("append");
-        let root = ledger.root_at(2).expect("root");
+        let root = ledger.root_at(3).expect("root");
 
         // A *genuinely signed* undertaking, lifted from a log the primary
         // implementation wrote, naming a root that is not a prefix root of
@@ -2004,7 +3168,14 @@ mod tests {
         // check -- and this crate cannot sign, by design. Borrowing a real
         // record from the other implementation is the honest way to exercise
         // the branch, and it doubles as a decode test against its bytes.
-        const SIGNED: &str = r#"{"created_at":"2026-08-06T15:35:22+00:00","height":2,"identity":"bee6e7dca0b328454bcb7b23475cb080d220c5a416168b051a47d76700dec386","root":"sha256:8fc854636ab4a4b63fd04b95cd837202a39c81b71f4c29e4c563e59508ae513c","signature":"2de2e015e147e43428491baa40a8dbe5b906b6187ebb90e30e65af7997490679c2e43b3edd81f4ca88768622e6f1309d890c2a23fb662e0603524ccee36a7507","type":"undertaking"}"#;
+        //
+        // These exact bytes are pinned on the other side too, by
+        // `the_signed_undertaking_the_reference_crate_pins_is_still_what_this_crate_writes`.
+        // A borrowed constant rots silently -- add a field to the record and
+        // this copy becomes one the primary would no longer write, so the two
+        // implementations stop being compared on the same bytes while both
+        // still pass. That test fails first and names this file.
+        const SIGNED: &str = r#"{"bond":500,"created_at":"2026-08-14T00:00:00+00:00","height":3,"identity":"197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61","root":"sha256:30ffa4f80f8e0198fd85844b9a63b682f11f1bca7a67532aaaae0f20d17e78ed","signature":"bac8259da5214a3026e01f1e912988a1cb4fd6969085a6ad0cddb6a43af99ee1a6202b4df610dd2e8df8472c34f6a7985d3ee0ed2ea37d1094f1f64ef15d4f06","type":"undertaking"}"#;
         let borrowed = Value::from_json(SIGNED).expect("the fixture is canonical JSON");
         let decoded = Undertaking::from_value(&borrowed).expect("and it decodes here");
         decoded
@@ -2054,8 +3225,145 @@ mod tests {
         );
         // And the check is not simply always-failing: this log's own root at
         // that height is a value the same code path accepts.
-        assert_eq!(node.ledger.root_at(2).as_deref(), Some(root.as_str()));
+        assert_eq!(node.ledger.root_at(3).as_deref(), Some(root.as_str()));
         assert_ne!(root, decoded.root, "the fixture must name a different root");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bond the log never funded is named here too.
+    ///
+    /// The rule the availability pool is divided by: a promise's share is
+    /// proportional to what it staked, so a stake nobody paid for is a share of
+    /// somebody else's money. It is the one number in an undertaking that the
+    /// record cannot establish about itself — what the identity has been paid
+    /// is written below it — which is exactly why a second implementation has
+    /// to derive it independently rather than take the first one's word.
+    ///
+    /// A slash the log carries no attestation for is a taking with no target.
+    ///
+    /// The case a second implementation exists for. `verification_slash` is a
+    /// record kind this crate could have ignored entirely and still reported
+    /// "log verified" — over fifty thousand units moved out of somebody's
+    /// balance by an append anybody can write. That is exactly how availability
+    /// settlements went unchecked here for a while.
+    #[test]
+    fn a_slash_pointing_at_no_attestation_is_reported() {
+        let dir = scratch("orphan-slash");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        ledger
+            .append(
+                VERIFICATION_SLASH,
+                Value::object([
+                    ("attestation_id", Value::string("sha256:nothing")),
+                    ("attestor", Value::string("victim")),
+                    ("catcher", Value::string("thief")),
+                    ("claim_id", Value::string("sha256:also-nothing")),
+                    ("units", Value::Int(i128::from(VERIFICATION_BOND))),
+                ]),
+                TS,
+            )
+            .expect("append");
+
+        let node = Node::new(ledger, ".");
+        let problems = node.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("which is not in this log")),
+            "a slash with no attestation behind it went unreported: {problems:?}"
+        );
+        // And the money is accounted for, which is the half a check on the
+        // record's *shape* would miss. A crate that did not know this kind
+        // would report the catcher holding nothing and the loser holding
+        // everything, and certify both.
+        assert_eq!(
+            node.spendable_within("thief", 1),
+            u128::from(VERIFICATION_BOND),
+            "the catcher's bounty was not credited"
+        );
+        assert_eq!(
+            node.committed_within("victim", 1),
+            u128::from(VERIFICATION_BOND),
+            "the loser was not debited"
+        );
+    }
+
+    /// An attestation nobody signed stakes nothing, and both crates say so.
+    ///
+    /// The two questions are one question. If this crate counted the bond, its
+    /// balances would differ from the primary's on the same bytes — and two
+    /// implementations disagreeing about a balance disagree about what settled.
+    #[test]
+    fn an_unsigned_attestation_is_named_and_stakes_nothing() {
+        let dir = scratch("unsigned-attestation");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        const KEY: &str = "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61";
+        ledger
+            .append(
+                ATTESTATION,
+                Value::object([
+                    ("type", Value::string("attestation")),
+                    ("attestor", Value::string(KEY)),
+                    ("claim_id", Value::string("sha256:whatever")),
+                    ("created_at", Value::string(TS)),
+                    ("status", Value::string("accept")),
+                ]),
+                TS,
+            )
+            .expect("append");
+
+        let node = Node::new(ledger, ".");
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("is not signed")),
+            "an unsigned attestation went unreported: {problems:?}"
+        );
+        assert_eq!(
+            node.committed_within(KEY, 1),
+            0,
+            "an attestation nobody signed staked a bond"
+        );
+    }
+
+    /// Same bytes as the fixture above, in a log that does *not* pay their
+    /// author. That is the whole difference, so what is reported is the
+    /// balance and not the shape.
+    #[test]
+    fn a_bond_the_log_never_funded_is_reported() {
+        let dir = scratch("unfunded-bond");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        for note in ["one", "two", "three"] {
+            ledger
+                .append("note", Value::string(note), TS)
+                .expect("append");
+        }
+        const SIGNED: &str = r#"{"bond":500,"created_at":"2026-08-14T00:00:00+00:00","height":3,"identity":"197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61","root":"sha256:30ffa4f80f8e0198fd85844b9a63b682f11f1bca7a67532aaaae0f20d17e78ed","signature":"bac8259da5214a3026e01f1e912988a1cb4fd6969085a6ad0cddb6a43af99ee1a6202b4df610dd2e8df8472c34f6a7985d3ee0ed2ea37d1094f1f64ef15d4f06","type":"undertaking"}"#;
+        let borrowed = Value::from_json(SIGNED).expect("the fixture is canonical JSON");
+        ledger.append(UNDERTAKING, borrowed, TS).expect("append");
+
+        let node = Node::new(ledger, ".");
+        let problems = node.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("bonds 500 units against a balance of 0")),
+            "a bond nobody funded went unreported: {problems:?}"
+        );
+        // The height rule is satisfied, so this is not that fault wearing a
+        // different message: the record sits at seq 3 and promises 3.
+        assert!(
+            !problems
+                .iter()
+                .any(|p| p.contains("not the promiser's to choose")),
+            "the fixture tripped the size rule instead: {problems:?}"
+        );
+        assert_eq!(
+            node.spendable_within(
+                "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+                3,
+            ),
+            0
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -135,6 +135,43 @@ pub const FINALITY_EPOCHS_ENV: &str = "CAIRN_FINALITY_EPOCHS";
 /// sampling. `docs/threat-model.md` carries the row.
 pub const COMMITTEE_SIZE: u8 = 5;
 
+/// Largest committee the envelope format will carry.
+///
+/// A sealed submission carries one McEliece-sealed share per seat, so seats
+/// cost bytes on the log per submission. Sixty-four is far past any committee a
+/// Stage-0 peer set could populate and is a bound rather than a target: what it
+/// stops is a sizing rule that grows without limit when the value sealed does.
+pub const MAX_COMMITTEE_SIZE: u8 = 64;
+
+/// The threshold for a committee of `size`: a strict majority.
+///
+/// A *function* of the size rather than a second constant, because the size is
+/// no longer fixed — see [`crate::node::Node::committee_size_at`]. Two numbers
+/// that must move together and can be set independently eventually will be, and
+/// a committee whose threshold does not match its size is one whose collusion
+/// bound nobody has computed.
+///
+/// `size / 2 + 1` reproduces [`COMMITTEE_THRESHOLD`] at [`COMMITTEE_SIZE`],
+/// which `the_threshold_rule_reproduces_the_constants` pins.
+pub const fn threshold_for(size: u8) -> u8 {
+    size / 2 + 1
+}
+
+/// The fraction of an early-opening cartel that gets caught, as `num/den`.
+///
+/// The `d` in `V <= t * d * S'` — the condition under which opening a sealed
+/// submission early does not pay, from `docs/node-incentives.md`. A half,
+/// matching `NodeParams::reference()`, and pessimistic on purpose: a cartel
+/// that is *never* caught cannot be deterred at any stake, so a `d` of zero
+/// would make every committee unworkable and a `d` of one would make every
+/// committee look fine.
+///
+/// A constant, because it is a modelling assumption about the world rather than
+/// anything the log records — and a rule that read it from the environment
+/// would not be a consensus rule.
+pub const DETECTION_NUM: u128 = 1;
+pub const DETECTION_DEN: u128 = 2;
+
 /// How many of [`COMMITTEE_SIZE`] must publish before a sealed submission opens.
 ///
 /// Three of five. Below the threshold the content key is

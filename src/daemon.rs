@@ -173,11 +173,13 @@ fn load_identity(path: &Path) -> Result<PeerIdentity, String> {
             ("public", Value::string(hex_encode(identity.public_key()))),
             ("secret", Value::string(hex_encode(identity.secret_key()))),
         ]);
-        fs::write(path, value.canonical_string()).map_err(|e| e.to_string())?;
+        crate::secret_file::write_new(path, value.canonical_string().as_bytes())
+            .map_err(|e| e.to_string())?;
         return Ok(identity);
     }
-    let value = Value::from_json(&fs::read_to_string(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let value =
+        Value::from_json(&crate::secret_file::read_to_string(path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     let public = hex_decode(
         value
             .get("public")
@@ -248,11 +250,13 @@ fn load_root_key(path: &Path) -> Result<RootKey, String> {
                 Value::string(hex_encode(&key.to_secret_bytes()[..])),
             ),
         ]);
-        fs::write(path, value.canonical_string()).map_err(|e| e.to_string())?;
+        crate::secret_file::write_new(path, value.canonical_string().as_bytes())
+            .map_err(|e| e.to_string())?;
         return Ok(key);
     }
-    let value = Value::from_json(&fs::read_to_string(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let value =
+        Value::from_json(&crate::secret_file::read_to_string(path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     let secret = hex_decode(
         value
             .get("secret")
@@ -713,7 +717,22 @@ pub fn run(config: Config) -> Result<(), String> {
                     );
                 }
                 Err(error) => {
-                    log::warn!("outbound session: {error}");
+                    // The address, not just the error. With more than one
+                    // bootstrap file a bare "Connection refused" names neither
+                    // which peer is down nor which file to look at, and the
+                    // loop repeats it every five seconds forever.
+                    //
+                    // `Connection refused` in particular is worth telling apart
+                    // from the placeholder-key warning at startup: this one
+                    // comes from `transport::connect`, before a single
+                    // handshake byte, so it means nothing is listening there.
+                    // A wrong key gets *further* than this and fails in the
+                    // exchange.
+                    log::warn!(
+                        "outbound session to {} ({}): {error}",
+                        peer_id_string(&endpoint.peer.id()),
+                        endpoint.addr
+                    );
                     // Tell the DHT, or every lookup that chose this peer waits
                     // on it forever. `peers_for` hands out the next hop of each
                     // lookup in flight and expects exactly one answer per

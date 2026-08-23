@@ -89,7 +89,7 @@ fn main() -> ExitCode {
                  cairn-reference [--log P] [--root D] commit <id> --submitter S --artifact F [--nonce N]\n    \
                  cairn-reference [--log P] [--root D] reveal <id> --submitter S --artifact F --nonce N [--cites ID]\n    \
                  cairn-reference [--log P] [--root D] settle\n    \
-                 cairn-reference [--log P] [--root D] audit\n    \
+                 cairn-reference [--log P] [--root D] audit [--rerun]\n    \
                  cairn-reference [--log P] prove <seq> [--out FILE]\n    \
                  cairn-reference check <proof.json> --merkle-root <sha256:...>\n"
             );
@@ -835,15 +835,21 @@ fn cli(args: &[String]) -> Result<(), String> {
             }
         }
         "audit" => {
-            // `rerun` on by default: re-running the pinned verifiers is the
-            // thing that makes an audit an audit rather than a checksum.
-            let problems = node.audit(!rest.iter().any(|a| a == "--no-rerun"));
+            // The reference intentionally has no host-confinement backend.
+            // Reruns therefore require an explicit opt-in; chain, record, and
+            // settlement checks remain the default independent audit.
+            let rerun = rest.iter().any(|a| a == "--rerun");
+            let problems = node.audit(rerun);
             say!("entries {}", node.ledger.len());
             if let Some(root) = node.ledger.merkle_root() {
                 say!("merkle  {root}");
             }
             if problems.is_empty() {
-                say!("\nlog verified: chain intact, every settled claim re-verified");
+                if rerun {
+                    say!("\nlog verified: chain intact, every settled claim re-verified");
+                } else {
+                    say!("\nlog verified: chain and consensus records intact (verifier reruns disabled; pass --rerun only for trusted objectives)");
+                }
             } else {
                 for problem in &problems {
                     say!("  ! {problem}");
@@ -906,8 +912,13 @@ fn random_nonce() -> String {
 fn decode_record(kind: &str, value: &Value) -> Result<String, String> {
     match kind {
         "objective" => Objective::from_value(value)
-            .map(|record| record.id())
-            .map_err(|e| e.to_string()),
+            .map_err(|e| e.to_string())
+            .and_then(|record| {
+                if let Some(block) = &record.ratchet {
+                    Ratchet::from_value(block)?;
+                }
+                Ok(record.id())
+            }),
         "commitment" => Commitment::from_value(value)
             .and_then(|record| {
                 record.verify_signature()?;

@@ -153,7 +153,8 @@ deterministic (seeded) statistics.
 
 **Design.**
 
-1. `commit_epoch = epoch_of(unix(commitment.created_at), EPOCH_SECONDS)`.
+1. `commit_epoch = epoch_of(unix(commitment.created_at), EPOCH_SECONDS)`, and
+   admission refuses unless it equals the epoch of the ledger append timestamp.
 2. On reveal, refuse unless `epoch_of(unix(reveal_ts), EPOCH_SECONDS) > commit_epoch`
    (`RuleViolation::RevealBeforeEpoch`). Nobody can act on a competitor's
    artifact inside the same epoch.
@@ -174,9 +175,11 @@ deterministic (seeded) statistics.
    > submitter nothing to vary. Pinned by
    > `test_settlement_order_cannot_be_ground_out_at_reveal_time`.
 
-Timestamps stay advisory for chain order; epoch membership is derived from the
-**record's own `created_at` / command `ts`**, which are already in the log and
-auditable.
+Timestamps stay advisory for chain order. A commitment's declared `created_at`
+and ledger admission timestamp must resolve to the same epoch; the ledger
+timestamp is authoritative for the commit side of commit–reveal, and audit
+rechecks the binding. P2P replay quarantines records from epochs later than the
+local clock, so peer metadata cannot manufacture finality.
 
 **Demo / test impact.** Same-second commit+reveal fails. Tests and scripts must
 commit in epoch N and reveal in N+1 (e.g. `created_at` at `t` and reveal `ts` at

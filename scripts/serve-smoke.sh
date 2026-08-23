@@ -37,9 +37,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# One-second epochs: a reveal must land in a strictly later epoch than its
-# commitment, and this script would otherwise take ten minutes.
-export CAIRN_EPOCH_SECONDS=1
+# Four-second epochs: short enough for a smoke test, long enough that an HTTP
+# commitment posted near the start of one is still in that epoch when the
+# operator immediately drains it. A reveal must land in a later epoch.
+export CAIRN_EPOCH_SECONDS=4
 
 rule "post an objective, then serve the log"
 OID=$("$RUST" --log "$LOG" --root . post examples/capset_progressive/objective.json \
@@ -158,7 +159,7 @@ PY
 rule "a stranger submits a commitment, then reveals an epoch later"
 ARTIFACT=examples/capset_progressive/artifact-12.json
 python3 - "$PORT" "$OID" "$ARTIFACT" <<'PY'
-import hashlib, json, sys, urllib.request
+import datetime, hashlib, json, sys, time, urllib.request
 
 port, oid, artifact_path = sys.argv[1], sys.argv[2], sys.argv[3]
 base = f"http://127.0.0.1:{port}"
@@ -183,9 +184,17 @@ inner = digest({"objective_id": oid, "artifact": artifact})
 commitment_hash = "sha256:" + hashlib.sha256(
     inner.encode() + b"|" + submitter.encode() + b"|" + nonce.encode()).hexdigest()
 
+# Leave at least three seconds for the HTTP round trip and immediate drain, so
+# the record's declared epoch and its local admission epoch cannot diverge just
+# because this smoke happened to start on a boundary.
+remainder = time.time() % 4
+if remainder > 1:
+    time.sleep(4 - remainder + 0.1)
+created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
 status, body = post("/submit?kind=commitment", {
     "type": "commitment", "objective_id": oid, "submitter": submitter,
-    "hash": commitment_hash, "created_at": "2026-07-28T00:00:00+00:00",
+    "hash": commitment_hash, "created_at": created_at,
 })
 assert status == 202, (status, body)
 assert "Queued, not admitted" in body["note"], body
@@ -194,7 +203,7 @@ print("  POST /submit (commitment) -> 202 queued, explicitly not a receipt")
 # A retry must not queue it twice -- the spool is content-addressed.
 status, again = post("/submit?kind=commitment", {
     "type": "commitment", "objective_id": oid, "submitter": submitter,
-    "hash": commitment_hash, "created_at": "2026-07-28T00:00:00+00:00",
+    "hash": commitment_hash, "created_at": created_at,
 })
 assert again["queued"] == body["queued"], (body, again)
 print("  a retry is idempotent, not a duplicate")
@@ -214,13 +223,14 @@ served_has commitment || fail "the commitment never reached the log"
 [ -z "$(ls -A "$QUEUE" 2>/dev/null)" ] || fail "the queue was not emptied"
 
 rule "reveal in a later epoch, through the queue again"
-sleep 1.2
+sleep 4.2
 python3 - "$PORT" "$OID" "$ARTIFACT" <<'PY'
-import hashlib, json, sys, urllib.request
+import datetime, hashlib, json, sys, urllib.request
 
 port, oid, artifact_path = sys.argv[1], sys.argv[2], sys.argv[3]
 base = f"http://127.0.0.1:{port}"
 artifact = json.load(open(artifact_path))
+created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -230,7 +240,7 @@ request = urllib.request.Request(
     data=canonical({
         "type": "claim", "objective_id": oid, "submitter": "stranger",
         "artifact": artifact, "nonce": "s3cret",
-        "created_at": "2026-07-28T00:00:00+00:00", "cites": [],
+        "created_at": created_at, "cites": [],
     }),
     headers={"content-type": "application/json"}, method="POST")
 with urllib.request.urlopen(request, timeout=10) as response:
@@ -244,9 +254,12 @@ served_has claim || fail "the claim never reached the log"
 rule "the log a stranger produced audits, and the frontier moved"
 # Two waits, not one: an epoch must close *and* wait out the finality delay
 # (CAIRN_FINALITY_EPOCHS, default 1) before anything settles.
-sleep 2.4
+sleep 8.4
 "$RUST" --log "$LOG" --root . settle | sed 's/^/  /'
-"$RUST" --log "$LOG" --root . audit --no-rerun | grep -q "log verified" \
+# `chain intact` rather than `log verified`: under --no-rerun no verifier runs,
+# and the clean line now says so instead of claiming a re-verification that did
+# not happen. Both branches still say the chain and the rules re-derived.
+"$RUST" --log "$LOG" --root . audit --no-rerun | grep -q "chain intact" \
   || fail "the log does not audit"
 
 python3 - "$PORT" "$OID" <<'PY'

@@ -662,13 +662,12 @@ fn percent_decode(text: &str) -> String {
     while i < bytes.len() {
         match bytes[i] {
             b'%' if i + 2 < bytes.len() => {
-                let hex = &text[i + 1..i + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => {
-                        out.push(byte);
+                match (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                    (Some(high), Some(low)) => {
+                        out.push((high << 4) | low);
                         i += 3;
                     }
-                    Err(_) => {
+                    _ => {
                         out.push(b'%');
                         i += 1;
                     }
@@ -685,6 +684,15 @@ fn percent_decode(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 // -- handlers ---------------------------------------------------------------
@@ -1345,6 +1353,25 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
         503 => "Service Unavailable",
         _ => "Error",
     };
+    // `access-control-allow-origin: *` is what lets a browser on another origin
+    // *read* this. Everything served here is public by construction -- the log,
+    // the objectives, the signed checkpoint -- so there is nothing for a
+    // same-origin policy to protect, and the site at
+    // aburan28.github.io/distributed-researcher reads a live node through it.
+    //
+    // It does **not** open cross-origin writes, and that is worth stating
+    // because the reason is indirect. `POST /submit` takes `application/json`,
+    // which is not a CORS-simple content type, so a browser preflights it with
+    // `OPTIONS` -- and `OPTIONS` falls through the router to 405 with no
+    // `access-control-allow-methods`, which fails the preflight. So the write
+    // stays same-origin without anything here saying so.
+    //
+    // Keep it that way. Cross-origin writes would let any page make its
+    // visitors' browsers submit to any node they can reach: not a new capability
+    // for the attacker, who can already `curl`, but a way to spend *other
+    // people's* addresses filling a queue. `a_stranger_may_read_but_not_write`
+    // pins both halves, because the refusal is emergent rather than written
+    // down, and the obvious "fix" for that 405 would quietly undo it.
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\n\
          content-type: {content_type}\r\n\
@@ -1385,6 +1412,62 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    /// A browser on another origin may read this node, and may not write to it.
+    ///
+    /// Both halves matter and only one of them is written down anywhere else.
+    /// The read is the point: the published site is served from
+    /// github.io while a node is on somebody's own address, so without the
+    /// header the page can reach the node and not see the answer.
+    ///
+    /// The write being refused is emergent -- `OPTIONS` is not routed, so a
+    /// preflight lands on the 405 arm and fails for want of
+    /// `access-control-allow-methods`. Nothing named it before this test, and
+    /// the natural tidy-up ("`OPTIONS` should not 405") would open cross-origin
+    /// submission without anyone deciding to.
+    #[test]
+    fn a_stranger_may_read_but_not_write() {
+        let dir = TempDir::new("cors");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, ".").accepting_into(dir.path.join("queue"));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        // A raw request, because the point is the bytes on the wire.
+        let ask = |request: &str| -> String {
+            let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+            socket.write_all(request.as_bytes()).expect("write");
+            let mut response = String::new();
+            let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+            response.to_ascii_lowercase()
+        };
+
+        let read = ask(
+            "GET /health HTTP/1.1\r\nHost: x\r\nOrigin: https://aburan28.github.io\r\n\
+             Connection: close\r\n\r\n",
+        );
+        assert!(read.starts_with("http/1.1 200"), "{read}");
+        assert!(
+            read.contains("access-control-allow-origin: *"),
+            "a cross-origin reader cannot see the answer: {read}"
+        );
+
+        // The preflight a browser sends before a JSON POST.
+        let preflight = ask(
+            "OPTIONS /submit HTTP/1.1\r\nHost: x\r\nOrigin: https://evil.example\r\n\
+             Access-Control-Request-Method: POST\r\n\
+             Access-Control-Request-Headers: content-type\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            !preflight.contains("access-control-allow-methods"),
+            "cross-origin submission is allowed; a page could spend its visitors' \
+             addresses filling this queue: {preflight}"
+        );
     }
 
     #[test]
@@ -1447,6 +1530,9 @@ mod tests {
         assert_eq!(percent_decode("plain"), "plain");
         // A stray `%` is not an escape and must not eat the rest of the value.
         assert_eq!(percent_decode("100%"), "100%");
+        // Indexing the UTF-8 string at byte offsets used to panic when the
+        // would-be hex pair ended in the middle of a multi-byte character.
+        assert_eq!(percent_decode("%aé"), "%aé");
     }
     #[test]
     fn a_full_queue_refuses_new_records_but_still_accepts_resends() {

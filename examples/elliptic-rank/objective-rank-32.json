@@ -1,0 +1,50 @@
+{
+  "artifact_schema": {
+    "additionalProperties": false,
+    "description": "An integral general Weierstrass model and 32 to 64 rational points whose full set is certified independent modulo torsion.",
+    "properties": {
+      "curve": {
+        "description": "The five integral coefficients [a1, a2, a3, a4, a6], each as a canonical decimal string.",
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 5,
+        "minItems": 5,
+        "type": "array"
+      },
+      "points": {
+        "description": "Between 32 and 64 affine rational points. Each point is [x, y] in canonical exact string form.",
+        "items": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "maxItems": 64,
+        "minItems": 32,
+        "type": "array"
+      }
+    },
+    "required": [
+      "curve",
+      "points"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-21T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-elliptic-rank-32",
+  "reward": 64000000,
+  "statement": "Find an elliptic curve over Q of Mordell-Weil rank at least 32. Submit an integral general Weierstrass equation and between 32 and 64 rational points. The pinned evaluator returns the number of submitted points only when every point lies on the curve, their Cremona-Brumer quadratic-character matrix has full row rank over F_2 at deterministic good primes p <= 10000, and a root-free good reduction in that bound proves E(Q)[2] = 0; otherwise it returns zero. A score of at least 32 therefore proves rank E(Q) >= 32 by exact arithmetic. This is a strict milestone beyond the public rank-at-least-30 curve #273 and the companion rank-31 objective. It does not prove the exact rank, BSD, GRH, or unboundedness of ranks over Q. Source baseline: https://elliptic-rank.icarm.cloud/curve/273.",
+  "verifier": {
+    "direction": "maximize",
+    "entrypoint": "score",
+    "evaluator": "examples/elliptic-rank/checkers/rank_31.py",
+    "evaluator_sha256": "5f25a97eeeaddfe972ab8f864bd338cab0b9a19fa7908ce376f185a29abc165f",
+    "kind": "evaluator",
+    "threshold": 32,
+    "timeout_seconds": 30
+  }
+}

@@ -208,7 +208,10 @@ jobs:
           /tmp/unpacked/cairn --log launch/cairn.jsonl --root . audit
           echo "unpacked binaries run and audit the published log"
 
-      - uses: actions/upload-artifact@v4
+      # v7. From v5 an artifact name may not be uploaded twice in a run, which
+      # this matrix already satisfies -- one upload per target, and the target
+      # is the name.
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |

@@ -39,9 +39,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# A reveal must land in a strictly later epoch than its commitment, and this
-# script would otherwise take ten minutes.
-export CAIRN_EPOCH_SECONDS=1
+# The daemon drains every five seconds. Six-second test epochs leave enough
+# room for a record posted near the boundary to be drained in the same epoch,
+# while keeping the commit/reveal smoke short.
+export CAIRN_EPOCH_SECONDS=6
 
 # Wait for a listener rather than sleeping a fixed amount.
 await_port() {
@@ -76,7 +77,7 @@ await_kind() {  # port kind
 
 submit() {  # port oid kind payload-python
   python3 - "$1" "$2" "$3" <<'PY'
-import hashlib, json, sys, urllib.request
+import datetime, hashlib, json, sys, time, urllib.request
 
 port, oid, kind = sys.argv[1], sys.argv[2], sys.argv[3]
 base = f"http://127.0.0.1:{port}"
@@ -89,20 +90,26 @@ def digest(value):
     return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
 
 submitter, nonce = "stranger", "s3cret"
+# Start near an epoch boundary so the daemon's next five-second tick still
+# admits this record in the epoch it declares.
+remainder = time.time() % 6
+if remainder > 0.5:
+    time.sleep(6 - remainder + 0.1)
+created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 if kind == "commitment":
     inner = digest({"objective_id": oid, "artifact": artifact})
     body = {
         "type": "commitment", "objective_id": oid, "submitter": submitter,
         "hash": "sha256:" + hashlib.sha256(
             inner.encode() + b"|" + submitter.encode() + b"|" + nonce.encode()).hexdigest(),
-        "created_at": "2026-07-28T00:00:00+00:00",
+        "created_at": created_at,
     }
     path = "/submit?kind=commitment"
 else:
     body = {
         "type": "claim", "objective_id": oid, "submitter": submitter,
         "artifact": artifact, "nonce": nonce,
-        "created_at": "2026-07-28T00:00:00+00:00", "cites": [],
+        "created_at": created_at, "cites": [],
     }
     path = "/submit?kind=claim"
 
@@ -184,7 +191,7 @@ echo "  the commitment reached the log with no external drain"
 echo "  the queue emptied itself"
 
 rule "reveal in a later epoch, same process"
-sleep 1.2
+sleep 6.2
 submit "$HTTP" "$OID" claim
 await_kind "$HTTP" claim \
   || { cat "$A/node.log" >&2; fail "the daemon never admitted the claim"; }
@@ -193,7 +200,7 @@ echo "  the claim reached the log with no external drain"
 rule "the log audits, and it audits from outside the process"
 # Two waits, not one: an epoch must close *and* wait out the finality delay
 # before anything settles. The daemon settles on its own tick after a drain.
-sleep 2.6
+sleep 12.6
 curl -s "http://127.0.0.1:$HTTP/log" >"$WORK/fetched.jsonl"
 if head -c 7 "$LOG" | grep -q '^pwenc1:'; then
   # A sealed log is unsealed on the way out -- serving ciphertext would hand a
@@ -207,7 +214,13 @@ else
     || fail "the served log is not byte-identical to the operator's file"
   echo "  GET /log is byte-identical to the file on disk"
 fi
-"$RUST" --log "$WORK/fetched.jsonl" --root . audit --no-rerun | grep -q "log verified" \
+# `--no-rerun` is the cheap audit: it re-derives every rule but takes recorded
+# verdicts at their word, so it prints "chain intact and every rule
+# re-derived, but no verifier was run" rather than "log verified" -- the
+# phrase the *expensive* path uses once it has actually re-run one. Matching
+# on "chain intact", which both share, checks the audit passed without
+# assuming which of the two ran.
+"$RUST" --log "$WORK/fetched.jsonl" --root . audit --no-rerun | grep -q "chain intact" \
   || fail "the log a stranger fetched does not audit"
 echo "  a stranger's copy re-derives"
 

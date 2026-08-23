@@ -129,6 +129,15 @@ impl Member {
 /// different sets and a test can tell a real draw from a rule that quietly
 /// admits every peer.
 fn network(label: &str) -> (TempDir, Node, Objective, Vec<Member>) {
+    network_with(label, None)
+}
+
+/// The same network, with the objective embargoed for `epochs`.
+fn embargoed_network(label: &str, epochs: u64) -> (TempDir, Node, Objective, Vec<Member>) {
+    network_with(label, Some(epochs))
+}
+
+fn network_with(label: &str, embargo: Option<u64>) -> (TempDir, Node, Objective, Vec<Member>) {
     let dir = TempDir::new(label);
     fs::write(dir.file("c.py"), CHECKER).expect("pinned checker is writable");
     let mut hasher = Sha256::new();
@@ -157,6 +166,10 @@ fn network(label: &str) -> (TempDir, Node, Objective, Vec<Member>) {
         None,
     )
     .expect("valid objective");
+    let objective = match embargo {
+        None => objective,
+        Some(epochs) => objective.with_embargo(epochs).expect("embargoed"),
+    };
     node.post_objective(&objective, COMMIT_AT).expect("post");
 
     let members: Vec<Member> = (1..=COMMITTEE_SIZE + 1).map(Member::new).collect();
@@ -782,4 +795,125 @@ fn the_audit_reports_a_share_that_should_never_have_been_admitted() {
         "a share that does not check is not a share"
     );
     drop(dir);
+}
+
+// -- the embargo -----------------------------------------------------------
+
+/// An embargo is the time rule with a longer arm, and this is what makes the
+/// class more than a label.
+///
+/// `Confidentiality::Embargoed` said *when* an artifact becomes public and
+/// nothing consulted it: a committee that felt like opening early could, and
+/// the funder who chose the class for a dual-use result would find out
+/// afterwards. A committee share is what opens a sealed artifact, so the wait
+/// is enforceable in exactly one place — here — and it is two integers an
+/// auditor re-reads out of the log rather than a policy anyone is trusted to
+/// apply.
+#[test]
+fn an_embargoed_artifact_stays_shut_until_its_epochs_have_passed() {
+    // Three epochs. The share that would have been in time on a public
+    // objective is now early, and the identical record three epochs later is
+    // admitted.
+    let (_dir, mut node, objective, members) = embargoed_network("embargo", 3);
+    assert_eq!(objective.embargo(), 3);
+
+    let submitter = Identity::from_secret_bytes([211u8; 32]);
+    let commitment_id = commit_sealed(
+        &mut node,
+        &objective,
+        &members,
+        &submitter,
+        n(42),
+        COMMITTEE_THRESHOLD,
+    );
+    let seats = node
+        .committee_of_commitment(&commitment_id)
+        .expect("committee");
+
+    // One epoch on: in time for a public objective, early for this one.
+    let early = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
+    let error = node
+        .post_committee_share(&early, REVEAL_AT)
+        .expect_err("the embargo has not lifted");
+    assert!(
+        matches!(error, RuleViolation::ShareBeforeEpoch { .. }),
+        "got {error:?}"
+    );
+
+    // Four epochs on -- past the commitment's epoch plus three -- and the same
+    // member's share is admitted. Nothing about the record changed except the
+    // epoch it names.
+    const AFTER_EMBARGO: &str = "2026-07-28T01:20:00+00:00";
+    assert!(
+        epoch_of(AFTER_EMBARGO) > epoch_of(COMMIT_AT) + 3,
+        "the fixture must actually clear the embargo"
+    );
+    let in_time = share_for(&node, &members, &commitment_id, &seats[0], AFTER_EMBARGO);
+    node.post_committee_share(&in_time, AFTER_EMBARGO)
+        .expect("the same member, past the embargo");
+    assert!(
+        node.audit(false).is_empty(),
+        "an embargoed reveal must audit clean: {:?}",
+        node.audit(false)
+    );
+}
+
+/// The length is inside the objective's id, so it cannot be shortened after
+/// work has started.
+///
+/// That is the whole reason it is a field on the objective rather than a
+/// setting on the node: an embargo a funder could edit is a promise made to
+/// the submitter and then taken back, and a submitter deciding whether to
+/// disclose through this network is deciding on the strength of that promise.
+#[test]
+fn shortening_an_embargo_makes_a_different_objective() {
+    let three = objective_embargoed_for(3);
+    let one = objective_embargoed_for(1);
+    assert_ne!(three.id(), one.id());
+
+    // And a length on an objective that is not embargoed is refused rather
+    // than ignored: a funder who thinks they asked for delay and did not is
+    // the failure they cannot see.
+    let public = cairn::records::Objective::new(
+        "G",
+        "public",
+        Value::object([("kind", Value::string("certificate"))]),
+        1,
+        "treasury",
+        COMMIT_AT,
+        None,
+        None,
+    )
+    .expect("valid");
+    assert!(public.with_embargo_epochs(3).is_err());
+
+    // An embargo of zero epochs is `public` wearing a longer name.
+    let zero = cairn::records::Objective::new(
+        "G",
+        "zero",
+        Value::object([("kind", Value::string("certificate"))]),
+        1,
+        "treasury",
+        COMMIT_AT,
+        None,
+        None,
+    )
+    .expect("valid");
+    assert!(zero.with_embargo(0).is_err());
+}
+
+fn objective_embargoed_for(epochs: u64) -> cairn::records::Objective {
+    cairn::records::Objective::new(
+        "G",
+        "dual use",
+        Value::object([("kind", Value::string("certificate"))]),
+        1,
+        "treasury",
+        COMMIT_AT,
+        None,
+        None,
+    )
+    .expect("valid")
+    .with_embargo(epochs)
+    .expect("embargoed")
 }

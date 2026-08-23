@@ -530,7 +530,7 @@ mod tests {
     fn every_message_survives_a_round_trip() {
         let manifest = manifest();
         let pieces = Some(manifest.pieces());
-        let record = crate::swarm::discovery::PeerRecord::sign(
+        let record = crate::p2p::swarm::discovery::PeerRecord::sign(
             &crate::crypto::identity::Identity::from_secret_bytes([3u8; 32]),
             &["127.0.0.1:9797".parse().expect("addr")],
             1,
@@ -666,13 +666,13 @@ mod tests {
         // An answer claiming ten thousand contacts is a peer trying to make this
         // node verify ten thousand signatures. The routing table would keep at
         // most K of them anyway, so the bound costs nothing legitimate.
-        let record = crate::swarm::discovery::PeerRecord::sign(
+        let record = crate::p2p::swarm::discovery::PeerRecord::sign(
             &crate::crypto::identity::Identity::from_secret_bytes([5u8; 32]),
             &["127.0.0.1:1234".parse().expect("addr")],
             1,
         )
         .expect("signs");
-        let too_many: Vec<Value> = (0..crate::swarm::dht::K + 1)
+        let too_many: Vec<Value> = (0..crate::p2p::swarm::dht::K + 1)
             .map(|_| record.to_value())
             .collect();
         let body = Value::object([

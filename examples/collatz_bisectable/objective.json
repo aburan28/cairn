@@ -1,0 +1,46 @@
+{
+  "artifact_schema": {
+    "description": "An object naming the integer whose trajectory is long, plus the trace commitment a challenger bisects against.",
+    "example": {
+      "n": 27,
+      "trace_root": "sha256:...",
+      "trace_states": 512
+    },
+    "properties": {
+      "n": {
+        "description": "The candidate integer, in [1, 10^7).",
+        "type": "integer"
+      },
+      "trace_root": {
+        "description": "Merkle root over the digests of every state the stepper visits, padded to trace_states.",
+        "type": "string"
+      },
+      "trace_states": {
+        "description": "How many states the trace commits to. Fixed length, so two parties can bisect against each other at all.",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "n",
+      "trace_root",
+      "trace_states"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-15T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-collatz-extremes",
+  "reward": 100000,
+  "statement": "Exhibit an integer n in [1, 10^7) whose Collatz trajectory reaches 1 in at least 500 steps, and commit to the trajectory itself so a disagreement can be settled by executing one step rather than all of them.",
+  "verifier": {
+    "checker": "examples/collatz_bisectable/checkers/long_trajectory.py",
+    "checker_sha256": "df78b43c279aa931b0ee481ca946cd5788eb7b28351d66f83e5a980a9cf91473",
+    "entrypoint": "check",
+    "kind": "certificate",
+    "stepper": {
+      "code": "examples/collatz_bisectable/steppers/trajectory.py",
+      "code_sha256": "b374839a946650a40d3fdd018e124d2170bba6c47e9b7efd1813b807919db374",
+      "entrypoint": "step"
+    }
+  }
+}

@@ -18,9 +18,12 @@
 //! 3. **Money arithmetic is checked.** Overflow returns an error rather than
 //!    wrapping, in debug and release alike.
 
+pub mod arena;
 pub mod attribution;
 pub mod blobs;
+pub mod canary;
 pub mod canonical;
+pub mod challenge;
 pub mod checkpoint;
 pub mod corpus;
 pub mod crypto;
@@ -41,11 +44,13 @@ pub mod records;
 pub mod scaffold;
 pub mod schema;
 pub mod sealed;
+pub mod secret_file;
 pub mod serve;
 pub mod shards;
 pub mod store;
-pub mod swarm;
+pub mod tier;
 pub mod time;
+pub mod vdf;
 pub mod verifiers;
 
 pub use attribution::{flow, FlowParams};

@@ -118,7 +118,7 @@ this way at all** — the checker alone is over five times the cap, and m=16 fit
 with less headroom than it looks (base64 costs 4/3, so the checker is always
 about 1.46x the instance). That is not a
 limitation to route around here; it is precisely the case
-[`src/shards/`](../../src/shards/) and [`src/swarm/`](../../src/swarm/) were
+[`src/shards/`](../../src/shards/) and [`src/p2p/swarm/`](../../src/p2p/swarm/) were
 built for and which `docs/roadmap.md` describes as "sized for artifacts that cap
 does not yet allow". The m=8 and m=16 instances fit today.
 

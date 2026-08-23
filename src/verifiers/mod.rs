@@ -374,21 +374,19 @@ Objective-authored code -- pinned checkers, evaluators, and statistics, replay \
 commands, and Lean on submitted proof text -- runs in a child process inside an \
 OS jail: bubblewrap on Linux, a seatbelt profile on macOS. Enforced by the \
 kernel: no network of any kind (including unix sockets to a local daemon), no \
-writes outside a scratch directory that is deleted when the check finishes, a \
-wall-clock deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. Pinned pure \
-functions additionally get a scrubbed environment, so a checker cannot read the \
-operator's credentials out of it. Directories a spec can name (replay's cwd, \
+reads outside declared bundle, toolchain, and system paths, no writes outside a \
+scratch directory that is deleted when the check finishes, a wall-clock \
+deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. Pinned pure functions always \
+get a scrubbed environment; requiring the sandbox also scrubs replay and Lean, \
+so objective code cannot return the operator's credentials in verdict evidence. \
+Directories a spec can name (replay's cwd, \
 lean's project_root) resolve against the objective root and are refused when \
-they escape it, so a record cannot choose which host paths are bound into its \
+they escape it, including through symlinks, so a record cannot choose which host paths are bound into its \
 own jail. \
 \
-It is NOT a VM boundary, and four gaps are real. (1) A kernel or policy bug is \
+It is NOT a VM boundary, and two gaps are real. (1) A kernel or policy bug is \
 still an escape; gVisor/Firecracker/WASM would bound that and are not \
-implemented. (2) The seatbelt profile denies writes and network but not reads, \
-so on macOS objective code can read any file the operator can -- it just cannot \
-transmit or persist what it read. (3) replay and Lean keep the operator's \
-environment, because their toolchains are configured through it; a checker's \
-environment is scrubbed but theirs is not. (4) On a host with no jail mechanism \
+implemented. (2) On a host with no jail mechanism \
 the child runs as before, unconfined; set CAIRN_REQUIRE_SANDBOX=1 to make \
 that Unavailable instead. When a jailed run fails, the verdict's evidence names \
 the mechanism, so an operator can tell a broken jail from a broken checker.";
@@ -580,6 +578,13 @@ def main():
         out = {"ok": result, "detail": ""}
     elif isinstance(result, int):
         out = {"score": result}
+    elif isinstance(result, (dict, list)):
+        # A structured return. No verifier kind accepts one -- a checker owes a
+        # bool and an evaluator an int -- so for those this is still an error,
+        # and `value_type` is carried so the diagnostic can name the type
+        # exactly as `bad_return` used to. What it is *for* is the stepper in
+        # `crate::challenge`, whose whole job is to return the next state.
+        out = {"value": result, "value_type": type(result).__name__}
     else:
         out = {"bad_return": type(result).__name__}
     json.dump(out, sys.stdout)
@@ -717,7 +722,7 @@ impl VerifierRegistry {
     /// For a caller that answers a human or an agent while it waits. An
     /// objective may declare a timeout of up to a day, which is a reasonable
     /// bound for a batch audit and a liveness attack on a single-threaded
-    /// server: one hostile objective would make `cairn-mcp` stop answering
+    /// server: one hostile objective would make `proofwork-mcp` stop answering
     /// `ping` and look dead to its client.
     ///
     /// Deliberately not the default. Settlement and `audit` must honour the
@@ -778,6 +783,61 @@ impl VerifierRegistry {
     /// objective whose payout has no machine behind it is an opinion.
     pub fn supports(kind: &str) -> bool {
         Kind::parse(kind).is_some()
+    }
+
+    /// Run a pinned entrypoint that maps one value to another, under the same
+    /// hash pin and the same jail as a checker.
+    ///
+    /// Not a verifier and deliberately not reachable from [`VerifierRegistry::run`]:
+    /// it returns a value rather than a verdict, and nothing it produces
+    /// settles anything by itself. It exists for [`crate::challenge::Stepper`],
+    /// where a *step* of a computation is exactly a value-to-value function and
+    /// the adjudication that follows is what settles.
+    ///
+    /// It shares the whole spawn path with the verifiers — hash checked before
+    /// the subprocess exists, scrubbed environment, memory cap, wall-clock
+    /// bound — because the code being run is a stranger's either way, and a
+    /// second, laxer path to executing pinned code would be the weakest one an
+    /// attacker has to find.
+    ///
+    /// Failures come back as a non-settling [`Verdict`] for the same reason
+    /// they do everywhere else: an absent interpreter is a fact about this
+    /// node, and a dispute it cannot adjudicate must stay open rather than
+    /// resolve against whoever happens to be accused.
+    pub fn transform(
+        &self,
+        role: &str,
+        pinned: &str,
+        declared_sha256: &str,
+        entrypoint: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, Verdict> {
+        let path = self.pinned(role, pinned, declared_sha256)?;
+        let harvest =
+            self.run_pinned(role, &path, entrypoint, input, self.bounded(timeout), None)?;
+        match harvest {
+            Harvest::Json { raw, type_name } => Value::from_json(&raw).map_err(|error| {
+                // A float in a state is not a bad node, it is a spec that
+                // cannot be adjudicated: two honest machines can disagree about
+                // its bytes, so no dispute over it can ever be settled. Naming
+                // it `invalid_spec` rather than `unavailable` says which party
+                // has to fix it.
+                Verdict::invalid_spec(format!(
+                    "{role} returned a {type_name} that is not canonically \
+                     representable: {error}"
+                ))
+            }),
+            Harvest::Boolean { .. } => Err(Verdict::invalid_spec(format!(
+                "{role} returned bool, expected an object or a list"
+            ))),
+            Harvest::Score(_) | Harvest::ScoreOutOfRange(_) => Err(Verdict::invalid_spec(format!(
+                "{role} returned int, expected an object or a list"
+            ))),
+            Harvest::BadReturn(kind) => Err(Verdict::invalid_spec(format!(
+                "{role} returned {kind}, expected an object or a list"
+            ))),
+        }
     }
 
     /// Verify `artifact` against `spec`.
@@ -876,9 +936,10 @@ impl VerifierRegistry {
             Harvest::Score(_) | Harvest::ScoreOutOfRange(_) => {
                 Verdict::invalid_spec("checker returned int, expected bool")
             }
-            Harvest::BadReturn(kind) => {
-                Verdict::invalid_spec(format!("checker returned {kind}, expected bool"))
-            }
+            Harvest::BadReturn(kind)
+            | Harvest::Json {
+                type_name: kind, ..
+            } => Verdict::invalid_spec(format!("checker returned {kind}, expected bool")),
         }
     }
 
@@ -1152,7 +1213,7 @@ impl VerifierRegistry {
         let preamble = spec.get("preamble").and_then(Value::as_str).unwrap_or("");
         let source = format!("{preamble}\n{statement} {proof}\n");
 
-        let workdir = match TempDir::new("cairn-lean") {
+        let workdir = match TempDir::new("proofwork-lean") {
             Ok(workdir) => workdir,
             Err(error) => {
                 return Verdict::unavailable(format!("cannot create a working directory: {error}"))
@@ -1327,7 +1388,7 @@ impl VerifierRegistry {
             }
         };
 
-        let workdir = match TempDir::new("cairn-replay") {
+        let workdir = match TempDir::new("proofwork-replay") {
             Ok(workdir) => workdir,
             Err(error) => {
                 return Verdict::unavailable(format!("cannot create a working directory: {error}"))
@@ -1482,10 +1543,10 @@ impl VerifierRegistry {
     ///   this node cannot verify: `Unavailable`. It says nothing about the
     ///   artifact, and a peer can fix it by sending the blob.
     ///
-    /// Both sides of the containment check are made absolute first. A relative
-    /// root like `"."` never prefixes a normalized relative join, so the naive
-    /// check rejects every legitimate objective -- an actual bug the reference
-    /// implementation carries a comment about.
+    /// Both sides of the lexical containment check are made absolute first. An
+    /// existing bundle file is then resolved through the filesystem before it is
+    /// read or executed. The second step is what makes an in-root symlink unable
+    /// to select a host file.
     fn pinned(
         &self,
         role: &str,
@@ -1537,39 +1598,56 @@ impl VerifierRegistry {
             return Err(PinFailure::Escape);
         }
 
+        // The content-addressed fallback, and the reason this module exists: a
+        // peer that learned the objective over the wire has no bundle file at
+        // all. Keep it available for any failure to resolve or read the bundle
+        // origin, while never allowing it to rescue an escaped path.
+        let blob_fallback =
+            |origin_error: io::Error| match self.blobs.read(declared) {
+                Ok(_) => absolutize(&self.blobs.path_of(declared).map_err(|error| {
+                    PinFailure::Absent {
+                        detail: error.to_string(),
+                    }
+                })?)
+                .map_err(|error| PinFailure::Absent {
+                    detail: format!("cannot resolve the blob store path: {error}"),
+                }),
+                Err(store) => Err(PinFailure::Absent {
+                    detail: format!("{origin_error} ({}); {store}", full.display()),
+                }),
+            };
+
+        // Resolve containment before reading. Reading first and rejecting the
+        // canonical path afterwards would still touch an attacker-selected host
+        // file (or device), even if its bytes never reached the verifier.
+        let canonical_full = match fs::canonicalize(&full) {
+            Ok(path) => path,
+            Err(error) => return blob_fallback(error),
+        };
+        let canonical_root = fs::canonicalize(&root).map_err(|error| PinFailure::Absent {
+            detail: format!("cannot canonicalize the objective root: {error}"),
+        })?;
+        if !canonical_full.starts_with(&canonical_root) {
+            return Err(PinFailure::Escape);
+        }
+
         // The bundle is the origin. Consulted first so that an operator who
         // edits a checker in place is told their edit no longer matches the pin,
         // rather than having a cached blob silently stand in for the file they
         // are looking at. Mismatch returns immediately; the store is only for
-        // peers that have no bundle file at all.
-        match fs::read(&full) {
-            Ok(source) => {
-                let actual = blobs::address(&source);
-                if actual == declared {
-                    Ok(full)
-                } else {
-                    Err(PinFailure::Mismatch { actual })
-                }
-            }
-            Err(error) => {
-                // The content-addressed fallback, and the reason this module
-                // exists: a peer that learned the objective over the wire has no
-                // bundle at all, and the blob it fetched is byte-identical by
-                // construction because its filename is the pin.
-                match self.blobs.read(declared) {
-                    Ok(_) => absolutize(&self.blobs.path_of(declared).map_err(|error| {
-                        PinFailure::Absent {
-                            detail: error.to_string(),
-                        }
-                    })?)
-                    .map_err(|error| PinFailure::Absent {
-                        detail: format!("cannot resolve the blob store path: {error}"),
-                    }),
-                    Err(store) => Err(PinFailure::Absent {
-                        detail: format!("{error} ({}); {store}", full.display()),
-                    }),
-                }
-            }
+        // peers that have no readable bundle file at all.
+        let source = match fs::read(&canonical_full) {
+            Ok(source) => source,
+            Err(error) => return blob_fallback(error),
+        };
+        let actual = blobs::address(&source);
+        if actual == declared {
+            // Preserve the canonical bundle location: Python checkers may
+            // deliberately read adjacent state, and audits rely on `__file__`
+            // naming that directory.
+            Ok(canonical_full)
+        } else {
+            Err(PinFailure::Mismatch { actual })
         }
     }
 
@@ -1606,24 +1684,22 @@ impl VerifierRegistry {
     /// Returns the addresses now servable from this node.
     pub fn publish_code(&self, spec: &Value) -> Vec<String> {
         let mut published = Vec::new();
-        let Ok(root) = absolutize(&self.root) else {
-            return published;
-        };
         for pin in pinned_code(spec) {
             if !blobs::is_address(&pin.sha256) {
                 continue;
             }
-            if self.blobs.holds(&pin.sha256) {
-                published.push(pin.sha256);
-                continue;
-            }
-            let Ok(full) = absolutize(&root.join(&pin.path)) else {
+            // Use the same symlink-aware containment and hash check execution
+            // uses. A publisher must not turn an in-bundle symlink into a way
+            // to read and distribute an arbitrary host file. The resolved path
+            // can be either the bundle origin or an existing store entry;
+            // `put` validates either before it is advertised.
+            let Ok(path) = self.resolve_pinned(&pin.path, &pin.sha256) else {
                 continue;
             };
-            if !full.starts_with(&root) {
+            let Ok(source) = fs::read(path) else {
                 continue;
-            }
-            if matches!(self.blobs.publish_file(&full, &pin.sha256), Ok(true)) {
+            };
+            if self.blobs.put(&pin.sha256, &source).is_ok() {
                 published.push(pin.sha256);
             }
         }
@@ -1673,7 +1749,7 @@ impl VerifierRegistry {
                 )))
             }
         };
-        let workdir = match TempDir::new("cairn-pinned") {
+        let workdir = match TempDir::new("proofwork-pinned") {
             Ok(workdir) => workdir,
             Err(error) => {
                 return Err(Verdict::unavailable(format!(
@@ -1789,6 +1865,16 @@ enum Harvest {
     /// The entrypoint returned something of the wrong type; carries the Python
     /// type name so the verdict can say which.
     BadReturn(String),
+    /// The entrypoint returned a dict or a list.
+    ///
+    /// Still an error for all five verifier kinds, and `type_name` exists so
+    /// the diagnostic reads exactly as [`Harvest::BadReturn`]'s used to. It has
+    /// a variant of its own because a *stepper* returns one on purpose, and
+    /// re-parsing a discarded type name out of an error string would be the
+    /// worse of the two designs. `raw` is the JSON text, unparsed: a state
+    /// containing a float is refusable rather than silently rounded, and the
+    /// refusal belongs at the call site that knows what it asked for.
+    Json { raw: String, type_name: String },
 }
 
 fn parse_harvest(stdout: &str) -> Option<Harvest> {
@@ -1796,6 +1882,17 @@ fn parse_harvest(stdout: &str) -> Option<Harvest> {
     let map = parsed.as_object()?;
     if let Some(name) = map.get("bad_return").and_then(|value| value.as_str()) {
         return Some(Harvest::BadReturn(name.to_string()));
+    }
+    if let Some(value) = map.get("value") {
+        let type_name = map
+            .get("value_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("object")
+            .to_string();
+        return Some(Harvest::Json {
+            raw: value.to_string(),
+            type_name,
+        });
     }
     if let Some(ok) = map.get("ok").and_then(|value| value.as_bool()) {
         let detail = map
@@ -1863,7 +1960,10 @@ fn score_verdict(
                  the comparison"
             ))
         }
-        Harvest::BadReturn(kind) => {
+        Harvest::BadReturn(kind)
+        | Harvest::Json {
+            type_name: kind, ..
+        } => {
             return Verdict::invalid_spec(format!(
                 "{role} returned {kind}; scores must be int so every node agrees on \
                  the comparison"
@@ -2032,10 +2132,10 @@ fn tail(text: &str, max_chars: usize) -> String {
 /// Lexical normalization: drop `.`, resolve `..` textually, never touch the
 /// filesystem.
 ///
-/// Deliberately *not* [`fs::canonicalize`]: that requires the path to exist (so
-/// a missing checker would report "escapes the root" instead of "not found")
-/// and it resolves symlinks, which would let a symlink inside the bundle change
-/// what the containment check means.
+/// Deliberately not [`fs::canonicalize`] at this first stage: missing checker
+/// paths must remain eligible for the content-addressed fallback. Existing
+/// files and directories receive a second, symlink-resolving containment check
+/// before they are read, mounted, or executed.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -2089,13 +2189,15 @@ fn absolutize(path: &Path) -> io::Result<PathBuf> {
 /// field is absolute, and the `starts_with` below is component-wise, so both
 /// the absolute and the `../` spellings land in `None`.
 fn contained_dir(root: &Path, relative: &str) -> Option<PathBuf> {
-    let root = absolutize(root).ok()?;
-    let full = absolutize(&root.join(relative)).ok()?;
-    if full.starts_with(&root) {
-        Some(full)
-    } else {
-        None
+    let lexical_root = absolutize(root).ok()?;
+    let lexical_full = absolutize(&lexical_root.join(relative)).ok()?;
+    if !lexical_full.starts_with(&lexical_root) {
+        return None;
     }
+    let canonical_root = fs::canonicalize(&lexical_root).ok()?;
+    let canonical_full = fs::canonicalize(&lexical_full).ok()?;
+    (canonical_full.is_dir() && canonical_full.starts_with(&canonical_root))
+        .then_some(canonical_full)
 }
 
 /// `shutil.which`, minus the Windows extension handling.
@@ -2821,7 +2923,7 @@ mod tests {
 
     #[test]
     fn a_sibling_directory_does_not_count_as_inside_the_root() {
-        let root = tmpdir("cairn-root-test");
+        let root = tmpdir("proofwork-root-test");
         let sibling = root.path().with_extension("evil");
         let registry = VerifierRegistry::new(root.path());
         let escape = registry.pinned("checker", "../", "0".repeat(64).as_str());
@@ -2832,7 +2934,7 @@ mod tests {
 
     #[test]
     fn a_missing_checker_is_unavailable_not_a_rejection() {
-        let root = tmpdir("cairn-missing");
+        let root = tmpdir("proofwork-missing");
         let registry = VerifierRegistry::new(root.path());
         let spec = Value::object([
             ("kind", Value::string("certificate")),
@@ -2847,7 +2949,7 @@ mod tests {
 
     #[test]
     fn an_edited_checker_invalidates_the_spec_rather_than_rescoring() {
-        let root = tmpdir("cairn-edited");
+        let root = tmpdir("proofwork-edited");
         let sha = write_pinned(&root, "c.py", CHECKER);
         // Same pin, different code: the objective's identity no longer matches.
         fs::write(
@@ -2969,7 +3071,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-statistical");
+        let root = tmpdir("proofwork-statistical");
         let sha = write_pinned(&root, "s.py", STATISTIC);
         let registry = VerifierRegistry::new(root.path());
         // Two data points, so the statistic is `seed * 10 + 2`.
@@ -3015,7 +3117,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-statistical-stable");
+        let root = tmpdir("proofwork-statistical-stable");
         let sha = write_pinned(&root, "s.py", STATISTIC);
         let registry = VerifierRegistry::new(root.path());
         let spec = statistical_spec(&sha, vec![("threshold", Value::Int(50))]);
@@ -3103,7 +3205,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-statistical-float");
+        let root = tmpdir("proofwork-statistical-float");
         let sha = write_pinned(
             &root,
             "s.py",
@@ -3125,7 +3227,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-statistical-edited");
+        let root = tmpdir("proofwork-statistical-edited");
         let sha = write_pinned(&root, "s.py", STATISTIC);
         fs::write(
             root.path().join("s.py"),
@@ -3170,7 +3272,7 @@ mod tests {
         if !have("sleep") {
             return;
         }
-        let workdir = tmpdir("cairn-timeout");
+        let workdir = tmpdir("proofwork-timeout");
         let mut command = Command::new("sleep");
         command.arg("30");
         let started = Instant::now();
@@ -3189,8 +3291,8 @@ mod tests {
 
     #[test]
     fn a_missing_binary_is_a_spawn_failure_not_a_hang() {
-        let workdir = tmpdir("cairn-spawn");
-        let mut command = Command::new("cairn-nonexistent-binary-xyz");
+        let workdir = tmpdir("proofwork-spawn");
+        let mut command = Command::new("proofwork-nonexistent-binary-xyz");
         let outcome = run_bounded(&mut command, workdir.path(), None, Duration::from_secs(5));
         assert!(matches!(outcome, Err(RunFailure::Spawn(_))));
     }
@@ -3268,7 +3370,7 @@ mod tests {
         // jail; before the containment check an objective could name any host
         // directory -- `/home/<op>/.ssh` included -- and have its own command
         // read it, with declared fields as the exfiltration channel.
-        let root = tmpdir("cairn-replay-escape");
+        let root = tmpdir("proofwork-replay-escape");
         let registry = VerifierRegistry::new(root.path());
         for escape in ["/", "/etc", "..", "../..", "a/../../.."] {
             let spec = Value::object([
@@ -3298,7 +3400,7 @@ mod tests {
         // the jail *writable*; "/" used to turn the sandbox into a
         // pass-through of the operator's whole filesystem. Screened before
         // the toolchain lookup, so the refusal is testable without Lean.
-        let root = tmpdir("cairn-lean-escape");
+        let root = tmpdir("proofwork-lean-escape");
         let registry = VerifierRegistry::new(root.path());
         for escape in ["/", "/etc", "..", "../.."] {
             let spec = Value::object([
@@ -3323,7 +3425,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-replay-ok");
+        let root = tmpdir("proofwork-replay-ok");
         fs::write(
             root.path().join("run.py"),
             b"import json\nprint(json.dumps({'count': 7, 'seconds': 1.5}))\n",
@@ -3423,7 +3525,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-cert");
+        let root = tmpdir("proofwork-cert");
         let sha = write_pinned(&root, "c.py", CHECKER);
         let registry = VerifierRegistry::new(root.path());
         let spec = Value::object([
@@ -3451,7 +3553,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-crash");
+        let root = tmpdir("proofwork-crash");
         let source = "def check(artifact):\n    raise RuntimeError('x')\n";
         let sha = write_pinned(&root, "boom.py", source);
         let registry = VerifierRegistry::new(root.path());
@@ -3472,7 +3574,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-chatty");
+        let root = tmpdir("proofwork-chatty");
         let source = "def check(artifact):\n    print('progress')\n    return True, 'fine'\n";
         let sha = write_pinned(&root, "chatty.py", source);
         let registry = VerifierRegistry::new(root.path());
@@ -3492,7 +3594,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-entry");
+        let root = tmpdir("proofwork-entry");
         let sha = write_pinned(&root, "c.py", CHECKER);
         let registry = VerifierRegistry::new(root.path());
         let spec = Value::object([
@@ -3512,7 +3614,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-eval");
+        let root = tmpdir("proofwork-eval");
         let sha = write_pinned(&root, "e.py", EVALUATOR);
         let registry = VerifierRegistry::new(root.path());
         let spec = Value::object([
@@ -3537,7 +3639,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-float");
+        let root = tmpdir("proofwork-float");
         let source = "def score(artifact):\n    return 3.5\n";
         let sha = write_pinned(&root, "f.py", source);
         let registry = VerifierRegistry::new(root.path());
@@ -3559,7 +3661,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-loop");
+        let root = tmpdir("proofwork-loop");
         let source = "import time\n\n\ndef check(artifact):\n    time.sleep(30)\n    return True\n";
         let sha = write_pinned(&root, "slow.py", source);
         let registry = VerifierRegistry::new(root.path());
@@ -3585,7 +3687,7 @@ mod tests {
         // `ping`. The clamp is opt-in: settlement must honour the objective's
         // own bound, or a slow verifier would settle differently depending on
         // who ran it.
-        let root = tmpdir("cairn-clamp");
+        let root = tmpdir("proofwork-clamp");
         // Settlement and audit honour whatever the objective declared, up to
         // the format's own day-long maximum.
         let batch = VerifierRegistry::new(root.path());
@@ -3611,7 +3713,7 @@ mod tests {
         if !have("python3") {
             return;
         }
-        let root = tmpdir("cairn-flood");
+        let root = tmpdir("proofwork-flood");
         // Writes well past the cap, as fast as it can.
         let source = "import sys\n\n\ndef check(artifact):\n    \
                       block = 'x' * 65536\n    \
@@ -3709,11 +3811,61 @@ mod tests {
         assert!(joined.starts_with(&absolute));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_cannot_escape_pinned_or_mounted_bundle_paths() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        let root = tmpdir("proofwork-symlink-root");
+        let outside = tmpdir("proofwork-symlink-outside");
+        fs::write(outside.path().join("checker.py"), CHECKER).expect("outside checker");
+        symlink(outside.path(), root.path().join("escape")).expect("symlink");
+
+        // Unix-domain socket paths are short (104 bytes on macOS), while the
+        // ordinary scratch helper deliberately carries a long unique name.
+        let socket_dir = TempDir {
+            path: PathBuf::from("/tmp").join(format!(
+                "pw-symlink-{}-{}",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            )),
+        };
+        create_private_dir(socket_dir.path()).expect("short socket dir");
+        let _socket = UnixListener::bind(socket_dir.path().join("s")).expect("outside socket");
+        symlink(socket_dir.path(), root.path().join("escape-socket")).expect("socket symlink");
+
+        assert!(contained_dir(root.path(), "escape").is_none());
+
+        let registry = VerifierRegistry::new(root.path());
+        let declared = sha256_hex(CHECKER.as_bytes());
+        assert!(matches!(
+            registry.resolve_pinned("escape/checker.py", &declared),
+            Err(PinFailure::Escape)
+        ));
+        // A regular outside file would still end in Escape if a buggy resolver
+        // opened it first and canonicalized second. A socket cannot be read as a
+        // file: Escape here proves containment is decided before any open/read.
+        assert!(matches!(
+            registry.resolve_pinned("escape-socket/s", &declared),
+            Err(PinFailure::Escape)
+        ));
+
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("escape/checker.py")),
+            ("checker_sha256", Value::string(declared.clone())),
+            ("entrypoint", Value::string("check")),
+        ]);
+        assert!(registry.publish_code(&spec).is_empty());
+        assert!(!registry.blobs().holds(&declared));
+    }
+
     #[test]
     fn which_finds_a_real_binary_and_not_an_imaginary_one() {
-        assert!(which("cairn-nonexistent-binary-xyz").is_none());
+        assert!(which("proofwork-nonexistent-binary-xyz").is_none());
         assert!(which("").is_none());
-        assert!(which("/cairn/does/not/exist").is_none());
+        assert!(which("/proofwork/does/not/exist").is_none());
         if have("sh") {
             let found = which("sh").expect("sh");
             assert!(is_executable_file(&found));
@@ -3734,7 +3886,7 @@ mod tests {
     #[test]
     fn a_temp_dir_is_removed_when_it_drops() {
         let path = {
-            let dir = tmpdir("cairn-drop");
+            let dir = tmpdir("proofwork-drop");
             let path = dir.path().to_path_buf();
             fs::write(path.join("scratch"), b"x").expect("write");
             assert!(path.exists());
@@ -3745,8 +3897,8 @@ mod tests {
 
     #[test]
     fn temp_dirs_do_not_collide() {
-        let first = tmpdir("cairn-unique");
-        let second = tmpdir("cairn-unique");
+        let first = tmpdir("proofwork-unique");
+        let second = tmpdir("proofwork-unique");
         assert_ne!(first.path(), second.path());
     }
 
@@ -3762,7 +3914,7 @@ mod tests {
     /// sandbox". That was the right test while there was no jail. Now there is
     /// one, and the risk has inverted: the note could quietly grow into a claim
     /// that the boundary is stronger than it is. So the assertions moved to the
-    /// four gaps, which are the part a reader acts on and the part a future
+    /// remaining gaps, which are the part a reader acts on and the part a future
     /// edit is tempted to drop.
     #[test]
     fn the_sandboxing_note_names_both_the_boundary_and_its_gaps() {
@@ -3773,10 +3925,6 @@ mod tests {
         for gap in [
             // A kernel escape is still an escape.
             "kernel",
-            // macOS reads are not confined.
-            "not reads",
-            // replay and lean keep the operator's environment.
-            "environment",
             // No jail at all on an unsupported host.
             sandbox::REQUIRE_ENV,
         ] {
@@ -3792,7 +3940,7 @@ mod tests {
         if !have("python3") || !sandbox::mechanism().is_jail() {
             return;
         }
-        let root = tmpdir("cairn-jail-network");
+        let root = tmpdir("proofwork-jail-network");
         // Opening a socket is the single capability the jail must remove.
         let source = "import socket\n\
                       def check(artifact):\n\
@@ -3824,7 +3972,7 @@ mod tests {
         if !have("python3") || !sandbox::mechanism().is_jail() {
             return;
         }
-        let root = tmpdir("cairn-jail-write");
+        let root = tmpdir("proofwork-jail-write");
         let target = root.path().join("escaped.txt");
         let source = format!(
             "def check(artifact):\n    open({:?}, \"w\").write(\"x\")\n    return True\n",
@@ -3849,7 +3997,7 @@ mod tests {
         // cached process-wide and tests share a process -- so the decision
         // function is checked directly. The invariant is the one that matters:
         // no configuration of this module produces a settling verdict.
-        let dir = tmpdir("cairn-require");
+        let dir = tmpdir("proofwork-require");
         let plan = sandbox::Confinement::new(dir.path(), dir.path(), 1);
         if let sandbox::Mechanism::None(_) = sandbox::mechanism() {
             // Only reachable on a host with no jail; the error type carries no

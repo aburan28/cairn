@@ -243,6 +243,35 @@ fork [settlement-convergence.md](settlement-convergence.md) exists to prevent.
 Off the settlement path, the same disagreement is a failing `differential.sh`
 instead — loud, and in the place built to hear it.
 
+## The VDF is the other answer, and it is also built
+
+`src/vdf.rs` landed separately: a Wesolowski delay function over the RSA-2048
+challenge modulus, recorded as a beacon with `source: vdf` and checked against
+a seed derived from the log's own Merkle root. It closes the same attack from
+the other side, and the two are worth holding next to each other because the
+trade is genuinely different rather than a matter of taste.
+
+| | `vdf` | `drand` |
+|---|---|---|
+| why a sequencer cannot grind | each candidate costs `T` sequential squarings | the draw happens somewhere they are not |
+| outside dependency | none | drand's relays, for liveness only |
+| who else could cheat | whoever knows the factors of RSA-2048 — believed nobody | a colluding threshold of the drand network, who learn rounds early |
+| cost to produce | the full delay, every epoch | one HTTP request |
+| checkable from the log alone | yes | yes |
+
+`source` is what discriminates, in `record_beacon_with` and in the audit, so
+the two coexist and an epoch still gets exactly one beacon — `cairn beacon`
+refuses `--delay` and `--drand-signature` together rather than ranking them,
+because silently preferring one proof over the other would be the command
+choosing an epoch's settlement anchor on the operator's behalf.
+
+If the network ever decides it wants no outside dependency at all — which is
+[anchored-time.md](anchored-time.md) recommendation 3, still open — the VDF is
+the answer and this note is the one that gets dropped. Nothing here argues
+otherwise. What drand buys in the meantime is a beacon that costs an HTTP
+request rather than most of an epoch's compute, on a network where a node is
+meant to be spending its cycles on the objectives.
+
 ## tlock is a different decision, and a later one
 
 Timelock encryption falls out of an unchained beacon: encrypt to round *R* with

@@ -310,6 +310,19 @@ pub fn implements(kind: &str) -> bool {
 }
 
 pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
+    if std::env::var_os("CAIRN_REQUIRE_SANDBOX").is_some_and(|value| {
+        let value = value.to_string_lossy();
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    }) {
+        return Verdict::plain(
+            Status::Unavailable,
+            "CAIRN_REQUIRE_SANDBOX is set, but the independent reference has no \
+             confinement backend; refusing to execute objective-authored code",
+        );
+    }
     match spec.get("kind").and_then(Value::as_str) {
         Some("certificate") => certificate(root, spec, artifact),
         Some("evaluator") => evaluator(root, spec, artifact),
@@ -1265,15 +1278,41 @@ mod tests {
         path
     }
 
+    /// Run the stand-in, retrying past `ETXTBSY`.
+    ///
+    /// **The race is not in what is being tested, and it cannot be fixed from
+    /// here.** `fake_lean` writes a script and then execs it. Every other test
+    /// thread in this binary also spawns processes, and a `fork` landing
+    /// between our `write` and our `exec` hands the child a duplicate of our
+    /// still-open write descriptor. The kernel then refuses to exec a file some
+    /// process holds open for writing -- `ETXTBSY`, reported here as
+    /// `Text file busy (os error 26)` -- until that child reaches its own
+    /// `exec` and `CLOEXEC` closes the copy. The window is microseconds wide
+    /// and it fired about one run in five under load, which is how it survived:
+    /// nobody ran the reference suite in a loop until `make check` started
+    /// running it as part of a longer sequence.
+    ///
+    /// Retried rather than locked, because a lock here would not help. The fork
+    /// that does the damage belongs to a thread that never calls this function,
+    /// so the only serialisation that would work is one every `Command::spawn`
+    /// in the crate agrees to take.
+    ///
+    /// Retrying is safe in the direction that matters: an `Unavailable` is
+    /// never a verdict about a proof, so this can only turn a non-answer into
+    /// an answer, and a genuinely missing toolchain still ends `Unavailable`
+    /// after the last attempt.
     #[cfg(unix)]
     fn with_fake_lean(tag: &str, code: i32, says: &str) -> Verdict {
         let binary = fake_lean(tag, code, says);
-        let verdict = lean_using(
-            binary.to_str().expect("utf-8 path"),
-            root(),
-            &lean_spec(vec![]),
-            &proof(":= trivial"),
-        );
+        let path = binary.to_str().expect("utf-8 path");
+        let mut verdict = Verdict::plain(Status::Unavailable, "never ran");
+        for attempt in 0..64 {
+            verdict = lean_using(path, root(), &lean_spec(vec![]), &proof(":= trivial"));
+            if !verdict.detail.contains("Text file busy") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2 + attempt));
+        }
         let _ = std::fs::remove_dir_all(binary.parent().expect("parent"));
         verdict
     }

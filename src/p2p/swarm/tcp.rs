@@ -1,6 +1,6 @@
 //! The part with sockets in it.
 //!
-//! [`crate::swarm::Swarm`] is a pure state machine: messages in, [`Action`]s out, no
+//! [`crate::p2p::swarm::Swarm`] is a pure state machine: messages in, [`Action`]s out, no
 //! clock and no randomness. This is the driver that gives it a network -- one
 //! thread per connection, blocking reads, and a ticker for the choking rounds.
 //!
@@ -13,8 +13,8 @@
 //!
 //! Everything that can fail for reasons that are **nobody's fault** lives here:
 //! a refused connection, a timeout, a half-closed socket, a DNS answer that
-//! changed. None of it reaches [`crate::swarm::Swarm`], and none of it produces a
-//! [`crate::swarm::Dropped`] -- which is the same rule the verification ladder runs on.
+//! changed. None of it reaches [`crate::p2p::swarm::Swarm`], and none of it produces a
+//! [`crate::p2p::swarm::Dropped`] -- which is the same rule the verification ladder runs on.
 //! A peer that cannot be reached has not misbehaved, exactly as a verifier that
 //! cannot run has not refuted anything.
 //!
@@ -27,7 +27,7 @@
 //! A blocking read on a peer that has gone quiet is a thread that never returns
 //! and a piece that is never reassigned. Every socket gets a read and write
 //! timeout, and a peer that trips one is disconnected -- at which point
-//! [`crate::swarm::Swarm::remove_peer`] returns its reservations to the pool and the
+//! [`crate::p2p::swarm::Swarm::remove_peer`] returns its reservations to the pool and the
 //! transfer continues without it. That is the only reason a stalled peer is
 //! survivable, and it is why the timeout is not a tunable nicety.
 
@@ -397,9 +397,10 @@ fn serve_one(mut connection: Connection, ctx: Serving) -> io::Result<()> {
     // this node's memory. An authenticated peer is not a trusted one.
     connection.set_max_frame(super::wire::MAX_FRAME as u32);
 
-    // The transport handshake already ran, so the peer is authenticated before
-    // a swarm byte moves. What is exchanged here is only *which blob* the
-    // session is about.
+    // The transport handshake already ran, so the channel is encrypted before
+    // a swarm byte moves. The inbound initiator id is only claimed and is never
+    // used here: `next_peer` assigns a local, connection-scoped number instead.
+    // What is exchanged here is only *which blob* the session is about.
     let Ok(head) = connection.receive(CONTEXT) else {
         return Ok(());
     };
@@ -1069,8 +1070,9 @@ pub fn describe(dropped: &Dropped) -> String {
     dropped.to_string()
 }
 
-// A known-open flake in the real-socket tests below, so the next person to
-// hit it does not re-derive this from nothing.
+// A macOS real-socket failure that is now closed in `p2p::transport`, retained
+// here because the symptom appears in this module and otherwise looks like a
+// swarm state-machine bug.
 //
 // On at least one heavily-loaded macOS sandbox, several of the tests that
 // drive `serve`/`fetch` over real loopback sockets (`a_blob_moves_between_-
@@ -1094,15 +1096,11 @@ pub fn describe(dropped: &Dropped) -> String {
 //   -1 -- src/p2p/transport.rs`): it reproduces identically on the commit
 //   before that one.
 //
-// What is still open is why *this* module's heavier orchestration --
-// multiple ticker threads per node, each taking the `Swarm` and outbox
-// mutexes on a 200ms tick, two such nodes in one test process -- produces the
-// early `WouldBlock` when two isolated `Connection`s under the same
-// read/write pattern do not. CI only runs `cargo test` on `ubuntu-latest`, so
-// whether this is Linux-portable or a macOS/BSD-scheduling artifact of a
-// contended sandbox is untested. The pure `Swarm` state machine (`swarm::mod`
-// tests) drives choking, rarest-first and endgame directly with no socket in
-// the loop and is not implicated.
+// The transport now retries `WouldBlock`/`TimedOut` only until the socket's
+// configured deadline, measured from the last byte of progress. A spurious
+// early wake therefore no longer drops a live peer, while a genuinely silent
+// one remains bounded. The pure `Swarm` state machine (`swarm::mod` tests) was
+// never implicated.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1359,7 +1357,7 @@ mod tests {
         // existing session; wiring this module to it is the fold the roadmap
         // tracks, and it is what restores the old property.
         use crate::crypto::identity::Identity;
-        use crate::swarm::discovery::PeerRecord;
+        use crate::p2p::swarm::discovery::PeerRecord;
 
         let dir = scratch("pex");
         let only_b = evaluator(40_000);
@@ -1459,7 +1457,7 @@ mod tests {
         // the signature no longer checks out, so it never reaches the book and C
         // dials nothing.
         use crate::crypto::identity::Identity;
-        use crate::swarm::discovery::PeerRecord;
+        use crate::p2p::swarm::discovery::PeerRecord;
 
         let signed = PeerRecord::sign(
             &Identity::from_secret_bytes([4u8; 32]),
@@ -1615,7 +1613,7 @@ mod tests {
         // fetches from B having been *handed* nothing -- which is what peer
         // exchange was always for.
         use crate::crypto::identity::Identity;
-        use crate::swarm::discovery::PeerRecord;
+        use crate::p2p::swarm::discovery::PeerRecord;
 
         struct OneKey(
             crate::p2p::handshake::PeerId,
@@ -1683,7 +1681,7 @@ mod tests {
         // An address with nothing to look a key up by, and nothing to check a
         // fetched one against, can never become a dial however good the source.
         use crate::crypto::identity::Identity;
-        use crate::swarm::discovery::PeerRecord;
+        use crate::p2p::swarm::discovery::PeerRecord;
 
         struct Anything(crate::p2p::handshake::PeerPublic);
         impl KeySource for Anything {
@@ -1780,7 +1778,7 @@ mod tests {
         let local = PeerIdentity::generate();
         let mut connection =
             transport::connect(&endpoint.peer, endpoint.addr, &local).expect("connects");
-        let oversized = vec![0u8; crate::swarm::wire::MAX_FRAME + 8192];
+        let oversized = vec![0u8; crate::p2p::swarm::wire::MAX_FRAME + 8192];
         // Before the write, not after: once the server's refusal lands as a
         // reset, `setsockopt` for a timeout fails outright with `EINVAL` on a
         // BSD-family kernel (macOS included), and by then the write has

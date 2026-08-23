@@ -65,11 +65,12 @@ use std::io::{self, Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
-use cairn::attribution::{payouts_over, FlowError, FlowParams};
+use cairn::attribution::{payouts_with_enforced, FlowError, FlowParams};
 use cairn::canonical::{short, CanonicalError, Value};
 use cairn::checkpoint::{RootKey, SignedCheckpoint};
 use cairn::crypto::identity::Identity;
 use cairn::drand;
+use cairn::frontier::Ratchet;
 use cairn::incentive::design::Report as IncentiveReport;
 use cairn::incentive::{sweep, NodeParams, ParamError, Rat};
 use cairn::knowledge::ConfidencePolicy;
@@ -453,6 +454,15 @@ enum Command {
     Post {
         objective: String,
     },
+    /// Declare units into the log's supply. Genesis prefix only — see
+    /// [`cairn::records::Issuance`].
+    Issue {
+        holder: String,
+        units: u64,
+    },
+    /// Who holds what, what is escrowed behind a promise to pay, and what the
+    /// genesis prefix issued.
+    Balances,
     Commit {
         objective_id: String,
         submitter: String,
@@ -505,6 +515,9 @@ enum Command {
         source: String,
         block: u64,
         value: String,
+        /// Compute the value as a verifiable delay of this many sequential
+        /// squarings, rather than taking it from the caller.
+        delay: Option<u64>,
     },
     /// Which drand round an epoch is settled against, and when it publishes.
     ///
@@ -608,6 +621,20 @@ enum Command {
     Availability {
         action: AvailabilityAction,
     },
+    /// Mint submissions whose verdict is already known, and check what the log
+    /// said about them.
+    Canary {
+        action: CanaryAction,
+    },
+    /// Dispute a committed trace, play the bisection, and settle it.
+    Dispute {
+        action: DisputeAction,
+    },
+    /// Stand behind a verdict under bond, and take the bond of somebody who
+    /// stood behind a wrong one.
+    Attest {
+        action: AttestAction,
+    },
     Attribute {
         params: FlowParams,
     },
@@ -630,6 +657,12 @@ enum Command {
     /// whole input from flags and is safe to run anywhere.
     Incentives {
         params: Box<NodeParams>,
+        /// The agent-market sub-game instead of the node game, when asked for.
+        ///
+        /// `Option` rather than a bool beside `params`, because the two are
+        /// different parameter sets and a caller that sets `--agents` has said
+        /// which report it wants without also having to say `--market`.
+        market: Option<Box<cairn::incentive::MarketParams>>,
         /// Also report how far each parameter can move before the mechanism
         /// breaks. Opt-in because it is hundreds of full solver runs.
         robustness: bool,
@@ -662,6 +695,18 @@ enum Command {
         cites: Vec<String>,
         /// Also wait out the reveal epoch and settle, so the round ends with a
         /// payout rather than a "settles when epoch N closes".
+        settle: bool,
+    },
+    /// Score candidate artifacts locally and submit only the ones that already
+    /// pass. The proposer loop.
+    Propose {
+        objective: String,
+        artifacts: Vec<String>,
+        submitter: String,
+        identity: Option<String>,
+        cites: Vec<String>,
+        /// Score and report; submit nothing.
+        dry_run: bool,
         settle: bool,
     },
     /// Write the files a new objective starts from, and post nothing.
@@ -831,15 +876,114 @@ impl Default for CodingChoice {
     }
 }
 
+/// `canary mint` and `canary check` — the two halves of the trap, and they are
+/// deliberately two commands rather than one.
+///
+/// Minting costs verifier runs and happens once. Checking costs nothing and
+/// happens continuously. A single command would tempt an operator into
+/// re-minting every time they wanted to check, which throws away the entire
+/// economic argument for canaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CanaryAction {
+    /// Mutate a real artifact until the objective's own verifier lands on the
+    /// wanted side, and write the results plus a private docket.
+    Mint(Minting),
+    /// Compare a docket against every verdict the log recorded. Runs no
+    /// verifier; exits non-zero if anything disagrees.
+    Check { docket: String },
+}
+
+/// `dispute trace|open|play|settle|status`.
+///
+/// Five verbs because a dispute is five distinct things a person does, at five
+/// different times, possibly on five different machines: build a trace, object
+/// to somebody else's, answer what the log asks you for, settle what the log
+/// has already decided, and look at where a dispute has got to. Collapsing them
+/// into one command would mean holding the whole dispute in one process, which
+/// is exactly the design this mechanism avoids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DisputeAction {
+    /// Run an objective's pinned stepper and write the trace it produces.
+    Trace {
+        objective: String,
+        from: String,
+        steps: usize,
+        out: String,
+    },
+    /// Object to a claim's committed trace, with a bond behind it.
+    Open {
+        claim: String,
+        trace: String,
+        bond: u64,
+        identity: String,
+    },
+    /// Answer whatever the log currently asks this party for.
+    Play {
+        id: String,
+        trace: String,
+        identity: String,
+    },
+    /// Decide a dispute that has narrowed, or one whose window has shut.
+    Settle { id: String },
+    /// Where every dispute has got to.
+    Status { id: Option<String> },
+}
+
+/// `attest stand|slash|list` — bonded verification.
+///
+/// Separate from `canary`, and the seam between them is the point. A docket
+/// says *this claim's recorded verdict is wrong* and knows it for free; an
+/// attestation says *this identity is answerable for that verdict* and has a
+/// bond behind it. `attest slash --docket` is the two halves meeting: the cheap
+/// half names the target, the expensive half runs once, and the bond moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttestAction {
+    /// Stand behind a claim's verdict, under signature and under bond.
+    Stand {
+        claim: String,
+        status: String,
+        identity: String,
+    },
+    /// Take an attestor's bond, on evidence. Either one attestation by id, or
+    /// every attestation a docket contradicts.
+    Slash {
+        attestation: Option<String>,
+        docket: Option<String>,
+        catcher: String,
+    },
+    /// Who has stood behind what, and whose bond is still live.
+    List,
+}
+
+/// One minting run's settings, in a struct so the command takes one argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Minting {
+    objective: String,
+    /// The seed. Should be an artifact the network really accepted — the whole
+    /// indistinguishability argument is that a canary is a real submission with
+    /// one edit in it.
+    from: String,
+    count: usize,
+    /// Fraction of the batch that should be known-*good*, as `num/den`.
+    valid_num: u32,
+    valid_den: u32,
+    /// Verifier runs to spend per canary before giving up.
+    budget: usize,
+    out: String,
+}
+
 /// The four steps of the availability mechanism.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AvailabilityAction {
-    /// Promise to hold this log at its current root and height.
+    /// Promise to hold this log at its current root and height, staking
+    /// `bond` units behind it.
     ///
-    /// No `--height`. The promise covers the whole log as it stands, because
-    /// the size of the promise is what the pool pays for, and a promiser who
-    /// could choose it chose one entry and took a full share.
-    Undertake { identity: String },
+    /// No `--height`: the promise covers the whole log as it stands, because a
+    /// promiser who could choose its size chose one entry and took a full
+    /// share. `--bond` is not optional for the mirror-image reason -- the pool
+    /// is divided in proportion to it, and that proportionality is the only
+    /// thing that makes forty identities no more profitable than one.
+    Undertake { identity: String, bond: u64 },
     /// Answer this epoch's sample for every promise this identity made.
     Answer {
         identity: String,
@@ -1039,6 +1183,12 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
 
     let command = match name.as_str() {
         "post" => parse_post(&mut cursor)?,
+        "propose" => parse_propose(&mut cursor)?,
+        "issue" => parse_issue(&mut cursor)?,
+        "balances" => {
+            expect_end(&mut cursor, "balances")?;
+            Command::Balances
+        }
         "commit" => parse_commit(&mut cursor)?,
         "reveal" => parse_reveal(&mut cursor)?,
         "settle" => {
@@ -1055,6 +1205,9 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "prove" => parse_prove(&mut cursor)?,
         "check" => parse_check(&mut cursor)?,
         "availability" => parse_availability(&mut cursor)?,
+        "canary" => parse_canary(&mut cursor)?,
+        "dispute" => parse_dispute(&mut cursor)?,
+        "attest" => parse_attest(&mut cursor)?,
         "attribute" => parse_attribute(&mut cursor)?,
         "knowledge" => parse_knowledge(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
@@ -1136,6 +1289,32 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
     };
 
     Ok(Invocation { options, command })
+}
+
+/// `issue --holder <name> --units <n>`.
+///
+/// Deliberately not `--signed-by`: a supply is authorised by its *position* in
+/// the log, not by a key. Nothing else has been written yet, so a signature
+/// would only say who opened the log, which is not in dispute.
+fn parse_issue(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut holder: Option<String> = None;
+    let mut units: Option<u64> = None;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--holder" => holder = Some(cursor.value("issue: --holder")?),
+            "--units" => {
+                let raw = cursor.value("issue: --units")?;
+                units = Some(raw.parse().map_err(|_| {
+                    CliError::Usage(format!("issue: --units expects an integer, got {raw:?}"))
+                })?);
+            }
+            other => return Err(CliError::Usage(format!("issue: unknown option {other:?}"))),
+        }
+    }
+    Ok(Command::Issue {
+        holder: require(holder, "issue", "--holder <name>")?,
+        units: units.ok_or_else(|| CliError::Usage(String::from("issue: --units <n>")))?,
+    })
 }
 
 fn parse_post(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -1360,6 +1539,7 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut source: Option<String> = None;
     let mut block: Option<u64> = None;
     let mut value: Option<String> = None;
+    let mut delay: Option<u64> = None;
     let mut drand_signature: Option<String> = None;
     while let Some(token) = cursor.take() {
         if token == "--orders" {
@@ -1370,6 +1550,8 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
             block = Some(parse_u64(&cursor.value("--block")?, "--block")?);
         } else if token == "--value" {
             value = Some(cursor.value("--value")?);
+        } else if token == "--delay" {
+            delay = Some(parse_u64(&cursor.value("--delay")?, "--delay")?);
         } else if token == "--drand-signature" {
             drand_signature = Some(cursor.value("--drand-signature")?);
         } else {
@@ -1380,6 +1562,16 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
         Some(orders) => orders,
         None => return Err(CliError::Usage("beacon: --orders is required".into())),
     };
+    // The two self-verifying sources, offered at once. Refused rather than
+    // ranked: an epoch gets one beacon, and a command that silently preferred
+    // one of two proofs would be choosing the settlement anchor on the
+    // operator's behalf.
+    if delay.is_some() && drand_signature.is_some() {
+        return Err(CliError::Usage(String::from(
+            "beacon: --delay and --drand-signature are two beacons for one epoch, \
+             and an epoch gets one",
+        )));
+    }
     if let Some(signature) = drand_signature {
         if source.is_some() || block.is_some() || value.is_some() {
             return Err(CliError::Usage(
@@ -1408,7 +1600,13 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
             source: drand::SOURCE.into(),
             block: drand::round_for_epoch(orders, cairn::partition::epoch_seconds()),
             value: signature,
+            delay: None,
         });
+    }
+    if delay.is_some() && value.is_some() {
+        return Err(CliError::Usage(String::from(
+            "beacon: --delay computes the value, so --value is not also given",
+        )));
     }
     Ok(Command::Beacon {
         orders,
@@ -1416,12 +1614,21 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
         // the sequencer did not choose if it came from somewhere -- but an
         // unnamed one is unverifiable by anyone holding a chain, so the name
         // it gets says exactly that rather than pretending to a provenance.
-        source: source.unwrap_or_else(|| "unattributed".into()),
+        source: match (&delay, source) {
+            (Some(_), _) => String::from(cairn::node::VDF_SOURCE),
+            (None, Some(source)) => source,
+            (None, None) => String::from("unattributed"),
+        },
         block: block.unwrap_or(0),
-        value: require(value, "beacon", "--value")?,
+        // With `--delay` the value is *computed*, so there is nothing to
+        // require: the whole point is that the sequencer does not choose it.
+        value: match (&delay, value) {
+            (Some(_), _) => String::new(),
+            (None, value) => require(value, "beacon", "--value or --delay")?,
+        },
+        delay,
     })
 }
-
 /// `drand-round [--orders N]`
 ///
 /// `--orders` defaults to the current epoch here, and is required on `beacon`,
@@ -1503,6 +1710,192 @@ fn parse_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
     })
 }
 
+/// `canary mint --objective ID --from FILE [--count N] [--valid-share N/D]`
+/// `canary check --docket FILE`
+fn parse_canary(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = cursor
+        .take()
+        .ok_or_else(|| CliError::Usage(String::from("canary: mint or check")))?;
+    let mut objective: Option<String> = None;
+    let mut from: Option<String> = None;
+    let mut docket: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut count: usize = 4;
+    let mut budget: usize = cairn::canary::DEFAULT_BUDGET;
+    let (mut valid_num, mut valid_den) = (1u32, 2u32);
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--objective" => objective = Some(cursor.value("--objective")?),
+            "--from" => from = Some(cursor.value("--from")?),
+            "--docket" => docket = Some(cursor.value("--docket")?),
+            "--out" => out = Some(cursor.value("--out")?),
+            "--count" => {
+                count = parse_u64(&cursor.value("--count")?, "--count")? as usize;
+            }
+            "--budget" => {
+                budget = parse_u64(&cursor.value("--budget")?, "--budget")? as usize;
+            }
+            "--valid-share" => {
+                let text = cursor.value("--valid-share")?;
+                let (num, den) = text.split_once('/').ok_or_else(|| {
+                    CliError::Usage(String::from(
+                        "canary: --valid-share takes NUM/DEN, e.g. 1/2",
+                    ))
+                })?;
+                valid_num = parse_u64(num, "--valid-share")? as u32;
+                valid_den = parse_u64(den, "--valid-share")? as u32;
+                if valid_den == 0 || valid_num > valid_den {
+                    return Err(CliError::Usage(String::from(
+                        "canary: --valid-share must be a fraction in [0, 1]",
+                    )));
+                }
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "canary {action}: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+    let action = match action.as_str() {
+        "mint" => CanaryAction::Mint(Minting {
+            objective: require(objective, "canary mint", "--objective")?,
+            from: require(from, "canary mint", "--from")?,
+            count: count.max(1),
+            valid_num,
+            valid_den,
+            budget: budget.max(1),
+            out: out.unwrap_or_else(|| String::from("canaries")),
+        }),
+        "check" => CanaryAction::Check {
+            docket: require(docket, "canary check", "--docket")?,
+        },
+        other => {
+            return Err(CliError::Usage(format!(
+                "canary: unknown action {other:?} (mint, check)"
+            )))
+        }
+    };
+    Ok(Command::Canary { action })
+}
+
+/// `dispute <verb> [...]`
+fn parse_dispute(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let verb = cursor.take().ok_or_else(|| {
+        CliError::Usage(String::from("dispute: trace, open, play, settle or status"))
+    })?;
+    let mut objective: Option<String> = None;
+    let mut from: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut claim: Option<String> = None;
+    let mut trace: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut id: Option<String> = None;
+    let mut steps: usize = 0;
+    let mut bond: u64 = 0;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--objective" => objective = Some(cursor.value("--objective")?),
+            "--from" => from = Some(cursor.value("--from")?),
+            "--out" => out = Some(cursor.value("--out")?),
+            "--claim" => claim = Some(cursor.value("--claim")?),
+            "--trace" => trace = Some(cursor.value("--trace")?),
+            "--identity" => identity = Some(cursor.value("--identity")?),
+            "--id" => id = Some(cursor.value("--id")?),
+            "--steps" => steps = parse_u64(&cursor.value("--steps")?, "--steps")? as usize,
+            "--bond" => bond = parse_u64(&cursor.value("--bond")?, "--bond")?,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "dispute {verb}: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+    let action = match verb.as_str() {
+        "trace" => DisputeAction::Trace {
+            objective: require(objective, "dispute trace", "--objective")?,
+            from: require(from, "dispute trace", "--from")?,
+            steps,
+            out: require(out, "dispute trace", "--out")?,
+        },
+        "open" => DisputeAction::Open {
+            claim: require(claim, "dispute open", "--claim")?,
+            trace: require(trace, "dispute open", "--trace")?,
+            bond,
+            identity: require(identity, "dispute open", "--identity")?,
+        },
+        "play" => DisputeAction::Play {
+            id: require(id, "dispute play", "--id")?,
+            trace: require(trace, "dispute play", "--trace")?,
+            identity: require(identity, "dispute play", "--identity")?,
+        },
+        "settle" => DisputeAction::Settle {
+            id: require(id, "dispute settle", "--id")?,
+        },
+        "status" => DisputeAction::Status { id },
+        other => {
+            return Err(CliError::Usage(format!(
+                "dispute: unknown action {other:?} (trace, open, play, settle, status)"
+            )))
+        }
+    };
+    Ok(Command::Dispute { action })
+}
+
+/// `attest stand --claim ID --status accept|reject --identity FILE`
+/// `attest slash (--attestation ID | --docket FILE) --catcher NAME`
+/// `attest list`
+fn parse_attest(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let verb = cursor.take().unwrap_or_else(|| String::from("list"));
+    let mut claim: Option<String> = None;
+    let mut status: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut attestation: Option<String> = None;
+    let mut docket: Option<String> = None;
+    let mut catcher: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--claim" => claim = Some(cursor.value("--claim")?),
+            "--status" => status = Some(cursor.value("--status")?),
+            "--identity" => identity = Some(cursor.value("--identity")?),
+            "--attestation" => attestation = Some(cursor.value("--attestation")?),
+            "--docket" => docket = Some(cursor.value("--docket")?),
+            "--catcher" => catcher = Some(cursor.value("--catcher")?),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "attest {verb}: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+    let action = match verb.as_str() {
+        "stand" => AttestAction::Stand {
+            claim: require(claim, "attest stand", "--claim")?,
+            status: require(status, "attest stand", "--status")?,
+            identity: require(identity, "attest stand", "--identity")?,
+        },
+        "slash" => {
+            if attestation.is_some() == docket.is_some() {
+                return Err(CliError::Usage(String::from(
+                    "attest slash: exactly one of --attestation ID or --docket FILE",
+                )));
+            }
+            AttestAction::Slash {
+                attestation,
+                docket,
+                catcher: require(catcher, "attest slash", "--catcher")?,
+            }
+        }
+        "list" => AttestAction::List,
+        other => {
+            return Err(CliError::Usage(format!(
+                "attest: unknown action {other:?} (stand, slash, list)"
+            )))
+        }
+    };
+    Ok(Command::Attest { action })
+}
+
 fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
     let action = cursor.take().unwrap_or_else(|| String::from("status"));
     let mut identity: Option<String> = None;
@@ -1518,6 +1911,7 @@ fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
                 funder = Some(cursor.value("--funder")?);
                 continue;
             }
+            "--bond" => "bond",
             "--epoch" => "epoch",
             "--per-epoch" => "per-epoch",
             "--from-epoch" => "from-epoch",
@@ -1539,6 +1933,9 @@ fn parse_availability(cursor: &mut Cursor) -> Result<Command, CliError> {
     let action = match action.as_str() {
         "undertake" => AvailabilityAction::Undertake {
             identity: need_identity("undertake")?,
+            bond: numbers.get("bond").copied().ok_or_else(|| {
+                CliError::Usage(String::from("availability undertake: --bond <units>"))
+            })?,
         },
         "answer" => AvailabilityAction::Answer {
             identity: need_identity("answer")?,
@@ -1710,6 +2107,76 @@ fn parse_try(cursor: &mut Cursor) -> Result<Command, CliError> {
     })
 }
 
+/// `propose <objective> --artifact F [--artifact G ...] [--dry-run] ...`
+fn parse_propose(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut objective: Option<String> = None;
+    let mut submitter: Option<String> = None;
+    let mut artifacts: Vec<String> = Vec::new();
+    let mut identity: Option<String> = None;
+    let mut cites: Vec<String> = Vec::new();
+    let mut dry_run = false;
+    let mut settle = false;
+
+    while let Some(token) = cursor.take() {
+        if token == "--submitter" {
+            submitter = Some(cursor.value("--submitter")?);
+        } else if token == "--artifact" {
+            artifacts.push(cursor.value("--artifact")?);
+        } else if token == "--identity" {
+            identity = Some(cursor.value("--identity")?);
+        } else if token == "--dry-run" {
+            dry_run = true;
+        } else if token == "--settle" {
+            settle = true;
+        } else if token == "--cites" {
+            while let Some(next) = cursor.peek_owned() {
+                if is_flag(&next) {
+                    break;
+                }
+                cursor.take();
+                cites.push(next);
+            }
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!(
+                "propose: unknown option {token:?}"
+            )));
+        } else if objective.is_some() {
+            return Err(CliError::Usage(format!(
+                "propose: unexpected argument {token:?}"
+            )));
+        } else {
+            objective = Some(token);
+        }
+    }
+
+    if artifacts.is_empty() {
+        return Err(CliError::Usage(String::from(
+            "propose: at least one --artifact",
+        )));
+    }
+    Ok(Command::Propose {
+        objective: require(objective, "propose", "an objective id or a JSON file")?,
+        artifacts,
+        // `--dry-run` scores without submitting, so it needs no name to submit
+        // under. Requiring one anyway would make the cheapest, safest use of
+        // this command the one that needs the most setup.
+        submitter: match (submitter, &identity, dry_run) {
+            (Some(submitter), _, _) => submitter,
+            (None, Some(_), _) => String::new(),
+            (None, None, true) => String::new(),
+            (None, None, false) => {
+                return Err(CliError::Usage(
+                    "propose: --submitter or --identity is required unless --dry-run".into(),
+                ))
+            }
+        },
+        identity,
+        cites,
+        dry_run,
+        settle,
+    })
+}
+
 /// `scaffold <name> --kind <kind> [--out DIR] [--artifact-example FILE] ...`
 ///
 /// Reads a worked artifact if one is offered and refuses everything it cannot
@@ -1811,6 +2278,8 @@ fn parse_scaffold(cursor: &mut Cursor) -> Result<Command, CliError> {
 /// throwing that away at the first threshold comparison.
 fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut params = NodeParams::reference();
+    let mut market = cairn::incentive::MarketParams::reference();
+    let mut want_market = false;
     let mut robustness = false;
     let mut sweep_axes: Vec<sweep::Axis> = Vec::new();
     let mut out: Option<String> = None;
@@ -1819,6 +2288,38 @@ fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
     while let Some(token) = cursor.take() {
         match token.as_str() {
             "--robustness" => robustness = true,
+            // The agent market is a separate parameter set, and separate on
+            // purpose: these are facts about agents searching an objective, not
+            // about operators running machines. See `src/incentive/market.rs`.
+            "--market" => want_market = true,
+            "--agents" => {
+                want_market = true;
+                market.agents = parse_u32(&cursor.value("--agents")?, "--agents")?;
+            }
+            "--candidate-value" => {
+                want_market = true;
+                market.candidate_value =
+                    parse_u64(&cursor.value("--candidate-value")?, "--candidate-value")?;
+            }
+            "--commons-value" => {
+                want_market = true;
+                market.population_value =
+                    parse_u64(&cursor.value("--commons-value")?, "--commons-value")?;
+            }
+            "--buyer-share" => {
+                want_market = true;
+                market.buyer_share = parse_rate(&cursor.value("--buyer-share")?, "--buyer-share")?;
+            }
+            "--exclusion" => {
+                want_market = true;
+                market.reciprocity_exclusion =
+                    parse_rate(&cursor.value("--exclusion")?, "--exclusion")?;
+            }
+            "--advance-rate" => {
+                want_market = true;
+                market.advance_rate =
+                    parse_rate(&cursor.value("--advance-rate")?, "--advance-rate")?;
+            }
             "--sweep" => {
                 let spec = cursor.value("--sweep")?;
                 let axis = sweep::Axis::parse(&spec)
@@ -1920,8 +2421,15 @@ fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
             "incentives --out/--format describe a sweep's table: add --sweep NAME=LO..HI[:STEPS]",
         )));
     }
+    if want_market && (robustness || !sweep_axes.is_empty()) {
+        return Err(CliError::Usage(String::from(
+            "incentives --market: the sweep and robustness ladders walk the node \
+             parameters, which the market does not share",
+        )));
+    }
     Ok(Command::Incentives {
         params: Box::new(params),
+        market: want_market.then(|| Box::new(market)),
         robustness,
         sweep: sweep_axes,
         out,
@@ -2065,6 +2573,8 @@ fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut delta_num = defaults.delta_num();
     let mut delta_den = defaults.delta_den();
     let mut max_depth = defaults.max_depth();
+    let mut reserved_num = defaults.reserved_num();
+    let mut reserved_den = defaults.reserved_den();
 
     while let Some(token) = cursor.take() {
         if token == "--delta-num" {
@@ -2073,6 +2583,10 @@ fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
             delta_den = parse_u64(&cursor.value("--delta-den")?, "--delta-den")?;
         } else if token == "--max-depth" {
             max_depth = parse_u32(&cursor.value("--max-depth")?, "--max-depth")?;
+        } else if token == "--reserved-num" {
+            reserved_num = parse_u64(&cursor.value("--reserved-num")?, "--reserved-num")?;
+        } else if token == "--reserved-den" {
+            reserved_den = parse_u64(&cursor.value("--reserved-den")?, "--reserved-den")?;
         } else {
             return Err(CliError::Usage(format!(
                 "attribute: unknown option {token:?}"
@@ -2082,7 +2596,9 @@ fn parse_attribute(cursor: &mut Cursor) -> Result<Command, CliError> {
 
     // Validated here rather than at use, so an impossible delta is a command
     // line error and not a surprise partway through a payout table.
-    let params = FlowParams::new(delta_num, delta_den, max_depth).map_err(CliError::Flow)?;
+    let params = FlowParams::new(delta_num, delta_den, max_depth)
+        .and_then(|params| params.with_reserved(reserved_num, reserved_den))
+        .map_err(CliError::Flow)?;
     Ok(Command::Attribute { params })
 }
 
@@ -2518,6 +3034,56 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      grind against it, later and you are picking who gets paid first",
     );
+    say(
+        out,
+        "  canary mint --objective ID --from FILE [--count N] [--valid-share N/D]",
+    );
+    say(
+        out,
+        "      mutate a real artifact until the objective's own verifier lands on",
+    );
+    say(
+        out,
+        "      the wanted side. Costs verifier runs once so that checking is free",
+    );
+    say(out, "  canary check --docket FILE");
+    say(
+        out,
+        "      compare a docket against every verdict the log recorded. Runs no",
+    );
+    say(
+        out,
+        "      verifier at all; exits non-zero if a node said what it cannot mean",
+    );
+    say(
+        out,
+        "  attest stand --claim ID --status accept|reject --identity FILE",
+    );
+    say(
+        out,
+        "      stand behind a verdict under bond. Nothing is checked here: the",
+    );
+    say(
+        out,
+        "      expensive question is asked once, by whoever brings evidence",
+    );
+    say(
+        out,
+        "  attest slash (--attestation ID | --docket FILE) --catcher NAME",
+    );
+    say(
+        out,
+        "      take the bond of somebody who stood behind a verdict the pinned",
+    );
+    say(
+        out,
+        "      verifier contradicts. A verifier that cannot run takes nothing",
+    );
+    say(out, "  attest list");
+    say(
+        out,
+        "      who has stood behind what, and whose bond is still live",
+    );
     say(out, "  checkpoint --root-key FILE [--out FILE]");
     say(
         out,
@@ -2553,9 +3119,33 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "  propose <objective> --artifact F [--artifact G ...] [--dry-run]",
+    );
+    say(
+        out,
+        "      score candidates locally, submit only the best that passes",
+    );
+    say(
+        out,
+        "  issue --holder <name> --units N     declare supply (genesis only)",
+    );
+    say(
+        out,
+        "  balances                            who holds what, what is escrowed",
+    );
+    say(
+        out,
         "  attribute [--delta-num N] [--delta-den N] [--max-depth N]",
     );
-    say(out, "      compute citation-flow payouts");
+    say(out, "            [--reserved-num N] [--reserved-den N]");
+    say(
+        out,
+        "      compute citation-flow payouts; --reserved-* holds that",
+    );
+    say(
+        out,
+        "      share of delta for the citation the rules forced",
+    );
     say(out, "  knowledge [<claim-id>] [--demanding] [--<weight> N]");
     say(
         out,
@@ -2643,6 +3233,22 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      e.g. --sweep canary-rate=1/20..1/5:5 --sweep stake=1000..10000:4",
+    );
+    say(
+        out,
+        "  incentives --market [--agents N] [--candidate-value N] [--exclusion N/D]",
+    );
+    say(
+        out,
+        "      the agent-to-agent market instead: does a price for sub-frontier",
+    );
+    say(
+        out,
+        "      candidates destroy the gossip population that feeds the search?",
+    );
+    say(
+        out,
+        "      exits non-zero when universal gossip is not a strict equilibrium",
     );
     say(
         out,
@@ -2805,6 +3411,176 @@ fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, C
     Ok(0)
 }
 
+/// What this reward costs the network to verify, said at post time.
+///
+/// A settlement pays for its own verification out of a fraction of itself. One
+/// too small to cover that fraction is paid for by everything else that
+/// settles, which is legal, unenforceable, and exactly the thing a funder
+/// deciding how finely to decompose a bounty needs to know *before* it funds
+/// rather than after.
+///
+/// Two numbers because the harness models full redundancy as the conservative
+/// case and real networks sample: the gap between them is the whole argument
+/// for sampled verification, so printing only one would be picking a side of an
+/// open question. Silent when the reward clears even the conservative floor,
+/// because a warning that fires on every healthy bounty is a warning nobody
+/// reads.
+fn decomposition_note(reward: u64) -> Vec<String> {
+    let params = NodeParams::default();
+    let (Ok(Some(full)), Ok(Some(sampled))) = (
+        cairn::incentive::design::decomposition_floor(&params, params.nodes),
+        cairn::incentive::design::decomposition_floor(&params, 3),
+    ) else {
+        return Vec::new();
+    };
+    let reward = Rat::units(reward);
+    if reward >= full {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "  note: below the decomposition floor -- this settlement does not pay \
+         for the verification it asks for"
+    )];
+    lines.push(format!(
+        "    {} at full redundancy ({} nodes), {} at 3-fold sampling",
+        full.floor(),
+        params.nodes,
+        sampled.floor()
+    ));
+    if reward >= sampled {
+        lines.push(String::from(
+            "    it clears the sampled floor, so this is a subsidy only while \
+             every node checks every artifact",
+        ));
+    } else {
+        lines.push(String::from(
+            "    it clears neither; sub-objectives want to be few and large",
+        ));
+    }
+    lines
+}
+
+fn cmd_issue(
+    out: &mut dyn Write,
+    options: &Options,
+    holder: &str,
+    units: u64,
+) -> Result<i32, CliError> {
+    let mut node = open_node_for_writing(options)?;
+    let record = cairn::records::Issuance::new(holder, units, timestamp());
+    let id = node
+        .post_issuance(&record, &timestamp())
+        .map_err(|error| CliError::Refused(error.to_string()))?;
+    say(out, format!("issued {units} to {holder}"));
+    say(out, format!("  record {}", short(&id)));
+    say(
+        out,
+        String::from(
+            "  the supply is the log's opening entries; once anything else is \
+             written, `issue` is refused",
+        ),
+    );
+    Ok(0)
+}
+
+/// Who holds what, and where the rest of the supply is sitting.
+///
+/// Three columns rather than one, because "balance" is three different numbers
+/// and conflating them is how a funder concludes it can afford something twice:
+/// what the log issued or paid you, what you have committed and cannot spend
+/// again, and the difference.
+fn cmd_balances(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
+    let node = open_node(options)?;
+    let issued = node.issued();
+    let escrowed = node.escrowed();
+    let balances = node.balances();
+    let tiered = node.tiered();
+
+    if !node.declares_supply() {
+        say(
+            out,
+            String::from(
+                "this log declares no supply, so nothing here is scarce: rewards are \
+                 backed by the operator's word rather than by an issuance. `issue` \
+                 before anything else to change that.",
+            ),
+        );
+    }
+    let total: u128 = issued.values().sum();
+    say(out, format!("issued {total}"));
+
+    // What a decided dispute or a slashed attestation took. Not visible in
+    // `spendable`, and that is not a display quirk: a live bond and a forfeited
+    // one are both subtracted from it, so an identity that just lost fifty
+    // thousand units prints exactly the number it printed before. The arena hit
+    // the same thing and scored a griefer that forfeited three bonds as having
+    // lost nothing.
+    let mut lost = node.challenge_debits();
+    for (name, units) in node.attestation_debits() {
+        let slot = lost.entry(name).or_insert(0);
+        *slot = slot.saturating_add(units);
+    }
+
+    let mut names: std::collections::BTreeSet<String> = balances.keys().cloned().collect();
+    names.extend(issued.keys().cloned());
+    names.extend(escrowed.keys().cloned());
+    for name in &names {
+        let spendable = balances.get(name).copied().unwrap_or(0);
+        let held = escrowed.get(name).copied().unwrap_or(0);
+        let forfeited = lost.get(name).copied().unwrap_or(0);
+        if spendable == 0 && held == 0 && forfeited == 0 {
+            continue;
+        }
+        let mut line = format!(
+            "  {:<20} spendable {spendable:>12}   escrowed {held:>12}",
+            short(name)
+        );
+        if forfeited > 0 {
+            line.push_str(&format!("   forfeited {forfeited:>12}"));
+        }
+        say(out, line);
+        // Then the provenance, because the total is the number that hides the
+        // interesting fact: a thousand units earned on millisecond certificate
+        // checks and a thousand earned on Lean proofs print identically above
+        // and are not interchangeable below.
+        //
+        // Shown whenever anything is *earned*, not only when there are two or
+        // more tiers. An identity holding nothing but certificate units has one
+        // tier and is exactly the case worth printing -- "spendable 100000" is
+        // true and says nothing about what that hundred thousand can buy. Only
+        // a purely universal holder has nothing to add.
+        if let Some(ledger) = tiered.get(name) {
+            let tiers = ledger.tiers();
+            let earned = tiers
+                .iter()
+                .any(|tier| *tier != cairn::tier::Tier::Universal);
+            if earned {
+                for tier in tiers {
+                    let has = ledger.held(tier);
+                    let owes = ledger.committed(tier);
+                    if has == 0 && owes == 0 {
+                        continue;
+                    }
+                    say(
+                        out,
+                        format!(
+                            "      {:<16} held {has:>12}   promised {owes:>12}",
+                            tier.to_string()
+                        ),
+                    );
+                }
+            }
+            if !ledger.solvent() {
+                say(
+                    out,
+                    String::from("      ! promises exceed holdings once tiers are kept apart"),
+                );
+            }
+        }
+    }
+    Ok(0)
+}
+
 /// Post the objective in `path` and return its id.
 ///
 /// Split out of [`cmd_post`] so [`cmd_try`] posts by exactly the same route
@@ -2838,6 +3614,9 @@ fn post_objective_file(
             objective.verifier_kind().unwrap_or("?")
         ),
     );
+    for line in decomposition_note(objective.reward) {
+        say(out, line);
+    }
 
     // A pin this node cannot resolve is not an error: content addressing is
     // what lets a node post an objective whose checker a peer will serve, and
@@ -2884,7 +3663,10 @@ fn load_identity(path: Option<&str>) -> Result<Option<Identity>, CliError> {
     let Some(path) = path else {
         return Ok(None);
     };
-    let value = read_json(path)?;
+    let text = cairn::secret_file::read_to_string(std::path::Path::new(path))
+        .map_err(|error| CliError::Usage(format!("{path}: {error}")))?;
+    let value =
+        Value::from_json(&text).map_err(|error| CliError::Usage(format!("{path}: {error}")))?;
     let field = |name: &'static str| -> Result<String, CliError> {
         value
             .get(name)
@@ -2956,8 +3738,13 @@ fn cmd_decode(out: &mut dyn Write, kind: &str, record_path: &str) -> Result<i32,
     let value = read_json(record_path)?;
     let decoded = match kind {
         "objective" => Objective::from_value(&value)
-            .map(|record| record.id())
-            .map_err(|error| error.to_string()),
+            .map_err(|error| error.to_string())
+            .and_then(|record| {
+                if let Some(block) = &record.ratchet {
+                    Ratchet::from_value(block).map_err(|error| error.to_string())?;
+                }
+                Ok(record.id())
+            }),
         "commitment" => Commitment::from_value(&value)
             .map_err(|error| error.to_string())
             .and_then(|record| {
@@ -3109,21 +3896,7 @@ fn cmd_identity(out: &mut dyn Write, path: &str) -> Result<i32, CliError> {
 /// Write a file only the owner can read, via a temporary so a crash cannot
 /// leave a half-written key behind.
 fn write_private_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    let tmp = path.with_file_name(name);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&tmp)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, path)
+    cairn::secret_file::write_new(path, text.as_bytes())
 }
 
 fn cmd_commit(
@@ -3334,15 +4107,61 @@ fn cmd_beacon(
     source: &str,
     block: u64,
     value: &str,
+    delay: Option<u64>,
 ) -> Result<i32, CliError> {
     let mut node = open_node_for_writing(options)?;
     let before = node.anchor_of_epoch(orders);
-    refused(node.record_beacon(orders, source, block, value, &timestamp()))?;
+
+    // With `--delay`, the value is not the caller's to give. It is computed
+    // over the log's own root, and computing it is the cost that makes trying a
+    // second ordering expensive -- so this command is *supposed* to take a
+    // while, and says so rather than looking hung.
+    let (value, proof) = match delay {
+        None => (value.to_string(), None),
+        Some(difficulty) => {
+            say(
+                out,
+                format!(
+                    "computing a delay of {difficulty} sequential squarings; this is the \
+                     cost a sequencer would pay per ordering it tried"
+                ),
+            );
+            let seed = node.vdf_seed(orders, node.ledger().len());
+            let computed = cairn::vdf::prove(&seed, difficulty);
+            (
+                computed.output_hex(),
+                Some((difficulty, computed.witness_hex())),
+            )
+        }
+    };
+    refused(
+        node.record_beacon_with(
+            orders,
+            source,
+            block,
+            &value,
+            proof
+                .as_ref()
+                .map(|(difficulty, witness)| (*difficulty, witness.as_str())),
+            &timestamp(),
+        ),
+    )?;
     say(out, format!("beacon for epoch {orders}"));
-    say(out, format!("  source   {source} block {block}"));
+    match &proof {
+        None => say(out, format!("  source   {source} block {block}")),
+        Some((difficulty, _)) => {
+            say(out, format!("  source   {source} difficulty {difficulty}"));
+            say(
+                out,
+                String::from(
+                    "  checked against the log alone -- no chain access needed to audit it",
+                ),
+            );
+        }
+    }
     say(
         out,
-        format!("  anchor   {} -> {}", short(&before), short(value)),
+        format!("  anchor   {} -> {}", short(&before), short(&value)),
     );
     if source == drand::SOURCE {
         // Said out loud because the difference between this and every other
@@ -3593,9 +4412,21 @@ fn cmd_audit(out: &mut dyn Write, options: &Options, rerun: bool) -> Result<i32,
     }
 
     say(out, "");
+    // The clean line must say what was actually checked. Under `--no-rerun` no
+    // verifier ran, so a recorded verdict was taken at its word -- and a node
+    // that wrote `accept` without looking passes this audit with the word
+    // "verified" printed over it. Saying "every settled claim re-verified"
+    // there was a false statement by the tool, which is worse than a missing
+    // check: it tells an operator the log is sound when nothing established it.
     say(
         out,
-        "log verified: chain intact, every settled claim re-verified",
+        if rerun {
+            "log verified: chain intact, every settled claim re-verified"
+        } else {
+            "chain intact and every rule re-derived, but no verifier was run: \
+             recorded verdicts were taken at their word (drop --no-rerun, or \
+             see `canary check`)"
+        },
     );
     Ok(0)
 }
@@ -3700,6 +4531,636 @@ fn cmd_verify(
     Ok(0)
 }
 
+/// `canary mint` — spend verifier runs now so that checking is free later.
+///
+/// The seed comes from `--from` and should be an artifact the network really
+/// accepted, because the generator's whole indistinguishability argument is
+/// that a canary is a real submission with one edit in it. Seeding from
+/// something you wrote for the purpose gets you a canary that looks like
+/// something somebody wrote for the purpose.
+fn cmd_canary_mint(
+    out: &mut dyn Write,
+    options: &Options,
+    minting: &Minting,
+) -> Result<i32, CliError> {
+    let Minting {
+        objective: objective_id,
+        from,
+        count,
+        valid_num,
+        valid_den,
+        budget,
+        out: dir,
+    } = minting;
+    let (count, valid_num, valid_den, budget) = (*count, *valid_num, *valid_den, *budget);
+    let node = open_node(options)?;
+    let objective = node
+        .objectives()
+        .get(objective_id)
+        .cloned()
+        .ok_or_else(|| CliError::Usage(format!("canary mint: no objective {objective_id}")))?;
+    let seed = read_json(from)?;
+
+    let generator =
+        cairn::canary::Generator::new(node.registry(), &objective.verifier).with_budget(budget);
+    let verdict = generator.verdict(&seed);
+    if !verdict.settles() {
+        say(
+            out,
+            format!(
+                "the seed artifact reaches no settling verdict here ({}). A canary \
+                 minted against a verifier that cannot run would accuse honest nodes, \
+                 so nothing was minted.",
+                verdict.detail
+            ),
+        );
+        return Ok(1);
+    }
+    say(
+        out,
+        format!(
+            "seed verifies: {} ({})",
+            verdict.status.as_str(),
+            verdict.detail
+        ),
+    );
+
+    let (minted, failures) = generator.mint_batch(&seed, count, valid_num, valid_den);
+    if minted.is_empty() {
+        for failure in &failures {
+            say(out, format!("  {failure}"));
+        }
+        say(
+            out,
+            "nothing minted; raise --budget or seed from a different artifact",
+        );
+        return Ok(1);
+    }
+
+    fs::create_dir_all(dir).map_err(|source| CliError::Io {
+        context: format!("creating {dir}"),
+        source,
+    })?;
+    let mut runs = 0usize;
+    for canary in &minted {
+        runs += canary.attempts;
+        let id = canary.artifact_id();
+        // Named by digest, not by index or expectation. A directory listing
+        // that sorts the known-bad ones together is a docket anybody can read
+        // off `ls`.
+        let short = id.split(':').next_back().unwrap_or(&id);
+        let path = format!("{dir}/a-{}.json", &short[..short.len().min(16)]);
+        fs::write(&path, format!("{}\n", canary.artifact.canonical_string())).map_err(
+            |source| CliError::Io {
+                context: format!("writing {path}"),
+                source,
+            },
+        )?;
+        say(
+            out,
+            format!(
+                "  {path}  expect {}  ({} verifier run{})",
+                canary.expectation,
+                canary.attempts,
+                if canary.attempts == 1 { "" } else { "s" }
+            ),
+        );
+    }
+    for failure in &failures {
+        say(out, format!("  not minted: {failure}"));
+    }
+
+    let docket = cairn::canary::Docket::from_canaries(&minted);
+    let path = format!("{dir}/docket.json");
+    fs::write(&path, format!("{}\n", docket.to_value().canonical_string())).map_err(|source| {
+        CliError::Io {
+            context: format!("writing {path}"),
+            source,
+        }
+    })?;
+    let (good, bad) = docket.mix();
+    say(
+        out,
+        format!(
+            "{} canaries in {runs} verifier runs: {good} known-good, {bad} known-bad",
+            minted.len()
+        ),
+    );
+    if good == 0 {
+        say(
+            out,
+            "no known-good canary: a node that rejects everything without looking \
+             passes this docket unharmed",
+        );
+    }
+    if bad == 0 {
+        say(
+            out,
+            "no known-bad canary: a node that accepts everything without looking \
+             passes this docket unharmed",
+        );
+    }
+    say(out, format!("docket written to {path} -- keep it private"));
+    say(
+        out,
+        "submit these the ordinary way, from identities that also submit real work. \
+         A canary is only a canary while nothing in the log separates it from one.",
+    );
+    Ok(0)
+}
+
+/// `canary check` — compare a docket against the log. No verifier runs.
+fn cmd_canary_check(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
+    let docket = cairn::canary::Docket::from_value(&read_json(path)?)
+        .ok_or_else(|| CliError::Usage(format!("canary check: {path} is not a docket")))?;
+    let node = open_node(options)?;
+    let recorded = node.recorded_verdicts();
+    let seen = recorded
+        .iter()
+        .filter(|verdict| docket.expectation_of(&verdict.artifact_id).is_some())
+        .count();
+    let found = docket.discrepancies(&recorded);
+    // And the other half: who put a *bond* behind a verdict the docket knows is
+    // wrong. A verdict record names a claim and, at Stage 0, no party -- so a
+    // check that read only those could report a liar it could not name.
+    let faults = docket.contradicted(&recorded, &node.attestations());
+    say(
+        out,
+        format!(
+            "{} verdicts in the log, {seen} of them on canaries from a docket of {}",
+            recorded.len(),
+            docket.len()
+        ),
+    );
+    if found.is_empty() && faults.is_empty() {
+        say(out, "nothing in this log contradicts what the docket knows");
+        return Ok(0);
+    }
+    for discrepancy in &found {
+        say(out, format!("  {discrepancy}"));
+    }
+    for fault in &faults {
+        say(out, format!("  {fault}"));
+    }
+    say(
+        out,
+        format!(
+            "{} verdict(s) and {} bonded attestation(s) the verifier disagrees with",
+            found.len(),
+            faults.len()
+        ),
+    );
+    Ok(1)
+}
+
+/// `attest` — bonded verification, and the seam where a canary becomes money.
+///
+/// Read `docs/bonded-verification.md` before changing any of this. The one rule
+/// that is not obvious from the code: `slash` runs the pinned verifier, and a
+/// verifier that cannot run takes **nothing**. An absent toolchain is a fact
+/// about this machine, and taking somebody's bond because a machine broke would
+/// make breaking machines profitable.
+fn cmd_attest(
+    out: &mut dyn Write,
+    options: &Options,
+    action: &AttestAction,
+) -> Result<i32, CliError> {
+    match action {
+        AttestAction::Stand {
+            claim,
+            status,
+            identity,
+        } => {
+            let who = load_identity(Some(identity))?.ok_or_else(|| {
+                CliError::Usage(String::from("attest stand: --identity is required"))
+            })?;
+            let mut node = open_node_for_writing(options)?;
+            let record =
+                cairn::records::Attestation::new(claim, who.submitter_id(), status, timestamp())
+                    .signed_with(&who);
+            let id = refused(node.post_attestation(&record, &timestamp()))?;
+            say(out, format!("attestation {id}"));
+            say(
+                out,
+                format!(
+                    "  {} stands behind {status} on claim {claim}, {} staked",
+                    cairn::canonical::short(&who.submitter_id()),
+                    cairn::node::VERIFICATION_BOND
+                ),
+            );
+            Ok(0)
+        }
+        AttestAction::Slash {
+            attestation,
+            docket,
+            catcher,
+        } => {
+            let mut node = open_node_for_writing(options)?;
+            // Which attestations to point at. One named outright, or every one
+            // standing behind a claim a docket already knows is misjudged --
+            // which is the whole economy of the thing: the naming is free and
+            // only the taking runs a verifier.
+            let targets: Vec<String> = match (attestation, docket) {
+                (Some(id), _) => vec![id.clone()],
+                (None, Some(path)) => {
+                    let docket =
+                        cairn::canary::Docket::from_value(&read_json(path)?).ok_or_else(|| {
+                            CliError::Usage(format!("attest slash: {path} is not a docket"))
+                        })?;
+                    // Compared against *attestations*, not against the node's
+                    // own verdict records. A verdict names a claim and no
+                    // party; an attestation names the key that signed it, and
+                    // only the second kind of finding has anything to take.
+                    let verdicts = node.recorded_verdicts();
+                    let faults = docket.contradicted(&verdicts, &node.attestations());
+                    if faults.is_empty() {
+                        say(out, "no attestation contradicts what the docket knows");
+                        return Ok(0);
+                    }
+                    for fault in &faults {
+                        say(out, format!("  {fault}"));
+                    }
+                    faults
+                        .into_iter()
+                        .map(|fault| fault.attestation_id)
+                        .collect()
+                }
+                (None, None) => unreachable!("the parser requires one of the two"),
+            };
+            if targets.is_empty() {
+                say(
+                    out,
+                    "the docket names claims nobody stood behind: there is no bond to take",
+                );
+                return Ok(0);
+            }
+
+            let mut taken = 0u128;
+            let mut stood = 0usize;
+            for id in &targets {
+                match node.slash_attestation(id, catcher, &timestamp()) {
+                    Ok(record) => {
+                        taken = taken.saturating_add(
+                            record
+                                .get("units")
+                                .and_then(Value::as_i128)
+                                .unwrap_or(0)
+                                .max(0) as u128,
+                        );
+                        say(out, format!("slashed {id}"));
+                        if let Some(detail) = record.get("detail").and_then(Value::as_str) {
+                            say(out, format!("  {detail}"));
+                        }
+                    }
+                    // Reported and stepped over rather than fatal: a docket
+                    // names claims, and an honest attestor standing behind a
+                    // claim somebody else misjudged must not stop the run.
+                    Err(why) => {
+                        stood += 1;
+                        say(out, format!("  {why}"));
+                    }
+                }
+            }
+            say(
+                out,
+                format!(
+                    "{} bond(s) taken, {taken} units to {}",
+                    targets.len() - stood,
+                    short(catcher)
+                ),
+            );
+            if stood > 0 {
+                // Reported separately, and not as a failure. An attestation the
+                // verifier agrees with is one this run declined to take, which
+                // is the mechanism working rather than the run falling short.
+                say(
+                    out,
+                    format!("{stood} attestation(s) stood up and were left alone"),
+                );
+            }
+            Ok(i32::from(taken == 0))
+        }
+        AttestAction::List => {
+            let node = open_node(options)?;
+            let attestations = node.attestations();
+            if attestations.is_empty() {
+                say(out, "nobody has stood behind a verdict in this log");
+                return Ok(0);
+            }
+            let slashed = node.slashed_attestations();
+            for (id, record) in &attestations {
+                let state = if slashed.contains(id) {
+                    "slashed"
+                } else {
+                    "live"
+                };
+                say(
+                    out,
+                    format!(
+                        "{} {} {} claim {} [{state}]",
+                        cairn::canonical::short(id),
+                        cairn::canonical::short(&record.attestor),
+                        record.status,
+                        cairn::canonical::short(&record.claim_id)
+                    ),
+                );
+            }
+            say(
+                out,
+                format!(
+                    "{} attestation(s), {} still bonded at {} each",
+                    attestations.len(),
+                    attestations.len() - slashed.len().min(attestations.len()),
+                    cairn::node::VERIFICATION_BOND
+                ),
+            );
+            Ok(0)
+        }
+    }
+}
+
+/// `dispute` — the five things a person does around an interactive fraud proof.
+///
+/// Read `docs/fraud-proofs.md` before changing any of this. The verbs are
+/// separate because a dispute is carried by the *log*, not by a process: the
+/// defender and the challenger may never run on the same machine, and neither
+/// of them holds the other's trace.
+fn cmd_dispute(
+    out: &mut dyn Write,
+    options: &Options,
+    action: &DisputeAction,
+) -> Result<i32, CliError> {
+    match action {
+        DisputeAction::Trace {
+            objective,
+            from,
+            steps,
+            out: path,
+        } => {
+            let node = open_node(options)?;
+            let objective = node.objectives().get(objective).cloned().ok_or_else(|| {
+                CliError::Usage(format!("dispute trace: no objective {objective}"))
+            })?;
+            let stepper =
+                cairn::challenge::Stepper::from_spec(node.registry(), &objective.verifier)
+                    .map_err(|why| CliError::Usage(format!("dispute trace: {why}")))?;
+            let start = read_json(from)?;
+            let trace = cairn::challenge::Trace::run(&stepper, start, *steps)
+                .map_err(|why| CliError::Usage(format!("dispute trace: {why}")))?;
+            let states: Vec<Value> = (0..trace.len())
+                .map(|i| trace.state_at(i).cloned().unwrap_or(Value::Null))
+                .collect();
+            let body = Value::Array(states);
+            fs::write(path, format!("{}\n", body.canonical_string())).map_err(|source| {
+                CliError::Io {
+                    context: format!("writing {path}"),
+                    source,
+                }
+            })?;
+            say(
+                out,
+                format!(
+                    "{} states, root {}\nwritten to {path}",
+                    trace.len(),
+                    trace.root()
+                ),
+            );
+            // The two fields an artifact has to carry for this trace to be
+            // disputable. Printed rather than written into a file, because the
+            // artifact is the submitter's to assemble.
+            say(
+                out,
+                format!(
+                    "  \"trace_root\": {:?}, \"trace_states\": {}",
+                    trace.root(),
+                    trace.len()
+                ),
+            );
+            Ok(0)
+        }
+        DisputeAction::Open {
+            claim,
+            trace,
+            bond,
+            identity,
+        } => {
+            let who = load_identity(Some(identity))?.ok_or_else(|| {
+                CliError::Usage(String::from("dispute open: --identity is required"))
+            })?;
+            let committed = trace_from_file(trace)?;
+            let mut node = open_node_for_writing(options)?;
+            let record = cairn::records::Challenge::new(
+                claim,
+                who.submitter_id(),
+                committed.root(),
+                committed.len() as u64,
+                *bond,
+                timestamp(),
+            )
+            .signed_with(&who);
+            let id = refused(node.post_challenge(&record, &timestamp()))?;
+            say(out, format!("challenge {id}"));
+            say(
+                out,
+                format!(
+                    "  {} states, root {}, {bond} staked",
+                    committed.len(),
+                    committed.root()
+                ),
+            );
+            say(
+                out,
+                "  both sides now open state 0 and the last state: `dispute play`",
+            );
+            Ok(0)
+        }
+        DisputeAction::Play {
+            id,
+            trace,
+            identity,
+        } => {
+            let who = load_identity(Some(identity))?.ok_or_else(|| {
+                CliError::Usage(String::from("dispute play: --identity is required"))
+            })?;
+            let committed = trace_from_file(trace)?;
+            let mut node = open_node_for_writing(options)?;
+            let mut played = 0usize;
+            // Loop, because the two endpoint moves and each subsequent round
+            // are separate records and a party owes whatever the log says it
+            // owes. Reading that out of the log each time is the whole design:
+            // nothing here remembers a dispute between calls.
+            loop {
+                let Some(state) = node.dispute(id) else {
+                    return Err(CliError::Usage(format!("dispute play: no challenge {id}")));
+                };
+                let side = match &state {
+                    cairn::node::DisputeState::Void { .. } => break,
+                    _ => match node.side_for(id, &who.submitter_id()) {
+                        Some(side) => side,
+                        None => {
+                            return Err(CliError::Usage(format!(
+                                "dispute play: {} is not a party to {id}",
+                                who.submitter_id()
+                            )))
+                        }
+                    },
+                };
+                let index = match &state {
+                    cairn::node::DisputeState::AwaitingEndpoints { missing, .. } => {
+                        match missing.iter().find(|(_, owed)| *owed == side) {
+                            Some((index, _)) => *index,
+                            None => break,
+                        }
+                    }
+                    cairn::node::DisputeState::Live { dispute, .. } => match dispute.next() {
+                        cairn::challenge::Next::Open { index, waiting_on }
+                            if waiting_on.contains(&side) =>
+                        {
+                            index
+                        }
+                        _ => break,
+                    },
+                    cairn::node::DisputeState::Void { .. } => break,
+                };
+                let mv = committed.open(id, index).ok_or_else(|| {
+                    CliError::Usage(format!("dispute play: no state {index} in this trace"))
+                })?;
+                let record = cairn::records::BisectionMove::new(
+                    id,
+                    who.submitter_id(),
+                    index as u64,
+                    mv.state.clone(),
+                    mv.path.siblings.clone(),
+                    timestamp(),
+                )
+                .signed_with(&who);
+                refused(node.post_bisection(&record, &timestamp()))?;
+                say(out, format!("  opened state {index}"));
+                played += 1;
+                if played > 128 {
+                    break;
+                }
+            }
+            if played == 0 {
+                say(out, "nothing owed: it is the other party's turn");
+            } else {
+                say(out, format!("{played} move(s) played"));
+            }
+            dispute_status(out, &node, id);
+            Ok(0)
+        }
+        DisputeAction::Settle { id } => {
+            let mut node = open_node_for_writing(options)?;
+            let record = refused(node.settle_challenge(id, &timestamp()))?;
+            say(
+                out,
+                format!(
+                    "{} wins: {}",
+                    record
+                        .get("winning_side")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?"),
+                    record.get("detail").and_then(Value::as_str).unwrap_or("")
+                ),
+            );
+            say(
+                out,
+                format!(
+                    "  {} units from {} to {}",
+                    record.get("units").and_then(Value::as_i128).unwrap_or(0),
+                    short(record.get("loser").and_then(Value::as_str).unwrap_or("?")),
+                    short(record.get("winner").and_then(Value::as_str).unwrap_or("?")),
+                ),
+            );
+            Ok(0)
+        }
+        DisputeAction::Status { id } => {
+            let node = open_node(options)?;
+            let ids: Vec<String> = match id {
+                Some(id) => vec![id.clone()],
+                None => node.challenges().keys().cloned().collect(),
+            };
+            if ids.is_empty() {
+                say(out, "no disputes in this log");
+                return Ok(0);
+            }
+            for id in ids {
+                say(out, format!("challenge {}", short(&id)));
+                dispute_status(out, &node, &id);
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// A trace read from a file of states, as `dispute trace` writes it.
+fn trace_from_file(path: &str) -> Result<cairn::challenge::Trace, CliError> {
+    let body = read_json(path)?;
+    let states = match body {
+        Value::Array(states) => states,
+        _ => {
+            return Err(CliError::Usage(format!(
+                "{path}: a trace is a JSON array of states"
+            )))
+        }
+    };
+    cairn::challenge::Trace::commit(states).map_err(|why| CliError::Usage(format!("{path}: {why}")))
+}
+
+/// Where a dispute has got to, in the words a party needs to act on.
+fn dispute_status(out: &mut dyn Write, node: &Node, id: &str) {
+    if let Some(record) = node.challenge_outcome(id) {
+        say(
+            out,
+            format!(
+                "  decided: {} wins, {} units -- {}",
+                record
+                    .get("winning_side")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?"),
+                record.get("units").and_then(Value::as_i128).unwrap_or(0),
+                record.get("detail").and_then(Value::as_str).unwrap_or("")
+            ),
+        );
+        return;
+    }
+    match node.dispute(id) {
+        None => say(out, "  no such challenge"),
+        Some(cairn::node::DisputeState::Void { why, .. }) => say(out, format!("  void: {why}")),
+        Some(cairn::node::DisputeState::AwaitingEndpoints { missing, .. }) => {
+            let owed: Vec<String> = missing
+                .iter()
+                .map(|(index, side)| format!("{side}@{index}"))
+                .collect();
+            say(out, format!("  awaiting endpoints: {}", owed.join(", ")));
+        }
+        Some(cairn::node::DisputeState::Live { dispute, .. }) => {
+            let (lo, hi) = dispute.interval();
+            match dispute.next() {
+                cairn::challenge::Next::Open { index, waiting_on } => {
+                    let owed: Vec<&str> = waiting_on.iter().map(|side| side.as_str()).collect();
+                    say(
+                        out,
+                        format!(
+                            "  disputed states {lo}..{hi}; state {index} owed by {}",
+                            owed.join(", ")
+                        ),
+                    );
+                }
+                cairn::challenge::Next::Adjudicate { agreed } => say(
+                    out,
+                    format!(
+                        "  narrowed: agreed on state {agreed}, disputing {}. \
+                         Run `dispute settle`",
+                        agreed + 1
+                    ),
+                ),
+                cairn::challenge::Next::Done(outcome) => say(out, format!("  {outcome}")),
+            }
+        }
+    }
+}
+
 /// The availability mechanism, from the operator's side.
 ///
 /// Nothing here talks to a network. A promise is a record, the challenge is a
@@ -3711,7 +5172,7 @@ fn cmd_availability(
     action: &AvailabilityAction,
 ) -> Result<i32, CliError> {
     match action {
-        AvailabilityAction::Undertake { identity } => {
+        AvailabilityAction::Undertake { identity, bond } => {
             let signer = load_identity(Some(identity))?.ok_or_else(|| {
                 CliError::Usage(String::from(
                     "availability undertake: --identity is required",
@@ -3722,8 +5183,14 @@ fn cmd_availability(
             let root = ledger_of(&node)
                 .root()
                 .ok_or_else(|| CliError::Usage(String::from("the log is empty")))?;
-            let record = Undertaking::new(signer.submitter_id(), &root, height as u64, timestamp())
-                .signed_with(&signer);
+            let record = Undertaking::new(
+                signer.submitter_id(),
+                &root,
+                height as u64,
+                *bond,
+                timestamp(),
+            )
+            .signed_with(&signer);
             let id = refused(node.post_undertaking(&record, &timestamp()))?;
             say(out, format!("undertaking {id}"));
             say(
@@ -4191,7 +5658,11 @@ fn cmd_attribute(
     let ledger = ledger_of(&node);
     let claims = claim_index(ledger)?;
     let settlements = settlements_of(ledger)?;
-    let payouts = payouts_over(&settlements, &claims, params).map_err(CliError::Flow)?;
+    // The enforced citations are re-derived from the log rather than passed in:
+    // a reserved share is only defensible if its recipient is the one the rules
+    // chose, and that is the frontier as it stood below each claim's own entry.
+    let payouts = payouts_with_enforced(&settlements, &claims, &node.enforced_citations(), params)
+        .map_err(CliError::Flow)?;
 
     for line in render_attribution(params, &payouts)? {
         say(out, line);
@@ -4400,6 +5871,152 @@ struct Round<'a> {
     nonce: Option<&'a str>,
     cites: &'a [String],
     settle: bool,
+}
+
+/// Score candidates against the pinned verifier locally, then submit the best
+/// one that already passes.
+///
+/// # Why local scoring is the whole point
+///
+/// Verification here is free and it is *ground truth*: the objective pins the
+/// checker, so the verdict a proposer computes at home is the verdict the
+/// network will compute. That makes the filter exact rather than heuristic —
+/// there is no "probably passes", and a proposer that submits only what already
+/// accepted spends nobody's time on a rejection.
+///
+/// It also removes the reason to spray. Under a mechanism where submitting is
+/// cheap and checking is expensive, volume is a strategy; here the proposer can
+/// tell in advance, so submitting a rejection is pure waste for the submitter
+/// too. `--dry-run` is the same loop with the submission removed, which is what
+/// an agent iterating on candidates actually wants most of the time.
+///
+/// # Why the best rather than all of them
+///
+/// On a ratchet only an improvement settles, and a batch of five candidates
+/// where four are worse than the fifth is four claims that verify, mint
+/// nothing, and still cost the network five verifications. So the loop ranks
+/// and submits one. On a non-ratcheted objective the first acceptance wins for
+/// the same reason: the pool settles once.
+struct Proposal<'a> {
+    objective: &'a str,
+    artifacts: &'a [String],
+    who: Submitter<'a>,
+    cites: &'a [String],
+    dry_run: bool,
+    settle: bool,
+}
+
+fn cmd_propose(
+    out: &mut dyn Write,
+    options: &Options,
+    proposal: Proposal<'_>,
+) -> Result<i32, CliError> {
+    let Proposal {
+        objective,
+        artifacts,
+        who,
+        cites,
+        dry_run,
+        settle,
+    } = proposal;
+    let objective_id = if objective.starts_with("sha256:") {
+        objective.to_string()
+    } else {
+        let data = read_json(objective)?;
+        validate_objective(&data).map_err(CliError::Schema)?;
+        Objective::from_value(&data).map_err(CliError::Record)?.id()
+    };
+
+    let node = open_node(options)?;
+    let record = node
+        .objectives()
+        .get(&objective_id)
+        .cloned()
+        .ok_or_else(|| CliError::Refused(format!("objective {objective_id} is not in this log")))?;
+    let held = node.frontier_of(&objective_id);
+    let ratchet = record
+        .ratchet
+        .as_ref()
+        .and_then(|block| cairn::frontier::Ratchet::from_value(block).ok());
+
+    // One pass, scoring only. Nothing is written, so a candidate that fails
+    // costs the proposer a local run and the network nothing at all.
+    let mut passing: Vec<(usize, &String, Option<i64>)> = Vec::new();
+    for (index, path) in artifacts.iter().enumerate() {
+        let artifact = read_json(path)?;
+        let verdict = node.registry().run(&record.verifier, &artifact);
+        let score = verdict.score();
+        let mut line = format!("  {path}: {}", verdict.status.as_str());
+        if let Some(score) = score {
+            line.push_str(&format!("  score {score}"));
+        }
+        if !verdict.accepted() {
+            // The detail comes from objective-authored code. Rendered, because
+            // it is the only diagnostic a proposer has, but never acted on.
+            line.push_str(&format!("  ({})", verdict.detail));
+            say(out, line);
+            continue;
+        }
+        // Accepted is necessary and not sufficient on a ratchet: a claim that
+        // does not beat the frontier verifies and mints nothing.
+        if let (Some(score), Some(frontier)) = (score, held.as_ref()) {
+            let improves = match &ratchet {
+                Some(ratchet) => ratchet.improves(Some(frontier.score), score),
+                None => score > frontier.score,
+            };
+            if !improves {
+                line.push_str(&format!(
+                    "  (does not beat the frontier at {})",
+                    frontier.score
+                ));
+                say(out, line);
+                continue;
+            }
+        }
+        say(out, line);
+        passing.push((index, path, score));
+    }
+
+    if passing.is_empty() {
+        say(
+            out,
+            String::from("nothing passed locally, so nothing was submitted"),
+        );
+        // Not an error: "I checked and none of these are ready" is the loop
+        // working, and an agent scripting this should not have to distinguish
+        // it from a crash.
+        return Ok(2);
+    }
+
+    // Highest score wins; ties and unscored verdicts fall back to the order the
+    // caller gave, which is the only tiebreak that does not invent a preference.
+    passing.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    let (_, best, score) = passing[0];
+    say(
+        out,
+        match score {
+            Some(score) => format!("submitting {best} (score {score})"),
+            None => format!("submitting {best}"),
+        },
+    );
+    if dry_run {
+        say(out, String::from("  --dry-run: nothing was written"));
+        return Ok(0);
+    }
+    drop(node);
+
+    cmd_try(
+        out,
+        options,
+        Round {
+            objective: &objective_id,
+            who,
+            artifact_path: best,
+            nonce: None,
+            cites,
+            settle,
+        },
+    )
 }
 
 fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i32, CliError> {
@@ -4724,6 +6341,27 @@ fn cmd_scaffold(
 /// The table goes to `--out` or to standard output, and progress goes to
 /// standard error, so `incentives --sweep .. > grid.csv` writes exactly the
 /// table -- the same split `--robustness` already makes.
+/// `incentives --market` -- the gate on `docs/agent-market.md`'s Stage 2.
+///
+/// Separate from [`cmd_incentives`] rather than a section of it, because the two
+/// answer different questions from different parameters. Merging them would mean
+/// a node report carrying seven numbers about agent search, and a market report
+/// validating against a committee threshold it does not have.
+fn cmd_incentives_market(
+    out: &mut dyn Write,
+    params: &cairn::incentive::MarketParams,
+) -> Result<i32, CliError> {
+    let report = cairn::incentive::MarketReport::of(params)
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    for line in report.to_string().lines() {
+        say(out, line);
+    }
+    // Exit non-zero when the commons does not survive contact with a market.
+    // The scope note in `docs/agent-market.md` gates Stage 2 on this answer, so
+    // it is worth being scriptable rather than only readable.
+    Ok(i32::from(!report.commons_survives()))
+}
+
 fn cmd_incentives_sweep(
     out: &mut dyn Write,
     params: &NodeParams,
@@ -5636,11 +7274,11 @@ fn cmd_blob_serve(
 ) -> Result<i32, CliError> {
     let identity = std::sync::Arc::new(load_transport_identity(identity_path)?);
     let published = node.publish_local_code();
-    let listener = cairn::swarm::tcp::serve(
+    let listener = cairn::p2p::swarm::tcp::serve(
         listen,
         std::sync::Arc::clone(&identity),
         store.clone(),
-        cairn::swarm::Limits::default(),
+        cairn::p2p::swarm::Limits::default(),
     )
     .map_err(|error| CliError::Usage(format!("blob serve: cannot listen on {listen}: {error}")))?;
 
@@ -5720,12 +7358,12 @@ fn cmd_blob_fetch(
     let mut got = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for address in &missing {
-        match cairn::swarm::tcp::fetch(
+        match cairn::p2p::swarm::tcp::fetch(
             address,
             &endpoints,
             std::sync::Arc::clone(&identity),
             store,
-            cairn::swarm::Limits::default(),
+            cairn::p2p::swarm::Limits::default(),
             deadline,
         ) {
             Ok(bytes) => {
@@ -5763,7 +7401,7 @@ fn cmd_blob_fetch(
 ///
 /// This is the caller that keeps [`cairn::shards`] honest. The module could
 /// be complete, tested and unreachable — which is precisely the state
-/// `src/swarm/` was in for a long time, and `docs/storage.md` records the two
+/// `src/p2p/swarm/` was in for a long time, and `docs/storage.md` records the two
 /// bugs that were sitting in the seam nobody crossed. Every action here goes
 /// through the same public API a network path would.
 ///
@@ -6178,8 +7816,8 @@ fn load_transport_identity(path: &str) -> Result<cairn::p2p::handshake::PeerIden
             .map_err(|error| CliError::Usage(format!("{path}: {error}")))?;
         return Ok(identity);
     }
-    let text =
-        std::fs::read_to_string(file).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
+    let text = cairn::secret_file::read_to_string(file)
+        .map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
     let value = Value::from_json(&text).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
     let field = |name: &str| -> Result<Vec<u8>, CliError> {
         let hex = value
@@ -6501,6 +8139,8 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             Ok(0)
         }
         Command::Post { objective } => cmd_post(out, options, objective),
+        Command::Issue { holder, units } => cmd_issue(out, options, holder, *units),
+        Command::Balances => cmd_balances(out, options),
         Command::Commit {
             objective_id,
             submitter,
@@ -6547,7 +8187,8 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             source,
             block,
             value,
-        } => cmd_beacon(out, options, *orders, source, *block, value),
+            delay,
+        } => cmd_beacon(out, options, *orders, source, *block, value, *delay),
         Command::Checkpoint {
             root_key,
             out: path,
@@ -6585,6 +8226,12 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             root_key.as_deref(),
         ),
         Command::Availability { action } => cmd_availability(out, options, action),
+        Command::Canary { action } => match action {
+            CanaryAction::Mint(minting) => cmd_canary_mint(out, options, minting),
+            CanaryAction::Check { docket } => cmd_canary_check(out, options, docket),
+        },
+        Command::Dispute { action } => cmd_dispute(out, options, action),
+        Command::Attest { action } => cmd_attest(out, options, action),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Knowledge { claim_id, policy } => {
             cmd_knowledge(out, options, claim_id.as_deref(), policy)
@@ -6614,15 +8261,41 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
                 settle: *settle,
             },
         ),
+        Command::Propose {
+            objective,
+            artifacts,
+            submitter,
+            identity,
+            cites,
+            dry_run,
+            settle,
+        } => cmd_propose(
+            out,
+            options,
+            Proposal {
+                objective,
+                artifacts,
+                who: Submitter {
+                    declared: submitter,
+                    identity: identity.as_deref(),
+                },
+                cites,
+                dry_run: *dry_run,
+                settle: *settle,
+            },
+        ),
         Command::Scaffold { request, force } => cmd_scaffold(out, options, request, *force),
         Command::Incentives {
             params,
+            market,
             robustness,
             sweep,
             out: destination,
             format,
         } => {
-            if sweep.is_empty() {
+            if let Some(market) = market {
+                cmd_incentives_market(out, market)
+            } else if sweep.is_empty() {
                 cmd_incentives(out, params, *robustness)
             } else {
                 cmd_incentives_sweep(
@@ -8025,6 +9698,7 @@ mod tests {
             parsed.command,
             Command::Incentives {
                 params: Box::new(NodeParams::reference()),
+                market: None,
                 robustness: false,
                 sweep: Vec::new(),
                 out: None,
@@ -8038,12 +9712,34 @@ mod tests {
                 .command,
             Command::Incentives {
                 params: Box::new(NodeParams::reference()),
+                market: None,
                 robustness: true,
                 sweep: Vec::new(),
                 out: None,
                 format: TableFormat::Csv,
             }
         );
+        // A market knob selects the market report without also needing
+        // `--market`: naming a parameter is saying which question you asked.
+        assert_eq!(
+            parse(argv(&["incentives", "--agents", "12"]))
+                .expect("parses")
+                .command,
+            Command::Incentives {
+                params: Box::new(NodeParams::reference()),
+                market: Some(Box::new(cairn::incentive::MarketParams {
+                    agents: 12,
+                    ..cairn::incentive::MarketParams::reference()
+                })),
+                robustness: false,
+                sweep: Vec::new(),
+                out: None,
+                format: TableFormat::Csv,
+            }
+        );
+        // And the two ladders are refused rather than silently ignored: they
+        // walk the node parameters, which the market does not share.
+        assert!(parse(argv(&["incentives", "--market", "--robustness"])).is_err());
     }
 
     /// The flags are `commit`'s and `reveal`'s, deliberately: a flag that meant
@@ -8163,6 +9859,51 @@ mod tests {
             }
             other => panic!("expected a try command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn propose_takes_many_artifacts_and_needs_a_name_only_to_submit() {
+        // The cheapest use is the one with the least setup: scoring candidates
+        // writes nothing, so it needs no identity to write under.
+        assert!(parse(argv(&["propose", "sha256:aa", "--artifact", "a.json"])).is_err());
+        assert!(parse(argv(&[
+            "propose",
+            "sha256:aa",
+            "--artifact",
+            "a.json",
+            "--dry-run"
+        ]))
+        .is_ok());
+
+        match parse(argv(&[
+            "propose",
+            "sha256:aa",
+            "--artifact",
+            "a.json",
+            "--artifact",
+            "b.json",
+            "--submitter",
+            "agent",
+        ]))
+        .expect("parses")
+        .command
+        {
+            Command::Propose {
+                artifacts,
+                submitter,
+                dry_run,
+                ..
+            } => {
+                assert_eq!(artifacts, vec!["a.json", "b.json"]);
+                assert_eq!(submitter, "agent");
+                assert!(!dry_run);
+            }
+            other => panic!("expected propose, got {other:?}"),
+        }
+
+        // No candidates is a usage error rather than a run that scores nothing
+        // and reports success.
+        assert!(parse(argv(&["propose", "sha256:aa", "--dry-run"])).is_err());
     }
 
     #[test]

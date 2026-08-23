@@ -61,6 +61,8 @@ pub struct Report {
     pub skipped_keys: Vec<PathBuf>,
     /// Plaintext ledger backups left by `store encrypt` and not copied.
     pub skipped_plaintext: Vec<PathBuf>,
+    /// Pending commit-reveal sidecars deliberately not copied in plaintext.
+    pub skipped_pending: Vec<PathBuf>,
     /// Bytes written.
     pub bytes: u64,
     /// Files whose modification time could not be carried to the destination.
@@ -115,6 +117,13 @@ impl Report {
                 lines.push(format!("  skipped {}", path.display()));
             }
         }
+        if !self.skipped_pending.is_empty() {
+            lines.push(format!(
+                "{} pending commitment sidecar(s) NOT copied -- they can contain \
+                 unrevealed nonces or legacy plaintext artifacts",
+                self.skipped_pending.len()
+            ));
+        }
         if self.undated > 0 {
             lines.push(format!(
                 "note: {} file(s) could not keep their modification time at the \
@@ -149,7 +158,11 @@ pub fn mirror(store: &Store, destination: &Path, options: Options) -> Result<Rep
     if !source.exists() {
         return Err(StoreError::NotADirectory(source.to_path_buf()));
     }
-    if destination.exists() && !destination.is_dir() {
+    if destination.exists()
+        && fs::symlink_metadata(destination)
+            .map(|metadata| !metadata.file_type().is_dir())
+            .unwrap_or(true)
+    {
         return Err(StoreError::NotADirectory(destination.to_path_buf()));
     }
     // Refuse to mirror a store into itself or into its own subtree, which would
@@ -179,6 +192,10 @@ pub fn mirror(store: &Store, destination: &Path, options: Options) -> Result<Rep
                 report.skipped_plaintext.push(file.path.clone());
                 continue;
             }
+            Some(Withhold::PendingSecret) => {
+                report.skipped_pending.push(file.path.clone());
+                continue;
+            }
             None => {}
         }
         let target = destination.join(relative);
@@ -194,14 +211,18 @@ pub fn mirror(store: &Store, destination: &Path, options: Options) -> Result<Rep
         }
         if !options.dry_run {
             if let Some(parent) = target.parent() {
+                reject_symlinks(destination, parent)?;
                 fs::create_dir_all(parent).map_err(|source| StoreError::Io {
                     context: format!("creating {}", parent.display()),
                     source,
                 })?;
+                reject_symlinks(destination, parent)?;
             }
-            fs::copy(&file.path, &target).map_err(|source| StoreError::Io {
-                context: format!("copying {} to {}", file.path.display(), target.display()),
-                source,
+            crate::secret_file::replace_from(&target, &file.path).map_err(|source| {
+                StoreError::Io {
+                    context: format!("copying {} to {}", file.path.display(), target.display()),
+                    source,
+                }
             })?;
             if !preserve_modified(&file.path, &target) {
                 report.undated = report.undated.saturating_add(1);
@@ -272,6 +293,9 @@ enum Withhold {
     /// points at. The whole conversion is undone by the backup that made it
     /// safe. So the mirror leaves it behind and says so.
     PlaintextBackup,
+    /// MCP's mutable commit-reveal state. Legacy versions stored both the full
+    /// artifact and nonce here in plaintext.
+    PendingSecret,
 }
 
 /// Should this file be withheld from the mirror?
@@ -288,6 +312,13 @@ fn withhold(path: &Path) -> Option<Withhold> {
     };
     let text = String::from_utf8_lossy(&head);
     let trimmed = text.trim_start();
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".pending.json"))
+    {
+        return Some(Withhold::PendingSecret);
+    }
     if trimmed.starts_with("pwkey1:") || trimmed.starts_with("pwkey1a:") {
         return Some(Withhold::Key);
     }
@@ -300,6 +331,22 @@ fn withhold(path: &Path) -> Option<Withhold> {
         return Some(Withhold::PlaintextBackup);
     }
     None
+}
+
+fn reject_symlinks(root: &Path, path: &Path) -> Result<(), StoreError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| StoreError::NotADirectory(path.into()))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if let Ok(metadata) = fs::symlink_metadata(&current) {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                return Err(StoreError::NotADirectory(current));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Suffix `store encrypt` leaves its unconverted original under.
@@ -480,6 +527,43 @@ mod tests {
         assert!(report.summary().contains("plaintext backup"));
         // The sealed log itself still goes.
         assert!(destination.join("log/cairn.jsonl").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pending_commitment_sidecar_is_never_mirrored() {
+        let (dir, store) = sealed_store("pending-sidecar");
+        let pending = store.log_path().with_extension("pending.json");
+        fs::write(&pending, r#"[{"artifact":"secret","nonce":"secret"}]"#).unwrap();
+        let destination = dir.join("mirror");
+        let report = mirror(&store, &destination, Options::default()).expect("mirrors");
+        assert_eq!(report.skipped_pending, vec![pending]);
+        assert!(!destination.join("log/cairn.pending.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_destination_symlink_is_replaced_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, store) = sealed_store("destination-symlink");
+        let destination = dir.join("mirror");
+        fs::create_dir_all(destination.join("cache")).unwrap();
+        let victim = dir.join("victim");
+        fs::write(&victim, "do not overwrite").unwrap();
+        symlink(&victim, destination.join("cache/blob")).unwrap();
+
+        mirror(&store, &destination, Options::default()).expect("mirrors safely");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "do not overwrite");
+        assert_eq!(
+            fs::read_to_string(destination.join("cache/blob")).unwrap(),
+            "cached"
+        );
+        assert!(!fs::symlink_metadata(destination.join("cache/blob"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         let _ = fs::remove_dir_all(&dir);
     }
 

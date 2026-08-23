@@ -17,6 +17,14 @@ updates:
       # `x25519-dalek 3` and `chacha20poly1305 0.11` against `rand_core 0.6`.
       # Grouped, the incompatibility shows up in one PR's own CI, which is
       # where it can be dealt with.
+      #
+      # `rand_core` stays in this group and stays at 0.6, which looks wrong and
+      # is not. It is the version `classic-mceliece-rust` and `argon2` take, and
+      # `src/crypto/kem.rs` passes one caller-supplied RNG to both; raising it
+      # alone type-errors in four files. `ed25519-dalek` reached 3 without it,
+      # by taking bytes rather than an RNG -- see the comment on that dependency
+      # in `Cargo.toml`. A `rand_core` bump here is blocked on those two crates,
+      # not on this repository.
       rustcrypto:
         patterns:
           - "sha2"

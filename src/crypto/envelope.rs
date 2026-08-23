@@ -1142,6 +1142,77 @@ fn field_u8(value: &Value, field: &'static str) -> Result<u8, EnvelopeError> {
 
 #[cfg(test)]
 mod tests {
+    /// RFC 8439 §2.8.2, against this crate's own AEAD construction.
+    ///
+    /// **Why a known-answer test and not another round-trip.** Every other
+    /// cipher test here seals and opens in the same process with the same
+    /// build, so it passes for any construction that is merely *self*-consistent
+    /// — including one that has quietly changed. A sealed store and a recorded
+    /// transport frame both outlive the binary that wrote them, so a cipher bump
+    /// that altered the nonce handling, the AAD framing or the tag position
+    /// would orphan every one of them and no test in this repository would have
+    /// noticed.
+    ///
+    /// This is the check that noticed nothing when `chacha20poly1305` went from
+    /// 0.10 to 0.11, which is the useful outcome and was not knowable before it
+    /// existed.
+    ///
+    /// The vector is the IETF one, so it also pins the *interoperable* thing:
+    /// these bytes are what any other implementation of ChaCha20-Poly1305
+    /// produces, which is the property a second reader of a sealed envelope
+    /// actually needs.
+    #[test]
+    fn the_aead_matches_the_rfc_8439_vector() {
+        use chacha20poly1305::aead::{Aead, Payload};
+
+        let key = Secret32::new([
+            0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d,
+            0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
+            0x9c, 0x9d, 0x9e, 0x9f,
+        ]);
+        let nonce: [u8; NONCE_LEN] = [
+            0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+        ];
+        let aad: [u8; 12] = [
+            0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+        ];
+        let plaintext: &[u8] = b"Ladies and Gentlemen of the class of '99: If I \
+could offer you only one tip for the future, sunscreen would be it.";
+        // The line continuation above must not smuggle in a newline: the vector
+        // is 114 bytes exactly, and a 115-byte plaintext would fail against a
+        // ciphertext that is still correct.
+        assert_eq!(plaintext.len(), 114, "the RFC plaintext is 114 bytes");
+
+        let sealed = cipher_for(&key)
+            .encrypt(
+                &Nonce::from(nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .expect("the vector encrypts");
+
+        const EXPECTED: &str = "\
+d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6\
+3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36\
+92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc\
+3ff4def08e4b7a9de576d26586cec64b6116\
+1ae10b594f09e26a7e902ecbd0600691";
+        assert_eq!(
+            hex_encode(&sealed),
+            EXPECTED,
+            "this crate's ChaCha20-Poly1305 no longer produces the IETF vector, \
+             so every sealed envelope and every stored log written by an earlier \
+             build is now unreadable"
+        );
+
+        // And the tag really is the last sixteen bytes, which is what makes the
+        // ciphertext length a function of the plaintext length rather than a
+        // detail of the library's framing.
+        assert_eq!(sealed.len(), plaintext.len() + 16);
+    }
+
     use super::*;
     use rand_core::OsRng;
 

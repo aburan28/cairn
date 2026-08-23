@@ -443,9 +443,26 @@ impl Identity {
     /// the module docs on what that costs, because a pseudonym nobody can
     /// attribute work to is a pseudonym nobody can pay.
     pub fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> Identity {
-        Identity {
-            signing: SigningKey::generate(rng),
-        }
+        // Bytes from the caller's RNG, then `from_bytes`, rather than
+        // `SigningKey::generate(rng)` -- which is what that function does
+        // internally and is not why this is written out.
+        //
+        // `ed25519-dalek` 3 takes its RNG from `rand_core` 0.10. Two of this
+        // crate's other dependencies -- `classic-mceliece-rust` through
+        // `rand 0.8`, and `argon2` through `password-hash` -- take theirs from
+        // `rand_core` 0.6, and `src/crypto/kem.rs` passes one caller-supplied
+        // `R` to all of them. Handing `rng` straight to dalek would make that
+        // `R` satisfy two different versions of one trait, which is not a thing
+        // a bound can say. Every 32-byte string is a valid ed25519 secret key,
+        // so the seam costs nothing and removes the coupling: this crate's
+        // signature library and its KEMs can now move independently.
+        let mut secret = [0u8; 32];
+        rng.fill_bytes(&mut secret);
+        let identity = Identity {
+            signing: SigningKey::from_bytes(&secret),
+        };
+        secret.zeroize();
+        identity
     }
 
     /// Reload a stored identity. Every 32-byte string is a valid ed25519 secret

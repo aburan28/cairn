@@ -340,7 +340,7 @@ handshake prefix is necessarily cleartext, because a responder must know which
 peer to expect before a key exists. Unlinkability is a transport-layer problem —
 onion routing, or rendezvous under a derived key — and is not solved here.
 
-**`swarm::tcp` runs over this transport too.** It did not for a long time — no
+**`p2p::swarm::tcp` runs over this transport too.** It did not for a long time — no
 handshake, no AEAD, no peer authentication, behind an off-by-default feature so
 it could not reach a binary by accident. The blocker was the identity mismatch
 this document keeps returning to: `swarm` records carry an ed25519 key and the
@@ -349,11 +349,21 @@ record the 32-byte *id* of one closed it, the same construction the log's own
 peer record uses.
 
 What it cost is worth naming. An authenticated dial needs the responder's key,
-so `swarm::tcp::fetch` takes endpoints rather than addresses, and an address
+so `p2p::swarm::tcp::fetch` takes endpoints rather than addresses, and an address
 learned by peer exchange is now a hint something must complete before it can be
-dialled. `p2p::dht`'s `GetKey` already fetches keys on demand over an existing
-session; wiring `swarm` to it restores the property and is the remaining half of
-folding the two stacks together.
+dialled. `p2p::dht`'s `GetKey` fetches keys on demand over an existing session,
+and `tcp::KeySource` — a trait rather than a second key-fetch message, because
+one inside the blob module would double the duplication the fold exists to
+remove — lets `fetch_using` complete those hints through it. A node handed one
+endpoint needs none the second time.
+
+That trait is also why the module now lives at `src/p2p/swarm/` rather than
+beside this one. It is declared there and implemented by `p2p::service::Service`
+here, so as siblings each module named the other and the direction of the
+dependency was something a reader had to work out. Blob transfer consumes this
+layer and nothing here consumes it back; the tree says so now. What remains of
+the fold is one *discovery* stack instead of two, which deletes public API and
+is a scope decision — see [roadmap.md](roadmap.md).
 
 ## Provider lookup
 
@@ -388,7 +398,7 @@ The consequence is worth stating rather than discovering later: **a routing
 answer from this stack is not self-proving.** It is a claim that a peer with that
 id lives at that address, checked only when somebody dials it and the handshake
 either derives the expected id or does not. Wrong answers cost a dial; they
-cannot cost correctness. `swarm::dht` makes the opposite trade, inlining a signed
+cannot cost correctness. `p2p::swarm::dht` makes the opposite trade, inlining a signed
 ed25519 record because at 32 bytes it can.
 
 ### Asked, not announced
@@ -544,7 +554,7 @@ does.
 - **Peer discovery.** Sampling and provider lookup both choose *among* the peers
   the address book already holds; nothing adds to it but `--bootstrap` files the
   operator wrote. The design calls for a signed, size-capped peer-list exchange;
-  `swarm::discovery` implements exactly that against a different identity scheme
+  `p2p::swarm::discovery` implements exactly that against a different identity scheme
   and is not wired in here, which is the "fold the two stacks together" item in
   [roadmap.md](roadmap.md). Until it is, the peer set is an operator configuration decision, which
   is a real limit and also the only thing currently standing between this node

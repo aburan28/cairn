@@ -49,6 +49,20 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Copy a directory tree, so a test can give a node its own verifier root.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("destination");
+    for entry in std::fs::read_dir(from).expect("read source") {
+        let entry = entry.expect("entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy");
+        }
+    }
+}
+
 /// A scratch ledger under `target/`, so a failed run leaves evidence and a
 /// passing one leaves nothing anyone has to clean out of /tmp.
 fn scratch(name: &str) -> PathBuf {
@@ -465,9 +479,30 @@ fn a_dialling_node_learns_who_holds_a_blob_and_asks_that_peer_next() {
     let bob_addr = listener.local_addr().expect("bound address");
     let endpoint = Endpoint::new(bob_addr, bob_public.clone());
 
+    // Bob's root is scratch too, not the repository. He publishes the checker
+    // into his root's blob store, and the store under the repository is shared
+    // with every demo script anyone has ever run here: if `demo.sh` already put
+    // this blob there, publishing is a no-op, bob announces nothing new, and
+    // alice records no provider. The test then fails on a developer machine and
+    // passes in CI, which is the worst shape a test can have. The examples are
+    // copied in because the checker is resolved by path relative to the root.
+    let bob_root = repo_root()
+        .join("target")
+        .join("p2p-tests")
+        .join("bob-root");
+    let _ = std::fs::remove_dir_all(&bob_root);
+    std::fs::create_dir_all(bob_root.join("examples")).expect("bob's root");
+    copy_tree(
+        &repo_root().join("examples").join("capset"),
+        &bob_root.join("examples").join("capset"),
+    );
+
     let bob_objective = objective.clone();
     let bob_thread = thread::spawn(move || {
-        let mut bob = node("bob-dht");
+        let mut bob = Node::new(
+            Ledger::open(scratch("bob-dht")).expect("open ledger"),
+            bob_root,
+        );
         bob.post_objective(&bob_objective, TS).expect("post");
         // Bob is the funder, so he is the one node that certainly has the
         // checker on disk. Publishing moves it into the content-addressed store,
@@ -500,10 +535,12 @@ fn a_dialling_node_learns_who_holds_a_blob_and_asks_that_peer_next() {
         empty_root,
     );
     alice.post_objective(&objective, TS).expect("post");
+    let wanted = alice.missing_code();
     assert!(
-        !alice.missing_code().is_empty(),
+        !wanted.is_empty(),
         "alice already holds the checker, so the ask would be empty"
     );
+    let wanted_address = wanted.iter().next().expect("non-empty want set").clone();
     let alice_service = Service::new(Arc::new(PeerIdentity::generate()));
     alice_service
         .dial_node_once(&endpoint, &mut alice)
@@ -511,15 +548,15 @@ fn a_dialling_node_learns_who_holds_a_blob_and_asks_that_peer_next() {
 
     let bob_holds = bob_thread.join().expect("bob's thread");
     assert!(
-        !bob_holds.is_empty(),
-        "bob holds no blobs to tell alice about"
+        bob_holds.contains(&wanted_address),
+        "bob does not hold the blob alice asked about"
     );
 
     // Alice heard the announcement, and attributed it to the peer she was
     // actually talking to.
     let now = cairn::time::unix_seconds();
     let (holders, _) =
-        alice_service.with_directory(|directory| directory.lookup_providers(&bob_holds[0], now));
+        alice_service.with_directory(|directory| directory.lookup_providers(&wanted_address, now));
     assert_eq!(
         holders.len(),
         1,

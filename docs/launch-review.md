@@ -213,20 +213,29 @@ languages the two are written in.
    beacon that orders work assignment now orders *money*, so grinding the
    anchor is a payout attack rather than a scheduling nuisance. A VDF or
    threshold signature is the Stage 2 answer.
-4. **No sandbox on the Python reference.** It `exec`s pinned code in-process
-   by design — it is the readable specification of the rules, not a hardened
-   node — and says so. Fine as long as nobody points it at an objective they
-   have not read, which is a rule enforced by documentation alone.
+4. **No sandbox on the Python reference.** It is the readable specification of
+   the rules, not a hardened node. Verifier reruns are therefore opt-in with
+   `audit --rerun`, and `CAIRN_REQUIRE_SANDBOX` makes every reference verifier
+   answer `Unavailable` rather than executing objective-authored code. Use
+   `--rerun` only for objectives whose code the auditor has independently
+   trusted.
 5. **NAT traversal, and peer identities in the log.** A node behind a home
    router can fetch and cannot seed, which makes the p2p half more centralised
    than the protocol suggests; and identity discovery is still a separate
    bootstrap problem from obtaining the log. Both are roadmap items with no
    new information from this pass.
-6. **`swarm::tcp` is still a second, unencrypted transport**, feature-gated
-   off, and `swarm::discovery`'s signed peer records are still not wired into
-   `p2p`'s address book. The DHT was already de-duplicated into `src/dht.rs`;
-   folding the rest is a genuine refactor rather than a launch blocker, and
-   doing it badly under time pressure would be worse than the duplication.
+6. ~~**`swarm::tcp` is still a second, unencrypted transport.**~~ **Fixed, and
+   the module has since moved.** Blob transfer runs over `p2p::transport` —
+   Classic McEliece to an AEAD channel, with its own context string so a blob
+   frame cannot be opened as a record sync — and the `insecure-swarm-tcp` gate
+   is gone because the reason for it is;
+   `a_transfer_puts_no_plaintext_on_the_wire` asserts it of the bytes, with a
+   recording relay between leech and seed. The module is `src/p2p/swarm/` now
+   rather than a sibling, which settles the dependency direction the rest of
+   this item was hedging about. What this line named that is *still* true is
+   narrower and stated as its own roadmap item: `p2p::swarm::discovery`'s signed
+   peer records overlap `records::PeerRecord` almost exactly, and collapsing the
+   two deletes public API rather than moving it.
 7. ~~**The `first-blood` bounties rest on operator trust.**~~ **Fixed.** The
    public-coin instance derivation this line asked for is built. `Q` is now
    *hashed to the curve* from a published seed rather than computed as `k*G`

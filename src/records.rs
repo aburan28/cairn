@@ -364,6 +364,19 @@ pub struct Objective {
     /// existing objective. The conformance vectors that predate it still pass
     /// unchanged, which is the check that this is true rather than intended.
     pub confidentiality: Confidentiality,
+    /// How many epochs an [`Confidentiality::Embargoed`] artifact stays shut
+    /// after its commitment's epoch closes.
+    ///
+    /// `None` on a public objective, and on an embargoed one it is the number
+    /// the class exists to name: declaring "revealed later" without saying
+    /// *how much* later is a class that means nothing an auditor can check.
+    ///
+    /// Omitted from the canonical form when absent, exactly like `deadline`,
+    /// `ratchet` and `confidentiality`, so adding it reissued no existing id.
+    /// It is *inside* the id when present, which is the point — an embargo a
+    /// funder could shorten after work had started would be a promise made to
+    /// the submitter and then taken back.
+    pub embargo_epochs: Option<u64>,
     /// What shape of artifact the verifier expects, for a submitter who has
     /// only the record.
     ///
@@ -428,6 +441,7 @@ impl Objective {
             deadline,
             ratchet,
             confidentiality: Confidentiality::Public,
+            embargo_epochs: None,
             artifact_schema: None,
             require_signed_submitter: false,
         };
@@ -468,6 +482,41 @@ impl Objective {
         Ok(self)
     }
 
+    /// Set the embargo length, re-validating.
+    ///
+    /// Meaningful only on an [`Confidentiality::Embargoed`] objective;
+    /// [`Objective::validate`] refuses the combinations that do not make sense
+    /// rather than ignoring the field, because a length silently dropped on a
+    /// public objective is a funder who thinks they asked for delay.
+    pub fn with_embargo_epochs(mut self, epochs: u64) -> Result<Objective, RecordError> {
+        self.embargo_epochs = Some(epochs);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Declare an embargo: the class and its length, together.
+    ///
+    /// One step because they only mean anything together. Setting the class
+    /// alone leaves an objective that says "revealed later" without saying how
+    /// much later — legal, because that is the shape every embargoed objective
+    /// had before the length existed, and useless, because nothing can enforce
+    /// it. This is the call a funder should reach for.
+    pub fn with_embargo(self, epochs: u64) -> Result<Objective, RecordError> {
+        self.with_confidentiality(Confidentiality::Embargoed)?
+            .with_embargo_epochs(epochs)
+    }
+
+    /// Epochs an embargoed artifact stays shut after its commitment's epoch.
+    ///
+    /// `0` for a public objective, which is the same answer as "no wait" and
+    /// lets the share rule read one number instead of branching on the class.
+    pub fn embargo(&self) -> u64 {
+        match self.confidentiality {
+            Confidentiality::Embargoed => self.embargo_epochs.unwrap_or(0),
+            _ => 0,
+        }
+    }
+
     /// The structural invariants the reference implementation checks in
     /// `__post_init__`.
     ///
@@ -490,6 +539,35 @@ impl Objective {
                     expected: "an object",
                 });
             }
+        }
+        // An embargo length on an objective that is not embargoed is a funder
+        // who thinks they asked for delay and did not. Refused rather than
+        // ignored, for the same reason `sealed` is refused rather than
+        // downgraded: silently dropping the one field somebody cared about is
+        // the failure they cannot see.
+        if self.embargo_epochs.is_some() && self.confidentiality != Confidentiality::Embargoed {
+            return Err(RecordError::InvalidField {
+                record: "objective",
+                field: "embargo_epochs",
+                expected: "an embargoed objective; a length has no meaning without one",
+            });
+        }
+        // An explicit zero is `public` wearing a longer name: an artifact
+        // readable in the epoch after its commitment is on the normal reveal
+        // schedule. Refused so the number means what it says.
+        //
+        // An *absent* length is a different thing and is allowed: that is the
+        // shape every embargoed objective had before this field existed, when
+        // the class was a label nothing enforced. Refusing it would make old
+        // logs undecodable to settle a point about new ones. So the presence
+        // of the number is what turns enforcement on, exactly as the presence
+        // of an issuance is what turns the supply accounting on.
+        if self.embargo_epochs == Some(0) {
+            return Err(RecordError::InvalidField {
+                record: "objective",
+                field: "embargo_epochs",
+                expected: "at least one epoch; zero is what `public` already means",
+            });
         }
         // Shape only. What the hint *says* is never checked -- the pinned
         // verifier decides what passes, and validating an artifact against
@@ -558,6 +636,14 @@ impl Objective {
                 Value::string(self.confidentiality.as_str()),
             );
         }
+        // Inside the id when present, omitted when absent. Inside, because an
+        // embargo a funder could shorten after work had started is a promise
+        // made to a submitter and then taken back; omitted, because every
+        // objective written before this field existed had no embargo and its
+        // digest must not move.
+        if let Some(epochs) = self.embargo_epochs {
+            body.insert("embargo_epochs".to_string(), Value::Int(i128::from(epochs)));
+        }
         // Omitted when absent, for the reason every optional field here is.
         if let Some(schema) = &self.artifact_schema {
             body.insert("artifact_schema".to_string(), schema.clone());
@@ -610,6 +696,20 @@ impl Objective {
             }
         };
 
+        let embargo_epochs = match value.get("embargo_epochs") {
+            None | Some(Value::Null) => None,
+            Some(Value::Int(epochs)) if *epochs >= 0 && *epochs <= i128::from(u64::MAX) => {
+                Some(*epochs as u64)
+            }
+            Some(_) => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "embargo_epochs",
+                    expected: "a non-negative integer number of epochs",
+                })
+            }
+        };
+
         // Absent and null both mean "no hint", exactly as for `ratchet`.
         let artifact_schema = match value.get("artifact_schema") {
             None | Some(Value::Null) => None,
@@ -626,6 +726,7 @@ impl Objective {
             deadline: optional_string(value, RECORD, "deadline")?,
             ratchet,
             confidentiality,
+            embargo_epochs,
             require_signed_submitter: match value.get("require_signed_submitter") {
                 None | Some(Value::Null) => false,
                 Some(Value::Bool(flag)) => *flag,
@@ -1940,6 +2041,41 @@ pub struct Undertaking {
     /// How many entries that root covers. See the type docs: a challenge needs
     /// the tree's shape, not only its root.
     pub height: u64,
+    /// Units staked behind this promise, and the whole of its Sybil
+    /// resistance.
+    ///
+    /// The availability pool is split **in proportion to this**, not evenly and
+    /// not by height, because a stake-weighted split is the one rule that is
+    /// exactly invariant to an operator wearing forty identities instead of
+    /// one: stake is conserved when it is divided, so forty promises of `S/40`
+    /// earn between them exactly what one promise of `S` earns.
+    /// `incentive::mechanism::SplitIdentities` proves that rather than
+    /// asserting it.
+    ///
+    /// It has to be *scarce* or the invariance is worthless -- a number anyone
+    /// can set to `u64::MAX` would look like the invariant rule and behave like
+    /// the free one. So it is bounded by what the log says this identity has
+    /// been paid and has not already locked: see
+    /// `crate::node::Node::balances_within`.
+    ///
+    /// # It is not scarce yet, and the difference matters
+    ///
+    /// A balance comes from a settlement, a settlement comes from an objective,
+    /// and `crate::node::Node::post_objective` **takes no deposit**: a funder
+    /// names a reward and nothing checks it had one. So an attacker posts a
+    /// bounty for an arbitrary sum against a verifier it chose, answers its own
+    /// question, and stakes the proceeds -- and does it once per key.
+    /// `node::tests::minting_a_bond_is_free_because_an_objective_needs_no_deposit`
+    /// mints 10^12 units in four commands and audits clean afterwards, because
+    /// nothing there breaks a rule; the rule is missing.
+    ///
+    /// So what this field buys today is *invariance*, not resistance: splitting
+    /// a stake across identities is exactly neutral, which is the property a
+    /// scarce stake would need and is not by itself enough. Closing it means
+    /// debiting an objective's reward from its funder's own balance, which
+    /// needs a genesis rule and moves both implementations. Until then, an
+    /// availability pool should not carry real money.
+    pub bond: u64,
     pub created_at: String,
     /// Ed25519 signature over [`Undertaking::signing_payload`], hex.
     ///
@@ -1968,12 +2104,14 @@ impl Undertaking {
         identity: impl Into<String>,
         root: impl Into<String>,
         height: u64,
+        bond: u64,
         created_at: impl Into<String>,
     ) -> Undertaking {
         Undertaking {
             identity: identity.into(),
             root: root.into(),
             height,
+            bond,
             created_at: created_at.into(),
             signature: None,
         }
@@ -1983,6 +2121,7 @@ impl Undertaking {
     pub fn signing_payload(&self) -> Value {
         Value::object([
             ("type", Value::string(RecordKind::Undertaking.as_str())),
+            ("bond", Value::Int(i128::from(self.bond))),
             ("created_at", Value::string(self.created_at.clone())),
             ("height", Value::Int(i128::from(self.height))),
             ("identity", Value::string(self.identity.clone())),
@@ -2063,6 +2202,17 @@ impl Undertaking {
                 expected: "between 1 and 2^32 - 1 entries",
             });
         }
+        // A promise backed by nothing earns nothing, so it is refused rather
+        // than admitted at zero weight: an unbonded undertaking in the log is a
+        // node that believes it is being sampled and will never be paid, and
+        // saying so on admission is kinder than saying it by silence.
+        if self.bond == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "bond",
+                expected: "at least one unit staked",
+            });
+        }
         Ok(())
     }
 
@@ -2073,6 +2223,7 @@ impl Undertaking {
             identity: required_string(value, RECORD, "identity")?,
             root: required_string(value, RECORD, "root")?,
             height: required_u64(value, RECORD, "height")?,
+            bond: required_u64(value, RECORD, "bond")?,
             created_at: required_string(value, RECORD, "created_at")?,
             signature: optional_string(value, RECORD, "signature")?,
         };
@@ -2097,15 +2248,19 @@ impl Undertaking {
 ///
 /// # What a fixed pot buys, and what it does not
 ///
-/// The pot is split equally among the epoch's verified answers, so the cost to
-/// a funder is bounded no matter how many nodes appear. What that does *not*
-/// buy is sybil resistance: ten identities behind one disk answer ten different
-/// samples from one copy of the log and take ten shares. Bounding that needs a
-/// bond — it is [`crate::incentive::NodeParams::stake`] in the model, and
-/// `docs/roadmap.md` puts bonded availability sampling in Stage 2. So this pays
-/// for answers, and it does not yet price the identity giving them. Stated here
-/// rather than left to be discovered, because a funder reading only the
-/// ceiling would conclude something stronger than is true.
+/// The pot is split among the epoch's verified answers **in proportion to the
+/// bond behind each**, so the cost to a funder is bounded no matter how many
+/// nodes appear *and* splitting one identity into forty earns exactly what it
+/// earned as one — stake is conserved when it is divided, a head count is not.
+/// Split equally, as this first did, ten identities behind one disk answered
+/// ten samples from one copy and took ten shares.
+///
+/// What it still does not buy is proof that the answerer *stored* anything: the
+/// answer proves the entry was produced, and a node fetching it from a peer as
+/// the epoch opens is not excluded. Nor is the bond slashed yet — silence is
+/// recorded and the units are locked, but nothing takes them. Stated here
+/// rather than left to be discovered, because a funder reading only the ceiling
+/// would conclude something stronger than is true.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvailabilityPool {
     /// Who is paying. A name, not necessarily a key: funding is not a claim
@@ -2188,6 +2343,110 @@ impl AvailabilityPool {
             per_epoch: required_u64(value, RECORD, "per_epoch")?,
             from_epoch: required_u64(value, RECORD, "from_epoch")?,
             to_epoch: required_u64(value, RECORD, "to_epoch")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// A unit of money entering the log, and the only way any ever does.
+///
+/// # Why the supply is a record and not a constant
+///
+/// Everything this crate weights by money — the availability pool's stake
+/// split, an objective's escrow, a bond — is worth exactly what the money is
+/// scarce. It was not. [`crate::node::Node::post_objective`] took no deposit,
+/// so a funder named a reward and nothing checked it had one: post a bounty for
+/// an arbitrary sum against a verifier you chose, answer your own question,
+/// stake the proceeds, repeat per key. Four commands, and the log audited
+/// clean, because nothing there broke a rule — the rule was missing.
+///
+/// An issuance is that rule. It says *this identity holds these units*, and
+/// once a log declares a supply, every unit in it is traceable to one:
+/// [`crate::node::Node::audit`] checks that issued equals held plus escrowed
+/// plus locked, in `u128`, and reports the difference rather than rounding it
+/// away.
+///
+/// # Why only in the genesis prefix
+///
+/// An issuance anywhere else is a mint, so it is admissible only *before* the
+/// log's first non-issuance entry. That makes the supply a property of the
+/// log's opening bytes: common knowledge in the sense the consensus literature
+/// means it, fixed at creation, and checkable by anyone reading forward from
+/// the first line. Anything later is an audit fault, not a balance.
+///
+/// # Why a log with no issuance is still legal
+///
+/// Declaring a supply is what turns the accounting on. A log with no issuance
+/// record has not claimed its units are scarce, and refusing every such log
+/// would refuse every log written before this record existed, including the
+/// published one. So the rule is conditional on the record, not on a flag: on a
+/// log with a declared supply, no unit exists that the supply did not issue; on
+/// a log without one, the operator's word is the backing and the audit says so
+/// rather than pretending otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issuance {
+    /// Who receives the units. A name or a key: a supply is declared by
+    /// whoever opened the log, and it is the *position* of the record rather
+    /// than a signature that authorises it — a signature would only prove who
+    /// wrote it, and in the genesis prefix there is nobody else it could be.
+    pub holder: String,
+    /// Units issued to `holder`.
+    pub units: u64,
+    pub created_at: String,
+}
+
+impl Issuance {
+    pub fn new(holder: impl Into<String>, units: u64, created_at: impl Into<String>) -> Issuance {
+        Issuance {
+            holder: holder.into(),
+            units,
+            created_at: created_at.into(),
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("type", Value::string("issuance")),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("holder", Value::string(self.holder.clone())),
+            ("units", Value::Int(i128::from(self.units))),
+        ])
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "issuance";
+        if self.holder.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "holder",
+                expected: "a non-empty name",
+            });
+        }
+        // Zero is refused rather than admitted as a no-op: it is a record that
+        // declares nothing while looking like a declaration, and a supply
+        // padded with them reads as larger than it is.
+        if self.units == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "units",
+                expected: "at least one unit",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Issuance, RecordError> {
+        const RECORD: &str = "issuance";
+        let value = expect_object(value, RECORD)?;
+        let record = Issuance {
+            holder: required_string(value, RECORD, "holder")?,
+            units: required_u64(value, RECORD, "units")?,
             created_at: required_string(value, RECORD, "created_at")?,
         };
         record.validate()?;
@@ -2441,6 +2700,491 @@ fn required_u64(
     }
 }
 
+/// A signed, bonded statement about what a verifier said.
+///
+/// # Why a verdict was not enough
+///
+/// A `verdict` record says what the checker returned. It does not say **who
+/// ran it**, because at Stage 0 a log has one writer and the question did not
+/// arise. That is exactly the gap `src/arena` measured: a canary docket names a
+/// *claim* whose verdict is wrong and cannot name a *party*, so there is nobody
+/// to slash and rubber-stamping pays. The arena reports it as the only OPEN
+/// attack in the set, and this record is what closes it.
+///
+/// # What it commits to
+///
+/// One identity, one claim, one status, signed. Signing is not decoration: an
+/// unsigned attestation is an attestation by nobody, and a penalty with nobody
+/// attached is not a penalty. The signature covers the status, so an attestor
+/// cannot later claim to have said something else about a claim it attested to.
+///
+/// # And what stands behind it
+///
+/// A bond, checked at admission against the attestor's own balance
+/// ([`crate::node::VERIFICATION_BOND`]). The bond is what a slash takes, and
+/// the reason the whole mechanism is not circular: a canary tells the *issuer*
+/// which attestations are wrong for free, and the slash itself is settled by
+/// running that one verifier, which anybody can do and anybody can check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attestation {
+    /// The claim this is about.
+    pub claim_id: String,
+    /// Ed25519 public key, hex. Who ran the verifier and is answerable for it.
+    pub attestor: String,
+    /// What they say it returned: the wire spelling of a
+    /// [`crate::verifiers::Status`].
+    pub status: String,
+    pub created_at: String,
+    /// Ed25519 signature over [`Attestation::signing_payload`], hex. Required.
+    pub signature: Option<String>,
+}
+
+impl Attestation {
+    pub fn new(
+        claim_id: impl Into<String>,
+        attestor: impl Into<String>,
+        status: impl Into<String>,
+        created_at: impl Into<String>,
+    ) -> Attestation {
+        Attestation {
+            claim_id: claim_id.into(),
+            attestor: attestor.into(),
+            status: status.into(),
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("attestation")),
+            ("attestor", Value::string(self.attestor.clone())),
+            ("claim_id", Value::string(self.claim_id.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("status", Value::string(self.status.clone())),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Attestation {
+        self.attestor = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "attestation";
+        if signed_submitter(&self.attestor).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.attestor.clone(),
+            });
+        }
+        let signature = self.signature.as_deref().ok_or(SignatureError::Missing {
+            record: RECORD,
+            submitter: self.attestor.clone(),
+        })?;
+        verify_record_signature(
+            RECORD,
+            &self.attestor,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "attestation";
+        if self.claim_id.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "claim_id",
+                expected: "the id of the claim attested to",
+            });
+        }
+        // Only the two *settling* statuses can be attested to under bond.
+        //
+        // `unavailable` says "my machine could not run this", which is a fact
+        // about the attestor rather than the artifact, and it is the answer the
+        // whole verifier interface exists to protect. Bonding it would put a
+        // price on admitting a broken toolchain, and the cheapest response to
+        // that price is to guess instead.
+        if self.status != "accept" && self.status != "reject" {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "status",
+                expected: "accept or reject; a non-settling status is not bondable",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Attestation, RecordError> {
+        const RECORD: &str = "attestation";
+        let value = expect_object(value, RECORD)?;
+        let record = Attestation {
+            claim_id: required_string(value, RECORD, "claim_id")?,
+            attestor: required_string(value, RECORD, "attestor")?,
+            status: required_string(value, RECORD, "status")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive fraud proofs
+// ---------------------------------------------------------------------------
+
+/// A bonded objection to a settled claim's committed trace.
+///
+/// The record that opens a dispute. It names the claim, commits the challenger
+/// to a trace root of their own, and stakes a bond behind the objection.
+///
+/// **The bond is the whole record.** Without it, opening a dispute is free, and
+/// a free dispute is a denial-of-service on every honest submitter: post one
+/// against every claim, answer nothing, and every payout is held for the length
+/// of the window. The bond makes losing cost something and makes stalling cost
+/// the same as losing, since a challenger who stops answering forfeits.
+///
+/// The challenger's root is committed **here**, before any bisection move, and
+/// that ordering is the security property rather than a convenience. A
+/// challenger who could choose their trace after seeing the defender's answers
+/// would win every dispute by construction: at each round, answer whatever the
+/// defender did not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Challenge {
+    /// The claim whose trace is disputed.
+    pub claim_id: String,
+    /// Ed25519 public key, hex. Who objects, and the record's authority.
+    pub challenger: String,
+    /// The challenger's own committed trace root.
+    pub root: String,
+    /// How many states both sides claim the trace has. Equal length is a rule:
+    /// two parties claiming different lengths have already stated their
+    /// disagreement in public and need no search to find it.
+    pub states: u64,
+    /// Units staked behind the objection, forfeit if it loses.
+    pub bond: u64,
+    pub created_at: String,
+    /// Ed25519 signature over [`Challenge::signing_payload`], hex. Required:
+    /// an unsigned objection is an objection by nobody, and there would be
+    /// nobody to slash.
+    pub signature: Option<String>,
+}
+
+impl Challenge {
+    pub fn new(
+        claim_id: impl Into<String>,
+        challenger: impl Into<String>,
+        root: impl Into<String>,
+        states: u64,
+        bond: u64,
+        created_at: impl Into<String>,
+    ) -> Challenge {
+        Challenge {
+            claim_id: claim_id.into(),
+            challenger: challenger.into(),
+            root: root.into(),
+            states,
+            bond,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("challenge")),
+            ("bond", Value::Int(i128::from(self.bond))),
+            ("challenger", Value::string(self.challenger.clone())),
+            ("claim_id", Value::string(self.claim_id.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("root", Value::string(self.root.clone())),
+            ("states", Value::Int(i128::from(self.states))),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> Challenge {
+        self.challenger = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "challenge";
+        if signed_submitter(&self.challenger).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.challenger.clone(),
+            });
+        }
+        let signature = self.signature.as_deref().ok_or(SignatureError::Missing {
+            record: RECORD,
+            submitter: self.challenger.clone(),
+        })?;
+        verify_record_signature(
+            RECORD,
+            &self.challenger,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "challenge";
+        if self.claim_id.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "claim_id",
+                expected: "the id of the claim being disputed",
+            });
+        }
+        if !self.root.starts_with("sha256:") {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "root",
+                expected: "a sha256: Merkle root over the trace",
+            });
+        }
+        // Fewer than two states is not a trace, so there is no step to
+        // disagree about; more than the cap is a dispute no log can carry.
+        if self.states < 2 || self.states > crate::challenge::MAX_TRACE as u64 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "states",
+                expected: "between 2 and 2^24 states",
+            });
+        }
+        // A zero bond is the free objection the record exists to prevent.
+        if self.bond == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "bond",
+                expected: "a bond of at least one unit",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<Challenge, RecordError> {
+        const RECORD: &str = "challenge";
+        let value = expect_object(value, RECORD)?;
+        let challenge = Challenge {
+            claim_id: required_string(value, RECORD, "claim_id")?,
+            challenger: required_string(value, RECORD, "challenger")?,
+            root: required_string(value, RECORD, "root")?,
+            states: required_u64(value, RECORD, "states")?,
+            bond: required_u64(value, RECORD, "bond")?,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        challenge.validate()?;
+        Ok(challenge)
+    }
+}
+
+/// One party's answer to one bisection query, as a record.
+///
+/// The wire form of [`crate::challenge::Move`]. Carries the state itself rather
+/// than only its digest, and the inclusion path proving that state is the one
+/// its author committed to before the game started. Both are checked at
+/// admission: a move that does not open its author's root is not a move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BisectionMove {
+    /// The [`Challenge::id`] this belongs to.
+    pub challenge_id: String,
+    /// Ed25519 public key, hex. Which party is answering. Whether that is the
+    /// defender or the challenger is derived from the log — the claim names its
+    /// submitter and the challenge names its challenger — so a mover cannot
+    /// answer for the other side by saying so.
+    pub mover: String,
+    /// Which state index the game asked about.
+    pub index: u64,
+    /// The state at that index.
+    pub state: Value,
+    /// The inclusion path, bottom up, against the mover's own root.
+    pub path: Vec<String>,
+    pub created_at: String,
+    /// Ed25519 signature over [`BisectionMove::signing_payload`], hex.
+    pub signature: Option<String>,
+}
+
+impl BisectionMove {
+    pub fn new(
+        challenge_id: impl Into<String>,
+        mover: impl Into<String>,
+        index: u64,
+        state: Value,
+        path: Vec<String>,
+        created_at: impl Into<String>,
+    ) -> BisectionMove {
+        BisectionMove {
+            challenge_id: challenge_id.into(),
+            mover: mover.into(),
+            index,
+            state,
+            path,
+            created_at: created_at.into(),
+            signature: None,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("bisection")),
+            ("challenge_id", Value::string(self.challenge_id.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("index", Value::Int(i128::from(self.index))),
+            ("mover", Value::string(self.mover.clone())),
+            (
+                "path",
+                Value::Array(self.path.iter().cloned().map(Value::String).collect()),
+            ),
+            ("state", self.state.clone()),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> BisectionMove {
+        self.mover = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "bisection";
+        if signed_submitter(&self.mover).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.mover.clone(),
+            });
+        }
+        let signature = self.signature.as_deref().ok_or(SignatureError::Missing {
+            record: RECORD,
+            submitter: self.mover.clone(),
+        })?;
+        verify_record_signature(
+            RECORD,
+            &self.mover,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "bisection";
+        if self.challenge_id.is_empty() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "challenge_id",
+                expected: "the id of the challenge being played",
+            });
+        }
+        // The same bound the availability answer carries, for the same reason:
+        // a path longer than any tree needs is a record big enough to be a
+        // nuisance and proves nothing extra.
+        if self.path.len() > MAX_AVAILABILITY_PATH {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "path",
+                expected: "at most 32 sibling hashes",
+            });
+        }
+        if self.state.canonical_bytes().len() > crate::challenge::MAX_STATE_BYTES {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "state",
+                expected: "a state of at most 64 KiB",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<BisectionMove, RecordError> {
+        const RECORD: &str = "bisection";
+        let value = expect_object(value, RECORD)?;
+        let path = match value.get("path") {
+            Some(Value::Array(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    match item.as_str() {
+                        Some(hash) => out.push(hash.to_string()),
+                        None => {
+                            return Err(RecordError::InvalidField {
+                                record: RECORD,
+                                field: "path",
+                                expected: "a list of hash strings",
+                            })
+                        }
+                    }
+                }
+                out
+            }
+            _ => {
+                return Err(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "path",
+                    expected: "a list of hash strings",
+                })
+            }
+        };
+        let record = BisectionMove {
+            challenge_id: required_string(value, RECORD, "challenge_id")?,
+            mover: required_string(value, RECORD, "mover")?,
+            index: required_u64(value, RECORD, "index")?,
+            state: value
+                .get("state")
+                .cloned()
+                .ok_or(RecordError::InvalidField {
+                    record: RECORD,
+                    field: "state",
+                    expected: "the state at that index",
+                })?,
+            path,
+            created_at: required_string(value, RECORD, "created_at")?,
+            signature: optional_string(value, RECORD, "signature")?,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2474,6 +3218,7 @@ mod tests {
             deadline: None,
             ratchet: None,
             confidentiality: Confidentiality::Public,
+            embargo_epochs: None,
             artifact_schema: None,
             require_signed_submitter: false,
         }
@@ -3245,6 +3990,41 @@ mod tests {
                 .expect("the top of the range decodes")
                 .seq,
             u64::MAX
+        );
+    }
+
+    /// The signed undertaking the *other* implementation pins as a fixture.
+    ///
+    /// `reference/rust` cannot sign — deliberately, so it can never agree with
+    /// this crate by sharing its bug — which means its audit tests need a
+    /// genuinely signed record borrowed from here. A borrowed constant rots
+    /// silently: add a field to the record and the reference's copy becomes a
+    /// record this crate would no longer write, so the two implementations stop
+    /// being compared on the same bytes while both still pass.
+    ///
+    /// So the bytes live here, where changing the record breaks *this* test
+    /// first and names the file to update. If you are reading this because it
+    /// failed: paste the printed value into `SIGNED` in
+    /// `reference/rust/src/node.rs`.
+    #[test]
+    fn the_signed_undertaking_the_reference_crate_pins_is_still_what_this_crate_writes() {
+        const SIGNED: &str = r#"{"bond":500,"created_at":"2026-08-14T00:00:00+00:00","height":3,"identity":"197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61","root":"sha256:30ffa4f80f8e0198fd85844b9a63b682f11f1bca7a67532aaaae0f20d17e78ed","signature":"bac8259da5214a3026e01f1e912988a1cb4fd6969085a6ad0cddb6a43af99ee1a6202b4df610dd2e8df8472c34f6a7985d3ee0ed2ea37d1094f1f64ef15d4f06","type":"undertaking"}"#;
+
+        let who = crate::crypto::identity::Identity::from_secret_bytes([42u8; 32]);
+        let record = Undertaking::new(
+            "",
+            crate::canonical::digest_bytes(b"a root no log ever had"),
+            3,
+            500,
+            "2026-08-14T00:00:00+00:00",
+        )
+        .signed_with(&who);
+        record.verify_signature().expect("this crate signs it");
+        assert_eq!(
+            record.to_value().canonical_string(),
+            SIGNED,
+            "the undertaking record changed shape; \
+             reference/rust/src/node.rs pins the old bytes"
         );
     }
 }
