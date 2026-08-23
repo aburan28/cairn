@@ -69,6 +69,7 @@ use cairn::attribution::{payouts_with_enforced, FlowError, FlowParams};
 use cairn::canonical::{short, CanonicalError, Value};
 use cairn::checkpoint::{RootKey, SignedCheckpoint};
 use cairn::crypto::identity::Identity;
+use cairn::drand;
 use cairn::frontier::Ratchet;
 use cairn::incentive::design::Report as IncentiveReport;
 use cairn::incentive::{sweep, NodeParams, ParamError, Rat};
@@ -503,6 +504,12 @@ enum Command {
     /// enforces the timing, and whoever supplies the value is responsible for
     /// it being the one the epoch boundary selects. See
     /// `docs/design/chain-beacon.md`.
+    ///
+    /// `--drand-signature` narrows *responsible for* to one thing. The chain is
+    /// pinned and the round is a function of the epoch, so the only input left
+    /// is the signature itself -- and unlike an Ethereum `--value`, a wrong one
+    /// is falsifiable by any reader holding 96 bytes of public key. See
+    /// `docs/design/drand-beacon.md`.
     Beacon {
         orders: u64,
         source: String,
@@ -511,6 +518,35 @@ enum Command {
         /// Compute the value as a verifiable delay of this many sequential
         /// squarings, rather than taking it from the caller.
         delay: Option<u64>,
+    },
+    /// Which drand round an epoch is settled against, and when it publishes.
+    ///
+    /// A query, so it is not `beacon --show-round`: that would be an append
+    /// command with a mode in which it appends nothing, and the two have
+    /// different failure modes and different exit codes.
+    ///
+    /// It exists for `scripts/drand-beacon.sh`. The script has to fetch the
+    /// round the log will later say it fetched, and the alternative was for it
+    /// to re-derive the mapping in bash -- a third implementation of a
+    /// consensus-visible derivation, living in a helper, silently producing an
+    /// unverifiable record on any disagreement. Asking the binary is cheaper
+    /// than making that correct.
+    DrandRound {
+        orders: Option<u64>,
+    },
+    /// Check a quicknet signature against the pinned key, and nothing else.
+    ///
+    /// Two audiences. An operator handed a beacon value can confirm it without
+    /// trusting the node that wrote it or the relay that served it — the whole
+    /// selling point of this source, reduced to one command. And
+    /// `scripts/differential.sh` can put the same signature in front of both
+    /// implementations and require the same verdict, which is the only way the
+    /// claim that two different BLS libraries agree is worth anything.
+    ///
+    /// Exit 0 for verified, 1 for anything else, so a shell can branch on it.
+    DrandVerify {
+        round: u64,
+        signature: String,
     },
     /// Sign the log's current state so a reader can pin what this operator
     /// claimed at a point in time.
@@ -1160,6 +1196,8 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             Command::Settle
         }
         "beacon" => parse_beacon(&mut cursor)?,
+        "drand-round" => parse_drand_round(&mut cursor)?,
+        "drand-verify" => parse_drand_verify(&mut cursor)?,
         "checkpoint" => parse_checkpoint(&mut cursor)?,
         "drain" => parse_drain(&mut cursor)?,
         "audit" => parse_audit(&mut cursor)?,
@@ -1481,19 +1519,28 @@ fn parse_drain(cursor: &mut Cursor) -> Result<Command, CliError> {
     })
 }
 
-/// `beacon --orders N --value HEX [--source NAME] [--block N]`
+/// `beacon --orders N (--drand-signature HEX | --value HEX [--source NAME] [--block N])`
 ///
 /// `--orders` is required rather than defaulted to the current epoch. The
 /// default would be right almost always and catastrophically wrong at a
 /// boundary -- a command run a second late would name the next epoch, be
 /// refused as out of time, and leave the epoch it meant to cover on the
 /// fallback. An operator scripting this knows which epoch they mean.
+///
+/// `--drand-signature` is one flag rather than a `--drand` mode plus a value,
+/// because there is nothing else to configure: the chain is pinned in
+/// [`drand`], the round is a function of `--orders`, and the signature is the
+/// only thing an operator can supply that this binary cannot derive. It fills
+/// in `--source`, `--block` and `--value` and **refuses** them rather than
+/// overriding them, since a command that quietly won an argument about which
+/// round governs an epoch is worse than one that stops.
 fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut orders: Option<u64> = None;
     let mut source: Option<String> = None;
     let mut block: Option<u64> = None;
     let mut value: Option<String> = None;
     let mut delay: Option<u64> = None;
+    let mut drand_signature: Option<String> = None;
     while let Some(token) = cursor.take() {
         if token == "--orders" {
             orders = Some(parse_u64(&cursor.value("--orders")?, "--orders")?);
@@ -1505,9 +1552,56 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
             value = Some(cursor.value("--value")?);
         } else if token == "--delay" {
             delay = Some(parse_u64(&cursor.value("--delay")?, "--delay")?);
+        } else if token == "--drand-signature" {
+            drand_signature = Some(cursor.value("--drand-signature")?);
         } else {
             return Err(CliError::Usage(format!("beacon: unexpected {token:?}")));
         }
+    }
+    let orders = match orders {
+        Some(orders) => orders,
+        None => return Err(CliError::Usage("beacon: --orders is required".into())),
+    };
+    // The two self-verifying sources, offered at once. Refused rather than
+    // ranked: an epoch gets one beacon, and a command that silently preferred
+    // one of two proofs would be choosing the settlement anchor on the
+    // operator's behalf.
+    if delay.is_some() && drand_signature.is_some() {
+        return Err(CliError::Usage(String::from(
+            "beacon: --delay and --drand-signature are two beacons for one epoch, \
+             and an epoch gets one",
+        )));
+    }
+    if let Some(signature) = drand_signature {
+        if source.is_some() || block.is_some() || value.is_some() {
+            return Err(CliError::Usage(
+                "beacon: --drand-signature derives --source, --block and --value; passing \
+                 one of them too would be asking which of the two answers about this \
+                 epoch's round is the real one"
+                    .into(),
+            ));
+        }
+        // Refused here as well as by `record_beacon`, because the useful
+        // error for the mistake people actually make is this one. 64 hex
+        // characters is drand's `randomness` field -- SHA-256 of the
+        // signature, and therefore a hash of the evidence rather than the
+        // evidence. "Does not verify" would describe that correctly and
+        // unhelpfully.
+        if !drand::is_signature_shaped(&signature) {
+            return Err(CliError::Usage(format!(
+                "beacon: --drand-signature takes the 96-hex-character `signature` field \
+                 of a quicknet round, and this is {} characters -- drand's `randomness` \
+                 field is 64 and is a hash of the evidence rather than the evidence",
+                signature.len()
+            )));
+        }
+        return Ok(Command::Beacon {
+            orders,
+            source: drand::SOURCE.into(),
+            block: drand::round_for_epoch(orders, cairn::partition::epoch_seconds()),
+            value: signature,
+            delay: None,
+        });
     }
     if delay.is_some() && value.is_some() {
         return Err(CliError::Usage(String::from(
@@ -1515,10 +1609,7 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
         )));
     }
     Ok(Command::Beacon {
-        orders: match orders {
-            Some(orders) => orders,
-            None => return Err(CliError::Usage("beacon: --orders is required".into())),
-        },
+        orders,
         // Defaulted, because a beacon with no stated origin is still a beacon
         // the sequencer did not choose if it came from somewhere -- but an
         // unnamed one is unverifiable by anyone holding a chain, so the name
@@ -1536,6 +1627,50 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
             (None, value) => require(value, "beacon", "--value or --delay")?,
         },
         delay,
+    })
+}
+/// `drand-round [--orders N]`
+///
+/// `--orders` defaults to the current epoch here, and is required on `beacon`,
+/// and that is not an inconsistency: this command writes nothing. A query that
+/// names the wrong epoch prints a number; an append that names the wrong epoch
+/// is refused as out of time and leaves the epoch it meant to cover on the
+/// fallback.
+fn parse_drand_round(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut orders: Option<u64> = None;
+    while let Some(token) = cursor.take() {
+        if token == "--orders" {
+            orders = Some(parse_u64(&cursor.value("--orders")?, "--orders")?);
+        } else {
+            return Err(CliError::Usage(format!(
+                "drand-round: unexpected {token:?}"
+            )));
+        }
+    }
+    Ok(Command::DrandRound { orders })
+}
+
+/// `drand-verify --round N --signature HEX`
+fn parse_drand_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut round: Option<u64> = None;
+    let mut signature: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        if token == "--round" {
+            round = Some(parse_u64(&cursor.value("--round")?, "--round")?);
+        } else if token == "--signature" {
+            signature = Some(cursor.value("--signature")?);
+        } else {
+            return Err(CliError::Usage(format!(
+                "drand-verify: unexpected {token:?}"
+            )));
+        }
+    }
+    Ok(Command::DrandVerify {
+        round: match round {
+            Some(round) => round,
+            None => return Err(CliError::Usage("drand-verify: --round is required".into())),
+        },
+        signature: require(signature, "drand-verify", "--signature")?,
     })
 }
 
@@ -2864,6 +2999,17 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  settle");
     say(out, "      pay out every reveal epoch that has closed");
+    say(out, "  drand-verify --round N --signature HEX");
+    say(
+        out,
+        "      does that signature carry that drand round? Exit 0 if it does.",
+    );
+    say(out, "  drand-round [--orders EPOCH]");
+    say(
+        out,
+        "      which drand round that epoch is settled against, and when it publishes",
+    );
+    say(out, "  beacon --orders EPOCH --drand-signature HEX");
     say(
         out,
         "  beacon --orders EPOCH --value HEX [--source NAME] [--block N]",
@@ -2871,6 +3017,14 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      record the randomness that epoch's settlement is ordered against.",
+    );
+    say(
+        out,
+        "      --drand-signature derives the source, round and value from the epoch:",
+    );
+    say(
+        out,
+        "      the round is not a choice, and a wrong value is falsifiable by anyone",
     );
     say(
         out,
@@ -3283,9 +3437,9 @@ fn decomposition_note(reward: u64) -> Vec<String> {
     if reward >= full {
         return Vec::new();
     }
-    let mut lines = vec![format!(
+    let mut lines = vec![String::from(
         "  note: below the decomposition floor -- this settlement does not pay \
-         for the verification it asks for"
+         for the verification it asks for",
     )];
     lines.push(format!(
         "    {} at full redundancy ({} nodes), {} at 3-fold sampling",
@@ -3902,6 +4056,45 @@ fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
     Ok(0)
 }
 
+/// Print the drand round an epoch is settled against.
+///
+/// Reads no log and writes nothing -- the mapping is arithmetic over pinned
+/// constants, which is the property that makes this source worth having, so a
+/// command that needed a node to answer would be misrepresenting it.
+fn cmd_drand_round(out: &mut dyn Write, orders: Option<u64>) -> Result<i32, CliError> {
+    let epoch = orders.unwrap_or_else(|| {
+        cairn::partition::epoch_of(
+            cairn::time::unix_seconds(),
+            cairn::partition::epoch_seconds(),
+        )
+    });
+    let round = drand::round_for_epoch(epoch, cairn::partition::epoch_seconds());
+    say(out, format!("epoch     {epoch}"));
+    say(out, format!("round     {round}"));
+    say(out, format!("publishes {}", drand::time_of_round(round)));
+    say(out, format!("chain     {}", drand::CHAIN_HASH));
+    Ok(0)
+}
+
+/// Verify one quicknet signature, against nothing but the pinned key.
+///
+/// No log, no network, no clock. If this command needed any of those, the claim
+/// it exists to demonstrate would be false.
+fn cmd_drand_verify(out: &mut dyn Write, round: u64, signature: &str) -> Result<i32, CliError> {
+    match drand::verify(round, signature) {
+        Ok(()) => {
+            say(out, format!("round {round}: verified"));
+            say(out, format!("  chain    {}", drand::CHAIN_HASH));
+            Ok(0)
+        }
+        Err(why) => {
+            say(out, format!("round {round}: does not verify"));
+            say(out, format!("  {why}"));
+            Ok(1)
+        }
+    }
+}
+
 /// Record one epoch's ordering randomness.
 ///
 /// Prints the epoch it covers and how the settlement order changed, because
@@ -3970,6 +4163,24 @@ fn cmd_beacon(
         out,
         format!("  anchor   {} -> {}", short(&before), short(&value)),
     );
+    if source == drand::SOURCE {
+        // Said out loud because the difference between this and every other
+        // source is exactly what an operator needs to know, and it is a claim
+        // they can check for themselves: the round was derived rather than
+        // chosen, and `record_beacon` would have refused this value if the
+        // pairing had not held.
+        say(
+            out,
+            format!(
+                "  round    {block} is the round epoch {orders} names; it was derived, not chosen"
+            ),
+        );
+        say(
+            out,
+            "  value    verified against the quicknet key pinned in src/drand.rs -- \
+             no chain, no relay, one pairing",
+        );
+    }
     Ok(0)
 }
 
@@ -7969,6 +8180,8 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             relations,
         ),
         Command::Settle => cmd_settle(out, options),
+        Command::DrandRound { orders } => cmd_drand_round(out, *orders),
+        Command::DrandVerify { round, signature } => cmd_drand_verify(out, *round, signature),
         Command::Beacon {
             orders,
             source,

@@ -1302,7 +1302,9 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
         _ => None,
     };
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }

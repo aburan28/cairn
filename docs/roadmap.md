@@ -765,6 +765,24 @@ downstream is unbacked.
       `CAIRN_REQUIRE_BEACON` makes that refusable rather than invisible.
       Refusing to settle instead would strand every claim in the epoch, which
       hands a censor a better weapon than the one being taken away.
+
+      **A second source landed beside it**, with the opposite trade.
+      [design/drand-beacon.md](design/drand-beacon.md) pins drand's quicknet:
+      the round an epoch uses is derived from the epoch, so nobody chooses it,
+      and the value is a threshold BLS signature verified against a key pinned
+      in the source — in both implementations, on two different BLS libraries,
+      because a pairing is the one check here where two correct-looking
+      programs can be made to disagree. Where the VDF buys grinding resistance
+      by making the sequencer *wait*, drand buys it by putting the draw outside
+      the sequencer entirely — and pays for that with an external dependency
+      and a new trust assumption, both in `docs/threat-model.md`. `source` is
+      what discriminates, so the two coexist and an epoch still gets one
+      beacon.
+
+      What is still not *decided* is whether the network should depend on an
+      outside beacon at all: [design/anchored-time.md](design/anchored-time.md)
+      recommendation 3, still open. The VDF is the answer that needs no
+      outsider, and it is now the one that is built first.
 - [ ] Forced inclusion via a base layer. Censorship is the primary threat --
       withholding a reveal steals a bounty -- and Stage 0 has no defence.
 
