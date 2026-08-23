@@ -1,0 +1,3 @@
+{
+  "source": "def run(xs):\n    acc = 0\n    for i, x in enumerate(xs):\n        branch = x % 3\n        if branch == 0:\n            acc = (acc * 7 + x) % 1000003\n        elif branch == 1:\n            shift = i if i < 5 else 5\n            acc = (acc ^ (x << shift)) % 1000003\n        else:\n            acc = (acc + x * x) % 1000003\n    return acc\n"
+}
