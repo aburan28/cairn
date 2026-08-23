@@ -3437,9 +3437,9 @@ fn decomposition_note(reward: u64) -> Vec<String> {
     if reward >= full {
         return Vec::new();
     }
-    let mut lines = vec![format!(
+    let mut lines = vec![String::from(
         "  note: below the decomposition floor -- this settlement does not pay \
-         for the verification it asks for"
+         for the verification it asks for",
     )];
     lines.push(format!(
         "    {} at full redundancy ({} nodes), {} at 3-fold sampling",
