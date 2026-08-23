@@ -145,8 +145,12 @@ fn fixture(label: &str, peers: u8, stake: u64, reward: u64) -> Fixture {
         )
         .expect("genesis issuance");
     }
-    node.post_issuance(&Issuance::new("treasury", 100_000_000, EPOCH_0), EPOCH_0)
-        .expect("genesis issuance");
+    let treasury = Identity::from_secret_bytes([0u8; 32]);
+    node.post_issuance(
+        &Issuance::new(treasury.submitter_id(), 100_000_000, EPOCH_0),
+        EPOCH_0,
+    )
+    .expect("genesis issuance");
 
     let objective = Objective::new(
         "G",
@@ -158,12 +162,13 @@ fn fixture(label: &str, peers: u8, stake: u64, reward: u64) -> Fixture {
             ("entrypoint", Value::string("check")),
         ]),
         reward,
-        "treasury",
+        treasury.submitter_id(),
         EPOCH_0,
         None,
         None,
     )
-    .expect("valid objective");
+    .expect("valid objective")
+    .funded_by(&treasury);
     node.post_objective(&objective, EPOCH_0).expect("post");
     for (index, member) in members.iter().enumerate() {
         node.post_peer(&member.peer_record(9000 + index as u16, EPOCH_0), EPOCH_0)

@@ -352,6 +352,8 @@ unrepresentable.
 
 ```sh
 cairn post   examples/capset/objective.json
+# In a scarce-supply log, sign the objective with the funding identity:
+cairn post   examples/capset/objective.json --identity treasury.json
 cairn commit <objective-id> --submitter bob --artifact solution.json --nonce s3cret
 cairn reveal <objective-id> --submitter bob --artifact solution.json --nonce s3cret
 cairn try    examples/capset/objective.json --submitter bob --artifact solution.json
@@ -909,8 +911,8 @@ examples/            worked objectives with real artifacts
 - **Not a blockchain.** One sequencer, no consensus, no token. Deliberate: the
   valuable property is "anyone can check", not "no one is in charge".
 - **Sandboxed, not virtualized.** Pinned verifier code runs in an OS jail
-  (bubblewrap / seatbelt): no network, confined writes, a deadline. A kernel
-  bug is still an escape, macOS does not confine reads, and a host with no
+  (bubblewrap / seatbelt): no network, declared reads only, confined writes,
+  and a deadline. A kernel or policy bug is still an escape, and a host with no
   jail mechanism runs unconfined unless `CAIRN_REQUIRE_SANDBOX=1` is set.
   VM-class isolation is Stage 2; see the threat model before opening
   objective authorship to strangers.

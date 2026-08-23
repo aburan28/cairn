@@ -1052,4 +1052,53 @@ mod tests {
         assert!(node.ledger().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn delayed_replay_preserves_the_recorded_commitment_epoch() {
+        let root = std::env::temp_dir().join(format!(
+            "cairn-p2p-delayed-commitment-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ledger = Ledger::open(root.join("log.jsonl")).unwrap();
+        let mut node = Node::new(ledger, &root);
+        let objective_at = "2026-08-18T00:00:00+00:00";
+        let commitment_at = "2026-08-18T00:01:00+00:00";
+        let now = "2026-08-18T00:20:00+00:00";
+        let objective = Objective::new(
+            "GOAL-delayed-sync",
+            "a delayed peer must preserve consensus history",
+            Value::object([
+                ("kind", Value::string("certificate")),
+                ("checker", Value::string("checker.py")),
+                ("checker_sha256", Value::string("aa".repeat(32))),
+                ("entrypoint", Value::string("check")),
+            ]),
+            1,
+            "treasury",
+            objective_at,
+            None,
+            None,
+        )
+        .unwrap();
+        let commitment = Commitment::new(
+            objective.id(),
+            "alice",
+            "sha256:committed-before-sync",
+            commitment_at,
+        );
+
+        replay_records_at(
+            &mut node,
+            &[
+                ("objective".into(), objective.to_value()),
+                ("commitment".into(), commitment.to_value()),
+            ],
+            now,
+        );
+
+        assert_eq!(node.ledger().entries_of_kind("commitment").len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

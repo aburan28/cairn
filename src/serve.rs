@@ -478,6 +478,7 @@ struct Request {
     path: String,
     query: BTreeMap<String, String>,
     length: u64,
+    content_type: Option<String>,
 }
 
 /// Serve until the process is killed.
@@ -622,6 +623,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     }
 
     let mut length = 0u64;
+    let mut content_type = None;
     loop {
         let mut header = String::new();
         let read = reader
@@ -641,6 +643,15 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
                     return Err(format!("body larger than {MAX_BODY_BYTES} bytes"));
                 }
             }
+            if name == "content-type" {
+                let media_type = value
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                content_type = Some(media_type);
+            }
             if name == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
                 return Err("chunked bodies are not supported; send content-length".to_string());
             }
@@ -652,6 +663,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         path,
         query,
         length,
+        content_type,
     })
 }
 
@@ -1166,6 +1178,9 @@ fn submit(
             "this node is read-only; it accepts no submissions",
         );
     };
+    if request.content_type.as_deref() != Some("application/json") {
+        return json_error(stream, 415, "POST /submit requires application/json");
+    }
     if request.length == 0 {
         return json_error(stream, 400, "empty body");
     }
@@ -1468,6 +1483,18 @@ mod tests {
             "cross-origin submission is allowed; a page could spend its visitors' \
              addresses filling this queue: {preflight}"
         );
+
+        // `text/plain` is a CORS-simple media type and therefore skips the
+        // preflight above. The server itself must enforce JSON rather than
+        // relying on a browser decision it cannot observe.
+        let body = r#"{"type":"claim"}"#;
+        let simple = ask(&format!(
+            "POST /submit HTTP/1.1\r\nHost: x\r\nOrigin: https://evil.example\r\n\
+             Content-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ));
+        assert!(simple.starts_with("http/1.1 415"), "{simple}");
     }
 
     #[test]

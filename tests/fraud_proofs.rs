@@ -166,11 +166,12 @@ fn network(label: &str) -> Network {
 
     let alice = Identity::from_secret_bytes([7u8; 32]);
     let bob = Identity::from_secret_bytes([9u8; 32]);
+    let treasury = Identity::from_secret_bytes([0u8; 32]);
     // Genesis first: issuance is admissible only in the genesis prefix.
     for (who, units) in [
         (alice.submitter_id(), 5_000_000u64),
         (bob.submitter_id(), 5_000_000),
-        ("treasury".to_string(), 5_000_000),
+        (treasury.submitter_id(), 5_000_000),
     ] {
         node.post_issuance(&Issuance::new(who, units, COMMIT_AT), COMMIT_AT)
             .expect("genesis issuance");
@@ -194,12 +195,13 @@ fn network(label: &str) -> Network {
             ),
         ]),
         1000,
-        "treasury",
+        treasury.submitter_id(),
         COMMIT_AT,
         None,
         None,
     )
-    .expect("valid objective");
+    .expect("valid objective")
+    .funded_by(&treasury);
     node.post_objective(&objective, COMMIT_AT).expect("post");
     Network {
         _dir: dir,

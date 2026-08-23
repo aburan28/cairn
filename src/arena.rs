@@ -586,6 +586,18 @@ impl Arena {
             secret.copy_from_slice(&hasher.finalize());
             identities.insert((*name).to_string(), Identity::from_secret_bytes(secret));
         }
+        // A scarce-supply log requires the identity funding an objective to
+        // authenticate the charge. Treasury used to be a nickname, which made
+        // every arena objective inadmissible once objective funding became
+        // signed and reduced economic scenarios to inert zero-vs-zero runs.
+        identities.entry("treasury".to_string()).or_insert_with(|| {
+            let mut hasher = Sha256::new();
+            hasher.update(b"cairn/arena/identity/v1");
+            hasher.update(b"treasury");
+            let mut secret = [0u8; 32];
+            secret.copy_from_slice(&hasher.finalize());
+            Identity::from_secret_bytes(secret)
+        });
         let stakes: BTreeMap<String, u64> = players
             .iter()
             .map(|(name, stake)| ((*name).to_string(), *stake))
@@ -593,7 +605,11 @@ impl Arena {
 
         let start = stamp(ORIGIN);
         // Genesis first: issuance is admissible only in the opening prefix.
-        node.post_issuance(&Issuance::new("treasury", supply, &start), &start)
+        let treasury = identities
+            .get("treasury")
+            .expect("treasury identity was inserted")
+            .submitter_id();
+        node.post_issuance(&Issuance::new(treasury, supply, &start), &start)
             .expect("genesis issuance");
         let mut opened = BTreeMap::new();
         for (name, identity) in &identities {
@@ -720,11 +736,7 @@ impl Arena {
         tag: &str,
         bisectable: bool,
     ) -> Option<String> {
-        let funder = if player == "treasury" {
-            "treasury".to_string()
-        } else {
-            self.who(player)
-        };
+        let funder = self.who(player);
         let mut verifier = vec![
             ("kind", Value::string("certificate")),
             ("checker", Value::string("c.py")),
@@ -751,7 +763,8 @@ impl Arena {
             None,
             None,
         )
-        .expect("a valid objective");
+        .expect("a valid objective")
+        .funded_by(self.identity(player));
         let ts = self.now();
         match self.node.post_objective(&objective, &ts) {
             Ok(_) => {

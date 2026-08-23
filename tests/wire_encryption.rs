@@ -139,8 +139,9 @@ fn nothing_a_session_carries_appears_in_the_bytes_on_the_wire() {
         "alice needs nothing, so the session would carry no blob traffic"
     );
 
-    let alice_service = Service::new(Arc::new(PeerIdentity::generate()));
-    let alice_id = alice_service.identity();
+    let alice_identity = Arc::new(PeerIdentity::generate());
+    let alice_key_prefix = alice_identity.public_key()[..64].to_vec();
+    let alice_service = Service::new(alice_identity);
     alice_service
         .dial_node_once(&Endpoint::new(relay_addr, bob_public), &mut alice)
         .expect("alice's session");
@@ -168,14 +169,13 @@ fn nothing_a_session_carries_appears_in_the_bytes_on_the_wire() {
     // The control: without it, every "does not appear" below would also pass on
     // an empty or misdirected capture, and the test would be checking nothing.
     // The disclosure: the handshake prefix genuinely *is* cleartext — an
-    // initiator sends its 32-byte peer id followed by the KEM ciphertext,
-    // because the responder must know which peer to expect before a key exists.
-    // So a network observer learns **who is talking to whom**, and only that.
+    // initiator sends its long-term public key so the responder can derive and
+    // authenticate its id before any application state is released.
     // Unlinkability is a transport-layer problem this design does not solve;
     // `docs/threat-model.md` says so under topology mapping.
     assert!(
-        contains(&bytes, &alice_id),
-        "the initiator's peer id should be visible in the handshake -- if it is \
+        contains(&bytes, &alice_key_prefix),
+        "the initiator's public key should be visible in the handshake -- if it is \
          not, this capture is not the session and the assertions below prove \
          nothing"
     );

@@ -34,7 +34,9 @@ REF="${REFERENCE_BIN:-./reference/rust/target/release/cairn-reference}"
   cargo build --release --manifest-path reference/rust/Cargo.toml
 }
 LOG="$WORK/log.jsonl"
-pw() { "$PW" --log "$LOG" --root "$WORK" "$@"; }
+pw() {
+  "$PW" --log "$LOG" --key-file "$WORK/no-at-rest-key" --root "$WORK" "$@"
+}
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
@@ -91,15 +93,17 @@ PY
 rule "a declared supply, so a bond costs something"
 # Without an issuance record the escrow rules are off and a bond is free, which
 # means the mechanism this script demonstrates is not actually running.
-"$PW" --log "$LOG" --root "$WORK" identity --out "$WORK/alice.json" >/dev/null
-"$PW" --log "$LOG" --root "$WORK" identity --out "$WORK/bob.json" >/dev/null
+pw identity --out "$WORK/alice.json" >/dev/null
+pw identity --out "$WORK/bob.json" >/dev/null
+pw identity --out "$WORK/treasury.json" >/dev/null
 ALICE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['public'])" "$WORK/alice.json")
 BOB=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['public'])" "$WORK/bob.json")
+TREASURY=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['public'])" "$WORK/treasury.json")
 pw issue --holder "$ALICE" --units 1000000 >/dev/null
 pw issue --holder "$BOB" --units 1000000 >/dev/null
-pw issue --holder treasury --units 1000000 >/dev/null
-pw post "$WORK/objective.json" >/dev/null
-OID=$("$PW" decode objective --record "$WORK/objective.json" | grep -o 'sha256:[0-9a-f]*' | head -1)
+pw issue --holder "$TREASURY" --units 1000000 >/dev/null
+OID=$(pw post "$WORK/objective.json" --identity "$WORK/treasury.json" \
+  | head -1 | awk '{print $2}')
 printf '  objective %s\n' "$OID"
 
 rule "the honest trace, and a forged one"

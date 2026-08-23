@@ -31,7 +31,11 @@ trap 'rm -rf "$WORK"' EXIT
 PW="${CAIRN_BIN:-./target/release/cairn}"
 [ -x "$PW" ] || { echo "building release binary..." >&2; cargo build --release; }
 LOG="$WORK/log.jsonl"
-pw() { "$PW" --log "$LOG" --root . "$@"; }
+# Keep the demo hermetic.  A developer may have a real key at the default
+# ~/.cairn/key path; if this temporary log inherited it, the ledger would be
+# sealed and the assertions below that deliberately inspect the raw public log
+# would be looking at ciphertext instead of records.
+pw() { "$PW" --log "$LOG" --key-file "$WORK/no-at-rest-key" --root . "$@"; }
 
 # One-second epochs, so the same rules play out in a script that finishes.
 # Changes no canonical bytes: nothing derived from this enters a record.
