@@ -374,6 +374,12 @@ fn confinement_refusal() -> Option<Verdict> {
 }
 
 pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
+    // The confinement refusal is deliberately *not* here. Each kind calls
+    // `confinement_refusal` after it has validated its own spec, so a
+    // malformed objective is still classified `InvalidSpec` in strict mode
+    // rather than being reported as this host's missing jail. Collapsing the
+    // two would tell a funder their objective is fine and this node is broken,
+    // when the objective is the broken one.
     match spec.get("kind").and_then(Value::as_str) {
         Some("certificate") => certificate(root, spec, artifact),
         Some("evaluator") => evaluator(root, spec, artifact),
