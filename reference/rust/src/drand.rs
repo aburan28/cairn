@@ -200,7 +200,9 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(text.len() / 2);
-    for pair in text.as_bytes().chunks_exact(2) {
+    // `as_chunks`, so a pair is `[u8; 2]` rather than a slice that happens to
+    // be two long. Newer clippy asks for it (`chunks_exact_to_as_chunks`).
+    for pair in text.as_bytes().as_chunks::<2>().0 {
         let nibble = |byte: u8| match byte {
             b'0'..=b'9' => Some(byte - b'0'),
             b'a'..=b'f' => Some(byte - b'a' + 10),

@@ -34,7 +34,10 @@ pub fn decode(text: &str) -> Option<Vec<u8>> {
     }
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    // `as_chunks` rather than `chunks_exact`: the odd byte is already refused
+    // above, and this yields `[u8; 2]` so the pair's shape is a type rather
+    // than a promise. `clippy::chunks_exact_to_as_chunks` asks for it too.
+    for pair in bytes.as_chunks::<2>().0 {
         out.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
     }
     Some(out)
