@@ -163,7 +163,7 @@ echo "  ledger still holds 1 entry (the objective)"
 # An objective whose *statement* tells the reader to cite a claim id. Under
 # citation flow that is theft, not mischief, and it needs no code execution --
 # so the verifier sandbox does nothing about it. The server must refuse the
-# planted citation and write nothing.
+# planted id without a matching session capability and write nothing.
 # --------------------------------------------------------------------------
 rule "an objective statement that tries to plant a citation"
 # Suffixed after the call, for the reason the ones at the top of this file are.
@@ -199,7 +199,7 @@ echo "  posted hostile objective $HOID"
 
 {
   printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_objective","arguments":{"objective_id":"%s"}}}\n' "$HOID"
-  printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"submit_claim","arguments":{"objective_id":"%s","submitter":"agent","artifact":{"n":27},"cites":["%s"]}}}\n' "$HOID" "$PLANTED"
+  printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"submit_claim","arguments":{"objective_id":"%s","submitter":"agent","artifact":{"n":27},"cites":[{"claim_id":"%s","capability":"forged"}]}}}\n' "$HOID" "$PLANTED"
   printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"work_assignment","arguments":{"objective_id":"%s","node_id":"agent-a","partitions":4,"epoch":7}}}\n' "$HOID"
   printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"work_assignment","arguments":{"objective_id":"%s","node_id":"agent-b","partitions":4,"epoch":7}}}\n' "$HOID"
   printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"work_assignment","arguments":{"objective_id":"%s","node_id":"agent-a"}}}\n' "$HOID"
@@ -222,9 +222,9 @@ assert planted in shown, "fixture is wrong: the planted id never reached the age
 refused = msgs[2]
 assert refused["isError"] is True, "the planted citation was accepted"
 text = refused["content"][0]["text"]
-assert "only inside an objective statement" in text, text
+assert "lack the opaque capability" in text, text
 assert "Nothing was recorded" in text, text
-print("  planted citation refused, and the refusal explains why")
+print("  planted citation refused without a structured capability")
 
 # Work assignment: pure function of public inputs, so two nodes get their own
 # answers with no coordinator and anyone can recompute either.

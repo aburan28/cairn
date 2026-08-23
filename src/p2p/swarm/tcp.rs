@@ -397,10 +397,10 @@ fn serve_one(mut connection: Connection, ctx: Serving) -> io::Result<()> {
     // this node's memory. An authenticated peer is not a trusted one.
     connection.set_max_frame(super::wire::MAX_FRAME as u32);
 
-    // The transport handshake already ran, so the channel is encrypted before
-    // a swarm byte moves. The inbound initiator id is only claimed and is never
-    // used here: `next_peer` assigns a local, connection-scoped number instead.
-    // What is exchanged here is only *which blob* the session is about.
+    // The mutual transport handshake already ran, so the channel is encrypted
+    // and both long-term identities are authenticated before a swarm byte
+    // moves. `next_peer` still assigns a local, connection-scoped number: what
+    // this layer exchanges is only *which blob* the session is about.
     let Ok(head) = connection.receive(CONTEXT) else {
         return Ok(());
     };

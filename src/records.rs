@@ -114,6 +114,9 @@ pub enum RecordError {
     /// Citations are a set. A repeated edge would otherwise be counted twice by
     /// attribution, which is a way of paying yourself for the same input.
     DuplicateCitation { id: String },
+    /// The frozen commitment preimage uses `|` as a field separator. Allowing
+    /// it inside `submitter` makes distinct field tuples encode identically.
+    AmbiguousSubmitter,
     /// Two relations naming one target. See [`Claim::validate`] for why the key
     /// is the target rather than the `(kind, target)` pair.
     DuplicateRelation { id: String },
@@ -174,6 +177,9 @@ impl fmt::Display for RecordError {
             RecordError::DuplicateCitation { id } => {
                 write!(f, "duplicate citation {id:?}")
             }
+            RecordError::AmbiguousSubmitter => f.write_str(
+                "submitter cannot contain '|' because it delimits the commitment preimage",
+            ),
             RecordError::DuplicateRelation { id } => write!(
                 f,
                 "two relations name the target {id:?}; a claim says one thing \
@@ -349,6 +355,9 @@ pub struct Objective {
     pub verifier: Value,
     pub reward: u64,
     pub funder: String,
+    /// Ed25519 authorization by `funder` over every economic and verifier
+    /// field in this objective. Omitted on legacy supplyless records.
+    pub funding_signature: Option<String>,
     pub created_at: String,
     pub deadline: Option<String>,
     /// Optional progressive-bounty parameters (see `frontier::Ratchet`). When
@@ -437,6 +446,7 @@ impl Objective {
             verifier,
             reward,
             funder: funder.into(),
+            funding_signature: None,
             created_at: created_at.into(),
             deadline,
             ratchet,
@@ -598,9 +608,8 @@ impl Objective {
         self.verifier.get("kind").and_then(Value::as_str)
     }
 
-    /// Canonical form. Optional fields are omitted when unset -- see the module
-    /// docs for why nulling them instead would reissue every id in the network.
-    pub fn to_value(&self) -> Value {
+    /// Canonical record without its funding signature.
+    fn unsigned_value(&self) -> Value {
         let mut body: BTreeMap<String, Value> = BTreeMap::new();
         body.insert(
             "type".to_string(),
@@ -654,6 +663,48 @@ impl Objective {
             body.insert("require_signed_submitter".to_string(), Value::Bool(true));
         }
         Value::Object(body)
+    }
+
+    /// Domain-separated bytes the funder authorizes.
+    pub fn funding_signing_payload(&self) -> Value {
+        Value::object([
+            ("domain", Value::string("cairn/objective-funding/v1")),
+            ("objective", self.unsigned_value()),
+        ])
+    }
+
+    /// Bind the charged funder to a signing identity and authorize the record.
+    pub fn funded_by(mut self, identity: &crate::crypto::identity::Identity) -> Objective {
+        self.funder = identity.submitter_id();
+        self.funding_signature = Some(
+            identity
+                .sign_value(&self.funding_signing_payload())
+                .to_hex(),
+        );
+        self
+    }
+
+    /// Check a funding authorization whenever `funder` is key-shaped.
+    pub fn verify_funding_signature(&self) -> Result<(), SignatureError> {
+        verify_record_signature(
+            "objective funding",
+            &self.funder,
+            &self.funding_signing_payload(),
+            self.funding_signature.as_deref(),
+        )
+    }
+
+    /// Canonical form. Optional fields are omitted when unset -- see the module
+    /// docs for why nulling them instead would reissue every id in the network.
+    pub fn to_value(&self) -> Value {
+        let mut value = self.unsigned_value();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.funding_signature) {
+            map.insert(
+                "funding_signature".to_string(),
+                Value::string(signature.clone()),
+            );
+        }
+        value
     }
 
     /// Content address of the whole record, verifier and ratchet included.
@@ -722,6 +773,7 @@ impl Objective {
             verifier: required(value, RECORD, "verifier")?.clone(),
             reward,
             funder: required_string(value, RECORD, "funder")?,
+            funding_signature: optional_string(value, RECORD, "funding_signature")?,
             created_at: required_string(value, RECORD, "created_at")?,
             deadline: optional_string(value, RECORD, "deadline")?,
             ratchet,
@@ -761,7 +813,9 @@ impl Objective {
 /// The construction is `sha256(digest({objective_id, artifact}) | submitter |
 /// nonce)`, with literal `|` bytes between the three parts. The inner digest is
 /// taken first so the outer input is fixed-length in its artifact component,
-/// and the separators keep `("ab", "c")` from colliding with `("a", "bc")`.
+/// and submitters containing `|` are inadmissible so the final boundary is
+/// unique. (The frozen format cannot length-prefix these fields without
+/// changing every existing commitment.)
 /// These bytes are consensus-critical: see `commitment_hash_cases` in
 /// `conformance/vectors.json`.
 pub fn commitment_hash(
@@ -786,6 +840,15 @@ pub fn commitment_hash(
     buf.push(b'|');
     buf.extend_from_slice(nonce.as_bytes());
     digest_bytes(&buf)
+}
+
+/// Preserve the frozen commitment bytes while making their boundary unique.
+pub fn validate_commitment_submitter(submitter: &str) -> Result<(), RecordError> {
+    if submitter.contains('|') {
+        Err(RecordError::AmbiguousSubmitter)
+    } else {
+        Ok(())
+    }
 }
 
 /// The public key a submitter name commits to, when it is one.
@@ -1041,14 +1104,16 @@ impl Commitment {
                 })?,
             ),
         };
-        Ok(Commitment {
+        let commitment = Commitment {
             objective_id: required_string(object, RECORD, "objective_id")?,
             submitter: required_string(object, RECORD, "submitter")?,
             hash: required_string(object, RECORD, "hash")?,
             created_at: required_string(object, RECORD, "created_at")?,
             envelope,
             signature: optional_string(object, RECORD, "signature")?,
-        })
+        };
+        validate_commitment_submitter(&commitment.submitter)?;
+        Ok(commitment)
     }
 }
 
@@ -1577,6 +1642,7 @@ impl Claim {
     /// differently — a consensus split bought with expressiveness nobody asked
     /// for. A claim needing to say two things about one target is two claims.
     pub fn validate(&self) -> Result<(), RecordError> {
+        validate_commitment_submitter(&self.submitter)?;
         if self.artifact.as_object().is_none() {
             return Err(RecordError::InvalidField {
                 record: "claim",
@@ -3214,6 +3280,7 @@ mod tests {
             verifier: certificate_verifier(),
             reward: 1000,
             funder: "treasury".to_string(),
+            funding_signature: None,
             created_at: TS.to_string(),
             deadline: None,
             ratchet: None,
@@ -3345,6 +3412,15 @@ mod tests {
             commitment_hash(OBJ_PLAIN, "ab", &artifact(1), ""),
             commitment_hash(OBJ_PLAIN, "a", &artifact(1), "b")
         );
+        assert_eq!(
+            commitment_hash(OBJ_PLAIN, "alice|part", &artifact(1), "nonce"),
+            commitment_hash(OBJ_PLAIN, "alice", &artifact(1), "part|nonce")
+        );
+        assert_eq!(
+            validate_commitment_submitter("alice|part"),
+            Err(RecordError::AmbiguousSubmitter)
+        );
+        assert!(validate_commitment_submitter("alice").is_ok());
     }
 
     // -- identity semantics -------------------------------------------------
@@ -3360,6 +3436,18 @@ mod tests {
             ..objective()
         };
         assert_ne!(a.id(), b.id());
+    }
+
+    #[test]
+    fn objective_funding_signature_binds_every_charged_field() {
+        let funder = crate::crypto::identity::Identity::from_secret_bytes([41; 32]);
+        let signed = objective().funded_by(&funder);
+        assert!(signed.verify_funding_signature().is_ok());
+        let mut changed = signed.clone();
+        changed.reward += 1;
+        assert!(changed.verify_funding_signature().is_err());
+        let decoded = Objective::from_value(&signed.to_value()).expect("round trip");
+        assert!(decoded.verify_funding_signature().is_ok());
     }
 
     #[test]

@@ -406,6 +406,12 @@ pub enum RuleViolation {
     /// here; wrapping it would silently reset an objective's running total and
     /// hide an overspent pool from the audit.
     PayoutOverflow { paid_cumulative: u64, reward: u64 },
+    /// Availability weights or allocation cannot be represented exactly.
+    ///
+    /// Availability settlement is consensus-visible accounting. Refusing an
+    /// unrepresentable sum is preferable to saturating it: saturation silently
+    /// changes the relative weights and therefore pays the wrong identities.
+    AvailabilityArithmeticOverflow,
     /// The objective's ratchet block is malformed, or its arithmetic could not
     /// be completed exactly.
     MalformedRatchet(RatchetError),
@@ -838,6 +844,10 @@ impl fmt::Display for RuleViolation {
                 f,
                 "cumulative payout {paid_cumulative} + {reward} overflows; \
                  refusing to wrap on a money path"
+            ),
+            RuleViolation::AvailabilityArithmeticOverflow => f.write_str(
+                "availability weights or payout cannot be represented exactly; \
+                 refusing to saturate or wrap consensus accounting",
             ),
             RuleViolation::MalformedRatchet(source) => {
                 write!(f, "objective carries an unusable ratchet: {source}")
@@ -1354,6 +1364,16 @@ impl Node {
                     objective: objective.reward,
                 });
             }
+        }
+
+        objective.verify_funding_signature()?;
+        if self.declares_supply() && crate::records::signed_submitter(&objective.funder).is_none() {
+            return Err(RuleViolation::UnsignedIdentity(
+                crate::records::SignatureError::Invalid {
+                    record: "objective funding",
+                    submitter: objective.funder.clone(),
+                },
+            ));
         }
 
         // The reward is escrowed from the funder's own balance. Last of the
@@ -3144,7 +3164,7 @@ impl Node {
         positions: usize,
     ) -> Result<(), RuleViolation> {
         let undertaking = self
-            .undertakings()
+            .undertakings_within(positions)
             .into_iter()
             .find(|u| u.id() == record.undertaking)
             .ok_or_else(|| RuleViolation::UnknownUndertaking {
@@ -3220,10 +3240,20 @@ impl Node {
     /// concatenation can hold two; resolving them differently here from there
     /// would make an auditor and an appender disagree about who was paid.
     pub fn availability_answers(&self) -> Vec<Availability> {
+        self.availability_answers_within(self.ledger.len())
+    }
+
+    /// [`Node::availability_answers`] over the first `positions` entries.
+    ///
+    /// Each answer is still checked at its own position. The outer bound is
+    /// what lets settlement and audit reconstruct the same historical view
+    /// even after the log grows.
+    fn availability_answers_within(&self, positions: usize) -> Vec<Availability> {
         let mut seen: BTreeSet<(String, u64)> = BTreeSet::new();
         self.ledger
             .entries_of_kind(AVAILABILITY)
             .into_iter()
+            .filter(|entry| (entry.seq as usize) < positions)
             .filter_map(|entry| {
                 Availability::from_value(&entry.payload)
                     .ok()
@@ -3768,6 +3798,8 @@ impl Node {
     /// A **progressive** objective does not: it stays open until its pool is
     /// exhausted, because the whole point is that improvements keep arriving.
     pub fn commit(&mut self, commitment: &Commitment, ts: &str) -> Result<String, RuleViolation> {
+        crate::records::validate_commitment_submitter(&commitment.submitter)
+            .map_err(RuleViolation::InadmissibleRecord)?;
         // Before anything else, and before anything is written: a submitter
         // that names a key must prove it holds that key. Cheap, and refusing
         // early means a forged identity never reaches the log at all.
@@ -4095,6 +4127,8 @@ impl Node {
     /// lost by waiting: the claim and its verdict are already in the log and
     /// already public.
     pub fn reveal(&mut self, claim: &Claim, ts: &str) -> Result<Outcome, RuleViolation> {
+        crate::records::validate_commitment_submitter(&claim.submitter)
+            .map_err(RuleViolation::InadmissibleRecord)?;
         // As in `commit`: a key-shaped submitter must prove it holds the key,
         // checked before any rule that could write. The commitment hash binds
         // the submitter string, so a signed commitment can only be opened by a
@@ -4669,9 +4703,14 @@ impl Node {
     }
 
     pub fn availability_pools(&self) -> Vec<AvailabilityPool> {
+        self.availability_pools_within(self.ledger.len())
+    }
+
+    fn availability_pools_within(&self, positions: usize) -> Vec<AvailabilityPool> {
         self.ledger
             .entries_of_kind(AVAILABILITY_POOL)
             .into_iter()
+            .filter(|entry| (entry.seq as usize) < positions)
             .filter_map(|entry| AvailabilityPool::from_value(&entry.payload).ok())
             .collect()
     }
@@ -4744,12 +4783,144 @@ impl Node {
     /// the ceiling where the audit can see it, never wrap to something small
     /// that looks fine.
     pub fn availability_offered(&self, epoch: u64) -> u128 {
-        self.availability_pools()
+        self.availability_pools_within(self.ledger.len())
             .iter()
             .filter(|pool| pool.covers(epoch))
             .fold(0u128, |total, pool| {
                 total.saturating_add(u128::from(pool.per_epoch))
             })
+    }
+
+    fn availability_offered_within(
+        &self,
+        epoch: u64,
+        positions: usize,
+    ) -> Result<u128, RuleViolation> {
+        self.availability_pools_within(positions)
+            .iter()
+            .filter(|pool| pool.covers(epoch))
+            .try_fold(0u128, |total, pool| {
+                total
+                    .checked_add(u128::from(pool.per_epoch))
+                    .ok_or(RuleViolation::AvailabilityArithmeticOverflow)
+            })
+    }
+
+    /// Deterministically reconstruct an availability settlement at a log
+    /// position. Production and audit both call this function; the reference
+    /// crate implements the same calculation independently.
+    fn availability_settlement_at(
+        &self,
+        epoch: u64,
+        positions: usize,
+    ) -> Result<Option<(Value, AvailabilityOutcome)>, RuleViolation> {
+        // A promise and a funding pool must exist before the target epoch
+        // begins. Otherwise an operator can wait for the challenge to be known,
+        // post a promise, answer it immediately, and collect for storage it
+        // never committed to provide during the epoch.
+        // Availability uses a true prefix boundary: once an entry is in or
+        // after the target epoch, no later (possibly back-dated) append may
+        // enlarge the eligible set. Continuing past that first boundary would
+        // let a late operator label a promise with an old timestamp and buy a
+        // challenge after seeing it.
+        let boundary = self
+            .ledger
+            .entries()
+            .iter()
+            .take(positions)
+            .position(|entry| {
+                crate::time::parse_rfc3339(&entry.ts).is_none_or(|seconds| {
+                    seconds < 0 || epoch_of(seconds as u64, partition::EPOCH_SECONDS) >= epoch
+                })
+            })
+            .unwrap_or_else(|| positions.min(self.ledger.len()));
+        let promises = self.undertakings_within(boundary);
+        let answered: BTreeMap<String, String> = self
+            .availability_answers_within(positions)
+            .into_iter()
+            .filter(|answer| answer.epoch == epoch)
+            .map(|answer| (answer.undertaking, answer.identity))
+            .collect();
+
+        let mut weight: BTreeMap<String, u128> = BTreeMap::new();
+        let mut answered_promises = 0usize;
+        let mut silent: Vec<String> = Vec::new();
+        for promise in &promises {
+            let id = promise.id();
+            match answered.get(&id) {
+                Some(identity) => {
+                    let slot = weight.entry(identity.clone()).or_insert(0);
+                    *slot = slot
+                        .checked_add(u128::from(promise.bond))
+                        .ok_or(RuleViolation::AvailabilityArithmeticOverflow)?;
+                    answered_promises += 1;
+                }
+                None => silent.push(id),
+            }
+        }
+        if answered_promises == 0 && silent.is_empty() {
+            return Ok(None);
+        }
+
+        // Pools admitted during or after the target epoch cannot retroactively
+        // fund it. This also makes the offered amount a property of the same
+        // fixed prefix as promise eligibility.
+        let offered = self.availability_offered_within(epoch, boundary)?;
+        let total = weight.values().try_fold(0u128, |sum, value| {
+            sum.checked_add(*value)
+                .ok_or(RuleViolation::AvailabilityArithmeticOverflow)
+        })?;
+        let mut awards: BTreeMap<String, (u64, u128)> = BTreeMap::new();
+        let mut spent = 0u128;
+        for (identity, identity_weight) in &weight {
+            let share = mul_div_floor(offered, *identity_weight, total)
+                .ok_or(RuleViolation::AvailabilityArithmeticOverflow)?;
+            let share =
+                u64::try_from(share).map_err(|_| RuleViolation::AvailabilityArithmeticOverflow)?;
+            spent = spent
+                .checked_add(u128::from(share))
+                .ok_or(RuleViolation::AvailabilityArithmeticOverflow)?;
+            awards.insert(identity.clone(), (share, *identity_weight));
+        }
+        let unpaid = offered
+            .checked_sub(spent)
+            .ok_or(RuleViolation::AvailabilityArithmeticOverflow)?;
+
+        let paid_rows = awards
+            .iter()
+            .map(|(identity, (reward, identity_weight))| {
+                let identity_weight = i128::try_from(*identity_weight)
+                    .map_err(|_| RuleViolation::AvailabilityArithmeticOverflow)?;
+                Ok(Value::object([
+                    ("identity", Value::string(identity.clone())),
+                    ("reward", Value::Int(i128::from(*reward))),
+                    ("weight", Value::Int(identity_weight)),
+                ]))
+            })
+            .collect::<Result<Vec<_>, RuleViolation>>()?;
+        let unpaid_value =
+            i128::try_from(unpaid).map_err(|_| RuleViolation::AvailabilityArithmeticOverflow)?;
+        let record = Value::object([
+            ("epoch", Value::Int(i128::from(epoch))),
+            (
+                "anchor",
+                Value::string(self.anchor_of_epoch_within(epoch, positions, Some(epoch))),
+            ),
+            ("paid", Value::Array(paid_rows)),
+            (
+                "silent",
+                Value::Array(silent.iter().cloned().map(Value::String).collect()),
+            ),
+            ("unpaid", Value::Int(unpaid_value)),
+        ]);
+        let outcome = AvailabilityOutcome {
+            epoch,
+            answered: awards.len(),
+            silent: silent.len(),
+            paid: spent,
+            unpaid,
+        };
+        Ok(Some((record, outcome)))
     }
 
     /// Pay the answers to one epoch's samples, and name the promises that went
@@ -4784,152 +4955,12 @@ impl Node {
             return Ok(None);
         }
 
-        // Only promises that existed *before* this epoch's anchor can be
-        // sampled in it. Without the bound, a node could post an undertaking
-        // after the fact, compute the index at leisure and answer a question it
-        // was never asked -- the same back-dating attack the batch bound
-        // exists for, and the reason `anchor_of_epoch_within` is written the
-        // way it is.
-        let promises: Vec<Undertaking> = self.undertakings();
-        let answered: BTreeMap<String, String> = self
-            .availability_answers()
-            .into_iter()
-            .filter(|answer| answer.epoch == epoch)
-            .map(|answer| (answer.undertaking, answer.identity))
-            .collect();
-
-        // Weighted by **bond**, summed per identity. Both halves are load
-        // bearing, and each closes a way of being paid for storage nobody
-        // bought.
-        //
-        // *Weighted*, because an equal split paid a one-entry promise what it
-        // paid a twenty-thousand-entry promise, so a node could answer with a
-        // thimble and collect like a warehouse.
-        //
-        // *By bond rather than by height*, because height is not a scarce
-        // resource. Promising the whole log costs a signature; forty keys each
-        // promising the whole log is the sybil attack with nothing spent, and
-        // no rule that reads only the promise can tell those forty from forty
-        // real disks. A bond can be told apart, because the log knows what each
-        // identity was paid and [`Node::post_undertaking`] refuses to lock more
-        // than that.
-        //
-        // *Summed rather than maxed*, because summing is what makes the rule
-        // sybil-*invariant* rather than merely sybil-*expensive*: an operator
-        // splitting one identity holding `S` into forty holding `S/40` has the
-        // same total weight either way, since stake is conserved when it is
-        // divided. Maxing -- which the height-weighted version had to do, since
-        // height is not conserved -- would here punish an honest operator for
-        // making two promises out of one balance, which the bond accounting
-        // already prevents from being free.
-        let mut weight: BTreeMap<String, u64> = BTreeMap::new();
-        let mut paid: Vec<(String, String)> = Vec::new();
-        let mut silent: Vec<String> = Vec::new();
-        for promise in &promises {
-            let id = promise.id();
-            match answered.get(&id) {
-                Some(identity) => {
-                    // **Summed**, not maxed, and weighted by bond rather than
-                    // height. Summing is what makes the rule Sybil-invariant:
-                    // an operator splitting one identity holding `S` into forty
-                    // holding `S/40` has the same total weight either way,
-                    // because stake is conserved when it is divided. Maxing --
-                    // which the height-weighted version had to do, since height
-                    // is *not* conserved and forty full-height promises would
-                    // otherwise be forty times the weight -- would here punish
-                    // an honest operator for making two promises out of one
-                    // balance, which the bond accounting already prevents from
-                    // being free.
-                    let slot = weight.entry(identity.clone()).or_insert(0);
-                    *slot = slot.saturating_add(promise.bond);
-                    paid.push((id, identity.clone()));
-                }
-                None => silent.push(id),
-            }
-        }
-        if paid.is_empty() && silent.is_empty() {
+        let Some((record, outcome)) = self.availability_settlement_at(epoch, self.ledger.len())?
+        else {
             return Ok(None);
-        }
-
-        let offered = self.availability_offered(epoch);
-        let total: u128 = weight.values().fold(0u128, |sum, w| sum + u128::from(*w));
-        // Every share floor-divided from the same denominator, so the parts sum
-        // to at most the whole and the remainder is whatever equal division
-        // could not place. `u128` throughout and `checked_mul` at the one place
-        // two large numbers meet: this crate does not wrap near money, and an
-        // overspend that wrapped would certify as fine.
-        let mut awards: BTreeMap<String, u64> = BTreeMap::new();
-        let mut spent: u128 = 0;
-        for (identity, w) in &weight {
-            let share = offered
-                .checked_mul(u128::from(*w))
-                .ok_or(RuleViolation::PayoutOverflow {
-                    paid_cumulative: u64::MAX,
-                    reward: 0,
-                })?
-                .checked_div(total)
-                .unwrap_or(0);
-            let share = u64::try_from(share).map_err(|_| RuleViolation::PayoutOverflow {
-                paid_cumulative: u64::MAX,
-                reward: 0,
-            })?;
-            spent += u128::from(share);
-            awards.insert(identity.clone(), share);
-        }
-        let unpaid = offered - spent;
-
-        // The payouts live *inside* this record rather than as `settlement`
-        // entries. A `settlement` names an objective and a claim, and the audit
-        // reads every one of them to check that the claim it paid was accepted
-        // and that its objective's pool was not overspent. An availability
-        // payout has neither, so borrowing the kind would have made the
-        // objective audit report every one of them as paying an unaccepted
-        // claim against an unknown objective -- a fault message for a record
-        // doing exactly what it should.
-        let record = Value::object([
-            ("epoch", Value::Int(i128::from(epoch))),
-            ("anchor", Value::string(self.anchor_of_epoch(epoch))),
-            // One row per *identity*, not per answer: an identity that
-            // answered two promises is paid once, and the record must say so or
-            // the audit's arithmetic would double-count it.
-            (
-                "paid",
-                Value::Array(
-                    awards
-                        .iter()
-                        .map(|(identity, reward)| {
-                            Value::object([
-                                ("identity", Value::string(identity.clone())),
-                                ("reward", Value::Int(i128::from(*reward))),
-                                (
-                                    "weight",
-                                    Value::Int(i128::from(
-                                        weight.get(identity).copied().unwrap_or(0),
-                                    )),
-                                ),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-            (
-                "silent",
-                Value::Array(silent.iter().cloned().map(Value::String).collect()),
-            ),
-            (
-                "unpaid",
-                Value::Int(i128::try_from(unpaid).unwrap_or(i128::MAX)),
-            ),
-        ]);
+        };
         self.append(AVAILABILITY_SETTLEMENT, record, ts)?;
-
-        Ok(Some(AvailabilityOutcome {
-            epoch,
-            answered: awards.len(),
-            silent: silent.len(),
-            paid: spent,
-            unpaid,
-        }))
+        Ok(Some(outcome))
     }
 
     /// Settle a batch for the epoch containing `ts`, and every earlier one.
@@ -5853,6 +5884,22 @@ impl Node {
         let (objectives, mut undecodable) = self.decode_objectives();
         problems.append(&mut undecodable);
 
+        for entry in self.ledger.entries_of_kind(OBJECTIVE) {
+            let Ok(objective) = Objective::from_value(&entry.payload) else {
+                continue;
+            };
+            if self.declares_supply()
+                && crate::records::signed_submitter(&objective.funder).is_none()
+            {
+                problems.push(format!(
+                    "objective at entry {} charges unauthenticated funder {:?}",
+                    entry.seq, objective.funder
+                ));
+            } else if let Err(error) = objective.verify_funding_signature() {
+                problems.push(format!("objective at entry {}: {error}", entry.seq));
+            }
+        }
+
         // Peer records settle nothing, so a bad one cannot cost money -- but a
         // reader must be told rather than left to wonder why a peer the log
         // names is never dialled. Both failures are named: one that cannot be
@@ -6120,7 +6167,38 @@ impl Node {
         for pool in self.availability_pools() {
             availability_funded = availability_funded.saturating_add(pool.ceiling());
         }
+        let mut settled_availability_epochs = BTreeSet::new();
         for entry in self.ledger.entries_of_kind(AVAILABILITY_SETTLEMENT) {
+            let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_u64) else {
+                problems.push(format!(
+                    "availability settlement at entry {}: missing epoch",
+                    entry.seq
+                ));
+                continue;
+            };
+            if !settled_availability_epochs.insert(epoch) {
+                problems.push(format!(
+                    "availability settlement at entry {}: epoch {epoch} settled more than once",
+                    entry.seq
+                ));
+            }
+            match self.availability_settlement_at(epoch, entry.seq as usize) {
+                Ok(Some((expected, _))) if expected != entry.payload => problems.push(format!(
+                    "availability settlement at entry {}: allocations, weights, silence, \
+                     remainder, or anchor differ from deterministic reconstruction",
+                    entry.seq
+                )),
+                Ok(None) => problems.push(format!(
+                    "availability settlement at entry {}: epoch {epoch} had no eligible \
+                     undertaking before its boundary",
+                    entry.seq
+                )),
+                Err(error) => problems.push(format!(
+                    "availability settlement at entry {} cannot be reconstructed: {error}",
+                    entry.seq
+                )),
+                Ok(Some(_)) => {}
+            }
             let rows = entry.payload.get("paid").and_then(Value::as_array);
             let unpaid = entry.payload.get("unpaid").and_then(Value::as_i128);
             let (Some(rows), Some(unpaid)) = (rows, unpaid) else {
@@ -6168,16 +6246,14 @@ impl Node {
                 continue;
             }
             availability_paid = availability_paid.saturating_add(spent);
-            if let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_u64) {
-                let offered = self.availability_offered(epoch);
-                if spent.saturating_add(unpaid as u128) != offered {
-                    problems.push(format!(
-                        "availability settlement at entry {}: epoch {epoch} offered {offered} \
-                         but the record accounts for {}",
-                        entry.seq,
-                        spent.saturating_add(unpaid as u128)
-                    ));
-                }
+            let offered = self.availability_offered(epoch);
+            if spent.saturating_add(unpaid as u128) != offered {
+                problems.push(format!(
+                    "availability settlement at entry {}: epoch {epoch} offered {offered} \
+                     but the record accounts for {}",
+                    entry.seq,
+                    spent.saturating_add(unpaid as u128)
+                ));
             }
         }
         if availability_paid > availability_funded {
@@ -6331,10 +6407,32 @@ impl Node {
             }
         }
 
+        let claims_by_id: BTreeMap<String, Claim> = self
+            .ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .filter_map(|entry| Claim::from_value(&entry.payload).ok())
+            .map(|claim| (claim.id(), claim))
+            .collect();
+        let mut previous_frontier: BTreeMap<String, u64> = BTreeMap::new();
+        let mut progressive_rewards: BTreeMap<String, u64> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(FRONTIER) {
+            let Ok(frontier) = FrontierEntry::from_value(&entry.payload) else {
+                continue;
+            };
+            let previous = previous_frontier
+                .insert(frontier.objective_id.clone(), frontier.paid_cumulative)
+                .unwrap_or(0);
+            if let Some(reward) = frontier.paid_cumulative.checked_sub(previous) {
+                progressive_rewards.insert(frontier.claim_id, reward);
+            }
+        }
+
         for entry in self.ledger.entries_of_kind(SETTLEMENT) {
             let objective_id =
                 payload_str(&entry.payload, "objective_id").unwrap_or("(no objective_id)");
-            let accepted = payload_str(&entry.payload, "claim_id")
+            let claim_id = payload_str(&entry.payload, "claim_id");
+            let accepted = claim_id
                 .and_then(|claim_id| recorded.get(claim_id))
                 .and_then(|verdict| status_of(verdict))
                 == Some(Status::Accept.as_str());
@@ -6342,6 +6440,40 @@ impl Node {
                 problems.push(format!(
                     "settlement of {objective_id}: paid a claim that was not accepted"
                 ));
+            }
+            let Some(claim) = claim_id.and_then(|id| claims_by_id.get(id)) else {
+                continue;
+            };
+            if objective_id != claim.objective_id {
+                problems.push(format!(
+                    "settlement at entry {}: objective {} differs from claim {} objective {}",
+                    entry.seq,
+                    objective_id,
+                    claim.id(),
+                    claim.objective_id
+                ));
+            }
+            if payload_str(&entry.payload, "submitter") != Some(claim.submitter.as_str()) {
+                problems.push(format!(
+                    "settlement at entry {}: recipient does not match claim {} submitter {}",
+                    entry.seq,
+                    claim.id(),
+                    claim.submitter
+                ));
+            }
+            if let Some(objective) = objectives.get(&claim.objective_id) {
+                let expected = if objective.ratchet.is_some() {
+                    progressive_rewards.get(claim.id().as_str()).copied()
+                } else {
+                    Some(objective.reward)
+                };
+                let recorded_reward = entry.payload.get("reward").and_then(Value::as_u64);
+                if expected != recorded_reward {
+                    problems.push(format!(
+                        "settlement at entry {}: reward {:?} differs from deterministic reward {:?}",
+                        entry.seq, recorded_reward, expected
+                    ));
+                }
             }
         }
 
@@ -7438,6 +7570,43 @@ impl Node {
 /// reads a hex *number* out of a record rather than a digest, and a hex helper
 /// in `canonical` would invite somebody to use it on an identifier, where the
 /// `sha256:` prefix makes the same call wrong.
+/// `floor(value * weight / total)` without an overflowing intermediate.
+///
+/// The only caller supplies `weight <= total`. The quotient/remainder split
+/// makes the integral part safe; the bitwise remainder fold keeps its running
+/// remainder below `total`, so it never computes the potentially overflowing
+/// `remainder * weight` directly.
+fn mul_div_floor(value: u128, weight: u128, total: u128) -> Option<u128> {
+    if total == 0 {
+        return Some(0);
+    }
+    if weight > total {
+        return None;
+    }
+    let whole = (value / total).checked_mul(weight)?;
+    let remainder = value % total;
+    let mut quotient = 0u128;
+    let mut residue = 0u128;
+    for bit in (0..u128::BITS).rev() {
+        quotient = quotient.checked_mul(2)?;
+        if residue >= total - residue {
+            residue -= total - residue;
+            quotient = quotient.checked_add(1)?;
+        } else {
+            residue *= 2;
+        }
+        if (weight >> bit) & 1 == 1 {
+            if residue >= total - remainder {
+                residue -= total - remainder;
+                quotient = quotient.checked_add(1)?;
+            } else {
+                residue += remainder;
+            }
+        }
+    }
+    whole.checked_add(quotient)
+}
+
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
@@ -7942,6 +8111,36 @@ mod tests {
         assert!(matches!(error, RuleViolation::MalformedRatchet(_)));
     }
 
+    #[test]
+    fn scarce_supply_can_only_be_committed_by_its_signing_funder() {
+        let dir = TempDir::new("signed-objective-funding");
+        let mut node = node(&dir);
+        let funder = crate::crypto::identity::Identity::from_secret_bytes([31; 32]);
+        node.post_issuance(&Issuance::new(funder.submitter_id(), 100, TS), TS)
+            .expect("issue");
+
+        let unsigned = Objective {
+            funder: funder.submitter_id(),
+            ..lean_objective(10)
+        };
+        assert!(matches!(
+            node.post_objective(&unsigned, TS),
+            Err(RuleViolation::UnsignedIdentity(_))
+        ));
+
+        let attacker = crate::crypto::identity::Identity::from_secret_bytes([32; 32]);
+        let mut forged = lean_objective(10).funded_by(&attacker);
+        forged.funder = funder.submitter_id();
+        assert!(matches!(
+            node.post_objective(&forged, TS),
+            Err(RuleViolation::UnsignedIdentity(_))
+        ));
+
+        let authorized = lean_objective(10).funded_by(&funder);
+        node.post_objective(&authorized, TS).expect("authorized");
+        assert_eq!(node.ledger().entries_of_kind(OBJECTIVE).len(), 1);
+    }
+
     // -- commit -------------------------------------------------------------
 
     #[test]
@@ -7958,6 +8157,26 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn an_ambiguous_commitment_submitter_never_reaches_the_log() {
+        let dir = TempDir::new("ambiguous-commitment");
+        let mut node = node(&dir);
+        let objective = lean_objective(10);
+        node.post_objective(&objective, TS).expect("post");
+        let before = node.ledger().len();
+        let error = node
+            .commit(
+                &Commitment::new(objective.id(), "alice|part", "sha256:x", TS),
+                TS,
+            )
+            .expect_err("delimiter-bearing submitter must be refused");
+        assert!(matches!(
+            error,
+            RuleViolation::InadmissibleRecord(crate::records::RecordError::AmbiguousSubmitter)
+        ));
+        assert_eq!(node.ledger().len(), before);
     }
 
     #[test]
@@ -9433,6 +9652,40 @@ mod tests {
     }
 
     #[test]
+    fn audit_binds_a_settlement_to_its_claim_recipient_objective_and_reward() {
+        let dir = TempDir::new("audit-settlement-binding");
+        let mut node = node(&dir);
+        let objective = lean_objective(10);
+        node.post_objective(&objective, TS).expect("post");
+        let claim_id = plant(
+            &mut node,
+            &objective,
+            "alice",
+            proof(":= by trivial"),
+            "n1",
+            Status::Accept,
+            None,
+        );
+        node.ledger_mut()
+            .append(
+                SETTLEMENT,
+                Value::object([
+                    ("objective_id", Value::string("sha256:attacker-selected")),
+                    ("claim_id", Value::string(claim_id)),
+                    ("submitter", Value::string("mallory")),
+                    ("reward", Value::Int(9)),
+                ]),
+                TS,
+            )
+            .expect("append");
+
+        let problems = node.audit(false).join("\n");
+        assert!(problems.contains("differs from claim"), "{problems}");
+        assert!(problems.contains("recipient does not match"), "{problems}");
+        assert!(problems.contains("deterministic reward"), "{problems}");
+    }
+
+    #[test]
     fn audit_catches_a_plain_objective_settled_twice() {
         let dir = TempDir::new("audit-twice");
         let mut node = node(&dir);
@@ -10146,18 +10399,20 @@ mod tests {
         let dir = TempDir::new("unfunded-objective");
         let mut node = node(&dir);
         let attacker = crate::crypto::identity::Identity::from_secret_bytes([77u8; 32]);
+        let treasury = crate::crypto::identity::Identity::from_secret_bytes([76u8; 32]);
 
         // A supply exists, and the attacker is not in it. One unit to somebody
         // else is enough: what matters is that the log has *declared* its
         // units, not how many there are.
-        node.post_issuance(&Issuance::new("treasury", 500, TS), TS)
+        node.post_issuance(&Issuance::new(treasury.submitter_id(), 500, TS), TS)
             .expect("genesis issuance");
 
         const ABSURD: u64 = 1_000_000_000_000;
         let Some(objective) = replay_objective_called(ABSURD, "a bounty I set myself") else {
             return;
         };
-        assert_eq!(objective.funder, "treasury");
+        let objective = objective.funded_by(&treasury);
+        assert_eq!(objective.funder, treasury.submitter_id());
         assert!(
             matches!(
                 node.post_objective(&objective, TS),
@@ -10175,15 +10430,16 @@ mod tests {
         let Some(affordable) = replay_objective_called(500, "a bounty I can pay for") else {
             return;
         };
+        let affordable = affordable.funded_by(&treasury);
         node.post_objective(&affordable, TS)
             .expect("a reward the funder holds");
         assert_eq!(
-            node.spendable_within("treasury", node.ledger().len()),
+            node.spendable_within(&treasury.submitter_id(), node.ledger().len()),
             0,
             "posting did not escrow the reward"
         );
         assert_eq!(
-            node.escrowed().get("treasury").copied(),
+            node.escrowed().get(&treasury.submitter_id()).copied(),
             Some(500),
             "the units went nowhere rather than into escrow"
         );
@@ -10193,6 +10449,7 @@ mod tests {
         let Some(second) = replay_objective_called(1, "one more, on credit") else {
             return;
         };
+        let second = second.funded_by(&treasury);
         assert!(
             matches!(
                 node.post_objective(&second, TS),
@@ -10213,7 +10470,8 @@ mod tests {
             None,
             None,
         )
-        .expect("valid objective");
+        .expect("valid objective")
+        .funded_by(&attacker);
         assert!(matches!(
             node.post_objective(&unfunded, TS),
             Err(RuleViolation::UnfundedReward { spendable: 0, .. })
@@ -10231,12 +10489,14 @@ mod tests {
         let dir = TempDir::new("escrow-conserves");
         let mut node = node(&dir);
         let worker = crate::crypto::identity::Identity::from_secret_bytes([78u8; 32]);
-        node.post_issuance(&Issuance::new("treasury", 1_000, TS), TS)
+        let treasury = crate::crypto::identity::Identity::from_secret_bytes([79u8; 32]);
+        node.post_issuance(&Issuance::new(treasury.submitter_id(), 1_000, TS), TS)
             .expect("genesis issuance");
 
         let Some(objective) = replay_objective_called(1_000, "the whole supply, at stake") else {
             return;
         };
+        let objective = objective.funded_by(&treasury);
         node.post_objective(&objective, TS).expect("post");
 
         let artifact = results(1);
@@ -10266,7 +10526,13 @@ mod tests {
         .expect("settle");
 
         // The units moved: escrow released, worker paid, total unchanged.
-        assert_eq!(node.escrowed().get("treasury").copied().unwrap_or(0), 0);
+        assert_eq!(
+            node.escrowed()
+                .get(&treasury.submitter_id())
+                .copied()
+                .unwrap_or(0),
+            0
+        );
         assert_eq!(
             node.balances().get(&worker.submitter_id()).copied(),
             Some(1_000)
@@ -10298,11 +10564,12 @@ mod tests {
     fn the_audit_names_a_reward_the_supply_never_covered() {
         let dir = TempDir::new("unfunded-reward-audit");
         let mut broke = node(&dir);
+        let treasury = crate::crypto::identity::Identity::from_secret_bytes([80u8; 32]);
         broke
-            .post_issuance(&Issuance::new("treasury", 100, TS), TS)
+            .post_issuance(&Issuance::new(treasury.submitter_id(), 100, TS), TS)
             .expect("genesis issuance");
 
-        let objective = lean_objective(1_000);
+        let objective = lean_objective(1_000).funded_by(&treasury);
         assert!(
             matches!(
                 broke.post_objective(&objective, TS),
@@ -10331,11 +10598,15 @@ mod tests {
         // inside its supply reports nothing about the supply at all.
         let clean = TempDir::new("funded-reward-audit");
         let mut solvent = node(&clean);
+        let solvent_treasury = crate::crypto::identity::Identity::from_secret_bytes([81u8; 32]);
         solvent
-            .post_issuance(&Issuance::new("treasury", 1_000, TS), TS)
+            .post_issuance(
+                &Issuance::new(solvent_treasury.submitter_id(), 1_000, TS),
+                TS,
+            )
             .expect("genesis issuance");
         solvent
-            .post_objective(&lean_objective(1_000), TS)
+            .post_objective(&lean_objective(1_000).funded_by(&solvent_treasury), TS)
             .expect("a reward the supply covers");
         assert_eq!(solvent.audit(false), Vec::<String>::new());
     }
@@ -10349,12 +10620,13 @@ mod tests {
     fn an_issuance_after_the_genesis_prefix_is_a_mint_the_audit_names() {
         let dir = TempDir::new("late-issuance");
         let mut node = node(&dir);
-        node.post_issuance(&Issuance::new("treasury", 10, TS), TS)
+        let treasury = crate::crypto::identity::Identity::from_secret_bytes([82u8; 32]);
+        node.post_issuance(&Issuance::new(treasury.submitter_id(), 10, TS), TS)
             .expect("genesis issuance");
-        node.post_objective(&lean_objective(10), TS)
+        node.post_objective(&lean_objective(10).funded_by(&treasury), TS)
             .expect("something after genesis");
 
-        let late = Issuance::new("treasury", 1_000_000, TS);
+        let late = Issuance::new(treasury.submitter_id(), 1_000_000, TS);
         assert!(
             matches!(
                 node.post_issuance(&late, TS),
@@ -10374,8 +10646,14 @@ mod tests {
         );
         // And it is not credited: the balance is what genesis said, minus what
         // the objective escrowed.
-        assert_eq!(node.issued().get("treasury").copied(), Some(10));
-        assert_eq!(node.spendable_within("treasury", node.ledger().len()), 0);
+        assert_eq!(
+            node.issued().get(&treasury.submitter_id()).copied(),
+            Some(10)
+        );
+        assert_eq!(
+            node.spendable_within(&treasury.submitter_id(), node.ledger().len()),
+            0
+        );
     }
 
     /// Promise the whole log as it stands, staking `bond`.
@@ -10405,6 +10683,21 @@ mod tests {
         let record = Undertaking::new(who.submitter_id(), &root, height, bond, TS).signed_with(who);
         node.post_undertaking(&record, TS).expect("undertaking");
         record
+    }
+
+    /// The first epoch strictly after every timestamp currently in the log.
+    /// Availability settlement fixtures use this rather than invented small
+    /// epoch numbers so their promises really predate the epoch they serve.
+    fn epoch_after_log(node: &Node) -> u64 {
+        node.ledger()
+            .entries()
+            .iter()
+            .filter_map(|entry| crate::time::parse_rfc3339(&entry.ts))
+            .filter(|seconds| *seconds >= 0)
+            .map(|seconds| epoch_of(seconds as u64, partition::EPOCH_SECONDS))
+            .max()
+            .unwrap_or_else(|| epoch_at(0))
+            .saturating_add(1)
     }
 
     /// A node that holds the log answers its sample; a node that guesses cannot.
@@ -10764,8 +11057,8 @@ mod tests {
             &AvailabilityPool {
                 funder: "treasury".to_string(),
                 per_epoch: 90,
-                from_epoch: 0,
-                to_epoch: 10,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
                 created_at: TS.to_string(),
             },
             TS,
@@ -10787,7 +11080,7 @@ mod tests {
         assert!(late_promise.height > early_promise.height);
         assert!(early_promise.bond > late_promise.bond);
 
-        let epoch = 4;
+        let epoch = epoch_after_log(&node);
         for (who, held) in [(&early, &early_promise), (&late, &late_promise)] {
             node.post_availability(&honest_answer(&node, held, epoch, who), TS)
                 .expect("answer");
@@ -10828,6 +11121,190 @@ mod tests {
         assert_eq!(node.audit(false), Vec::<String>::new());
     }
 
+    #[test]
+    fn undertaking_admitted_after_the_epoch_boundary_cannot_earn() {
+        let dir = TempDir::new("availability-late-promise");
+        let mut node = node(&dir);
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 90,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+        let early = crate::crypto::identity::Identity::from_secret_bytes([41u8; 32]);
+        let late = crate::crypto::identity::Identity::from_secret_bytes([42u8; 32]);
+        let early_promise = promise(&mut node, &early, 1_000);
+        assert!(fund(&mut node, &late, 1_000), "fund late identity");
+        let epoch = epoch_after_log(&node);
+
+        node.post_availability(&honest_answer(&node, &early_promise, epoch, &early), TS)
+            .expect("early answer");
+
+        // The promise is genuinely admitted in the target epoch. An answer can
+        // be a valid proof, but it cannot turn a promise made after the draw
+        // was fixed into eligible work.
+        let late_seconds = epoch
+            .checked_mul(partition::EPOCH_SECONDS)
+            .and_then(|seconds| i64::try_from(seconds).ok())
+            .expect("fixture epoch fits an RFC3339 timestamp");
+        let late_ts = crate::time::format_iso8601_utc(late_seconds);
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+        let late_promise = Undertaking::new(late.submitter_id(), &root, height, 1_000, &late_ts)
+            .signed_with(&late);
+        node.post_undertaking(&late_promise, &late_ts)
+            .expect("late promise is structurally valid");
+        let admitted_epoch = node
+            .ledger()
+            .entries_of_kind(UNDERTAKING)
+            .last()
+            .and_then(|entry| crate::time::parse_rfc3339(&entry.ts))
+            .filter(|seconds| *seconds >= 0)
+            .map(|seconds| epoch_of(seconds as u64, partition::EPOCH_SECONDS));
+        assert_eq!(admitted_epoch, Some(epoch), "late fixture is not late");
+        node.post_availability(&honest_answer(&node, &late_promise, epoch, &late), TS)
+            .expect("late answer is a valid proof");
+
+        let outcome = node
+            .settle_availability(epoch, TS)
+            .expect("settles")
+            .expect("early promise is eligible");
+        assert_eq!(outcome.answered, 1);
+        let paid = availability_payouts(&node);
+        assert_eq!(paid.get(&early.submitter_id()), Some(&90));
+        assert!(!paid.contains_key(&late.submitter_id()));
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    #[test]
+    fn availability_bond_weights_do_not_saturate_at_u64() {
+        let dir = TempDir::new("availability-u128-weight");
+        let mut node = node(&dir);
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 300,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+        let doubled = crate::crypto::identity::Identity::from_secret_bytes([43u8; 32]);
+        let single = crate::crypto::identity::Identity::from_secret_bytes([44u8; 32]);
+        let mut credit = |who: &str, tag: &str| {
+            node.append(
+                SETTLEMENT,
+                Value::object([
+                    ("claim_id", Value::string(format!("claim-{tag}"))),
+                    ("objective_id", Value::string(format!("objective-{tag}"))),
+                    ("submitter", Value::string(who)),
+                    ("reward", Value::Int(i128::from(u64::MAX))),
+                ]),
+                TS,
+            )
+            .expect("synthetic balance for arithmetic regression");
+        };
+        credit(&doubled.submitter_id(), "double-a");
+        credit(&doubled.submitter_id(), "double-b");
+        credit(&single.submitter_id(), "single");
+        let doubled_a = stake(&mut node, &doubled, u64::MAX);
+        let doubled_b = stake(&mut node, &doubled, u64::MAX);
+        let single_promise = stake(&mut node, &single, u64::MAX);
+        let epoch = epoch_after_log(&node);
+        for (who, held) in [
+            (&doubled, &doubled_a),
+            (&doubled, &doubled_b),
+            (&single, &single_promise),
+        ] {
+            node.post_availability(&honest_answer(&node, held, epoch, who), TS)
+                .expect("answer");
+        }
+        node.settle_availability(epoch, TS)
+            .expect("settles")
+            .expect("work exists");
+
+        let paid = availability_payouts(&node);
+        assert_eq!(paid.get(&doubled.submitter_id()), Some(&200));
+        assert_eq!(paid.get(&single.submitter_id()), Some(&100));
+        let doubled_weight = node
+            .ledger()
+            .entries_of_kind(AVAILABILITY_SETTLEMENT)
+            .first()
+            .and_then(|entry| entry.payload.get("paid"))
+            .and_then(Value::as_array)
+            .and_then(|rows| {
+                rows.iter().find(|row| {
+                    payload_str(row, "identity") == Some(doubled.submitter_id().as_str())
+                })
+            })
+            .and_then(|row| row.get("weight"))
+            .and_then(Value::as_i128)
+            .expect("u128-range weight is recorded exactly");
+        assert_eq!(doubled_weight, i128::from(u64::MAX) * 2);
+    }
+
+    #[test]
+    fn audit_reconstructs_exact_availability_allocations() {
+        let dir = TempDir::new("availability-exact-audit");
+        let mut node = node(&dir);
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 90,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+        let who = crate::crypto::identity::Identity::from_secret_bytes([45u8; 32]);
+        let held = promise(&mut node, &who, 1_000);
+        let epoch = epoch_after_log(&node);
+        node.post_availability(&honest_answer(&node, &held, epoch, &who), TS)
+            .expect("answer");
+        let Some((mut forged, _)) = node
+            .availability_settlement_at(epoch, node.ledger().len())
+            .expect("reconstruct")
+        else {
+            panic!("eligible work exists")
+        };
+        let Value::Object(fields) = &mut forged else {
+            panic!("settlement is an object")
+        };
+        let Some(Value::Array(rows)) = fields.get_mut("paid") else {
+            panic!("paid rows exist")
+        };
+        let Some(Value::Object(row)) = rows.first_mut() else {
+            panic!("one paid row exists")
+        };
+        row.insert("reward".to_string(), Value::Int(89));
+        fields.insert("unpaid".to_string(), Value::Int(1));
+        node.append(AVAILABILITY_SETTLEMENT, forged, TS)
+            .expect("append forged settlement");
+
+        let problems = node.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("deterministic reconstruction")),
+            "a wrong recipient allocation with correct totals passed: {problems:?}"
+        );
+        assert!(
+            !problems
+                .iter()
+                .any(|problem| problem.contains("accounts for")),
+            "the fixture must preserve totals so only exact reconstruction catches it"
+        );
+    }
+
     /// Splitting one balance across two promises earns what one promise of the
     /// whole balance earns.
     ///
@@ -10849,8 +11326,8 @@ mod tests {
             &AvailabilityPool {
                 funder: "treasury".to_string(),
                 per_epoch: 100,
-                from_epoch: 0,
-                to_epoch: 10,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
                 created_at: TS.to_string(),
             },
             TS,
@@ -10887,7 +11364,7 @@ mod tests {
             "a third promise was free, so the split was never bounded by anything"
         );
 
-        let epoch = 2;
+        let epoch = epoch_after_log(&node);
         for (who, held) in [
             (&plain, &plain_promise),
             (&greedy, &first),
@@ -10978,8 +11455,8 @@ mod tests {
             &AvailabilityPool {
                 funder: "treasury".to_string(),
                 per_epoch: 32_000,
-                from_epoch: 0,
-                to_epoch: 1_000,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
                 created_at: TS.to_string(),
             },
             TS,
@@ -11000,7 +11477,7 @@ mod tests {
             })
             .collect();
 
-        let epoch = 4;
+        let epoch = epoch_after_log(&node);
         node.post_availability(&honest_answer(&node, &honest_promise, epoch, &honest), TS)
             .expect("answer");
         for (who, held) in &attackers {
@@ -11035,21 +11512,21 @@ mod tests {
             &AvailabilityPool {
                 funder: "treasury".to_string(),
                 per_epoch: 7,
-                from_epoch: 0,
-                to_epoch: 0,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
                 created_at: TS.to_string(),
             },
             TS,
         )
         .expect("pool");
 
-        let epoch = 0;
         let mut held = Vec::new();
         for i in 0..3u8 {
             let who = crate::crypto::identity::Identity::from_secret_bytes([30 + i; 32]);
             let promise = promise(&mut node, &who, 1_000);
             held.push((who, promise));
         }
+        let epoch = epoch_after_log(&node);
         for (who, promise) in &held {
             node.post_availability(&honest_answer(&node, promise, epoch, who), TS)
                 .expect("answer");

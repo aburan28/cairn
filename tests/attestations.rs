@@ -123,8 +123,12 @@ fn fixture(label: &str, funded: &[(&str, u64)]) -> Fixture {
     fs::write(dir.path.join("c.py"), CHECKER).expect("writable");
     let ledger = Ledger::open(dir.path.join("log.jsonl")).expect("an empty log");
     let mut node = Node::with_registry(ledger, VerifierRegistry::new(&dir.path));
-    node.post_issuance(&Issuance::new("treasury", 1_000_000, GENESIS), GENESIS)
-        .expect("genesis issuance");
+    let treasury = identity(0);
+    node.post_issuance(
+        &Issuance::new(treasury.submitter_id(), 1_000_000, GENESIS),
+        GENESIS,
+    )
+    .expect("genesis issuance");
     for (who, units) in funded {
         node.post_issuance(&Issuance::new(*who, *units, GENESIS), GENESIS)
             .expect("the attestor is funded");
@@ -141,12 +145,13 @@ fn fixture(label: &str, funded: &[(&str, u64)]) -> Fixture {
         "attestation fixture: even numbers only",
         verifier,
         1_000,
-        "treasury",
+        treasury.submitter_id(),
         GENESIS,
         None,
         None,
     )
-    .expect("valid objective");
+    .expect("valid objective")
+    .funded_by(&treasury);
     node.post_objective(&objective, GENESIS).expect("post");
     let objective_id = objective.id();
     Fixture {
@@ -190,6 +195,7 @@ fn claim_against(
 /// without the bundle. A verifier *kind* with no toolchain here is the honest
 /// form of the same condition.
 fn unrunnable_claim(fixture: &mut Fixture, who: &str, nonce: &str) -> String {
+    let treasury = identity(0);
     let objective = Objective::new(
         "G",
         "attestation fixture: nothing here can run this",
@@ -199,12 +205,13 @@ fn unrunnable_claim(fixture: &mut Fixture, who: &str, nonce: &str) -> String {
             ("entry", Value::string("Main.lean")),
         ]),
         1_000,
-        "treasury",
+        treasury.submitter_id(),
         GENESIS,
         None,
         None,
     )
-    .expect("valid objective");
+    .expect("valid objective")
+    .funded_by(&treasury);
     fixture
         .node
         .post_objective(&objective, GENESIS)
@@ -262,6 +269,7 @@ fn settle_past_the_window(fixture: &mut Fixture) {
 /// One per claim that has to settle: a reward is escrowed once, and paying it
 /// twice is a different bug than any of these tests is looking for.
 fn fresh_objective(fixture: &mut Fixture, label: &str, ts: &str) -> String {
+    let treasury = identity(0);
     let verifier = Value::object([
         ("kind", Value::string("certificate")),
         ("checker", Value::string("c.py")),
@@ -273,12 +281,13 @@ fn fresh_objective(fixture: &mut Fixture, label: &str, ts: &str) -> String {
         format!("attestation fixture: {label}"),
         verifier,
         1_000,
-        "treasury",
+        treasury.submitter_id(),
         GENESIS,
         None,
         None,
     )
-    .expect("valid objective");
+    .expect("valid objective")
+    .funded_by(&treasury);
     fixture.node.post_objective(&objective, ts).expect("post");
     objective.id()
 }
@@ -835,6 +844,7 @@ fn a_bond_posted_against_nothing_is_named_even_when_a_later_payout_covers_it() {
     let mut fixture = fixture("retroactive", &[]);
 
     // A bounty big enough to cover the bond, so the log ends balanced.
+    let treasury = identity(0);
     let objective = Objective::new(
         "G",
         "attestation fixture: pays more than a bond",
@@ -845,12 +855,13 @@ fn a_bond_posted_against_nothing_is_named_even_when_a_later_payout_covers_it() {
             ("entrypoint", Value::string("check")),
         ]),
         VERIFICATION_BOND,
-        "treasury",
+        treasury.submitter_id(),
         GENESIS,
         None,
         None,
     )
-    .expect("valid objective");
+    .expect("valid objective")
+    .funded_by(&treasury);
     fixture
         .node
         .post_objective(&objective, GENESIS)

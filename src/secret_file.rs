@@ -147,6 +147,18 @@ pub fn read_to_string(path: &Path) -> io::Result<String> {
     Ok(text)
 }
 
+/// Read validated bytes through the descriptor that was checked.
+///
+/// This is the binary counterpart of [`read_to_string`]. Content-addressed
+/// files use it too: a symlink named like a digest must not turn a later
+/// verifier read into a read outside the store.
+pub fn read(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = open_existing(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

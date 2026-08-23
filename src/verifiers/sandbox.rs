@@ -90,9 +90,8 @@ pub struct Confinement<'a> {
     pub readable: Vec<PathBuf>,
     /// Extra paths the child must be able to write. Empty is the normal case.
     pub writable: Vec<PathBuf>,
-    /// Replace the environment with a minimal one. Off for `replay` and
-    /// `lean`, whose toolchains are configured through the environment the
-    /// operator set up; see the module docs in [`super`].
+    /// Replace the environment with a minimal one. Objective-authored code
+    /// must not inherit operator credentials through any verifier path.
     pub scrub_env: bool,
     /// `RLIMIT_CPU`, seconds. Complements the wall-clock kill: a child that
     /// spins in a tight loop hits this first and dies on `SIGXCPU`.
@@ -297,7 +296,7 @@ fn bubblewrap(
     // System directories, read only. `/bin` and friends are symlinks into
     // `/usr` on merged-usr distributions; binding a symlink source as a
     // directory fails, so recreate the link instead.
-    for top in ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc"] {
+    for top in ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64"] {
         let path = Path::new(top);
         match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_symlink() => {
@@ -406,16 +405,13 @@ fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]
     // and adjacent resources from the version root two levels above `bin`.
     // Allow that version root, not the whole package manager or home directory.
     for executable in [resolve(program)] {
-        if let Some(runtime_root) = executable.parent().and_then(Path::parent) {
+        if let Some(runtime_root) = narrow_runtime_root(&executable) {
             // A runtime root is an installation prefix such as
             // `/opt/homebrew/Cellar/python@3.13/3.13.2`, never the filesystem
             // root. In particular, the grandparent of `/bin/sh` is `/`; adding
             // it here turns the deny-by-default profile into a read-everything
             // profile.
-            if runtime_root == Path::new("/") {
-                continue;
-            }
-            readable.push(runtime_root.to_path_buf());
+            readable.push(runtime_root);
         }
     }
     readable.sort();
@@ -445,6 +441,38 @@ fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]
     profile.push_str("(allow file-write-data (literal \"/dev/null\"))\n");
     profile.push_str("(allow file-write-data (literal \"/dev/dtracehelper\"))\n");
     profile
+}
+
+/// The narrow installation prefix needed by a runtime, when its shape is safe.
+///
+/// `~/bin/tool` and `~/.local/bin/tool` are common, but their grandparent is
+/// the operator's home or `.local` data tree. Granting either subtree to
+/// objective-authored code is a sandbox escape. Versioned rustup/pyenv/elan
+/// roots are deeper and remain usable.
+fn narrow_runtime_root(executable: &Path) -> Option<PathBuf> {
+    let root = executable.parent()?.parent()?.to_path_buf();
+    if root == Path::new("/") {
+        return None;
+    }
+
+    let configured_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| resolve(&path));
+    let structural_home = |path: &Path| {
+        path == Path::new("/root")
+            || path
+                .parent()
+                .is_some_and(|parent| parent == Path::new("/Users") || parent == Path::new("/home"))
+    };
+    if configured_home
+        .as_deref()
+        .is_some_and(|home| root == home || root.parent() == Some(home))
+        || structural_home(&root)
+        || root.parent().is_some_and(structural_home)
+    {
+        return None;
+    }
+    Some(root)
 }
 
 /// Prefix the child with a shell that sets `ulimit`s, when a shell exists.
@@ -611,6 +639,26 @@ mod tests {
         assert!(profile.contains("/private/tmp/proofwork-seatbelt-work"));
         assert!(!profile.contains("/Users/"));
         assert!(!profile.contains("(subpath \"/\")"));
+    }
+
+    #[test]
+    fn shallow_user_runtime_paths_never_allow_their_data_ancestor() {
+        assert_eq!(
+            narrow_runtime_root(Path::new("/Users/alice/.local/bin/uv")),
+            None
+        );
+        assert_eq!(
+            narrow_runtime_root(Path::new("/Users/alice/bin/tool")),
+            None
+        );
+        assert_eq!(
+            narrow_runtime_root(Path::new(
+                "/Users/alice/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"
+            )),
+            Some(PathBuf::from(
+                "/Users/alice/.rustup/toolchains/stable-aarch64-apple-darwin"
+            ))
+        );
     }
 
     #[test]

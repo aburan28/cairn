@@ -124,6 +124,7 @@ pub struct Objective {
     pub verifier: Value,
     pub reward: u64,
     pub funder: String,
+    pub funding_signature: Option<String>,
     pub created_at: String,
     pub deadline: Option<String>,
     pub ratchet: Option<Value>,
@@ -141,7 +142,7 @@ pub struct Objective {
 }
 
 impl Objective {
-    pub fn to_value(&self) -> Value {
+    fn unsigned_value(&self) -> Value {
         let mut body = vec![
             ("type", Value::string("objective")),
             ("goal", Value::string(self.goal.clone())),
@@ -173,6 +174,30 @@ impl Objective {
             body.push(("require_signed_submitter", Value::Bool(true)));
         }
         Value::object(body)
+    }
+
+    pub fn funding_signing_payload(&self) -> Value {
+        Value::object([
+            ("domain", Value::string("cairn/objective-funding/v1")),
+            ("objective", self.unsigned_value()),
+        ])
+    }
+
+    pub fn verify_funding_signature(&self) -> Result<(), RecordError> {
+        verify_record_signature(
+            "objective funding",
+            &self.funder,
+            &self.funding_signing_payload(),
+            self.funding_signature.as_deref(),
+        )
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.unsigned_value();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.funding_signature) {
+            map.insert("funding_signature".into(), Value::string(signature.clone()));
+        }
+        value
     }
 
     pub fn id(&self) -> String {
@@ -232,6 +257,7 @@ impl Objective {
             verifier: field(value, "verifier")?.clone(),
             reward: raw_reward as u64,
             funder: text(value, "funder")?,
+            funding_signature: optional_text(value, "funding_signature")?,
             created_at: text(value, "created_at")?,
             deadline: optional_text(value, "deadline")?,
             ratchet: match value.get("ratchet") {
@@ -323,6 +349,17 @@ pub fn commitment_hash(
     digest_bytes(&buf)
 }
 
+/// Preserve the frozen hash format while making its delimiter unambiguous.
+pub fn validate_commitment_submitter(submitter: &str) -> Result<(), RecordError> {
+    if submitter.contains('|') {
+        Err(RecordError(
+            "submitter cannot contain '|' because it delimits the commitment preimage".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commitment {
     pub objective_id: String,
@@ -388,14 +425,16 @@ impl Commitment {
     }
 
     pub fn from_value(value: &Value) -> Result<Commitment, RecordError> {
-        Ok(Commitment {
+        let commitment = Commitment {
             objective_id: text(value, "objective_id")?,
             submitter: text(value, "submitter")?,
             hash: text(value, "hash")?,
             created_at: text(value, "created_at")?,
             envelope: value.get("envelope").cloned(),
             signature: optional_text(value, "signature")?,
-        })
+        };
+        validate_commitment_submitter(&commitment.submitter)?;
+        Ok(commitment)
     }
 }
 
@@ -556,6 +595,7 @@ impl Claim {
     }
 
     pub fn validate(&self) -> Result<(), RecordError> {
+        validate_commitment_submitter(&self.submitter)?;
         if self.artifact.as_object().is_none() {
             return Err(RecordError("claim artifact must be an object".into()));
         }
@@ -908,6 +948,7 @@ mod tests {
             verifier: verifier(),
             reward: 1000,
             funder: "treasury".into(),
+            funding_signature: None,
             created_at: "2026-07-28T00:00:00+00:00".into(),
             deadline: None,
             ratchet: None,
@@ -999,6 +1040,17 @@ mod tests {
         assert!(signed_submitter(&"A".repeat(64)).is_none());
         assert!(signed_submitter(&"a".repeat(63)).is_none());
         assert!(signed_submitter(&"g".repeat(64)).is_none());
+    }
+
+    #[test]
+    fn delimiter_bearing_submitters_are_refused_without_changing_frozen_hashes() {
+        let artifact = Value::object([("n", Value::Int(1))]);
+        assert_eq!(
+            commitment_hash("sha256:objective", "alice|part", &artifact, "nonce"),
+            commitment_hash("sha256:objective", "alice", &artifact, "part|nonce")
+        );
+        assert!(validate_commitment_submitter("alice|part").is_err());
+        assert!(validate_commitment_submitter("alice").is_ok());
     }
 
     #[test]
