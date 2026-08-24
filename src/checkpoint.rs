@@ -327,7 +327,9 @@ fn hex_decode(text: &str) -> Result<Vec<u8>, CheckpointError> {
         return Err(CheckpointError::Invalid("odd-length hex".into()));
     }
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = lower_hex_nibble(pair[0])?;
             let low = lower_hex_nibble(pair[1])?;

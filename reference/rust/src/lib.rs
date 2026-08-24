@@ -15,6 +15,7 @@
 
 pub mod attribution;
 pub mod canonical;
+pub mod drand;
 pub mod frontier;
 pub mod ledger;
 pub mod node;

@@ -57,6 +57,7 @@ use std::path::{Path, PathBuf};
 use crate::blobs;
 use crate::canonical::Inclusion;
 use crate::canonical::{short, Value};
+use crate::drand;
 use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
 use crate::knowledge::{
     ClaimFacts, ConfidencePolicy, KnowledgeGraph, KnowledgeState, Reproducible,
@@ -537,6 +538,37 @@ pub enum RuleViolation {
     /// after reading the first — which is the entire lever this record exists
     /// to remove, restored by an operator who simply writes twice.
     DuplicateBeacon { epoch: u64 },
+    /// A `drand` beacon naming a round its epoch does not name.
+    ///
+    /// The round a beacon may use is a function of the epoch it orders --
+    /// [`crate::drand::round_for_epoch`] -- so unlike the Ethereum block this
+    /// record was first built for, *which draw to use* is not a choice anyone
+    /// gets to make. Refusing a mismatch is what turns that from a rule an
+    /// honest operator follows into arithmetic every reader repeats.
+    ///
+    /// Only for [`crate::drand::SOURCE`]. A beacon from somewhere else is not
+    /// checked here, because this module cannot know what its `block` means.
+    BeaconRoundMismatch {
+        orders: u64,
+        block: u64,
+        expected: u64,
+    },
+    /// A `drand` beacon whose value is not that round's signature.
+    ///
+    /// The check the source was chosen for. An Ethereum `value` can only be
+    /// confirmed by an auditor holding the chain, so the rules engine could
+    /// never do more than record it; a drand round is a threshold signature
+    /// over its own number, so `e(sig, -g2)·e(H(round), pk) == 1` settles it
+    /// here, offline, against a key pinned in [`crate::drand::PUBLIC_KEY`].
+    ///
+    /// **Refused when written, reported when read, and deliberately not
+    /// consulted when settling.** `Node::audit_beacons` carries the argument for
+    /// why the third is a decision rather than an oversight.
+    BeaconSignatureInvalid {
+        orders: u64,
+        round: u64,
+        why: drand::VerifyError,
+    },
     /// A record whose own decoder would refuse it.
     ///
     /// Every other kind arrives here already decoded, so `from_value` has run
@@ -931,6 +963,22 @@ impl fmt::Display for RuleViolation {
                 f,
                 "epoch {epoch} already has a beacon; a second one would let whoever \
                  writes it re-roll the settlement order after reading the first"
+            ),
+            RuleViolation::BeaconRoundMismatch {
+                orders,
+                block,
+                expected,
+            } => write!(
+                f,
+                "a drand beacon ordering epoch {orders} names round {block}, and epoch \
+                 {orders} names round {expected}; the round is derived from the epoch, \
+                 so a beacon that picks its own is a beacon whose draw was chosen"
+            ),
+            RuleViolation::BeaconSignatureInvalid { orders, round, why } => write!(
+                f,
+                "a drand beacon ordering epoch {orders} does not carry round {round}'s \
+                 signature: {why}. The value would have become the anchor that decides \
+                 who is paid first, and an unverifiable one is a value somebody chose"
             ),
             RuleViolation::UnfundedBond {
                 identity,
@@ -5360,6 +5408,28 @@ impl Node {
         if source == VDF_SOURCE {
             self.check_vdf_beacon(&record, self.ledger.len())?;
         }
+        // The other self-verifying source, and `source` is what discriminates
+        // between them: a `vdf` beacon proves somebody waited, a `drand` beacon
+        // proves a threshold group signed a round nobody could have chosen, and
+        // an `ethereum` one proves nothing to a reader without an RPC endpoint.
+        // Both checks here need only the log and a constant.
+        if source == drand::SOURCE {
+            let expected = drand::round_for_epoch(orders, epoch_seconds());
+            if block != expected {
+                return Err(RuleViolation::BeaconRoundMismatch {
+                    orders,
+                    block,
+                    expected,
+                });
+            }
+            if let Err(why) = drand::verify(expected, value) {
+                return Err(RuleViolation::BeaconSignatureInvalid {
+                    orders,
+                    round: expected,
+                    why,
+                });
+            }
+        }
         self.append(BEACON, record, ts)
     }
 
@@ -7159,6 +7229,32 @@ impl Node {
     ///
     /// Epochs that settled on the fallback are **not** reported here. See
     /// [`Node::epochs_without_beacon`] for why that is a separate query.
+    ///
+    /// # Why a bad signature is reported and not consulted when settling
+    ///
+    /// The timing and duplicate rules *do* reach settlement:
+    /// [`Node::epoch_beacon_within`] skips a beacon drawn outside its epoch, so
+    /// such a record orders nothing. The pairing check deliberately does not
+    /// join them, for two reasons that point the same way.
+    ///
+    /// It buys almost nothing. A beacon that orders nothing falls back to the
+    /// epoch-chain head, which is the value a sequencer can grind anyway — so
+    /// filtering converts *grinding via a forged beacon* into *grinding via the
+    /// fallback*, and the attacker is no worse off.
+    ///
+    /// And it costs the one thing this project cannot spend. Every other check
+    /// on this path compares integers and strings, where two implementations
+    /// cannot disagree. A pairing is the one place where they can: subgroup
+    /// membership and non-canonical point encodings are exactly where BLS
+    /// libraries have historically differed, and this crate and
+    /// `reference/rust` deliberately use *different* ones. Two nodes that
+    /// disagree about whether a signature verifies would disagree about the
+    /// anchor, settle in different orders, and both audit clean — the silent
+    /// fork `docs/design/settlement-convergence.md` exists to prevent.
+    ///
+    /// So: refused when written, reported to every reader, and never a fork.
+    /// The disagreement it could cause shows up in `scripts/differential.sh`
+    /// as two audit reports rather than in the log as two payment orders.
     fn audit_beacons(&self) -> Vec<String> {
         let mut problems = Vec::new();
         let mut seen: BTreeSet<u64> = BTreeSet::new();
@@ -7186,6 +7282,48 @@ impl Node {
                      committer, one drawn late by the operator",
                     entry.seq, entry.ts
                 ));
+            }
+            // drand only, and re-derived rather than believed. This is the
+            // whole reason for preferring that source: both halves are checks a
+            // reader holding nothing but the log can run, where the Ethereum
+            // beacon's `block` and `value` could only ever be checked by
+            // someone holding a chain.
+            if payload_str(&entry.payload, "source") == Some(drand::SOURCE) {
+                let expected = drand::round_for_epoch(orders, epoch_seconds());
+                if entry.payload.get("block").and_then(Value::as_u64) != Some(expected) {
+                    problems.push(format!(
+                        "beacon at entry {}: orders epoch {orders} from drand, which names \
+                         round {expected} -- a drand beacon does not choose its own round",
+                        entry.seq
+                    ));
+                }
+                // The pairing, against the round the record *claims* rather
+                // than the one the epoch names. The two faults are then
+                // independent and each says its own thing: "a real round, but
+                // not this epoch's" is a different accusation from "not a round
+                // at all", and collapsing them would report the second whenever
+                // the first was true.
+                let claimed = entry
+                    .payload
+                    .get("block")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(expected);
+                match payload_str(&entry.payload, "value") {
+                    Some(value) => {
+                        if let Err(why) = drand::verify(claimed, value) {
+                            problems.push(format!(
+                                "beacon at entry {}: orders epoch {orders} from drand and \
+                                 does not carry round {claimed}'s signature: {why}",
+                                entry.seq
+                            ));
+                        }
+                    }
+                    None => problems.push(format!(
+                        "beacon at entry {}: orders epoch {orders} from drand and carries \
+                         no value at all",
+                        entry.seq
+                    )),
+                }
             }
             // A delay beacon carries its own evidence, so unlike a chain
             // beacon it can be checked here rather than taken on the
@@ -7607,6 +7745,14 @@ fn mul_div_floor(value: u128, weight: u128, total: u128) -> Option<u128> {
     whole.checked_add(quotient)
 }
 
+/// Hex, leniently: `from_str_radix` accepts uppercase, so this and
+/// [`crate::hex::decode`] are two decoders with two answers about the same
+/// bytes. That is a wart and it is deliberately not fixed here. `crate::hex`
+/// is strict because it reads values other implementations write, where two
+/// spellings would be two spellings a record id could disagree about; this one
+/// reads a VDF witness and tightening it would move an admission boundary,
+/// which is a consensus-visible change and belongs in its own commit rather
+/// than in a merge.
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
@@ -11844,6 +11990,175 @@ mod tests {
             matches!(second, RuleViolation::DuplicateBeacon { epoch } if epoch == orders),
             "{second}"
         );
+    }
+
+    /// The round `epoch_at(EPOCH)` names, and quicknet's real signature over
+    /// it, fetched from two independent relays.
+    ///
+    /// A fixture rather than a synthetic value because the pairing is the whole
+    /// point: a made-up 96 hex characters exercises the shape check and nothing
+    /// else, and the shape check is the part that was already easy.
+    const DRAND_ROUND: u64 = 30_798_012;
+    const DRAND_SIGNATURE: &str = "90973449df156e156dc8c702aa397ebe24ab3ba4f0d7f46e921ba6ab906bc07515977132dc109498c6adebe27cde6fb5";
+    /// The *next* round's signature: a real point, a real threshold signature,
+    /// over the wrong message. The case no amount of shape checking catches.
+    const DRAND_NEXT_SIGNATURE: &str = "b7abb7a37451334949ab825934753d4b497b3cb83f4ba2c949f739027a76402266dea97c91782dff87cafd8609048026";
+
+    /// The round the test fixtures assume, checked rather than trusted.
+    fn drand_round_of_the_fixture_epoch() -> u64 {
+        let names = drand::round_for_epoch(epoch_at(EPOCH), epoch_seconds());
+        assert_eq!(
+            names, DRAND_ROUND,
+            "the signature fixtures are round {DRAND_ROUND}'s. BASE or EPOCH_SECONDS \
+             moved, so fetch round {names} from a drand relay and replace them"
+        );
+        names
+    }
+
+    #[test]
+    fn a_drand_beacon_does_not_choose_its_own_round() {
+        let dir = TempDir::new("beacon-drand-round");
+        let mut picky = node(&dir);
+        let orders = epoch_at(EPOCH);
+        let names = drand_round_of_the_fixture_epoch();
+
+        let wrong = picky
+            .record_beacon(
+                orders,
+                drand::SOURCE,
+                names + 1,
+                DRAND_SIGNATURE,
+                &stamp(EPOCH),
+            )
+            .expect_err("a drand beacon that names its own round");
+        assert!(
+            matches!(wrong, RuleViolation::BeaconRoundMismatch { orders: o, block, expected }
+                if o == orders && block == names + 1 && expected == names),
+            "{wrong}"
+        );
+
+        // Some other source is not checked, because this module cannot know
+        // what an `ethereum` block number is supposed to be. Named here so that
+        // a later change tightening drand does not tighten everything.
+        picky
+            .record_beacon(orders, "ethereum", names + 1, "aa", &stamp(EPOCH))
+            .expect("a non-drand beacon names whatever it likes");
+
+        let ok_dir = TempDir::new("beacon-drand-round-ok");
+        let mut ok = node(&ok_dir);
+        ok.record_beacon(orders, drand::SOURCE, names, DRAND_SIGNATURE, &stamp(EPOCH))
+            .expect("the round the epoch names, with that round's signature");
+        assert_eq!(ok.anchor_of_epoch(orders), DRAND_SIGNATURE);
+    }
+
+    #[test]
+    fn a_drand_beacon_must_carry_that_rounds_signature() {
+        let dir = TempDir::new("beacon-drand-signature");
+        let mut node = node(&dir);
+        let orders = epoch_at(EPOCH);
+        let names = drand_round_of_the_fixture_epoch();
+
+        // The attack this check exists for, and the reason a shape check was
+        // never enough: a *real* signature, by the real drand group, over a
+        // round one later. Everything about it is well-formed. It is simply not
+        // the value this epoch is entitled to, and an operator who could choose
+        // between adjacent rounds could choose the settlement order.
+        let borrowed = node
+            .record_beacon(
+                orders,
+                drand::SOURCE,
+                names,
+                DRAND_NEXT_SIGNATURE,
+                &stamp(EPOCH),
+            )
+            .expect_err("another round's signature");
+        assert!(
+            matches!(borrowed, RuleViolation::BeaconSignatureInvalid { round, why, .. }
+                if round == names && why == drand::VerifyError::DoesNotVerify),
+            "{borrowed}"
+        );
+
+        // And the paste that started all this: drand's `randomness` field,
+        // which is SHA-256 of the signature and proves nothing.
+        let hashed = node
+            .record_beacon(orders, drand::SOURCE, names, &"b".repeat(64), &stamp(EPOCH))
+            .expect_err("the randomness field");
+        assert!(
+            matches!(hashed, RuleViolation::BeaconSignatureInvalid { why, .. }
+                if why == drand::VerifyError::NotSignatureShaped),
+            "{hashed}"
+        );
+
+        node.record_beacon(orders, drand::SOURCE, names, DRAND_SIGNATURE, &stamp(EPOCH))
+            .expect("the round's own signature");
+    }
+
+    #[test]
+    fn a_hand_written_drand_beacon_is_caught_by_the_audit() {
+        // The same attack shape as the back-dated beacon below: `record_beacon`
+        // refuses it, so a sequencer appends straight to the ledger. Every
+        // fault is re-derived at read time from the log alone -- which is the
+        // only reason to prefer this source over an Ethereum block.
+        let dir = TempDir::new("beacon-drand-audit");
+        let mut misround = node(&dir);
+        let orders = epoch_at(EPOCH);
+        let names = drand_round_of_the_fixture_epoch();
+
+        let beacon = |block: u64, value: &str| {
+            Value::object([
+                ("orders", Value::Int(i128::from(orders))),
+                ("source", Value::string(drand::SOURCE)),
+                ("block", Value::Int(i128::from(block))),
+                ("value", Value::string(value)),
+            ])
+        };
+
+        // A genuine round, correctly signed, recorded against an epoch that
+        // does not name it. The signature check passes and the derivation is
+        // what catches it, which is why both exist.
+        misround
+            .ledger_mut()
+            .append(
+                BEACON,
+                beacon(DRAND_ROUND + 1, DRAND_NEXT_SIGNATURE),
+                &stamp(EPOCH),
+            )
+            .expect("append");
+        let problems: Vec<String> = misround.audit(false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains(&format!("names round {names}")),
+            "{problems:?}"
+        );
+
+        // The other half: a value that is not a signature at all. The round is
+        // right, so only the pairing has anything to say.
+        let paste_dir = TempDir::new("beacon-drand-randomness");
+        let mut paste = node(&paste_dir);
+        paste
+            .ledger_mut()
+            .append(BEACON, beacon(names, &"b".repeat(64)), &stamp(EPOCH))
+            .expect("append");
+        let problems: Vec<String> = paste.audit(false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("does not carry round"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_well_formed_drand_beacon_audits_clean() {
+        let dir = TempDir::new("beacon-drand-clean");
+        let mut clean = node(&dir);
+        let orders = epoch_at(EPOCH);
+        clean
+            .record_beacon(
+                orders,
+                drand::SOURCE,
+                drand_round_of_the_fixture_epoch(),
+                DRAND_SIGNATURE,
+                &stamp(EPOCH),
+            )
+            .expect("record");
+        assert_eq!(clean.audit(false), Vec::<String>::new());
     }
 
     /// A delay beacon carries its own evidence, so nobody has to hold a chain

@@ -96,6 +96,11 @@ cannot afford.
 
 ## Which chain, and what it is worth
 
+> **Read [drand-beacon.md](drand-beacon.md) alongside this.** The limit this
+> section is honest about — that a wrong `value` is caught only by someone
+> holding the chain — is a property of *Ethereum*, not of beacons, and that
+> note is the argument for the source that does not have it.
+
 Ethereum's RANDAO (`block.prevrandao`), read at the first block whose timestamp
 is at or after the epoch boundary. Pinning the block to the boundary is what
 stops the operator choosing *which* draw to use; without that rule the record
@@ -172,9 +177,15 @@ reference implementation reverted, the same log reports `batch anchor is
 
 Remaining:
 
-- [ ] the fetcher: `cairn beacon` currently takes `--value`, so something
-      still has to supply the chain's randomness. Deliberately outside the
-      rules engine, but until it exists the provenance fields are operator
-      assertions
+- [x] the fetcher, for **drand and not for Ethereum** —
+      [drand-beacon.md](drand-beacon.md). `cairn beacon --drand-signature`
+      derives the source, the round and the value; `scripts/drand-beacon.sh`
+      does the fetching, outside the binary, because `tests/cipher_policy.rs`
+      refuses a TLS crate in the tree. An `ethereum` `--value` is exactly as it
+      was: an operator assertion, and the provenance fields with it
+- [x] the *verification*, for drand: both implementations run the pairing
+      against a pinned public key, on two different BLS libraries. An Ethereum
+      `value` still cannot be checked without an Ethereum node, and that is a
+      property of the source rather than of this record
 - [ ] `cairn-p2p` drawing one per epoch on a timer
 - [ ] whether to adopt this at all, per anchored-time.md's recommendation 3

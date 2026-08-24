@@ -176,6 +176,73 @@ PY
   && fail "the reference accepted an edited entry"
 echo "  both refuse an entry edited under a path that still reaches the root"
 
+rule "drand signatures"
+
+# The one check in this protocol where two correct-looking programs can be made
+# to disagree, and the only one where the two implementations run *different*
+# third-party code: `bls12_381` in the primary, `bls12_381_plus` in the
+# reference. Subgroup membership and non-canonical point encodings are where
+# BLS libraries have historically differed, so the table below is mostly
+# boundary cases rather than valid signatures.
+#
+# A disagreement here would not fork settlement -- the pairing is deliberately
+# off that path, see `Node::audit_beacons` -- but it would mean one
+# implementation certifies a beacon the other calls forged, and an operator
+# would have no way to tell which was right. That is what this section exists
+# to notice.
+#
+# No network: every signature is a fixture. A verification test that had to
+# reach a relay would be a test that fails when somebody else's server is down.
+SIG_1="b55e7cb2d5c613ee0b2e28d6750aabbb78c39dcc96bd9d38c2c2e12198df95571de8e8e402a0cc48871c7089a2b3af4b"
+SIG_A="90973449df156e156dc8c702aa397ebe24ab3ba4f0d7f46e921ba6ab906bc07515977132dc109498c6adebe27cde6fb5"
+SIG_B="b7abb7a37451334949ab825934753d4b497b3cb83f4ba2c949f739027a76402266dea97c91782dff87cafd8609048026"
+ZEROS=$(printf '0%.0s' $(seq 96))
+# The field modulus, with the compression flag set: a well-formed-looking point
+# whose x coordinate is not a field element. The classic non-canonical encoding.
+MODULUS="9a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab"
+
+DRAND_AGREED=0
+DRAND_VERIFIED=0
+DRAND_REFUSED=0
+check_signature() {
+  local round="$1" signature="$2" note="$3"
+  # `|| primary=1` rather than `$?`: `set -e` is on, and a refusal is a
+  # non-zero exit that this section exists to collect rather than to die on.
+  # Both are normalised to verified / not-verified, because the two phrase a
+  # refusal differently and the phrasing is not what is under test.
+  local primary=0 reference=0
+  "$RUST" drand-verify --round "$round" --signature "$signature" >/dev/null 2>&1 || primary=1
+  "$REF" drand-verify "$round" --signature "$signature" >/dev/null 2>&1 || reference=1
+  if [ "$primary" -ne "$reference" ]; then
+    fail "the two BLS libraries disagree about $note (primary=$primary reference=$reference)"
+  fi
+  DRAND_AGREED=$((DRAND_AGREED + 1))
+  if [ "$primary" -eq 0 ]; then
+    DRAND_VERIFIED=$((DRAND_VERIFIED + 1))
+  else
+    DRAND_REFUSED=$((DRAND_REFUSED + 1))
+  fi
+}
+
+check_signature 1 "$SIG_1" "round 1, its own signature"
+check_signature 30798012 "$SIG_A" "a real round"
+check_signature 30798013 "$SIG_B" "the next real round"
+check_signature 30798012 "$SIG_B" "a real signature over the neighbouring round"
+check_signature 2 "$SIG_1" "round 1's signature offered as round 2"
+check_signature 30798012 "${SIG_A:0:8}f${SIG_A:9}" "one flipped character"
+check_signature 30798012 "$(printf 'a%.0s' $(seq 64))" "drand's randomness field, not its signature"
+check_signature 30798012 "" "nothing at all"
+check_signature 30798012 "$ZEROS" "48 zero bytes, so no compression flag"
+check_signature 30798012 "c0${ZEROS:2}" "the point at infinity, correctly encoded"
+check_signature 30798012 "e0${ZEROS:2}" "infinity with the sign bit set, which is not a legal encoding"
+check_signature 30798012 "$(printf 'f%.0s' $(seq 96))" "an x coordinate larger than the field"
+check_signature 30798012 "$MODULUS" "x = p exactly: non-canonical, and the classic disagreement"
+
+[ "$DRAND_VERIFIED" -gt 0 ] || fail "no signature verified; the harness is not exercising the accept path"
+[ "$DRAND_REFUSED" -gt 0 ] || fail "no signature was refused; the harness is not exercising the refuse path"
+echo "  $DRAND_AGREED signatures, same verdict from both BLS libraries"
+echo "  $DRAND_VERIFIED verified, $DRAND_REFUSED refused -- both paths exercised"
+
 rule "availability"
 
 # A real availability log, built by the primary and audited by both. The kinds
@@ -359,3 +426,4 @@ echo "  both refuse a forged promise appended past the admission rules"
 
 printf '\n\033[32mDIFFERENTIAL OK: both implementations agree on every record in the corpus\033[0m\n'
 printf '\033[32m  and on every inclusion proof over the published log\033[0m\n'
+printf '\033[32m  and on every drand signature, through two different BLS libraries\033[0m\n'
