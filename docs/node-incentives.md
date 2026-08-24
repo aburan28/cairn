@@ -103,6 +103,12 @@ Settlement divides the epoch's pot **by stake** — floor-divided in proportion 
 what each identity bonded, summed across its promises — records the remainder it
 could not divide, and names every promise that was samplable and said nothing.
 The silence is the half a slash attaches to; the bond is what a slash would take.
+All eligibility is fixed at the first log entry in or after the epoch: a promise
+or pool appended later does not become eligible merely because its record
+claims an earlier timestamp. Bond sums use checked `u128`, proportional shares
+use exact overflow-safe integer division, and audit reconstructs every weight,
+allocation, silent promise, remainder and anchor rather than accepting matching
+totals.
 
 The answer carries the sampled **entry** as well as its path, and that is the
 difference between proving storage and proving arithmetic. It did not, at first:
@@ -188,7 +194,11 @@ whole `reward`; funding an availability pool charges its whole ceiling; an
 undertaking charges its bond. `spendable = issued + settled − committed`, and
 `post_objective` refuses what the funder cannot cover — so a bounty for a sum
 nobody issued is refused at the door, and one appended past the door is named by
-the audit, in both implementations, from their own arithmetic.
+the audit, in both implementations, from their own arithmetic. In a log that
+declares scarcity, the objective funder must be an Ed25519 public key and a
+domain-separated signature binds the whole charged objective. A nickname or a
+signature copied onto different reward, verifier, tier, or timing fields is
+refused by admission and independently named by audit.
 
 Charged *in full and permanently*, which is the part that is easy to get wrong:
 the first version released a reward from escrow as settlements drew it down,

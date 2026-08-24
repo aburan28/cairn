@@ -51,7 +51,13 @@
       "description": "Integer units of account. Never a float -- floats do not round-trip identically across implementations."
     },
     "funder": {
-      "type": "string"
+      "type": "string",
+      "description": "Charged identity. In a scarce-supply log this must be a 64-character lowercase Ed25519 public key and funding_signature must verify under it."
+    },
+    "funding_signature": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{128}$",
+      "description": "Ed25519 authorization over the domain-separated objective without this field. Omitted on legacy supplyless objectives; mandatory when the log declares a scarce supply."
     },
     "created_at": {
       "type": "string",

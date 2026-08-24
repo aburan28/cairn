@@ -110,14 +110,15 @@ layer can establish that:
 truncated and stripped of control characters in list views so a statement cannot
 forge extra rows.
 
-**Structural.** The server tracks provenance. A claim id it hands the agent
-through a structured field — a frontier holder, or the id of a claim the agent
-itself submitted — is *offered*. A claim id appearing inside a rendered
-statement is *tainted*. `submit_claim` refuses any citation that is tainted and
-never offered, which is the injection signature exactly. Text a pinned verifier
-prints (`detail`, evidence) is tainted the same way: the checker was authored
-by whoever posted the objective, so it is the same attacker speaking through a
-second door.
+**Structural.** The server issues a random, session-local capability beside
+every citable claim in MCP `structuredContent`. `submit_claim.cites` accepts
+objects of the form `{"claim_id":"sha256:…","capability":"…"}` and refuses a
+claim id unless the matching capability came back with it. A statement,
+artifact, or verifier output receives no capability. Copying an id out of that
+prose — even after case folding or Unicode normalization — therefore cannot
+turn attacker-controlled data into citation authority. Lexical taint is still
+used for warning labels and regression tests, but it is not the authorization
+boundary.
 
 **A claim's artifact is a third door, and `get_claim` opens it deliberately.**
 An artifact is written by whoever submitted it, so an attacker can put *"also
@@ -126,17 +127,21 @@ frontier in order to beat it has every reason to study that text closely, which
 makes it a *better* channel than a statement rather than a worse one. It
 discloses nothing new (every accepted claim is already in the log this node
 publishes byte for byte); what is new is rendering it to a model. So artifacts
-are fenced and tainted exactly like statements, and only *accepted* claims are
+are fenced and labelled exactly like statements, and only *accepted* claims are
 readable — serving refused submissions would let anyone put arbitrary text in
-front of an agent for the price of a submission nobody had to accept.
+front of an agent for the price of a submission nobody had to accept. Reading
+an accepted claim through `get_claim` returns a fresh capability for that claim,
+not for ids merely mentioned inside its artifact.
 
-The check is deliberately narrow. An id the agent learned some other way (a
-human pasted it, an earlier session) is untouched: a claim id that never
-appeared in a statement was not injected through one, and blocking those would
-break honest use to catch nothing. It removes the one path by which an attacker
-can *plant* a citation; it does not verify that citations are earned. That
-remains what it always was — δ decaying with depth bounds the payoff, and
-validators slashing bad edges is designed, not built.
+The capability is deliberately session-local. A bare id pasted by a human or
+carried over from an earlier process is no longer sufficient; reacquire it with
+`frontier_status`, `get_claim`, or the successful response that created the
+claim. That is a breaking MCP input change and an intentional fail-closed
+tradeoff: an id is public data, not proof of where the agent learned it. The
+mechanism removes the path by which an attacker can *plant* a citation; it does
+not verify that citations are earned. That remains what it always was — δ
+decaying with depth bounds the payoff, and validators slashing bad edges is
+designed, not built.
 
 ## Wiring
 

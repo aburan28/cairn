@@ -180,9 +180,9 @@ Enforced by the kernel:
 - **No writes outside a scratch directory** that is deleted when the check
   finishes.
 - A wall-clock deadline, and best-effort `RLIMIT_CPU` / `RLIMIT_AS`.
-- A **scrubbed environment** for pinned pure functions. With
-  `CAIRN_REQUIRE_SANDBOX=1`, replay and Lean are scrubbed too, so strict
-  mode cannot return the operator's credentials in verdict evidence.
+- A **scrubbed environment for every objective subprocess**. Only the minimum
+  runtime variables and a scratch `HOME`/`TMPDIR` survive, so replay and Lean
+  cannot inherit the operator's credentials even when sandboxing is optional.
 - On macOS, reads are limited to declared bundle/toolchain paths and standard
   system runtime paths. Objective-selected directories are resolved through
   symlinks before the profile is built.
@@ -190,7 +190,9 @@ Enforced by the kernel:
 A jail that cannot start is `UNAVAILABLE`, never `REJECT` — the rule at the top
 of this document applies to the sandbox exactly as it applies to a missing
 toolchain. When a jailed run fails, the verdict's evidence names the mechanism,
-so an operator can tell a broken jail from a broken checker.
+so an operator can tell a broken jail from a broken checker. Raw child
+stdout/stderr is not copied into consensus evidence: only SHA-256 digests and
+the derived fields needed to reproduce the verdict are retained.
 
 Two gaps remain real and neither is hypothetical:
 
@@ -204,13 +206,16 @@ Two gaps remain real and neither is hypothetical:
 
 One thing that is *not* a gap, because it is checked: directories a spec can
 name — replay's `cwd`, lean's `project_root` — resolve against the objective
-root and are refused when they escape it, including through a symlink. A record cannot choose which host
-paths are bound into its own jail.
+root and are refused when they escape it, including through a symlink. A record
+cannot choose which host paths are bound into its own jail. A declared Lean
+project is read-only; scratch is the only writable location.
 
 **The reference implementation does not jail at all.** It spawns the
 interpreter directly, by design — it exists to be an independent second opinion
-on the *rules*, not a hardened node — and `reference/rust/src/verifiers.rs` says
-so in those words. Do not point it at an objective you have not read.
+on the *rules*, not a hardened node. It does scrub every child environment,
+stores output digests instead of raw streams, and copies a contained Lean
+project into scratch before execution, but those are not a kernel boundary. Do
+not point it at an objective you have not read.
 
 It implements **every kind the primary settles**: `certificate`, `evaluator`,
 `statistical`, `replay` and `lean`. That list was shorter for a long time, and
@@ -257,7 +262,7 @@ checking is how an exit code maps to a verdict, and that does not need a kernel.
 
 ## What an audit actually re-derives
 
-`proofwork audit --rerun` prints one line — *chain intact, every settled claim
+`cairn audit --rerun` prints one line — *chain intact, every settled claim
 re-verified* — and the value of the whole project rests on that sentence being
 literally true. The independent reference requires the explicit `--rerun`
 opt-in because it has no confinement backend; with `CAIRN_REQUIRE_SANDBOX` it

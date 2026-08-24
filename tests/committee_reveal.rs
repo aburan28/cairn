@@ -311,14 +311,21 @@ fn the_committee_is_drawn_from_the_log_and_anyone_recomputes_it() {
         "some registered peer must have been left out, or nothing was drawn"
     );
 
-    // A different epoch draws a different committee, which is what stops a
-    // fixed set being worth bribing (`docs/censorship.md` §2 on rotation).
-    let elsewhere = node.committee_for(epoch + 7, at).expect("draws");
-    assert_ne!(
-        once.iter().map(|s| &s.transport).collect::<Vec<_>>(),
-        elsewhere.iter().map(|s| &s.transport).collect::<Vec<_>>(),
-        "the committee must rotate with the epoch"
-    );
+    // The draw varies with the epoch, which is what stops a fixed set being
+    // worth bribing (`docs/censorship.md` §2 on rotation).  Two pseudorandom
+    // draws may legitimately select the same ordered 5-of-6 committee, so a
+    // single chosen epoch is a probabilistic assertion.  A committee that is
+    // actually fixed cannot survive this bounded sweep.
+    let first: Vec<_> = once.iter().map(|seat| &seat.transport).collect();
+    let rotates = (1..=64).any(|offset| {
+        let elsewhere = node.committee_for(epoch + offset, at).expect("draws");
+        elsewhere
+            .iter()
+            .map(|seat| &seat.transport)
+            .collect::<Vec<_>>()
+            != first
+    });
+    assert!(rotates, "the committee stayed fixed across 64 epochs");
 }
 
 // -- the property the whole design exists for ------------------------------

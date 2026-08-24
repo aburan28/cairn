@@ -217,6 +217,118 @@ impl Node {
             .saturating_sub(self.committed_within(identity, positions))
     }
 
+    /// What remains spendable for an objective verifier kind, including the
+    /// universal reserve after every other tier's shortfall is covered.
+    fn spendable_in_within(&self, identity: &str, wanted: &str, positions: u64) -> u128 {
+        if !self.declares_supply() {
+            return u128::MAX;
+        }
+        let objectives: BTreeMap<String, Objective> = self.objectives();
+        let mut universal_held = self.issued_within(identity, positions);
+        let mut held: BTreeMap<String, u128> = BTreeMap::new();
+        let mut committed: BTreeMap<String, u128> = BTreeMap::new();
+
+        for entry in self.ledger.entries() {
+            if entry.seq >= positions {
+                break;
+            }
+            match entry.kind.as_str() {
+                SETTLEMENT
+                    if entry.payload.get("submitter").and_then(Value::as_str) == Some(identity) =>
+                {
+                    let units = entry
+                        .payload
+                        .get("reward")
+                        .and_then(Value::as_u64)
+                        .map(u128::from)
+                        .unwrap_or(0);
+                    let kind = entry
+                        .payload
+                        .get("objective_id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| objectives.get(id))
+                        .and_then(Objective::verifier_kind)
+                        .unwrap_or("certificate")
+                        .to_string();
+                    let slot = held.entry(kind).or_insert(0);
+                    *slot = slot.saturating_add(units);
+                }
+                AVAILABILITY_SETTLEMENT => {
+                    for row in entry
+                        .payload
+                        .get("paid")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                    {
+                        if row.get("identity").and_then(Value::as_str) == Some(identity) {
+                            universal_held = universal_held.saturating_add(
+                                row.get("reward")
+                                    .and_then(Value::as_u64)
+                                    .map(u128::from)
+                                    .unwrap_or(0),
+                            );
+                        }
+                    }
+                }
+                CHALLENGE_SETTLEMENT
+                    if entry.payload.get("winner").and_then(Value::as_str) == Some(identity) =>
+                {
+                    universal_held = universal_held.saturating_add(
+                        entry
+                            .payload
+                            .get("units")
+                            .and_then(Value::as_u64)
+                            .map(u128::from)
+                            .unwrap_or(0),
+                    );
+                }
+                VERIFICATION_SLASH
+                    if entry.payload.get("catcher").and_then(Value::as_str) == Some(identity) =>
+                {
+                    universal_held = universal_held.saturating_add(
+                        entry
+                            .payload
+                            .get("units")
+                            .and_then(Value::as_u64)
+                            .map(u128::from)
+                            .unwrap_or(0),
+                    );
+                }
+                OBJECTIVE => {
+                    if let Ok(objective) = Objective::from_value(&entry.payload) {
+                        if objective.funder == identity {
+                            let kind = objective
+                                .verifier_kind()
+                                .unwrap_or("certificate")
+                                .to_string();
+                            let slot = committed.entry(kind).or_insert(0);
+                            *slot = slot.saturating_add(u128::from(objective.reward));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let objective_committed = committed
+            .values()
+            .fold(0u128, |sum, units| sum.saturating_add(*units));
+        let universal_committed = self
+            .committed_within(identity, positions)
+            .saturating_sub(objective_committed);
+        let universal_drawn = committed
+            .iter()
+            .fold(universal_committed, |drawn, (kind, owes)| {
+                drawn.saturating_add(owes.saturating_sub(held.get(kind).copied().unwrap_or(0)))
+            });
+        let universal_left = universal_held.saturating_sub(universal_drawn);
+        held.get(wanted)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(committed.get(wanted).copied().unwrap_or(0))
+            .saturating_add(universal_left)
+    }
+
     /// What the log says `identity` holds, before its commitments: issued at
     /// genesis, plus settled, plus availability payouts.
     fn held_within(&self, identity: &str, positions: u64) -> u128 {
@@ -1615,7 +1727,7 @@ impl Node {
         out
     }
 
-    fn matching_commitment(&self, claim: &Claim) -> Option<Value> {
+    fn matching_commitment(&self, claim: &Claim) -> Option<(Value, String)> {
         let target = claim.commitment_hash();
         self.ledger
             .entries_of_kind(COMMITMENT)
@@ -1626,7 +1738,7 @@ impl Node {
                     && payload.get("submitter").and_then(Value::as_str) == Some(&claim.submitter)
                     && payload.get("hash").and_then(Value::as_str) == Some(target.as_str())
             })
-            .map(|entry| entry.payload.clone())
+            .map(|entry| (entry.payload.clone(), entry.ts.clone()))
     }
 
     fn recorded_verdict(&self, claim_id: &str) -> Option<Verdict> {
@@ -1667,11 +1779,41 @@ impl Node {
                 return Err("ratchet reward and objective reward disagree".into());
             }
         }
+        objective
+            .verify_funding_signature()
+            .map_err(|error| error.to_string())?;
+        if self.declares_supply() && signed_submitter(&objective.funder).is_none() {
+            return Err(format!(
+                "objective funding requires a key-shaped funder in a scarce-supply log; {:?} is unauthenticated",
+                objective.funder
+            ));
+        }
+        if self.declares_supply() {
+            let positions = self.ledger.entries().len() as u64;
+            let reward = u128::from(objective.reward);
+            let spendable = self.spendable_within(&objective.funder, positions);
+            if reward > spendable {
+                return Err(format!(
+                    "funder {:?} offers {reward} units but has only {spendable} spendable",
+                    objective.funder
+                ));
+            }
+            let kind = objective.verifier_kind().unwrap_or("certificate");
+            let tier_spendable = self.spendable_in_within(&objective.funder, kind, positions);
+            if reward > tier_spendable {
+                return Err(format!(
+                    "funder {:?} offers {reward} {kind} units but has only {tier_spendable} spendable in that tier",
+                    objective.funder
+                ));
+            }
+        }
         self.ledger.append(OBJECTIVE, objective.to_value(), ts)?;
         Ok(id)
     }
 
     pub fn commit(&mut self, commitment: &Commitment, ts: &str) -> Result<String, String> {
+        crate::records::validate_commitment_submitter(&commitment.submitter)
+            .map_err(|error| error.to_string())?;
         commitment.verify_signature().map_err(|e| e.to_string())?;
         let declared = self.epoch_of_ts("commitment", &commitment.created_at)?;
         let now = self.epoch_of_ts("commit", ts)?;
@@ -1704,6 +1846,8 @@ impl Node {
     }
 
     pub fn reveal(&mut self, claim: &Claim, ts: &str) -> Result<Outcome, String> {
+        crate::records::validate_commitment_submitter(&claim.submitter)
+            .map_err(|error| error.to_string())?;
         claim.verify_signature().map_err(|e| e.to_string())?;
         let reveal_epoch = self.epoch_of_ts("reveal", ts)?;
         // Drain first: an epoch that closed while this node was idle must
@@ -1724,14 +1868,21 @@ impl Node {
                 claim.submitter
             ));
         }
-        let commitment = self
+        let (commitment, admitted_at) = self
             .matching_commitment(claim)
             .ok_or("no matching prior commitment: commit H(artifact‖submitter‖nonce) first")?;
         let created_at = commitment
             .get("created_at")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let commit_epoch = self.epoch_of_ts("commitment", created_at)?;
+        let declared_commit_epoch = self.epoch_of_ts("commitment", created_at)?;
+        let commit_epoch = self.epoch_of_ts("commitment admission", &admitted_at)?;
+        if declared_commit_epoch != commit_epoch {
+            return Err(format!(
+                "commitment declares epoch {declared_commit_epoch} but was admitted in epoch \
+                 {commit_epoch}; commit-reveal ordering uses the admission epoch"
+            ));
+        }
         // Strictly later, so the reveal that would be copied is public before
         // a competitor's commitment can be written.
         if reveal_epoch <= commit_epoch {
@@ -2039,6 +2190,226 @@ impl Node {
 
     // -- audit -----------------------------------------------------------
 
+    /// Reconstruct one availability settlement independently from the prefix
+    /// below the settlement record.
+    fn expected_availability_settlement(
+        &self,
+        epoch: u64,
+        positions: usize,
+    ) -> Result<Option<Value>, String> {
+        // Stop at the first record in or after the epoch. Continuing after the
+        // first boundary would let a later, back-dated undertaking join an
+        // already-known challenge.
+        let boundary = self
+            .ledger
+            .entries()
+            .iter()
+            .take(positions)
+            .position(|entry| {
+                unix_seconds(&entry.ts).is_none_or(|seconds| {
+                    epoch_of(seconds, crate::partition::EPOCH_SECONDS) >= epoch
+                })
+            })
+            .unwrap_or_else(|| positions.min(self.ledger.entries().len()));
+
+        let valid_promises = |limit: usize| -> BTreeMap<String, Undertaking> {
+            self.ledger
+                .entries_of_kind(UNDERTAKING)
+                .into_iter()
+                .filter(|entry| (entry.seq as usize) < limit)
+                .filter_map(|entry| {
+                    Undertaking::from_value(&entry.payload)
+                        .ok()
+                        .filter(|record| record.height == entry.seq)
+                        .filter(|record| record.verify_signature().is_ok())
+                        .filter(|record| {
+                            u128::from(record.bond)
+                                <= self.spendable_within(&record.identity, entry.seq)
+                        })
+                        .filter(|record| {
+                            usize::try_from(record.height)
+                                .ok()
+                                .and_then(|height| self.ledger.root_at(height))
+                                .as_deref()
+                                == Some(record.root.as_str())
+                        })
+                })
+                .map(|record| (record.id(), record))
+                .collect()
+        };
+        let promises = valid_promises(boundary);
+
+        // First valid answer for each promise/epoch wins, checked against only
+        // the promises that existed below that answer's own position.
+        let mut seen = BTreeSet::new();
+        let mut answered = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(AVAILABILITY) {
+            if (entry.seq as usize) >= positions {
+                continue;
+            }
+            let Ok(record) = Availability::from_value(&entry.payload) else {
+                continue;
+            };
+            if record.epoch != epoch || record.verify_signature().is_err() {
+                continue;
+            }
+            let at = valid_promises(entry.seq as usize);
+            let Some(promise) = at.get(&record.undertaking) else {
+                continue;
+            };
+            if promise.identity != record.identity {
+                continue;
+            }
+            let Some(index) = self.sampled_index(promise, record.epoch, entry.seq as usize) else {
+                continue;
+            };
+            let checks = Proof::from_parts(
+                &record.entry,
+                usize::try_from(index).unwrap_or(usize::MAX),
+                usize::try_from(promise.height).unwrap_or(usize::MAX),
+                record.path.clone(),
+            )
+            .is_some_and(|proof| proof.check(&promise.root).is_ok());
+            if !checks || !seen.insert((record.undertaking.clone(), record.epoch)) {
+                continue;
+            }
+            answered.insert(record.undertaking, record.identity);
+        }
+
+        let mut weights: BTreeMap<String, u128> = BTreeMap::new();
+        let mut answered_promises = 0usize;
+        let mut silent = Vec::new();
+        for (id, promise) in &promises {
+            match answered.get(id) {
+                Some(identity) => {
+                    let slot = weights.entry(identity.clone()).or_insert(0);
+                    *slot = slot
+                        .checked_add(u128::from(promise.bond))
+                        .ok_or_else(|| "availability weight overflow".to_string())?;
+                    answered_promises += 1;
+                }
+                None => silent.push(id.clone()),
+            }
+        }
+        if answered_promises == 0 && silent.is_empty() {
+            return Ok(None);
+        }
+
+        // Undertakings are returned in an id-keyed map above, while the wire
+        // format names silent promises in ledger order. Rebuild just that order
+        // independently before encoding.
+        silent.sort_by_key(|id| {
+            self.ledger
+                .entries_of_kind(UNDERTAKING)
+                .into_iter()
+                .position(|entry| {
+                    Undertaking::from_value(&entry.payload)
+                        .ok()
+                        .is_some_and(|record| record.id() == *id)
+                })
+                .unwrap_or(usize::MAX)
+        });
+
+        let offered = self
+            .ledger
+            .entries_of_kind(AVAILABILITY_POOL)
+            .into_iter()
+            .filter(|entry| (entry.seq as usize) < boundary)
+            .filter_map(|entry| AvailabilityPool::from_value(&entry.payload).ok())
+            .filter(|pool| pool.covers(epoch))
+            .try_fold(0u128, |total, pool| {
+                total
+                    .checked_add(u128::from(pool.per_epoch))
+                    .ok_or_else(|| "availability offer overflow".to_string())
+            })?;
+        let total = weights.values().try_fold(0u128, |sum, weight| {
+            sum.checked_add(*weight)
+                .ok_or_else(|| "availability weight overflow".to_string())
+        })?;
+        let mut paid = Vec::new();
+        let mut spent = 0u128;
+        for (identity, weight) in weights {
+            let reward = mul_div_floor(offered, weight, total)
+                .ok_or_else(|| "availability allocation overflow".to_string())?;
+            let reward =
+                u64::try_from(reward).map_err(|_| "availability reward exceeds u64".to_string())?;
+            spent = spent
+                .checked_add(u128::from(reward))
+                .ok_or_else(|| "availability spend overflow".to_string())?;
+            paid.push(Value::object([
+                ("identity", Value::string(identity)),
+                ("reward", Value::Int(i128::from(reward))),
+                (
+                    "weight",
+                    Value::Int(
+                        i128::try_from(weight)
+                            .map_err(|_| "availability weight exceeds i128".to_string())?,
+                    ),
+                ),
+            ]));
+        }
+        let unpaid = offered
+            .checked_sub(spent)
+            .and_then(|value| i128::try_from(value).ok())
+            .ok_or_else(|| "availability remainder is unrepresentable".to_string())?;
+        Ok(Some(Value::object([
+            ("epoch", Value::Int(i128::from(epoch))),
+            (
+                "anchor",
+                Value::string(self.availability_anchor(epoch, positions)),
+            ),
+            ("paid", Value::Array(paid)),
+            (
+                "silent",
+                Value::Array(silent.into_iter().map(Value::String).collect()),
+            ),
+            ("unpaid", Value::Int(unpaid)),
+        ])))
+    }
+
+    fn availability_anchor(&self, epoch: u64, positions: usize) -> String {
+        if let Some(value) = self.epoch_beacon(epoch, Some(positions)) {
+            return value;
+        }
+        let mut head = String::new();
+        for entry in self.ledger.entries().iter().take(positions) {
+            if entry.kind != BATCH {
+                continue;
+            }
+            let Some(batch_epoch) = entry
+                .payload
+                .get("epoch")
+                .and_then(Value::as_i128)
+                .filter(|value| u64::try_from(*value).is_ok())
+            else {
+                continue;
+            };
+            if batch_epoch == i128::from(epoch) {
+                break;
+            }
+            let mut claims: Vec<String> = entry
+                .payload
+                .get("claims")
+                .and_then(Value::as_array)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect();
+            claims.sort();
+            head = Value::object([
+                ("prev", Value::string(head)),
+                ("epoch", Value::Int(batch_epoch)),
+                (
+                    "claims",
+                    Value::Array(claims.into_iter().map(Value::String).collect()),
+                ),
+            ])
+            .digest();
+        }
+        head
+    }
+
     /// Re-derive everything the log claims, from the artifacts themselves.
     pub fn audit(&self, rerun: bool) -> Vec<String> {
         let mut problems = self.ledger.verify_chain();
@@ -2049,7 +2420,16 @@ impl Node {
         for entry in self.ledger.entries() {
             let re_encoded = match entry.kind.as_str() {
                 OBJECTIVE => Objective::from_value(&entry.payload)
-                    .map(|r| r.to_value())
+                    .and_then(|r| {
+                        if self.declares_supply() && signed_submitter(&r.funder).is_none() {
+                            return Err(crate::records::RecordError(format!(
+                                "objective funding requires a key-shaped funder in a scarce-supply log; {:?} is unauthenticated",
+                                r.funder
+                            )));
+                        }
+                        r.verify_funding_signature()?;
+                        Ok(r.to_value())
+                    })
                     .map_err(|e| e.to_string()),
                 COMMITMENT => Commitment::from_value(&entry.payload)
                     .and_then(|r| {
@@ -2417,6 +2797,7 @@ impl Node {
                 })
         };
         let mut spent_total = 0u128;
+        let mut settled_availability_epochs = BTreeSet::new();
         for entry in self.ledger.entries_of_kind(AVAILABILITY_SETTLEMENT) {
             let rows = entry.payload.get("paid").and_then(Value::as_array);
             let unpaid = entry.payload.get("unpaid").and_then(Value::as_i128);
@@ -2428,6 +2809,29 @@ impl Node {
                 ));
                 continue;
             };
+            if !settled_availability_epochs.insert(epoch) {
+                problems.push(format!(
+                    "entry {}: availability epoch {epoch} settled more than once",
+                    entry.seq
+                ));
+            }
+            match self.expected_availability_settlement(epoch, entry.seq as usize) {
+                Ok(Some(expected)) if expected != entry.payload => problems.push(format!(
+                    "entry {}: availability allocations, weights, silence, remainder, or \
+                     anchor differ from deterministic reconstruction",
+                    entry.seq
+                )),
+                Ok(None) => problems.push(format!(
+                    "entry {}: availability epoch {epoch} had no eligible undertaking \
+                     before its boundary",
+                    entry.seq
+                )),
+                Err(error) => problems.push(format!(
+                    "entry {}: availability settlement cannot be reconstructed: {error}",
+                    entry.seq
+                )),
+                Ok(Some(_)) => {}
+            }
             if unpaid < 0 {
                 problems.push(format!(
                     "entry {}: availability settlement has a negative remainder",
@@ -2506,8 +2910,22 @@ impl Node {
             }
         }
 
-        // Every settlement must name a claim whose recorded verdict accepted.
+        // Every settlement must name the exact accepted claim, objective,
+        // recipient, and deterministic reward it purports to pay.
         let accepted = self.accepted_claims();
+        let mut previous_frontier: BTreeMap<String, u64> = BTreeMap::new();
+        let mut progressive_rewards: BTreeMap<String, u64> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(FRONTIER) {
+            let Some(frontier) = FrontierEntry::from_value(&entry.payload) else {
+                continue;
+            };
+            let previous = previous_frontier
+                .insert(frontier.objective_id.clone(), frontier.paid_cumulative)
+                .unwrap_or(0);
+            if let Some(reward) = frontier.paid_cumulative.checked_sub(previous) {
+                progressive_rewards.insert(frontier.claim_id, reward);
+            }
+        }
         for entry in self.ledger.entries_of_kind(SETTLEMENT) {
             let Some(claim_id) = entry.payload.get("claim_id").and_then(Value::as_str) else {
                 problems.push(format!("entry {}: settlement has no claim_id", entry.seq));
@@ -2519,6 +2937,45 @@ impl Node {
                     entry.seq,
                     short(claim_id)
                 ));
+                continue;
+            }
+            let claim = &accepted[claim_id];
+            let objective_id = entry
+                .payload
+                .get("objective_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if objective_id != claim.objective_id {
+                problems.push(format!(
+                    "entry {}: settlement objective {} differs from claim {} objective {}",
+                    entry.seq,
+                    short(objective_id),
+                    short(claim_id),
+                    short(&claim.objective_id)
+                ));
+            }
+            if entry.payload.get("submitter").and_then(Value::as_str)
+                != Some(claim.submitter.as_str())
+            {
+                problems.push(format!(
+                    "entry {}: settlement recipient does not match claim {} submitter",
+                    entry.seq,
+                    short(claim_id)
+                ));
+            }
+            if let Some(objective) = objectives.get(&claim.objective_id) {
+                let expected = if objective.ratchet.is_some() {
+                    progressive_rewards.get(claim_id).copied()
+                } else {
+                    Some(objective.reward)
+                };
+                let recorded = entry.payload.get("reward").and_then(Value::as_u64);
+                if expected != recorded {
+                    problems.push(format!(
+                        "entry {}: settlement reward {:?} differs from deterministic reward {:?}",
+                        entry.seq, recorded, expected
+                    ));
+                }
             }
         }
 
@@ -2552,11 +3009,27 @@ impl Node {
             if !seen_claims.insert(claim_id.clone()) {
                 continue;
             }
-            if self.matching_commitment(&claim).is_none() {
-                problems.push(format!(
+            match self.matching_commitment(&claim) {
+                None => problems.push(format!(
                     "claim {}: no matching commitment",
                     short(&claim_id)
-                ));
+                )),
+                Some((commitment, admitted_at)) => {
+                    let declared = commitment
+                        .get("created_at")
+                        .and_then(Value::as_str)
+                        .and_then(unix_seconds)
+                        .map(|seconds| epoch_of(seconds, epoch_seconds()));
+                    let admitted = unix_seconds(&admitted_at)
+                        .map(|seconds| epoch_of(seconds, epoch_seconds()));
+                    if declared != admitted {
+                        problems.push(format!(
+                            "claim {}: matching commitment's declared epoch disagrees with its \
+                             ledger admission epoch",
+                            short(&claim_id)
+                        ));
+                    }
+                }
             }
             if !with_verdict.contains(&claim_id) {
                 problems.push(format!("claim {}: no verdict recorded", short(&claim_id)));
@@ -3083,6 +3556,39 @@ impl Node {
     }
 }
 
+/// Exact floor division for `value * weight / total` without overflowing the
+/// intermediate product. Kept independent from the primary implementation.
+fn mul_div_floor(value: u128, weight: u128, total: u128) -> Option<u128> {
+    if total == 0 {
+        return Some(0);
+    }
+    if weight > total {
+        return None;
+    }
+    let whole = (value / total).checked_mul(weight)?;
+    let remainder = value % total;
+    let mut quotient = 0u128;
+    let mut residue = 0u128;
+    for bit in (0..u128::BITS).rev() {
+        quotient = quotient.checked_mul(2)?;
+        if residue >= total - residue {
+            residue -= total - residue;
+            quotient = quotient.checked_add(1)?;
+        } else {
+            residue *= 2;
+        }
+        if (weight >> bit) & 1 == 1 {
+            if residue >= total - remainder {
+                residue -= total - remainder;
+                quotient = quotient.checked_add(1)?;
+            } else {
+                residue += remainder;
+            }
+        }
+    }
+    whole.checked_add(quotient)
+}
+
 fn unsettled(claim_id: String, verdict: Verdict, note: &str) -> Outcome {
     Outcome {
         claim_id,
@@ -3118,6 +3624,73 @@ mod tests {
             std::env::temp_dir().join(format!("pw-ref-{tag}-{}-{nanos}-{n}", std::process::id()));
         std::fs::create_dir_all(&path).expect("scratch");
         path
+    }
+
+    #[test]
+    fn live_objective_admission_enforces_reference_affordability() {
+        use ed25519_dalek::{Signer as _, SigningKey};
+
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+
+        fn signed_objective(
+            key: &SigningKey,
+            funder: &str,
+            reward: u64,
+            statement: &str,
+        ) -> Objective {
+            let mut objective = Objective {
+                goal: "reference affordability".into(),
+                statement: statement.into(),
+                verifier: Value::object([("kind", Value::string("replay"))]),
+                reward,
+                funder: funder.into(),
+                funding_signature: None,
+                created_at: TS.into(),
+                deadline: None,
+                ratchet: None,
+                confidentiality: crate::records::DEFAULT_CONFIDENTIALITY.into(),
+                embargo_epochs: None,
+                artifact_schema: None,
+                require_signed_submitter: false,
+            };
+            objective.funding_signature = Some(hex(&key
+                .sign(&objective.funding_signing_payload().canonical_bytes())
+                .to_bytes()));
+            objective
+        }
+
+        let dir = scratch("objective-affordability");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        let key = SigningKey::from_bytes(&[91u8; 32]);
+        let funder = hex(key.verifying_key().as_bytes());
+        ledger
+            .append(
+                ISSUANCE,
+                Value::object([
+                    ("type", Value::string("issuance")),
+                    ("holder", Value::string(funder.clone())),
+                    ("units", Value::Int(100)),
+                    ("created_at", Value::string(TS)),
+                ]),
+                TS,
+            )
+            .expect("issuance");
+        let mut node = Node::new(ledger, &dir);
+
+        let too_large = signed_objective(&key, &funder, 101, "too large");
+        let error = node
+            .post_objective(&too_large, TS)
+            .expect_err("101 units cannot be funded by 100");
+        assert!(error.contains("only 100 spendable"), "{error}");
+
+        node.post_objective(&signed_objective(&key, &funder, 60, "first"), TS)
+            .expect("first objective fits");
+        let error = node
+            .post_objective(&signed_objective(&key, &funder, 50, "second"), TS)
+            .expect_err("the first escrow leaves only 40");
+        assert!(error.contains("only 40 spendable"), "{error}");
     }
 
     /// The audit really checks these records, rather than reporting clean over
@@ -3323,6 +3896,79 @@ mod tests {
             0,
             "an attestation nobody signed staked a bond"
         );
+    }
+
+    #[test]
+    fn reveal_and_audit_bind_commitments_to_their_admission_epoch() {
+        let dir = scratch("commitment-admission-epoch");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        let declared_at = "2026-07-27T23:50:00+00:00";
+        let admitted_at = "2026-07-28T00:00:00+00:00";
+        let reveal_at = "2026-07-28T00:10:00+00:00";
+        let objective = Objective {
+            goal: "GOAL-admission".into(),
+            statement: "bind declaration to admission".into(),
+            verifier: Value::object([
+                ("kind", Value::string("certificate")),
+                ("checker", Value::string("checker.py")),
+                ("checker_sha256", Value::string("aa".repeat(32))),
+                ("entrypoint", Value::string("check")),
+            ]),
+            reward: 0,
+            funder: "treasury".into(),
+            funding_signature: None,
+            created_at: declared_at.into(),
+            deadline: None,
+            ratchet: None,
+            confidentiality: "public".into(),
+            embargo_epochs: None,
+            artifact_schema: None,
+            require_signed_submitter: false,
+        };
+        let artifact = Value::object([("answer", Value::Int(1))]);
+        let nonce = "nonce";
+        let commitment = Commitment {
+            objective_id: objective.id(),
+            submitter: "mallory".into(),
+            hash: crate::records::commitment_hash(&objective.id(), "mallory", &artifact, nonce),
+            created_at: declared_at.into(),
+            envelope: None,
+            signature: None,
+        };
+        let claim = Claim {
+            objective_id: objective.id(),
+            submitter: "mallory".into(),
+            artifact,
+            nonce: nonce.into(),
+            created_at: reveal_at.into(),
+            cites: Vec::new(),
+            relations: Vec::new(),
+            signature: None,
+        };
+        ledger
+            .append(OBJECTIVE, objective.to_value(), declared_at)
+            .expect("objective");
+        ledger
+            .append(COMMITMENT, commitment.to_value(), admitted_at)
+            .expect("crafted commitment");
+        let mut node = Node::new(ledger, ".");
+
+        let error = node
+            .reveal(&claim, reveal_at)
+            .expect_err("reveal accepted a backdated commitment");
+        assert!(error.contains("was admitted in epoch"), "{error}");
+
+        node.ledger
+            .append(CLAIM, claim.to_value(), reveal_at)
+            .expect("crafted claim");
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|problem| problem.contains(
+                "matching commitment's declared epoch disagrees with its ledger admission epoch"
+            )),
+            "audit missed the mismatch: {problems:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Same bytes as the fixture above, in a log that does *not* pay their

@@ -10,24 +10,22 @@
 //! | encapsulate | 22 µs | ciphertext **96 bytes** |
 //! | decapsulate | 12 ms | shared secret 32 bytes |
 //!
-//! A 255 KB public key cannot travel in every handshake, and a 243 ms keygen
-//! cannot happen per connection. So the public key is a peer's **long-term
-//! identity**: published once, fetched once, cached by id thereafter. After
-//! that a handshake costs 96 bytes on the wire — smaller than an X25519
-//! exchange plus a certificate, which is a genuinely good trade for gossip.
+//! A 243 ms keygen cannot happen per connection. So the public key is a peer's
+//! **long-term identity**. The low-level primitive in this module produces one
+//! 96-byte KEM leg. The TCP transport sends the initiator's public key plus that
+//! leg, returns an independent reverse leg, mixes both secrets, and performs
+//! encrypted key confirmation. That larger exchange is what authenticates both
+//! long-term identities and prevents a replayed first leg from recreating a
+//! prior AEAD key.
 //!
 //! # What this does and does not give you
 //!
 //! * **Confidentiality against a quantum adversary.** Classic McEliece is the
 //!   most conservative KEM available: the underlying problem has resisted
 //!   attack since 1978, which is the reason to accept the key size.
-//! * **Responder authentication, implicitly.** Only the holder of the secret
-//!   key can decapsulate, so a session that decrypts proves you are talking to
-//!   the owner of that public key.
-//! * **No initiator authentication.** The KEM says nothing about who
-//!   encapsulated. Peers that must prove who they are sign the transcript with
-//!   the ed25519 identity in [`crate::crypto::identity`] — that layer already
-//!   exists and this one deliberately does not duplicate it.
+//! * **One KEM leg authenticates its decapsulator.** The TCP transport runs a
+//!   leg in each direction and confirms the combined keys before exposing a
+//!   connection, so its completed session authenticates both peers.
 //! * **No forward secrecy.** This is the real cost of a static key, and it is
 //!   stated rather than buried: if a peer's McEliece secret leaks, every past
 //!   session it accepted becomes decryptable to whoever recorded the traffic.
@@ -37,10 +35,10 @@
 //!
 //! # The amplification a deployment must handle
 //!
-//! Encapsulation costs 22 µs; decapsulation costs 12 ms. A 96-byte message
-//! therefore buys about **125,000× its cost in CPU** from the responder. That
-//! is a denial-of-service asymmetry, not a cryptographic weakness, and it is
-//! the responder's problem to price: rate-limit per source, or require
+//! Encapsulation costs 22 µs; decapsulation costs 12 ms. A syntactically valid
+//! hello therefore buys a decapsulation from the responder. That is a
+//! denial-of-service asymmetry, not a cryptographic weakness, and it is the
+//! responder's problem to price: rate-limit per source, or require
 //! something cheap-to-verify and expensive-to-produce before decapsulating.
 //! Nothing in this module does that for you.
 
@@ -53,6 +51,12 @@ use classic_mceliece_rust::{
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use std::fmt;
+use zeroize::Zeroize;
+
+/// Wire size of a Classic McEliece public key.
+pub const PUBLIC_KEY_BYTES: usize = CRYPTO_PUBLICKEYBYTES;
+/// Wire size of a Classic McEliece ciphertext.
+pub const CIPHERTEXT_BYTES: usize = CRYPTO_CIPHERTEXTBYTES;
 
 /// A peer's identity: the SHA-256 of its public key.
 ///
@@ -270,7 +274,7 @@ struct SessionKeys {
 ///
 /// Both peer ids and the ciphertext go into the KDF, so a shared secret is
 /// useless outside the exact handshake that produced it: a ciphertext replayed
-/// against a different claimed initiator derives different keys and every frame
+/// against a different initiator identity derives different keys and every frame
 /// fails to authenticate.
 ///
 /// Separate keys per direction because the nonce is a counter starting at zero
@@ -377,6 +381,33 @@ impl Channel {
             Role::Initiator => (keys.i2r, keys.r2i),
             Role::Responder => (keys.r2i, keys.i2r),
         };
+        Channel {
+            send_key,
+            recv_key,
+            send_counter: 0,
+            recv_high: None,
+        }
+    }
+
+    /// Combine two independently generated, opposite-direction KEM legs.
+    ///
+    /// Both peers pass the legs in transcript order. A replayed first leg then
+    /// receives fresh keys from the responder's second leg, so counters that
+    /// restart at zero cannot repeat a ChaCha20-Poly1305 nonce/key pair.
+    pub(crate) fn mix(mut self, mut other: Channel) -> Channel {
+        let leg = |first: &[u8; 32], second: &[u8; 32]| -> [u8; 32] {
+            let mut hash = Sha256::new();
+            hash.update(b"proofwork/p2p/mceliece/mutual/v2");
+            hash.update(first);
+            hash.update(second);
+            hash.finalize().into()
+        };
+        let send_key = leg(&self.send_key, &other.send_key);
+        let recv_key = leg(&self.recv_key, &other.recv_key);
+        self.send_key.zeroize();
+        self.recv_key.zeroize();
+        other.send_key.zeroize();
+        other.recv_key.zeroize();
         Channel {
             send_key,
             recv_key,
@@ -648,7 +679,7 @@ mod tests {
 
     #[test]
     fn the_transcript_is_bound_into_the_keys() {
-        // A ciphertext replayed under a different claimed initiator must not
+        // A ciphertext replayed under a different initiator identity must not
         // produce a working session.
         let (alice, bob) = pair();
         let (ct, mut a_chan) = bob.to_public().initiate(alice.id());
@@ -683,6 +714,32 @@ mod tests {
                 counter: n1,
                 expected_above: n2
             })
+        );
+    }
+
+    #[test]
+    fn replaying_the_first_kem_leg_cannot_recreate_transport_keys() {
+        let (alice, bob) = pair();
+        let alice_public = alice.to_public();
+        let (first_ciphertext, first_client) = bob.to_public().initiate(alice.id());
+
+        let first_server = bob.accept(alice.id(), &first_ciphertext).unwrap();
+        let (reverse_one, second_server) = alice_public.initiate(bob.id());
+        let second_client = alice.accept(bob.id(), &reverse_one).unwrap();
+        let mut original_client = first_client.mix(second_client);
+        let mut original_server = first_server.mix(second_server);
+        let (counter, frame) = original_client.seal(b"sync state", b"ctx").unwrap();
+        assert_eq!(
+            original_server.open(counter, &frame, b"ctx").unwrap(),
+            b"sync state"
+        );
+
+        let replayed_first = bob.accept(alice.id(), &first_ciphertext).unwrap();
+        let (_reverse_two, fresh_second) = alice_public.initiate(bob.id());
+        let mut replayed_server = replayed_first.mix(fresh_second);
+        assert_eq!(
+            replayed_server.open(counter, &frame, b"ctx"),
+            Err(HandshakeError::NotAuthentic)
         );
     }
 

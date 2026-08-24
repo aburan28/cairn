@@ -103,28 +103,32 @@ Measured on the development machine, `mceliece348864`:
 Those numbers determine the protocol, so they are worth stating before the
 design rather than after.
 
-**A 255 KB public key cannot travel in every handshake**, and a 243 ms keygen
-cannot happen per connection. So a peer's public key is its **long-term
-identity**: published once, fetched once, cached by id. A `PeerId` is the
-SHA-256 of the key — 32 bytes — so peer references stay small everywhere, and
-the id commits to the key, meaning "fetch the key for this id later" is safe.
+**A 243 ms keygen cannot happen per connection**, so a peer's public key is its
+**long-term identity**. A `PeerId` is the SHA-256 of that key — 32 bytes — so
+peer references stay small and commit to the key fetched later.
 
-After caching, a handshake is **96 bytes and 22 µs for the initiator**. That is
-smaller than X25519 plus a certificate chain. The cost is entirely front-loaded
-into a one-time key distribution, which suits gossip well: peers are long-lived,
-connections are many.
+Mutual authentication changes the wire cost. The initiator sends its 261,120
+byte public key plus a 96-byte KEM ciphertext. The responder derives the
+initiator id from that key, returns a fresh 96-byte ciphertext encapsulated to
+it, and both sides mix the two independent secrets before exchanging encrypted
+key-confirmation frames. Public keys remain long-lived and keygen is still paid
+once, but an honest description of each inbound handshake includes the large
+initiator key.
 
 ### What the handshake gives you
 
 - **Confidentiality against a quantum adversary.** Classic McEliece is the most
   conservative KEM available; its problem has resisted attack since 1978, which
   is the reason to accept the key size at all.
-- **Implicit responder authentication.** Only the secret-key holder can
-  decapsulate, so a session that decrypts proves who is on the other end.
-- **Transcript binding.** Both peer ids and the ciphertext go into the KDF, so a
-  shared secret is useless outside the exact handshake that produced it. A
-  ciphertext replayed under a different claimed initiator derives different keys
-  and every frame fails to authenticate.
+- **Mutual long-term-key authentication.** Each peer decapsulates one KEM leg,
+  both legs are mixed, and each side must open an encrypted key-confirmation
+  frame before a connection is returned. The responder authenticates the
+  initiator key it received; the initiator authenticates the cached responder
+  key it chose to dial.
+- **Transcript and replay binding.** Peer ids and each ciphertext enter their
+  leg's KDF, then both independently generated legs enter the final key. A
+  replayed first leg therefore receives a fresh second leg and cannot recreate
+  an earlier key even though frame counters restart at zero.
 - **Directional keys.** The nonce is a frame counter starting at zero on both
   sides, so a single key would have both peers using nonce 0 under it — the one
   failure ChaCha20-Poly1305 cannot survive. Two keys, one per direction.
@@ -139,12 +143,9 @@ connections are many.
   recorded the traffic. Ephemeral keypairs would fix it at 243 ms and 255 KB per
   connection, which no gossip protocol can pay. The available mitigation is
   rotation, and a peer's id changes when it rotates.
-- **No initiator authentication.** The KEM says nothing about who encapsulated.
-  Peers that must prove identity sign the transcript with the ed25519 key in
-  [`crypto/identity.rs`](../src/crypto/identity.rs); that layer already exists
-  and the handshake deliberately does not duplicate it.
-- **A 125,000× DoS amplification.** Encapsulation costs 22 µs, decapsulation
-  12 ms. A 96-byte message buys that much CPU from the responder. Not a
+- **A pre-authentication DoS asymmetry.** Encapsulation costs 22 µs and
+  decapsulation 12 ms. A syntactically valid hello buys that work from the
+  responder before key confirmation. It is not a
   cryptographic weakness — a pricing problem the deployment must solve with rate
   limiting or a cheap-to-verify proof of work before decapsulating. **Nothing in
   the module does this for you**, and exposing `accept` to open traffic without
@@ -332,13 +333,15 @@ with a positive control so it cannot pass on an empty parse.
 That claim is checked rather than asserted. `tests/wire_encryption.rs` puts a
 recording relay between two real nodes, runs a session that carries an
 objective, a blob and a DHT ask/tell, and asserts none of the content appears in
-the captured bytes. It also asserts the initiator's peer id *is* visible, which
-is the positive control: without it the test would pass on an empty capture.
+the captured bytes. It also asserts a prefix of the initiator's public key *is*
+visible, which is the positive control: without it the test would pass on an
+empty capture.
 
 **What an observer still learns.** Who talks to whom, how much, and when. The
-handshake prefix is necessarily cleartext, because a responder must know which
-peer to expect before a key exists. Unlinkability is a transport-layer problem —
-onion routing, or rendezvous under a derived key — and is not solved here.
+initiator's long-term public key is cleartext because the responder needs it to
+authenticate and encapsulate the reverse KEM leg before a shared channel exists.
+Unlinkability is a transport-layer problem — onion routing, or rendezvous under
+a derived key — and is not solved here.
 
 **`p2p::swarm::tcp` runs over this transport too.** It did not for a long time — no
 handshake, no AEAD, no peer authentication, behind an off-by-default feature so
@@ -450,8 +453,9 @@ connections, so `O(log n)` routing is designed and not running.
 ## Implemented baseline
 
 `p2p::discovery::AddressBook` stores non-consensus `PeerId` to socket-address
-hints. `p2p::transport` performs the 32-byte-id/96-byte-ciphertext handshake and
-length-bounded encrypted framing. `p2p::session` drives the inventory,
+hints. `p2p::transport` performs the public-key-plus-two-ciphertext mutual
+handshake, encrypted key confirmation, and length-bounded framing.
+`p2p::session` drives the inventory,
 bucket-id, want, records, and done exchange — and, separately, the population
 digest/want/records exchange — while `p2p::service::Service` connects those
 pieces for dialing and inbound accepts. The service does one anti-entropy round
@@ -472,11 +476,10 @@ and checks that records moved passes either way. `scripts/p2p-demo.sh` queues a
 submission *after* startup — work that can only be done by a loop still going
 round — and that is what tells the difference.
 
-The responder still cannot authenticate the initiator from the KEM alone. A
-deployment that needs mutual authentication must restrict inbound ids to its
-discovery/address-book policy or add a signed session greeting. The listener
-also remains responsible for rate limiting before calling the expensive
-McEliece decapsulation.
+Both long-term identities are authenticated before application data is
+released. The listener still remains responsible for rate limiting before
+calling the expensive McEliece decapsulation, and static KEM keys still provide
+no forward secrecy.
 
 The `cairn-p2p` binary is the runnable daemon wrapper. It persists a local
 McEliece identity, opens the node ledger, accepts inbound sessions, dials a
@@ -525,7 +528,7 @@ like silence rather than like a firewall.
 **Unreachable peers are bounded, and were not always.** `transport::connect`
 uses `DIAL_TIMEOUT` rather than the kernel's SYN-retransmit schedule (~127 s on
 Linux), every session carries `IO_TIMEOUT` per read and write, and an accepted
-stream has `HANDSHAKE_TIMEOUT` to produce its 128-byte hello. The last one is
+stream has `HANDSHAKE_TIMEOUT` to produce its public-key-and-ciphertext hello. The last one is
 not an optimisation: `cairn-p2p` runs the handshake with the node mutex
 held, a public address is port-scanned within minutes of existing, and an
 unbounded read there is a seed that wedges on the first scanner and never dials,

@@ -34,7 +34,9 @@ REF="${REFERENCE_BIN:-./reference/rust/target/release/cairn-reference}"
   cargo build --release --manifest-path reference/rust/Cargo.toml
 }
 LOG="$WORK/log.jsonl"
-pw() { "$PW" --log "$LOG" --root . "$@"; }
+pw() {
+  "$PW" --log "$LOG" --key-file "$WORK/no-at-rest-key" --root . "$@"
+}
 
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
@@ -49,23 +51,24 @@ rule "a declared supply, so a bond costs something"
 # Without an issuance record the escrow rules are off and a bond is free, which
 # would mean the mechanism this script is about is not actually running.
 # Issuance is admissible only in the log's opening prefix, so it comes first.
-"$PW" --log "$LOG" --root . identity --out "$WORK/honest.json" >/dev/null
-"$PW" --log "$LOG" --root . identity --out "$WORK/stamper.json" >/dev/null
+pw identity --out "$WORK/honest.json" >/dev/null
+pw identity --out "$WORK/stamper.json" >/dev/null
+pw identity --out "$WORK/treasury.json" >/dev/null
 pubkey() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['public'])" "$1"; }
 HONEST=$(pubkey "$WORK/honest.json")
 STAMPER=$(pubkey "$WORK/stamper.json")
+TREASURY=$(pubkey "$WORK/treasury.json")
 pw issue --holder "$HONEST" --units 1000000 >/dev/null
 pw issue --holder "$STAMPER" --units 1000000 >/dev/null
-pw issue --holder treasury --units 1000000 >/dev/null
+pw issue --holder "$TREASURY" --units 1000000 >/dev/null
 printf '  honest  %s\n  stamper %s\n' "${HONEST:0:16}" "${STAMPER:0:16}"
 
 rule "an objective with a real pinned verifier"
 # Cap sets, as in `canary-demo.sh`, and for the same reason: a known-*good*
 # canary needs an artifact holding an unordered collection, because reordering
 # a set is the reliable validity-preserving edit and half the trap needs one.
-pw post examples/capset/objective.json >/dev/null
-OID=$("$PW" decode objective --record examples/capset/objective.json \
-        | grep -o 'sha256:[0-9a-f]*' | head -1)
+OID=$(pw post examples/capset/objective.json --identity "$WORK/treasury.json" \
+  | head -1 | awk '{print $2}')
 [ -n "$OID" ] || fail "could not read the objective id back"
 printf '  %s\n' "$OID"
 

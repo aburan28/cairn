@@ -29,6 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 use cairn::canonical::Value;
+use cairn::crypto::identity::Identity;
 use cairn::ledger::Ledger;
 use cairn::node::{Node, RuleViolation};
 use cairn::records::{Claim, Commitment, Issuance, Objective};
@@ -93,6 +94,19 @@ fn sha(text: &str) -> String {
     cairn::hex::encode(&hasher.finalize())
 }
 
+fn identity(name: &str) -> Identity {
+    let mut hasher = Sha256::new();
+    hasher.update(b"cairn/tests/tiers/identity/v1");
+    hasher.update(name.as_bytes());
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&hasher.finalize());
+    Identity::from_secret_bytes(secret)
+}
+
+fn key(name: &str) -> String {
+    identity(name).submitter_id()
+}
+
 struct Fixture {
     _dir: TempDir,
     node: Node,
@@ -105,7 +119,7 @@ fn fixture(label: &str, reserve: u64) -> Fixture {
     fs::write(dir.path.join("e.py"), EVALUATOR).expect("writable");
     let ledger = Ledger::open(dir.path.join("log.jsonl")).expect("an empty log");
     let mut node = Node::with_registry(ledger, VerifierRegistry::new(&dir.path));
-    node.post_issuance(&Issuance::new("treasury", reserve, GENESIS), GENESIS)
+    node.post_issuance(&Issuance::new(key("treasury"), reserve, GENESIS), GENESIS)
         .expect("genesis issuance");
     Fixture { _dir: dir, node }
 }
@@ -114,6 +128,7 @@ fn fixture(label: &str, reserve: u64) -> Fixture {
 /// with runnable pinned code in this fixture; `lean` needs no toolchain here
 /// because nothing ever submits to it — the test refuses at *post* time.
 fn objective(kind: &str, funder: &str, reward: u64, label: &str) -> Objective {
+    let signer = identity(funder);
     let verifier = match kind {
         "certificate" => Value::object([
             ("kind", Value::string("certificate")),
@@ -141,26 +156,32 @@ fn objective(kind: &str, funder: &str, reward: u64, label: &str) -> Objective {
         format!("tier fixture: {label}"),
         verifier,
         reward,
-        funder,
+        signer.submitter_id(),
         GENESIS,
         None,
         None,
     )
     .expect("valid objective")
+    .funded_by(&signer)
 }
 
 /// Submit and settle, so the submitter is actually paid.
 fn earn(fixture: &mut Fixture, objective: &Objective, who: &str, nonce: &str) {
     let id = objective.id();
+    let signer = identity(who);
+    let who = signer.submitter_id();
     let artifact = Value::object([("n", Value::Int(1))]);
     let commitment = Commitment::new(
         &id,
-        who,
-        cairn::records::commitment_hash(&id, who, &artifact, nonce),
+        &who,
+        cairn::records::commitment_hash(&id, &who, &artifact, nonce),
         COMMIT_AT,
-    );
+    )
+    .signed_with(&signer);
     fixture.node.commit(&commitment, COMMIT_AT).expect("commit");
-    let claim = Claim::new(&id, who, artifact, nonce, REVEAL_AT, Vec::new()).expect("valid claim");
+    let claim = Claim::new(&id, &who, artifact, nonce, REVEAL_AT, Vec::new())
+        .expect("valid claim")
+        .signed_with(&signer);
     fixture.node.reveal(&claim, REVEAL_AT).expect("reveal");
 
     let now = {
@@ -196,14 +217,19 @@ fn settling_mints_units_of_the_verifiers_own_tier() {
     earn(&mut fixture, &certificate, "alice", "n1");
 
     let tiered = fixture.node.tiered();
-    let alice = tiered.get("alice").expect("alice was paid");
+    let alice = tiered.get(&key("alice")).expect("alice was paid");
     assert_eq!(alice.held(tier("certificate")), 1_000);
     assert_eq!(alice.held(Tier::Universal), 0, "work minted reserve");
     assert_eq!(alice.held(tier("lean")), 0);
     // And the untyped total is unchanged, so every existing reader of
     // `balances` still gets the same number.
     assert_eq!(
-        fixture.node.balances().get("alice").copied().unwrap_or(0),
+        fixture
+            .node
+            .balances()
+            .get(&key("alice"))
+            .copied()
+            .unwrap_or(0),
         1_000
     );
     assert!(fixture.node.audit(true).is_empty());
@@ -225,7 +251,12 @@ fn a_certificate_mill_cannot_fund_lean_work() {
         .expect("post");
     earn(&mut fixture, &certificate, "alice", "n1");
     assert_eq!(
-        fixture.node.balances().get("alice").copied().unwrap_or(0),
+        fixture
+            .node
+            .balances()
+            .get(&key("alice"))
+            .copied()
+            .unwrap_or(0),
         1_000,
         "alice really does hold a thousand units"
     );
@@ -278,9 +309,11 @@ fn earnings_fund_their_own_tier_as_before() {
         .post_objective(&second, REVEAL_AT)
         .expect("certificate earnings fund certificate work");
     assert_eq!(
-        fixture
-            .node
-            .spendable_in("alice", tier("certificate"), fixture.node.ledger().len()),
+        fixture.node.spendable_in(
+            &key("alice"),
+            tier("certificate"),
+            fixture.node.ledger().len(),
+        ),
         0,
         "the whole balance should now be committed"
     );
@@ -301,7 +334,7 @@ fn the_reserve_declared_at_genesis_funds_any_tier() {
             .unwrap_or_else(|why| panic!("the reserve could not fund {kind}: {why}"));
     }
     let tiered = fixture.node.tiered();
-    let treasury = tiered.get("treasury").expect("the funder");
+    let treasury = tiered.get(&key("treasury")).expect("the funder");
     assert_eq!(treasury.held(Tier::Universal), 10_000);
     assert_eq!(treasury.spendable_in(Tier::Universal), 7_000);
     // Every tier sees the same remaining reserve, because it is one pool.

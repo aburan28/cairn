@@ -453,6 +453,7 @@ fn read_passphrase_file(path: &str) -> Result<String, CliError> {
 enum Command {
     Post {
         objective: String,
+        identity: Option<String>,
     },
     /// Declare units into the log's supply. Genesis prefix only — see
     /// [`cairn::records::Issuance`].
@@ -1319,19 +1320,23 @@ fn parse_issue(cursor: &mut Cursor) -> Result<Command, CliError> {
 
 fn parse_post(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut objective: Option<String> = None;
+    let mut identity: Option<String> = None;
     while let Some(token) = cursor.take() {
-        if is_flag(&token) {
+        if token == "--identity" {
+            identity = Some(cursor.value("post: --identity")?);
+        } else if is_flag(&token) {
             return Err(CliError::Usage(format!("post: unknown option {token:?}")));
-        }
-        if objective.is_some() {
+        } else if objective.is_some() {
             return Err(CliError::Usage(format!(
                 "post: unexpected argument {token:?}"
             )));
+        } else {
+            objective = Some(token);
         }
-        objective = Some(token);
     }
     Ok(Command::Post {
         objective: require(objective, "post", "an objective JSON file")?,
+        identity,
     })
 }
 
@@ -2970,7 +2975,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "usage: cairn [--log PATH] [--root PATH] <command>");
     say(out, "");
     say(out, "commands:");
-    say(out, "  post <objective.json>");
+    say(out, "  post <objective.json> [--identity <file>]");
     say(out, "      fund a checkable question");
     say(
         out,
@@ -3406,8 +3411,13 @@ fn read_json(path: &str) -> Result<Value, CliError> {
     })
 }
 
-fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
-    post_objective_file(out, options, path)?;
+fn cmd_post(
+    out: &mut dyn Write,
+    options: &Options,
+    path: &str,
+    identity: Option<&str>,
+) -> Result<i32, CliError> {
+    post_objective_file(out, options, path, identity)?;
     Ok(0)
 }
 
@@ -3591,6 +3601,7 @@ fn post_objective_file(
     out: &mut dyn Write,
     options: &Options,
     path: &str,
+    identity: Option<&str>,
 ) -> Result<String, CliError> {
     let mut node = open_node_for_writing(options)?;
     let data = read_json(path)?;
@@ -3601,6 +3612,10 @@ fn post_objective_file(
     // that `spec/objective.schema.json` would reject.
     validate_objective(&data).map_err(CliError::Schema)?;
     let objective = Objective::from_value(&data).map_err(CliError::Record)?;
+    let objective = match load_identity(identity)? {
+        Some(identity) => objective.funded_by(&identity),
+        None => objective,
+    };
     let id = post_objective(&mut node, &objective, &timestamp())?;
 
     // Field 2 of this line is the objective id, and `scripts/demo.sh` reads it
@@ -6048,7 +6063,7 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
             say(out, "  already posted; using it");
             id
         } else {
-            post_objective_file(out, options, objective)?
+            post_objective_file(out, options, objective, None)?
         }
     };
 
@@ -8138,7 +8153,10 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             print_help(out);
             Ok(0)
         }
-        Command::Post { objective } => cmd_post(out, options, objective),
+        Command::Post {
+            objective,
+            identity,
+        } => cmd_post(out, options, objective, identity.as_deref()),
         Command::Issue { holder, units } => cmd_issue(out, options, holder, *units),
         Command::Balances => cmd_balances(out, options),
         Command::Commit {
@@ -8758,7 +8776,7 @@ mod tests {
         let path = dir.join("objective.json");
         std::fs::write(&path, objective.canonical_string()).expect("write objective");
         let mut out: Vec<u8> = Vec::new();
-        cmd_post(&mut out, options, &path.display().to_string()).expect("post succeeds");
+        cmd_post(&mut out, options, &path.display().to_string(), None).expect("post succeeds");
         String::from_utf8(out).expect("utf-8")
     }
 
