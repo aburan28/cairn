@@ -3464,6 +3464,31 @@ fn post_objective_file(
         say(out, line);
     }
 
+    // Same shape of problem as the unresolved pin below: admissible, funded,
+    // and unwinnable. Progress is clamped to the span, so a `min_improvement`
+    // larger than the span is a gate no claim can pass however good it is, and
+    // the whole reward sits in the log forever. `Ratchet::validate` admits it
+    // on purpose -- refusing here would change what records a node accepts,
+    // which orphans any log that already carries one -- so the only honest
+    // move is to say it out loud while the funder can still repost.
+    if let Some(ratchet) = objective
+        .ratchet
+        .as_ref()
+        .and_then(|block| Ratchet::from_value(block).ok())
+    {
+        if !ratchet.is_fundable() {
+            say(
+                out,
+                format!(
+                    "  warning: min_improvement {} exceeds the whole baseline-to-target span \
+ {}, so no claim can ever settle and the reward is stranded.",
+                    ratchet.min_improvement,
+                    ratchet.span()
+                ),
+            );
+        }
+    }
+
     // A pin this node cannot resolve is not an error: content addressing is
     // what lets a node post an objective whose checker a peer will serve, and
     // record sync admits objectives from nodes that never had the bundle. So

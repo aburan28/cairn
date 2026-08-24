@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 use crate::blobs;
 use crate::canonical::Inclusion;
 use crate::canonical::{short, Value};
-use crate::frontier::{FrontierEntry, Ratchet, RatchetError};
+use crate::frontier::{FrontierEntry, Ratchet, RatchetError, Stall};
 use crate::knowledge::{
     ClaimFacts, ConfidencePolicy, KnowledgeGraph, KnowledgeState, Reproducible,
 };
@@ -5768,12 +5768,21 @@ impl Node {
         };
 
         let previous = held.map(|frontier| frontier.score);
-        if !ratchet.improves(previous, score) {
-            let note = format!(
-                "score {score} does not improve on {} by at least {}",
-                render_previous(previous),
-                ratchet.min_improvement
-            );
+        // `stall` rather than `improves`, because the note is read by whoever
+        // submitted: a strictly better score reported as "does not improve"
+        // tells a contributor holding a real advance to throw it away. See
+        // `Ratchet::stall`.
+        if let Some(stall) = ratchet.stall(previous, score) {
+            let note = match stall {
+                // The historical phrasing, which named `min_improvement` even
+                // for a plain regression where it is not the reason.
+                Stall::Regressed { .. } => format!(
+                    "score {score} does not improve on {} by at least {}",
+                    render_previous(previous),
+                    ratchet.min_improvement
+                ),
+                stall => format!("score {score}: {stall}"),
+            };
             return Ok(Outcome::unsettled(claim_id, verdict, note));
         }
 
