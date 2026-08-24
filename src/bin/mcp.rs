@@ -1567,9 +1567,10 @@ impl Server {
     }
 
     /// Commitments still waiting on their reveal. Read-only, and deliberately
-    /// silent about nonces and artifacts: on a shared server another
-    /// submitter's unrevealed artifact must stay hidden, which is the whole
-    /// point of committing first.
+    /// silent about nonces, artifacts, **and artifact digests**: on a shared
+    /// server another submitter's unrevealed artifact must stay hidden, which
+    /// includes not handing out an offline dictionary oracle for a small
+    /// artifact domain.
     fn pending_reveals(&mut self, args: &Json) -> Result<String, String> {
         let filter = args.get("submitter").and_then(Json::as_str);
         let ts = timestamp();
@@ -1587,11 +1588,10 @@ impl Server {
         let mut out = String::new();
         for pending in &entries {
             out.push_str(&format!(
-                "objective {}\n  submitter: {}   committed in epoch {}   artifact digest: {}\n  {}\n",
+                "objective {}\n  submitter: {}   committed in epoch {}\n  {}\n",
                 pending.objective_id,
                 pending.submitter,
                 pending.epoch,
-                pending.artifact_digest,
                 if now > pending.epoch {
                     "revealable NOW: call submit_claim with the same objective, submitter, \
                      and artifact"
@@ -1872,9 +1872,15 @@ mod tests {
             None => commitment,
         };
         server.node.commit(&commitment, TS).expect("commit");
-        let claim =
-            cairn::records::Claim::new(&objective_id, &submitter, artifact, "n1", TS, Vec::new())
-                .expect("valid claim");
+        let claim = cairn::records::Claim::new(
+            &objective_id,
+            &submitter,
+            artifact,
+            "n1",
+            LATER,
+            Vec::new(),
+        )
+        .expect("valid claim");
         let claim = match signer {
             Some(identity) => claim.signed_with(identity),
             None => claim,
@@ -2393,7 +2399,7 @@ mod tests {
             )
             .expect("commit");
         let retraction =
-            cairn::records::Claim::new(&second_id, &who, artifact, "n2", LATER, Vec::new())
+            cairn::records::Claim::new(&second_id, &who, artifact, "n2", LATEST, Vec::new())
                 .expect("valid claim")
                 .relating(vec![cairn::records::ClaimRelation::new(
                     cairn::records::Relation::Retracts,
@@ -2729,6 +2735,13 @@ mod tests {
         // And the raw artifact is not echoed either -- on a shared server
         // another submitter's unrevealed artifact must stay hidden.
         assert!(!listed.contains("\"n\":1"), "{listed}");
+        // A bare digest is enough to recover a small-domain artifact offline;
+        // the nonce only helps while guesses have to go through the commitment.
+        let digest = &s.pending.entries[0].artifact_digest;
+        assert!(
+            !listed.contains(digest.as_str()),
+            "the artifact digest leaked"
+        );
 
         let filtered = call(&mut s, "pending_reveals", json!({ "submitter": "nobody" }));
         assert!(filtered.contains("No commitments"), "{filtered}");

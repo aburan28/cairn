@@ -445,10 +445,11 @@ fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]
 
 /// The narrow installation prefix needed by a runtime, when its shape is safe.
 ///
-/// `~/bin/tool` and `~/.local/bin/tool` are common, but their grandparent is
-/// the operator's home or `.local` data tree. Granting either subtree to
-/// objective-authored code is a sandbox escape. Versioned rustup/pyenv/elan
-/// roots are deeper and remain usable.
+/// `~/bin/tool`, `~/.local/bin/tool`, and versioned rustup/pyenv/elan installs
+/// are common, but every one is below the operator's home. Granting any such
+/// subtree to objective-authored code can expose unrelated operator data, so a
+/// runtime beneath a home directory is refused rather than broadened into a
+/// read capability. System installation prefixes remain usable.
 fn narrow_runtime_root(executable: &Path) -> Option<PathBuf> {
     let root = executable.parent()?.parent()?.to_path_buf();
     if root == Path::new("/") {
@@ -466,9 +467,8 @@ fn narrow_runtime_root(executable: &Path) -> Option<PathBuf> {
     };
     if configured_home
         .as_deref()
-        .is_some_and(|home| root == home || root.parent() == Some(home))
-        || structural_home(&root)
-        || root.parent().is_some_and(structural_home)
+        .is_some_and(|home| root.starts_with(home))
+        || root.ancestors().any(structural_home)
     {
         return None;
     }
@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn shallow_user_runtime_paths_never_allow_their_data_ancestor() {
+    fn user_runtime_paths_never_allow_their_data_ancestor() {
         assert_eq!(
             narrow_runtime_root(Path::new("/Users/alice/.local/bin/uv")),
             None
@@ -655,9 +655,11 @@ mod tests {
             narrow_runtime_root(Path::new(
                 "/Users/alice/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"
             )),
-            Some(PathBuf::from(
-                "/Users/alice/.rustup/toolchains/stable-aarch64-apple-darwin"
-            ))
+            None
+        );
+        assert_eq!(
+            narrow_runtime_root(Path::new("/Users/alice/Projects/private/bin/python")),
+            None
         );
     }
 

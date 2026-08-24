@@ -62,6 +62,7 @@ use std::env;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -69,6 +70,7 @@ use cairn::attribution::{payouts_with_enforced, FlowError, FlowParams};
 use cairn::canonical::{short, CanonicalError, Value};
 use cairn::checkpoint::{RootKey, SignedCheckpoint};
 use cairn::crypto::identity::Identity;
+use cairn::daemon::{self, Config as DaemonConfig};
 use cairn::frontier::Ratchet;
 use cairn::incentive::design::Report as IncentiveReport;
 use cairn::incentive::{sweep, NodeParams, ParamError, Rat};
@@ -261,6 +263,10 @@ enum CliError {
     /// against, so it is refused before any constructor gets to interpret it.
     Schema(SchemaError),
     Ledger(LedgerError),
+    /// The combined node could not start. This is separate from a refused
+    /// record: `run` has not opened a submission path yet, and a caller should
+    /// see a startup failure rather than a consensus refusal.
+    Daemon(String),
     Flow(FlowError),
     /// A payload already in the log cannot be read back. Distinct from
     /// [`CliError::Record`], which is about a file the user just supplied: this
@@ -300,6 +306,7 @@ impl fmt::Display for CliError {
             CliError::Record(source) => write!(f, "{source}"),
             CliError::Schema(source) => write!(f, "{source}"),
             CliError::Ledger(source) => write!(f, "{source}"),
+            CliError::Daemon(message) => write!(f, "node: {message}"),
             CliError::Flow(source) => write!(f, "{source}"),
             CliError::LogPayload { seq, reason } => write!(f, "log entry {seq}: {reason}"),
             CliError::Overflow(what) => {
@@ -662,6 +669,11 @@ enum Command {
         /// payout rather than a "settles when epoch N closes".
         settle: bool,
     },
+    /// Start the local node: P2P synchronization, HTTP publishing, and the
+    /// embedded reader, all against one exclusive ledger.
+    Run {
+        request: RunRequest,
+    },
     /// Score candidate artifacts locally and submit only the ones that already
     /// pass. The proposer loop.
     Propose {
@@ -729,6 +741,27 @@ enum Command {
     },
     Log,
     Help,
+}
+
+/// Configuration for `cairn run`.
+///
+/// The command deliberately has useful local defaults. The release binary is
+/// the thing an operator downloads, so asking them to copy the `cairn-p2p`
+/// command's seven paths before seeing a page is the wrong first-run shape.
+/// The advanced flags remain available for a public node or an existing store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunRequest {
+    identity: Option<String>,
+    root_key: Option<String>,
+    checkpoint: Option<String>,
+    listen: String,
+    serve: String,
+    queue: Option<String>,
+    no_queue: bool,
+    population: Option<String>,
+    bootstrap: Vec<String>,
+    fanout: Option<usize>,
+    max_queue: Option<usize>,
 }
 
 /// How a sweep's table is written.
@@ -1178,6 +1211,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "incentives" => parse_incentives(&mut cursor)?,
         "scaffold" => parse_scaffold(&mut cursor)?,
         "try" => parse_try(&mut cursor)?,
+        "run" => parse_run(&mut cursor)?,
         "canon" => {
             let mut input: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1252,6 +1286,74 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
     };
 
     Ok(Invocation { options, command })
+}
+
+/// Parse `run`'s node-specific flags.
+///
+/// The global `--log`, `--root`, `--data-dir`, and key flags still belong
+/// before the command, like every other CLI command. These flags describe the
+/// daemon's two listeners and its local peer configuration, so keeping them
+/// here avoids making the ordinary read-only commands carry daemon concepts.
+fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut request = RunRequest {
+        identity: None,
+        root_key: None,
+        checkpoint: None,
+        listen: String::from("127.0.0.1:9000"),
+        serve: String::from("127.0.0.1:8080"),
+        queue: None,
+        no_queue: false,
+        population: None,
+        bootstrap: Vec::new(),
+        fanout: None,
+        max_queue: None,
+    };
+
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--identity" => request.identity = Some(cursor.value("run: --identity")?),
+            "--root-key" => request.root_key = Some(cursor.value("run: --root-key")?),
+            "--checkpoint" => request.checkpoint = Some(cursor.value("run: --checkpoint")?),
+            "--listen" => request.listen = cursor.value("run: --listen")?,
+            "--serve" | "--http" => request.serve = cursor.value("run: --serve")?,
+            "--queue" => {
+                request.queue = Some(cursor.value("run: --queue")?);
+                request.no_queue = false;
+            }
+            "--no-queue" => {
+                request.no_queue = true;
+                request.queue = None;
+            }
+            "--population" => request.population = Some(cursor.value("run: --population")?),
+            "--bootstrap" => request.bootstrap.push(cursor.value("run: --bootstrap")?),
+            "--fanout" => {
+                let raw = cursor.value("run: --fanout")?;
+                request.fanout = Some(raw.parse::<usize>().map_err(|_| {
+                    CliError::Usage(String::from("run: --fanout needs a positive integer"))
+                })?);
+                if request.fanout == Some(0) {
+                    return Err(CliError::Usage(String::from(
+                        "run: --fanout needs a positive integer",
+                    )));
+                }
+            }
+            "--max-queue" => {
+                let raw = cursor.value("run: --max-queue")?;
+                request.max_queue = Some(raw.parse::<usize>().map_err(|_| {
+                    CliError::Usage(String::from("run: --max-queue needs a positive integer"))
+                })?);
+                if request.max_queue == Some(0) {
+                    return Err(CliError::Usage(String::from(
+                        "run: --max-queue needs a positive integer",
+                    )));
+                }
+            }
+            "--help" | "-h" => return Ok(Command::Help),
+            other => return Err(CliError::Usage(format!("run: unknown option {other:?}"))),
+        }
+    }
+
+    Ok(Command::Run { request })
 }
 
 /// `issue --holder <name> --units <n>`.
@@ -3119,6 +3221,22 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "  run [--listen HOST:PORT] [--serve HOST:PORT] [--bootstrap FILE ...]",
+    );
+    say(
+        out,
+        "      start P2P, HTTP, the submission queue, and the embedded UI in one node",
+    );
+    say(
+        out,
+        "      defaults: data in .local, P2P on 127.0.0.1:9000, HTTP on 127.0.0.1:8080",
+    );
+    say(
+        out,
+        "      use --no-queue for a read-only HTTP node; stop with Ctrl-C",
+    );
+    say(
+        out,
         "  scaffold <name> --kind <certificate|evaluator|statistical|replay|lean>",
     );
     say(
@@ -3240,6 +3358,108 @@ fn print_help(out: &mut dyn Write) {
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
+
+/// Start the combined local node used by `cairn run`.
+///
+/// This is intentionally a direct call into [`cairn::daemon::run`], not a
+/// child-process wrapper around `cairn-p2p`. The daemon owns the log's
+/// exclusive writer lock and the HTTP thread queues into the same process, so
+/// a submission accepted over HTTP can actually be admitted on the next tick.
+/// A wrapper would have to rediscover binary paths and would make the release's
+/// promise of one node process less clear.
+fn cmd_run(out: &mut dyn Write, options: &Options, request: &RunRequest) -> Result<i32, CliError> {
+    if !cfg!(feature = "ui") {
+        return Err(CliError::Usage(String::from(
+            "run requires the embedded UI; build with `make ui-build` or \
+             `cargo build --release --features ui`, then run the resulting binary",
+        )));
+    }
+
+    let data = options
+        .data
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".local"));
+    let store = Store::new(&data).with_limit(options.max_size);
+    store.prepare().map_err(CliError::Store)?;
+
+    let default_path = |name: &str| data.join(name);
+    let log = if options.log == DEFAULT_LOG
+        && env::var("CAIRN_LOG")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        store.log_path()
+    } else {
+        PathBuf::from(&options.log)
+    };
+    let identity = request
+        .identity
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_path("node.identity.json"));
+    let root_key = request
+        .root_key
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_path("root.key"));
+    let checkpoint = request
+        .checkpoint
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_path("checkpoint.json"));
+    let listen = request.listen.parse::<SocketAddr>().map_err(|_| {
+        CliError::Usage(format!(
+            "run: --listen needs host:port, got {:?}",
+            request.listen
+        ))
+    })?;
+    let serve = request.serve.parse::<SocketAddr>().map_err(|_| {
+        CliError::Usage(format!(
+            "run: --serve needs host:port, got {:?}",
+            request.serve
+        ))
+    })?;
+
+    let mut config = DaemonConfig::new(
+        identity,
+        root_key,
+        checkpoint,
+        listen,
+        log.clone(),
+        options.root.clone(),
+    );
+    config.serve = Some(serve.to_string());
+    config.key_file = options.key_file.as_ref().map(PathBuf::from);
+    config.population = request.population.as_ref().map(PathBuf::from);
+    config.bootstrap = request.bootstrap.iter().map(PathBuf::from).collect();
+    config.fanout = request
+        .fanout
+        .unwrap_or(cairn::p2p::service::DEFAULT_FANOUT);
+    config.max_queued = request
+        .max_queue
+        .unwrap_or(cairn::serve::DEFAULT_MAX_QUEUED);
+    if !request.no_queue {
+        config.queue = Some(
+            request
+                .queue
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| default_path("queue")),
+        );
+    }
+
+    say(out, "cairn node starting");
+    say(out, format!("  ui:   http://{serve}/ui/"));
+    say(out, format!("  http: {serve}"));
+    say(out, format!("  p2p:  {listen}"));
+    say(out, format!("  log:  {}", log.display()));
+    say(out, "  stop with Ctrl-C");
+
+    daemon::run(config).map_err(CliError::Daemon)?;
+    Ok(0)
+}
 
 /// Read a JSON file as a canonical value.
 ///
@@ -8066,6 +8286,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
                 settle: *settle,
             },
         ),
+        Command::Run { request } => cmd_run(out, options, request),
         Command::Propose {
             objective,
             artifacts,
@@ -9931,6 +10152,48 @@ mod tests {
             let parsed = parse(argv(&spelling)).expect("parses");
             assert_eq!(parsed.command, Command::Help, "for {spelling:?}");
         }
+    }
+
+    #[test]
+    fn run_has_local_node_defaults_and_accepts_network_overrides() {
+        let parsed = parse(argv(&["run"])).expect("the one-command launcher parses");
+        match parsed.command {
+            Command::Run { request } => {
+                assert_eq!(request.listen, "127.0.0.1:9000");
+                assert_eq!(request.serve, "127.0.0.1:8080");
+                assert!(!request.no_queue);
+                assert!(
+                    request.queue.is_none(),
+                    "the data-dir default is resolved at run time"
+                );
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
+
+        let parsed = parse(argv(&[
+            "run",
+            "--listen",
+            "0.0.0.0:9000",
+            "--http",
+            "0.0.0.0:8080",
+            "--bootstrap",
+            "seed.json",
+            "--no-queue",
+        ]))
+        .expect("run overrides parse");
+        match parsed.command {
+            Command::Run { request } => {
+                assert_eq!(request.listen, "0.0.0.0:9000");
+                assert_eq!(request.serve, "0.0.0.0:8080");
+                assert_eq!(request.bootstrap, vec![String::from("seed.json")]);
+                assert!(request.no_queue);
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
+
+        assert!(parse(argv(&["run", "--fanout", "0"])).is_err());
+        assert!(parse(argv(&["run", "--max-queue", "nope"])).is_err());
+        assert!(parse(argv(&["run", "--wat"])).is_err());
     }
 
     #[test]

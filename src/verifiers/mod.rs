@@ -2339,8 +2339,22 @@ fn run_bounded(
 ) -> Result<Completed, RunFailure> {
     let out_path = workdir.join("stdout");
     let err_path = workdir.join("stderr");
-    let out_file = fs::File::create(&out_path).map_err(RunFailure::Io)?;
-    let err_file = fs::File::create(&err_path).map_err(RunFailure::Io)?;
+    let capture = |path: &Path| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+    };
+    let out_file = capture(&out_path).map_err(RunFailure::Io)?;
+    let err_file = capture(&err_path).map_err(RunFailure::Io)?;
+    // Keep parent-owned handles to the exact inodes we created. The child owns
+    // `workdir` and can replace `stdout` or `stderr` with a symlink while it
+    // runs; reopening either pathname afterwards would make the unsandboxed
+    // parent follow that link and read a host file on the child's behalf.
+    let out_child = out_file.try_clone().map_err(RunFailure::Io)?;
+    let err_child = err_file.try_clone().map_err(RunFailure::Io)?;
 
     match stdin {
         Some(bytes) => {
@@ -2355,8 +2369,8 @@ fn run_bounded(
             command.stdin(Stdio::null());
         }
     }
-    command.stdout(Stdio::from(out_file));
-    command.stderr(Stdio::from(err_file));
+    command.stdout(Stdio::from(out_child));
+    command.stderr(Stdio::from(err_child));
 
     // Its own process group, so the deadline can take out whatever the child
     // spawned rather than only the child. Under bubblewrap `--unshare-pid`
@@ -2386,7 +2400,7 @@ fn run_bounded(
                 // A checker that prints for its whole CPU budget fills the
                 // operator's disk. Checked while it runs rather than after,
                 // because "after" is too late for the bytes already written.
-                if captured_bytes(&out_path, &err_path) > MAX_CAPTURED_BYTES {
+                if captured_bytes(&out_file, &err_file) > MAX_CAPTURED_BYTES {
                     over_cap = true;
                     reap(&mut child);
                     break None;
@@ -2408,8 +2422,8 @@ fn run_bounded(
 
     Ok(Completed {
         code,
-        stdout: read_lossy(&out_path),
-        stderr: read_lossy(&err_path),
+        stdout: read_lossy(out_file),
+        stderr: read_lossy(err_file),
     })
 }
 
@@ -2461,9 +2475,9 @@ unsafe extern "C" {
 }
 
 /// Bytes captured so far across both streams.
-fn captured_bytes(out_path: &Path, err_path: &Path) -> u64 {
-    let size = |path: &Path| fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-    size(out_path).saturating_add(size(err_path))
+fn captured_bytes(out_file: &fs::File, err_file: &fs::File) -> u64 {
+    let size = |file: &fs::File| file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    size(out_file).saturating_add(size(err_file))
 }
 
 /// Read captured output, tolerating both a missing file and invalid UTF-8.
@@ -2473,12 +2487,11 @@ fn captured_bytes(out_path: &Path, err_path: &Path) -> u64 {
 /// Reads at most [`MAX_CAPTURED_BYTES`]: the caller only ever keeps a short
 /// tail, and loading a multi-gigabyte capture into a `String` to throw nearly
 /// all of it away is how a disk-filling checker becomes an OOM as well.
-fn read_lossy(path: &Path) -> String {
-    let mut file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return String::new(),
-    };
-    use std::io::Read as _;
+fn read_lossy(mut file: fs::File) -> String {
+    use std::io::{Read as _, Seek as _};
+    if file.rewind().is_err() {
+        return String::new();
+    }
     let mut buffer = Vec::new();
     if file
         .by_ref()
@@ -3284,6 +3297,32 @@ mod tests {
         let mut command = Command::new("proofwork-nonexistent-binary-xyz");
         let outcome = run_bounded(&mut command, workdir.path(), None, Duration::from_secs(5));
         assert!(matches!(outcome, Err(RunFailure::Spawn(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_collection_reads_the_original_descriptor_not_a_child_symlink() {
+        let workdir = tmpdir("proofwork-capture-symlink");
+        let outside = std::env::temp_dir().join(format!(
+            "proofwork-capture-secret-{}",
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&outside, "host secret").expect("write sentinel");
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf child-output && rm \"$1/stdout\" && ln -s \"$2\" \"$1/stdout\"")
+            .arg("sh")
+            .arg(workdir.path())
+            .arg(&outside);
+        let completed = run_bounded(&mut command, workdir.path(), None, Duration::from_secs(5))
+            .expect("child completes");
+
+        assert_eq!(completed.code, Some(0));
+        assert_eq!(completed.stdout, "child-output");
+        assert!(!completed.stdout.contains("host secret"));
+        let _ = fs::remove_file(outside);
     }
 
     // -- replay ------------------------------------------------------------

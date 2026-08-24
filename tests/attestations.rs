@@ -371,6 +371,42 @@ fn an_attestation_nobody_signed_is_refused() {
     assert!(fixture.node.attestations().is_empty());
 }
 
+/// The bond window starts when the signed record is admitted, not whenever its
+/// author says it started. Binding both timestamps to one epoch prevents a
+/// backdated attestation from returning its bond early on replay.
+#[test]
+fn an_attestation_cannot_be_backdated_across_an_epoch() {
+    if !have_python() {
+        eprintln!("skipping: no python3");
+        return;
+    }
+    let stamper = identity(47);
+    let key = stamper.submitter_id();
+    let mut fixture = fixture("backdated", &[(key.as_str(), VERIFICATION_BOND * 2)]);
+    let claim_id = claim(&mut fixture, "alice", 2, "n1");
+    let record = Attestation::new(&claim_id, "", "accept", REVEAL_AT).signed_with(&stamper);
+
+    assert!(matches!(
+        fixture.node.post_attestation(&record, ATTEST_AT),
+        Err(RuleViolation::RecordEpochMismatch {
+            record: "attestation",
+            ..
+        })
+    ));
+    fixture
+        .node
+        .ledger_mut()
+        .append("attestation", record.to_value(), ATTEST_AT)
+        .expect("inject a peer-imported attestation");
+    let problems = fixture.node.audit(false);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("attestation declares epoch")),
+        "the audit missed a backdated attestation: {problems:?}"
+    );
+}
+
 /// One statement per attestor per claim. A second is either a change of mind,
 /// which the first signature already forecloses, or a way to bury the first
 /// under noise.

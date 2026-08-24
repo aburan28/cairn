@@ -203,12 +203,20 @@ fn submit(
     )
     .expect("commit");
 
-    let claim = Claim::new(objective.id(), submitter, artifact, nonce, TS, cites)
-        .expect("valid claim")
-        .relating(relations)
-        .expect("valid claim");
+    let reveal_at = stamp(step + epoch());
+    let claim = Claim::new(
+        objective.id(),
+        submitter,
+        artifact,
+        nonce,
+        &reveal_at,
+        cites,
+    )
+    .expect("valid claim")
+    .relating(relations)
+    .expect("valid claim");
 
-    let outcome = node.reveal(&claim, &stamp(step + epoch()))?;
+    let outcome = node.reveal(&claim, &reveal_at)?;
     if !outcome.is_pending() {
         return Ok(outcome);
     }

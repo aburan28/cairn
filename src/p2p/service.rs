@@ -927,16 +927,27 @@ fn replay_records_with_horizon(
         payload
             .get("created_at")
             .and_then(crate::canonical::Value::as_str)
-            .map(str::to_string)
-            // A record with no readable instant still has to go somewhere,
-            // and the local clock is the only remaining answer. The rules
-            // engine refuses it a moment later if that instant does not work.
-            .unwrap_or_else(timestamp)
+            // Missing author time is malformed input, not permission to mint
+            // an admission time from this node's clock. The decoder/rules
+            // engine below refuses the empty stamp without making replay
+            // depend on which machine happened to receive it.
+            .unwrap_or("")
+            .to_string()
     };
     for kind in ["objective", "commitment", "claim"] {
         let mut batch: Vec<&(String, crate::canonical::Value)> =
             records.iter().filter(|(k, _)| k == kind).collect();
-        batch.sort_by_key(|(_, payload)| held(payload));
+        // RFC-3339 offsets make raw strings unsuitable as an instant order:
+        // `2026-08-19T00:30:00+14:00` is earlier than
+        // `2026-08-18T23:00:00-12:00` even though it sorts later. Replaying a
+        // later claim first can drain the earlier one's epoch as a side effect.
+        // Invalid timestamps still sort deterministically and are refused by
+        // the rules engine below; the payload digest breaks equal-time ties so
+        // arrival order never leaks into replay.
+        batch.sort_by_key(|(_, payload)| {
+            let stamp = held(payload);
+            (crate::time::parse_rfc3339(&stamp), payload.digest())
+        });
         for (_, payload) in batch {
             if node
                 .ledger()

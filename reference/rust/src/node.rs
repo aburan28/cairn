@@ -165,6 +165,25 @@ impl Node {
             })
     }
 
+    /// The independent reader-side form of the primary's admission invariant:
+    /// a signed timestamp and the ledger timestamp carrying it must select the
+    /// same epoch whenever the record controls a deadline or embargo.
+    fn record_admission_epoch(
+        &self,
+        record: &str,
+        declared_ts: &str,
+        admitted_ts: &str,
+    ) -> Result<u64, String> {
+        let declared = self.epoch_of_ts(record, declared_ts)?;
+        let admitted = self.epoch_of_ts("ledger admission", admitted_ts)?;
+        if declared != admitted {
+            return Err(format!(
+                "{record} declares epoch {declared} but was admitted in epoch {admitted}"
+            ));
+        }
+        Ok(admitted)
+    }
+
     // -- reads -----------------------------------------------------------
 
     pub fn objectives(&self) -> BTreeMap<String, Objective> {
@@ -546,8 +565,11 @@ impl Node {
 
         // Claims by id, so a challenge can be checked against what it disputes.
         let mut claims: BTreeMap<String, Value> = BTreeMap::new();
+        let mut claim_admissions: BTreeMap<String, String> = BTreeMap::new();
         for entry in self.ledger.entries_of_kind(CLAIM) {
-            claims.insert(entry.payload.digest(), entry.payload.clone());
+            let id = entry.payload.digest();
+            claim_admissions.insert(id.clone(), entry.ts.clone());
+            claims.insert(id, entry.payload.clone());
         }
 
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -557,6 +579,13 @@ impl Node {
             challenges.insert(id.clone(), entry.payload.clone());
             let claim_id = text(&entry.payload, "claim_id");
             let challenger = text(&entry.payload, "challenger");
+            if let Err(error) = self.record_admission_epoch(
+                "challenge",
+                &text(&entry.payload, "created_at"),
+                &entry.ts,
+            ) {
+                problems.push(format!("entry {}: {error}", entry.seq));
+            }
             if !seen.insert(format!("{claim_id}|{challenger}")) {
                 problems.push(format!(
                     "entry {}: {} already has a live objection to claim {}",
@@ -616,10 +645,17 @@ impl Node {
                     entry.seq
                 ));
             }
-            // The window, from the two records' own timestamps.
+            // A sealed claim is signed at commit time, so the dispute window
+            // starts at the ledger timestamp that says when it was revealed.
             if let (Ok(opened), Ok(claimed)) = (
                 self.epoch_of_ts("challenge", &text(&entry.payload, "created_at")),
-                self.epoch_of_ts("claim", &text(claim, "created_at")),
+                self.epoch_of_ts(
+                    "claim admission",
+                    claim_admissions
+                        .get(&claim_id)
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                ),
             ) {
                 let closes = claimed.saturating_add(CHALLENGE_WINDOW_EPOCHS);
                 if opened > closes {
@@ -633,6 +669,14 @@ impl Node {
         }
 
         for entry in self.ledger.entries_of_kind(BISECTION) {
+            if let Err(error) = self.record_admission_epoch(
+                "bisection",
+                &text(&entry.payload, "created_at"),
+                &entry.ts,
+            ) {
+                problems.push(format!("entry {}: {error}", entry.seq));
+                continue;
+            }
             let challenge_id = text(&entry.payload, "challenge_id");
             let Some(challenge) = challenges.get(&challenge_id) else {
                 problems.push(format!(
@@ -827,6 +871,14 @@ impl Node {
             let attestor = text(&entry.payload, "attestor");
             let status = text(&entry.payload, "status");
             attestations.insert(entry.payload.digest(), entry.payload.clone());
+
+            if let Err(error) = self.record_admission_epoch(
+                "attestation",
+                &text(&entry.payload, "created_at"),
+                &entry.ts,
+            ) {
+                problems.push(format!("entry {}: {error}", entry.seq));
+            }
 
             if !attestation_is_signed(&entry.payload) {
                 problems.push(format!(
@@ -1849,6 +1901,17 @@ impl Node {
             .map_err(|error| error.to_string())?;
         claim.verify_signature().map_err(|e| e.to_string())?;
         let reveal_epoch = self.epoch_of_ts("reveal", ts)?;
+        let declared_reveal_epoch = self.epoch_of_ts("claim", &claim.created_at)?;
+        let matching_commitment = self.matching_commitment(claim);
+        let sealed = matching_commitment
+            .as_ref()
+            .is_some_and(|(commitment, _)| commitment.get("envelope").is_some());
+        if declared_reveal_epoch != reveal_epoch && !sealed {
+            return Err(format!(
+                "claim declares epoch {declared_reveal_epoch} but was admitted in epoch \
+                 {reveal_epoch}; settlement and replay require one reveal epoch"
+            ));
+        }
         // Drain first: an epoch that closed while this node was idle must
         // settle before this claim's checks read the frontier, or an
         // improvement would be measured against a stale one.
@@ -1867,8 +1930,7 @@ impl Node {
                 claim.submitter
             ));
         }
-        let (commitment, admitted_at) = self
-            .matching_commitment(claim)
+        let (commitment, admitted_at) = matching_commitment
             .ok_or("no matching prior commitment: commit H(artifact‖submitter‖nonce) first")?;
         let created_at = commitment
             .get("created_at")
@@ -2495,7 +2557,6 @@ impl Node {
             if record.validate().is_err() || record.verify_signature().is_err() {
                 continue;
             }
-            let at = entry.seq as usize;
             let Some((commit_at, commitment)) = self.commitment_at(&record.commitment) else {
                 problems.push(format!(
                     "entry {}: committee_share names commitment {} which is not in this log",
@@ -2512,11 +2573,19 @@ impl Node {
                 ));
                 continue;
             }
-            if at >= entry.seq as usize {
+            if commit_at >= entry.seq as usize {
                 problems.push(format!(
                     "entry {}: committee_share precedes the commitment it opens",
                     entry.seq
                 ));
+                continue;
+            }
+            if let Err(error) = self.record_admission_epoch(
+                "committee_share",
+                &record.created_at,
+                &entry.ts,
+            ) {
+                problems.push(format!("entry {}: {error}", entry.seq));
                 continue;
             }
             let (Some(commit_seconds), Some(share_seconds)) = (
@@ -3008,7 +3077,21 @@ impl Node {
             if !seen_claims.insert(claim_id.clone()) {
                 continue;
             }
-            match self.matching_commitment(&claim) {
+            let declared_claim = unix_seconds(&claim.created_at)
+                .map(|seconds| epoch_of(seconds, epoch_seconds()));
+            let admitted_claim = unix_seconds(&entry.ts)
+                .map(|seconds| epoch_of(seconds, epoch_seconds()));
+            let matching = self.matching_commitment(&claim);
+            let sealed = matching
+                .as_ref()
+                .is_some_and(|(commitment, _)| commitment.get("envelope").is_some());
+            if declared_claim != admitted_claim && !sealed {
+                problems.push(format!(
+                    "claim {}: declared epoch disagrees with its ledger admission epoch",
+                    short(&claim_id)
+                ));
+            }
+            match matching {
                 None => problems.push(format!(
                     "claim {}: no matching commitment",
                     short(&claim_id)
@@ -3924,6 +4007,21 @@ mod tests {
                 "matching commitment's declared epoch disagrees with its ledger admission epoch"
             )),
             "audit missed the mismatch: {problems:?}"
+        );
+
+        let backdated_claim = Claim {
+            created_at: admitted_at.into(),
+            ..claim
+        };
+        node.ledger
+            .append(CLAIM, backdated_claim.to_value(), reveal_at)
+            .expect("crafted claim with mismatched admission epoch");
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|problem| problem.contains(
+                "declared epoch disagrees with its ledger admission epoch"
+            )),
+            "audit missed the claim mismatch: {problems:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

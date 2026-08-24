@@ -95,6 +95,45 @@ cargo install --path .        # puts `cairn` and the other binaries on PATH
 
 ## Quick start
 
+An installed release has the complete local node behind one command:
+
+```sh
+cairn run
+```
+
+This starts P2P synchronization, the HTTP API, a local submission queue, and
+the embedded reader in one process. Open <http://127.0.0.1:8080/ui/>. Its local
+state lives under `.local/`; P2P listens on `127.0.0.1:9000`, so the default is
+safe for a first run and does not expose a node to the network. Stop it with
+Ctrl-C.
+
+To join through a known bootstrap file, pass it after `run`:
+
+```sh
+cairn run --bootstrap .local/seed.json
+```
+
+To expose the listeners deliberately, choose the addresses explicitly:
+
+```sh
+cairn run \
+  --listen 0.0.0.0:9000 \
+  --serve 0.0.0.0:8080 \
+  --bootstrap .local/seed.json
+```
+
+The source checkout's ordinary `cargo build` does not require Node and therefore
+does not embed the reader. Build the reader first when working from source:
+
+```sh
+make ui-build
+./target/release/cairn run
+```
+
+Published release tarballs are built with the UI feature by the release
+workflow and are checked by starting `cairn run` and fetching `/ui/` from the
+unpacked binary.
+
 ```sh
 cargo test                    # the full suite, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution

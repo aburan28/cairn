@@ -430,6 +430,29 @@ pub enum RuleViolation {
     /// A commitment's submitter-authored timestamp disagrees with the epoch in
     /// which the ledger actually admitted it.
     CommitmentEpochMismatch { declared: u64, admitted: u64 },
+    /// A plain claim's submitter-authored timestamp disagrees with the epoch in
+    /// which the ledger actually admitted it.
+    ///
+    /// A peer has only the record timestamp when it reconstructs an input log.
+    /// If the original writer admitted the same bytes in a different epoch,
+    /// the two nodes assign the claim to different settlement batches while
+    /// both believe they followed the rules. Sealed claims are the deliberate
+    /// exception: they are signed at commit time so a committee can reveal
+    /// after the submitter disappears, and their admission epoch comes from
+    /// the claim entry timestamp instead.
+    ClaimEpochMismatch { declared: u64, admitted: u64 },
+    /// A signed record's author-controlled timestamp disagrees with the epoch
+    /// in which the ledger actually admitted it.
+    ///
+    /// Challenges, bisection moves, attestations, and committee shares all use
+    /// their own timestamps to decide a deadline or an embargo. Letting those
+    /// bytes land in another epoch makes the writer and a replaying peer apply
+    /// different rules to the same record.
+    RecordEpochMismatch {
+        record: &'static str,
+        declared: u64,
+        admitted: u64,
+    },
     /// A submitter that names an ed25519 public key did not prove it holds
     /// that key.
     ///
@@ -865,6 +888,20 @@ impl fmt::Display for RuleViolation {
                 f,
                 "commitment declares epoch {declared} but was admitted in epoch {admitted}; \
                  commit-reveal ordering uses the admission epoch"
+            ),
+            RuleViolation::ClaimEpochMismatch { declared, admitted } => write!(
+                f,
+                "claim declares epoch {declared} but was admitted in epoch {admitted}; \
+                 settlement and replay require one reveal epoch"
+            ),
+            RuleViolation::RecordEpochMismatch {
+                record,
+                declared,
+                admitted,
+            } => write!(
+                f,
+                "{record} declares epoch {declared} but was admitted in epoch {admitted}; \
+                 record deadlines and replay require one epoch"
             ),
             RuleViolation::UnsignedIdentity(error) => write!(f, "{error}"),
             RuleViolation::InadmissibleRecord(error) => {
@@ -1538,6 +1575,7 @@ impl Node {
             .validate()
             .map_err(RuleViolation::InadmissibleRecord)?;
         challenge.verify_signature()?;
+        let opened_at = ensure_record_admission_epoch(CHALLENGE, &challenge.created_at, ts)?;
 
         let (claim, objective) =
             self.disputed_claim(challenge)
@@ -1570,8 +1608,12 @@ impl Node {
             });
         }
 
-        let opened_at = epoch_of_timestamp(CHALLENGE, ts)?;
-        let claim_epoch = epoch_of_timestamp(CLAIM, &claim.created_at)?;
+        let claim_epoch = self
+            .claim_entry(&challenge.claim_id)
+            .ok_or_else(|| RuleViolation::UnknownClaim {
+                claim_id: challenge.claim_id.clone(),
+            })
+            .and_then(|entry| epoch_of_timestamp("claim admission", &entry.ts))?;
         let closes = claim_epoch.saturating_add(CHALLENGE_WINDOW_EPOCHS);
         if opened_at > closes {
             return Err(RuleViolation::ChallengeWindowClosed {
@@ -1737,6 +1779,7 @@ impl Node {
             .validate()
             .map_err(RuleViolation::InadmissibleRecord)?;
         record.verify_signature()?;
+        ensure_record_admission_epoch(BISECTION, &record.created_at, ts)?;
 
         let challenge = self
             .challenges()
@@ -2604,6 +2647,7 @@ impl Node {
             .validate()
             .map_err(RuleViolation::InadmissibleRecord)?;
         record.verify_signature()?;
+        ensure_record_admission_epoch(ATTESTATION, &record.created_at, ts)?;
 
         if !self.claim_ids().contains(&record.claim_id) {
             return Err(RuleViolation::UnknownClaim {
@@ -3486,6 +3530,7 @@ impl Node {
             .validate()
             .map_err(RuleViolation::InadmissibleRecord)?;
         record.verify_signature()?;
+        ensure_record_admission_epoch(COMMITTEE_SHARE, &record.created_at, ts)?;
         // The position this record is about to land at. `append` is the very
         // next thing that happens, so this is where it goes.
         self.check_committee_share(record, self.ledger.len())?;
@@ -3970,6 +4015,23 @@ impl Node {
         out
     }
 
+    /// The ledger entry carrying a claim id.
+    ///
+    /// A claim's payload timestamp is normally its reveal time, but a sealed
+    /// claim was signed while the submitter was still present, at commit time.
+    /// Rules about when the reveal actually landed therefore read the entry
+    /// timestamp, which is the fact both reveal paths leave in the log.
+    fn claim_entry(&self, claim_id: &str) -> Option<&crate::ledger::Entry> {
+        self.ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .find(|entry| {
+                Claim::from_value(&entry.payload)
+                    .map(|claim| claim.id() == claim_id)
+                    .unwrap_or(false)
+            })
+    }
+
     /// The knowledge graph over every claim in the log.
     ///
     /// Borrowed from `claims`, which the caller owns, because the graph indexes
@@ -4136,6 +4198,23 @@ impl Node {
         // rather than merely declared.
         claim.verify_signature()?;
         let reveal_epoch = epoch_of_timestamp("reveal", ts)?;
+        let declared_reveal_epoch = epoch_of_timestamp("claim", &claim.created_at)?;
+        // A sealed claim is signed at commit time because its submitter may be
+        // permanently gone when the committee opens it. Its payload timestamp
+        // is intentionally earlier; the reveal epoch is the ledger entry
+        // timestamp, and money/window rules use that fact. Plain claims have
+        // no reason for a mismatch and are refused.
+        let matching_commitment = self.matching_commitment_entry(claim).cloned();
+        let sealed = matching_commitment
+            .as_ref()
+            .and_then(|entry| Commitment::from_value(&entry.payload).ok())
+            .is_some_and(|commitment| commitment.envelope.is_some());
+        if declared_reveal_epoch != reveal_epoch && !sealed {
+            return Err(RuleViolation::ClaimEpochMismatch {
+                declared: declared_reveal_epoch,
+                admitted: reveal_epoch,
+            });
+        }
         // Drain first. An epoch that closed while this node was idle must
         // settle *before* this claim's admission checks read the frontier, or
         // an improvement would be measured against a stale one.
@@ -4162,8 +4241,8 @@ impl Node {
             });
         }
 
-        let commitment_entry = match self.matching_commitment_entry(claim) {
-            Some(commitment) => commitment.clone(),
+        let commitment_entry = match matching_commitment {
+            Some(commitment) => commitment,
             None => return Err(RuleViolation::NoMatchingCommitment),
         };
         let declared_commit_epoch = epoch_of_timestamp(
@@ -5982,6 +6061,12 @@ impl Node {
                 problems.push(format!("committee_share at entry {}: {error}", entry.seq));
                 continue;
             }
+            if let Err(error) =
+                ensure_record_admission_epoch(COMMITTEE_SHARE, &record.created_at, &entry.ts)
+            {
+                problems.push(format!("committee_share at entry {}: {error}", entry.seq));
+                continue;
+            }
             if let Err(error) = self.check_committee_share(&record, entry.seq as usize) {
                 problems.push(format!("committee_share at entry {}: {error}", entry.seq));
                 continue;
@@ -6299,7 +6384,22 @@ impl Node {
             if !seen_claims.insert(claim_id.clone()) {
                 continue;
             }
-            match self.matching_commitment_entry(&claim) {
+            let declared_claim = crate::time::parse_rfc3339(&claim.created_at)
+                .filter(|seconds| *seconds >= 0)
+                .map(|seconds| epoch_of(seconds as u64, epoch_seconds()));
+            let admitted_claim = crate::time::parse_rfc3339(&entry.ts)
+                .filter(|seconds| *seconds >= 0)
+                .map(|seconds| epoch_of(seconds as u64, epoch_seconds()));
+            let matching = self.matching_commitment_entry(&claim);
+            let sealed = matching
+                .and_then(|commitment| Commitment::from_value(&commitment.payload).ok())
+                .is_some_and(|commitment| commitment.envelope.is_some());
+            if declared_claim != admitted_claim && !sealed {
+                problems.push(format!(
+                    "claim {claim_id}: declared epoch disagrees with its ledger admission epoch"
+                ));
+            }
+            match matching {
                 None => problems.push(format!("claim {claim_id}: no matching commitment")),
                 Some(commitment) => {
                     let declared_commit = payload_str(&commitment.payload, "created_at")
@@ -6681,6 +6781,11 @@ impl Node {
                     entry.seq
                 ));
             }
+            if let Err(error) =
+                ensure_record_admission_epoch(ATTESTATION, &record.created_at, &entry.ts)
+            {
+                problems.push(format!("attestation at entry {}: {error}", entry.seq));
+            }
             if !seen.insert(format!("{}|{}", record.claim_id, record.attestor)) {
                 problems.push(format!(
                     "attestation at entry {}: {} stood behind claim {} twice",
@@ -6965,6 +7070,11 @@ impl Node {
             if record.verify_signature().is_err() {
                 problems.push(format!("challenge {id}: signature does not verify"));
             }
+            if let Err(error) =
+                ensure_record_admission_epoch(CHALLENGE, &record.created_at, &entry.ts)
+            {
+                problems.push(format!("challenge {id}: {error}"));
+            }
             if !seen.insert(format!("{}|{}", record.claim_id, record.challenger)) {
                 problems.push(format!(
                     "challenge {id}: {} already had a live objection to claim {}",
@@ -7010,10 +7120,17 @@ impl Node {
                     }
                 }
             }
-            // The window, re-derived from the two records' own timestamps.
+            // The window starts when the claim entered the log. A sealed claim
+            // was signed at commit time and intentionally carries that earlier
+            // payload timestamp, so using it here could make a dispute window
+            // close before the committee had even revealed the artifact.
             if let (Ok(opened), Ok(claimed)) = (
                 epoch_of_timestamp(CHALLENGE, &record.created_at),
-                epoch_of_timestamp(CLAIM, &claim.created_at),
+                self.claim_entry(&record.claim_id)
+                    .ok_or_else(|| RuleViolation::UnknownClaim {
+                        claim_id: record.claim_id.clone(),
+                    })
+                    .and_then(|entry| epoch_of_timestamp("claim admission", &entry.ts)),
             ) {
                 let closes = claimed.saturating_add(CHALLENGE_WINDOW_EPOCHS);
                 if opened > closes {
@@ -7045,6 +7162,12 @@ impl Node {
                     "bisection at entry {}: signature does not verify",
                     entry.seq
                 ));
+                continue;
+            }
+            if let Err(error) =
+                ensure_record_admission_epoch(BISECTION, &record.created_at, &entry.ts)
+            {
+                problems.push(format!("bisection at entry {}: {error}", entry.seq));
                 continue;
             }
             let Some(challenge) = challenges.get(&record.challenge_id) else {
@@ -7657,6 +7780,29 @@ fn epoch_of_timestamp(record: &'static str, ts: &str) -> Result<u64, RuleViolati
     }
 }
 
+/// Require an author-controlled record timestamp and its ledger admission
+/// timestamp to name the same epoch.
+///
+/// Comparing epochs rather than strings deliberately permits equivalent
+/// RFC-3339 spellings and harmless clock skew inside one batch. What may not
+/// vary is the epoch that a timeout, embargo, or replay rule will derive.
+fn ensure_record_admission_epoch(
+    record: &'static str,
+    declared_ts: &str,
+    admitted_ts: &str,
+) -> Result<u64, RuleViolation> {
+    let declared = epoch_of_timestamp(record, declared_ts)?;
+    let admitted = epoch_of_timestamp("ledger admission", admitted_ts)?;
+    if declared != admitted {
+        return Err(RuleViolation::RecordEpochMismatch {
+            record,
+            declared,
+            admitted,
+        });
+    }
+    Ok(admitted)
+}
+
 /// Whether an attestation is still open to a slash, as of settled epoch `now`.
 ///
 /// A malformed `created_at` keeps the window **open**. The alternative would
@@ -7886,7 +8032,17 @@ mod tests {
     }
 
     fn claim_for(objective: &Objective, who: &str, artifact: Value, nonce: &str) -> Claim {
-        Claim::new(objective.id(), who, artifact, nonce, TS, vec![]).expect("valid claim")
+        claim_for_at(objective, who, artifact, nonce, &stamp(EPOCH))
+    }
+
+    fn claim_for_at(
+        objective: &Objective,
+        who: &str,
+        artifact: Value,
+        nonce: &str,
+        created_at: &str,
+    ) -> Claim {
+        Claim::new(objective.id(), who, artifact, nonce, created_at, vec![]).expect("valid claim")
     }
 
     /// Seconds since the Unix epoch for [`TS`], and the length of one epoch.
@@ -7939,9 +8095,10 @@ mod tests {
             &stamp(step),
         )
         .expect("commit");
-        let claim =
-            Claim::new(objective.id(), who, artifact, nonce, TS, cites).expect("valid claim");
-        let outcome = node.reveal(&claim, &stamp(step + EPOCH))?;
+        let reveal_at = stamp(step + EPOCH);
+        let claim = Claim::new(objective.id(), who, artifact, nonce, &reveal_at, cites)
+            .expect("valid claim");
+        let outcome = node.reveal(&claim, &reveal_at)?;
         if !outcome.is_pending() {
             return Ok(outcome);
         }
@@ -8240,7 +8397,7 @@ mod tests {
         let objective = lean_objective(10);
         node.post_objective(&objective, TS).expect("post");
 
-        let claim = claim_for(&objective, "eve", proof(":= by trivial"), "n1");
+        let claim = claim_for_at(&objective, "eve", proof(":= by trivial"), "n1", TS);
         let error = node.reveal(&claim, TS).expect_err("must be refused");
         assert!(matches!(error, RuleViolation::NoMatchingCommitment));
         // Nothing was recorded: a refusal is not evidence about anybody's work.
@@ -8260,7 +8417,7 @@ mod tests {
             .expect("commit");
 
         // Eve saw alice's commitment but cannot reveal against it as herself.
-        let stolen = claim_for(&objective, "eve", artifact, "n1");
+        let stolen = claim_for_at(&objective, "eve", artifact, "n1", TS);
         assert!(matches!(
             node.reveal(&stolen, TS),
             Err(RuleViolation::NoMatchingCommitment)
@@ -8279,7 +8436,7 @@ mod tests {
         node.commit(&Commitment::new(objective.id(), "alice", hash, TS), TS)
             .expect("commit");
 
-        let claim = claim_for(&objective, "alice", artifact, "wrong");
+        let claim = claim_for_at(&objective, "alice", artifact, "wrong", TS);
         assert!(matches!(
             node.reveal(&claim, TS),
             Err(RuleViolation::NoMatchingCommitment)
@@ -8588,10 +8745,8 @@ mod tests {
 
         // Same epoch: refused, and nothing is written.
         let before = node.ledger().len();
-        let too_soon = node.reveal(
-            &claim_for(&objective, "alice", results(1), "a"),
-            &stamp(EPOCH - 1),
-        );
+        let too_soon_claim = claim_for_at(&objective, "alice", results(1), "a", &stamp(EPOCH - 1));
+        let too_soon = node.reveal(&too_soon_claim, &stamp(EPOCH - 1));
         assert!(
             matches!(too_soon, Err(RuleViolation::RevealBeforeEpoch { .. })),
             "{too_soon:?}"
@@ -8599,11 +8754,45 @@ mod tests {
         assert_eq!(node.ledger().len(), before, "a refusal wrote to the log");
 
         // One second later, in the next epoch: admitted.
-        node.reveal(
-            &claim_for(&objective, "alice", results(1), "a"),
-            &stamp(EPOCH),
+        let claim = claim_for_at(&objective, "alice", results(1), "a", &stamp(EPOCH));
+        node.reveal(&claim, &stamp(EPOCH)).expect("reveal");
+    }
+
+    #[test]
+    fn a_claim_declared_in_another_epoch_is_not_admitted() {
+        let dir = TempDir::new("backdated-claim");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        let artifact = results(1);
+        let nonce = "nonce";
+        let hash = commitment_hash(&objective.id(), "alice", &artifact, nonce);
+        node.commit(
+            &Commitment::new(objective.id(), "alice", hash, stamp(0)),
+            &stamp(0),
         )
-        .expect("reveal");
+        .expect("commit");
+        let claim = claim_for_at(&objective, "alice", artifact, nonce, &stamp(0));
+
+        let before = node.ledger().len();
+        assert!(matches!(
+            node.reveal(&claim, &stamp(EPOCH)),
+            Err(RuleViolation::ClaimEpochMismatch { .. })
+        ));
+        assert_eq!(node.ledger().len(), before, "a refusal wrote to the log");
+
+        node.ledger_mut()
+            .append(CLAIM, claim.to_value(), &stamp(EPOCH))
+            .expect("inject mismatched claim");
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|problem| problem
+                .contains("declared epoch disagrees with its ledger admission epoch")),
+            "audit missed the claim epoch mismatch: {problems:?}"
+        );
     }
 
     #[test]
@@ -8952,7 +9141,7 @@ mod tests {
 
         // Re-derive the same log against a different epoch length.
         let hinted = {
-            let _guard = EpochGuard::set("7");
+            let _guard = crate::partition::test_epoch_seconds(7);
             node.audit(false)
         };
         let note = hinted
@@ -9020,27 +9209,6 @@ mod tests {
             note.contains("will not fix it"),
             "the note must say choosing a length cannot recover this: {note}"
         );
-    }
-
-    /// Sets `CAIRN_EPOCH_SECONDS` for as long as it lives.
-    ///
-    /// Tests share a process, so the variable has to go back; a leaked value
-    /// would silently re-epoch every test that ran afterwards.
-    struct EpochGuard;
-
-    impl EpochGuard {
-        fn set(value: &str) -> EpochGuard {
-            // SAFETY: single-threaded test, and the guard restores it on drop.
-            unsafe { std::env::set_var(crate::partition::EPOCH_SECONDS_ENV, value) };
-            EpochGuard
-        }
-    }
-
-    impl Drop for EpochGuard {
-        fn drop(&mut self) {
-            // SAFETY: as above.
-            unsafe { std::env::remove_var(crate::partition::EPOCH_SECONDS_ENV) };
-        }
     }
 
     // -- the improvement path -----------------------------------------------
@@ -9351,7 +9519,7 @@ mod tests {
                 TS,
             )
             .expect("append");
-        let claim = claim_for(objective, who, artifact, nonce);
+        let claim = claim_for_at(objective, who, artifact, nonce, TS);
         let claim_id = claim.id();
         node.ledger_mut()
             .append(CLAIM, claim.to_value(), TS)
@@ -9445,7 +9613,7 @@ mod tests {
         let objective = lean_objective(10);
         node.post_objective(&objective, TS).expect("post");
         let artifact = proof(":= by sorry");
-        let claim = claim_for(&objective, "alice", artifact.clone(), "n1");
+        let claim = claim_for_at(&objective, "alice", artifact.clone(), "n1", TS);
         let claim_id = claim.id();
         let hash = commitment_hash(&objective.id(), "alice", &artifact, "n1");
         node.ledger_mut()
@@ -9608,7 +9776,7 @@ mod tests {
         let mut node = node(&dir);
         let objective = lean_objective(10);
         node.post_objective(&objective, TS).expect("post");
-        let claim = claim_for(&objective, "eve", proof(":= by trivial"), "n1");
+        let claim = claim_for_at(&objective, "eve", proof(":= by trivial"), "n1", TS);
         node.ledger_mut()
             .append(CLAIM, claim.to_value(), TS)
             .expect("append");
@@ -10356,17 +10524,18 @@ mod tests {
             &stamp(step),
         )
         .expect("commit");
+        let reveal_at = stamp(step + EPOCH);
         let claim = Claim::new(
             objective.id(),
             who.submitter_id(),
             artifact,
             &nonce,
-            TS,
+            &reveal_at,
             Vec::new(),
         )
         .expect("valid claim")
         .signed_with(who);
-        let outcome = node.reveal(&claim, &stamp(step + EPOCH)).expect("reveal");
+        let outcome = node.reveal(&claim, &reveal_at).expect("reveal");
         let settled = node
             .settle_at(&stamp(
                 step + (2 + crate::partition::finality_epochs() as i64) * EPOCH,
@@ -10509,17 +10678,18 @@ mod tests {
             &stamp(step),
         )
         .expect("commit");
+        let reveal_at = stamp(step + EPOCH);
         let claim = Claim::new(
             objective.id(),
             worker.submitter_id(),
             artifact,
             "n",
-            TS,
+            &reveal_at,
             Vec::new(),
         )
         .expect("valid claim")
         .signed_with(&worker);
-        node.reveal(&claim, &stamp(step + EPOCH)).expect("reveal");
+        node.reveal(&claim, &reveal_at).expect("reveal");
         node.settle_at(&stamp(
             step + (2 + crate::partition::finality_epochs() as i64) * EPOCH,
         ))

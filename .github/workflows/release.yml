@@ -203,7 +203,7 @@ jobs:
           set -euo pipefail
           NAME="cairn-${VERSION}-${{ matrix.target }}"
           mkdir -p /tmp/unpacked && tar -C /tmp/unpacked -xzf "$NAME.tar.gz"
-          for bin in cairn cairn-serve cairn-p2p cairn-gen-bootstrap; do
+          for bin in cairn cairn-mcp cairn-serve cairn-p2p cairn-gen-bootstrap; do
             "/tmp/unpacked/$bin" --help >/dev/null 2>&1 \
               || { echo "$bin --help failed from the tarball" >&2; exit 1; }
           done
@@ -213,6 +213,39 @@ jobs:
           # artifact can make about itself.
           /tmp/unpacked/cairn --log launch/cairn.jsonl --root . audit
           echo "unpacked binaries run and audit the published log"
+
+          # The operator-facing path is `cairn run`, not a hand-assembled
+          # cairn-p2p invocation. Start the unpacked release against an empty
+          # temporary store and ask the real HTTP listener for the embedded
+          # reader. This catches the exact packaging mistake a compile alone
+          # cannot: a release built with the UI feature but missing or mounting
+          # the exported files incorrectly.
+          NODE_DATA="$(mktemp -d)"
+          NODE_OUT="$(mktemp)"
+          "/tmp/unpacked/cairn" --data-dir "$NODE_DATA" run >"$NODE_OUT" 2>&1 &
+          NODE_PID=$!
+          cleanup_node() {
+            kill "$NODE_PID" 2>/dev/null || true
+            wait "$NODE_PID" 2>/dev/null || true
+            rm -rf "$NODE_DATA" "$NODE_OUT"
+          }
+          trap cleanup_node EXIT
+          for attempt in {1..60}; do
+            if curl --fail --silent --show-error \
+                http://127.0.0.1:8080/ui/ >/tmp/cairn-release-ui.html; then
+              break
+            fi
+            if ! kill -0 "$NODE_PID" 2>/dev/null; then
+              cat "$NODE_OUT" >&2
+              echo "cairn run exited before serving /ui/" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          test -s /tmp/cairn-release-ui.html
+          grep -q "<html" /tmp/cairn-release-ui.html
+          rm -f /tmp/cairn-release-ui.html
+          echo "cairn run serves the embedded UI"
 
       # v7. From v5 an artifact name may not be uploaded twice in a run, which
       # this matrix already satisfies -- one upload per target, and the target
