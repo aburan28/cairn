@@ -75,6 +75,40 @@ if [ ! -x "$MCP_BIN" ]; then
   say "note: $MCP_BIN is not built yet -- 'make build' before starting a client"
 fi
 
+# An identity file that exists but is not a cairn identity is worse than no
+# identity at all: the stanza wires up, the client launches the server, and
+# cairn-mcp exits 2 before the MCP handshake -- which every client reports as
+# a bare connection failure with no mention of a key. The default filename is
+# one a p2p node key also answers to, and that key is the wrong shape by three
+# orders of magnitude. Check for what --identity actually takes, not for a
+# filename, because existence was never the property that mattered here.
+if [ -f "$IDENTITY" ]; then
+  if ! IDENTITY_WHY=$(IDENTITY="$IDENTITY" "$PYTHON" -c '
+import json, os, sys
+path = os.environ["IDENTITY"]
+try:
+    with open(path) as fh:
+        value = json.load(fh)
+except (OSError, ValueError) as exc:
+    sys.exit("not usable JSON (%s)" % exc)
+if not isinstance(value, dict):
+    sys.exit("not a JSON object")
+secret = value.get("secret")
+if not isinstance(secret, str):
+    sys.exit("no \"secret\" field")
+if len(secret) != 64:
+    sys.exit("\"secret\" must be 32 bytes of hex, got %d characters" % len(secret))
+if any(c not in "0123456789abcdefABCDEF" for c in secret):
+    sys.exit("\"secret\" is not hex")
+' 2>&1); then
+    say "ignoring $IDENTITY: $IDENTITY_WHY"
+    say "wiring up unsigned instead -- submissions will authenticate nothing."
+    say 'write one this takes with: cairn identity --out .local/agent.identity.json'
+    say "then rerun with --identity .local/agent.identity.json"
+    IDENTITY=""
+  fi
+fi
+
 if [ "$PRINT" = "1" ]; then
   MCP_BIN="$MCP_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
 import json, os
