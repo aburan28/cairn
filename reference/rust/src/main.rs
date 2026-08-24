@@ -111,7 +111,6 @@ fn read(path: Option<&str>, what: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|error| format!("cannot read {path}: {error}"))
 }
 
-/// The argument following `word`, wherever `word` sits in the argument list.
 /// Does a quicknet signature verify, according to *this* implementation?
 ///
 /// A command so that `scripts/differential.sh` can put the same signatures in
@@ -137,6 +136,7 @@ fn drand_verify(round: Option<&str>, signature: Option<&str>) -> Result<(), Stri
     }
 }
 
+/// The argument following `word`, wherever `word` sits in the argument list.
 fn after<'a>(args: &'a [String], word: &str) -> Option<&'a str> {
     args.iter()
         .position(|arg| arg == word)

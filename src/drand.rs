@@ -65,10 +65,8 @@ pub const CHAIN_HASH: &str = "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792
 
 /// The group public key, 96 bytes on G2, hex.
 ///
-/// Unused by this module: it is what a *reader* needs to verify a recorded
-/// signature, and it is pinned here so that reader does not have to ask the
-/// network which key to trust -- asking the network would make the check
-/// circular.
+/// Used by [`verify`] and pinned here so verification does not ask the network
+/// which key to trust -- asking the network would make the check circular.
 pub const PUBLIC_KEY: &str = "83cf0f2896adee7eb8b5f01fcad3912212c437e0073e911fb90022d3e760183c8c4b450b6a0a6c3ac6a5776a2d1064510d1fec758c921cc22b0e17e63aaf4bcb5ed66304de9cf809bd274ca73bab4af5a6e9c76a4bc09e76eae8991ef5ece45a";
 
 /// Seconds between rounds.
