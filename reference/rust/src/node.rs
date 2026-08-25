@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::canonical::{short, Value};
+use crate::drand;
 use crate::frontier::Ratchet;
 use crate::ledger::{Ledger, Proof};
 use crate::partition::{assign, beacon, epoch_of, epoch_seconds, settlement_rank, COMMITTEE_SIZE};
@@ -3332,6 +3333,48 @@ impl Node {
                     drawn.map_or_else(|| "an unreadable epoch".to_string(), |e| e.to_string())
                 ));
             }
+            // A drand beacon does not get to say which round it is. The round
+            // is a function of the epoch, so this is the one provenance field
+            // in any beacon record that a reader holding only the log can
+            // check -- an Ethereum `block` needs the chain and this needs
+            // arithmetic. Re-derived here rather than compared against the
+            // primary implementation's answer, which is the entire job.
+            if entry.payload.get("source").and_then(Value::as_str) == Some(drand::SOURCE) {
+                let names = drand::round_for_epoch(orders, epoch_seconds());
+                if entry.payload.get("block").and_then(Value::as_u64) != Some(names) {
+                    problems.push(format!(
+                        "entry {}: drand beacon for epoch {orders} names a round other than \
+                         {names}, which is the round that epoch names",
+                        entry.seq
+                    ));
+                }
+                // The pairing, against the round the record claims rather than
+                // the one the epoch names -- so "a real round, but not this
+                // epoch's" and "not a round at all" stay separate accusations.
+                //
+                // Reported and never consulted when settling. A pairing is the
+                // one check here where this crate and the primary could be made
+                // to disagree, and a disagreement on the settlement path is a
+                // silent fork; a disagreement in an audit report is a failing
+                // `differential.sh`.
+                let claimed = entry
+                    .payload
+                    .get("block")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(names);
+                if !entry
+                    .payload
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| drand::verify(claimed, value))
+                {
+                    problems.push(format!(
+                        "entry {}: drand beacon for epoch {orders} does not carry round \
+                         {claimed}'s signature, so its anchor is a value somebody chose",
+                        entry.seq
+                    ));
+                }
+            }
         }
 
         // Every batch must name the anchor the log actually had at its epoch's
@@ -4008,7 +4051,6 @@ mod tests {
             )),
             "audit missed the mismatch: {problems:?}"
         );
-
         let backdated_claim = Claim {
             created_at: admitted_at.into(),
             ..claim

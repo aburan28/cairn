@@ -26,6 +26,7 @@ top-level README.
 | [`ecdsa-fail`](ecdsa-fail/) | evaluator (minimize) + ratchet | 1000000 | worked | python3; optional external `ecdsafail` CLI | `artifacts/` |
 | [`permutation`](permutation/) | statistical | 50000 | worked | python3 | `artifact.json` |
 | [`ecdlp`](ecdlp/) | certificate | 250000 | **open bounty** | python3 | none — that is the point |
+| [`elliptic-rank`](elliptic-rank/) | certificate + exact evaluator | 20000000 – 64000000 | **4 open rank-record bounties** | python3 | rank-30 record (baseline only) |
 | [`lean`](lean/) | lean | 50000 | **open bounty** | a Lean 4 toolchain on PATH | none |
 | [`first-blood`](first-blood/) | certificate | 100000 – 409600000 | **open bounty** ×5 | python3 | none |
 | [`faster-algorithms`](faster-algorithms/) | evaluator (minimize) + ratchet | 1200000 – 2000000 | **open bounty** ×4 | python3 | `artifacts/`, baselines only |

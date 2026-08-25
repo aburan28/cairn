@@ -1,0 +1,50 @@
+{
+  "artifact_schema": {
+    "additionalProperties": false,
+    "description": "A rank-at-least-30 curve with exact integral-model invariant height below curve #273, plus an exact independence witness.",
+    "properties": {
+      "curve": {
+        "description": "The five integral coefficients [a1, a2, a3, a4, a6], each as a canonical decimal string.",
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 5,
+        "minItems": 5,
+        "type": "array"
+      },
+      "points": {
+        "description": "Between 30 and 64 affine rational points. Each point is [x, y] in canonical exact string form.",
+        "items": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "maxItems": 64,
+        "minItems": 30,
+        "type": "array"
+      }
+    },
+    "required": [
+      "curve",
+      "points"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-21T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-elliptic-rank-30-lower-height",
+  "reward": 25000000,
+  "statement": "Improve the size record at rank at least 30. Submit an integral general Weierstrass equation with 30 to 64 rational points. The pinned evaluator proves the full point set independent modulo torsion by exact Cremona-Brumer quadratic characters and a root-free good reduction at deterministic primes p <= 10000, then requires max(|c4|^3, c6^2) for the submitted integral model to be strictly smaller than the exact value for public curve #273. It returns the certified point count only when both conditions hold; threshold 30 therefore proves rank E(Q) >= 30 with an integral model below the baseline invariant height. An accepted nonminimal model is still sound evidence of a lower global-minimal height because minimalization can only divide c4 and c6 by the corresponding fourth and sixth powers. No rounded logarithm or floating-point height enters the verdict. Baseline: https://elliptic-rank.icarm.cloud/curve/273.",
+  "verifier": {
+    "direction": "maximize",
+    "entrypoint": "score_lower_height",
+    "evaluator": "examples/elliptic-rank/checkers/rank_31.py",
+    "evaluator_sha256": "5f25a97eeeaddfe972ab8f864bd338cab0b9a19fa7908ce376f185a29abc165f",
+    "kind": "evaluator",
+    "threshold": 30,
+    "timeout_seconds": 30
+  }
+}
