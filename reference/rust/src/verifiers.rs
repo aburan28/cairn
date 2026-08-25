@@ -356,14 +356,32 @@ pub fn implements(kind: &str) -> bool {
     KINDS.contains(&kind)
 }
 
-fn confinement_refusal() -> Option<Verdict> {
-    if std::env::var_os("CAIRN_REQUIRE_SANDBOX").is_some_and(|value| {
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only strict-mode control that cannot leak into verifier tests on
+    /// neighboring threads. The process environment remains the production
+    /// interface; mutating it inside the parallel test runner was a race.
+    static TEST_REQUIRE_SANDBOX: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+fn confinement_required() -> bool {
+    #[cfg(test)]
+    if let Some(required) = TEST_REQUIRE_SANDBOX.get() {
+        return required;
+    }
+    std::env::var_os("CAIRN_REQUIRE_SANDBOX").is_some_and(|value| {
         let value = value.to_string_lossy();
         !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "" | "0" | "false" | "no" | "off"
         )
-    }) {
+    })
+}
+
+fn confinement_refusal() -> Option<Verdict> {
+    if confinement_required() {
         return Some(Verdict::plain(
             Status::Unavailable,
             "CAIRN_REQUIRE_SANDBOX is set, but the independent reference has no \
@@ -1009,9 +1027,7 @@ mod tests {
 
     #[test]
     fn strict_mode_still_classifies_malformed_specs_before_refusing_execution() {
-        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV.lock().expect("environment lock");
-        std::env::set_var("CAIRN_REQUIRE_SANDBOX", "1");
+        TEST_REQUIRE_SANDBOX.set(Some(true));
         let malformed = Value::object([("kind", Value::string("certificate"))]);
         let empty_artifact = Value::object(Vec::<(String, Value)>::new());
         let malformed_verdict = run(root(), &malformed, &empty_artifact);
@@ -1022,7 +1038,7 @@ mod tests {
             ("entrypoint", Value::string("check")),
         ]);
         let valid_verdict = run(root(), &valid, &empty_artifact);
-        std::env::remove_var("CAIRN_REQUIRE_SANDBOX");
+        TEST_REQUIRE_SANDBOX.set(None);
 
         assert_eq!(malformed_verdict.status, Status::InvalidSpec);
         assert_eq!(valid_verdict.status, Status::Unavailable);

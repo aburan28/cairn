@@ -568,6 +568,75 @@ fn a_challenge_needs_something_it_can_be_settled_against() {
     ));
 }
 
+/// A signed dispute timestamp is not permission to choose the epoch that owns
+/// its deadline. The ledger admission and the signed bytes must agree, and the
+/// audit must impose the same rule on an imported log.
+#[test]
+fn dispute_records_cannot_be_backdated_across_an_epoch() {
+    if !have_python() {
+        eprintln!("skipping: no python3");
+        return;
+    }
+    let mut net = network("backdated-dispute");
+    let (alice, bob) = (net.alice.clone(), net.bob.clone());
+    let truth = Trace::commit(honest()).expect("a trace");
+    let lie = Trace::commit(forged(11)).expect("a trace");
+    let claim = submit(&mut net, &alice, &artifact(&truth), "n-1");
+
+    let backdated = Challenge::new(
+        &claim,
+        bob.submitter_id(),
+        lie.root(),
+        lie.len() as u64,
+        10,
+        COMMIT_AT,
+    )
+    .signed_with(&bob);
+    assert!(matches!(
+        net.node.post_challenge(&backdated, CHALLENGE_AT),
+        Err(RuleViolation::RecordEpochMismatch {
+            record: "challenge",
+            ..
+        })
+    ));
+
+    net.node
+        .ledger_mut()
+        .append("challenge", backdated.to_value(), CHALLENGE_AT)
+        .expect("inject a peer-imported challenge");
+    let problems = net.node.audit(false);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("challenge declares epoch")),
+        "the audit missed a backdated challenge: {problems:?}"
+    );
+
+    // A move has the same invariant. Exercise admission on a clean dispute so
+    // the timestamp check cannot be masked by the injected duplicate above.
+    let mut net = network("backdated-move");
+    let (alice, bob) = (net.alice.clone(), net.bob.clone());
+    let claim = submit(&mut net, &alice, &artifact(&truth), "n-2");
+    let id = open_challenge(&mut net, &bob, &claim, &lie, 10);
+    let opened = truth.open(&id, 0).expect("endpoint");
+    let move_record = BisectionMove::new(
+        &id,
+        alice.submitter_id(),
+        0,
+        opened.state.clone(),
+        opened.path.siblings.clone(),
+        REVEAL_AT,
+    )
+    .signed_with(&alice);
+    assert!(matches!(
+        net.node.post_bisection(&move_record, MOVE_AT),
+        Err(RuleViolation::RecordEpochMismatch {
+            record: "bisection",
+            ..
+        })
+    ));
+}
+
 /// The single most important check in the game, at the record layer: a party
 /// that could answer with a state it never committed to would win every dispute
 /// by playing whatever beats the other side this round.

@@ -444,6 +444,49 @@ fn a_share_published_in_the_commitment_epoch_is_refused() {
         .expect("the same member, an epoch later");
 }
 
+/// A committee member cannot sign a share for one epoch and have a sequencer
+/// admit it in another. Otherwise the signed bytes and the log disagree about
+/// when an embargo lifted, and replaying peers can reach opposite verdicts.
+#[test]
+fn a_committee_share_cannot_be_backdated_across_an_epoch() {
+    let (_dir, mut node, objective, members) = network("backdated-share");
+    let submitter = Identity::from_secret_bytes([212u8; 32]);
+    let commitment_id = commit_sealed(
+        &mut node,
+        &objective,
+        &members,
+        &submitter,
+        n(42),
+        COMMITTEE_THRESHOLD,
+    );
+    let seats = node
+        .committee_of_commitment(&commitment_id)
+        .expect("committee");
+    let share = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
+
+    let error = node.post_committee_share(&share, LATER_AT);
+    assert!(
+        matches!(
+            error,
+            Err(RuleViolation::RecordEpochMismatch {
+                record: "committee_share",
+                ..
+            })
+        ),
+        "got {error:?}"
+    );
+    node.ledger_mut()
+        .append("committee_share", share.to_value(), LATER_AT)
+        .expect("inject a peer-imported share");
+    let problems = node.audit(false);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("committee_share declares epoch")),
+        "the audit missed a backdated committee share: {problems:?}"
+    );
+}
+
 // -- who may publish -------------------------------------------------------
 
 /// A Shamir share is not individually checkable, so anyone able to publish for
