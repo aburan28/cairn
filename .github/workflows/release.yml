@@ -88,7 +88,7 @@ jobs:
           # --- macOS ----------------------------------------------------------
           - os: macos-latest        # Apple Silicon
             target: aarch64-apple-darwin
-          - os: macos-13            # the last Intel image
+          - os: macos-15-intel      # the last Intel image
             target: x86_64-apple-darwin
           #
           # No Windows target, and that is a decision rather than an oversight.
