@@ -94,7 +94,7 @@ use serde_json::{json, Map, Value as Json};
 
 use cairn::canonical::Value;
 use cairn::crypto::identity::Identity;
-use cairn::frontier::Ratchet;
+use cairn::frontier::{Ratchet, Stall};
 use cairn::knowledge::{ConfidencePolicy, Standing};
 use cairn::ledger::Ledger;
 use cairn::node::{Node, RuleViolation};
@@ -1266,6 +1266,17 @@ impl Server {
                         "smallest score movement that counts: {}\n",
                         ratchet.min_improvement
                     ));
+                    // The pool line above can read as "44690 still to win" when
+                    // the honest answer is that nothing will ever collect it:
+                    // once the whole remaining span is under `min_improvement`,
+                    // every future claim gains too little to settle. Better to
+                    // say so than to let somebody spend a run finding out.
+                    if ratchet.is_exhausted(f.score) {
+                        line.push_str(
+                            "this objective is exhausted: the remaining pool is smaller than \
+ one settling move, so no claim can be paid here again.\n",
+                        );
+                    }
                 }
                 line
             }
@@ -1296,25 +1307,40 @@ impl Server {
                 // Maximize assumed `score > best`; minimize objectives (ecdsa.fail-
                 // shaped) need the ratchet's notion of progress or they are told
                 // a worse product "improves" the frontier.
-                let improves = match objective
+                //
+                // And the no branch needs `stall`, not the negation of a bool.
+                // A score that beats the frontier but does not clear
+                // `min_improvement` is not the same news as a score that loses
+                // to it, and collapsing the two reads as "your result is worse"
+                // to the one audience that is hill-climbing against this text.
+                let ratchet = objective
                     .ratchet
                     .as_ref()
-                    .and_then(|block| Ratchet::from_value(block).ok())
-                {
-                    Some(ratchet) => ratchet.improves(Some(f.score), score),
-                    None => score > f.score,
+                    .and_then(|block| Ratchet::from_value(block).ok());
+                let stall = match &ratchet {
+                    Some(ratchet) => ratchet.stall(Some(f.score), score),
+                    None => (score <= f.score).then_some(Stall::Regressed {
+                        previous: Some(f.score),
+                        score,
+                    }),
                 };
-                if improves {
-                    out.push_str(&format!(
+                match stall {
+                    None => out.push_str(&format!(
                         "This improves the frontier ({} -> {score}).\n",
                         f.score
-                    ));
-                } else {
-                    out.push_str(&format!(
+                    )),
+                    Some(Stall::Regressed { .. }) => out.push_str(&format!(
                         "This does not improve the frontier (best is {}). It would verify fine \
                          and earn zero.\n",
                         f.score
-                    ));
+                    )),
+                    // Better than the frontier and still unpaid. Say both
+                    // halves: the result stands, the money does not follow.
+                    Some(stall) => out.push_str(&format!(
+                        "This beats the frontier ({} -> {score}) but earns zero: {stall}. It \
+ would verify fine.\n",
+                        f.score
+                    )),
                 }
                 // The requirement is not conditional on improving: once a
                 // frontier exists on a ratcheted objective, every claim must

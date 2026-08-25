@@ -222,6 +222,86 @@ impl fmt::Display for RatchetError {
 
 impl std::error::Error for RatchetError {}
 
+/// Why a verified claim moved the frontier nowhere.
+///
+/// Returned by [`Ratchet::stall`]. Not an error: every variant describes an
+/// artifact the verifier *accepted*. It is the difference between "your result
+/// is worse" and "your result is better and this ratchet still will not pay for
+/// it", which is a distinction the settlement path and the agent-facing tools
+/// both have to render and neither can derive from a bool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stall {
+    /// The score is no better than the frontier's. The only variant that means
+    /// "this result is not an advance".
+    Regressed {
+        /// The frontier's score, or `None` when there is no frontier yet.
+        previous: Option<i64>,
+        /// The score just offered.
+        score: i64,
+    },
+    /// Strictly better, by less than `min_improvement`.
+    BelowMinImprovement {
+        /// Progress this move actually adds.
+        gained: u64,
+        /// Progress a move has to add to settle.
+        min_improvement: u64,
+    },
+    /// Strictly better, and by enough — except that the part beyond `target`
+    /// earns nothing, and what is left inside the span is under
+    /// `min_improvement`. Telling somebody here to find a bigger improvement is
+    /// wrong: a bigger one pays the same nothing.
+    ClampedByTarget {
+        /// Progress this move adds after the clamp.
+        gained: u64,
+        /// Progress a move has to add to settle.
+        min_improvement: u64,
+        /// The score past which progress stops accruing.
+        target: i64,
+    },
+    /// The frontier already sits at or past `target`. Nothing will ever move
+    /// this objective again, and the rest of its pool is stranded.
+    TargetReached {
+        /// The score the frontier reached.
+        target: i64,
+    },
+}
+
+impl fmt::Display for Stall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // Kept byte-for-byte compatible with the settlement note this
+            // replaced: it is the phrase the CLI has always printed for a
+            // regression, and `tests` and demo scripts read it.
+            Stall::Regressed { previous, score } => {
+                let previous = match previous {
+                    Some(previous) => previous.to_string(),
+                    None => String::from("none"),
+                };
+                write!(f, "score {score} does not improve on {previous}")
+            }
+            Stall::BelowMinImprovement {
+                gained,
+                min_improvement,
+            } => write!(
+                f,
+                "better than the frontier, but gains only {gained} of the {min_improvement} progress a settling move needs"
+            ),
+            Stall::ClampedByTarget {
+                gained,
+                min_improvement,
+                target,
+            } => write!(
+                f,
+                "better than the frontier, but progress stops at the target {target}, so this gains {gained} of the {min_improvement} a settling move needs; no larger improvement gains more"
+            ),
+            Stall::TargetReached { target } => write!(
+                f,
+                "the frontier has reached the target {target}; no claim can move this objective again"
+            ),
+        }
+    }
+}
+
 // -- decoding helpers ------------------------------------------------------
 
 fn required<'a>(
@@ -429,6 +509,95 @@ impl Ratchet {
             Some(old) => i128::from(self.progress(new)) - i128::from(self.progress(old)),
         };
         gained >= i128::from(self.min_improvement)
+    }
+
+    /// Why [`Ratchet::improves`] said no, in enough detail to tell a
+    /// contributor apart from a copier.
+    ///
+    /// `improves` answers one bit, and one bit is not enough to act on: a score
+    /// that is *strictly better* and a score that is *worse* both come back
+    /// false, and a caller that renders them with one sentence tells somebody
+    /// holding a genuine advance that their result is not an advance. That is
+    /// not a cosmetic complaint — it is the reward signal, and an agent
+    /// hill-climbing against it will discard the improvement and stop. Callers
+    /// rendering a refusal should reach for this rather than `improves`.
+    ///
+    /// `None` means the move does pay. Every variant carries the numbers it is
+    /// talking about, because "too small" without the two quantities is the
+    /// same dead end one bit further along.
+    pub fn stall(&self, old: Option<i64>, new: i64) -> Option<Stall> {
+        if self.improves(old, new) {
+            return None;
+        }
+        let span = self.span();
+        let before = old.map(|score| self.progress(score)).unwrap_or(0);
+        let after = self.progress(new);
+
+        // Nothing can ever move again: the frontier is already at the target,
+        // so every future claim gains exactly zero however good it is. Worth
+        // its own variant because it is the one case where the honest advice is
+        // "stop", not "try harder".
+        if before >= span {
+            return Some(Stall::TargetReached {
+                target: self.target,
+            });
+        }
+        if after <= before {
+            return Some(Stall::Regressed {
+                previous: old,
+                score: new,
+            });
+        }
+
+        // Strictly better, but not by enough to pay. `after - before` cannot
+        // wrap: `after > before` is what this branch is.
+        let gained = after - before;
+        // The raw distance the score actually moved, before the target clamp
+        // ate any of it. When these disagree the clamp is the reason the move
+        // does not pay, and saying "too small" instead sends somebody off to
+        // find a bigger improvement that will also pay nothing.
+        let raw = match old {
+            None => i128::from(after),
+            Some(old) => match self.direction {
+                Direction::Maximize => i128::from(new) - i128::from(old),
+                Direction::Minimize => i128::from(old) - i128::from(new),
+            },
+        };
+        if raw > i128::from(gained) {
+            return Some(Stall::ClampedByTarget {
+                gained,
+                min_improvement: self.min_improvement,
+                target: self.target,
+            });
+        }
+        Some(Stall::BelowMinImprovement {
+            gained,
+            min_improvement: self.min_improvement,
+        })
+    }
+
+    /// Can a frontier sitting at `score` ever be moved again?
+    ///
+    /// False once the most a further claim could gain — the whole remaining
+    /// span — is under `min_improvement`. The pool left over at that point is
+    /// stranded: no artifact at any score settles against this objective again,
+    /// and the funder's money stays in it forever. Reachable long before the
+    /// target, which is what makes it worth asking rather than assuming
+    /// `progress < span` means "still open".
+    pub fn is_exhausted(&self, score: i64) -> bool {
+        u128::from(self.span() - self.progress(score)) < u128::from(self.min_improvement)
+    }
+
+    /// Can this ratchet ever pay anybody, from an empty frontier?
+    ///
+    /// False when `min_improvement` exceeds the whole span, which no claim can
+    /// clear because progress is clamped to the span. [`Ratchet::validate`]
+    /// admits it — deliberately, since tightening admission would change which
+    /// records a node accepts and orphan logs that already carry one — so this
+    /// is advisory, for a funder to be told at post time rather than after
+    /// funding a bounty nothing can win.
+    pub fn is_fundable(&self) -> bool {
+        u128::from(self.min_improvement) <= u128::from(self.span())
     }
 
     // -- money -------------------------------------------------------------
@@ -1134,5 +1303,109 @@ mod tests {
         assert!(Direction::from_str("Maximize").is_err());
         assert_eq!(Direction::Minimize.to_string(), "minimize");
         assert_eq!(Direction::default(), Direction::Maximize);
+    }
+
+    /// The ecdsa.fail case that motivated `Stall`, with its real numbers.
+    ///
+    /// Baseline 10,758,874,395, target 1,400,000,000, min_improvement 100M.
+    /// A frontier at the published world-best leaves 83,649,332 of span --
+    /// under the gate -- so the strictly better low-qubit record settles
+    /// nothing. `improves` says false for that and for a regression alike,
+    /// which is exactly the conflation this test exists to stop.
+    #[test]
+    fn a_better_score_the_clamp_will_not_pay_for_is_not_a_regression() {
+        let ratchet = Ratchet::new(
+            10_758_874_395,
+            1_400_000_000,
+            5_000_000,
+            Direction::Minimize,
+            100_000_000,
+        )
+        .expect("valid");
+        let world_best = 1_483_649_332;
+        let low_qubit = 1_170_013_503;
+
+        assert!(!ratchet.improves(Some(world_best), low_qubit));
+        let stall = ratchet.stall(Some(world_best), low_qubit).expect("stalls");
+        assert_eq!(
+            stall,
+            Stall::ClampedByTarget {
+                gained: 83_649_332,
+                min_improvement: 100_000_000,
+                target: 1_400_000_000,
+            }
+        );
+        // The whole point: this must not read as "your result is worse".
+        let rendered = stall.to_string();
+        assert!(rendered.contains("better than the frontier"), "{rendered}");
+        assert!(
+            rendered.contains("no larger improvement gains more"),
+            "{rendered}"
+        );
+
+        // And a genuine regression still says so.
+        let worse = ratchet
+            .stall(Some(world_best), 2_000_000_000)
+            .expect("stalls");
+        assert!(matches!(worse, Stall::Regressed { .. }), "{worse:?}");
+    }
+
+    #[test]
+    fn a_move_that_pays_does_not_stall() {
+        let ratchet = Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 10).expect("valid");
+        assert_eq!(ratchet.stall(Some(20), 40), None);
+        assert_eq!(
+            ratchet.stall(Some(20), 25),
+            Some(Stall::BelowMinImprovement {
+                gained: 5,
+                min_improvement: 10,
+            })
+        );
+        // No frontier yet: progress is measured from the baseline, and a score
+        // at or below it gains nothing rather than going negative.
+        assert_eq!(
+            ratchet.stall(None, 0),
+            Some(Stall::Regressed {
+                previous: None,
+                score: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn a_frontier_at_the_target_stalls_everything_after_it() {
+        let ratchet = Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 10).expect("valid");
+        assert_eq!(
+            ratchet.stall(Some(100), 200),
+            Some(Stall::TargetReached { target: 100 })
+        );
+        assert!(ratchet.is_exhausted(100));
+        // Overshooting the target is the same state, not a worse one.
+        assert!(ratchet.is_exhausted(150));
+    }
+
+    /// `progress < span` does not mean the objective is still winnable.
+    #[test]
+    fn a_pool_smaller_than_one_settling_move_is_stranded() {
+        let ratchet = Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 10).expect("valid");
+        assert!(
+            !ratchet.is_exhausted(89),
+            "10 of span left, exactly the gate"
+        );
+        assert!(ratchet.is_exhausted(91), "9 of span left, under the gate");
+        // The frontier is nowhere near the target and the objective is over.
+        assert!(ratchet.progress(91) < ratchet.span());
+    }
+
+    /// A ratchet `validate` admits and no claim can ever win.
+    #[test]
+    fn a_min_improvement_over_the_span_can_never_pay() {
+        let ratchet = Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 101).expect("valid");
+        assert!(!ratchet.is_fundable());
+        // Even a perfect score, straight to the target, clears nothing.
+        assert!(!ratchet.improves(None, 100));
+        assert!(Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 100)
+            .expect("valid")
+            .is_fundable());
     }
 }
