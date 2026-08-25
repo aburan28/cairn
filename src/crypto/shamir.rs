@@ -512,17 +512,12 @@ fn hex_decode(text: &str) -> Result<Vec<u8>, ShamirError> {
         });
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        // Slice patterns instead of indexing: `chunks_exact(2)` guarantees the
-        // shape, and matching says so to the compiler rather than to a reader.
-        let (high, low) = match pair {
-            [high, low] => (*high, *low),
-            _ => {
-                return Err(ShamirError::Invariant(
-                    "chunks_exact(2) yielded a short chunk",
-                ))
-            }
-        };
+    for pair in bytes.as_chunks::<2>().0 {
+        // `as_chunks` rather than `chunks_exact`, so the pair is `[u8; 2]` and
+        // the short-chunk arm this used to carry is not merely unreachable but
+        // unwritable. The invariant moved from a runtime error into the type,
+        // which is where it was always trying to be.
+        let [high, low] = *pair;
         let (high, low) = match (digit(high), digit(low)) {
             (Some(h), Some(l)) => (h, l),
             _ => {

@@ -311,14 +311,21 @@ fn the_committee_is_drawn_from_the_log_and_anyone_recomputes_it() {
         "some registered peer must have been left out, or nothing was drawn"
     );
 
-    // A different epoch draws a different committee, which is what stops a
-    // fixed set being worth bribing (`docs/censorship.md` §2 on rotation).
-    let elsewhere = node.committee_for(epoch + 7, at).expect("draws");
-    assert_ne!(
-        once.iter().map(|s| &s.transport).collect::<Vec<_>>(),
-        elsewhere.iter().map(|s| &s.transport).collect::<Vec<_>>(),
-        "the committee must rotate with the epoch"
-    );
+    // The draw varies with the epoch, which is what stops a fixed set being
+    // worth bribing (`docs/censorship.md` §2 on rotation).  Two pseudorandom
+    // draws may legitimately select the same ordered 5-of-6 committee, so a
+    // single chosen epoch is a probabilistic assertion.  A committee that is
+    // actually fixed cannot survive this bounded sweep.
+    let first: Vec<_> = once.iter().map(|seat| &seat.transport).collect();
+    let rotates = (1..=64).any(|offset| {
+        let elsewhere = node.committee_for(epoch + offset, at).expect("draws");
+        elsewhere
+            .iter()
+            .map(|seat| &seat.transport)
+            .collect::<Vec<_>>()
+            != first
+    });
+    assert!(rotates, "the committee stayed fixed across 64 epochs");
 }
 
 // -- the property the whole design exists for ------------------------------
@@ -435,6 +442,49 @@ fn a_share_published_in_the_commitment_epoch_is_refused() {
     let in_time = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
     node.post_committee_share(&in_time, REVEAL_AT)
         .expect("the same member, an epoch later");
+}
+
+/// A committee member cannot sign a share for one epoch and have a sequencer
+/// admit it in another. Otherwise the signed bytes and the log disagree about
+/// when an embargo lifted, and replaying peers can reach opposite verdicts.
+#[test]
+fn a_committee_share_cannot_be_backdated_across_an_epoch() {
+    let (_dir, mut node, objective, members) = network("backdated-share");
+    let submitter = Identity::from_secret_bytes([212u8; 32]);
+    let commitment_id = commit_sealed(
+        &mut node,
+        &objective,
+        &members,
+        &submitter,
+        n(42),
+        COMMITTEE_THRESHOLD,
+    );
+    let seats = node
+        .committee_of_commitment(&commitment_id)
+        .expect("committee");
+    let share = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
+
+    let error = node.post_committee_share(&share, LATER_AT);
+    assert!(
+        matches!(
+            error,
+            Err(RuleViolation::RecordEpochMismatch {
+                record: "committee_share",
+                ..
+            })
+        ),
+        "got {error:?}"
+    );
+    node.ledger_mut()
+        .append("committee_share", share.to_value(), LATER_AT)
+        .expect("inject a peer-imported share");
+    let problems = node.audit(false);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("committee_share declares epoch")),
+        "the audit missed a backdated committee share: {problems:?}"
+    );
 }
 
 // -- who may publish -------------------------------------------------------

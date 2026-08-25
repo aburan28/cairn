@@ -490,11 +490,18 @@ fn replay_does_not_lose_a_claim_to_the_order_records_arrive_in() {
         &root,
     );
 
-    // Three objectives: two revealed in epoch E, one in E+2.
-    let t0: i64 = 1_900_000_000;
-    let early_reveal = format_iso8601_utc(t0 + EPOCH);
-    let late_reveal = format_iso8601_utc(t0 + 3 * EPOCH);
-    let commit_ts = format_iso8601_utc(t0);
+    // Three objectives: two revealed in an early epoch, one much later. The
+    // spellings deliberately invert byte order: RFC-3339 offsets describe
+    // instants, and a calendar string carrying +14:00 is not ordered against
+    // one carrying -12:00 by ordinary string comparison.
+    let early_reveal = "2030-01-02T00:30:00+14:00".to_string();
+    let late_reveal = "2030-01-01T23:00:00-12:00".to_string();
+    let commit_ts = "2029-12-31T00:00:00+00:00".to_string();
+    assert!(early_reveal > late_reveal, "fixture must invert text order");
+    assert!(
+        cairn::time::parse_rfc3339(&early_reveal) < cairn::time::parse_rfc3339(&late_reveal),
+        "fixture must retain chronological order"
+    );
 
     let mut author = Node::new(
         Ledger::open(scratch("replayorder", 0, 1)).expect("ledger"),

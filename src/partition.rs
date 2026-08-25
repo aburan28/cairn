@@ -318,6 +318,34 @@ pub fn epoch_of(timestamp_seconds: u64, epoch_seconds: u64) -> u64 {
 /// Overrides [`EPOCH_SECONDS`] for a local demo. Never set this in production.
 pub const EPOCH_SECONDS_ENV: &str = "CAIRN_EPOCH_SECONDS";
 
+#[cfg(test)]
+std::thread_local! {
+    /// A unit-test-only override that cannot leak across the parallel test
+    /// runner. Mutating the process environment made unrelated settlement
+    /// tests observe a seven-second epoch between one test's set and restore.
+    static TEST_EPOCH_SECONDS: std::cell::Cell<Option<u64>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) struct TestEpochSecondsGuard(Option<u64>);
+
+#[cfg(test)]
+impl Drop for TestEpochSecondsGuard {
+    fn drop(&mut self) {
+        TEST_EPOCH_SECONDS.set(self.0);
+    }
+}
+
+/// Override the epoch length on this test thread until the guard drops.
+#[cfg(test)]
+pub(crate) fn test_epoch_seconds(seconds: u64) -> TestEpochSecondsGuard {
+    assert!(seconds > 0, "a zero-length epoch has no meaning");
+    let previous = TEST_EPOCH_SECONDS.replace(Some(seconds));
+    TestEpochSecondsGuard(previous)
+}
+
 /// The epoch length in force for this process.
 ///
 /// [`EPOCH_SECONDS`] is ten minutes, which makes the commit-in-N/reveal-in-N+1
@@ -331,6 +359,10 @@ pub const EPOCH_SECONDS_ENV: &str = "CAIRN_EPOCH_SECONDS";
 /// set to. A malformed or zero value falls back to the default rather than
 /// producing an epoch length of nothing.
 pub fn epoch_seconds() -> u64 {
+    #[cfg(test)]
+    if let Some(seconds) = TEST_EPOCH_SECONDS.get() {
+        return seconds;
+    }
     match std::env::var(EPOCH_SECONDS_ENV) {
         Ok(text) => match text.trim().parse::<u64>() {
             Ok(seconds) if seconds > 0 => seconds,

@@ -1,0 +1,39 @@
+{
+  "goal": "GOAL-programbench-vetted-pilot",
+  "statement": "Reconstruct readable source for the program pinned inside the evaluator. The evaluator carries the reference as a flat opcode list for the stack machine it also implements -- the same runnable artifact a ProgramBench task hands the agent -- and grades behaviourally: 200 input lists derived from the pinned seed 20260822, compared exactly against the reference's output. Score is basis points, the share of those cases reproduced, so 10000 is ProgramBench's 'resolved' and 9500 or above is its 'almost'. Scaled to integers because IEEE-754 does not reproduce bitwise across hosts and two honest nodes must reach the same verdict; there is no float anywhere near a score here. Publishing this evaluator gives a submitter nothing the task did not already give them, which is the property that lets a reconstruction benchmark live on an open log at all: the oracle is the binary, and the answer is its source. Three escape hatches are screened before the checker runs -- a submission that embeds the opcode list and interprets it, a submission that reaches outside its namespace, and a submission that never returns -- and each screening scores zero rather than raising, because an exception out of a verifier is a broken verifier and not a bad artifact. Baseline 100, one case in fifty; payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move.",
+  "verifier": {
+    "kind": "evaluator",
+    "evaluator": "examples/programbench-vetted/evaluators/programbench_pilot.py",
+    "evaluator_sha256": "75248f3dd80debdaaa21242a4ba2a14b5c9311e843579958e3989140f4d281d4",
+    "entrypoint": "score",
+    "direction": "maximize",
+    "threshold": 100,
+    "timeout_seconds": 120
+  },
+  "ratchet": {
+    "baseline": 100,
+    "target": 10000,
+    "direction": "maximize",
+    "min_improvement": 100,
+    "reward": 1000000
+  },
+  "reward": 1000000,
+  "funder": "vetto",
+  "created_at": "2026-08-22T00:00:00+00:00",
+  "artifact_schema": {
+    "type": "object",
+    "required": [
+      "source"
+    ],
+    "description": "Python source defining run(xs) -> int, where xs is a list of non-negative ints. At most 4000 characters. No imports, no dunder attribute access, and no copy of the reference opcode list.",
+    "properties": {
+      "source": {
+        "type": "string",
+        "description": "The reconstructed program."
+      }
+    },
+    "example": {
+      "source": "def run(xs):\n    return 0\n"
+    }
+  }
+}

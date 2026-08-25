@@ -166,11 +166,12 @@ fn network(label: &str) -> Network {
 
     let alice = Identity::from_secret_bytes([7u8; 32]);
     let bob = Identity::from_secret_bytes([9u8; 32]);
+    let treasury = Identity::from_secret_bytes([0u8; 32]);
     // Genesis first: issuance is admissible only in the genesis prefix.
     for (who, units) in [
         (alice.submitter_id(), 5_000_000u64),
         (bob.submitter_id(), 5_000_000),
-        ("treasury".to_string(), 5_000_000),
+        (treasury.submitter_id(), 5_000_000),
     ] {
         node.post_issuance(&Issuance::new(who, units, COMMIT_AT), COMMIT_AT)
             .expect("genesis issuance");
@@ -194,12 +195,13 @@ fn network(label: &str) -> Network {
             ),
         ]),
         1000,
-        "treasury",
+        treasury.submitter_id(),
         COMMIT_AT,
         None,
         None,
     )
-    .expect("valid objective");
+    .expect("valid objective")
+    .funded_by(&treasury);
     node.post_objective(&objective, COMMIT_AT).expect("post");
     Network {
         _dir: dir,
@@ -563,6 +565,75 @@ fn a_challenge_needs_something_it_can_be_settled_against() {
     assert!(matches!(
         net.node.post_challenge(&again, CHALLENGE_AT),
         Err(RuleViolation::DuplicateChallenge { .. })
+    ));
+}
+
+/// A signed dispute timestamp is not permission to choose the epoch that owns
+/// its deadline. The ledger admission and the signed bytes must agree, and the
+/// audit must impose the same rule on an imported log.
+#[test]
+fn dispute_records_cannot_be_backdated_across_an_epoch() {
+    if !have_python() {
+        eprintln!("skipping: no python3");
+        return;
+    }
+    let mut net = network("backdated-dispute");
+    let (alice, bob) = (net.alice.clone(), net.bob.clone());
+    let truth = Trace::commit(honest()).expect("a trace");
+    let lie = Trace::commit(forged(11)).expect("a trace");
+    let claim = submit(&mut net, &alice, &artifact(&truth), "n-1");
+
+    let backdated = Challenge::new(
+        &claim,
+        bob.submitter_id(),
+        lie.root(),
+        lie.len() as u64,
+        10,
+        COMMIT_AT,
+    )
+    .signed_with(&bob);
+    assert!(matches!(
+        net.node.post_challenge(&backdated, CHALLENGE_AT),
+        Err(RuleViolation::RecordEpochMismatch {
+            record: "challenge",
+            ..
+        })
+    ));
+
+    net.node
+        .ledger_mut()
+        .append("challenge", backdated.to_value(), CHALLENGE_AT)
+        .expect("inject a peer-imported challenge");
+    let problems = net.node.audit(false);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("challenge declares epoch")),
+        "the audit missed a backdated challenge: {problems:?}"
+    );
+
+    // A move has the same invariant. Exercise admission on a clean dispute so
+    // the timestamp check cannot be masked by the injected duplicate above.
+    let mut net = network("backdated-move");
+    let (alice, bob) = (net.alice.clone(), net.bob.clone());
+    let claim = submit(&mut net, &alice, &artifact(&truth), "n-2");
+    let id = open_challenge(&mut net, &bob, &claim, &lie, 10);
+    let opened = truth.open(&id, 0).expect("endpoint");
+    let move_record = BisectionMove::new(
+        &id,
+        alice.submitter_id(),
+        0,
+        opened.state.clone(),
+        opened.path.siblings.clone(),
+        REVEAL_AT,
+    )
+    .signed_with(&alice);
+    assert!(matches!(
+        net.node.post_bisection(&move_record, MOVE_AT),
+        Err(RuleViolation::RecordEpochMismatch {
+            record: "bisection",
+            ..
+        })
     ));
 }
 

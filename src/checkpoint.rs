@@ -322,22 +322,44 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 fn hex_decode(text: &str) -> Result<Vec<u8>, CheckpointError> {
-    if !text.len().is_multiple_of(2) {
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return Err(CheckpointError::Invalid("odd-length hex".into()));
     }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&text[i..i + 2], 16)
-                .map_err(|_| CheckpointError::Invalid("hex".into()))
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let high = lower_hex_nibble(pair[0])?;
+            let low = lower_hex_nibble(pair[1])?;
+            Ok((high << 4) | low)
         })
         .collect()
+}
+
+fn lower_hex_nibble(byte: u8) -> Result<u8, CheckpointError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(CheckpointError::Invalid("hex".into())),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn malformed_unicode_checkpoint_hex_is_refused_without_unwinding() {
+        for malformed in ["é", "💣", "aé", "ＡＡ", "AA", "0F"] {
+            let decoded = std::panic::catch_unwind(|| hex_decode(malformed));
+            assert!(decoded.is_ok(), "hex decoder panicked on {malformed:?}");
+            assert!(decoded.unwrap().is_err(), "accepted {malformed:?}");
+        }
+        assert_eq!(hex_decode("00ff10").unwrap(), vec![0, 255, 16]);
+    }
 
     #[test]
     fn ml_dsa_checkpoint_binds_the_exact_ledger_state() {

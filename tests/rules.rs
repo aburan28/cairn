@@ -334,9 +334,9 @@ fn reveal_only(
     reveal_at(node, objective, submitter, artifact, nonce, cites, TS)
 }
 
-/// Reveal at a chosen instant. `created_at` on the claim stays [`TS`]: the
-/// commitment binds the artifact and the nonce, not when the claim record says
-/// it was written, and holding it fixed keeps claim ids reproducible.
+/// Reveal at a chosen instant. The claim carries the same timestamp as the
+/// ledger admission: otherwise two nodes could place the signed record in
+/// different settlement epochs while agreeing on its id.
 #[allow(clippy::too_many_arguments)]
 fn reveal_at(
     node: &mut Node,
@@ -347,7 +347,7 @@ fn reveal_at(
     cites: Vec<String>,
     ts: &str,
 ) -> Result<Outcome, RuleViolation> {
-    let claim = Claim::new(objective.id(), submitter, artifact, nonce, TS, cites)
+    let claim = Claim::new(objective.id(), submitter, artifact, nonce, ts, cites)
         .expect("structurally valid claim");
     node.reveal(&claim, ts)
 }

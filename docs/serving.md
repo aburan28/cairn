@@ -88,6 +88,13 @@ the response says so in those words. The record is checked exactly twice: once
 for shape at the boundary (so a typo is reported immediately rather than after
 a queue delay), and once for everything, by `node.rs`, at drain time.
 
+The write boundary accepts only `Content-Type: application/json` (parameters
+such as `charset=utf-8` are permitted). In particular it refuses browser-simple
+`text/plain` POSTs. Combined with the absence of permissive CORS headers, that
+prevents an unrelated web origin from queueing a record merely by causing a
+visitor's browser to send a no-preflight request; deployments still enforce
+their own origin policy at the TLS reverse proxy.
+
 A refused record is dropped from the queue with its reason printed, rather than
 retried: nearly every refusal is permanent — a stale epoch, a citation that is
 not an accepted claim — and a queue that retries a permanent failure never

@@ -28,5 +28,23 @@ path = "src/main.rs"
 sha2 = "0.11"
 ed25519-dalek = "3"
 
+# The pairing check on a drand beacon -- and **deliberately not the crate the
+# primary implementation uses**, which is `bls12_381`.
+#
+# Everywhere else these two agree because they were written separately over the
+# same integers and strings, and two correct programs cannot disagree about a
+# SHA-256. A pairing is the exception: subgroup membership and non-canonical
+# point encodings are where BLS libraries have historically differed, so a
+# signature crafted at that boundary could verify under one library and not the
+# other. That is the one disagreement worth spending a second dependency to
+# find, and `scripts/differential.sh` is where it would show up.
+#
+# `crate::drand` supplies its own `expand_message_xmd` over the `sha2` above,
+# rather than taking this crate's `ExpandMsgXmd`, which is generic over `digest`
+# 0.10 and would put a second SHA-256 in the tree. It is also a second
+# hand-written expander, checked against RFC 9380's vectors independently of the
+# primary's -- the same bargain as the rest of this crate.
+bls12_381_plus = "0.9"
+
 [profile.release]
 overflow-checks = true

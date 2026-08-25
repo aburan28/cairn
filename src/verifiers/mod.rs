@@ -376,9 +376,9 @@ OS jail: bubblewrap on Linux, a seatbelt profile on macOS. Enforced by the \
 kernel: no network of any kind (including unix sockets to a local daemon), no \
 reads outside declared bundle, toolchain, and system paths, no writes outside a \
 scratch directory that is deleted when the check finishes, a wall-clock \
-deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. Pinned pure functions always \
-get a scrubbed environment; requiring the sandbox also scrubs replay and Lean, \
-so objective code cannot return the operator's credentials in verdict evidence. \
+deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. Every child process gets a \
+scrubbed environment, so objective code cannot return the operator's credentials \
+in verdict evidence. Raw child output is retained only by digest. \
 Directories a spec can name (replay's cwd, \
 lean's project_root) resolve against the objective root and are refused when \
 they escape it, including through symlinks, so a record cannot choose which host paths are bound into its \
@@ -430,13 +430,10 @@ pub const TIME_LIKE: &[&str] = &[
 /// checker is not noticeably delayed, large enough not to spin a core.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Characters of subprocess output retained as evidence.
-const OUTPUT_TAIL_CHARS: usize = 2000;
-
 /// Ceiling on what one verification may write to stdout and stderr together.
 ///
-/// Only [`OUTPUT_TAIL_CHARS`] of it is ever kept, so this is not a limit on
-/// anything useful -- it is the bound that stops an objective's checker from
+/// Only its digest is retained as evidence, so this is not a limit on anything
+/// useful -- it is the bound that stops an objective's checker from
 /// filling the operator's disk (and then the node's memory, when the capture
 /// is read back) by printing for its whole CPU budget. 8 MiB is far more than
 /// any real checker emits and far less than a `df` moves.
@@ -1173,15 +1170,12 @@ impl VerifierRegistry {
         }
 
         // `project_root` comes from the objective record -- attacker-authored,
-        // like every other spec field -- and it is handed to the jail as a
-        // *writable* bind. Unconfined, `"/"` turns the sandbox into a
-        // pass-through of the whole filesystem, so it resolves against the
-        // bundle root and must stay inside it, exactly as pinned code paths
-        // must. Screened before the toolchain lookup: a malformed spec is
-        // malformed whether or not this node has Lean, and the reference
-        // implementation refuses it in the same place. Writes inside the
-        // bundle are bounded: every pinned file is hash-checked on each run,
-        // so a build that scribbles on a checker is caught when it resolves.
+        // like every other spec field -- and is made readable inside the jail.
+        // It resolves against the bundle root and must stay inside it, exactly
+        // as pinned code paths must. Screened before the toolchain lookup: a
+        // malformed spec is malformed whether or not this node has Lean, and
+        // the reference implementation refuses it in the same place. The
+        // project itself is read-only; generated files belong in scratch.
         let project_cwd = match spec.get("project_root").and_then(Value::as_str) {
             Some(root) if !root.is_empty() => match contained_dir(&self.root, root) {
                 Some(cwd) => Some(cwd),
@@ -1228,13 +1222,12 @@ impl VerifierRegistry {
 
         // Lean elaboration runs arbitrary code (macros, `#eval`), and half the
         // input is submitter-controlled, so this spawn is jailed like any
-        // other. `project_root` is writable because building a Lake project
-        // writes `.olean` files into it; the environment is inherited because
-        // `elan`/`LEAN_PATH` is how a Lean toolchain is located at all.
-        let mut plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs()).reading(&binary);
-        if cwd != workdir.path() {
-            plan = plan.writing(&cwd);
-        }
+        // other. A declared project is read-only: verifier execution must not
+        // persist generated files or modify code seen by later claims. The
+        // scratch directory remains the only writable location.
+        let plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs())
+            .reading(&binary)
+            .scrubbed();
         let jailed = match sandbox::confine(&binary, &sandbox::argv([claim.as_os_str()]), &plan) {
             Ok(jailed) => jailed,
             Err(sandbox::Unavailable(why)) => {
@@ -1269,8 +1262,8 @@ impl VerifierRegistry {
                 },
             ),
             (
-                "output_tail",
-                Value::string(tail(&output, OUTPUT_TAIL_CHARS)),
+                "output_sha256",
+                Value::string(blobs::address(output.as_bytes())),
             ),
             ("lean_binary", Value::string(binary.to_string_lossy())),
         ]);
@@ -1410,11 +1403,12 @@ impl VerifierRegistry {
         let rest: Vec<OsString> = sandbox::argv(command_parts.get(1..).unwrap_or(&[]));
         // The replay command is objective-authored by definition. Its `cwd` is
         // read-only: a re-run that needs to mutate the bundle it is checking
-        // is not reproducible anyway. The environment is inherited because the
-        // command's toolchain is the operator's, not the objective's.
+        // is not reproducible anyway. Its environment is minimal because the
+        // command is objective-controlled and verdict evidence is public.
         let plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs())
             .reading(&resolved)
-            .reading(&self.root);
+            .reading(&self.root)
+            .scrubbed();
         let jailed = match sandbox::confine(&resolved, &rest, &plan) {
             Ok(jailed) => jailed,
             Err(sandbox::Unavailable(why)) => {
@@ -1448,8 +1442,8 @@ impl VerifierRegistry {
                      evidence about the artifact"
                 ),
                 Value::object([(
-                    "stderr_tail",
-                    Value::string(tail(&completed.stderr, OUTPUT_TAIL_CHARS)),
+                    "stderr_sha256",
+                    Value::string(blobs::address(completed.stderr.as_bytes())),
                 )]),
             );
         }
@@ -1475,7 +1469,7 @@ impl VerifierRegistry {
         };
 
         let mut mismatches: BTreeMap<String, Value> = BTreeMap::new();
-        let mut reproduced: BTreeMap<String, Value> = BTreeMap::new();
+        let mut reproduced: Vec<String> = Vec::new();
         for name in declared_fields.iter().copied() {
             let raw = match observed.get(name) {
                 Some(raw) => raw,
@@ -1499,11 +1493,14 @@ impl VerifierRegistry {
             };
             let claim = claimed.get(name).cloned().unwrap_or(Value::Null);
             if claim == seen {
-                reproduced.insert(name.to_string(), seen);
+                reproduced.push(name.to_string());
             } else {
                 mismatches.insert(
                     name.to_string(),
-                    Value::object([("claimed", claim), ("observed", seen)]),
+                    Value::object([
+                        ("claimed_sha256", Value::string(claim.digest())),
+                        ("observed_sha256", Value::string(seen.digest())),
+                    ]),
                 );
             }
         }
@@ -1521,7 +1518,10 @@ impl VerifierRegistry {
                 "replay reproduced {} declared field(s)",
                 declared_fields.len()
             ),
-            Value::object([("reproduced", Value::Object(reproduced))]),
+            Value::object([(
+                "reproduced_fields",
+                Value::array(reproduced.into_iter().map(Value::string)),
+            )]),
         )
     }
 
@@ -1819,8 +1819,8 @@ impl VerifierRegistry {
                 ),
                 Value::object([
                     (
-                        "stderr_tail",
-                        Value::string(tail(&completed.stderr, OUTPUT_TAIL_CHARS)),
+                        "stderr_sha256",
+                        Value::string(blobs::address(completed.stderr.as_bytes())),
                     ),
                     ("sandbox", Value::string(mechanism)),
                 ]),
@@ -1834,12 +1834,12 @@ impl VerifierRegistry {
                 format!("pinned {role} did not print a result object this node can read"),
                 Value::object([
                     (
-                        "stdout_tail",
-                        Value::string(tail(&completed.stdout, OUTPUT_TAIL_CHARS)),
+                        "stdout_sha256",
+                        Value::string(blobs::address(completed.stdout.as_bytes())),
                     ),
                     (
-                        "stderr_tail",
-                        Value::string(tail(&completed.stderr, OUTPUT_TAIL_CHARS)),
+                        "stderr_sha256",
+                        Value::string(blobs::address(completed.stderr.as_bytes())),
                     ),
                     ("sandbox", Value::string(mechanism)),
                 ]),
@@ -2115,16 +2115,6 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     false
 }
 
-/// Last `max_chars` characters, on a character boundary so the result is always
-/// valid UTF-8 (byte slicing here would panic on multi-byte output).
-fn tail(text: &str, max_chars: usize) -> String {
-    let total = text.chars().count();
-    if total <= max_chars {
-        return text.to_string();
-    }
-    text.chars().skip(total - max_chars).collect()
-}
-
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -2183,8 +2173,7 @@ fn absolutize(path: &Path) -> io::Result<PathBuf> {
 /// applies to pinned code, for the same reason.
 ///
 /// A spec field must never choose a host path: these directories are handed to
-/// the jail as bind mounts (`project_root` writable, replay's `cwd` readable),
-/// so an unconfined one turns the sandbox into a pass-through of whatever the
+/// the jail as readable roots, so an uncontained one exposes whatever the
 /// record names -- `"/"` included. `Path::join` replaces the root when the
 /// field is absolute, and the `starts_with` below is component-wise, so both
 /// the absolute and the `../` spellings land in `None`.
@@ -2350,8 +2339,22 @@ fn run_bounded(
 ) -> Result<Completed, RunFailure> {
     let out_path = workdir.join("stdout");
     let err_path = workdir.join("stderr");
-    let out_file = fs::File::create(&out_path).map_err(RunFailure::Io)?;
-    let err_file = fs::File::create(&err_path).map_err(RunFailure::Io)?;
+    let capture = |path: &Path| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+    };
+    let out_file = capture(&out_path).map_err(RunFailure::Io)?;
+    let err_file = capture(&err_path).map_err(RunFailure::Io)?;
+    // Keep parent-owned handles to the exact inodes we created. The child owns
+    // `workdir` and can replace `stdout` or `stderr` with a symlink while it
+    // runs; reopening either pathname afterwards would make the unsandboxed
+    // parent follow that link and read a host file on the child's behalf.
+    let out_child = out_file.try_clone().map_err(RunFailure::Io)?;
+    let err_child = err_file.try_clone().map_err(RunFailure::Io)?;
 
     match stdin {
         Some(bytes) => {
@@ -2366,8 +2369,8 @@ fn run_bounded(
             command.stdin(Stdio::null());
         }
     }
-    command.stdout(Stdio::from(out_file));
-    command.stderr(Stdio::from(err_file));
+    command.stdout(Stdio::from(out_child));
+    command.stderr(Stdio::from(err_child));
 
     // Its own process group, so the deadline can take out whatever the child
     // spawned rather than only the child. Under bubblewrap `--unshare-pid`
@@ -2397,7 +2400,7 @@ fn run_bounded(
                 // A checker that prints for its whole CPU budget fills the
                 // operator's disk. Checked while it runs rather than after,
                 // because "after" is too late for the bytes already written.
-                if captured_bytes(&out_path, &err_path) > MAX_CAPTURED_BYTES {
+                if captured_bytes(&out_file, &err_file) > MAX_CAPTURED_BYTES {
                     over_cap = true;
                     reap(&mut child);
                     break None;
@@ -2419,8 +2422,8 @@ fn run_bounded(
 
     Ok(Completed {
         code,
-        stdout: read_lossy(&out_path),
-        stderr: read_lossy(&err_path),
+        stdout: read_lossy(out_file),
+        stderr: read_lossy(err_file),
     })
 }
 
@@ -2472,9 +2475,9 @@ unsafe extern "C" {
 }
 
 /// Bytes captured so far across both streams.
-fn captured_bytes(out_path: &Path, err_path: &Path) -> u64 {
-    let size = |path: &Path| fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-    size(out_path).saturating_add(size(err_path))
+fn captured_bytes(out_file: &fs::File, err_file: &fs::File) -> u64 {
+    let size = |file: &fs::File| file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    size(out_file).saturating_add(size(err_file))
 }
 
 /// Read captured output, tolerating both a missing file and invalid UTF-8.
@@ -2484,12 +2487,11 @@ fn captured_bytes(out_path: &Path, err_path: &Path) -> u64 {
 /// Reads at most [`MAX_CAPTURED_BYTES`]: the caller only ever keeps a short
 /// tail, and loading a multi-gigabyte capture into a `String` to throw nearly
 /// all of it away is how a disk-filling checker becomes an OOM as well.
-fn read_lossy(path: &Path) -> String {
-    let mut file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return String::new(),
-    };
-    use std::io::Read as _;
+fn read_lossy(mut file: fs::File) -> String {
+    use std::io::{Read as _, Seek as _};
+    if file.rewind().is_err() {
+        return String::new();
+    }
     let mut buffer = Vec::new();
     if file
         .by_ref()
@@ -3297,6 +3299,32 @@ mod tests {
         assert!(matches!(outcome, Err(RunFailure::Spawn(_))));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn capture_collection_reads_the_original_descriptor_not_a_child_symlink() {
+        let workdir = tmpdir("proofwork-capture-symlink");
+        let outside = std::env::temp_dir().join(format!(
+            "proofwork-capture-secret-{}",
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&outside, "host secret").expect("write sentinel");
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf child-output && rm \"$1/stdout\" && ln -s \"$2\" \"$1/stdout\"")
+            .arg("sh")
+            .arg(workdir.path())
+            .arg(&outside);
+        let completed = run_bounded(&mut command, workdir.path(), None, Duration::from_secs(5))
+            .expect("child completes");
+
+        assert_eq!(completed.code, Some(0));
+        assert_eq!(completed.stdout, "child-output");
+        assert!(!completed.stdout.contains("host secret"));
+        let _ = fs::remove_file(outside);
+    }
+
     // -- replay ------------------------------------------------------------
 
     #[test]
@@ -3396,9 +3424,8 @@ mod tests {
 
     #[test]
     fn lean_project_root_cannot_escape_the_objective_root() {
-        // Regression. `project_root` is objective-authored and is bound into
-        // the jail *writable*; "/" used to turn the sandbox into a
-        // pass-through of the operator's whole filesystem. Screened before
+        // Regression. `project_root` is objective-authored and readable in the
+        // jail; "/" used to expose the operator's whole filesystem. Screened before
         // the toolchain lookup, so the refusal is testable without Lean.
         let root = tmpdir("proofwork-lean-escape");
         let registry = VerifierRegistry::new(root.path());
@@ -3454,6 +3481,11 @@ mod tests {
         );
         assert_eq!(rejected.status, Status::Reject);
         assert!(rejected.evidence.get("mismatches").is_some());
+        let evidence = rejected.evidence.canonical_string();
+        assert!(evidence.contains("claimed_sha256"));
+        assert!(evidence.contains("observed_sha256"));
+        assert!(!evidence.contains("\"claimed\":"));
+        assert!(!evidence.contains("\"observed\":"));
         // An artifact with no results object is a bad artifact, not a bad node.
         let no_results = registry.run(&spec, &empty_object());
         assert_eq!(no_results.status, Status::Reject);
@@ -3707,8 +3739,8 @@ mod tests {
 
     #[test]
     fn a_checker_that_floods_its_output_is_stopped_and_reported_unavailable() {
-        // Only OUTPUT_TAIL_CHARS of the capture is ever kept, so an unbounded
-        // one buys nothing and costs the operator's disk -- and then the
+        // Only a digest of the capture is retained, so an unbounded one buys
+        // nothing and costs the operator's disk -- and then the
         // node's memory when the capture is read back.
         if !have("python3") {
             return;
@@ -3870,17 +3902,6 @@ mod tests {
             let found = which("sh").expect("sh");
             assert!(is_executable_file(&found));
         }
-    }
-
-    #[test]
-    fn tails_are_bounded_and_stay_valid_utf8() {
-        assert_eq!(tail("abc", 10), "abc");
-        assert_eq!(tail("abcdef", 3), "def");
-        assert_eq!(tail("", 3), "");
-        // Multi-byte characters: byte slicing here would panic.
-        let text = "αβγδε";
-        assert_eq!(tail(text, 2), "δε");
-        assert_eq!(tail(text, 0), "");
     }
 
     #[test]

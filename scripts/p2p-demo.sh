@@ -53,6 +53,11 @@ WORK=$(mktemp -d /tmp/pw-p2p-demo-XXXXXX)
 A="$WORK/a"
 B="$WORK/b"
 mkdir -p "$A" "$B"
+# Do not inherit an operator's real default at-rest key into this disposable
+# two-node fixture.  The independent reference deliberately reads the public
+# JSONL directly, so a hermetic absent key keeps the fixture plaintext without
+# changing production defaults.
+export CAIRN_KEY="$WORK/no-at-rest-key"
 cleanup() {
   for pid in ${APID:-} ${BPID:-} ${SERVE_PID:-}; do kill "$pid" 2>/dev/null || true; done
   rm -rf "$WORK"

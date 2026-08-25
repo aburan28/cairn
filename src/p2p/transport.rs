@@ -1,13 +1,19 @@
 //! TCP transport and the wire framing around an encrypted channel.
 
-use super::handshake::{Channel, HandshakeError, Opener, PeerId, PeerIdentity, PeerPublic, Sealer};
+use super::handshake::{
+    Channel, HandshakeError, Opener, PeerId, PeerIdentity, PeerPublic, Sealer, CIPHERTEXT_BYTES,
+    PUBLIC_KEY_BYTES,
+};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-const CIPHERTEXT_BYTES: usize = 96;
-const HANDSHAKE_BYTES: usize = 32 + CIPHERTEXT_BYTES;
+const HELLO_BYTES: usize = PUBLIC_KEY_BYTES + CIPHERTEXT_BYTES;
+const CONFIRM_CONTEXT: &[u8] = b"proofwork/p2p/transport/key-confirmation/v2";
+const RESPONDER_CONFIRMED: &[u8] = b"proofwork responder confirmed";
+const INITIATOR_CONFIRMED: &[u8] = b"proofwork initiator confirmed";
+const CONFIRM_MAX_FRAME: u32 = 1024;
 /// Largest frame this transport will read, unless a caller lowers it.
 ///
 /// Generous, because the transport does not know what any subsystem sends. A
@@ -39,7 +45,7 @@ pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// that keeps arriving is never cut off.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long an accepted stream has to produce its 128-byte hello.
+/// How long an accepted stream has to produce its public-key-and-ciphertext hello.
 ///
 /// Shorter than [`IO_TIMEOUT`] because this one is reachable by anybody who
 /// can open a TCP connection, before any authentication has happened. A public
@@ -81,11 +87,8 @@ impl From<HandshakeError> for TransportError {
     }
 }
 
-/// A connected encrypted stream.
-///
-/// The initiator authenticates the responder because it encapsulates to a
-/// preselected public key. The responder only receives the initiator's claimed
-/// id in cleartext; callers must not attribute state to that id.
+/// A connected stream whose two long-term peer identities and fresh session
+/// keys have both been confirmed.
 pub struct Connection {
     stream: TcpStream,
     channel: Channel,
@@ -115,9 +118,8 @@ impl Connection {
 
     /// Whether the remote id was authenticated by the handshake.
     ///
-    /// `true` on a dialled connection, where successful channel use proves the
-    /// endpoint held the expected private key. `false` on an accepted
-    /// connection, whose initiator id is only a self-asserted routing hint.
+    /// Mutual key confirmation completes before either side receives a
+    /// `Connection`, so every successfully constructed connection returns true.
     pub fn remote_authenticated(&self) -> bool {
         self.remote_authenticated
     }
@@ -350,32 +352,43 @@ pub fn connect(
     local: &PeerIdentity,
 ) -> Result<Connection, TransportError> {
     let mut stream = TcpStream::connect_timeout(&addr, DIAL_TIMEOUT)?;
-    // Before the write, not after: the hello is 128 bytes, but a peer that
+    // Before the write, not after: a peer that
     // accepted the connection and then stalled would otherwise hold this
     // thread in `write_all` with the caller's lock still taken.
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let (ciphertext, channel) = endpoint.initiate(local.id());
-    let mut hello = [0u8; HANDSHAKE_BYTES];
-    hello[..32].copy_from_slice(&local.id());
-    hello[32..].copy_from_slice(&ciphertext);
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    let (ciphertext, first) = endpoint.initiate(local.id());
+    let mut hello = vec![0u8; HELLO_BYTES];
+    hello[..PUBLIC_KEY_BYTES].copy_from_slice(local.public_key());
+    hello[PUBLIC_KEY_BYTES..].copy_from_slice(&ciphertext);
     stream.write_all(&hello)?;
     stream.flush()?;
-    Ok(Connection {
+
+    let mut reverse = [0u8; CIPHERTEXT_BYTES];
+    read_exact_resilient(&mut stream, &mut reverse)?;
+    let second = local.accept(endpoint.id(), &reverse)?;
+    let mut connection = Connection {
         stream,
-        channel,
+        channel: first.mix(second),
         local: local.id(),
         remote: endpoint.id(),
         remote_authenticated: true,
-        max_frame: MAX_FRAME,
-    })
+        max_frame: CONFIRM_MAX_FRAME,
+    };
+    if connection.receive(CONFIRM_CONTEXT)? != RESPONDER_CONFIRMED {
+        return Err(HandshakeError::NotAuthentic.into());
+    }
+    connection.send(INITIATOR_CONFIRMED, CONFIRM_CONTEXT)?;
+    connection.max_frame = MAX_FRAME;
+    connection.set_timeouts(Some(IO_TIMEOUT), Some(IO_TIMEOUT))?;
+    Ok(connection)
 }
 
-/// Accept an inbound connection. The claimed initiator id is returned as the
-/// remote id; callers that need initiator authentication must bind it to a
-/// previously discovered key or add a signature at the session layer.
+/// Accept an inbound connection only after authenticating the initiator's
+/// public key and completing encrypted key confirmation in both directions.
 pub fn accept(mut stream: TcpStream, local: &PeerIdentity) -> Result<Connection, TransportError> {
-    let mut hello = [0u8; HANDSHAKE_BYTES];
+    stream.set_nonblocking(false)?;
+    let mut hello = vec![0u8; HELLO_BYTES];
     // The tight one first, then the session default once a hello has actually
     // arrived: an unauthenticated stranger gets `HANDSHAKE_TIMEOUT` to say
     // something, and a peer that has said something gets `IO_TIMEOUT` per call
@@ -389,18 +402,27 @@ pub fn accept(mut stream: TcpStream, local: &PeerIdentity) -> Result<Connection,
             TransportError::Io(e)
         }
     })?;
-    let remote: PeerId = hello[..32].try_into().expect("fixed handshake header");
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let channel = local.accept(remote, &hello[32..])?;
-    Ok(Connection {
+    let remote_public = PeerPublic::from_bytes(&hello[..PUBLIC_KEY_BYTES])?;
+    let remote = remote_public.id();
+    let first = local.accept(remote, &hello[PUBLIC_KEY_BYTES..])?;
+    let (reverse, second) = remote_public.initiate(local.id());
+    stream.write_all(&reverse)?;
+    stream.flush()?;
+    let mut connection = Connection {
         stream,
-        channel,
+        channel: first.mix(second),
         local: local.id(),
         remote,
-        remote_authenticated: false,
-        max_frame: MAX_FRAME,
-    })
+        remote_authenticated: true,
+        max_frame: CONFIRM_MAX_FRAME,
+    };
+    connection.send(RESPONDER_CONFIRMED, CONFIRM_CONTEXT)?;
+    if connection.receive(CONFIRM_CONTEXT)? != INITIATOR_CONFIRMED {
+        return Err(HandshakeError::NotAuthentic.into());
+    }
+    connection.max_frame = MAX_FRAME;
+    connection.set_timeouts(Some(IO_TIMEOUT), Some(IO_TIMEOUT))?;
+    Ok(connection)
 }
 
 #[cfg(test)]
@@ -448,13 +470,10 @@ mod tests {
     }
 
     #[test]
-    fn only_the_dialled_responder_identity_is_authenticated() {
+    fn both_transport_identities_are_authenticated() {
         let (dialed, accepted) = pair();
         assert!(dialed.remote_authenticated());
-        assert!(
-            !accepted.remote_authenticated(),
-            "the inbound hello contains only a claimed initiator id"
-        );
+        assert!(accepted.remote_authenticated());
     }
 
     /// A stranger that connects and says nothing must not hold the accept path.

@@ -48,18 +48,18 @@ cairn with `install.sh`, reading your own node's chain is a URL, not a
 toolchain:
 
 ```sh
-cairn-p2p --identity id.json --root-key root.key --checkpoint cp.json \
-    --listen 0.0.0.0:9000 --log cairn.jsonl --root . --serve 0.0.0.0:8080
+cairn run --listen 0.0.0.0:9000 --serve 0.0.0.0:8080
 # then http://localhost:8080/ui/
 ```
 
-To build it into the binaries from a checkout, `make ui-build` (the `ui` cargo
-feature is off by default, because `cargo build` must work without Node).
+To build it into the binaries from a checkout, run `make ui-build` (the `ui`
+cargo feature is off by default, because `cargo build` must work without Node),
+then use `./target/release/cairn run`.
 
 To work *on* the reader:
 
 ```sh
-make node          # a node to read, from the repository root
+make node          # the lower-level daemon entry point, from the repository root
 make ui            # the reader in dev mode, http://localhost:3000
 ```
 

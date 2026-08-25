@@ -855,9 +855,8 @@ impl Directory {
 
     /// Record a **first-hand** claim of holdership.
     ///
-    /// `from` must be the authenticated responder id of a dialled session;
-    /// [`super::session::exchange_dht`] enforces that before calling here. An
-    /// accepted session's claimed initiator id must never reach this method.
+    /// `from` must be the authenticated remote id of a completed session;
+    /// [`super::session::exchange_dht`] enforces that before calling here.
     /// That is why it takes a [`PeerId`] and an address separately rather than
     /// a [`Holder`] a caller might have decoded from a message body.
     ///
@@ -1096,8 +1095,11 @@ impl Directory {
     /// amplifier — name a victim as the holder of a popular blob and the
     /// network dials the victim. A lie dies with the lookup that heard it.
     ///
-    /// Contacts *are* entered into the routing table, because a wrong one costs
-    /// only a dial: the handshake derives the id or the session does not key up.
+    /// Contacts *are* entered into the routing table as freshness-free hints,
+    /// because a wrong one costs only a dial: the handshake derives the id or
+    /// the session does not key up. Their unauthenticated sequence number must
+    /// never overwrite or outrank a contact learned from that peer's signed
+    /// record.
     pub fn on_providers(&mut self, from: NodeId, answers: &[ProviderAnswer]) {
         // It answered, so it is alive whatever it did last time. Clearing here
         // rather than only in `saw` matters because a peer already in the table
@@ -1112,7 +1114,15 @@ impl Directory {
                 continue;
             }
             for contact in &answer.closer {
-                self.saw(contact.clone());
+                let known = self
+                    .routing
+                    .contacts()
+                    .any(|held| held.id() == contact.id());
+                if !known {
+                    let mut hint = contact.clone();
+                    hint.seq = 0;
+                    self.saw(hint);
+                }
                 if !self
                     .routing
                     .contacts()
@@ -1600,6 +1610,35 @@ mod tests {
             addr(9002),
             "a replayed old address is ignored"
         );
+    }
+
+    #[test]
+    fn an_unsigned_closer_contact_cannot_outrank_signed_freshness() {
+        let target = address(0xaa);
+        let from = NodeId::from_bytes(peer(2));
+        let named = NodeId::from_bytes(peer(3));
+        let mut directory = Directory::new(peer(1));
+        directory.saw(PeerContact::new(peer(2), addr(9002), 0));
+        directory.saw(PeerContact::new(peer(3), addr(9003), 7));
+        directory
+            .outstanding
+            .insert(from, BTreeSet::from([target.clone()]));
+
+        directory.on_providers(
+            from,
+            &[answer(
+                &target,
+                Vec::new(),
+                vec![PeerContact::new(peer(3), addr(7777), u64::MAX)],
+            )],
+        );
+        let held = directory
+            .routing()
+            .contacts()
+            .find(|contact| contact.id() == named)
+            .expect("signed contact remains");
+        assert_eq!(held.addr, addr(9003));
+        assert_eq!(held.seq, 7);
     }
 
     // -- the multi-hop driver ----------------------------------------------

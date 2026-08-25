@@ -219,7 +219,9 @@ impl BlobStore {
     /// [`BlobStore::read`], which is the only place the bytes are actually used.
     pub fn holds(&self, address: &str) -> bool {
         match self.path_of(address) {
-            Ok(path) => path.is_file(),
+            Ok(path) => {
+                fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+            }
             Err(_) => false,
         }
     }
@@ -235,7 +237,7 @@ impl BlobStore {
     /// fetch that would replace it would never be attempted.
     pub fn read(&self, wanted: &str) -> Result<Vec<u8>, BlobError> {
         let path = self.path_of(wanted)?;
-        let metadata = match fs::metadata(&path) {
+        let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Err(BlobError::Absent {
@@ -252,7 +254,12 @@ impl BlobStore {
                 got: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
             });
         }
-        let bytes = fs::read(&path).map_err(io_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(BlobError::Io {
+                detail: format!("{} is not a regular blob file", path.display()),
+            });
+        }
+        let bytes = crate::secret_file::read(&path).map_err(io_error)?;
         let actual = address(&bytes);
         if actual != wanted {
             let _ = fs::remove_file(&path);
@@ -300,20 +307,17 @@ impl BlobStore {
             return Ok(path);
         }
         create_dir(&self.dir)?;
-        // Written under a temporary name and renamed, so a crash cannot leave a
-        // truncated file visible under an address it does not hash to. The
-        // temporary name carries the pid so two processes sharing a root do not
-        // rename each other's partial writes into place.
-        let staging = self
-            .dir
-            .join(format!(".{declared}.{}.partial", std::process::id()));
-        write_private(&staging, bytes)?;
-        match fs::rename(&staging, &path) {
+        // Random, exclusive staging plus no-replace installation. A predictable
+        // partial name would let a planted symlink redirect this write, and a
+        // replacing rename would let a race overwrite an entry another process
+        // had just installed.
+        match crate::secret_file::write_new(&path, bytes) {
             Ok(()) => Ok(path),
-            Err(error) => {
-                let _ = fs::remove_file(&staging);
-                Err(io_error(error))
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                self.read(declared)?;
+                Ok(path)
             }
+            Err(error) => Err(io_error(error)),
         }
     }
 
@@ -418,31 +422,6 @@ fn create_dir(dir: &Path) -> Result<(), BlobError> {
     fs::create_dir_all(dir).map_err(io_error)
 }
 
-/// Write with no execute bit and no group or world access.
-///
-/// The mode is the point. This file holds code a stranger sent; the only thing
-/// that should ever open it is the interpreter the verifier spawns inside the
-/// jail, and nothing should be able to `exec` it directly.
-#[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), BlobError> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(io_error)?;
-    file.write_all(bytes).map_err(io_error)?;
-    file.sync_all().map_err(io_error)
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), BlobError> {
-    fs::write(path, bytes).map_err(io_error)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,6 +522,8 @@ mod tests {
         symlink(&outside, dir.join(&a)).expect("symlink");
 
         let store = BlobStore::at(&dir);
+        assert!(!store.holds(&a));
+        assert!(matches!(store.read(&a), Err(BlobError::Io { .. })));
         assert!(matches!(store.put(&a, CODE), Err(BlobError::Io { .. })));
     }
 

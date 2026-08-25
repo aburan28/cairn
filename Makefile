@@ -79,6 +79,8 @@ help:
 	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
 	  '  make node                One process: p2p sync AND HTTP, sharing a log.' \
+	  '  cairn run                Installed release: P2P + HTTP + embedded UI.' \
+	  '                           From a checkout, run make ui-build first.' \
 	  '  make install             Install the released binaries from GitHub.' \
 	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
 	  '  make ui-check            Typecheck and build the UI, as CI does.' \

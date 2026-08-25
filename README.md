@@ -95,6 +95,45 @@ cargo install --path .        # puts `cairn` and the other binaries on PATH
 
 ## Quick start
 
+An installed release has the complete local node behind one command:
+
+```sh
+cairn run
+```
+
+This starts P2P synchronization, the HTTP API, a local submission queue, and
+the embedded reader in one process. Open <http://127.0.0.1:8080/ui/>. Its local
+state lives under `.local/`; P2P listens on `127.0.0.1:9000`, so the default is
+safe for a first run and does not expose a node to the network. Stop it with
+Ctrl-C.
+
+To join through a known bootstrap file, pass it after `run`:
+
+```sh
+cairn run --bootstrap .local/seed.json
+```
+
+To expose the listeners deliberately, choose the addresses explicitly:
+
+```sh
+cairn run \
+  --listen 0.0.0.0:9000 \
+  --serve 0.0.0.0:8080 \
+  --bootstrap .local/seed.json
+```
+
+The source checkout's ordinary `cargo build` does not require Node and therefore
+does not embed the reader. Build the reader first when working from source:
+
+```sh
+make ui-build
+./target/release/cairn run
+```
+
+Published release tarballs are built with the UI feature by the release
+workflow and are checked by starting `cairn run` and fetching `/ui/` from the
+unpacked binary.
+
 ```sh
 cargo test                    # the full suite, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
@@ -352,6 +391,8 @@ unrepresentable.
 
 ```sh
 cairn post   examples/capset/objective.json
+# In a scarce-supply log, sign the objective with the funding identity:
+cairn post   examples/capset/objective.json --identity treasury.json
 cairn commit <objective-id> --submitter bob --artifact solution.json --nonce s3cret
 cairn reveal <objective-id> --submitter bob --artifact solution.json --nonce s3cret
 cairn try    examples/capset/objective.json --submitter bob --artifact solution.json
@@ -909,8 +950,8 @@ examples/            worked objectives with real artifacts
 - **Not a blockchain.** One sequencer, no consensus, no token. Deliberate: the
   valuable property is "anyone can check", not "no one is in charge".
 - **Sandboxed, not virtualized.** Pinned verifier code runs in an OS jail
-  (bubblewrap / seatbelt): no network, confined writes, a deadline. A kernel
-  bug is still an escape, macOS does not confine reads, and a host with no
+  (bubblewrap / seatbelt): no network, declared reads only, confined writes,
+  and a deadline. A kernel or policy bug is still an escape, and a host with no
   jail mechanism runs unconfined unless `CAIRN_REQUIRE_SANDBOX=1` is set.
   VM-class isolation is Stage 2; see the threat model before opening
   objective authorship to strangers.

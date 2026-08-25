@@ -17,12 +17,55 @@
 //! would let an attacker fail every honest submission by taking verifiers
 //! offline.
 
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use sha2::{Digest as _, Sha256};
 
 use crate::canonical::Value;
+
+fn scrub_environment(command: &mut Command, home: &Path) {
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
+    command
+        .env_clear()
+        .env("PATH", path)
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .env("HOME", home)
+        .env("TMPDIR", home)
+        .env("PYTHONDONTWRITEBYTECODE", "1");
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(7 + digest.len() * 2);
+    out.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn copy_project_tree(source: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for item in std::fs::read_dir(source)? {
+        let item = item?;
+        let kind = item.file_type()?;
+        let target = destination.join(item.file_name());
+        if kind.is_dir() {
+            copy_project_tree(&item.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(item.path(), target)?;
+        } else {
+            return Err(io::Error::other(
+                "Lean project contains a symlink or special file",
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -257,15 +300,19 @@ print(json.dumps({"ok": func(artifact) if seed is None else func(artifact, seed)
     if let Some(seed) = seed {
         args.push(seed.to_string());
     }
-    let mut child = Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            Verdict::plain(Status::Unavailable, format!("cannot run python3: {error}"))
-        })?;
+        .stderr(std::process::Stdio::piped());
+    scrub_environment(
+        &mut command,
+        path.parent().unwrap_or_else(|| Path::new(".")),
+    );
+    let mut child = command.spawn().map_err(|error| {
+        Verdict::plain(Status::Unavailable, format!("cannot run python3: {error}"))
+    })?;
     {
         use std::io::Write as _;
         let stdin = child.stdin.as_mut().expect("piped");
@@ -282,8 +329,8 @@ print(json.dumps({"ok": func(artifact) if seed is None else func(artifact, seed)
         return Err(Verdict::plain(
             Status::Unavailable,
             format!(
-                "pinned code raised: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                "pinned code raised; stderr digest {}",
+                digest_bytes(&output.stderr)
             ),
         ));
     }
@@ -309,20 +356,48 @@ pub fn implements(kind: &str) -> bool {
     KINDS.contains(&kind)
 }
 
-pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
-    if std::env::var_os("CAIRN_REQUIRE_SANDBOX").is_some_and(|value| {
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only strict-mode control that cannot leak into verifier tests on
+    /// neighboring threads. The process environment remains the production
+    /// interface; mutating it inside the parallel test runner was a race.
+    static TEST_REQUIRE_SANDBOX: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+fn confinement_required() -> bool {
+    #[cfg(test)]
+    if let Some(required) = TEST_REQUIRE_SANDBOX.get() {
+        return required;
+    }
+    std::env::var_os("CAIRN_REQUIRE_SANDBOX").is_some_and(|value| {
         let value = value.to_string_lossy();
         !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "" | "0" | "false" | "no" | "off"
         )
-    }) {
-        return Verdict::plain(
+    })
+}
+
+fn confinement_refusal() -> Option<Verdict> {
+    if confinement_required() {
+        return Some(Verdict::plain(
             Status::Unavailable,
             "CAIRN_REQUIRE_SANDBOX is set, but the independent reference has no \
              confinement backend; refusing to execute objective-authored code",
-        );
+        ));
     }
+    None
+}
+
+pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
+    // The confinement refusal is deliberately *not* here. Each kind calls
+    // `confinement_refusal` after it has validated its own spec, so a
+    // malformed objective is still classified `InvalidSpec` in strict mode
+    // rather than being reported as this host's missing jail. Collapsing the
+    // two would tell a funder their objective is fine and this node is broken,
+    // when the objective is the broken one.
     match spec.get("kind").and_then(Value::as_str) {
         Some("certificate") => certificate(root, spec, artifact),
         Some("evaluator") => evaluator(root, spec, artifact),
@@ -348,6 +423,9 @@ fn certificate(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
         (Ok(a), Ok(b), Ok(c)) => (a, b, c),
         (Err(v), _, _) | (_, Err(v), _) | (_, _, Err(v)) => return v,
     };
+    if let Some(verdict) = confinement_refusal() {
+        return verdict;
+    }
     let path = match pinned(root, checker, declared) {
         Ok(path) => path,
         Err(verdict) => return verdict,
@@ -520,16 +598,20 @@ fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verd
     let project_cwd = match spec.get("project_root").and_then(Value::as_str) {
         Some(relative) if !relative.is_empty() => {
             let joined = normalize(&canonical_root.join(relative));
-            if !joined.starts_with(&canonical_root) {
+            let resolved = std::fs::canonicalize(&joined).unwrap_or(joined);
+            if !resolved.starts_with(&canonical_root) || !resolved.is_dir() {
                 return Verdict::plain(
                     Status::InvalidSpec,
                     format!("project_root escapes the objective root: {relative}"),
                 );
             }
-            Some(joined)
+            Some(resolved)
         }
         _ => None,
     };
+    if let Some(verdict) = confinement_refusal() {
+        return verdict;
+    }
 
     let preamble = spec.get("preamble").and_then(Value::as_str).unwrap_or("");
     let source = format!("{preamble}\n{statement} {proof}\n");
@@ -542,14 +624,29 @@ fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verd
     if std::fs::create_dir_all(&dir).is_err() {
         return Verdict::plain(Status::Unavailable, "cannot create a working directory");
     }
+    let cwd = match project_cwd {
+        Some(source) => {
+            let copied = dir.join("project");
+            if let Err(error) = copy_project_tree(&source, &copied) {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Verdict::plain(
+                    Status::Unavailable,
+                    format!("cannot copy the Lean project into scratch: {error}"),
+                );
+            }
+            copied
+        }
+        None => dir.clone(),
+    };
     let claim = dir.join("Claim.lean");
     if std::fs::write(&claim, source.as_bytes()).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return Verdict::plain(Status::Unavailable, "cannot write the Lean source");
     }
-    let cwd = project_cwd.unwrap_or_else(|| dir.clone());
-
-    let output = Command::new(binary).arg(&claim).current_dir(&cwd).output();
+    let mut command = Command::new(binary);
+    command.arg(&claim).current_dir(&cwd);
+    scrub_environment(&mut command, &dir);
+    let output = command.output();
     let _ = std::fs::remove_dir_all(&dir);
     let output = match output {
         Ok(output) => output,
@@ -698,12 +795,16 @@ fn replay(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
             format!("cwd escapes the objective root: {relative}"),
         );
     }
+    if let Some(verdict) = confinement_refusal() {
+        return verdict;
+    }
 
-    let output = match Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(command_parts.get(1..).unwrap_or(&[]))
-        .current_dir(&cwd)
-        .output()
-    {
+        .current_dir(&cwd);
+    scrub_environment(&mut command, &cwd);
+    let output = match command.output() {
         Ok(output) => output,
         Err(error) => {
             return Verdict::plain(
@@ -743,11 +844,14 @@ fn replay(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
         };
         let claim = claimed.get(*name).cloned().unwrap_or(Value::Null);
         if &claim == seen {
-            reproduced.push(((*name).to_string(), seen.clone()));
+            reproduced.push((*name).to_string());
         } else {
             mismatches.push((
                 (*name).to_string(),
-                Value::object([("claimed", claim), ("observed", seen.clone())]),
+                Value::object([
+                    ("claimed_sha256", Value::string(claim.digest())),
+                    ("observed_sha256", Value::string(seen.digest())),
+                ]),
             ));
         }
     }
@@ -763,14 +867,13 @@ fn replay(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
             Value::object([("mismatches", Value::Object(map))]),
         );
     }
-    let mut map = std::collections::BTreeMap::new();
-    for (k, v) in reproduced {
-        map.insert(k, v);
-    }
     Verdict::new(
         Status::Accept,
         format!("replay reproduced {} declared field(s)", declared.len()),
-        Value::object([("reproduced", Value::Object(map))]),
+        Value::object([(
+            "reproduced_fields",
+            Value::Array(reproduced.into_iter().map(Value::string).collect()),
+        )]),
     )
 }
 
@@ -828,6 +931,9 @@ fn statistical(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
     // entrypoint with one argument, which raised, which became `Unavailable`,
     // which the audit skips. Correct-looking and completely inert.
     let seed = spec.get("seed").and_then(Value::as_i64).unwrap_or(0);
+    if let Some(verdict) = confinement_refusal() {
+        return verdict;
+    }
     let path = match pinned(root, path_text, declared) {
         Ok(path) => path,
         Err(verdict) => return verdict,
@@ -884,6 +990,9 @@ fn evaluator(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
             format!("unknown direction {direction_text:?}"),
         );
     };
+    if let Some(verdict) = confinement_refusal() {
+        return verdict;
+    }
     let path = match pinned(root, evaluator, declared) {
         Ok(path) => path,
         Err(verdict) => return verdict,
@@ -915,6 +1024,25 @@ fn evaluator(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_mode_still_classifies_malformed_specs_before_refusing_execution() {
+        TEST_REQUIRE_SANDBOX.set(Some(true));
+        let malformed = Value::object([("kind", Value::string("certificate"))]);
+        let empty_artifact = Value::object(Vec::<(String, Value)>::new());
+        let malformed_verdict = run(root(), &malformed, &empty_artifact);
+        let valid = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("checker.py")),
+            ("checker_sha256", Value::string("aa".repeat(32))),
+            ("entrypoint", Value::string("check")),
+        ]);
+        let valid_verdict = run(root(), &valid, &empty_artifact);
+        TEST_REQUIRE_SANDBOX.set(None);
+
+        assert_eq!(malformed_verdict.status, Status::InvalidSpec);
+        assert_eq!(valid_verdict.status, Status::Unavailable);
+    }
 
     /// A replay spec whose command prints `json` and declares `fields`.
     fn spec(json: &str, fields: &[&str], cwd: Option<&str>) -> Value {
@@ -1214,11 +1342,11 @@ mod tests {
 
     #[test]
     fn a_project_root_that_escapes_the_objective_root_is_refused() {
-        // The primary hands `project_root` to the jail as a *writable* bind, so
-        // `"/"` unconfined is a pass-through of the filesystem. It is
-        // attacker-authored like every other spec field, and a malformed spec
-        // is malformed whether or not this node has Lean -- hence checked
-        // before the lookup.
+        // `project_root` is attacker-authored like every other spec field. The
+        // primary exposes only a contained, read-only project to its jail and
+        // this implementation copies the contained project into scratch. A
+        // malformed spec is malformed whether or not this node has Lean, so it
+        // is checked before the lookup.
         for escape in ["..", "../..", "/etc"] {
             let spec = lean_spec(vec![("project_root", Value::string(escape))]);
             let verdict = lean_using(NO_LEAN, root(), &spec, &proof(":= trivial"));
@@ -1228,6 +1356,30 @@ mod tests {
                 "project_root {escape:?} was allowed"
             );
         }
+    }
+
+    #[test]
+    fn a_lean_project_is_copied_before_execution() {
+        let source = std::env::temp_dir().join(format!(
+            "cairn-reference-project-source-{}",
+            std::process::id()
+        ));
+        let copied = std::env::temp_dir().join(format!(
+            "cairn-reference-project-copy-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&copied);
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::write(source.join("lakefile.lean"), b"original").expect("project file");
+        copy_project_tree(&source, &copied).expect("copy");
+        std::fs::write(copied.join("lakefile.lean"), b"mutated").expect("mutate scratch");
+        assert_eq!(
+            std::fs::read(source.join("lakefile.lean")).unwrap(),
+            b"original"
+        );
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&copied);
     }
 
     #[test]

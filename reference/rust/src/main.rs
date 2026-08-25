@@ -70,6 +70,9 @@ fn main() -> ExitCode {
         Some("conformance") => conformance(after(&args, "conformance")),
         Some("signed-records") => signed_records(after(&args, "signed-records")),
         Some("signatures") => signatures(after(&args, "signatures")),
+        Some("drand-verify") => {
+            drand_verify(after(&args, "drand-verify"), after(&args, "--signature"))
+        }
         Some("audit") | Some("post") | Some("commit") | Some("reveal") | Some("settle")
         | Some("log") | Some("decode") | Some("canon") | Some("prove") | Some("check") => {
             cli(&args)
@@ -81,6 +84,7 @@ fn main() -> ExitCode {
                  cairn-reference conformance <vectors.json>\n    \
                  cairn-reference signed-records <signed-records.json>\n    \
                  cairn-reference signatures <signatures.json>\n    \
+                 cairn-reference drand-verify <round> --signature <hex>\n    \
                  cairn-reference [--log P] [--root D] post <objective.json>\n    \
                  cairn-reference [--log P] [--root D] commit <id> --submitter S --artifact F [--nonce N]\n    \
                  cairn-reference [--log P] [--root D] reveal <id> --submitter S --artifact F --nonce N [--cites ID]\n    \
@@ -105,6 +109,31 @@ fn main() -> ExitCode {
 fn read(path: Option<&str>, what: &str) -> Result<String, String> {
     let path = path.ok_or_else(|| format!("expected a path to {what}"))?;
     std::fs::read_to_string(path).map_err(|error| format!("cannot read {path}: {error}"))
+}
+
+/// Does a quicknet signature verify, according to *this* implementation?
+///
+/// A command so that `scripts/differential.sh` can put the same signatures in
+/// front of both implementations and require the same answer. The pairing is
+/// the one check in this protocol where two correct-looking programs can be
+/// made to disagree -- the two run different BLS libraries deliberately -- and
+/// a claim that they agree is worth nothing unless something asks them both.
+///
+/// Exit 0 for verified and 1 for anything else, so a shell can branch on it
+/// without parsing prose.
+fn drand_verify(round: Option<&str>, signature: Option<&str>) -> Result<(), String> {
+    let round = round.ok_or("expected a round number")?;
+    let round: u64 = round
+        .parse()
+        .map_err(|_| format!("not a round number: {round:?}"))?;
+    let signature = signature.ok_or("expected --signature <hex>")?;
+    if cairn_reference::drand::verify(round, signature) {
+        println!("round {round}: verified");
+        Ok(())
+    } else {
+        println!("round {round}: does not verify");
+        Err(format!("round {round} is not carried by that signature"))
+    }
 }
 
 /// The argument following `word`, wherever `word` sits in the argument list.

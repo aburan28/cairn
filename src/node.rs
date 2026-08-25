@@ -57,6 +57,7 @@ use std::path::{Path, PathBuf};
 use crate::blobs;
 use crate::canonical::Inclusion;
 use crate::canonical::{short, Value};
+use crate::drand;
 use crate::frontier::{FrontierEntry, Ratchet, RatchetError, Stall};
 use crate::knowledge::{
     ClaimFacts, ConfidencePolicy, KnowledgeGraph, KnowledgeState, Reproducible,
@@ -406,6 +407,12 @@ pub enum RuleViolation {
     /// here; wrapping it would silently reset an objective's running total and
     /// hide an overspent pool from the audit.
     PayoutOverflow { paid_cumulative: u64, reward: u64 },
+    /// Availability weights or allocation cannot be represented exactly.
+    ///
+    /// Availability settlement is consensus-visible accounting. Refusing an
+    /// unrepresentable sum is preferable to saturating it: saturation silently
+    /// changes the relative weights and therefore pays the wrong identities.
+    AvailabilityArithmeticOverflow,
     /// The objective's ratchet block is malformed, or its arithmetic could not
     /// be completed exactly.
     MalformedRatchet(RatchetError),
@@ -424,6 +431,29 @@ pub enum RuleViolation {
     /// A commitment's submitter-authored timestamp disagrees with the epoch in
     /// which the ledger actually admitted it.
     CommitmentEpochMismatch { declared: u64, admitted: u64 },
+    /// A plain claim's submitter-authored timestamp disagrees with the epoch in
+    /// which the ledger actually admitted it.
+    ///
+    /// A peer has only the record timestamp when it reconstructs an input log.
+    /// If the original writer admitted the same bytes in a different epoch,
+    /// the two nodes assign the claim to different settlement batches while
+    /// both believe they followed the rules. Sealed claims are the deliberate
+    /// exception: they are signed at commit time so a committee can reveal
+    /// after the submitter disappears, and their admission epoch comes from
+    /// the claim entry timestamp instead.
+    ClaimEpochMismatch { declared: u64, admitted: u64 },
+    /// A signed record's author-controlled timestamp disagrees with the epoch
+    /// in which the ledger actually admitted it.
+    ///
+    /// Challenges, bisection moves, attestations, and committee shares all use
+    /// their own timestamps to decide a deadline or an embargo. Letting those
+    /// bytes land in another epoch makes the writer and a replaying peer apply
+    /// different rules to the same record.
+    RecordEpochMismatch {
+        record: &'static str,
+        declared: u64,
+        admitted: u64,
+    },
     /// A submitter that names an ed25519 public key did not prove it holds
     /// that key.
     ///
@@ -531,6 +561,37 @@ pub enum RuleViolation {
     /// after reading the first — which is the entire lever this record exists
     /// to remove, restored by an operator who simply writes twice.
     DuplicateBeacon { epoch: u64 },
+    /// A `drand` beacon naming a round its epoch does not name.
+    ///
+    /// The round a beacon may use is a function of the epoch it orders --
+    /// [`crate::drand::round_for_epoch`] -- so unlike the Ethereum block this
+    /// record was first built for, *which draw to use* is not a choice anyone
+    /// gets to make. Refusing a mismatch is what turns that from a rule an
+    /// honest operator follows into arithmetic every reader repeats.
+    ///
+    /// Only for [`crate::drand::SOURCE`]. A beacon from somewhere else is not
+    /// checked here, because this module cannot know what its `block` means.
+    BeaconRoundMismatch {
+        orders: u64,
+        block: u64,
+        expected: u64,
+    },
+    /// A `drand` beacon whose value is not that round's signature.
+    ///
+    /// The check the source was chosen for. An Ethereum `value` can only be
+    /// confirmed by an auditor holding the chain, so the rules engine could
+    /// never do more than record it; a drand round is a threshold signature
+    /// over its own number, so `e(sig, -g2)·e(H(round), pk) == 1` settles it
+    /// here, offline, against a key pinned in [`crate::drand::PUBLIC_KEY`].
+    ///
+    /// **Refused when written, reported when read, and deliberately not
+    /// consulted when settling.** `Node::audit_beacons` carries the argument for
+    /// why the third is a decision rather than an oversight.
+    BeaconSignatureInvalid {
+        orders: u64,
+        round: u64,
+        why: drand::VerifyError,
+    },
     /// A record whose own decoder would refuse it.
     ///
     /// Every other kind arrives here already decoded, so `from_value` has run
@@ -839,6 +900,10 @@ impl fmt::Display for RuleViolation {
                 "cumulative payout {paid_cumulative} + {reward} overflows; \
                  refusing to wrap on a money path"
             ),
+            RuleViolation::AvailabilityArithmeticOverflow => f.write_str(
+                "availability weights or payout cannot be represented exactly; \
+                 refusing to saturate or wrap consensus accounting",
+            ),
             RuleViolation::MalformedRatchet(source) => {
                 write!(f, "objective carries an unusable ratchet: {source}")
             }
@@ -855,6 +920,20 @@ impl fmt::Display for RuleViolation {
                 f,
                 "commitment declares epoch {declared} but was admitted in epoch {admitted}; \
                  commit-reveal ordering uses the admission epoch"
+            ),
+            RuleViolation::ClaimEpochMismatch { declared, admitted } => write!(
+                f,
+                "claim declares epoch {declared} but was admitted in epoch {admitted}; \
+                 settlement and replay require one reveal epoch"
+            ),
+            RuleViolation::RecordEpochMismatch {
+                record,
+                declared,
+                admitted,
+            } => write!(
+                f,
+                "{record} declares epoch {declared} but was admitted in epoch {admitted}; \
+                 record deadlines and replay require one epoch"
             ),
             RuleViolation::UnsignedIdentity(error) => write!(f, "{error}"),
             RuleViolation::InadmissibleRecord(error) => {
@@ -921,6 +1000,22 @@ impl fmt::Display for RuleViolation {
                 f,
                 "epoch {epoch} already has a beacon; a second one would let whoever \
                  writes it re-roll the settlement order after reading the first"
+            ),
+            RuleViolation::BeaconRoundMismatch {
+                orders,
+                block,
+                expected,
+            } => write!(
+                f,
+                "a drand beacon ordering epoch {orders} names round {block}, and epoch \
+                 {orders} names round {expected}; the round is derived from the epoch, \
+                 so a beacon that picks its own is a beacon whose draw was chosen"
+            ),
+            RuleViolation::BeaconSignatureInvalid { orders, round, why } => write!(
+                f,
+                "a drand beacon ordering epoch {orders} does not carry round {round}'s \
+                 signature: {why}. The value would have become the anchor that decides \
+                 who is paid first, and an unverifiable one is a value somebody chose"
             ),
             RuleViolation::UnfundedBond {
                 identity,
@@ -1356,6 +1451,16 @@ impl Node {
             }
         }
 
+        objective.verify_funding_signature()?;
+        if self.declares_supply() && crate::records::signed_submitter(&objective.funder).is_none() {
+            return Err(RuleViolation::UnsignedIdentity(
+                crate::records::SignatureError::Invalid {
+                    record: "objective funding",
+                    submitter: objective.funder.clone(),
+                },
+            ));
+        }
+
         // The reward is escrowed from the funder's own balance. Last of the
         // checks, because it is the only one that depends on the rest of the
         // log rather than on the record, and a record that is malformed should
@@ -1518,6 +1623,7 @@ impl Node {
             .validate()
             .map_err(RuleViolation::InadmissibleRecord)?;
         challenge.verify_signature()?;
+        let opened_at = ensure_record_admission_epoch(CHALLENGE, &challenge.created_at, ts)?;
 
         let (claim, objective) =
             self.disputed_claim(challenge)
@@ -1550,8 +1656,12 @@ impl Node {
             });
         }
 
-        let opened_at = epoch_of_timestamp(CHALLENGE, ts)?;
-        let claim_epoch = epoch_of_timestamp(CLAIM, &claim.created_at)?;
+        let claim_epoch = self
+            .claim_entry(&challenge.claim_id)
+            .ok_or_else(|| RuleViolation::UnknownClaim {
+                claim_id: challenge.claim_id.clone(),
+            })
+            .and_then(|entry| epoch_of_timestamp("claim admission", &entry.ts))?;
         let closes = claim_epoch.saturating_add(CHALLENGE_WINDOW_EPOCHS);
         if opened_at > closes {
             return Err(RuleViolation::ChallengeWindowClosed {
@@ -1717,6 +1827,7 @@ impl Node {
             .validate()
             .map_err(RuleViolation::InadmissibleRecord)?;
         record.verify_signature()?;
+        ensure_record_admission_epoch(BISECTION, &record.created_at, ts)?;
 
         let challenge = self
             .challenges()
@@ -2584,6 +2695,7 @@ impl Node {
             .validate()
             .map_err(RuleViolation::InadmissibleRecord)?;
         record.verify_signature()?;
+        ensure_record_admission_epoch(ATTESTATION, &record.created_at, ts)?;
 
         if !self.claim_ids().contains(&record.claim_id) {
             return Err(RuleViolation::UnknownClaim {
@@ -3144,7 +3256,7 @@ impl Node {
         positions: usize,
     ) -> Result<(), RuleViolation> {
         let undertaking = self
-            .undertakings()
+            .undertakings_within(positions)
             .into_iter()
             .find(|u| u.id() == record.undertaking)
             .ok_or_else(|| RuleViolation::UnknownUndertaking {
@@ -3220,10 +3332,20 @@ impl Node {
     /// concatenation can hold two; resolving them differently here from there
     /// would make an auditor and an appender disagree about who was paid.
     pub fn availability_answers(&self) -> Vec<Availability> {
+        self.availability_answers_within(self.ledger.len())
+    }
+
+    /// [`Node::availability_answers`] over the first `positions` entries.
+    ///
+    /// Each answer is still checked at its own position. The outer bound is
+    /// what lets settlement and audit reconstruct the same historical view
+    /// even after the log grows.
+    fn availability_answers_within(&self, positions: usize) -> Vec<Availability> {
         let mut seen: BTreeSet<(String, u64)> = BTreeSet::new();
         self.ledger
             .entries_of_kind(AVAILABILITY)
             .into_iter()
+            .filter(|entry| (entry.seq as usize) < positions)
             .filter_map(|entry| {
                 Availability::from_value(&entry.payload)
                     .ok()
@@ -3456,6 +3578,7 @@ impl Node {
             .validate()
             .map_err(RuleViolation::InadmissibleRecord)?;
         record.verify_signature()?;
+        ensure_record_admission_epoch(COMMITTEE_SHARE, &record.created_at, ts)?;
         // The position this record is about to land at. `append` is the very
         // next thing that happens, so this is where it goes.
         self.check_committee_share(record, self.ledger.len())?;
@@ -3768,6 +3891,8 @@ impl Node {
     /// A **progressive** objective does not: it stays open until its pool is
     /// exhausted, because the whole point is that improvements keep arriving.
     pub fn commit(&mut self, commitment: &Commitment, ts: &str) -> Result<String, RuleViolation> {
+        crate::records::validate_commitment_submitter(&commitment.submitter)
+            .map_err(RuleViolation::InadmissibleRecord)?;
         // Before anything else, and before anything is written: a submitter
         // that names a key must prove it holds that key. Cheap, and refusing
         // early means a forged identity never reaches the log at all.
@@ -3938,6 +4063,23 @@ impl Node {
         out
     }
 
+    /// The ledger entry carrying a claim id.
+    ///
+    /// A claim's payload timestamp is normally its reveal time, but a sealed
+    /// claim was signed while the submitter was still present, at commit time.
+    /// Rules about when the reveal actually landed therefore read the entry
+    /// timestamp, which is the fact both reveal paths leave in the log.
+    fn claim_entry(&self, claim_id: &str) -> Option<&crate::ledger::Entry> {
+        self.ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .find(|entry| {
+                Claim::from_value(&entry.payload)
+                    .map(|claim| claim.id() == claim_id)
+                    .unwrap_or(false)
+            })
+    }
+
     /// The knowledge graph over every claim in the log.
     ///
     /// Borrowed from `claims`, which the caller owns, because the graph indexes
@@ -4095,6 +4237,8 @@ impl Node {
     /// lost by waiting: the claim and its verdict are already in the log and
     /// already public.
     pub fn reveal(&mut self, claim: &Claim, ts: &str) -> Result<Outcome, RuleViolation> {
+        crate::records::validate_commitment_submitter(&claim.submitter)
+            .map_err(RuleViolation::InadmissibleRecord)?;
         // As in `commit`: a key-shaped submitter must prove it holds the key,
         // checked before any rule that could write. The commitment hash binds
         // the submitter string, so a signed commitment can only be opened by a
@@ -4102,6 +4246,23 @@ impl Node {
         // rather than merely declared.
         claim.verify_signature()?;
         let reveal_epoch = epoch_of_timestamp("reveal", ts)?;
+        let declared_reveal_epoch = epoch_of_timestamp("claim", &claim.created_at)?;
+        // A sealed claim is signed at commit time because its submitter may be
+        // permanently gone when the committee opens it. Its payload timestamp
+        // is intentionally earlier; the reveal epoch is the ledger entry
+        // timestamp, and money/window rules use that fact. Plain claims have
+        // no reason for a mismatch and are refused.
+        let matching_commitment = self.matching_commitment_entry(claim).cloned();
+        let sealed = matching_commitment
+            .as_ref()
+            .and_then(|entry| Commitment::from_value(&entry.payload).ok())
+            .is_some_and(|commitment| commitment.envelope.is_some());
+        if declared_reveal_epoch != reveal_epoch && !sealed {
+            return Err(RuleViolation::ClaimEpochMismatch {
+                declared: declared_reveal_epoch,
+                admitted: reveal_epoch,
+            });
+        }
         // Drain first. An epoch that closed while this node was idle must
         // settle *before* this claim's admission checks read the frontier, or
         // an improvement would be measured against a stale one.
@@ -4128,8 +4289,8 @@ impl Node {
             });
         }
 
-        let commitment_entry = match self.matching_commitment_entry(claim) {
-            Some(commitment) => commitment.clone(),
+        let commitment_entry = match matching_commitment {
+            Some(commitment) => commitment,
             None => return Err(RuleViolation::NoMatchingCommitment),
         };
         let declared_commit_epoch = epoch_of_timestamp(
@@ -4669,9 +4830,14 @@ impl Node {
     }
 
     pub fn availability_pools(&self) -> Vec<AvailabilityPool> {
+        self.availability_pools_within(self.ledger.len())
+    }
+
+    fn availability_pools_within(&self, positions: usize) -> Vec<AvailabilityPool> {
         self.ledger
             .entries_of_kind(AVAILABILITY_POOL)
             .into_iter()
+            .filter(|entry| (entry.seq as usize) < positions)
             .filter_map(|entry| AvailabilityPool::from_value(&entry.payload).ok())
             .collect()
     }
@@ -4744,12 +4910,144 @@ impl Node {
     /// the ceiling where the audit can see it, never wrap to something small
     /// that looks fine.
     pub fn availability_offered(&self, epoch: u64) -> u128 {
-        self.availability_pools()
+        self.availability_pools_within(self.ledger.len())
             .iter()
             .filter(|pool| pool.covers(epoch))
             .fold(0u128, |total, pool| {
                 total.saturating_add(u128::from(pool.per_epoch))
             })
+    }
+
+    fn availability_offered_within(
+        &self,
+        epoch: u64,
+        positions: usize,
+    ) -> Result<u128, RuleViolation> {
+        self.availability_pools_within(positions)
+            .iter()
+            .filter(|pool| pool.covers(epoch))
+            .try_fold(0u128, |total, pool| {
+                total
+                    .checked_add(u128::from(pool.per_epoch))
+                    .ok_or(RuleViolation::AvailabilityArithmeticOverflow)
+            })
+    }
+
+    /// Deterministically reconstruct an availability settlement at a log
+    /// position. Production and audit both call this function; the reference
+    /// crate implements the same calculation independently.
+    fn availability_settlement_at(
+        &self,
+        epoch: u64,
+        positions: usize,
+    ) -> Result<Option<(Value, AvailabilityOutcome)>, RuleViolation> {
+        // A promise and a funding pool must exist before the target epoch
+        // begins. Otherwise an operator can wait for the challenge to be known,
+        // post a promise, answer it immediately, and collect for storage it
+        // never committed to provide during the epoch.
+        // Availability uses a true prefix boundary: once an entry is in or
+        // after the target epoch, no later (possibly back-dated) append may
+        // enlarge the eligible set. Continuing past that first boundary would
+        // let a late operator label a promise with an old timestamp and buy a
+        // challenge after seeing it.
+        let boundary = self
+            .ledger
+            .entries()
+            .iter()
+            .take(positions)
+            .position(|entry| {
+                crate::time::parse_rfc3339(&entry.ts).is_none_or(|seconds| {
+                    seconds < 0 || epoch_of(seconds as u64, partition::EPOCH_SECONDS) >= epoch
+                })
+            })
+            .unwrap_or_else(|| positions.min(self.ledger.len()));
+        let promises = self.undertakings_within(boundary);
+        let answered: BTreeMap<String, String> = self
+            .availability_answers_within(positions)
+            .into_iter()
+            .filter(|answer| answer.epoch == epoch)
+            .map(|answer| (answer.undertaking, answer.identity))
+            .collect();
+
+        let mut weight: BTreeMap<String, u128> = BTreeMap::new();
+        let mut answered_promises = 0usize;
+        let mut silent: Vec<String> = Vec::new();
+        for promise in &promises {
+            let id = promise.id();
+            match answered.get(&id) {
+                Some(identity) => {
+                    let slot = weight.entry(identity.clone()).or_insert(0);
+                    *slot = slot
+                        .checked_add(u128::from(promise.bond))
+                        .ok_or(RuleViolation::AvailabilityArithmeticOverflow)?;
+                    answered_promises += 1;
+                }
+                None => silent.push(id),
+            }
+        }
+        if answered_promises == 0 && silent.is_empty() {
+            return Ok(None);
+        }
+
+        // Pools admitted during or after the target epoch cannot retroactively
+        // fund it. This also makes the offered amount a property of the same
+        // fixed prefix as promise eligibility.
+        let offered = self.availability_offered_within(epoch, boundary)?;
+        let total = weight.values().try_fold(0u128, |sum, value| {
+            sum.checked_add(*value)
+                .ok_or(RuleViolation::AvailabilityArithmeticOverflow)
+        })?;
+        let mut awards: BTreeMap<String, (u64, u128)> = BTreeMap::new();
+        let mut spent = 0u128;
+        for (identity, identity_weight) in &weight {
+            let share = mul_div_floor(offered, *identity_weight, total)
+                .ok_or(RuleViolation::AvailabilityArithmeticOverflow)?;
+            let share =
+                u64::try_from(share).map_err(|_| RuleViolation::AvailabilityArithmeticOverflow)?;
+            spent = spent
+                .checked_add(u128::from(share))
+                .ok_or(RuleViolation::AvailabilityArithmeticOverflow)?;
+            awards.insert(identity.clone(), (share, *identity_weight));
+        }
+        let unpaid = offered
+            .checked_sub(spent)
+            .ok_or(RuleViolation::AvailabilityArithmeticOverflow)?;
+
+        let paid_rows = awards
+            .iter()
+            .map(|(identity, (reward, identity_weight))| {
+                let identity_weight = i128::try_from(*identity_weight)
+                    .map_err(|_| RuleViolation::AvailabilityArithmeticOverflow)?;
+                Ok(Value::object([
+                    ("identity", Value::string(identity.clone())),
+                    ("reward", Value::Int(i128::from(*reward))),
+                    ("weight", Value::Int(identity_weight)),
+                ]))
+            })
+            .collect::<Result<Vec<_>, RuleViolation>>()?;
+        let unpaid_value =
+            i128::try_from(unpaid).map_err(|_| RuleViolation::AvailabilityArithmeticOverflow)?;
+        let record = Value::object([
+            ("epoch", Value::Int(i128::from(epoch))),
+            (
+                "anchor",
+                Value::string(self.anchor_of_epoch_within(epoch, positions, Some(epoch))),
+            ),
+            ("paid", Value::Array(paid_rows)),
+            (
+                "silent",
+                Value::Array(silent.iter().cloned().map(Value::String).collect()),
+            ),
+            ("unpaid", Value::Int(unpaid_value)),
+        ]);
+        let outcome = AvailabilityOutcome {
+            epoch,
+            answered: awards.len(),
+            silent: silent.len(),
+            paid: spent,
+            unpaid,
+        };
+        Ok(Some((record, outcome)))
     }
 
     /// Pay the answers to one epoch's samples, and name the promises that went
@@ -4784,152 +5082,12 @@ impl Node {
             return Ok(None);
         }
 
-        // Only promises that existed *before* this epoch's anchor can be
-        // sampled in it. Without the bound, a node could post an undertaking
-        // after the fact, compute the index at leisure and answer a question it
-        // was never asked -- the same back-dating attack the batch bound
-        // exists for, and the reason `anchor_of_epoch_within` is written the
-        // way it is.
-        let promises: Vec<Undertaking> = self.undertakings();
-        let answered: BTreeMap<String, String> = self
-            .availability_answers()
-            .into_iter()
-            .filter(|answer| answer.epoch == epoch)
-            .map(|answer| (answer.undertaking, answer.identity))
-            .collect();
-
-        // Weighted by **bond**, summed per identity. Both halves are load
-        // bearing, and each closes a way of being paid for storage nobody
-        // bought.
-        //
-        // *Weighted*, because an equal split paid a one-entry promise what it
-        // paid a twenty-thousand-entry promise, so a node could answer with a
-        // thimble and collect like a warehouse.
-        //
-        // *By bond rather than by height*, because height is not a scarce
-        // resource. Promising the whole log costs a signature; forty keys each
-        // promising the whole log is the sybil attack with nothing spent, and
-        // no rule that reads only the promise can tell those forty from forty
-        // real disks. A bond can be told apart, because the log knows what each
-        // identity was paid and [`Node::post_undertaking`] refuses to lock more
-        // than that.
-        //
-        // *Summed rather than maxed*, because summing is what makes the rule
-        // sybil-*invariant* rather than merely sybil-*expensive*: an operator
-        // splitting one identity holding `S` into forty holding `S/40` has the
-        // same total weight either way, since stake is conserved when it is
-        // divided. Maxing -- which the height-weighted version had to do, since
-        // height is not conserved -- would here punish an honest operator for
-        // making two promises out of one balance, which the bond accounting
-        // already prevents from being free.
-        let mut weight: BTreeMap<String, u64> = BTreeMap::new();
-        let mut paid: Vec<(String, String)> = Vec::new();
-        let mut silent: Vec<String> = Vec::new();
-        for promise in &promises {
-            let id = promise.id();
-            match answered.get(&id) {
-                Some(identity) => {
-                    // **Summed**, not maxed, and weighted by bond rather than
-                    // height. Summing is what makes the rule Sybil-invariant:
-                    // an operator splitting one identity holding `S` into forty
-                    // holding `S/40` has the same total weight either way,
-                    // because stake is conserved when it is divided. Maxing --
-                    // which the height-weighted version had to do, since height
-                    // is *not* conserved and forty full-height promises would
-                    // otherwise be forty times the weight -- would here punish
-                    // an honest operator for making two promises out of one
-                    // balance, which the bond accounting already prevents from
-                    // being free.
-                    let slot = weight.entry(identity.clone()).or_insert(0);
-                    *slot = slot.saturating_add(promise.bond);
-                    paid.push((id, identity.clone()));
-                }
-                None => silent.push(id),
-            }
-        }
-        if paid.is_empty() && silent.is_empty() {
+        let Some((record, outcome)) = self.availability_settlement_at(epoch, self.ledger.len())?
+        else {
             return Ok(None);
-        }
-
-        let offered = self.availability_offered(epoch);
-        let total: u128 = weight.values().fold(0u128, |sum, w| sum + u128::from(*w));
-        // Every share floor-divided from the same denominator, so the parts sum
-        // to at most the whole and the remainder is whatever equal division
-        // could not place. `u128` throughout and `checked_mul` at the one place
-        // two large numbers meet: this crate does not wrap near money, and an
-        // overspend that wrapped would certify as fine.
-        let mut awards: BTreeMap<String, u64> = BTreeMap::new();
-        let mut spent: u128 = 0;
-        for (identity, w) in &weight {
-            let share = offered
-                .checked_mul(u128::from(*w))
-                .ok_or(RuleViolation::PayoutOverflow {
-                    paid_cumulative: u64::MAX,
-                    reward: 0,
-                })?
-                .checked_div(total)
-                .unwrap_or(0);
-            let share = u64::try_from(share).map_err(|_| RuleViolation::PayoutOverflow {
-                paid_cumulative: u64::MAX,
-                reward: 0,
-            })?;
-            spent += u128::from(share);
-            awards.insert(identity.clone(), share);
-        }
-        let unpaid = offered - spent;
-
-        // The payouts live *inside* this record rather than as `settlement`
-        // entries. A `settlement` names an objective and a claim, and the audit
-        // reads every one of them to check that the claim it paid was accepted
-        // and that its objective's pool was not overspent. An availability
-        // payout has neither, so borrowing the kind would have made the
-        // objective audit report every one of them as paying an unaccepted
-        // claim against an unknown objective -- a fault message for a record
-        // doing exactly what it should.
-        let record = Value::object([
-            ("epoch", Value::Int(i128::from(epoch))),
-            ("anchor", Value::string(self.anchor_of_epoch(epoch))),
-            // One row per *identity*, not per answer: an identity that
-            // answered two promises is paid once, and the record must say so or
-            // the audit's arithmetic would double-count it.
-            (
-                "paid",
-                Value::Array(
-                    awards
-                        .iter()
-                        .map(|(identity, reward)| {
-                            Value::object([
-                                ("identity", Value::string(identity.clone())),
-                                ("reward", Value::Int(i128::from(*reward))),
-                                (
-                                    "weight",
-                                    Value::Int(i128::from(
-                                        weight.get(identity).copied().unwrap_or(0),
-                                    )),
-                                ),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-            (
-                "silent",
-                Value::Array(silent.iter().cloned().map(Value::String).collect()),
-            ),
-            (
-                "unpaid",
-                Value::Int(i128::try_from(unpaid).unwrap_or(i128::MAX)),
-            ),
-        ]);
+        };
         self.append(AVAILABILITY_SETTLEMENT, record, ts)?;
-
-        Ok(Some(AvailabilityOutcome {
-            epoch,
-            answered: awards.len(),
-            silent: silent.len(),
-            paid: spent,
-            unpaid,
-        }))
+        Ok(Some(outcome))
     }
 
     /// Settle a batch for the epoch containing `ts`, and every earlier one.
@@ -5328,6 +5486,28 @@ impl Node {
         // tool to write, and a log can be assembled by concatenation.
         if source == VDF_SOURCE {
             self.check_vdf_beacon(&record, self.ledger.len())?;
+        }
+        // The other self-verifying source, and `source` is what discriminates
+        // between them: a `vdf` beacon proves somebody waited, a `drand` beacon
+        // proves a threshold group signed a round nobody could have chosen, and
+        // an `ethereum` one proves nothing to a reader without an RPC endpoint.
+        // Both checks here need only the log and a constant.
+        if source == drand::SOURCE {
+            let expected = drand::round_for_epoch(orders, epoch_seconds());
+            if block != expected {
+                return Err(RuleViolation::BeaconRoundMismatch {
+                    orders,
+                    block,
+                    expected,
+                });
+            }
+            if let Err(why) = drand::verify(expected, value) {
+                return Err(RuleViolation::BeaconSignatureInvalid {
+                    orders,
+                    round: expected,
+                    why,
+                });
+            }
         }
         self.append(BEACON, record, ts)
     }
@@ -5862,6 +6042,22 @@ impl Node {
         let (objectives, mut undecodable) = self.decode_objectives();
         problems.append(&mut undecodable);
 
+        for entry in self.ledger.entries_of_kind(OBJECTIVE) {
+            let Ok(objective) = Objective::from_value(&entry.payload) else {
+                continue;
+            };
+            if self.declares_supply()
+                && crate::records::signed_submitter(&objective.funder).is_none()
+            {
+                problems.push(format!(
+                    "objective at entry {} charges unauthenticated funder {:?}",
+                    entry.seq, objective.funder
+                ));
+            } else if let Err(error) = objective.verify_funding_signature() {
+                problems.push(format!("objective at entry {}: {error}", entry.seq));
+            }
+        }
+
         // Peer records settle nothing, so a bad one cannot cost money -- but a
         // reader must be told rather than left to wonder why a peer the log
         // names is never dialled. Both failures are named: one that cannot be
@@ -5941,6 +6137,12 @@ impl Node {
                 continue;
             }
             if let Err(error) = record.verify_signature() {
+                problems.push(format!("committee_share at entry {}: {error}", entry.seq));
+                continue;
+            }
+            if let Err(error) =
+                ensure_record_admission_epoch(COMMITTEE_SHARE, &record.created_at, &entry.ts)
+            {
                 problems.push(format!("committee_share at entry {}: {error}", entry.seq));
                 continue;
             }
@@ -6129,7 +6331,38 @@ impl Node {
         for pool in self.availability_pools() {
             availability_funded = availability_funded.saturating_add(pool.ceiling());
         }
+        let mut settled_availability_epochs = BTreeSet::new();
         for entry in self.ledger.entries_of_kind(AVAILABILITY_SETTLEMENT) {
+            let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_u64) else {
+                problems.push(format!(
+                    "availability settlement at entry {}: missing epoch",
+                    entry.seq
+                ));
+                continue;
+            };
+            if !settled_availability_epochs.insert(epoch) {
+                problems.push(format!(
+                    "availability settlement at entry {}: epoch {epoch} settled more than once",
+                    entry.seq
+                ));
+            }
+            match self.availability_settlement_at(epoch, entry.seq as usize) {
+                Ok(Some((expected, _))) if expected != entry.payload => problems.push(format!(
+                    "availability settlement at entry {}: allocations, weights, silence, \
+                     remainder, or anchor differ from deterministic reconstruction",
+                    entry.seq
+                )),
+                Ok(None) => problems.push(format!(
+                    "availability settlement at entry {}: epoch {epoch} had no eligible \
+                     undertaking before its boundary",
+                    entry.seq
+                )),
+                Err(error) => problems.push(format!(
+                    "availability settlement at entry {} cannot be reconstructed: {error}",
+                    entry.seq
+                )),
+                Ok(Some(_)) => {}
+            }
             let rows = entry.payload.get("paid").and_then(Value::as_array);
             let unpaid = entry.payload.get("unpaid").and_then(Value::as_i128);
             let (Some(rows), Some(unpaid)) = (rows, unpaid) else {
@@ -6177,16 +6410,14 @@ impl Node {
                 continue;
             }
             availability_paid = availability_paid.saturating_add(spent);
-            if let Some(epoch) = entry.payload.get("epoch").and_then(Value::as_u64) {
-                let offered = self.availability_offered(epoch);
-                if spent.saturating_add(unpaid as u128) != offered {
-                    problems.push(format!(
-                        "availability settlement at entry {}: epoch {epoch} offered {offered} \
-                         but the record accounts for {}",
-                        entry.seq,
-                        spent.saturating_add(unpaid as u128)
-                    ));
-                }
+            let offered = self.availability_offered(epoch);
+            if spent.saturating_add(unpaid as u128) != offered {
+                problems.push(format!(
+                    "availability settlement at entry {}: epoch {epoch} offered {offered} \
+                     but the record accounts for {}",
+                    entry.seq,
+                    spent.saturating_add(unpaid as u128)
+                ));
             }
         }
         if availability_paid > availability_funded {
@@ -6232,7 +6463,22 @@ impl Node {
             if !seen_claims.insert(claim_id.clone()) {
                 continue;
             }
-            match self.matching_commitment_entry(&claim) {
+            let declared_claim = crate::time::parse_rfc3339(&claim.created_at)
+                .filter(|seconds| *seconds >= 0)
+                .map(|seconds| epoch_of(seconds as u64, epoch_seconds()));
+            let admitted_claim = crate::time::parse_rfc3339(&entry.ts)
+                .filter(|seconds| *seconds >= 0)
+                .map(|seconds| epoch_of(seconds as u64, epoch_seconds()));
+            let matching = self.matching_commitment_entry(&claim);
+            let sealed = matching
+                .and_then(|commitment| Commitment::from_value(&commitment.payload).ok())
+                .is_some_and(|commitment| commitment.envelope.is_some());
+            if declared_claim != admitted_claim && !sealed {
+                problems.push(format!(
+                    "claim {claim_id}: declared epoch disagrees with its ledger admission epoch"
+                ));
+            }
+            match matching {
                 None => problems.push(format!("claim {claim_id}: no matching commitment")),
                 Some(commitment) => {
                     let declared_commit = payload_str(&commitment.payload, "created_at")
@@ -6340,10 +6586,32 @@ impl Node {
             }
         }
 
+        let claims_by_id: BTreeMap<String, Claim> = self
+            .ledger
+            .entries_of_kind(CLAIM)
+            .into_iter()
+            .filter_map(|entry| Claim::from_value(&entry.payload).ok())
+            .map(|claim| (claim.id(), claim))
+            .collect();
+        let mut previous_frontier: BTreeMap<String, u64> = BTreeMap::new();
+        let mut progressive_rewards: BTreeMap<String, u64> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(FRONTIER) {
+            let Ok(frontier) = FrontierEntry::from_value(&entry.payload) else {
+                continue;
+            };
+            let previous = previous_frontier
+                .insert(frontier.objective_id.clone(), frontier.paid_cumulative)
+                .unwrap_or(0);
+            if let Some(reward) = frontier.paid_cumulative.checked_sub(previous) {
+                progressive_rewards.insert(frontier.claim_id, reward);
+            }
+        }
+
         for entry in self.ledger.entries_of_kind(SETTLEMENT) {
             let objective_id =
                 payload_str(&entry.payload, "objective_id").unwrap_or("(no objective_id)");
-            let accepted = payload_str(&entry.payload, "claim_id")
+            let claim_id = payload_str(&entry.payload, "claim_id");
+            let accepted = claim_id
                 .and_then(|claim_id| recorded.get(claim_id))
                 .and_then(|verdict| status_of(verdict))
                 == Some(Status::Accept.as_str());
@@ -6351,6 +6619,40 @@ impl Node {
                 problems.push(format!(
                     "settlement of {objective_id}: paid a claim that was not accepted"
                 ));
+            }
+            let Some(claim) = claim_id.and_then(|id| claims_by_id.get(id)) else {
+                continue;
+            };
+            if objective_id != claim.objective_id {
+                problems.push(format!(
+                    "settlement at entry {}: objective {} differs from claim {} objective {}",
+                    entry.seq,
+                    objective_id,
+                    claim.id(),
+                    claim.objective_id
+                ));
+            }
+            if payload_str(&entry.payload, "submitter") != Some(claim.submitter.as_str()) {
+                problems.push(format!(
+                    "settlement at entry {}: recipient does not match claim {} submitter {}",
+                    entry.seq,
+                    claim.id(),
+                    claim.submitter
+                ));
+            }
+            if let Some(objective) = objectives.get(&claim.objective_id) {
+                let expected = if objective.ratchet.is_some() {
+                    progressive_rewards.get(claim.id().as_str()).copied()
+                } else {
+                    Some(objective.reward)
+                };
+                let recorded_reward = entry.payload.get("reward").and_then(Value::as_u64);
+                if expected != recorded_reward {
+                    problems.push(format!(
+                        "settlement at entry {}: reward {:?} differs from deterministic reward {:?}",
+                        entry.seq, recorded_reward, expected
+                    ));
+                }
             }
         }
 
@@ -6557,6 +6859,11 @@ impl Node {
                     "attestation at entry {}: signature does not verify",
                     entry.seq
                 ));
+            }
+            if let Err(error) =
+                ensure_record_admission_epoch(ATTESTATION, &record.created_at, &entry.ts)
+            {
+                problems.push(format!("attestation at entry {}: {error}", entry.seq));
             }
             if !seen.insert(format!("{}|{}", record.claim_id, record.attestor)) {
                 problems.push(format!(
@@ -6842,6 +7149,11 @@ impl Node {
             if record.verify_signature().is_err() {
                 problems.push(format!("challenge {id}: signature does not verify"));
             }
+            if let Err(error) =
+                ensure_record_admission_epoch(CHALLENGE, &record.created_at, &entry.ts)
+            {
+                problems.push(format!("challenge {id}: {error}"));
+            }
             if !seen.insert(format!("{}|{}", record.claim_id, record.challenger)) {
                 problems.push(format!(
                     "challenge {id}: {} already had a live objection to claim {}",
@@ -6887,10 +7199,17 @@ impl Node {
                     }
                 }
             }
-            // The window, re-derived from the two records' own timestamps.
+            // The window starts when the claim entered the log. A sealed claim
+            // was signed at commit time and intentionally carries that earlier
+            // payload timestamp, so using it here could make a dispute window
+            // close before the committee had even revealed the artifact.
             if let (Ok(opened), Ok(claimed)) = (
                 epoch_of_timestamp(CHALLENGE, &record.created_at),
-                epoch_of_timestamp(CLAIM, &claim.created_at),
+                self.claim_entry(&record.claim_id)
+                    .ok_or_else(|| RuleViolation::UnknownClaim {
+                        claim_id: record.claim_id.clone(),
+                    })
+                    .and_then(|entry| epoch_of_timestamp("claim admission", &entry.ts)),
             ) {
                 let closes = claimed.saturating_add(CHALLENGE_WINDOW_EPOCHS);
                 if opened > closes {
@@ -6922,6 +7241,12 @@ impl Node {
                     "bisection at entry {}: signature does not verify",
                     entry.seq
                 ));
+                continue;
+            }
+            if let Err(error) =
+                ensure_record_admission_epoch(BISECTION, &record.created_at, &entry.ts)
+            {
+                problems.push(format!("bisection at entry {}: {error}", entry.seq));
                 continue;
             }
             let Some(challenge) = challenges.get(&record.challenge_id) else {
@@ -7036,6 +7361,32 @@ impl Node {
     ///
     /// Epochs that settled on the fallback are **not** reported here. See
     /// [`Node::epochs_without_beacon`] for why that is a separate query.
+    ///
+    /// # Why a bad signature is reported and not consulted when settling
+    ///
+    /// The timing and duplicate rules *do* reach settlement:
+    /// [`Node::epoch_beacon_within`] skips a beacon drawn outside its epoch, so
+    /// such a record orders nothing. The pairing check deliberately does not
+    /// join them, for two reasons that point the same way.
+    ///
+    /// It buys almost nothing. A beacon that orders nothing falls back to the
+    /// epoch-chain head, which is the value a sequencer can grind anyway — so
+    /// filtering converts *grinding via a forged beacon* into *grinding via the
+    /// fallback*, and the attacker is no worse off.
+    ///
+    /// And it costs the one thing this project cannot spend. Every other check
+    /// on this path compares integers and strings, where two implementations
+    /// cannot disagree. A pairing is the one place where they can: subgroup
+    /// membership and non-canonical point encodings are exactly where BLS
+    /// libraries have historically differed, and this crate and
+    /// `reference/rust` deliberately use *different* ones. Two nodes that
+    /// disagree about whether a signature verifies would disagree about the
+    /// anchor, settle in different orders, and both audit clean — the silent
+    /// fork `docs/design/settlement-convergence.md` exists to prevent.
+    ///
+    /// So: refused when written, reported to every reader, and never a fork.
+    /// The disagreement it could cause shows up in `scripts/differential.sh`
+    /// as two audit reports rather than in the log as two payment orders.
     fn audit_beacons(&self) -> Vec<String> {
         let mut problems = Vec::new();
         let mut seen: BTreeSet<u64> = BTreeSet::new();
@@ -7063,6 +7414,48 @@ impl Node {
                      committer, one drawn late by the operator",
                     entry.seq, entry.ts
                 ));
+            }
+            // drand only, and re-derived rather than believed. This is the
+            // whole reason for preferring that source: both halves are checks a
+            // reader holding nothing but the log can run, where the Ethereum
+            // beacon's `block` and `value` could only ever be checked by
+            // someone holding a chain.
+            if payload_str(&entry.payload, "source") == Some(drand::SOURCE) {
+                let expected = drand::round_for_epoch(orders, epoch_seconds());
+                if entry.payload.get("block").and_then(Value::as_u64) != Some(expected) {
+                    problems.push(format!(
+                        "beacon at entry {}: orders epoch {orders} from drand, which names \
+                         round {expected} -- a drand beacon does not choose its own round",
+                        entry.seq
+                    ));
+                }
+                // The pairing, against the round the record *claims* rather
+                // than the one the epoch names. The two faults are then
+                // independent and each says its own thing: "a real round, but
+                // not this epoch's" is a different accusation from "not a round
+                // at all", and collapsing them would report the second whenever
+                // the first was true.
+                let claimed = entry
+                    .payload
+                    .get("block")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(expected);
+                match payload_str(&entry.payload, "value") {
+                    Some(value) => {
+                        if let Err(why) = drand::verify(claimed, value) {
+                            problems.push(format!(
+                                "beacon at entry {}: orders epoch {orders} from drand and \
+                                 does not carry round {claimed}'s signature: {why}",
+                                entry.seq
+                            ));
+                        }
+                    }
+                    None => problems.push(format!(
+                        "beacon at entry {}: orders epoch {orders} from drand and carries \
+                         no value at all",
+                        entry.seq
+                    )),
+                }
             }
             // A delay beacon carries its own evidence, so unlike a chain
             // beacon it can be checked here rather than taken on the
@@ -7447,6 +7840,51 @@ impl Node {
 /// reads a hex *number* out of a record rather than a digest, and a hex helper
 /// in `canonical` would invite somebody to use it on an identifier, where the
 /// `sha256:` prefix makes the same call wrong.
+/// `floor(value * weight / total)` without an overflowing intermediate.
+///
+/// The only caller supplies `weight <= total`. The quotient/remainder split
+/// makes the integral part safe; the bitwise remainder fold keeps its running
+/// remainder below `total`, so it never computes the potentially overflowing
+/// `remainder * weight` directly.
+fn mul_div_floor(value: u128, weight: u128, total: u128) -> Option<u128> {
+    if total == 0 {
+        return Some(0);
+    }
+    if weight > total {
+        return None;
+    }
+    let whole = (value / total).checked_mul(weight)?;
+    let remainder = value % total;
+    let mut quotient = 0u128;
+    let mut residue = 0u128;
+    for bit in (0..u128::BITS).rev() {
+        quotient = quotient.checked_mul(2)?;
+        if residue >= total - residue {
+            residue -= total - residue;
+            quotient = quotient.checked_add(1)?;
+        } else {
+            residue *= 2;
+        }
+        if (weight >> bit) & 1 == 1 {
+            if residue >= total - remainder {
+                residue -= total - remainder;
+                quotient = quotient.checked_add(1)?;
+            } else {
+                residue += remainder;
+            }
+        }
+    }
+    whole.checked_add(quotient)
+}
+
+/// Hex, leniently: `from_str_radix` accepts uppercase, so this and
+/// [`crate::hex::decode`] are two decoders with two answers about the same
+/// bytes. That is a wart and it is deliberately not fixed here. `crate::hex`
+/// is strict because it reads values other implementations write, where two
+/// spellings would be two spellings a record id could disagree about; this one
+/// reads a VDF witness and tightening it would move an admission boundary,
+/// which is a consensus-visible change and belongs in its own commit rather
+/// than in a merge.
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
@@ -7495,6 +7933,29 @@ fn epoch_of_timestamp(record: &'static str, ts: &str) -> Result<u64, RuleViolati
             value: ts.to_string(),
         }),
     }
+}
+
+/// Require an author-controlled record timestamp and its ledger admission
+/// timestamp to name the same epoch.
+///
+/// Comparing epochs rather than strings deliberately permits equivalent
+/// RFC-3339 spellings and harmless clock skew inside one batch. What may not
+/// vary is the epoch that a timeout, embargo, or replay rule will derive.
+fn ensure_record_admission_epoch(
+    record: &'static str,
+    declared_ts: &str,
+    admitted_ts: &str,
+) -> Result<u64, RuleViolation> {
+    let declared = epoch_of_timestamp(record, declared_ts)?;
+    let admitted = epoch_of_timestamp("ledger admission", admitted_ts)?;
+    if declared != admitted {
+        return Err(RuleViolation::RecordEpochMismatch {
+            record,
+            declared,
+            admitted,
+        });
+    }
+    Ok(admitted)
 }
 
 /// Whether an attestation is still open to a slash, as of settled epoch `now`.
@@ -7726,7 +8187,17 @@ mod tests {
     }
 
     fn claim_for(objective: &Objective, who: &str, artifact: Value, nonce: &str) -> Claim {
-        Claim::new(objective.id(), who, artifact, nonce, TS, vec![]).expect("valid claim")
+        claim_for_at(objective, who, artifact, nonce, &stamp(EPOCH))
+    }
+
+    fn claim_for_at(
+        objective: &Objective,
+        who: &str,
+        artifact: Value,
+        nonce: &str,
+        created_at: &str,
+    ) -> Claim {
+        Claim::new(objective.id(), who, artifact, nonce, created_at, vec![]).expect("valid claim")
     }
 
     /// Seconds since the Unix epoch for [`TS`], and the length of one epoch.
@@ -7779,9 +8250,10 @@ mod tests {
             &stamp(step),
         )
         .expect("commit");
-        let claim =
-            Claim::new(objective.id(), who, artifact, nonce, TS, cites).expect("valid claim");
-        let outcome = node.reveal(&claim, &stamp(step + EPOCH))?;
+        let reveal_at = stamp(step + EPOCH);
+        let claim = Claim::new(objective.id(), who, artifact, nonce, &reveal_at, cites)
+            .expect("valid claim");
+        let outcome = node.reveal(&claim, &reveal_at)?;
         if !outcome.is_pending() {
             return Ok(outcome);
         }
@@ -7951,6 +8423,36 @@ mod tests {
         assert!(matches!(error, RuleViolation::MalformedRatchet(_)));
     }
 
+    #[test]
+    fn scarce_supply_can_only_be_committed_by_its_signing_funder() {
+        let dir = TempDir::new("signed-objective-funding");
+        let mut node = node(&dir);
+        let funder = crate::crypto::identity::Identity::from_secret_bytes([31; 32]);
+        node.post_issuance(&Issuance::new(funder.submitter_id(), 100, TS), TS)
+            .expect("issue");
+
+        let unsigned = Objective {
+            funder: funder.submitter_id(),
+            ..lean_objective(10)
+        };
+        assert!(matches!(
+            node.post_objective(&unsigned, TS),
+            Err(RuleViolation::UnsignedIdentity(_))
+        ));
+
+        let attacker = crate::crypto::identity::Identity::from_secret_bytes([32; 32]);
+        let mut forged = lean_objective(10).funded_by(&attacker);
+        forged.funder = funder.submitter_id();
+        assert!(matches!(
+            node.post_objective(&forged, TS),
+            Err(RuleViolation::UnsignedIdentity(_))
+        ));
+
+        let authorized = lean_objective(10).funded_by(&funder);
+        node.post_objective(&authorized, TS).expect("authorized");
+        assert_eq!(node.ledger().entries_of_kind(OBJECTIVE).len(), 1);
+    }
+
     // -- commit -------------------------------------------------------------
 
     #[test]
@@ -7967,6 +8469,26 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn an_ambiguous_commitment_submitter_never_reaches_the_log() {
+        let dir = TempDir::new("ambiguous-commitment");
+        let mut node = node(&dir);
+        let objective = lean_objective(10);
+        node.post_objective(&objective, TS).expect("post");
+        let before = node.ledger().len();
+        let error = node
+            .commit(
+                &Commitment::new(objective.id(), "alice|part", "sha256:x", TS),
+                TS,
+            )
+            .expect_err("delimiter-bearing submitter must be refused");
+        assert!(matches!(
+            error,
+            RuleViolation::InadmissibleRecord(crate::records::RecordError::AmbiguousSubmitter)
+        ));
+        assert_eq!(node.ledger().len(), before);
     }
 
     #[test]
@@ -8030,7 +8552,7 @@ mod tests {
         let objective = lean_objective(10);
         node.post_objective(&objective, TS).expect("post");
 
-        let claim = claim_for(&objective, "eve", proof(":= by trivial"), "n1");
+        let claim = claim_for_at(&objective, "eve", proof(":= by trivial"), "n1", TS);
         let error = node.reveal(&claim, TS).expect_err("must be refused");
         assert!(matches!(error, RuleViolation::NoMatchingCommitment));
         // Nothing was recorded: a refusal is not evidence about anybody's work.
@@ -8050,7 +8572,7 @@ mod tests {
             .expect("commit");
 
         // Eve saw alice's commitment but cannot reveal against it as herself.
-        let stolen = claim_for(&objective, "eve", artifact, "n1");
+        let stolen = claim_for_at(&objective, "eve", artifact, "n1", TS);
         assert!(matches!(
             node.reveal(&stolen, TS),
             Err(RuleViolation::NoMatchingCommitment)
@@ -8069,7 +8591,7 @@ mod tests {
         node.commit(&Commitment::new(objective.id(), "alice", hash, TS), TS)
             .expect("commit");
 
-        let claim = claim_for(&objective, "alice", artifact, "wrong");
+        let claim = claim_for_at(&objective, "alice", artifact, "wrong", TS);
         assert!(matches!(
             node.reveal(&claim, TS),
             Err(RuleViolation::NoMatchingCommitment)
@@ -8378,10 +8900,8 @@ mod tests {
 
         // Same epoch: refused, and nothing is written.
         let before = node.ledger().len();
-        let too_soon = node.reveal(
-            &claim_for(&objective, "alice", results(1), "a"),
-            &stamp(EPOCH - 1),
-        );
+        let too_soon_claim = claim_for_at(&objective, "alice", results(1), "a", &stamp(EPOCH - 1));
+        let too_soon = node.reveal(&too_soon_claim, &stamp(EPOCH - 1));
         assert!(
             matches!(too_soon, Err(RuleViolation::RevealBeforeEpoch { .. })),
             "{too_soon:?}"
@@ -8389,11 +8909,45 @@ mod tests {
         assert_eq!(node.ledger().len(), before, "a refusal wrote to the log");
 
         // One second later, in the next epoch: admitted.
-        node.reveal(
-            &claim_for(&objective, "alice", results(1), "a"),
-            &stamp(EPOCH),
+        let claim = claim_for_at(&objective, "alice", results(1), "a", &stamp(EPOCH));
+        node.reveal(&claim, &stamp(EPOCH)).expect("reveal");
+    }
+
+    #[test]
+    fn a_claim_declared_in_another_epoch_is_not_admitted() {
+        let dir = TempDir::new("backdated-claim");
+        let objective = match replay_objective(1000) {
+            Some(objective) => objective,
+            None => return,
+        };
+        let mut node = node(&dir);
+        node.post_objective(&objective, TS).expect("post");
+        let artifact = results(1);
+        let nonce = "nonce";
+        let hash = commitment_hash(&objective.id(), "alice", &artifact, nonce);
+        node.commit(
+            &Commitment::new(objective.id(), "alice", hash, stamp(0)),
+            &stamp(0),
         )
-        .expect("reveal");
+        .expect("commit");
+        let claim = claim_for_at(&objective, "alice", artifact, nonce, &stamp(0));
+
+        let before = node.ledger().len();
+        assert!(matches!(
+            node.reveal(&claim, &stamp(EPOCH)),
+            Err(RuleViolation::ClaimEpochMismatch { .. })
+        ));
+        assert_eq!(node.ledger().len(), before, "a refusal wrote to the log");
+
+        node.ledger_mut()
+            .append(CLAIM, claim.to_value(), &stamp(EPOCH))
+            .expect("inject mismatched claim");
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|problem| problem
+                .contains("declared epoch disagrees with its ledger admission epoch")),
+            "audit missed the claim epoch mismatch: {problems:?}"
+        );
     }
 
     #[test]
@@ -8742,7 +9296,7 @@ mod tests {
 
         // Re-derive the same log against a different epoch length.
         let hinted = {
-            let _guard = EpochGuard::set("7");
+            let _guard = crate::partition::test_epoch_seconds(7);
             node.audit(false)
         };
         let note = hinted
@@ -8810,27 +9364,6 @@ mod tests {
             note.contains("will not fix it"),
             "the note must say choosing a length cannot recover this: {note}"
         );
-    }
-
-    /// Sets `CAIRN_EPOCH_SECONDS` for as long as it lives.
-    ///
-    /// Tests share a process, so the variable has to go back; a leaked value
-    /// would silently re-epoch every test that ran afterwards.
-    struct EpochGuard;
-
-    impl EpochGuard {
-        fn set(value: &str) -> EpochGuard {
-            // SAFETY: single-threaded test, and the guard restores it on drop.
-            unsafe { std::env::set_var(crate::partition::EPOCH_SECONDS_ENV, value) };
-            EpochGuard
-        }
-    }
-
-    impl Drop for EpochGuard {
-        fn drop(&mut self) {
-            // SAFETY: as above.
-            unsafe { std::env::remove_var(crate::partition::EPOCH_SECONDS_ENV) };
-        }
     }
 
     // -- the improvement path -----------------------------------------------
@@ -9141,7 +9674,7 @@ mod tests {
                 TS,
             )
             .expect("append");
-        let claim = claim_for(objective, who, artifact, nonce);
+        let claim = claim_for_at(objective, who, artifact, nonce, TS);
         let claim_id = claim.id();
         node.ledger_mut()
             .append(CLAIM, claim.to_value(), TS)
@@ -9235,7 +9768,7 @@ mod tests {
         let objective = lean_objective(10);
         node.post_objective(&objective, TS).expect("post");
         let artifact = proof(":= by sorry");
-        let claim = claim_for(&objective, "alice", artifact.clone(), "n1");
+        let claim = claim_for_at(&objective, "alice", artifact.clone(), "n1", TS);
         let claim_id = claim.id();
         let hash = commitment_hash(&objective.id(), "alice", &artifact, "n1");
         node.ledger_mut()
@@ -9398,7 +9931,7 @@ mod tests {
         let mut node = node(&dir);
         let objective = lean_objective(10);
         node.post_objective(&objective, TS).expect("post");
-        let claim = claim_for(&objective, "eve", proof(":= by trivial"), "n1");
+        let claim = claim_for_at(&objective, "eve", proof(":= by trivial"), "n1", TS);
         node.ledger_mut()
             .append(CLAIM, claim.to_value(), TS)
             .expect("append");
@@ -9439,6 +9972,40 @@ mod tests {
                 .any(|p| p.contains("paid a claim that was not accepted")),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn audit_binds_a_settlement_to_its_claim_recipient_objective_and_reward() {
+        let dir = TempDir::new("audit-settlement-binding");
+        let mut node = node(&dir);
+        let objective = lean_objective(10);
+        node.post_objective(&objective, TS).expect("post");
+        let claim_id = plant(
+            &mut node,
+            &objective,
+            "alice",
+            proof(":= by trivial"),
+            "n1",
+            Status::Accept,
+            None,
+        );
+        node.ledger_mut()
+            .append(
+                SETTLEMENT,
+                Value::object([
+                    ("objective_id", Value::string("sha256:attacker-selected")),
+                    ("claim_id", Value::string(claim_id)),
+                    ("submitter", Value::string("mallory")),
+                    ("reward", Value::Int(9)),
+                ]),
+                TS,
+            )
+            .expect("append");
+
+        let problems = node.audit(false).join("\n");
+        assert!(problems.contains("differs from claim"), "{problems}");
+        assert!(problems.contains("recipient does not match"), "{problems}");
+        assert!(problems.contains("deterministic reward"), "{problems}");
     }
 
     #[test]
@@ -10112,17 +10679,18 @@ mod tests {
             &stamp(step),
         )
         .expect("commit");
+        let reveal_at = stamp(step + EPOCH);
         let claim = Claim::new(
             objective.id(),
             who.submitter_id(),
             artifact,
             &nonce,
-            TS,
+            &reveal_at,
             Vec::new(),
         )
         .expect("valid claim")
         .signed_with(who);
-        let outcome = node.reveal(&claim, &stamp(step + EPOCH)).expect("reveal");
+        let outcome = node.reveal(&claim, &reveal_at).expect("reveal");
         let settled = node
             .settle_at(&stamp(
                 step + (2 + crate::partition::finality_epochs() as i64) * EPOCH,
@@ -10155,18 +10723,20 @@ mod tests {
         let dir = TempDir::new("unfunded-objective");
         let mut node = node(&dir);
         let attacker = crate::crypto::identity::Identity::from_secret_bytes([77u8; 32]);
+        let treasury = crate::crypto::identity::Identity::from_secret_bytes([76u8; 32]);
 
         // A supply exists, and the attacker is not in it. One unit to somebody
         // else is enough: what matters is that the log has *declared* its
         // units, not how many there are.
-        node.post_issuance(&Issuance::new("treasury", 500, TS), TS)
+        node.post_issuance(&Issuance::new(treasury.submitter_id(), 500, TS), TS)
             .expect("genesis issuance");
 
         const ABSURD: u64 = 1_000_000_000_000;
         let Some(objective) = replay_objective_called(ABSURD, "a bounty I set myself") else {
             return;
         };
-        assert_eq!(objective.funder, "treasury");
+        let objective = objective.funded_by(&treasury);
+        assert_eq!(objective.funder, treasury.submitter_id());
         assert!(
             matches!(
                 node.post_objective(&objective, TS),
@@ -10184,15 +10754,16 @@ mod tests {
         let Some(affordable) = replay_objective_called(500, "a bounty I can pay for") else {
             return;
         };
+        let affordable = affordable.funded_by(&treasury);
         node.post_objective(&affordable, TS)
             .expect("a reward the funder holds");
         assert_eq!(
-            node.spendable_within("treasury", node.ledger().len()),
+            node.spendable_within(&treasury.submitter_id(), node.ledger().len()),
             0,
             "posting did not escrow the reward"
         );
         assert_eq!(
-            node.escrowed().get("treasury").copied(),
+            node.escrowed().get(&treasury.submitter_id()).copied(),
             Some(500),
             "the units went nowhere rather than into escrow"
         );
@@ -10202,6 +10773,7 @@ mod tests {
         let Some(second) = replay_objective_called(1, "one more, on credit") else {
             return;
         };
+        let second = second.funded_by(&treasury);
         assert!(
             matches!(
                 node.post_objective(&second, TS),
@@ -10222,7 +10794,8 @@ mod tests {
             None,
             None,
         )
-        .expect("valid objective");
+        .expect("valid objective")
+        .funded_by(&attacker);
         assert!(matches!(
             node.post_objective(&unfunded, TS),
             Err(RuleViolation::UnfundedReward { spendable: 0, .. })
@@ -10240,12 +10813,14 @@ mod tests {
         let dir = TempDir::new("escrow-conserves");
         let mut node = node(&dir);
         let worker = crate::crypto::identity::Identity::from_secret_bytes([78u8; 32]);
-        node.post_issuance(&Issuance::new("treasury", 1_000, TS), TS)
+        let treasury = crate::crypto::identity::Identity::from_secret_bytes([79u8; 32]);
+        node.post_issuance(&Issuance::new(treasury.submitter_id(), 1_000, TS), TS)
             .expect("genesis issuance");
 
         let Some(objective) = replay_objective_called(1_000, "the whole supply, at stake") else {
             return;
         };
+        let objective = objective.funded_by(&treasury);
         node.post_objective(&objective, TS).expect("post");
 
         let artifact = results(1);
@@ -10258,24 +10833,31 @@ mod tests {
             &stamp(step),
         )
         .expect("commit");
+        let reveal_at = stamp(step + EPOCH);
         let claim = Claim::new(
             objective.id(),
             worker.submitter_id(),
             artifact,
             "n",
-            TS,
+            &reveal_at,
             Vec::new(),
         )
         .expect("valid claim")
         .signed_with(&worker);
-        node.reveal(&claim, &stamp(step + EPOCH)).expect("reveal");
+        node.reveal(&claim, &reveal_at).expect("reveal");
         node.settle_at(&stamp(
             step + (2 + crate::partition::finality_epochs() as i64) * EPOCH,
         ))
         .expect("settle");
 
         // The units moved: escrow released, worker paid, total unchanged.
-        assert_eq!(node.escrowed().get("treasury").copied().unwrap_or(0), 0);
+        assert_eq!(
+            node.escrowed()
+                .get(&treasury.submitter_id())
+                .copied()
+                .unwrap_or(0),
+            0
+        );
         assert_eq!(
             node.balances().get(&worker.submitter_id()).copied(),
             Some(1_000)
@@ -10307,11 +10889,12 @@ mod tests {
     fn the_audit_names_a_reward_the_supply_never_covered() {
         let dir = TempDir::new("unfunded-reward-audit");
         let mut broke = node(&dir);
+        let treasury = crate::crypto::identity::Identity::from_secret_bytes([80u8; 32]);
         broke
-            .post_issuance(&Issuance::new("treasury", 100, TS), TS)
+            .post_issuance(&Issuance::new(treasury.submitter_id(), 100, TS), TS)
             .expect("genesis issuance");
 
-        let objective = lean_objective(1_000);
+        let objective = lean_objective(1_000).funded_by(&treasury);
         assert!(
             matches!(
                 broke.post_objective(&objective, TS),
@@ -10340,11 +10923,15 @@ mod tests {
         // inside its supply reports nothing about the supply at all.
         let clean = TempDir::new("funded-reward-audit");
         let mut solvent = node(&clean);
+        let solvent_treasury = crate::crypto::identity::Identity::from_secret_bytes([81u8; 32]);
         solvent
-            .post_issuance(&Issuance::new("treasury", 1_000, TS), TS)
+            .post_issuance(
+                &Issuance::new(solvent_treasury.submitter_id(), 1_000, TS),
+                TS,
+            )
             .expect("genesis issuance");
         solvent
-            .post_objective(&lean_objective(1_000), TS)
+            .post_objective(&lean_objective(1_000).funded_by(&solvent_treasury), TS)
             .expect("a reward the supply covers");
         assert_eq!(solvent.audit(false), Vec::<String>::new());
     }
@@ -10358,12 +10945,13 @@ mod tests {
     fn an_issuance_after_the_genesis_prefix_is_a_mint_the_audit_names() {
         let dir = TempDir::new("late-issuance");
         let mut node = node(&dir);
-        node.post_issuance(&Issuance::new("treasury", 10, TS), TS)
+        let treasury = crate::crypto::identity::Identity::from_secret_bytes([82u8; 32]);
+        node.post_issuance(&Issuance::new(treasury.submitter_id(), 10, TS), TS)
             .expect("genesis issuance");
-        node.post_objective(&lean_objective(10), TS)
+        node.post_objective(&lean_objective(10).funded_by(&treasury), TS)
             .expect("something after genesis");
 
-        let late = Issuance::new("treasury", 1_000_000, TS);
+        let late = Issuance::new(treasury.submitter_id(), 1_000_000, TS);
         assert!(
             matches!(
                 node.post_issuance(&late, TS),
@@ -10383,8 +10971,14 @@ mod tests {
         );
         // And it is not credited: the balance is what genesis said, minus what
         // the objective escrowed.
-        assert_eq!(node.issued().get("treasury").copied(), Some(10));
-        assert_eq!(node.spendable_within("treasury", node.ledger().len()), 0);
+        assert_eq!(
+            node.issued().get(&treasury.submitter_id()).copied(),
+            Some(10)
+        );
+        assert_eq!(
+            node.spendable_within(&treasury.submitter_id(), node.ledger().len()),
+            0
+        );
     }
 
     /// Promise the whole log as it stands, staking `bond`.
@@ -10414,6 +11008,21 @@ mod tests {
         let record = Undertaking::new(who.submitter_id(), &root, height, bond, TS).signed_with(who);
         node.post_undertaking(&record, TS).expect("undertaking");
         record
+    }
+
+    /// The first epoch strictly after every timestamp currently in the log.
+    /// Availability settlement fixtures use this rather than invented small
+    /// epoch numbers so their promises really predate the epoch they serve.
+    fn epoch_after_log(node: &Node) -> u64 {
+        node.ledger()
+            .entries()
+            .iter()
+            .filter_map(|entry| crate::time::parse_rfc3339(&entry.ts))
+            .filter(|seconds| *seconds >= 0)
+            .map(|seconds| epoch_of(seconds as u64, partition::EPOCH_SECONDS))
+            .max()
+            .unwrap_or_else(|| epoch_at(0))
+            .saturating_add(1)
     }
 
     /// A node that holds the log answers its sample; a node that guesses cannot.
@@ -10773,8 +11382,8 @@ mod tests {
             &AvailabilityPool {
                 funder: "treasury".to_string(),
                 per_epoch: 90,
-                from_epoch: 0,
-                to_epoch: 10,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
                 created_at: TS.to_string(),
             },
             TS,
@@ -10796,7 +11405,7 @@ mod tests {
         assert!(late_promise.height > early_promise.height);
         assert!(early_promise.bond > late_promise.bond);
 
-        let epoch = 4;
+        let epoch = epoch_after_log(&node);
         for (who, held) in [(&early, &early_promise), (&late, &late_promise)] {
             node.post_availability(&honest_answer(&node, held, epoch, who), TS)
                 .expect("answer");
@@ -10837,6 +11446,190 @@ mod tests {
         assert_eq!(node.audit(false), Vec::<String>::new());
     }
 
+    #[test]
+    fn undertaking_admitted_after_the_epoch_boundary_cannot_earn() {
+        let dir = TempDir::new("availability-late-promise");
+        let mut node = node(&dir);
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 90,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+        let early = crate::crypto::identity::Identity::from_secret_bytes([41u8; 32]);
+        let late = crate::crypto::identity::Identity::from_secret_bytes([42u8; 32]);
+        let early_promise = promise(&mut node, &early, 1_000);
+        assert!(fund(&mut node, &late, 1_000), "fund late identity");
+        let epoch = epoch_after_log(&node);
+
+        node.post_availability(&honest_answer(&node, &early_promise, epoch, &early), TS)
+            .expect("early answer");
+
+        // The promise is genuinely admitted in the target epoch. An answer can
+        // be a valid proof, but it cannot turn a promise made after the draw
+        // was fixed into eligible work.
+        let late_seconds = epoch
+            .checked_mul(partition::EPOCH_SECONDS)
+            .and_then(|seconds| i64::try_from(seconds).ok())
+            .expect("fixture epoch fits an RFC3339 timestamp");
+        let late_ts = crate::time::format_iso8601_utc(late_seconds);
+        let height = node.ledger().len() as u64;
+        let root = node.ledger().root().expect("root");
+        let late_promise = Undertaking::new(late.submitter_id(), &root, height, 1_000, &late_ts)
+            .signed_with(&late);
+        node.post_undertaking(&late_promise, &late_ts)
+            .expect("late promise is structurally valid");
+        let admitted_epoch = node
+            .ledger()
+            .entries_of_kind(UNDERTAKING)
+            .last()
+            .and_then(|entry| crate::time::parse_rfc3339(&entry.ts))
+            .filter(|seconds| *seconds >= 0)
+            .map(|seconds| epoch_of(seconds as u64, partition::EPOCH_SECONDS));
+        assert_eq!(admitted_epoch, Some(epoch), "late fixture is not late");
+        node.post_availability(&honest_answer(&node, &late_promise, epoch, &late), TS)
+            .expect("late answer is a valid proof");
+
+        let outcome = node
+            .settle_availability(epoch, TS)
+            .expect("settles")
+            .expect("early promise is eligible");
+        assert_eq!(outcome.answered, 1);
+        let paid = availability_payouts(&node);
+        assert_eq!(paid.get(&early.submitter_id()), Some(&90));
+        assert!(!paid.contains_key(&late.submitter_id()));
+        assert_eq!(node.audit(false), Vec::<String>::new());
+    }
+
+    #[test]
+    fn availability_bond_weights_do_not_saturate_at_u64() {
+        let dir = TempDir::new("availability-u128-weight");
+        let mut node = node(&dir);
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 300,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+        let doubled = crate::crypto::identity::Identity::from_secret_bytes([43u8; 32]);
+        let single = crate::crypto::identity::Identity::from_secret_bytes([44u8; 32]);
+        let mut credit = |who: &str, tag: &str| {
+            node.append(
+                SETTLEMENT,
+                Value::object([
+                    ("claim_id", Value::string(format!("claim-{tag}"))),
+                    ("objective_id", Value::string(format!("objective-{tag}"))),
+                    ("submitter", Value::string(who)),
+                    ("reward", Value::Int(i128::from(u64::MAX))),
+                ]),
+                TS,
+            )
+            .expect("synthetic balance for arithmetic regression");
+        };
+        credit(&doubled.submitter_id(), "double-a");
+        credit(&doubled.submitter_id(), "double-b");
+        credit(&single.submitter_id(), "single");
+        let doubled_a = stake(&mut node, &doubled, u64::MAX);
+        let doubled_b = stake(&mut node, &doubled, u64::MAX);
+        let single_promise = stake(&mut node, &single, u64::MAX);
+        let epoch = epoch_after_log(&node);
+        for (who, held) in [
+            (&doubled, &doubled_a),
+            (&doubled, &doubled_b),
+            (&single, &single_promise),
+        ] {
+            node.post_availability(&honest_answer(&node, held, epoch, who), TS)
+                .expect("answer");
+        }
+        node.settle_availability(epoch, TS)
+            .expect("settles")
+            .expect("work exists");
+
+        let paid = availability_payouts(&node);
+        assert_eq!(paid.get(&doubled.submitter_id()), Some(&200));
+        assert_eq!(paid.get(&single.submitter_id()), Some(&100));
+        let doubled_weight = node
+            .ledger()
+            .entries_of_kind(AVAILABILITY_SETTLEMENT)
+            .first()
+            .and_then(|entry| entry.payload.get("paid"))
+            .and_then(Value::as_array)
+            .and_then(|rows| {
+                rows.iter().find(|row| {
+                    payload_str(row, "identity") == Some(doubled.submitter_id().as_str())
+                })
+            })
+            .and_then(|row| row.get("weight"))
+            .and_then(Value::as_i128)
+            .expect("u128-range weight is recorded exactly");
+        assert_eq!(doubled_weight, i128::from(u64::MAX) * 2);
+    }
+
+    #[test]
+    fn audit_reconstructs_exact_availability_allocations() {
+        let dir = TempDir::new("availability-exact-audit");
+        let mut node = node(&dir);
+        node.post_availability_pool(
+            &AvailabilityPool {
+                funder: "treasury".to_string(),
+                per_epoch: 90,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
+                created_at: TS.to_string(),
+            },
+            TS,
+        )
+        .expect("pool");
+        let who = crate::crypto::identity::Identity::from_secret_bytes([45u8; 32]);
+        let held = promise(&mut node, &who, 1_000);
+        let epoch = epoch_after_log(&node);
+        node.post_availability(&honest_answer(&node, &held, epoch, &who), TS)
+            .expect("answer");
+        let Some((mut forged, _)) = node
+            .availability_settlement_at(epoch, node.ledger().len())
+            .expect("reconstruct")
+        else {
+            panic!("eligible work exists")
+        };
+        let Value::Object(fields) = &mut forged else {
+            panic!("settlement is an object")
+        };
+        let Some(Value::Array(rows)) = fields.get_mut("paid") else {
+            panic!("paid rows exist")
+        };
+        let Some(Value::Object(row)) = rows.first_mut() else {
+            panic!("one paid row exists")
+        };
+        row.insert("reward".to_string(), Value::Int(89));
+        fields.insert("unpaid".to_string(), Value::Int(1));
+        node.append(AVAILABILITY_SETTLEMENT, forged, TS)
+            .expect("append forged settlement");
+
+        let problems = node.audit(false);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("deterministic reconstruction")),
+            "a wrong recipient allocation with correct totals passed: {problems:?}"
+        );
+        assert!(
+            !problems
+                .iter()
+                .any(|problem| problem.contains("accounts for")),
+            "the fixture must preserve totals so only exact reconstruction catches it"
+        );
+    }
+
     /// Splitting one balance across two promises earns what one promise of the
     /// whole balance earns.
     ///
@@ -10858,8 +11651,8 @@ mod tests {
             &AvailabilityPool {
                 funder: "treasury".to_string(),
                 per_epoch: 100,
-                from_epoch: 0,
-                to_epoch: 10,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
                 created_at: TS.to_string(),
             },
             TS,
@@ -10896,7 +11689,7 @@ mod tests {
             "a third promise was free, so the split was never bounded by anything"
         );
 
-        let epoch = 2;
+        let epoch = epoch_after_log(&node);
         for (who, held) in [
             (&plain, &plain_promise),
             (&greedy, &first),
@@ -10987,8 +11780,8 @@ mod tests {
             &AvailabilityPool {
                 funder: "treasury".to_string(),
                 per_epoch: 32_000,
-                from_epoch: 0,
-                to_epoch: 1_000,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
                 created_at: TS.to_string(),
             },
             TS,
@@ -11009,7 +11802,7 @@ mod tests {
             })
             .collect();
 
-        let epoch = 4;
+        let epoch = epoch_after_log(&node);
         node.post_availability(&honest_answer(&node, &honest_promise, epoch, &honest), TS)
             .expect("answer");
         for (who, held) in &attackers {
@@ -11044,21 +11837,21 @@ mod tests {
             &AvailabilityPool {
                 funder: "treasury".to_string(),
                 per_epoch: 7,
-                from_epoch: 0,
-                to_epoch: 0,
+                from_epoch: epoch_at(0),
+                to_epoch: epoch_at(10_000 * EPOCH),
                 created_at: TS.to_string(),
             },
             TS,
         )
         .expect("pool");
 
-        let epoch = 0;
         let mut held = Vec::new();
         for i in 0..3u8 {
             let who = crate::crypto::identity::Identity::from_secret_bytes([30 + i; 32]);
             let promise = promise(&mut node, &who, 1_000);
             held.push((who, promise));
         }
+        let epoch = epoch_after_log(&node);
         for (who, promise) in &held {
             node.post_availability(&honest_answer(&node, promise, epoch, who), TS)
                 .expect("answer");
@@ -11376,6 +12169,175 @@ mod tests {
             matches!(second, RuleViolation::DuplicateBeacon { epoch } if epoch == orders),
             "{second}"
         );
+    }
+
+    /// The round `epoch_at(EPOCH)` names, and quicknet's real signature over
+    /// it, fetched from two independent relays.
+    ///
+    /// A fixture rather than a synthetic value because the pairing is the whole
+    /// point: a made-up 96 hex characters exercises the shape check and nothing
+    /// else, and the shape check is the part that was already easy.
+    const DRAND_ROUND: u64 = 30_798_012;
+    const DRAND_SIGNATURE: &str = "90973449df156e156dc8c702aa397ebe24ab3ba4f0d7f46e921ba6ab906bc07515977132dc109498c6adebe27cde6fb5";
+    /// The *next* round's signature: a real point, a real threshold signature,
+    /// over the wrong message. The case no amount of shape checking catches.
+    const DRAND_NEXT_SIGNATURE: &str = "b7abb7a37451334949ab825934753d4b497b3cb83f4ba2c949f739027a76402266dea97c91782dff87cafd8609048026";
+
+    /// The round the test fixtures assume, checked rather than trusted.
+    fn drand_round_of_the_fixture_epoch() -> u64 {
+        let names = drand::round_for_epoch(epoch_at(EPOCH), epoch_seconds());
+        assert_eq!(
+            names, DRAND_ROUND,
+            "the signature fixtures are round {DRAND_ROUND}'s. BASE or EPOCH_SECONDS \
+             moved, so fetch round {names} from a drand relay and replace them"
+        );
+        names
+    }
+
+    #[test]
+    fn a_drand_beacon_does_not_choose_its_own_round() {
+        let dir = TempDir::new("beacon-drand-round");
+        let mut picky = node(&dir);
+        let orders = epoch_at(EPOCH);
+        let names = drand_round_of_the_fixture_epoch();
+
+        let wrong = picky
+            .record_beacon(
+                orders,
+                drand::SOURCE,
+                names + 1,
+                DRAND_SIGNATURE,
+                &stamp(EPOCH),
+            )
+            .expect_err("a drand beacon that names its own round");
+        assert!(
+            matches!(wrong, RuleViolation::BeaconRoundMismatch { orders: o, block, expected }
+                if o == orders && block == names + 1 && expected == names),
+            "{wrong}"
+        );
+
+        // Some other source is not checked, because this module cannot know
+        // what an `ethereum` block number is supposed to be. Named here so that
+        // a later change tightening drand does not tighten everything.
+        picky
+            .record_beacon(orders, "ethereum", names + 1, "aa", &stamp(EPOCH))
+            .expect("a non-drand beacon names whatever it likes");
+
+        let ok_dir = TempDir::new("beacon-drand-round-ok");
+        let mut ok = node(&ok_dir);
+        ok.record_beacon(orders, drand::SOURCE, names, DRAND_SIGNATURE, &stamp(EPOCH))
+            .expect("the round the epoch names, with that round's signature");
+        assert_eq!(ok.anchor_of_epoch(orders), DRAND_SIGNATURE);
+    }
+
+    #[test]
+    fn a_drand_beacon_must_carry_that_rounds_signature() {
+        let dir = TempDir::new("beacon-drand-signature");
+        let mut node = node(&dir);
+        let orders = epoch_at(EPOCH);
+        let names = drand_round_of_the_fixture_epoch();
+
+        // The attack this check exists for, and the reason a shape check was
+        // never enough: a *real* signature, by the real drand group, over a
+        // round one later. Everything about it is well-formed. It is simply not
+        // the value this epoch is entitled to, and an operator who could choose
+        // between adjacent rounds could choose the settlement order.
+        let borrowed = node
+            .record_beacon(
+                orders,
+                drand::SOURCE,
+                names,
+                DRAND_NEXT_SIGNATURE,
+                &stamp(EPOCH),
+            )
+            .expect_err("another round's signature");
+        assert!(
+            matches!(borrowed, RuleViolation::BeaconSignatureInvalid { round, why, .. }
+                if round == names && why == drand::VerifyError::DoesNotVerify),
+            "{borrowed}"
+        );
+
+        // And the paste that started all this: drand's `randomness` field,
+        // which is SHA-256 of the signature and proves nothing.
+        let hashed = node
+            .record_beacon(orders, drand::SOURCE, names, &"b".repeat(64), &stamp(EPOCH))
+            .expect_err("the randomness field");
+        assert!(
+            matches!(hashed, RuleViolation::BeaconSignatureInvalid { why, .. }
+                if why == drand::VerifyError::NotSignatureShaped),
+            "{hashed}"
+        );
+
+        node.record_beacon(orders, drand::SOURCE, names, DRAND_SIGNATURE, &stamp(EPOCH))
+            .expect("the round's own signature");
+    }
+
+    #[test]
+    fn a_hand_written_drand_beacon_is_caught_by_the_audit() {
+        // The same attack shape as the back-dated beacon below: `record_beacon`
+        // refuses it, so a sequencer appends straight to the ledger. Every
+        // fault is re-derived at read time from the log alone -- which is the
+        // only reason to prefer this source over an Ethereum block.
+        let dir = TempDir::new("beacon-drand-audit");
+        let mut misround = node(&dir);
+        let orders = epoch_at(EPOCH);
+        let names = drand_round_of_the_fixture_epoch();
+
+        let beacon = |block: u64, value: &str| {
+            Value::object([
+                ("orders", Value::Int(i128::from(orders))),
+                ("source", Value::string(drand::SOURCE)),
+                ("block", Value::Int(i128::from(block))),
+                ("value", Value::string(value)),
+            ])
+        };
+
+        // A genuine round, correctly signed, recorded against an epoch that
+        // does not name it. The signature check passes and the derivation is
+        // what catches it, which is why both exist.
+        misround
+            .ledger_mut()
+            .append(
+                BEACON,
+                beacon(DRAND_ROUND + 1, DRAND_NEXT_SIGNATURE),
+                &stamp(EPOCH),
+            )
+            .expect("append");
+        let problems: Vec<String> = misround.audit(false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains(&format!("names round {names}")),
+            "{problems:?}"
+        );
+
+        // The other half: a value that is not a signature at all. The round is
+        // right, so only the pairing has anything to say.
+        let paste_dir = TempDir::new("beacon-drand-randomness");
+        let mut paste = node(&paste_dir);
+        paste
+            .ledger_mut()
+            .append(BEACON, beacon(names, &"b".repeat(64)), &stamp(EPOCH))
+            .expect("append");
+        let problems: Vec<String> = paste.audit(false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("does not carry round"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_well_formed_drand_beacon_audits_clean() {
+        let dir = TempDir::new("beacon-drand-clean");
+        let mut clean = node(&dir);
+        let orders = epoch_at(EPOCH);
+        clean
+            .record_beacon(
+                orders,
+                drand::SOURCE,
+                drand_round_of_the_fixture_epoch(),
+                DRAND_SIGNATURE,
+                &stamp(EPOCH),
+            )
+            .expect("record");
+        assert_eq!(clean.audit(false), Vec::<String>::new());
     }
 
     /// A delay beacon carries its own evidence, so nobody has to hold a chain

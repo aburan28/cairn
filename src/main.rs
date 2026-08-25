@@ -62,6 +62,7 @@ use std::env;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -69,6 +70,8 @@ use cairn::attribution::{payouts_with_enforced, FlowError, FlowParams};
 use cairn::canonical::{short, CanonicalError, Value};
 use cairn::checkpoint::{RootKey, SignedCheckpoint};
 use cairn::crypto::identity::Identity;
+use cairn::daemon::{self, Config as DaemonConfig};
+use cairn::drand;
 use cairn::frontier::Ratchet;
 use cairn::incentive::design::Report as IncentiveReport;
 use cairn::incentive::{sweep, NodeParams, ParamError, Rat};
@@ -261,6 +264,10 @@ enum CliError {
     /// against, so it is refused before any constructor gets to interpret it.
     Schema(SchemaError),
     Ledger(LedgerError),
+    /// The combined node could not start. This is separate from a refused
+    /// record: `run` has not opened a submission path yet, and a caller should
+    /// see a startup failure rather than a consensus refusal.
+    Daemon(String),
     Flow(FlowError),
     /// A payload already in the log cannot be read back. Distinct from
     /// [`CliError::Record`], which is about a file the user just supplied: this
@@ -300,6 +307,7 @@ impl fmt::Display for CliError {
             CliError::Record(source) => write!(f, "{source}"),
             CliError::Schema(source) => write!(f, "{source}"),
             CliError::Ledger(source) => write!(f, "{source}"),
+            CliError::Daemon(message) => write!(f, "node: {message}"),
             CliError::Flow(source) => write!(f, "{source}"),
             CliError::LogPayload { seq, reason } => write!(f, "log entry {seq}: {reason}"),
             CliError::Overflow(what) => {
@@ -452,6 +460,7 @@ fn read_passphrase_file(path: &str) -> Result<String, CliError> {
 enum Command {
     Post {
         objective: String,
+        identity: Option<String>,
     },
     /// Declare units into the log's supply. Genesis prefix only — see
     /// [`cairn::records::Issuance`].
@@ -503,6 +512,12 @@ enum Command {
     /// enforces the timing, and whoever supplies the value is responsible for
     /// it being the one the epoch boundary selects. See
     /// `docs/design/chain-beacon.md`.
+    ///
+    /// `--drand-signature` narrows *responsible for* to one thing. The chain is
+    /// pinned and the round is a function of the epoch, so the only input left
+    /// is the signature itself -- and unlike an Ethereum `--value`, a wrong one
+    /// is falsifiable by any reader holding 96 bytes of public key. See
+    /// `docs/design/drand-beacon.md`.
     Beacon {
         orders: u64,
         source: String,
@@ -511,6 +526,35 @@ enum Command {
         /// Compute the value as a verifiable delay of this many sequential
         /// squarings, rather than taking it from the caller.
         delay: Option<u64>,
+    },
+    /// Which drand round an epoch is settled against, and when it publishes.
+    ///
+    /// A query, so it is not `beacon --show-round`: that would be an append
+    /// command with a mode in which it appends nothing, and the two have
+    /// different failure modes and different exit codes.
+    ///
+    /// It exists for `scripts/drand-beacon.sh`. The script has to fetch the
+    /// round the log will later say it fetched, and the alternative was for it
+    /// to re-derive the mapping in bash -- a third implementation of a
+    /// consensus-visible derivation, living in a helper, silently producing an
+    /// unverifiable record on any disagreement. Asking the binary is cheaper
+    /// than making that correct.
+    DrandRound {
+        orders: Option<u64>,
+    },
+    /// Check a quicknet signature against the pinned key, and nothing else.
+    ///
+    /// Two audiences. An operator handed a beacon value can confirm it without
+    /// trusting the node that wrote it or the relay that served it — the whole
+    /// selling point of this source, reduced to one command. And
+    /// `scripts/differential.sh` can put the same signature in front of both
+    /// implementations and require the same verdict, which is the only way the
+    /// claim that two different BLS libraries agree is worth anything.
+    ///
+    /// Exit 0 for verified, 1 for anything else, so a shell can branch on it.
+    DrandVerify {
+        round: u64,
+        signature: String,
     },
     /// Sign the log's current state so a reader can pin what this operator
     /// claimed at a point in time.
@@ -661,6 +705,11 @@ enum Command {
         /// payout rather than a "settles when epoch N closes".
         settle: bool,
     },
+    /// Start the local node: P2P synchronization, HTTP publishing, and the
+    /// embedded reader, all against one exclusive ledger.
+    Run {
+        request: RunRequest,
+    },
     /// Score candidate artifacts locally and submit only the ones that already
     /// pass. The proposer loop.
     Propose {
@@ -728,6 +777,27 @@ enum Command {
     },
     Log,
     Help,
+}
+
+/// Configuration for `cairn run`.
+///
+/// The command deliberately has useful local defaults. The release binary is
+/// the thing an operator downloads, so asking them to copy the `cairn-p2p`
+/// command's seven paths before seeing a page is the wrong first-run shape.
+/// The advanced flags remain available for a public node or an existing store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunRequest {
+    identity: Option<String>,
+    root_key: Option<String>,
+    checkpoint: Option<String>,
+    listen: String,
+    serve: String,
+    queue: Option<String>,
+    no_queue: bool,
+    population: Option<String>,
+    bootstrap: Vec<String>,
+    fanout: Option<usize>,
+    max_queue: Option<usize>,
 }
 
 /// How a sweep's table is written.
@@ -1160,6 +1230,8 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             Command::Settle
         }
         "beacon" => parse_beacon(&mut cursor)?,
+        "drand-round" => parse_drand_round(&mut cursor)?,
+        "drand-verify" => parse_drand_verify(&mut cursor)?,
         "checkpoint" => parse_checkpoint(&mut cursor)?,
         "drain" => parse_drain(&mut cursor)?,
         "audit" => parse_audit(&mut cursor)?,
@@ -1177,6 +1249,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "incentives" => parse_incentives(&mut cursor)?,
         "scaffold" => parse_scaffold(&mut cursor)?,
         "try" => parse_try(&mut cursor)?,
+        "run" => parse_run(&mut cursor)?,
         "canon" => {
             let mut input: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1253,6 +1326,74 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
     Ok(Invocation { options, command })
 }
 
+/// Parse `run`'s node-specific flags.
+///
+/// The global `--log`, `--root`, `--data-dir`, and key flags still belong
+/// before the command, like every other CLI command. These flags describe the
+/// daemon's two listeners and its local peer configuration, so keeping them
+/// here avoids making the ordinary read-only commands carry daemon concepts.
+fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut request = RunRequest {
+        identity: None,
+        root_key: None,
+        checkpoint: None,
+        listen: String::from("127.0.0.1:9000"),
+        serve: String::from("127.0.0.1:8080"),
+        queue: None,
+        no_queue: false,
+        population: None,
+        bootstrap: Vec::new(),
+        fanout: None,
+        max_queue: None,
+    };
+
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--identity" => request.identity = Some(cursor.value("run: --identity")?),
+            "--root-key" => request.root_key = Some(cursor.value("run: --root-key")?),
+            "--checkpoint" => request.checkpoint = Some(cursor.value("run: --checkpoint")?),
+            "--listen" => request.listen = cursor.value("run: --listen")?,
+            "--serve" | "--http" => request.serve = cursor.value("run: --serve")?,
+            "--queue" => {
+                request.queue = Some(cursor.value("run: --queue")?);
+                request.no_queue = false;
+            }
+            "--no-queue" => {
+                request.no_queue = true;
+                request.queue = None;
+            }
+            "--population" => request.population = Some(cursor.value("run: --population")?),
+            "--bootstrap" => request.bootstrap.push(cursor.value("run: --bootstrap")?),
+            "--fanout" => {
+                let raw = cursor.value("run: --fanout")?;
+                request.fanout = Some(raw.parse::<usize>().map_err(|_| {
+                    CliError::Usage(String::from("run: --fanout needs a positive integer"))
+                })?);
+                if request.fanout == Some(0) {
+                    return Err(CliError::Usage(String::from(
+                        "run: --fanout needs a positive integer",
+                    )));
+                }
+            }
+            "--max-queue" => {
+                let raw = cursor.value("run: --max-queue")?;
+                request.max_queue = Some(raw.parse::<usize>().map_err(|_| {
+                    CliError::Usage(String::from("run: --max-queue needs a positive integer"))
+                })?);
+                if request.max_queue == Some(0) {
+                    return Err(CliError::Usage(String::from(
+                        "run: --max-queue needs a positive integer",
+                    )));
+                }
+            }
+            "--help" | "-h" => return Ok(Command::Help),
+            other => return Err(CliError::Usage(format!("run: unknown option {other:?}"))),
+        }
+    }
+
+    Ok(Command::Run { request })
+}
+
 /// `issue --holder <name> --units <n>`.
 ///
 /// Deliberately not `--signed-by`: a supply is authorised by its *position* in
@@ -1281,19 +1422,23 @@ fn parse_issue(cursor: &mut Cursor) -> Result<Command, CliError> {
 
 fn parse_post(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut objective: Option<String> = None;
+    let mut identity: Option<String> = None;
     while let Some(token) = cursor.take() {
-        if is_flag(&token) {
+        if token == "--identity" {
+            identity = Some(cursor.value("post: --identity")?);
+        } else if is_flag(&token) {
             return Err(CliError::Usage(format!("post: unknown option {token:?}")));
-        }
-        if objective.is_some() {
+        } else if objective.is_some() {
             return Err(CliError::Usage(format!(
                 "post: unexpected argument {token:?}"
             )));
+        } else {
+            objective = Some(token);
         }
-        objective = Some(token);
     }
     Ok(Command::Post {
         objective: require(objective, "post", "an objective JSON file")?,
+        identity,
     })
 }
 
@@ -1481,19 +1626,28 @@ fn parse_drain(cursor: &mut Cursor) -> Result<Command, CliError> {
     })
 }
 
-/// `beacon --orders N --value HEX [--source NAME] [--block N]`
+/// `beacon --orders N (--drand-signature HEX | --value HEX [--source NAME] [--block N])`
 ///
 /// `--orders` is required rather than defaulted to the current epoch. The
 /// default would be right almost always and catastrophically wrong at a
 /// boundary -- a command run a second late would name the next epoch, be
 /// refused as out of time, and leave the epoch it meant to cover on the
 /// fallback. An operator scripting this knows which epoch they mean.
+///
+/// `--drand-signature` is one flag rather than a `--drand` mode plus a value,
+/// because there is nothing else to configure: the chain is pinned in
+/// [`drand`], the round is a function of `--orders`, and the signature is the
+/// only thing an operator can supply that this binary cannot derive. It fills
+/// in `--source`, `--block` and `--value` and **refuses** them rather than
+/// overriding them, since a command that quietly won an argument about which
+/// round governs an epoch is worse than one that stops.
 fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut orders: Option<u64> = None;
     let mut source: Option<String> = None;
     let mut block: Option<u64> = None;
     let mut value: Option<String> = None;
     let mut delay: Option<u64> = None;
+    let mut drand_signature: Option<String> = None;
     while let Some(token) = cursor.take() {
         if token == "--orders" {
             orders = Some(parse_u64(&cursor.value("--orders")?, "--orders")?);
@@ -1505,9 +1659,56 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
             value = Some(cursor.value("--value")?);
         } else if token == "--delay" {
             delay = Some(parse_u64(&cursor.value("--delay")?, "--delay")?);
+        } else if token == "--drand-signature" {
+            drand_signature = Some(cursor.value("--drand-signature")?);
         } else {
             return Err(CliError::Usage(format!("beacon: unexpected {token:?}")));
         }
+    }
+    let orders = match orders {
+        Some(orders) => orders,
+        None => return Err(CliError::Usage("beacon: --orders is required".into())),
+    };
+    // The two self-verifying sources, offered at once. Refused rather than
+    // ranked: an epoch gets one beacon, and a command that silently preferred
+    // one of two proofs would be choosing the settlement anchor on the
+    // operator's behalf.
+    if delay.is_some() && drand_signature.is_some() {
+        return Err(CliError::Usage(String::from(
+            "beacon: --delay and --drand-signature are two beacons for one epoch, \
+             and an epoch gets one",
+        )));
+    }
+    if let Some(signature) = drand_signature {
+        if source.is_some() || block.is_some() || value.is_some() {
+            return Err(CliError::Usage(
+                "beacon: --drand-signature derives --source, --block and --value; passing \
+                 one of them too would be asking which of the two answers about this \
+                 epoch's round is the real one"
+                    .into(),
+            ));
+        }
+        // Refused here as well as by `record_beacon`, because the useful
+        // error for the mistake people actually make is this one. 64 hex
+        // characters is drand's `randomness` field -- SHA-256 of the
+        // signature, and therefore a hash of the evidence rather than the
+        // evidence. "Does not verify" would describe that correctly and
+        // unhelpfully.
+        if !drand::is_signature_shaped(&signature) {
+            return Err(CliError::Usage(format!(
+                "beacon: --drand-signature takes the 96-hex-character `signature` field \
+                 of a quicknet round, and this is {} characters -- drand's `randomness` \
+                 field is 64 and is a hash of the evidence rather than the evidence",
+                signature.len()
+            )));
+        }
+        return Ok(Command::Beacon {
+            orders,
+            source: drand::SOURCE.into(),
+            block: drand::round_for_epoch(orders, cairn::partition::epoch_seconds()),
+            value: signature,
+            delay: None,
+        });
     }
     if delay.is_some() && value.is_some() {
         return Err(CliError::Usage(String::from(
@@ -1515,10 +1716,7 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
         )));
     }
     Ok(Command::Beacon {
-        orders: match orders {
-            Some(orders) => orders,
-            None => return Err(CliError::Usage("beacon: --orders is required".into())),
-        },
+        orders,
         // Defaulted, because a beacon with no stated origin is still a beacon
         // the sequencer did not choose if it came from somewhere -- but an
         // unnamed one is unverifiable by anyone holding a chain, so the name
@@ -1536,6 +1734,50 @@ fn parse_beacon(cursor: &mut Cursor) -> Result<Command, CliError> {
             (None, value) => require(value, "beacon", "--value or --delay")?,
         },
         delay,
+    })
+}
+/// `drand-round [--orders N]`
+///
+/// `--orders` defaults to the current epoch here, and is required on `beacon`,
+/// and that is not an inconsistency: this command writes nothing. A query that
+/// names the wrong epoch prints a number; an append that names the wrong epoch
+/// is refused as out of time and leaves the epoch it meant to cover on the
+/// fallback.
+fn parse_drand_round(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut orders: Option<u64> = None;
+    while let Some(token) = cursor.take() {
+        if token == "--orders" {
+            orders = Some(parse_u64(&cursor.value("--orders")?, "--orders")?);
+        } else {
+            return Err(CliError::Usage(format!(
+                "drand-round: unexpected {token:?}"
+            )));
+        }
+    }
+    Ok(Command::DrandRound { orders })
+}
+
+/// `drand-verify --round N --signature HEX`
+fn parse_drand_verify(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut round: Option<u64> = None;
+    let mut signature: Option<String> = None;
+    while let Some(token) = cursor.take() {
+        if token == "--round" {
+            round = Some(parse_u64(&cursor.value("--round")?, "--round")?);
+        } else if token == "--signature" {
+            signature = Some(cursor.value("--signature")?);
+        } else {
+            return Err(CliError::Usage(format!(
+                "drand-verify: unexpected {token:?}"
+            )));
+        }
+    }
+    Ok(Command::DrandVerify {
+        round: match round {
+            Some(round) => round,
+            None => return Err(CliError::Usage("drand-verify: --round is required".into())),
+        },
+        signature: require(signature, "drand-verify", "--signature")?,
     })
 }
 
@@ -2835,7 +3077,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "usage: cairn [--log PATH] [--root PATH] <command>");
     say(out, "");
     say(out, "commands:");
-    say(out, "  post <objective.json>");
+    say(out, "  post <objective.json> [--identity <file>]");
     say(out, "      fund a checkable question");
     say(
         out,
@@ -2864,6 +3106,17 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  settle");
     say(out, "      pay out every reveal epoch that has closed");
+    say(out, "  drand-verify --round N --signature HEX");
+    say(
+        out,
+        "      does that signature carry that drand round? Exit 0 if it does.",
+    );
+    say(out, "  drand-round [--orders EPOCH]");
+    say(
+        out,
+        "      which drand round that epoch is settled against, and when it publishes",
+    );
+    say(out, "  beacon --orders EPOCH --drand-signature HEX");
     say(
         out,
         "  beacon --orders EPOCH --value HEX [--source NAME] [--block N]",
@@ -2871,6 +3124,14 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      record the randomness that epoch's settlement is ordered against.",
+    );
+    say(
+        out,
+        "      --drand-signature derives the source, round and value from the epoch:",
+    );
+    say(
+        out,
+        "      the round is not a choice, and a wrong value is falsifiable by anyone",
     );
     say(
         out,
@@ -3114,6 +3375,22 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "  run [--listen HOST:PORT] [--serve HOST:PORT] [--bootstrap FILE ...]",
+    );
+    say(
+        out,
+        "      start P2P, HTTP, the submission queue, and the embedded UI in one node",
+    );
+    say(
+        out,
+        "      defaults: data in .local, P2P on 127.0.0.1:9000, HTTP on 127.0.0.1:8080",
+    );
+    say(
+        out,
+        "      use --no-queue for a read-only HTTP node; stop with Ctrl-C",
+    );
+    say(
+        out,
         "  scaffold <name> --kind <certificate|evaluator|statistical|replay|lean>",
     );
     say(
@@ -3236,6 +3513,108 @@ fn print_help(out: &mut dyn Write) {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// Start the combined local node used by `cairn run`.
+///
+/// This is intentionally a direct call into [`cairn::daemon::run`], not a
+/// child-process wrapper around `cairn-p2p`. The daemon owns the log's
+/// exclusive writer lock and the HTTP thread queues into the same process, so
+/// a submission accepted over HTTP can actually be admitted on the next tick.
+/// A wrapper would have to rediscover binary paths and would make the release's
+/// promise of one node process less clear.
+fn cmd_run(out: &mut dyn Write, options: &Options, request: &RunRequest) -> Result<i32, CliError> {
+    if !cfg!(feature = "ui") {
+        return Err(CliError::Usage(String::from(
+            "run requires the embedded UI; build with `make ui-build` or \
+             `cargo build --release --features ui`, then run the resulting binary",
+        )));
+    }
+
+    let data = options
+        .data
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".local"));
+    let store = Store::new(&data).with_limit(options.max_size);
+    store.prepare().map_err(CliError::Store)?;
+
+    let default_path = |name: &str| data.join(name);
+    let log = if options.log == DEFAULT_LOG
+        && env::var("CAIRN_LOG")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        store.log_path()
+    } else {
+        PathBuf::from(&options.log)
+    };
+    let identity = request
+        .identity
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_path("node.identity.json"));
+    let root_key = request
+        .root_key
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_path("root.key"));
+    let checkpoint = request
+        .checkpoint
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_path("checkpoint.json"));
+    let listen = request.listen.parse::<SocketAddr>().map_err(|_| {
+        CliError::Usage(format!(
+            "run: --listen needs host:port, got {:?}",
+            request.listen
+        ))
+    })?;
+    let serve = request.serve.parse::<SocketAddr>().map_err(|_| {
+        CliError::Usage(format!(
+            "run: --serve needs host:port, got {:?}",
+            request.serve
+        ))
+    })?;
+
+    let mut config = DaemonConfig::new(
+        identity,
+        root_key,
+        checkpoint,
+        listen,
+        log.clone(),
+        options.root.clone(),
+    );
+    config.serve = Some(serve.to_string());
+    config.key_file = options.key_file.as_ref().map(PathBuf::from);
+    config.population = request.population.as_ref().map(PathBuf::from);
+    config.bootstrap = request.bootstrap.iter().map(PathBuf::from).collect();
+    config.fanout = request
+        .fanout
+        .unwrap_or(cairn::p2p::service::DEFAULT_FANOUT);
+    config.max_queued = request
+        .max_queue
+        .unwrap_or(cairn::serve::DEFAULT_MAX_QUEUED);
+    if !request.no_queue {
+        config.queue = Some(
+            request
+                .queue
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| default_path("queue")),
+        );
+    }
+
+    say(out, "cairn node starting");
+    say(out, format!("  ui:   http://{serve}/ui/"));
+    say(out, format!("  http: {serve}"));
+    say(out, format!("  p2p:  {listen}"));
+    say(out, format!("  log:  {}", log.display()));
+    say(out, "  stop with Ctrl-C");
+
+    daemon::run(config).map_err(CliError::Daemon)?;
+    Ok(0)
+}
+
 /// Read a JSON file as a canonical value.
 ///
 /// Floats are refused here, at the boundary, rather than deeper in: a float
@@ -3252,8 +3631,13 @@ fn read_json(path: &str) -> Result<Value, CliError> {
     })
 }
 
-fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
-    post_objective_file(out, options, path)?;
+fn cmd_post(
+    out: &mut dyn Write,
+    options: &Options,
+    path: &str,
+    identity: Option<&str>,
+) -> Result<i32, CliError> {
+    post_objective_file(out, options, path, identity)?;
     Ok(0)
 }
 
@@ -3283,9 +3667,9 @@ fn decomposition_note(reward: u64) -> Vec<String> {
     if reward >= full {
         return Vec::new();
     }
-    let mut lines = vec![format!(
+    let mut lines = vec![String::from(
         "  note: below the decomposition floor -- this settlement does not pay \
-         for the verification it asks for"
+         for the verification it asks for",
     )];
     lines.push(format!(
         "    {} at full redundancy ({} nodes), {} at 3-fold sampling",
@@ -3437,6 +3821,7 @@ fn post_objective_file(
     out: &mut dyn Write,
     options: &Options,
     path: &str,
+    identity: Option<&str>,
 ) -> Result<String, CliError> {
     let mut node = open_node_for_writing(options)?;
     let data = read_json(path)?;
@@ -3447,6 +3832,10 @@ fn post_objective_file(
     // that `spec/objective.schema.json` would reject.
     validate_objective(&data).map_err(CliError::Schema)?;
     let objective = Objective::from_value(&data).map_err(CliError::Record)?;
+    let objective = match load_identity(identity)? {
+        Some(identity) => objective.funded_by(&identity),
+        None => objective,
+    };
     let id = post_objective(&mut node, &objective, &timestamp())?;
 
     // Field 2 of this line is the objective id, and `scripts/demo.sh` reads it
@@ -3927,6 +4316,45 @@ fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
     Ok(0)
 }
 
+/// Print the drand round an epoch is settled against.
+///
+/// Reads no log and writes nothing -- the mapping is arithmetic over pinned
+/// constants, which is the property that makes this source worth having, so a
+/// command that needed a node to answer would be misrepresenting it.
+fn cmd_drand_round(out: &mut dyn Write, orders: Option<u64>) -> Result<i32, CliError> {
+    let epoch = orders.unwrap_or_else(|| {
+        cairn::partition::epoch_of(
+            cairn::time::unix_seconds(),
+            cairn::partition::epoch_seconds(),
+        )
+    });
+    let round = drand::round_for_epoch(epoch, cairn::partition::epoch_seconds());
+    say(out, format!("epoch     {epoch}"));
+    say(out, format!("round     {round}"));
+    say(out, format!("publishes {}", drand::time_of_round(round)));
+    say(out, format!("chain     {}", drand::CHAIN_HASH));
+    Ok(0)
+}
+
+/// Verify one quicknet signature, against nothing but the pinned key.
+///
+/// No log, no network, no clock. If this command needed any of those, the claim
+/// it exists to demonstrate would be false.
+fn cmd_drand_verify(out: &mut dyn Write, round: u64, signature: &str) -> Result<i32, CliError> {
+    match drand::verify(round, signature) {
+        Ok(()) => {
+            say(out, format!("round {round}: verified"));
+            say(out, format!("  chain    {}", drand::CHAIN_HASH));
+            Ok(0)
+        }
+        Err(why) => {
+            say(out, format!("round {round}: does not verify"));
+            say(out, format!("  {why}"));
+            Ok(1)
+        }
+    }
+}
+
 /// Record one epoch's ordering randomness.
 ///
 /// Prints the epoch it covers and how the settlement order changed, because
@@ -3995,6 +4423,24 @@ fn cmd_beacon(
         out,
         format!("  anchor   {} -> {}", short(&before), short(&value)),
     );
+    if source == drand::SOURCE {
+        // Said out loud because the difference between this and every other
+        // source is exactly what an operator needs to know, and it is a claim
+        // they can check for themselves: the round was derived rather than
+        // chosen, and `record_beacon` would have refused this value if the
+        // pairing had not held.
+        say(
+            out,
+            format!(
+                "  round    {block} is the round epoch {orders} names; it was derived, not chosen"
+            ),
+        );
+        say(
+            out,
+            "  value    verified against the quicknet key pinned in src/drand.rs -- \
+             no chain, no relay, one pairing",
+        );
+    }
     Ok(0)
 }
 
@@ -5862,7 +6308,7 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
             say(out, "  already posted; using it");
             id
         } else {
-            post_objective_file(out, options, objective)?
+            post_objective_file(out, options, objective, None)?
         }
     };
 
@@ -7952,7 +8398,10 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             print_help(out);
             Ok(0)
         }
-        Command::Post { objective } => cmd_post(out, options, objective),
+        Command::Post {
+            objective,
+            identity,
+        } => cmd_post(out, options, objective, identity.as_deref()),
         Command::Issue { holder, units } => cmd_issue(out, options, holder, *units),
         Command::Balances => cmd_balances(out, options),
         Command::Commit {
@@ -7994,6 +8443,8 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             relations,
         ),
         Command::Settle => cmd_settle(out, options),
+        Command::DrandRound { orders } => cmd_drand_round(out, *orders),
+        Command::DrandVerify { round, signature } => cmd_drand_verify(out, *round, signature),
         Command::Beacon {
             orders,
             source,
@@ -8073,6 +8524,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
                 settle: *settle,
             },
         ),
+        Command::Run { request } => cmd_run(out, options, request),
         Command::Propose {
             objective,
             artifacts,
@@ -8570,7 +9022,7 @@ mod tests {
         let path = dir.join("objective.json");
         std::fs::write(&path, objective.canonical_string()).expect("write objective");
         let mut out: Vec<u8> = Vec::new();
-        cmd_post(&mut out, options, &path.display().to_string()).expect("post succeeds");
+        cmd_post(&mut out, options, &path.display().to_string(), None).expect("post succeeds");
         String::from_utf8(out).expect("utf-8")
     }
 
@@ -9938,6 +10390,48 @@ mod tests {
             let parsed = parse(argv(&spelling)).expect("parses");
             assert_eq!(parsed.command, Command::Help, "for {spelling:?}");
         }
+    }
+
+    #[test]
+    fn run_has_local_node_defaults_and_accepts_network_overrides() {
+        let parsed = parse(argv(&["run"])).expect("the one-command launcher parses");
+        match parsed.command {
+            Command::Run { request } => {
+                assert_eq!(request.listen, "127.0.0.1:9000");
+                assert_eq!(request.serve, "127.0.0.1:8080");
+                assert!(!request.no_queue);
+                assert!(
+                    request.queue.is_none(),
+                    "the data-dir default is resolved at run time"
+                );
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
+
+        let parsed = parse(argv(&[
+            "run",
+            "--listen",
+            "0.0.0.0:9000",
+            "--http",
+            "0.0.0.0:8080",
+            "--bootstrap",
+            "seed.json",
+            "--no-queue",
+        ]))
+        .expect("run overrides parse");
+        match parsed.command {
+            Command::Run { request } => {
+                assert_eq!(request.listen, "0.0.0.0:9000");
+                assert_eq!(request.serve, "0.0.0.0:8080");
+                assert_eq!(request.bootstrap, vec![String::from("seed.json")]);
+                assert!(request.no_queue);
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
+
+        assert!(parse(argv(&["run", "--fanout", "0"])).is_err());
+        assert!(parse(argv(&["run", "--max-queue", "nope"])).is_err());
+        assert!(parse(argv(&["run", "--wat"])).is_err());
     }
 
     #[test]

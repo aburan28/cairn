@@ -296,14 +296,19 @@ fn sybil_history(seed: u64, keys: u64, per_key: u64) -> Split {
         crate::time::parse_rfc3339(&ts).unwrap_or(0) as u64,
         crate::partition::EPOCH_SECONDS,
     );
+    let first_paid_epoch = epoch + 1;
     let pool = crate::records::AvailabilityPool {
-        funder: "treasury".to_string(),
+        funder: arena.who("treasury"),
         per_epoch: 2_000,
-        from_epoch: epoch,
-        to_epoch: epoch + 16,
+        from_epoch: first_paid_epoch,
+        to_epoch: first_paid_epoch + 16,
         created_at: ts.clone(),
     };
     let _ = arena.node_mut().post_availability_pool(&pool, &ts);
+    // Eligibility is fixed at the epoch boundary. Promises and pools created
+    // during an epoch start earning only in a later one; otherwise a late,
+    // backdated promise could wait to learn that epoch's challenge.
+    arena.tick();
 
     let mut rounds = 0u128;
     for _ in 0..6 {
@@ -593,14 +598,16 @@ fn availability_run(seed: u64, sampled: bool) -> Run {
         crate::time::parse_rfc3339(&ts).unwrap_or(0) as u64,
         crate::partition::EPOCH_SECONDS,
     );
+    let first_paid_epoch = epoch + 1;
     let pool = crate::records::AvailabilityPool {
-        funder: "treasury".to_string(),
+        funder: arena.who("treasury"),
         per_epoch: 2_000,
-        from_epoch: epoch,
-        to_epoch: epoch + 8,
+        from_epoch: first_paid_epoch,
+        to_epoch: first_paid_epoch + 8,
         created_at: ts.clone(),
     };
     let _ = arena.node_mut().post_availability_pool(&pool, &ts);
+    arena.tick();
 
     for _ in 0..6 {
         // The holder keeps the log and can answer. The free-rider did not, and

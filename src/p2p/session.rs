@@ -131,8 +131,8 @@ fn receive_dht(connection: &mut Connection) -> Result<DhtMessage, SessionError> 
     Ok(message)
 }
 
-/// One protocol line. Inbound connections carry only a claimed initiator id,
-/// so the trace labels whether attribution is authenticated.
+/// One protocol line. The transport authenticates either direction before a
+/// connection reaches this function; the trace keeps that fact explicit.
 fn trace(connection: &Connection, dir: Dir, described: String) {
     log::debug!(
         target: "proofwork::p2p",
