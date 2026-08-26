@@ -20,6 +20,7 @@ top-level README.
 | example | verifier | reward | status | needs | worked artifact |
 |---|---|---|---|---|---|
 | [`reversible-adder`](reversible-adder/) | evaluator (minimize) + ratchet | 1000000 | **worked, and open** | python3 | `artifact-cuccaro.json`, `artifact-truncated.json` |
+| [`secp256k1-modadd`](secp256k1-modadd/) | evaluator (minimize) + ratchet | 1000000 | **worked, and open** | python3 | `artifacts/vbe-seed.json`, `artifacts/reused-ancillas.json` |
 | [`collatz`](collatz/) | certificate | 100000 | worked | python3 | `artifact.json` |
 | [`capset`](capset/) | evaluator | 250000 | worked | python3 | `artifact.json` |
 | [`capset_progressive`](capset_progressive/) | evaluator + ratchet | 1100000 | worked | python3 | `artifact-12/16/20.json` |
@@ -47,12 +48,20 @@ top-level README.
   honest nodes disagree about them by construction; `TIME_LIKE` in
   `src/verifiers/mod.rs` already refuses that class of claim. Read it before
   writing an objective about performance.
-- **`reversible-adder` is the one to read if you are judging the design.** It
-  is the only example whose score is *derived by simulating the artifact*
-  rather than read off a field the submitter filled in, which is what makes an
-  objective safe to fund. Compare it against `ecdsa-fail`, which has the same
-  shape and accepts declared numbers — one is a bounty, the other is a demo,
-  and the difference is the whole thesis.
+- **`reversible-adder` is the one to read if you are judging the design.** Its
+  score is *derived by simulating the artifact* rather than read off a field the
+  submitter filled in, which is what makes an objective safe to fund. Compare it
+  against `ecdsa-fail`, which has the same shape and accepts declared numbers —
+  one is a bounty, the other is a demo, and the difference is the whole thesis.
+- **[`secp256k1-modadd`](secp256k1-modadd/) is that same treatment carried one
+  step toward a real target.** Modular addition is the primitive that dominates
+  elliptic-curve point-add cost, and `P = 29 = 2⁵ − 2¹ − 1` is a pseudo-Mersenne
+  prime of the same shape as secp256k1's `p = 2²⁵⁶ − 2³² − 977`, so the
+  structure a construction exploits is the structure that matters there. It is
+  harder than the adder next door because the reduction is conditional and its
+  condition has to be uncomputed — the same obligation ecdsa.fail's
+  forward∘reverse check imposes. All 841 valid input pairs are simulated, so the
+  check is total.
 - **open bounty** — no known solution ships. Submitting requires actually
   solving the problem; scoring a candidate is still free.
 - Without a Lean toolchain the `lean` objective verifies as `unavailable` on

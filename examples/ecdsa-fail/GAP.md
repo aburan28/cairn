@@ -5,8 +5,11 @@
 > so anyone can type two small integers and clear it. For the same shape with a
 > verifier that *derives* the score by simulating the submitted circuit — which
 > is what makes an objective safe to fund — see
-> [`../reversible-adder/`](../reversible-adder/). Read the two side by side:
-> the difference is the entire thesis of this project.
+> [`../reversible-adder/`](../reversible-adder/), or
+> [`../secp256k1-modadd/`](../secp256k1-modadd/) for the same treatment applied
+> to modular addition, the primitive that dominates point-add cost. Read them
+> side by side with this one: the difference is the entire thesis of this
+> project.
 
 Honest inventory for the MVP in this directory. **Implemented** means the
 harness loop runs end-to-end on a local cairn log. **Design-only** means
@@ -74,6 +77,30 @@ minimize.
    Fixed for ratchet-aware improve checks so minimize objectives are not lied
    to in `score_candidate` text. No consensus / record-id changes.
 
+7. **A ratchet can strand its own pool, and used to do it silently.** Progress
+   is clamped to `baseline - target`, so once the frontier lands within
+   `min_improvement` of the target, the largest gain any further claim can
+   record is smaller than the gate — and *no* artifact at *any* score settles
+   against that objective again. It is reachable long before the target and
+   from a single claim: the live objective in this directory paid 4,955,310 of
+   5,000,000 on its first accepted submission and closed, stranding the rest.
+
+   The failure was invisible in two places, both now fixed. `score_candidate`
+   and the settlement note rendered `Ratchet::improves` as one bit, so a
+   *strictly better* score came back as "does not improve the frontier" —
+   telling a contributor holding a genuine advance to discard it. Both now use
+   `Ratchet::stall`, which separates a regression from better-but-clamped and
+   says when no larger improvement would help either. `frontier_status` reports
+   exhaustion rather than advertising a pool nothing can collect, and `post`
+   warns when `min_improvement` exceeds the whole span.
+
+   What is *not* fixed is the incentive shape: a funder still has to pick
+   `min_improvement` small enough not to strand the pool and large enough to
+   stop epsilon-farming, and `docs/design/workspace-benchmarks.md` notes the
+   same knob is the only thing standing between `workspace` and a
+   verification-cost denial of service. Those two pressures point opposite
+   ways. Naming that is threat-model work, not a message change.
+
 ## Smallest path chosen (this directory)
 
 | Deliverable | Status |
@@ -84,6 +111,7 @@ minimize.
 | Thin ecdsafail ↔ cairn adapter | implemented (`adapter.sh`, `score_to_artifact.py`) |
 | MCP wiring | natural: existing tools; `mcp-score.sh` smoke |
 | Pin real `benchmark.sh` / submit to api.ecdsa.fail from cairn | **not** implemented — blockers below |
+| Sub-problem with a *derived* score (`../secp256k1-modadd/`) | implemented |
 | Consensus / record schema changes | **out of scope** (deliberately untouched) |
 
 ## Blockers for a *real* ecdsa.fail submission from this harness
