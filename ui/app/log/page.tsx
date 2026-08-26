@@ -22,6 +22,7 @@ import {
 export default function Page() {
   const [base, setBase] = useState(NODE_URL);
   const [records, setRecords] = useState<LogRecord[] | null>(null);
+  const [problems, setProblems] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<string | null>(null);
@@ -32,11 +33,13 @@ export default function Page() {
     setError(null);
     try {
       const next = await fetchLog(url);
-      setRecords(next);
+      setRecords(next.records);
+      setProblems(next.problems);
       setFilter(null);
       setExpanded(null);
     } catch (cause) {
       setRecords(null);
+      setProblems([]);
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
@@ -91,7 +94,27 @@ export default function Page() {
         </div>
       )}
 
-      {records && records.length === 0 && (
+      {/* Reported, not thrown: one bad line used to blank the whole page,
+          which hid every good line and the fact that one was bad. */}
+      {problems.length > 0 && (
+        <div className="panel bad">
+          <b>
+            {problems.length} line{problems.length === 1 ? "" : "s"} could not
+            be read as a record
+          </b>
+          The rows below are the lines that could. <code>cairn audit</code>{" "}
+          reads the same file; run it to see what it makes of them.
+          <ul className="claims">
+            {problems.map((problem) => (
+              <li key={problem}>
+                <code className="dim">{problem}</code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {records && records.length === 0 && problems.length === 0 && (
         <p className="empty">This node&apos;s log is empty.</p>
       )}
 

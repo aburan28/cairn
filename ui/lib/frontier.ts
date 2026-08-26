@@ -16,6 +16,7 @@ import {
   short as shortId,
 } from "@/lib/objectives";
 import { type FrontierMove, buildMoves, fetchLog } from "@/lib/log";
+import { expectFields } from "@/lib/shape";
 
 export { short } from "@/lib/objectives";
 export type { FrontierMove };
@@ -79,7 +80,11 @@ export async function fetchObjective(
   if (!response.ok) {
     throw new NodeUnreachable(`${base}/objective/${id} answered ${response.status}.`);
   }
-  return (await response.json()) as ObjectiveResponse;
+  return expectFields<ObjectiveResponse>(
+    await response.json(),
+    ["id", "record"],
+    `${base}/objective/${id}`,
+  );
 }
 
 /**
@@ -94,10 +99,15 @@ export async function fetchObjective(
 export async function fetchMoves(
   objectiveId: string,
   base: string = NODE_URL,
-): Promise<FrontierMove[]> {
-  const records = await fetchLog(base);
-  return buildMoves(records, objectiveId);
+): Promise<MoveHistory> {
+  const { records, problems } = await fetchLog(base);
+  return { moves: buildMoves(records, objectiveId), problems };
 }
+
+/** The moves, and any log line that could not be read on the way to them.
+ *  Carried rather than dropped: a move history built from a log with a
+ *  corrupt line is a history with a hole in it, and the page must say so. */
+export type MoveHistory = { moves: FrontierMove[]; problems: string[] };
 
 /**
  * How far a ratchet has travelled from baseline to target, in [0, 1].

@@ -14,6 +14,8 @@
  * network never published.
  */
 
+import { expectFields } from "./shape";
+
 export type Peer = {
   /** ed25519 identity — this *is* the submitter name. */
   identity: string;
@@ -55,8 +57,12 @@ export async function fetchPeers(
   if (!response.ok) {
     throw new Error(`${base}/peers answered ${response.status}.`);
   }
-  const body = (await response.json()) as PeersResponse;
-  return { peers: body.peers ?? [], note: body.note ?? "" };
+  const body = expectFields<PeersResponse>(
+    await response.json(),
+    ["peers"],
+    `${base}/peers`,
+  );
+  return { peers: body.peers, note: body.note ?? "" };
 }
 
 /** A hash or key, short enough to scan a column of them. */

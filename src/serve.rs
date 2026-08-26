@@ -1016,6 +1016,10 @@ fn log(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
 /// Published because comparing chains is how two operators find *where* they
 /// diverged rather than only that they did — the head alone says a mismatch
 /// exists and nothing about which epoch caused it.
+///
+/// Also carries the ledger's `height` and `ledger_head`, which a checkpoint
+/// signs and the chain's `links` and `head` are not: see the comment at the
+/// body below.
 fn chain(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let node = match serving.node() {
         Ok(node) => node,
@@ -1026,9 +1030,24 @@ fn chain(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         .last()
         .map(|link| link.link.clone())
         .unwrap_or_default();
+    // The ledger's own height and head, alongside the epoch chain's. They are
+    // different units: `links` counts settled epochs and `head` is the last
+    // *link*, while a checkpoint (`GET /checkpoint`) signs the ledger's entry
+    // count and the last *entry's* hash -- exactly what `Checkpoint::from_ledger`
+    // reads. A reader comparing a checkpoint against this endpoint had only
+    // `links` to compare `height` with, and since a log always holds at least
+    // as many entries as batches, "the checkpoint is behind the head" could
+    // never be observed. Both come from state the node already loaded to fold
+    // the chain, so publishing them costs nothing.
+    let ledger = node.ledger();
     let body = Value::object([
         ("head", Value::string(head)),
         ("links", Value::Int(links.len() as i128)),
+        ("height", Value::Int(ledger.len() as i128)),
+        (
+            "ledger_head",
+            Value::string(ledger.head().unwrap_or_default()),
+        ),
         (
             "chain",
             Value::Array(
@@ -1056,7 +1075,10 @@ fn chain(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 "Derived from GET /log, not stored: each link is \
                  H({prev, epoch, sorted claim ids}). Two nodes that settled the same claims \
                  in the same epochs compute the same head. A head that differs from a peer's \
-                 means a fork -- compare link by link to find the epoch it started at.",
+                 means a fork -- compare link by link to find the epoch it started at. \
+                 `height` and `ledger_head` are the ledger's entry count and last entry \
+                 hash, the units a checkpoint signs; `links` and `head` are the epoch \
+                 chain's, and the two are not comparable.",
             ),
         ),
     ]);
@@ -1193,6 +1215,13 @@ fn escape(text: &str) -> String {
     out
 }
 
+/// Serve the signed checkpoint, or a 404 that says why there is none.
+///
+/// Both 404 bodies are `{"error": "…checkpoint…"}`, and the reader keys on
+/// exactly that (`classifyCheckpoint` in `ui/lib/checkpoint.ts`): a JSON
+/// `error` naming a checkpoint is this node saying it has none, which the
+/// page reports, while any other 404 -- a static host with no node behind it
+/// -- is nothing to say anything about. Reword the message and keep the word.
 fn checkpoint(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let Some(path) = &serving.checkpoint else {
         return json_error(
@@ -1543,6 +1572,81 @@ mod tests {
             body
         ));
         assert!(simple.starts_with("http/1.1 415"), "{simple}");
+    }
+
+    /// `GET /chain` publishes the ledger's height and head *beside* the epoch
+    /// chain's link count and head, in the units a checkpoint signs.
+    ///
+    /// The fixture is chosen so the two pairs differ: three entries, one of
+    /// them a batch, so `links` is 1 while `height` is 3, and `head` is a link
+    /// hash while `ledger_head` is an entry hash. A reader that compared a
+    /// checkpoint's `height` against `links` -- which is what the reader in
+    /// `ui/` did -- could never see a checkpoint fall behind, because a log
+    /// holds at least as many entries as batches.
+    #[test]
+    fn chain_publishes_the_ledger_height_and_head_in_the_units_a_checkpoint_signs() {
+        let dir = TempDir::new("chain-height");
+        let log = dir.path.join("log.jsonl");
+        let ts = "2026-01-01T00:00:00+00:00";
+        let last_entry_hash = {
+            let mut ledger = Ledger::open(&log).expect("ledger");
+            ledger
+                .append("note", Value::object([("n", Value::Int(1))]), ts)
+                .expect("append");
+            ledger
+                .append(
+                    "batch",
+                    Value::object([
+                        ("epoch", Value::Int(1)),
+                        ("anchor", Value::string("")),
+                        ("claims", Value::Array(vec![])),
+                    ]),
+                    ts,
+                )
+                .expect("append");
+            ledger
+                .append("note", Value::object([("n", Value::Int(2))]), ts)
+                .expect("append")
+                .hash
+                .clone()
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, ".");
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        socket
+            .write_all(b"GET /chain HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .expect("write");
+        let mut response = String::new();
+        let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("a body");
+        let chain = Value::from_json(body).expect("json");
+
+        assert_eq!(chain.get("links").and_then(Value::as_i128), Some(1));
+        assert_eq!(chain.get("height").and_then(Value::as_i128), Some(3));
+        assert_eq!(
+            chain.get("ledger_head").and_then(Value::as_str),
+            Some(last_entry_hash.as_str())
+        );
+        let head = chain.get("head").and_then(Value::as_str).expect("head");
+        assert!(
+            !head.is_empty(),
+            "one batch settled, so the chain has a head"
+        );
+        assert_ne!(
+            head, last_entry_hash,
+            "the chain head is a link hash and the ledger head is an entry hash; \
+             if these ever coincide the fixture proves nothing"
+        );
     }
 
     #[test]

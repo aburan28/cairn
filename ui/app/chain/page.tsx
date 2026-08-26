@@ -13,7 +13,7 @@ import {
 import {
   type CheckpointResponse,
   coversHead,
-  fetchCheckpoint,
+  readCheckpoint,
 } from "@/lib/checkpoint";
 
 /**
@@ -28,29 +28,35 @@ export default function Page() {
   const [base, setBase] = useState(NODE_URL);
   const [chain, setChain] = useState<Chain | null>(null);
   const [checkpoint, setCheckpoint] = useState<CheckpointResponse | null>(null);
+  const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async (url: string) => {
     setLoading(true);
     setError(null);
-    try {
-      // Both, and the checkpoint never fails the page: a node with no
-      // checkpoint is an ordinary state, so `fetchCheckpoint` resolves to null
-      // rather than turning "nobody has signed this yet" into an error.
-      const [next, signed] = await Promise.all([
-        fetchChain(url),
-        fetchCheckpoint(url),
-      ]);
-      setChain(next);
-      setCheckpoint(signed);
-    } catch (cause) {
-      setChain(null);
-      setCheckpoint(null);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
+    setCheckpointError(null);
+    // Two requests, and each fails on its own. They shared one `Promise.all`
+    // for a while, so a `/checkpoint` answer in the wrong shape blanked the
+    // chain as well -- the one thing this page is for, withheld over a panel
+    // it could have rendered without. `readCheckpoint` never throws: a node
+    // with no checkpoint is an ordinary state and says so below, and a node
+    // that answered wrongly gets its own red panel rather than the chain's.
+    const [next, answer] = await Promise.all([
+      fetchChain(url).then(
+        (chain) => ({ chain, error: null }),
+        (cause: unknown) => ({
+          chain: null,
+          error: cause instanceof Error ? cause.message : String(cause),
+        }),
+      ),
+      readCheckpoint(url),
+    ]);
+    setChain(next.chain);
+    setError(next.error);
+    setCheckpoint(answer.kind === "signed" ? answer.value : null);
+    setCheckpointError(answer.kind === "unreadable" ? answer.message : null);
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -99,6 +105,16 @@ export default function Page() {
         </div>
       )}
 
+      {/* Its own panel, and the chain below still renders: the node answered
+          `/checkpoint` with something that is not a checkpoint, which is a
+          bug on one side of the seam and not a reason to withhold the head. */}
+      {checkpointError && (
+        <div className="panel bad">
+          <b>could not read this node&apos;s checkpoint</b>
+          {checkpointError}
+        </div>
+      )}
+
       {chain && (
         <>
           <div className="panel">
@@ -107,18 +123,52 @@ export default function Page() {
           </div>
 
           {checkpoint && (
-            <div className="panel">
+            <div
+              className={
+                coversHead(checkpoint.checkpoint, chain.height) === "ahead"
+                  ? "panel bad"
+                  : "panel"
+              }
+            >
+              {/* `chain.height` — the ledger's entry count — and not
+                  `chain.links`. A checkpoint signs the entry count, and the
+                  two were compared for a while; since a log holds at least as
+                  many entries as batches, "behind" could never be seen. */}
               <b>
-                signed at height {checkpoint.checkpoint.height}
-                {coversHead(checkpoint.checkpoint, chain.links) === "behind" &&
-                  " — behind the head below, which is normal after further appends"}
+                signed at height {checkpoint.checkpoint.height} of{" "}
+                {chain.height} entries
+                {coversHead(checkpoint.checkpoint, chain.height) === "at" &&
+                  " — covers every entry this node serves"}
+                {coversHead(checkpoint.checkpoint, chain.height) === "behind" &&
+                  " — behind the log, which is normal after further appends"}
+                {coversHead(checkpoint.checkpoint, chain.height) === "ahead" &&
+                  " — more entries than this node now serves; the signed prefix is not this log"}
               </b>
               <div className="meta">
                 merkle root{" "}
                 <code className="dim" title={checkpoint.checkpoint.root}>
                   {short(checkpoint.checkpoint.root)}
                 </code>{" "}
+                · ledger head{" "}
+                <code className="dim" title={checkpoint.checkpoint.head}>
+                  {short(checkpoint.checkpoint.head)}
+                </code>
+                {checkpoint.checkpoint.head === chain.ledger_head
+                  ? " (this node's)"
+                  : coversHead(checkpoint.checkpoint, chain.height) === "at"
+                    ? " (differs from this node's, at the same height — not the same log)"
+                    : ""}{" "}
                 · issued {checkpoint.checkpoint.issued_at}
+              </div>
+              <div className="meta">
+                signed by{" "}
+                <code className="dim" title={checkpoint.public_key}>
+                  {short(checkpoint.public_key)}
+                </code>{" "}
+                <span className="dim">
+                  — the ML-DSA key, in full on hover. Whether that is the key you
+                  were told to expect is yours to check.
+                </span>
               </div>
               {/* Said plainly, because the alternative is a reader assuming the
                   green text means somebody checked. Verifying ML-DSA here would
@@ -206,7 +256,8 @@ export default function Page() {
 
           <p className="lede" style={{ marginTop: "2rem" }}>
             {chain.links} link(s) settling {claims} claim(s) in total, newest
-            first. Verify none of it on trust:{" "}
+            first, derived from a log of {chain.height} entries. Verify none of
+            it on trust:{" "}
             <code>cairn --log &lt;log&gt; --root . audit</code> re-derives
             the chain and checks every batch against the anchor it recorded.
           </p>

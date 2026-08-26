@@ -83,7 +83,7 @@ help:
 	  '                           From a checkout, run make ui-build first.' \
 	  '  make install             Install the released binaries from GitHub.' \
 	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
-	  '  make ui-check            Typecheck and build the UI, as CI does.' \
+	  '  make ui-check            Typecheck, test and build the UI, as CI does.' \
 	  '  make ui-build            Export the site and build it INTO the binaries.' \
 	  '  make site-snapshot       Regenerate the site fallback from launch/.' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
@@ -336,6 +336,7 @@ site-snapshot: build
 # nothing about whether the thing compiles.
 ui-check: $(ROOT)/ui/node_modules
 	cd "$(ROOT)/ui" && npx tsc --noEmit
+	cd "$(ROOT)/ui" && npm test
 	cd "$(ROOT)/ui" && npm run build
 
 # `--locked`, `fmt` and `clippy` here as well as on the primary: CI gates the

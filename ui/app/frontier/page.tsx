@@ -41,6 +41,7 @@ function FrontierPage() {
   const [base, setBase] = useState(NODE_URL);
   const [objective, setObjective] = useState<ObjectiveResponse | null>(null);
   const [moves, setMoves] = useState<FrontierMove[] | null>(null);
+  const [problems, setProblems] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -56,10 +57,12 @@ function FrontierPage() {
         fetchMoves(id, url),
       ]);
       setObjective(obj);
-      setMoves(history);
+      setMoves(history.moves);
+      setProblems(history.problems);
     } catch (cause) {
       setObjective(null);
       setMoves(null);
+      setProblems([]);
       if (cause instanceof ObjectiveNotFound) {
         setNotFound(true);
       } else {
@@ -126,6 +129,25 @@ function FrontierPage() {
         <div className="panel bad">
           <b>could not read this objective</b>
           {error}
+        </div>
+      )}
+
+      {problems.length > 0 && (
+        <div className="panel bad">
+          <b>
+            {problems.length} line{problems.length === 1 ? "" : "s"} of the log
+            could not be read as a record
+          </b>
+          The moves below were built from the lines that could; a move
+          recorded on one of these would be missing. <code>cairn audit</code>{" "}
+          reads the same file; run it to see what it makes of them.
+          <ul className="claims">
+            {problems.map((problem) => (
+              <li key={problem}>
+                <code className="dim">{problem}</code>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

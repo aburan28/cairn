@@ -300,6 +300,12 @@ jobs:
         working-directory: ui
       - run: npx tsc --noEmit
         working-directory: ui
+      # The pure functions in ui/lib: the chain check, the frontier join,
+      # NDJSON parsing, the checkpoint comparison. `tsc` and `next build`
+      # prove the reader compiles, and for a while that was all this job
+      # proved -- a checkpoint compared in the wrong units passed both.
+      - run: npm test
+        working-directory: ui
       - run: npm run build
         working-directory: ui
 

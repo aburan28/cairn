@@ -52,7 +52,8 @@ def get(path):
 
 objectives = get("/objectives")["objectives"]
 chain = get("/chain")
-checkpoint = json.load(open("launch/checkpoint.json"))["checkpoint"]
+signed = json.load(open("launch/checkpoint.json"))
+checkpoint = signed["checkpoint"]
 
 # Each objective's full record, for the statement and the ratchet a challenge
 # page shows. The listing deliberately truncates; this does not.
@@ -63,13 +64,38 @@ snapshot = {
     # Named so nothing downstream can render it as live by accident.
     "source": logpath,
     "generated_by": "scripts/site-snapshot.sh",
+    # The flat keys predate the two objects below and are kept for whoever
+    # still reads them; the site reads the objects. They are shaped like the
+    # endpoints they came from, so a page falling back from `/chain` to the
+    # snapshot handles one shape rather than two -- and so the ledger height
+    # a checkpoint signs sits beside the link count it must not be compared
+    # with, each under its own name.
     "merkle_root": checkpoint["root"],
     "head": checkpoint["head"],
     "height": checkpoint["height"],
     "issued_at": checkpoint["issued_at"],
     "links": chain["links"],
+    "chain": {
+        "head": chain["head"],
+        "links": chain["links"],
+        "height": chain["height"],
+        "ledger_head": chain["ledger_head"],
+    },
+    "checkpoint": {
+        "head": checkpoint["head"],
+        "height": checkpoint["height"],
+        "root": checkpoint["root"],
+        "issued_at": checkpoint["issued_at"],
+        "public_key": signed["public_key"],
+    },
     "objectives": objectives,
 }
+
+# The one thing worth asserting here: the log the checkpoint was signed over
+# is the log the node just served. A snapshot whose chain and checkpoint
+# disagreed would teach the landing page to show a mismatch as normal.
+assert chain["height"] == checkpoint["height"], (chain["height"], checkpoint["height"])
+assert chain["ledger_head"] == checkpoint["head"], (chain["ledger_head"], checkpoint["head"])
 with open(out, "w") as f:
     json.dump(snapshot, f, indent=2, sort_keys=True)
     f.write("\n")
