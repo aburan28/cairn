@@ -2581,11 +2581,9 @@ impl Node {
                 ));
                 continue;
             }
-            if let Err(error) = self.record_admission_epoch(
-                "committee_share",
-                &record.created_at,
-                &entry.ts,
-            ) {
+            if let Err(error) =
+                self.record_admission_epoch("committee_share", &record.created_at, &entry.ts)
+            {
                 problems.push(format!("entry {}: {error}", entry.seq));
                 continue;
             }
@@ -3078,10 +3076,10 @@ impl Node {
             if !seen_claims.insert(claim_id.clone()) {
                 continue;
             }
-            let declared_claim = unix_seconds(&claim.created_at)
-                .map(|seconds| epoch_of(seconds, epoch_seconds()));
-            let admitted_claim = unix_seconds(&entry.ts)
-                .map(|seconds| epoch_of(seconds, epoch_seconds()));
+            let declared_claim =
+                unix_seconds(&claim.created_at).map(|seconds| epoch_of(seconds, epoch_seconds()));
+            let admitted_claim =
+                unix_seconds(&entry.ts).map(|seconds| epoch_of(seconds, epoch_seconds()));
             let matching = self.matching_commitment(&claim);
             let sealed = matching
                 .as_ref()
@@ -4060,9 +4058,8 @@ mod tests {
             .expect("crafted claim with mismatched admission epoch");
         let problems = node.audit(false);
         assert!(
-            problems.iter().any(|problem| problem.contains(
-                "declared epoch disagrees with its ledger admission epoch"
-            )),
+            problems.iter().any(|problem| problem
+                .contains("declared epoch disagrees with its ledger admission epoch")),
             "audit missed the claim mismatch: {problems:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
