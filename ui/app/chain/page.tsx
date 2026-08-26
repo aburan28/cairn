@@ -13,7 +13,7 @@ import {
 import {
   type CheckpointResponse,
   coversHead,
-  fetchCheckpoint,
+  readCheckpoint,
 } from "@/lib/checkpoint";
 
 /**
@@ -28,29 +28,35 @@ export default function Page() {
   const [base, setBase] = useState(NODE_URL);
   const [chain, setChain] = useState<Chain | null>(null);
   const [checkpoint, setCheckpoint] = useState<CheckpointResponse | null>(null);
+  const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async (url: string) => {
     setLoading(true);
     setError(null);
-    try {
-      // Both, and the checkpoint never fails the page: a node with no
-      // checkpoint is an ordinary state, so `fetchCheckpoint` resolves to null
-      // rather than turning "nobody has signed this yet" into an error.
-      const [next, signed] = await Promise.all([
-        fetchChain(url),
-        fetchCheckpoint(url),
-      ]);
-      setChain(next);
-      setCheckpoint(signed);
-    } catch (cause) {
-      setChain(null);
-      setCheckpoint(null);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
+    setCheckpointError(null);
+    // Two requests, and each fails on its own. They shared one `Promise.all`
+    // for a while, so a `/checkpoint` answer in the wrong shape blanked the
+    // chain as well -- the one thing this page is for, withheld over a panel
+    // it could have rendered without. `readCheckpoint` never throws: a node
+    // with no checkpoint is an ordinary state and says so below, and a node
+    // that answered wrongly gets its own red panel rather than the chain's.
+    const [next, answer] = await Promise.all([
+      fetchChain(url).then(
+        (chain) => ({ chain, error: null }),
+        (cause: unknown) => ({
+          chain: null,
+          error: cause instanceof Error ? cause.message : String(cause),
+        }),
+      ),
+      readCheckpoint(url),
+    ]);
+    setChain(next.chain);
+    setError(next.error);
+    setCheckpoint(answer.kind === "signed" ? answer.value : null);
+    setCheckpointError(answer.kind === "unreadable" ? answer.message : null);
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -96,6 +102,16 @@ export default function Page() {
         <div className="panel bad">
           <b>could not read a chain</b>
           {error}
+        </div>
+      )}
+
+      {/* Its own panel, and the chain below still renders: the node answered
+          `/checkpoint` with something that is not a checkpoint, which is a
+          bug on one side of the seam and not a reason to withhold the head. */}
+      {checkpointError && (
+        <div className="panel bad">
+          <b>could not read this node&apos;s checkpoint</b>
+          {checkpointError}
         </div>
       )}
 

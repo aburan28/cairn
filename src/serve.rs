@@ -1167,6 +1167,13 @@ fn escape(text: &str) -> String {
     out
 }
 
+/// Serve the signed checkpoint, or a 404 that says why there is none.
+///
+/// Both 404 bodies are `{"error": "…checkpoint…"}`, and the reader keys on
+/// exactly that (`classifyCheckpoint` in `ui/lib/checkpoint.ts`): a JSON
+/// `error` naming a checkpoint is this node saying it has none, which the
+/// page reports, while any other 404 -- a static host with no node behind it
+/// -- is nothing to say anything about. Reword the message and keep the word.
 fn checkpoint(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let Some(path) = &serving.checkpoint else {
         return json_error(

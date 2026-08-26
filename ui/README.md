@@ -79,7 +79,10 @@ The tests are `lib/*.test.ts`, run by vitest with no DOM and no mocking of a
 node: everything in `lib/` that is not a `fetch` is a pure function over what a
 node answered, and those are what the tests hold still — the chain check, the
 frontier join, NDJSON parsing with a bad line, the checkpoint-against-height
-comparison in its correct units. The pages themselves are exercised by `next
+comparison in its correct units, and which 404 at `/checkpoint` is the node's
+own (`{"error": "…checkpoint…"}`, meaning nobody has signed one) and which is a
+static host with no node behind it, which is what the public site gets for
+every fetch and must say nothing about. The pages themselves are exercised by `next
 build` and by `scripts/node-smoke.sh` against a real node. Each fetcher also
 asserts at runtime that the fields a page reads are present (`lib/shape.ts`),
 because an `as`-cast passes `tsc` for any field name at all.

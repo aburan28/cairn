@@ -22,7 +22,7 @@
  * not.
  */
 
-import { expectFields } from "./shape";
+import { ShapeMismatch, expectFields } from "./shape";
 
 export type Checkpoint = {
   /** Ledger head the signature covers. */
@@ -49,44 +49,116 @@ export type CheckpointResponse = {
 export const NODE_URL = process.env.NEXT_PUBLIC_CAIRN_NODE ?? "";
 
 /**
- * Fetch the checkpoint, or `null` when the node has none.
+ * What `GET /checkpoint` turned out to be, sorted into the four things a page
+ * can honestly say about it.
  *
- * A node that has never been checkpointed is an ordinary state, not an error —
- * `cairn checkpoint` is a thing an operator chooses to run — so this
- * resolves to `null` rather than throwing and making the caller special-case a
- * message.
+ * Four and not two, because "no checkpoint" was hiding three different facts
+ * behind one `null`, and the landing page turned one of them into a sentence
+ * about a node that did not exist. With `NEXT_PUBLIC_CAIRN_NODE` unset --
+ * which is how `pages.yml` builds the public site, and what `npm run dev`
+ * with no node is -- every fetch is relative, and on GitHub Pages or the
+ * Next dev server `/checkpoint` is answered by the static host: a 404 with
+ * an HTML body. `/objectives` and `/chain` 404 there too and fell back to
+ * the snapshot silently, while this one said "this node publishes no
+ * checkpoint" on a site where there is no node at all.
+ *
+ * - `signed`: a checkpoint, with the key that signed it.
+ * - `unsigned`: the node's own 404 -- `json_error` in `src/serve.rs` writes
+ *   `{"error": "…checkpoint…"}` -- meaning nobody has run `cairn checkpoint`
+ *   on it. Ordinary, and worth a sentence.
+ * - `no-node`: nothing answered, or a 404 that is not the node's. Nothing
+ *   here is a node, so there is nothing to say about one.
+ * - `unreadable`: something answered and it was not a checkpoint -- a 5xx, a
+ *   200 that is not JSON, a 200 in the wrong shape. A node that is reachable
+ *   and answers wrongly is a bug on one side of the seam, and the page
+ *   reports it rather than folding it into either silence above.
  */
-export async function fetchCheckpoint(
-  base: string = NODE_URL,
-): Promise<CheckpointResponse | null> {
-  let response: Response;
-  try {
-    response = await fetch(`${base}/checkpoint`, { cache: "no-store" });
-  } catch {
-    return null;
+export type CheckpointAnswer =
+  | { kind: "signed"; value: CheckpointResponse }
+  | { kind: "unsigned"; reason: string }
+  | { kind: "no-node" }
+  | { kind: "unreadable"; message: string };
+
+/**
+ * Sort one HTTP answer to `/checkpoint` into a `CheckpointAnswer`.
+ *
+ * Pure -- a status and a body text in, a classification out -- so the test
+ * can feed it a static host's 404 page beside the node's JSON 404 and pin
+ * that only the second is allowed to say anything about a node.
+ *
+ * A 404 counts as the node's only if its body is `{"error": <string>}` and
+ * the string names a checkpoint. The shape alone would accept any JSON API
+ * at this origin that answers `{"error": "not found"}`, which is a 404 from
+ * something that is not a node; the word alone would accept an HTML 404
+ * page that happens to contain it.
+ */
+export function classifyCheckpoint(
+  status: number,
+  body: string,
+  what: string,
+): CheckpointAnswer {
+  if (status === 404) {
+    const error = nodeError(body);
+    return error !== null && /checkpoint/i.test(error)
+      ? { kind: "unsigned", reason: error }
+      : { kind: "no-node" };
   }
-  if (response.status === 404) return null;
-  if (!response.ok) return null;
-  let body: unknown;
+  if (status < 200 || status >= 300) {
+    return { kind: "unreadable", message: `${what} answered ${status}.` };
+  }
+  let parsed: unknown;
   try {
-    body = await response.json();
+    parsed = JSON.parse(body);
   } catch {
-    return null;
+    return {
+      kind: "unreadable",
+      message: `${what} answered ${status} with a body that is not JSON.`,
+    };
   }
   // A 200 that is not a checkpoint is not "no checkpoint"; it is a node and a
-  // page that disagree about the shape, and `null` here would hide that
-  // behind the same silence an unsigned node gets. So this one throws.
-  const signed = expectFields<CheckpointResponse>(
-    body,
-    ["checkpoint", "public_key"],
-    `${base}/checkpoint`,
-  );
-  expectFields<Checkpoint>(
-    signed.checkpoint,
-    ["height", "head", "root", "issued_at"],
-    `${base}/checkpoint`,
-  );
-  return signed;
+  // page that disagree about the shape, and silence here would hide that
+  // behind what an unsigned node gets.
+  try {
+    const signed = expectFields<CheckpointResponse>(parsed, ["checkpoint", "public_key"], what);
+    expectFields<Checkpoint>(signed.checkpoint, ["height", "head", "root", "issued_at"], what);
+    return { kind: "signed", value: signed };
+  } catch (cause) {
+    if (cause instanceof ShapeMismatch) return { kind: "unreadable", message: cause.message };
+    throw cause;
+  }
+}
+
+/** The message in a `{"error": "…"}` body, or `null` when the body is not one. */
+function nodeError(body: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const error = (parsed as Record<string, unknown>).error;
+  return typeof error === "string" ? error : null;
+}
+
+/**
+ * Fetch and classify the checkpoint.
+ *
+ * Never throws: every outcome, "nothing answered" included, is one of the four
+ * kinds above, so a page chooses what to say per kind rather than catching an
+ * error and guessing which of them it was.
+ */
+export async function readCheckpoint(base: string = NODE_URL): Promise<CheckpointAnswer> {
+  let status: number;
+  let body: string;
+  try {
+    const response = await fetch(`${base}/checkpoint`, { cache: "no-store" });
+    status = response.status;
+    body = await response.text();
+  } catch {
+    return { kind: "no-node" };
+  }
+  return classifyCheckpoint(status, body, `${base || "this node"}/checkpoint`);
 }
 
 /**

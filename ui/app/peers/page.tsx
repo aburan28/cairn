@@ -10,7 +10,7 @@ import {
   short,
 } from "@/lib/peers";
 import { type Chain, fetchChain } from "@/lib/chain";
-import { type CheckpointResponse, fetchCheckpoint } from "@/lib/checkpoint";
+import { type CheckpointAnswer, readCheckpoint } from "@/lib/checkpoint";
 
 /**
  * The address book this node has been handed.
@@ -25,7 +25,7 @@ export default function Page() {
   const [peers, setPeers] = useState<Peer[] | null>(null);
   const [note, setNote] = useState("");
   const [chain, setChain] = useState<Chain | null>(null);
-  const [checkpoint, setCheckpoint] = useState<CheckpointResponse | null>(null);
+  const [checkpoint, setCheckpoint] = useState<CheckpointAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -38,16 +38,15 @@ export default function Page() {
       setNote(body.note);
       // Neither blocks the page on failure: a node older than the epoch
       // chain has no `/chain`, and an unchecked node has no `/checkpoint` --
-      // both are ordinary states `fetchCheckpoint` already treats as such,
-      // and `fetchChain` is wrapped the same way here rather than imported
-      // for its throwing behaviour, which the chain page wants and this one
-      // does not.
-      const [nextChain, signed] = await Promise.all([
+      // `readCheckpoint` never throws and names which of its states this is,
+      // and `fetchChain` is wrapped here rather than imported for its
+      // throwing behaviour, which the chain page wants and this one does not.
+      const [nextChain, answer] = await Promise.all([
         fetchChain(url).catch(() => null),
-        fetchCheckpoint(url),
+        readCheckpoint(url),
       ]);
       setChain(nextChain);
-      setCheckpoint(signed);
+      setCheckpoint(answer);
     } catch (cause) {
       setPeers(null);
       setChain(null);
@@ -78,23 +77,32 @@ export default function Page() {
         node is talking to”.
       </p>
 
-      {(chain || checkpoint) && (
+      {(chain || checkpoint?.kind === "signed") && (
         <div className="row stats">
           {chain && <Stat label="chain links" value={String(chain.links)} />}
-          {checkpoint && (
+          {checkpoint?.kind === "signed" && (
             <Stat
               label="checkpoint"
-              value={`height ${checkpoint.checkpoint.height}`}
+              value={`height ${checkpoint.value.checkpoint.height}`}
             />
           )}
         </div>
       )}
-      {!checkpoint && chain && (
+      {/* Only the node's own "no checkpoint" earns this sentence. A
+          `/checkpoint` that answered wrongly is said as that, and a 404 that
+          is not the node's says nothing about a node at all. */}
+      {checkpoint?.kind === "unsigned" && chain && (
         <p className="meta dim" style={{ marginTop: "-0.75rem", marginBottom: "1.25rem" }}>
           This node has never signed a checkpoint. See the{" "}
           <Link href="/chain">chain</Link> page for what a signature would
           cover, and this node&apos;s <Link href="/log">full log</Link>.
         </p>
+      )}
+      {checkpoint?.kind === "unreadable" && (
+        <div className="panel bad">
+          <b>could not read this node&apos;s checkpoint</b>
+          {checkpoint.message}
+        </div>
       )}
 
       <div className="row">

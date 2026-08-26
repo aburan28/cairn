@@ -20,6 +20,7 @@
  * `live: false` and are expected to show it.
  */
 
+import { readCheckpoint } from "./checkpoint";
 import snapshot from "./snapshot.json";
 import { ShapeMismatch, expectFields } from "./shape";
 
@@ -222,45 +223,45 @@ export async function loadChain(base: string = NODE_URL): Promise<Sourced<ChainF
 /**
  * The signed checkpoint, from a node or the snapshot.
  *
- * A node that answers 404 here is a node nobody has run `cairn checkpoint`
- * on, which is ordinary and is said so in the `note` — the snapshot's
- * checkpoint is shown in its place, labelled as the snapshot's, because a
- * live node's root and a bundled log's signature must not sit in one panel
- * as if they were one fact.
+ * A node that answers its own 404 here is a node nobody has run
+ * `cairn checkpoint` on, which is ordinary and is said so in the `note` — the
+ * snapshot's checkpoint is shown in its place, labelled as the snapshot's,
+ * because a live node's root and a bundled log's signature must not sit in
+ * one panel as if they were one fact.
+ *
+ * Only the node's own 404 earns that sentence. The public site is built with
+ * no node URL, so this fetch goes to GitHub Pages, which 404s with an HTML
+ * page — and for a while that rendered "this node publishes no checkpoint"
+ * on a site with no node behind it. `readCheckpoint` tells the two apart by
+ * the body, and a 404 that is not the node's falls back as silently as
+ * `/objectives` and `/chain` do.
  */
 export async function loadCheckpoint(
   base: string = NODE_URL,
 ): Promise<Sourced<CheckpointFacts>> {
   const fallback = { value: SNAPSHOT.checkpoint, live: false, origin: SNAPSHOT.source };
-  try {
-    const response = await fetch(`${base}/checkpoint`, { cache: "no-store" });
-    if (response.status === 404) {
-      return { ...fallback, note: `${base || "this node"} publishes no checkpoint` };
+  const answer = await readCheckpoint(base);
+  switch (answer.kind) {
+    case "signed": {
+      const { checkpoint, public_key } = answer.value;
+      return {
+        value: {
+          head: checkpoint.head,
+          height: checkpoint.height,
+          root: checkpoint.root,
+          issued_at: checkpoint.issued_at,
+          public_key,
+        },
+        live: true,
+        origin: base || "this node",
+      };
     }
-    if (!response.ok) throw new Error(String(response.status));
-    const body = expectFields<{ checkpoint: unknown; public_key: string }>(
-      await response.json(),
-      ["checkpoint", "public_key"],
-      `${base || "this node"}/checkpoint`,
-    );
-    const signed = expectFields<Omit<CheckpointFacts, "public_key">>(
-      body.checkpoint,
-      ["head", "height", "root", "issued_at"],
-      `${base || "this node"}/checkpoint`,
-    );
-    return {
-      value: {
-        head: signed.head,
-        height: signed.height,
-        root: signed.root,
-        issued_at: signed.issued_at,
-        public_key: body.public_key,
-      },
-      live: true,
-      origin: base || "this node",
-    };
-  } catch (cause) {
-    return cause instanceof ShapeMismatch ? { ...fallback, note: cause.message } : fallback;
+    case "unsigned":
+      return { ...fallback, note: `${base || "this node"} publishes no checkpoint` };
+    case "unreadable":
+      return { ...fallback, note: answer.message };
+    case "no-node":
+      return fallback;
   }
 }
 
