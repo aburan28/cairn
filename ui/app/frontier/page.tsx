@@ -218,7 +218,26 @@ function Detail({
         </div>
       )}
 
-      {!frontier && (
+      {!frontier && objective.settlement && (
+        /* A certificate writes no frontier record, so its one settlement is
+           the whole move history. Saying "no claim yet" about it was false. */
+        <div className="panel">
+          <b>
+            settled — {amount(objective.settlement.reward)} paid to{" "}
+            {objective.settlement.submitter}
+          </b>
+          <div className="meta">
+            for claim{" "}
+            <code className="dim" title={objective.settlement.claim_id}>
+              {short(objective.settlement.claim_id)}
+            </code>
+            . A certificate settles once and moves no frontier, so there are no
+            moves to list.
+          </div>
+        </div>
+      )}
+
+      {!frontier && !objective.settlement && (
         <p className="empty">
           No claim yet — the frontier starts at the objective&apos;s baseline.
         </p>

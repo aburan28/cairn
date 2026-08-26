@@ -18,6 +18,7 @@
       "funder": "treasury",
       "goal": "GOAL-capset-lower-bounds",
       "id": "sha256:4dfa0bbffb2d244de6fdb51d53d186d8d50e14477c366c31320746c171249185",
+      "open": false,
       "record": {
         "created_at": "2026-07-28T00:00:00+00:00",
         "funder": "treasury",
@@ -43,6 +44,7 @@
       },
       "reward": 1100000,
       "settled": true,
+      "settlement": null,
       "statement": "Grow a cap set in F_3^4 as large as possible (no three distinct points collinear). Score is the set size. Baseline 9, target 20 (the known maximum). Payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move and every improvement must cite the frontier it beat.",
       "verifier_kind": "evaluator"
     },
@@ -50,6 +52,7 @@
       "funder": "treasury",
       "goal": "GOAL-collatz-extremes",
       "id": "sha256:978beb308f77c4bd1520d474b92dd23c310c6adee774716bf4c39f31fd3ed075",
+      "open": false,
       "record": {
         "artifact_schema": {
           "description": "An object naming the integer whose trajectory is long. The checker reads exactly one field.",
@@ -82,6 +85,11 @@
       },
       "reward": 100000,
       "settled": true,
+      "settlement": {
+        "claim_id": "sha256:e51dc4613d329c328e72f0bb4d1354efcd6ad85c372ef63874dae449b2334198",
+        "reward": 100000,
+        "submitter": "alice"
+      },
       "statement": "Exhibit an integer n in [1, 10^7) whose Collatz trajectory reaches 1 in at least 500 steps.",
       "verifier_kind": "certificate"
     }

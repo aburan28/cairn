@@ -9,7 +9,12 @@
  * `lib/log.ts` for what is and is not re-derived and why.
  */
 
-import { type Ratchet, type Verifier, short as shortId } from "@/lib/objectives";
+import {
+  type Ratchet,
+  type Settlement,
+  type Verifier,
+  short as shortId,
+} from "@/lib/objectives";
 import { type FrontierMove, buildMoves, fetchLog } from "@/lib/log";
 
 export { short } from "@/lib/objectives";
@@ -36,6 +41,10 @@ export type ObjectiveRecord = {
 
 export type ObjectiveResponse = {
   id: string;
+  settled: boolean;
+  open: boolean;
+  /** A certificate's one payment; `null` for a ratchet. See `objectives.ts`. */
+  settlement: Settlement | null;
   frontier?: Frontier;
   record: ObjectiveRecord;
 };

@@ -154,6 +154,24 @@ function Challenge() {
             refused.
           </div>
         </>
+      ) : objective.settlement ? (
+        /* A certificate never gets a frontier record; its whole story is one
+           settlement. Before this branch the page said "settled" in the tag
+           line and "No claim yet" here, about the same objective. */
+        <div className="panel">
+          <b>
+            settled — {units(objective.settlement.reward)} paid to{" "}
+            {objective.settlement.submitter}
+          </b>
+          <div className="meta">
+            for claim{" "}
+            <code className="dim" title={objective.settlement.claim_id}>
+              {short(objective.settlement.claim_id)}
+            </code>
+            . A certificate settles once, so there is nothing left to cite and
+            nothing left to win here.
+          </div>
+        </div>
       ) : (
         <p className="empty">
           No claim yet — the frontier starts at the objective&apos;s baseline, and
