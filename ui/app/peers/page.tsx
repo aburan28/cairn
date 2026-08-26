@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
   type Peer,
@@ -8,6 +9,8 @@ import {
   fetchPeers,
   short,
 } from "@/lib/peers";
+import { type Chain, fetchChain } from "@/lib/chain";
+import { type CheckpointResponse, fetchCheckpoint } from "@/lib/checkpoint";
 
 /**
  * The address book this node has been handed.
@@ -21,6 +24,8 @@ export default function Page() {
   const [base, setBase] = useState(NODE_URL);
   const [peers, setPeers] = useState<Peer[] | null>(null);
   const [note, setNote] = useState("");
+  const [chain, setChain] = useState<Chain | null>(null);
+  const [checkpoint, setCheckpoint] = useState<CheckpointResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -31,8 +36,22 @@ export default function Page() {
       const body = await fetchPeers(url);
       setPeers(body.peers);
       setNote(body.note);
+      // Neither blocks the page on failure: a node older than the epoch
+      // chain has no `/chain`, and an unchecked node has no `/checkpoint` --
+      // both are ordinary states `fetchCheckpoint` already treats as such,
+      // and `fetchChain` is wrapped the same way here rather than imported
+      // for its throwing behaviour, which the chain page wants and this one
+      // does not.
+      const [nextChain, signed] = await Promise.all([
+        fetchChain(url).catch(() => null),
+        fetchCheckpoint(url),
+      ]);
+      setChain(nextChain);
+      setCheckpoint(signed);
     } catch (cause) {
       setPeers(null);
+      setChain(null);
+      setCheckpoint(null);
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
@@ -58,6 +77,25 @@ export default function Page() {
         retracts one. Read this as “who this node could try”, never as “who this
         node is talking to”.
       </p>
+
+      {(chain || checkpoint) && (
+        <div className="row stats">
+          {chain && <Stat label="chain links" value={String(chain.links)} />}
+          {checkpoint && (
+            <Stat
+              label="checkpoint"
+              value={`height ${checkpoint.checkpoint.height}`}
+            />
+          )}
+        </div>
+      )}
+      {!checkpoint && chain && (
+        <p className="meta dim" style={{ marginTop: "-0.75rem", marginBottom: "1.25rem" }}>
+          This node has never signed a checkpoint. See the{" "}
+          <Link href="/chain">chain</Link> page for what a signature would
+          cover, and this node&apos;s <Link href="/log">full log</Link>.
+        </p>
+      )}
 
       <div className="row">
         <input
@@ -155,5 +193,14 @@ export default function Page() {
         </p>
       )}
     </main>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="stat">
+      <div className="statValue">{value}</div>
+      <div className="statLabel">{label}</div>
+    </div>
   );
 }

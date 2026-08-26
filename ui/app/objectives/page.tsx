@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
   type Objective,
@@ -266,7 +267,9 @@ function ObjectiveCard({
           )}
 
           <div className="meta">
-            frontier score <b className="accent">{objective.frontier.score}</b>{" "}
+            <Link href={`/frontier?id=${encodeURIComponent(objective.id)}`}>
+              frontier score <b className="accent">{objective.frontier.score}</b>
+            </Link>{" "}
             held by{" "}
             <code className="dim" title={objective.frontier.holder}>
               {short(objective.frontier.holder)}

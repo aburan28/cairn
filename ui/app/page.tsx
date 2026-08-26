@@ -99,7 +99,10 @@ export default function Page() {
                   pool <code>{units(o.reward)}</code>
                   {o.frontier ? (
                     <>
-                      {" · "}best <code className="accent">{o.frontier.score}</code>
+                      {" · "}
+                      <Link href={`/frontier?id=${encodeURIComponent(o.id)}`}>
+                        best <code className="accent">{o.frontier.score}</code>
+                      </Link>
                       {" held by "}
                       <code>{o.frontier.holder}</code>
                       {pct !== null && (

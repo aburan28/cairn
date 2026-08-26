@@ -51,6 +51,7 @@ export default function RootLayout({
           <Link href="/objectives">objectives</Link>
           <Link href="/chain">chain</Link>
           <Link href="/peers">peers</Link>
+          <Link href="/log">log</Link>
           <Link href="/docs">docs</Link>
         </nav>
         {children}
