@@ -23,13 +23,28 @@ export type Frontier = {
   score: number;
 };
 
+/**
+ * A certificate's one payment. `null` for a ratchet, whose payouts are many
+ * and are carried per move by `frontier.paid_cumulative`.
+ */
+export type Settlement = {
+  claim_id: string;
+  submitter: string;
+  reward: number;
+};
+
 export type Objective = {
   id: string;
   goal: string;
   funder: string;
   reward: number;
   statement: string;
+  /** No longer payable, as the node judges it -- not "a settlement exists",
+   *  which a ratchet satisfies from its first paid slice onward. */
   settled: boolean;
+  /** `!settled`, published by the node rather than negated here. */
+  open: boolean;
+  settlement: Settlement | null;
   /** "certificate" for pass/fail, "evaluator" for a scored ratchet. */
   verifier_kind: string;
   frontier?: Frontier;

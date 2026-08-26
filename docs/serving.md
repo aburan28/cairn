@@ -22,13 +22,24 @@ checkpoint.json` to publish what you signed.
 |---|---|
 | `GET /log` | the log, byte for byte as it is on disk |
 | `GET /checkpoint` | the signed `(root, height, signature)`, if you publish one |
-| `GET /objectives` | every objective, with its frontier |
+| `GET /objectives` | every objective, with its frontier and whether it is still payable |
 | `GET /objective/{id}` | one full record, verifier spec included |
 | `GET /frontier/{id}` | best score, who holds it, what to cite, pool remaining |
 | `GET /health` | liveness, for whatever is watching the process |
 | `POST /submit` | queue a commitment or a claim (only with `--queue`) |
 
 Everything except `/log` is a convenience. `/log` is the product.
+
+Both objective views carry the same three lifecycle fields. `settled` means *no
+longer payable* -- for a certificate, that a settlement exists; for a ratchet,
+that the frontier is at the target or the span left under it is smaller than
+`min_improvement`, so no claim can settle there again. It does **not** mean "a
+settlement record exists": a ratchet writes one on every paying move, and by
+that reading a progressive objective was settled from its first slice onward
+with most of its pool untouched. `open` is its complement, published rather
+than left for a reader to negate. `settlement` is `{claim_id, submitter,
+reward}` for a settled certificate and `null` otherwise -- a ratchet's payouts
+are many, and `frontier.paid_cumulative` carries them.
 
 ## What a contributor should actually do
 

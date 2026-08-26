@@ -31,6 +31,18 @@ export type Frontier = {
   pool_remaining: number;
 };
 
+/**
+ * A certificate's one payment: who was paid, how much, for which claim.
+ *
+ * `null` for a ratchet, whose payouts are many and are carried per move by
+ * `frontier.paid_cumulative` -- see `lifecycle_fields` in `src/serve.rs`.
+ */
+export type Settlement = {
+  claim_id: string;
+  submitter: string;
+  reward: number;
+};
+
 export type Objective = {
   id: string;
   goal: string;
@@ -38,7 +50,17 @@ export type Objective = {
   reward: number;
   funder: string;
   verifier_kind: string;
+  /**
+   * No longer payable. The node decides this, and it is the only thing that
+   * does: for a certificate, a settlement exists; for a ratchet, the frontier
+   * is at the target or the span left is too small for a move to settle. A
+   * ratchet that has paid once is *not* settled, which is why pages must not
+   * read a `settlement` record as closure.
+   */
   settled: boolean;
+  /** `!settled`, published by the node rather than negated here. */
+  open: boolean;
+  settlement: Settlement | null;
   frontier?: Frontier;
   record?: {
     ratchet?: {
