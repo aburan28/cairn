@@ -275,9 +275,19 @@ fn load_root_key(path: &Path) -> Result<RootKey, String> {
     Ok(key)
 }
 
+// Both files below go through `secret_file::replace_public` rather than
+// `fs::write`, which truncates in place: a daemon killed between the truncate
+// and the last byte left a torn checkpoint that failed every reader's
+// verification, or a torn population file that refused the next start -- and
+// the daemon is killed mid-write routinely, since it rewrites both every round
+// and an operator's `kill` lands wherever it lands. The public variant, not
+// `replace`: `GET /checkpoint` serves this file and a reader copies it, so
+// 0600 would be the wrong mode.
+
 fn write_checkpoint(path: &Path, key: &RootKey, node: &Node) -> Result<(), String> {
     let signed = key.sign_ledger(node.ledger(), timestamp());
-    fs::write(path, signed.to_value().canonical_string()).map_err(|e| e.to_string())
+    crate::secret_file::replace_public(path, signed.to_value().canonical_string().as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 /// Read the population file, or start empty if it is not there yet.
@@ -295,7 +305,43 @@ fn load_population(path: &Path) -> Result<Population, String> {
 }
 
 fn save_population(path: &Path, population: &Population) -> Result<(), String> {
-    fs::write(path, population.to_value().canonical_string()).map_err(|e| e.to_string())
+    crate::secret_file::replace_public(path, population.to_value().canonical_string().as_bytes())
+        .map_err(|e| e.to_string())
+}
+
+/// Settle every epoch that has come due, and say whether the log changed.
+///
+/// Run once per tick, unconditionally. It used to run only after a drain that
+/// admitted or refused something, and every p2p session settles on its own
+/// through `apply_records` -- so a node with no reachable peers and an empty
+/// spool never settled a closed epoch at all. Its contributors' claims sat
+/// accepted and unpaid, and its checkpoint stood still, for as long as nobody
+/// dialled it. That is the ordinary state of a node run alone, which is how
+/// every node starts.
+///
+/// The answer is what gates the checkpoint rewrite. Nothing due is the common
+/// case, and re-signing and rewriting the checkpoint every five seconds for a
+/// log that has not moved is churn a reader polling `/checkpoint` would see as
+/// change.
+fn settle_tick(node: &mut Node, now: &str) -> bool {
+    let before = node.ledger().len();
+    match node.settle_at(now) {
+        Ok(outcomes) => {
+            let paid = outcomes.iter().filter(|o| o.settled).count();
+            if !outcomes.is_empty() {
+                log::info!(
+                    "settle: {} claim(s) in batch, {paid} paid, {} entries now",
+                    outcomes.len(),
+                    node.ledger().len()
+                );
+            }
+        }
+        Err(error) => log::warn!("settle: {error}"),
+    }
+    // Measured on the log rather than on the outcomes: a batch record is
+    // appended even when every claim in it settled for zero, and it is the
+    // log that the checkpoint signs.
+    node.ledger().len() != before
 }
 
 /// A scorer for one sync round.
@@ -640,26 +686,31 @@ pub fn run(config: Config) -> Result<(), String> {
         //
         // Before the dial, deliberately: a record admitted this tick is one a
         // peer can learn about this tick, rather than five seconds later.
-        if let Some(queue) = &spool {
+        {
             let mut guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let admissions = serve::drain_into(&mut guard.node, queue, &timestamp(), false);
-            let drained = !admissions.is_empty();
-            for (path, admission) in admissions {
-                log::info!("drain: {}", admission.note);
-                // Removed whether admitted or refused. Nearly every refusal is
-                // permanent -- a stale epoch, a citation that is not an
-                // accepted claim -- and a queue that retries one never empties.
-                if let Err(error) = queue.take(&path) {
-                    log::warn!("drain: cannot remove {}: {error}", path.display());
+            let now = timestamp();
+            let mut changed = false;
+            if let Some(queue) = &spool {
+                let admissions = serve::drain_into(&mut guard.node, queue, &now, false);
+                changed |= !admissions.is_empty();
+                for (path, admission) in admissions {
+                    log::info!("drain: {}", admission.note);
+                    // Removed whether admitted or refused. Nearly every refusal
+                    // is permanent -- a stale epoch, a citation that is not an
+                    // accepted claim -- and a queue that retries one never
+                    // empties.
+                    if let Err(error) = queue.take(&path) {
+                        log::warn!("drain: cannot remove {}: {error}", path.display());
+                    }
                 }
             }
-            if drained {
-                // Settlement is deferred to the close of the reveal epoch, so a
-                // drain that admitted a reveal into an epoch that has already
-                // closed settles here rather than waiting for a peer to dial.
-                let _ = guard.node.settle_at(&timestamp());
+            // Settlement is deferred to the close of the reveal epoch, and the
+            // clock closes epochs whether or not anything arrived this tick.
+            // See `settle_tick` for what happened when this waited on a drain.
+            changed |= settle_tick(&mut guard.node, &now);
+            if changed {
                 persist(
                     &guard,
                     &config.checkpoint,
@@ -742,5 +793,98 @@ pub fn run(config: Config) -> Result<(), String> {
             }
         }
         thread::sleep(Duration::from_secs(TICK_SECONDS));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::records::{commitment_hash, Claim, Commitment};
+
+    // The same three instants `tests/p2p_convergence.rs` uses, for the same
+    // reason: commit, reveal one epoch later, settle after the reveal epoch
+    // has closed and waited out `FINALITY_EPOCHS`.
+    const TS: &str = "2026-07-29T00:00:00+00:00";
+    const TS_REVEAL: &str = "2026-07-29T00:10:00+00:00";
+    const TS_SETTLE: &str = "2026-07-29T00:30:00+00:00";
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// A scratch node under `target/`, so a failed run leaves evidence.
+    fn node(name: &str) -> Node {
+        let dir = repo_root().join("target").join("daemon-tests");
+        fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join(format!("{}-{name}.jsonl", std::process::id()));
+        let _ = fs::remove_file(&path);
+        Node::new(Ledger::open(path).expect("open ledger"), repo_root())
+    }
+
+    fn example(path: &str) -> Value {
+        let text = fs::read_to_string(repo_root().join(path)).expect("read example");
+        Value::from_json(&text).expect("parse")
+    }
+
+    /// One accepted claim in a closed epoch, and nobody else: no peer to dial,
+    /// nothing in a spool. This is the state the tick loop must settle from
+    /// on its own, and until `settle_tick` ran unconditionally it did not.
+    #[test]
+    fn a_tick_settles_a_due_epoch_with_no_peers_and_an_empty_spool() {
+        let mut node = node("settles-alone");
+        let objective = Objective::from_value(&example("examples/collatz/objective.json"))
+            .expect("objective decodes");
+        let objective_id = node.post_objective(&objective, TS).expect("post");
+        let artifact = example("examples/collatz/artifact.json");
+        let nonce = "n-alone";
+        let hash = commitment_hash(&objective_id, "alone", &artifact, nonce);
+        node.commit(&Commitment::new(&objective_id, "alone", &hash, TS), TS)
+            .expect("commit");
+        let claim =
+            Claim::new(&objective_id, "alone", artifact, nonce, TS_REVEAL, vec![]).expect("claim");
+        let revealed = node.reveal(&claim, TS_REVEAL).expect("reveal");
+        assert!(revealed.is_pending(), "{}", revealed.note);
+
+        // Before the epoch closes: nothing is due, and the tick must say so,
+        // or the checkpoint would be rewritten every five seconds for a log
+        // that has not moved.
+        let height = node.ledger().len();
+        assert!(!settle_tick(&mut node, TS_REVEAL));
+        assert_eq!(node.ledger().len(), height);
+
+        // After: the batch settles, and the answer gates the checkpoint.
+        assert!(settle_tick(&mut node, TS_SETTLE));
+        assert!(node.ledger().len() > height);
+        assert!(
+            node.settlement_for_claim(&revealed.claim_id).is_some(),
+            "the claim was not paid"
+        );
+
+        // And once, not once per tick: a settled epoch is not due again.
+        let height = node.ledger().len();
+        assert!(!settle_tick(&mut node, TS_SETTLE));
+        assert_eq!(node.ledger().len(), height);
+    }
+
+    /// Both files a round rewrites go through the atomic path: the file at the
+    /// destination is always a complete write, whatever is beside it.
+    #[test]
+    fn checkpoint_and_population_are_replaced_whole() {
+        let node = node("atomic-state");
+        let dir = repo_root().join("target").join("daemon-tests");
+        let checkpoint = dir.join(format!("{}-cp.json", std::process::id()));
+        let population = dir.join(format!("{}-pop.json", std::process::id()));
+        let key = RootKey::generate();
+        write_checkpoint(&checkpoint, &key, &node).expect("checkpoint");
+        let first = fs::read(&checkpoint).expect("read checkpoint");
+        save_population(&population, &Population::default()).expect("population");
+        // Overwritten, not appended to or truncated around: each rewrite is a
+        // whole file, and what was there before is gone with no seam.
+        write_checkpoint(&checkpoint, &key, &node).expect("checkpoint again");
+        let second = fs::read(&checkpoint).expect("read checkpoint");
+        assert_eq!(first.len(), second.len());
+        assert!(load_population(&population).is_ok());
+        let _ = fs::remove_file(checkpoint);
+        let _ = fs::remove_file(population);
     }
 }
