@@ -17,18 +17,30 @@ primitive; the numbers below are the unit of account the settlement rules
 operate on, not money anyone is holding. See *What this is not* in the
 top-level README.
 
+Every directory under `examples/` is listed; the table was regenerated from
+the tree on 2026-08-25 (19 directories, 32 objective files), and the *status*
+column for every committed artifact is what `cairn try` reported on that date.
+
 | example | verifier | reward | status | needs | worked artifact |
 |---|---|---|---|---|---|
-| [`reversible-adder`](reversible-adder/) | evaluator (minimize) + ratchet | 1000000 | **worked, and open** | python3 | `artifact-cuccaro.json`, `artifact-truncated.json` |
+| [`reversible-adder`](reversible-adder/) | evaluator (minimize) + ratchet | 1000000 | **worked, and open** | python3 | `artifact-cuccaro.json`, `artifact-truncated.json`, `artifact-5ccx.json` (score 45) |
 | [`collatz`](collatz/) | certificate | 100000 | worked | python3 | `artifact.json` |
+| [`collatz_bisectable`](collatz_bisectable/) | certificate, with a pinned stepper so a dispute bisects the trajectory | 100000 | worked | python3 | `artifact.json` |
 | [`capset`](capset/) | evaluator | 250000 | worked | python3 | `artifact.json` |
 | [`capset_progressive`](capset_progressive/) | evaluator + ratchet | 1100000 | worked | python3 | `artifact-12/16/20.json` |
-| [`ecdsa-fail`](ecdsa-fail/) | evaluator (minimize) + ratchet | 1000000 | worked | python3; optional external `ecdsafail` CLI | `artifacts/` |
+| [`ecdsa-fail`](ecdsa-fail/) | evaluator (minimize) + ratchet | 1000000; `objective-live.json` 5000000 | worked | python3; optional external `ecdsafail` CLI | `artifacts/` |
 | [`permutation`](permutation/) | statistical | 50000 | worked | python3 | `artifact.json` |
-| [`ecdlp`](ecdlp/) | certificate | 250000 | **open bounty** | python3 | none — that is the point |
-| [`elliptic-rank`](elliptic-rank/) | certificate + exact evaluator | 20000000 – 64000000 | **4 open rank-record bounties** | python3 | rank-30 record (baseline only) |
-| [`lean`](lean/) | lean | 50000 | **open bounty** | a Lean 4 toolchain on PATH | none |
+| [`ecdlp`](ecdlp/) | certificate | 5000 | worked — a 45-bit demonstration whose answer ships | python3 | `artifact.json` |
+| [`golomb-ruler`](golomb-ruler/) | evaluator (minimize) + ratchet | 900000 | worked; `artifact-72.json` reaches the proved optimum and exhausts the pool | python3 | `artifact-72.json`, `artifacts/greedy-96.json` (baseline) |
+| [`sorting-network`](sorting-network/) | evaluator (minimize) + ratchet | 800000 | worked; `artifact-batcher19.json` reaches the proved optimum and exhausts the pool | python3 | `artifact-batcher19.json`, `artifacts/bubble-56.json` (baseline) |
+| [`ramsey`](ramsey/) | certificate | 250000 | worked — a witness to a known bound, `R(4,4) = 18` | python3 | `artifacts/paley-17.json` |
+| [`attested-fact`](attested-fact/) | certificate | 100000 | worked — verifies **provenance, not truth**; read its README | python3 | `artifacts/sourced.json`; `misquoted`, `one-source` and `tampered-source` are there to be refused |
+| [`programbench-vetted`](programbench-vetted/) | evaluator (maximize) + ratchet | 1000000 | worked — a held-out benchmark task graded on a log | python3 | `artifacts/resolved.json`; `partial`, `almost`, `cheating`, `hanging` score lower or are refused, by design |
+| [`lean`](lean/) | lean | 50000 | worked, if you have Lean — `unavailable` on a node without it | a Lean 4 toolchain on PATH | `artifact.json`; `hole.json` is the `sorry` the verifier refuses |
+| [`elliptic-rank`](elliptic-rank/) | certificate + exact evaluator | 20000000 – 64000000 | **4 open rank-record bounties** | python3 | `artifacts/rank-30-record.json` — a baseline, rejected by the rank-31 objective |
+| [`certicom-ecdlp`](certicom-ecdlp/) | certificate | 120000 / 400000 / 2000000 | **open bounty** ×3 — two solvable NUMS rungs (50 and 60 bits) and Certicom's ECCp-131, posted as a frontier and not expected to settle | python3 | none |
 | [`first-blood`](first-blood/) | certificate | 100000 – 409600000 | **open bounty** ×5 | python3 | none |
+| [`aadp-witness-encryption`](aadp-witness-encryption/) | certificate | 300000 | **open bounty** — an external cryptanalysis challenge, pinned as posted | python3 | none |
 | [`faster-algorithms`](faster-algorithms/) | evaluator (minimize) + ratchet | 1200000 – 2000000 | **open bounty** ×4 | python3 | `artifacts/`, baselines only |
 
 - **worked** — a passing artifact is committed, so the whole loop
