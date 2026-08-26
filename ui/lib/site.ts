@@ -21,6 +21,7 @@
  */
 
 import snapshot from "./snapshot.json";
+import { ShapeMismatch, expectFields } from "./shape";
 
 export type Frontier = {
   claim_id: string;
@@ -53,13 +54,38 @@ export type Objective = {
   };
 };
 
+/** What `GET /chain` said about the snapshot log. Same field names as the
+ *  endpoint, so the live and fallback values are the same shape and a page
+ *  cannot render one where it meant the other. */
+export type ChainFacts = {
+  head: string;
+  links: number;
+  /** Ledger entry count — the unit a checkpoint's `height` is in. */
+  height: number;
+  ledger_head: string;
+};
+
+/** `launch/checkpoint.json`'s signed body, plus the key that signed it. */
+export type CheckpointFacts = {
+  head: string;
+  height: number;
+  root: string;
+  issued_at: string;
+  public_key: string;
+};
+
 export type Snapshot = {
   source: string;
+  /** Flattened copies of the two objects below. Kept because the snapshot
+   *  is a committed file that more than one change regenerates, and a
+   *  removed key is a conflict for no gain. The site reads the nested ones. */
   merkle_root: string;
   head: string;
   height: number;
   issued_at: string;
   links: number;
+  chain: ChainFacts;
+  checkpoint: CheckpointFacts;
   objectives: Objective[];
 };
 
@@ -97,7 +123,37 @@ export type Feed = {
   live: boolean;
   /** Where it came from, for a line the reader can check. */
   origin: string;
+  /** Why the page is showing the snapshot when a node *did* answer — the
+   *  answer was not the shape this page reads. Rendered, because a node and
+   *  a page that disagree about a field name is a bug, and a fallback that
+   *  hid it would be the incident `units` documents, again. */
+  warning?: string;
 };
+
+/**
+ * One value and where it came from.
+ *
+ * The landing page shows numbers from three endpoints, and each falls back
+ * on its own: a node that answers `/objectives` and not `/checkpoint` is an
+ * ordinary node that nobody has run `cairn checkpoint` on. So provenance is
+ * per value rather than per page, and every stat says which it is. Before
+ * this, one sentence claimed the numbers came from the live node while the
+ * merkle root beside it was always the snapshot's.
+ */
+export type Sourced<T> = {
+  value: T;
+  live: boolean;
+  origin: string;
+  /** A reason worth showing beside the value — the node answered but had
+   *  no checkpoint, or answered in a shape this page does not read. */
+  note?: string;
+};
+
+/** The label every stat carries. One function so the wording cannot drift
+ *  between the places it is rendered. */
+export function provenance(sourced: { live: boolean; origin: string }): string {
+  return sourced.live ? `live from ${sourced.origin}` : `from ${sourced.origin} snapshot`;
+}
 
 /**
  * Objectives from a node, or from the settled log if none answers.
@@ -109,16 +165,102 @@ export async function loadObjectives(base: string = NODE_URL): Promise<Feed> {
   try {
     const response = await fetch(`${base}/objectives`, { cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
-    const body = (await response.json()) as { objectives?: Objective[] };
-    const objectives = body.objectives ?? [];
+    const body = expectFields<{ objectives: Objective[] }>(
+      await response.json(),
+      ["objectives"],
+      `${base || "this node"}/objectives`,
+    );
+    const objectives = body.objectives;
     // A node with an empty log is a real answer, but showing a visitor nothing
     // when a settled log ships in the repository helps no one.
     if (objectives.length === 0) {
       return { objectives: SNAPSHOT.objectives, live: false, origin: SNAPSHOT.source };
     }
     return { objectives, live: true, origin: base || "this node" };
-  } catch {
-    return { objectives: SNAPSHOT.objectives, live: false, origin: SNAPSHOT.source };
+  } catch (cause) {
+    return {
+      objectives: SNAPSHOT.objectives,
+      live: false,
+      origin: SNAPSHOT.source,
+      warning: cause instanceof ShapeMismatch ? cause.message : undefined,
+    };
+  }
+}
+
+/**
+ * The chain's link count and the ledger's height, from a node or the snapshot.
+ *
+ * Never throws, like `loadObjectives`, and for the same reason. A shape
+ * mismatch is the one failure that is *not* "no node answered", so it comes
+ * back as a `note` beside the fallback rather than disappearing into it.
+ */
+export async function loadChain(base: string = NODE_URL): Promise<Sourced<ChainFacts>> {
+  const fallback = { value: SNAPSHOT.chain, live: false, origin: SNAPSHOT.source };
+  try {
+    const response = await fetch(`${base}/chain`, { cache: "no-store" });
+    if (!response.ok) throw new Error(String(response.status));
+    const body = expectFields<ChainFacts>(
+      await response.json(),
+      ["head", "links", "height", "ledger_head"],
+      `${base || "this node"}/chain`,
+    );
+    return {
+      value: {
+        head: body.head,
+        links: body.links,
+        height: body.height,
+        ledger_head: body.ledger_head,
+      },
+      live: true,
+      origin: base || "this node",
+    };
+  } catch (cause) {
+    return cause instanceof ShapeMismatch ? { ...fallback, note: cause.message } : fallback;
+  }
+}
+
+/**
+ * The signed checkpoint, from a node or the snapshot.
+ *
+ * A node that answers 404 here is a node nobody has run `cairn checkpoint`
+ * on, which is ordinary and is said so in the `note` — the snapshot's
+ * checkpoint is shown in its place, labelled as the snapshot's, because a
+ * live node's root and a bundled log's signature must not sit in one panel
+ * as if they were one fact.
+ */
+export async function loadCheckpoint(
+  base: string = NODE_URL,
+): Promise<Sourced<CheckpointFacts>> {
+  const fallback = { value: SNAPSHOT.checkpoint, live: false, origin: SNAPSHOT.source };
+  try {
+    const response = await fetch(`${base}/checkpoint`, { cache: "no-store" });
+    if (response.status === 404) {
+      return { ...fallback, note: `${base || "this node"} publishes no checkpoint` };
+    }
+    if (!response.ok) throw new Error(String(response.status));
+    const body = expectFields<{ checkpoint: unknown; public_key: string }>(
+      await response.json(),
+      ["checkpoint", "public_key"],
+      `${base || "this node"}/checkpoint`,
+    );
+    const signed = expectFields<Omit<CheckpointFacts, "public_key">>(
+      body.checkpoint,
+      ["head", "height", "root", "issued_at"],
+      `${base || "this node"}/checkpoint`,
+    );
+    return {
+      value: {
+        head: signed.head,
+        height: signed.height,
+        root: signed.root,
+        issued_at: signed.issued_at,
+        public_key: body.public_key,
+      },
+      live: true,
+      origin: base || "this node",
+    };
+  } catch (cause) {
+    return cause instanceof ShapeMismatch ? { ...fallback, note: cause.message } : fallback;
   }
 }
 

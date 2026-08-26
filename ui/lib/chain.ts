@@ -9,6 +9,8 @@
  * rather than a re-derivation of it.
  */
 
+import { expectFields } from "./shape";
+
 export type EpochLink = {
   epoch: number;
   /** Sorted claim ids, as the link commits to them. */
@@ -19,8 +21,20 @@ export type EpochLink = {
 };
 
 export type Chain = {
+  /** The last link's hash; empty string when no epoch has settled. */
   head: string;
+  /** How many epochs have settled — the length of `chain`. */
   links: number;
+  /**
+   * The ledger's entry count and last entry hash. These are what a
+   * checkpoint signs (`Checkpoint::from_ledger` in `src/checkpoint.rs` reads
+   * `ledger.len()` and `ledger.head()`), and they are *not* `links` and
+   * `head`: a log holds at least as many entries as batches, so comparing a
+   * checkpoint's height against `links` could never show it behind. That
+   * comparison was the only one this reader made, and it was dead code.
+   */
+  height: number;
+  ledger_head: string;
   chain: EpochLink[];
   note: string;
 };
@@ -65,7 +79,11 @@ export async function fetchChain(base: string = NODE_URL): Promise<Chain> {
         `chain has no /chain endpoint.`,
     );
   }
-  return (await response.json()) as Chain;
+  return expectFields<Chain>(
+    await response.json(),
+    ["head", "links", "height", "ledger_head", "chain"],
+    `${base}/chain`,
+  );
 }
 
 /**

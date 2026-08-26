@@ -11,6 +11,8 @@
  * a judgement about them.
  */
 
+import { expectFields } from "./shape";
+
 /** Where a ratcheted objective currently stands. Absent until the first claim. */
 export type Frontier = {
   claim_id: string;
@@ -66,8 +68,12 @@ export async function fetchObjectives(
   if (!response.ok) {
     throw new Error(`${base}/objectives answered ${response.status}.`);
   }
-  const body = (await response.json()) as Objectives;
-  return body.objectives ?? [];
+  const body = expectFields<Objectives>(
+    await response.json(),
+    ["objectives"],
+    `${base}/objectives`,
+  );
+  return body.objectives;
 }
 
 /**

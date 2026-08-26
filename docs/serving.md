@@ -25,6 +25,8 @@ checkpoint.json` to publish what you signed.
 | `GET /objectives` | every objective, with its frontier |
 | `GET /objective/{id}` | one full record, verifier spec included |
 | `GET /frontier/{id}` | best score, who holds it, what to cite, pool remaining |
+| `GET /chain` | the epoch chain: `links` and `head` are the chain's, `height` and `ledger_head` are the ledger's — the units a checkpoint signs, and not interchangeable with the first two |
+| `GET /chain.html` | the same, as a page with no build step |
 | `GET /health` | liveness, for whatever is watching the process |
 | `POST /submit` | queue a commitment or a claim (only with `--queue`) |
 

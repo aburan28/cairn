@@ -173,6 +173,25 @@ case "$UI_CODE" in
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP$ASSET")
     [ "$code" = "200" ] || fail "the reader's stylesheet -> $code"
     echo "  GET /ui/ -> 200, assets under /ui/_next resolve"
+    # The reader's other pages, each by a sentence it states about itself.
+    # `trailingSlash` in next.config.mjs is what makes /ui/chain/ a file the
+    # server can find, so a 404 here is the export and the router disagreeing
+    # about a path, which no unit test on either side can see. The sentinels
+    # are prerendered prose from each page's lede -- present in the static
+    # HTML before any fetch runs -- rather than headings, so a wording change
+    # in a title does not fail the build and a wrong page served under the
+    # right path does.
+    while IFS='|' read -r page sentinel; do
+      code=$(curl -s -o "$WORK/page.body" -w '%{http_code}' "http://127.0.0.1:$HTTP$page")
+      [ "$code" = "200" ] || fail "GET $page -> $code"
+      grep -q "$sentinel" "$WORK/page.body" \
+        || fail "$page is 200 but does not say \"$sentinel\"; the wrong page is under that path"
+      echo "  GET $page -> 200, says \"$sentinel\""
+    done <<'PAGES'
+/ui/objectives/|what remains payable
+/ui/chain/|Nothing here is stored
+/ui/log/|Every record this node holds
+PAGES
     ;;
   404)
     grep -q "built without the embedded reader" "$WORK/ui.body" \

@@ -513,6 +513,14 @@ pre {
   margin-top: 0.1rem;
 }
 
+/* Where a stat's number came from: a node, or the bundled log. Smaller than
+   the label and allowed to wrap, because an origin is a URL. */
+.statFrom {
+  font-size: 0.72rem;
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+}
+
 ul.cards {
   list-style: none;
   margin: 0;

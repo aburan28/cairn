@@ -107,18 +107,52 @@ export default function Page() {
           </div>
 
           {checkpoint && (
-            <div className="panel">
+            <div
+              className={
+                coversHead(checkpoint.checkpoint, chain.height) === "ahead"
+                  ? "panel bad"
+                  : "panel"
+              }
+            >
+              {/* `chain.height` — the ledger's entry count — and not
+                  `chain.links`. A checkpoint signs the entry count, and the
+                  two were compared for a while; since a log holds at least as
+                  many entries as batches, "behind" could never be seen. */}
               <b>
-                signed at height {checkpoint.checkpoint.height}
-                {coversHead(checkpoint.checkpoint, chain.links) === "behind" &&
-                  " — behind the head below, which is normal after further appends"}
+                signed at height {checkpoint.checkpoint.height} of{" "}
+                {chain.height} entries
+                {coversHead(checkpoint.checkpoint, chain.height) === "at" &&
+                  " — covers every entry this node serves"}
+                {coversHead(checkpoint.checkpoint, chain.height) === "behind" &&
+                  " — behind the log, which is normal after further appends"}
+                {coversHead(checkpoint.checkpoint, chain.height) === "ahead" &&
+                  " — more entries than this node now serves; the signed prefix is not this log"}
               </b>
               <div className="meta">
                 merkle root{" "}
                 <code className="dim" title={checkpoint.checkpoint.root}>
                   {short(checkpoint.checkpoint.root)}
                 </code>{" "}
+                · ledger head{" "}
+                <code className="dim" title={checkpoint.checkpoint.head}>
+                  {short(checkpoint.checkpoint.head)}
+                </code>
+                {checkpoint.checkpoint.head === chain.ledger_head
+                  ? " (this node's)"
+                  : coversHead(checkpoint.checkpoint, chain.height) === "at"
+                    ? " (differs from this node's, at the same height — not the same log)"
+                    : ""}{" "}
                 · issued {checkpoint.checkpoint.issued_at}
+              </div>
+              <div className="meta">
+                signed by{" "}
+                <code className="dim" title={checkpoint.public_key}>
+                  {short(checkpoint.public_key)}
+                </code>{" "}
+                <span className="dim">
+                  — the ML-DSA key, in full on hover. Whether that is the key you
+                  were told to expect is yours to check.
+                </span>
               </div>
               {/* Said plainly, because the alternative is a reader assuming the
                   green text means somebody checked. Verifying ML-DSA here would
@@ -206,7 +240,8 @@ export default function Page() {
 
           <p className="lede" style={{ marginTop: "2rem" }}>
             {chain.links} link(s) settling {claims} claim(s) in total, newest
-            first. Verify none of it on trust:{" "}
+            first, derived from a log of {chain.height} entries. Verify none of
+            it on trust:{" "}
             <code>cairn --log &lt;log&gt; --root . audit</code> re-derives
             the chain and checks every batch against the anchor it recorded.
           </p>

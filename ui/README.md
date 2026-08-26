@@ -73,7 +73,16 @@ comparing one node's head against a peer's must not need a redeploy.
 `npm ci` first. `cd ui && npm install && npm run dev` does the same thing by
 hand and *resolves* the lockfile rather than obeying it, which is the
 difference `npm ci` exists for. `make ui-check` runs what CI gates on:
-`tsc --noEmit` and a build.
+`tsc --noEmit`, `npm test`, and a build.
+
+The tests are `lib/*.test.ts`, run by vitest with no DOM and no mocking of a
+node: everything in `lib/` that is not a `fetch` is a pure function over what a
+node answered, and those are what the tests hold still — the chain check, the
+frontier join, NDJSON parsing with a bad line, the checkpoint-against-height
+comparison in its correct units. The pages themselves are exercised by `next
+build` and by `scripts/node-smoke.sh` against a real node. Each fetcher also
+asserts at runtime that the fields a page reads are present (`lib/shape.ts`),
+because an `as`-cast passes `tsc` for any field name at all.
 
 ## How the public site gets there
 

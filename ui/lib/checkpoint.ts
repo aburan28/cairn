@@ -22,6 +22,8 @@
  * not.
  */
 
+import { expectFields } from "./shape";
+
 export type Checkpoint = {
   /** Ledger head the signature covers. */
   head: string;
@@ -35,6 +37,9 @@ export type Checkpoint = {
 
 export type CheckpointResponse = {
   checkpoint: Checkpoint;
+  /** The ML-DSA verifying key, hex. Rendered, because a signature nobody can
+   *  see the signer of is a green tick and nothing more: the reader has to be
+   *  able to compare this against the key they were given out of band. */
   public_key: string;
   signature?: string;
 };
@@ -62,23 +67,49 @@ export async function fetchCheckpoint(
   }
   if (response.status === 404) return null;
   if (!response.ok) return null;
+  let body: unknown;
   try {
-    const body = (await response.json()) as CheckpointResponse;
-    return body.checkpoint ? body : null;
+    body = await response.json();
   } catch {
     return null;
   }
+  // A 200 that is not a checkpoint is not "no checkpoint"; it is a node and a
+  // page that disagree about the shape, and `null` here would hide that
+  // behind the same silence an unsigned node gets. So this one throws.
+  const signed = expectFields<CheckpointResponse>(
+    body,
+    ["checkpoint", "public_key"],
+    `${base}/checkpoint`,
+  );
+  expectFields<Checkpoint>(
+    signed.checkpoint,
+    ["height", "head", "root", "issued_at"],
+    `${base}/checkpoint`,
+  );
+  return signed;
 }
 
 /**
- * Whether the checkpoint's head is the chain head the node also served.
+ * Where the checkpoint's signed height stands against the ledger the node
+ * is serving now.
+ *
+ * `ledgerHeight` is `Chain.height` from `/chain` — the entry count — and not
+ * `Chain.links`. The two were compared for a while, and since a log always
+ * holds at least as many entries as batches the answer was "at" for every
+ * node that ever ran; a checkpoint could not be seen to fall behind.
  *
  * The one arithmetic-free check worth making here, and it can legitimately
  * disagree: a checkpoint is a signature over a *prefix*, so an operator who
  * signed and then kept appending has a checkpoint behind their head. That is
  * normal and is why this returns a three-way answer rather than a boolean —
- * "behind" is expected, "unrelated" is not.
+ * "behind" is expected, "ahead" is not: it means the checkpoint covers more
+ * entries than the node now serves, so either the log was truncated or the
+ * checkpoint was signed over a different one.
  */
-export function coversHead(checkpoint: Checkpoint, height: number): "at" | "behind" {
-  return checkpoint.height >= height ? "at" : "behind";
+export function coversHead(
+  checkpoint: Checkpoint,
+  ledgerHeight: number,
+): "at" | "behind" | "ahead" {
+  if (checkpoint.height === ledgerHeight) return "at";
+  return checkpoint.height < ledgerHeight ? "behind" : "ahead";
 }

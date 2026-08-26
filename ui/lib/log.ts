@@ -15,6 +15,8 @@
  * `objectives.ts` and `firstBrokenLink` in `chain.ts` already make.
  */
 
+import { expectFields } from "./shape";
+
 /** One entry, exactly as the log stores it. `payload` is record-kind-specific
  *  and untyped here on purpose — this file's job is parsing NDJSON, not
  *  knowing every record shape the protocol will ever add. */
@@ -33,6 +35,54 @@ export const NODE_URL = process.env.NEXT_PUBLIC_CAIRN_NODE ?? "";
 
 export class NodeUnreachable extends Error {}
 
+/** The records a log held, and every line of it that was not one. */
+export type ParsedLog = {
+  records: LogRecord[];
+  /** One entry per line that did not parse as a record, naming the line.
+   *  Never thrown: a log with one bad line still has every other line, and
+   *  a page that blanks itself over one has hidden the rest — including the
+   *  fact that something is wrong with the file `cairn audit` reads. */
+  problems: string[];
+};
+
+/**
+ * Parse NDJSON into records, one line at a time.
+ *
+ * Per line, and guarded per line, rather than one `JSON.parse` over the
+ * whole body: a single malformed line used to throw out of the loop and
+ * leave the page with an error where the log should be. What a reader
+ * needs from a corrupt line is *which* line, and the ones around it still
+ * rendered — the audit tool reads the same file, and a page that says
+ * "line 17 is not a record" sends somebody straight to it.
+ *
+ * "Not a record" covers a line that parses but lacks the fields every
+ * entry carries: `seq`, `kind`, `hash`, `payload`. `prev` is `null` at
+ * genesis, so it is deliberately not on that list — `expectFields` checks
+ * for `undefined`, but a reader should not have to know that to trust it.
+ */
+export function parseLog(text: string): ParsedLog {
+  const records: LogRecord[] = [];
+  const problems: string[] = [];
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim()) continue;
+    try {
+      records.push(
+        expectFields<LogRecord>(
+          JSON.parse(line),
+          ["seq", "kind", "hash", "payload"],
+          `line ${index + 1}`,
+        ),
+      );
+    } catch (cause) {
+      const why = cause instanceof Error ? cause.message : String(cause);
+      problems.push(`line ${index + 1}: ${why}`);
+    }
+  }
+  return { records, problems };
+}
+
 /**
  * Fetch and parse the log.
  *
@@ -40,7 +90,7 @@ export class NodeUnreachable extends Error {}
  * append-only, so a cached answer can only ever be a stale prefix, and a
  * stale prefix is the one thing a records explorer must not show silently.
  */
-export async function fetchLog(base: string = NODE_URL): Promise<LogRecord[]> {
+export async function fetchLog(base: string = NODE_URL): Promise<ParsedLog> {
   let response: Response;
   try {
     response = await fetch(`${base}/log`, { cache: "no-store" });
@@ -54,13 +104,7 @@ export async function fetchLog(base: string = NODE_URL): Promise<LogRecord[]> {
   if (!response.ok) {
     throw new NodeUnreachable(`${base}/log answered ${response.status}.`);
   }
-  const text = await response.text();
-  const records: LogRecord[] = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    records.push(JSON.parse(line) as LogRecord);
-  }
-  return records;
+  return parseLog(await response.text());
 }
 
 /** How many records of each kind, in the order each kind first appears —
