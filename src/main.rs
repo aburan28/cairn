@@ -441,9 +441,9 @@ impl Options {
         // neither is set still depends on whether a data directory was chosen.
         // An operator upgrading into this release must find their log exactly
         // where they left it. The deprecated `$CAIRN_LOG` is not read here:
-        // `parse` consults it last, after `--log` has had its chance, so a
-        // level exported for a daemon does not stop a command that named its
-        // log on the command line.
+        // `run` applies it after `parse` has finished, so `--log` has had its
+        // chance and a level exported for a daemon does not stop a command
+        // that named its log on the command line.
         let log = env::var(LOG_PATH_VAR).ok().filter(|v| !v.is_empty());
         let log_chosen = log.is_some();
         Options {
@@ -1378,21 +1378,36 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         other => return Err(CliError::Usage(format!("unknown command {other:?}"))),
     };
 
-    // The deprecated name, consulted last so that `--log` and `$CAIRN_LOG_PATH`
-    // both beat it, and skipped for `help` because a request for the manual
-    // should never be answered with a complaint about the environment.
-    if !options.log_chosen && command != Command::Help {
-        if let Some(value) = env::var(LEGACY_LOG_VAR).ok().filter(|v| !v.is_empty()) {
-            options.log = legacy_log_path(&value)?;
-            options.log_chosen = true;
-            eprintln!(
-                "warning: {LEGACY_LOG_VAR} is deprecated for the ledger path; \
-                 set {LOG_PATH_VAR}={value:?} instead"
-            );
-        }
-    }
-
     Ok(Invocation { options, command })
+}
+
+/// Apply the deprecated `$CAIRN_LOG` to a parsed invocation.
+///
+/// The value is a parameter rather than read here, and this is not part of
+/// [`parse`], because `parse` is called directly by some seventy unit tests
+/// and the variable is exactly the one a developer of this repository has
+/// exported for the daemons. Read it inside `parse` and
+/// `CAIRN_LOG=debug cargo test --bin cairn` fails every one of them with the
+/// refusal below, while CI (which exports nothing) stays green. Only [`run`]
+/// consults the environment; `tests/cli_env.rs` pins that on the real process
+/// with a scrubbed environment.
+///
+/// It is consulted last so that `--log` and `$CAIRN_LOG_PATH` both beat it,
+/// and skipped for `help` because a request for the manual should never be
+/// answered with a complaint about the environment.
+fn apply_legacy_log(invocation: &mut Invocation, legacy: Option<&str>) -> Result<(), CliError> {
+    if invocation.options.log_chosen || invocation.command == Command::Help {
+        return Ok(());
+    }
+    if let Some(value) = legacy.filter(|v| !v.is_empty()) {
+        invocation.options.log = legacy_log_path(value)?;
+        invocation.options.log_chosen = true;
+        eprintln!(
+            "warning: {LEGACY_LOG_VAR} is deprecated for the ledger path; \
+             set {LOG_PATH_VAR}={value:?} instead"
+        );
+    }
+    Ok(())
 }
 
 /// Parse `run`'s node-specific flags.
@@ -8455,7 +8470,8 @@ fn hex(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
-    let invocation = parse(argv)?;
+    let mut invocation = parse(argv)?;
+    apply_legacy_log(&mut invocation, env::var(LEGACY_LOG_VAR).ok().as_deref())?;
     let options = &invocation.options;
     match &invocation.command {
         Command::Help => {
@@ -8754,6 +8770,34 @@ mod tests {
                 "the refusal must say where the path goes now"
             );
         }
+    }
+
+    /// The precedence the deprecated name gets, checked without touching the
+    /// environment: it loses to `--log`, it never interrupts `help`, and a
+    /// level in it is a usage error only when it would actually have been
+    /// opened as the ledger.
+    #[test]
+    fn the_legacy_log_variable_is_applied_last_and_never_to_help() {
+        let mut named = parse(argv(&["--log", "/tmp/x.jsonl", "audit"])).expect("parses");
+        apply_legacy_log(&mut named, Some("debug")).expect("--log already chose the ledger");
+        assert_eq!(named.options.log, "/tmp/x.jsonl");
+
+        let mut help = parse(argv(&["help"])).expect("parses");
+        apply_legacy_log(&mut help, Some("debug")).expect("help is never refused");
+        assert_eq!(help.command, Command::Help);
+
+        let mut unset = parse(argv(&["audit"])).expect("parses");
+        apply_legacy_log(&mut unset, None).expect("nothing to apply");
+        assert!(!unset.options.log_chosen);
+
+        let mut path = parse(argv(&["audit"])).expect("parses");
+        apply_legacy_log(&mut path, Some("legacy/cairn.jsonl")).expect("a path is honoured");
+        assert_eq!(path.options.log, "legacy/cairn.jsonl");
+        assert!(path.options.log_chosen);
+
+        let mut level = parse(argv(&["audit"])).expect("parses");
+        let error = apply_legacy_log(&mut level, Some("debug")).expect_err("a level is refused");
+        assert!(matches!(error, CliError::Usage(_)), "got {error:?}");
     }
 
     #[test]
