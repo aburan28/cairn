@@ -1,5 +1,15 @@
 # Launch review — August 2026
 
+> **Refreshed 2026-08-25.** This file is a snapshot of one review and is left
+> as history rather than rewritten (see the note under *What still remains*).
+> Two counts in it had drifted from the tree and were corrected on that date,
+> nothing else was touched: the conformance vector count under *The reference
+> implementation is Rust* (it said 256; `cairn-reference conformance` prints
+> **448**), and the example count under *Fixed in this pass* item 7 (it said 12;
+> `examples/` now holds 19 directories and 32 `objective*.json` files, and
+> `scripts/check-examples.sh` walks all of them). Every other number here is
+> as the review found it and may have aged since.
+
 A full pass over the repository before opening it to outside contributors:
 three parallel reviews (the agent-facing MCP surface, the core protocol
 invariants, and operational readiness), the complete test and e2e suite, and
@@ -126,8 +136,10 @@ remains.
    not the attacker-authored statement. Omitted when absent, so it moved no
    ids: every pre-existing conformance vector is byte-identical.
 7. **CI is hardened.** `--locked` everywhere, `cargo audit` as a blocking job,
-   `scripts/check-examples.sh` re-pinning and posting all 12 examples (CI
-   previously exercised 3), dependabot, a release workflow, and `SECURITY.md`.
+   `scripts/check-examples.sh` re-pinning and posting every example objective
+   (12 at the time of the review; 32 across 19 directories as of the
+   2026-08-25 refresh — CI previously exercised 3), dependabot, a release
+   workflow, and `SECURITY.md`.
 8. **A discovery from building the artifact, now guarded.** A log written with
    `CAIRN_EPOCH_SECONDS=1` audits as *thoroughly broken* under the default
    600 — in both implementations, and both are right, because epochs are
@@ -140,8 +152,9 @@ remains.
 
 `reference/python/` is gone; `reference/rust/` replaces it as an independent
 second implementation, sharing no code with the primary and not even a cargo
-workspace. It reproduces all 256 frozen conformance vectors and passes interop
-in both directions.
+workspace. It reproduces all 448 frozen conformance vectors (the review said
+256; corrected 2026-08-25 to what `cairn-reference conformance` prints) and
+passes interop in both directions.
 
 Two Rust implementations share blind spots that Rust and Python did not — the
 reward-above-`u64` bound and the `"cites": "abc"` decode were both caught by

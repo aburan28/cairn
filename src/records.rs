@@ -1380,11 +1380,16 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
 ///
 /// # Why this is not just another citation
 ///
-/// `cites` says *I used this*, and it moves money: attribution flows value back
-/// along those edges. A relation says *this is what I found about that*, and it
-/// moves **nothing**. The separation is the whole security argument. If
-/// declaring "I refute X" paid, refutation would be a way to bill X; if it
-/// demoted X on the frontier, it would be a way to steal X's bounty. So
+/// `cites` says *I used this*, and it is the edge attribution walks:
+/// `cairn attribute` reports a share of each settled reward flowing back to
+/// what it cites. Today that is a *report* derived from the log — no
+/// settlement record and no balance changes because of a citation — but it is
+/// the only edge that could ever pay, and the frontier rule already turns on
+/// it. A relation says *this is what I found about that*, and it moves
+/// **nothing**. The separation is the
+/// whole security argument. If declaring "I refute X" paid, refutation would
+/// be a way to bill X; if it demoted X on the frontier, it would be a way to
+/// steal X's bounty. So
 /// [`crate::attribution`] walks `cites` and never reads this field, settlement
 /// never reads it, and the frontier never reads it. What reads it is
 /// [`crate::knowledge`], which computes a *view* nobody has to agree with.
