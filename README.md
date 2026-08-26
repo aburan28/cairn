@@ -318,15 +318,22 @@ network symptom.
 
 ### Turning up the logs
 
-`CAIRN_LOG` sets the level — `error`, `warn`, `info` (default), `debug`,
+`CAIRN_LOG_LEVEL` sets the level — `error`, `warn`, `info` (default), `debug`,
 `trace`, or `off`. Everything goes to **stderr**, always, which is what makes it
 safe to raise on `cairn-mcp`, whose *stdout* is the JSON-RPC protocol.
+
+It used to be `CAIRN_LOG`, and the `cairn` CLI read that same name as the
+**ledger path** — so `CAIRN_LOG=debug` exported for a daemon sent `cairn audit`
+to an empty file called `debug`, which audits clean. The two are now
+`CAIRN_LOG_LEVEL` (the level, every daemon) and `CAIRN_LOG_PATH` (the ledger,
+the CLI). The daemons still accept a level in `CAIRN_LOG` with a warning; the
+CLI refuses one outright and names both variables.
 
 `debug` adds every p2p protocol message, in both directions, with the peer it
 was exchanged with:
 
 ```
-$ CAIRN_LOG=debug make p2p
+$ CAIRN_LOG_LEVEL=debug make p2p
 … DEBUG cairn::p2p 59758322… -> Hello peer=083e078e… records=0
 … DEBUG cairn::p2p 59758322… <- Inventory records=1
 … DEBUG cairn::p2p 59758322… -> Want ids=1

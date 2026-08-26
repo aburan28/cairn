@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 PW="${CAIRN_BIN:-$ROOT/target/release/cairn}"
-LOG="${CAIRN_LOG:-/tmp/cairn-ecdsa-adapter.jsonl}"
+LOG="${CAIRN_LOG_PATH:-/tmp/cairn-ecdsa-adapter.jsonl}"
 OID_FILE="${CAIRN_ECDSA_OID_FILE:-/tmp/cairn-ecdsa-adapter.oid}"
 EXAMPLE="$ROOT/examples/ecdsa-fail"
 
