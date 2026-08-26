@@ -8,6 +8,8 @@ const objective = (reward: number, paid: number, remaining: number): Objective =
   reward,
   statement: "",
   settled: false,
+  open: true,
+  settlement: null,
   verifier_kind: "evaluator",
   frontier: {
     claim_id: "sha256:c",
