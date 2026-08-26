@@ -89,8 +89,56 @@ use cairn::store::atrest::{AtRestError, Cipher};
 use cairn::store::{exposure, mirror, quota, Store, StoreError};
 use cairn::time::timestamp;
 
-/// Where the log lives when `--log` and `$CAIRN_LOG` are both silent.
+/// Where the log lives when `--log` and `$CAIRN_LOG_PATH` are both silent.
 const DEFAULT_LOG: &str = "cairn.jsonl";
+
+/// The environment variable naming the ledger file.
+///
+/// This used to be `CAIRN_LOG`, which `cairn-serve`, `cairn-p2p` and
+/// `cairn-mcp` read as the stderr log *level*. One name for two things meant
+/// an operator who exported `CAIRN_LOG=debug` to turn up a daemon's logging
+/// then ran `cairn audit` against a nonexistent file named `debug` -- which
+/// opens as an empty log and audits clean. See [`legacy_log_path`] for what
+/// the old name still does.
+const LOG_PATH_VAR: &str = "CAIRN_LOG_PATH";
+
+/// The overloaded name, still read so nobody's ledger silently moves.
+const LEGACY_LOG_VAR: &str = cairn::logging::LEGACY_LEVEL_VAR;
+
+/// What the deprecated `CAIRN_LOG` may still mean to this binary.
+///
+/// A value that parses as a level is refused rather than opened as a path:
+/// that is the exact input that produced a clean audit of nothing. A value
+/// that is unmistakably a path (it has a separator in it, or the log's own
+/// extension) is honoured with a warning, so a script written against the old
+/// name keeps finding its ledger. Anything else -- a bare word that is neither
+/// -- is refused too, because a misspelled level looks exactly like one, and
+/// guessing which the operator meant is how this started.
+fn legacy_log_path(value: &str) -> Result<String, CliError> {
+    let advice = format!(
+        "set {LOG_PATH_VAR} for the ledger path (or pass --log) and \
+         {} for the stderr level of cairn-serve, cairn-p2p and cairn-mcp, \
+         then unset {LEGACY_LOG_VAR}",
+        cairn::logging::LEVEL_VAR
+    );
+    if cairn::logging::parse_level(value).is_some() {
+        return Err(CliError::Usage(format!(
+            "{LEGACY_LOG_VAR}={value:?} is a log level, but the cairn CLI reads \
+             {LEGACY_LOG_VAR} as the ledger path; {advice}"
+        )));
+    }
+    let looks_like_a_path = value.contains(std::path::MAIN_SEPARATOR)
+        || value.contains('/')
+        || std::path::Path::new(value)
+            .extension()
+            .is_some_and(|ext| ext == "jsonl");
+    if !looks_like_a_path {
+        return Err(CliError::Usage(format!(
+            "{LEGACY_LOG_VAR}={value:?} is neither a log level nor an obvious path; {advice}"
+        )));
+    }
+    Ok(value.to_string())
+}
 
 /// Bytes of entropy in a generated nonce -- `secrets.token_hex(16)`.
 const NONCE_BYTES: usize = 16;
@@ -366,6 +414,12 @@ impl CliError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Options {
     log: String,
+    /// Whether `--log` or `$CAIRN_LOG_PATH` named the log outright, as opposed
+    /// to it being derived from a data directory or the default. `--data-dir`
+    /// and `run` redirect the log only when nothing more specific chose it,
+    /// and this is that fact recorded once rather than re-read from the
+    /// environment at each of those sites.
+    log_chosen: bool,
     root: String,
     /// The data directory, when one was chosen. `None` keeps the pre-existing
     /// behaviour exactly: a bare `cairn.jsonl` wherever you are standing.
@@ -383,17 +437,22 @@ impl Options {
         let data = env::var(cairn::store::DATA_ENV)
             .ok()
             .filter(|value| !value.is_empty());
-        // `--log` and `$CAIRN_LOG` still win, and the default when neither
-        // is set still depends on whether a data directory was chosen. An
-        // operator upgrading into this release must find their log exactly
-        // where they left it.
-        let log = env::var("CAIRN_LOG").ok().filter(|v| !v.is_empty());
+        // `--log` and `$CAIRN_LOG_PATH` still win, and the default when
+        // neither is set still depends on whether a data directory was chosen.
+        // An operator upgrading into this release must find their log exactly
+        // where they left it. The deprecated `$CAIRN_LOG` is not read here:
+        // `run` applies it after `parse` has finished, so `--log` has had its
+        // chance and a level exported for a daemon does not stop a command
+        // that named its log on the command line.
+        let log = env::var(LOG_PATH_VAR).ok().filter(|v| !v.is_empty());
+        let log_chosen = log.is_some();
         Options {
             log: match (log, &data) {
                 (Some(explicit), _) => explicit,
                 (None, Some(data)) => Store::new(data).log_path().display().to_string(),
                 (None, None) => DEFAULT_LOG.to_string(),
             },
+            log_chosen,
             root: String::from("."),
             data,
             key_file: None,
@@ -1173,6 +1232,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         if token == "--log" {
             cursor.take();
             options.log = cursor.value("--log")?;
+            options.log_chosen = true;
         } else if token == "--root" {
             cursor.take();
             options.root = cursor.value("--root")?;
@@ -1180,12 +1240,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             cursor.take();
             let data = cursor.value("--data-dir")?;
             // Only redirect the log if nothing more specific already did.
-            if env::var("CAIRN_LOG")
-                .ok()
-                .filter(|v| !v.is_empty())
-                .is_none()
-                && options.log == DEFAULT_LOG
-            {
+            if !options.log_chosen && options.log == DEFAULT_LOG {
                 options.log = Store::new(&data).log_path().display().to_string();
             }
             options.data = Some(data);
@@ -1324,6 +1379,35 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
     };
 
     Ok(Invocation { options, command })
+}
+
+/// Apply the deprecated `$CAIRN_LOG` to a parsed invocation.
+///
+/// The value is a parameter rather than read here, and this is not part of
+/// [`parse`], because `parse` is called directly by some seventy unit tests
+/// and the variable is exactly the one a developer of this repository has
+/// exported for the daemons. Read it inside `parse` and
+/// `CAIRN_LOG=debug cargo test --bin cairn` fails every one of them with the
+/// refusal below, while CI (which exports nothing) stays green. Only [`run`]
+/// consults the environment; `tests/cli_env.rs` pins that on the real process
+/// with a scrubbed environment.
+///
+/// It is consulted last so that `--log` and `$CAIRN_LOG_PATH` both beat it,
+/// and skipped for `help` because a request for the manual should never be
+/// answered with a complaint about the environment.
+fn apply_legacy_log(invocation: &mut Invocation, legacy: Option<&str>) -> Result<(), CliError> {
+    if invocation.options.log_chosen || invocation.command == Command::Help {
+        return Ok(());
+    }
+    if let Some(value) = legacy.filter(|v| !v.is_empty()) {
+        invocation.options.log = legacy_log_path(value)?;
+        invocation.options.log_chosen = true;
+        eprintln!(
+            "warning: {LEGACY_LOG_VAR} is deprecated for the ledger path; \
+             set {LOG_PATH_VAR}={value:?} instead"
+        );
+    }
+    Ok(())
 }
 
 /// Parse `run`'s node-specific flags.
@@ -3476,7 +3560,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "options:");
     say(
         out,
-        "  --log PATH    JSONL log (default: $CAIRN_LOG, else cairn.jsonl)",
+        "  --log PATH    JSONL log (default: $CAIRN_LOG_PATH, else cairn.jsonl)",
     );
     say(
         out,
@@ -3538,12 +3622,7 @@ fn cmd_run(out: &mut dyn Write, options: &Options, request: &RunRequest) -> Resu
     store.prepare().map_err(CliError::Store)?;
 
     let default_path = |name: &str| data.join(name);
-    let log = if options.log == DEFAULT_LOG
-        && env::var("CAIRN_LOG")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .is_none()
-    {
+    let log = if options.log == DEFAULT_LOG && !options.log_chosen {
         store.log_path()
     } else {
         PathBuf::from(&options.log)
@@ -8391,7 +8470,8 @@ fn hex(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
-    let invocation = parse(argv)?;
+    let mut invocation = parse(argv)?;
+    apply_legacy_log(&mut invocation, env::var(LEGACY_LOG_VAR).ok().as_deref())?;
     let options = &invocation.options;
     match &invocation.command {
         Command::Help => {
@@ -8631,6 +8711,93 @@ mod tests {
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    /// The input that produced a clean audit of nothing: a level, exported for
+    /// a daemon, read here as a path. Every spelling of every level is refused,
+    /// and the refusal names both replacements, since an operator hitting this
+    /// has one variable set and needs to know it became two.
+    #[test]
+    fn a_level_in_the_legacy_log_variable_is_refused_not_opened() {
+        for level in ["trace", "debug", "info", "warn", "warning", "error", "off"] {
+            for spelling in [
+                level.to_string(),
+                level.to_uppercase(),
+                format!(" {level} "),
+            ] {
+                let error = legacy_log_path(&spelling)
+                    .expect_err(&format!("{spelling:?} was opened as a ledger path"));
+                let message = error.report();
+                assert!(
+                    message.contains(LOG_PATH_VAR) && message.contains(cairn::logging::LEVEL_VAR),
+                    "the refusal must name both replacements; got: {message}"
+                );
+                assert!(
+                    matches!(error, CliError::Usage(_)),
+                    "a bad environment is a usage error, got {error:?}"
+                );
+            }
+        }
+    }
+
+    /// The other half of the promise: a script that still exports the old
+    /// name with an actual path in it keeps finding its ledger.
+    #[test]
+    fn an_obvious_path_in_the_legacy_log_variable_is_still_honoured() {
+        for path in [
+            "/srv/cairn/cairn.jsonl",
+            "./cairn.jsonl",
+            "logs/node-a",
+            "cairn.jsonl",
+            "DEBUG.jsonl",
+        ] {
+            assert_eq!(
+                legacy_log_path(path).expect("a path is a path").as_str(),
+                path
+            );
+        }
+    }
+
+    /// A bare word that is neither a level nor a path is refused too. `verbose`
+    /// is a level somebody meant to type and a file nobody meant to audit;
+    /// guessing between those is how the original bug happened.
+    #[test]
+    fn a_bare_word_in_the_legacy_log_variable_is_ambiguous_and_refused() {
+        for word in ["verbose", "debg", "cairn", "mylog"] {
+            let error = legacy_log_path(word).expect_err("opened an ambiguous value");
+            assert!(
+                error.report().contains(LOG_PATH_VAR),
+                "the refusal must say where the path goes now"
+            );
+        }
+    }
+
+    /// The precedence the deprecated name gets, checked without touching the
+    /// environment: it loses to `--log`, it never interrupts `help`, and a
+    /// level in it is a usage error only when it would actually have been
+    /// opened as the ledger.
+    #[test]
+    fn the_legacy_log_variable_is_applied_last_and_never_to_help() {
+        let mut named = parse(argv(&["--log", "/tmp/x.jsonl", "audit"])).expect("parses");
+        apply_legacy_log(&mut named, Some("debug")).expect("--log already chose the ledger");
+        assert_eq!(named.options.log, "/tmp/x.jsonl");
+
+        let mut help = parse(argv(&["help"])).expect("parses");
+        apply_legacy_log(&mut help, Some("debug")).expect("help is never refused");
+        assert_eq!(help.command, Command::Help);
+
+        let mut unset = parse(argv(&["audit"])).expect("parses");
+        apply_legacy_log(&mut unset, None).expect("nothing to apply");
+        assert!(!unset.options.log_chosen);
+
+        let mut path = parse(argv(&["audit"])).expect("parses");
+        apply_legacy_log(&mut path, Some("legacy/cairn.jsonl")).expect("a path is honoured");
+        assert_eq!(path.options.log, "legacy/cairn.jsonl");
+        assert!(path.options.log_chosen);
+
+        let mut level = parse(argv(&["audit"])).expect("parses");
+        let error = apply_legacy_log(&mut level, Some("debug")).expect_err("a level is refused");
+        assert!(matches!(error, CliError::Usage(_)), "got {error:?}");
     }
 
     #[test]
@@ -9009,6 +9176,7 @@ mod tests {
         ]);
         let options = Options {
             log: dir.join("log.jsonl").display().to_string(),
+            log_chosen: true,
             root: dir.display().to_string(),
             data: None,
             key_file: None,
@@ -9081,6 +9249,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("data")).expect("scratch dir");
         let options = Options {
             log: dir.join("data/log.jsonl").display().to_string(),
+            log_chosen: true,
             root: dir.display().to_string(),
             data: Some(dir.join("data").display().to_string()),
             key_file: Some(dir.join("key").display().to_string()),
@@ -9746,6 +9915,7 @@ mod tests {
         let dir = scratch_dir("prove");
         let options = Options {
             log: dir.join("log.jsonl").display().to_string(),
+            log_chosen: true,
             root: dir.display().to_string(),
             data: None,
             key_file: None,
@@ -9848,6 +10018,7 @@ mod tests {
         let dir = scratch_dir("prove-stale");
         let options = Options {
             log: dir.join("log.jsonl").display().to_string(),
+            log_chosen: true,
             root: dir.display().to_string(),
             data: None,
             key_file: None,

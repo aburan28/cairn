@@ -3373,6 +3373,49 @@ impl Node {
         None
     }
 
+    /// Whether an objective can still pay anybody. This is what "settled"
+    /// means everywhere the node publishes it.
+    ///
+    /// One definition, here, rather than one per reader. The rule every reader
+    /// used to apply -- "a settlement record exists" -- is right for a
+    /// certificate, which settles once, and wrong for a ratchet, which writes a
+    /// settlement on *every* paying advance. By that rule a progressive
+    /// objective read as settled the moment its first slice was paid, with most
+    /// of its pool still on the table and its target unreached, and
+    /// `list_objectives` steered every agent away from the one kind of work the
+    /// network most wants done.
+    ///
+    /// For a ratchet, closed means what [`Ratchet::is_exhausted`] means: the
+    /// frontier stands at the target, or the span left below it is under
+    /// `min_improvement`, so no claim at any score can settle here again. That
+    /// is deliberately the same test the MCP server's frontier line makes when
+    /// it warns a contributor off, so the listing and the warning cannot
+    /// disagree. A ratchet with no frontier yet is open unless
+    /// [`Ratchet::is_fundable`] says nothing could ever clear its first step.
+    ///
+    /// Reporting only. [`Node::commit`] still admits a commitment against an
+    /// exhausted ratchet -- the reveal then stalls (`Ratchet::stall`) and pays
+    /// nothing -- and this method changes none of that. Admission is a
+    /// rule both implementations must agree on record for record, and
+    /// tightening it here alone would make `src/` and `reference/rust/`
+    /// disagree about which logs are valid.
+    pub fn objective_is_closed(&self, objective: &Objective) -> bool {
+        let id = objective.id();
+        let Some(block) = &objective.ratchet else {
+            return self.settlement_of(&id).is_some();
+        };
+        let Ok(ratchet) = Ratchet::from_value(block) else {
+            // `post_objective` refuses an unreadable ratchet, so this only
+            // arises on a log a peer wrote. `settle_one` pays nothing against
+            // one, which is the definition of closed used here.
+            return true;
+        };
+        match self.frontier_of(&id) {
+            Some(frontier) => ratchet.is_exhausted(frontier.score),
+            None => !ratchet.is_fundable(),
+        }
+    }
+
     /// What one claim was paid, if it has settled.
     ///
     /// Keyed on the claim rather than the objective, which
@@ -9534,6 +9577,124 @@ mod tests {
             .expect("outcome");
         assert!(!outcome.settled);
         assert!(node.ledger().entries_of_kind(FRONTIER).is_empty());
+    }
+
+    /// A ratchet that has paid once is not settled. It is *working*.
+    ///
+    /// Every settlement record a ratchet writes looked, to the readers, like
+    /// the record that closes a certificate -- so the HTTP listing, the MCP
+    /// listing and three pages of the site all reported a progressive
+    /// objective closed from its first paid slice onward, and steered every
+    /// contributor away from the pool it still had.
+    #[test]
+    fn a_ratchet_with_pool_remaining_is_open_and_an_exhausted_one_is_closed() {
+        let dir = TempDir::new("closed-ratchet");
+        let mut node = node(&dir);
+        let objective = ratchet_objective();
+        node.post_objective(&objective, TS).expect("post");
+        let ratchet = Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 1).expect("valid");
+
+        assert!(!node.objective_is_closed(&objective), "no frontier yet");
+
+        let first = claim_for(
+            &objective,
+            "alice",
+            Value::object([("s", Value::Int(40))]),
+            "n1",
+        );
+        node.settle_improvement(&first, scored(40), &ratchet, None, TS)
+            .expect("first");
+        // The naive rule -- and the old one -- would say settled here.
+        assert!(node.settlement_of(&objective.id()).is_some());
+        assert!(
+            !node.objective_is_closed(&objective),
+            "600_000 of the pool is still payable"
+        );
+
+        let held = node.frontier_of(&objective.id()).expect("frontier");
+        let last = claim_for(
+            &objective,
+            "bob",
+            Value::object([("s", Value::Int(100))]),
+            "n2",
+        );
+        node.settle_improvement(&last, scored(100), &ratchet, Some(&held), TS)
+            .expect("last");
+        assert!(
+            node.objective_is_closed(&objective),
+            "the frontier is at the target and the pool is paid out"
+        );
+    }
+
+    /// Closed does not mean paid out. A frontier whose remaining span is
+    /// under `min_improvement` can never move again, so the pool left in it
+    /// is stranded -- and an objective nothing can settle against is closed
+    /// however much money it still holds. Same test `Ratchet::is_exhausted`
+    /// makes, and the same one the MCP frontier line warns with.
+    #[test]
+    fn a_ratchet_stranded_below_min_improvement_is_closed_with_pool_left() {
+        let dir = TempDir::new("closed-stranded");
+        let mut node = node(&dir);
+        let block = Value::object([
+            ("baseline", Value::Int(0)),
+            ("target", Value::Int(10)),
+            ("reward", Value::Int(1_000_000)),
+            ("direction", Value::string("maximize")),
+            ("min_improvement", Value::Int(3)),
+        ]);
+        let objective = Objective::new(
+            "G",
+            "maximize the score",
+            evaluator_verifier(),
+            1_000_000,
+            "treasury",
+            TS,
+            None,
+            Some(block),
+        )
+        .expect("valid objective");
+        node.post_objective(&objective, TS).expect("post");
+        let ratchet = Ratchet::new(0, 10, 1_000_000, Direction::Maximize, 3).expect("valid");
+
+        let claim = claim_for(
+            &objective,
+            "alice",
+            Value::object([("s", Value::Int(8))]),
+            "n1",
+        );
+        node.settle_improvement(&claim, scored(8), &ratchet, None, TS)
+            .expect("advance");
+        let frontier = node.frontier_of(&objective.id()).expect("frontier");
+        assert!(
+            frontier.paid_cumulative < 1_000_000,
+            "pool left: {}",
+            frontier.paid_cumulative
+        );
+        assert!(node.objective_is_closed(&objective));
+    }
+
+    /// For a certificate the old rule and the new one agree: one settlement
+    /// closes it, and before that it is open.
+    #[test]
+    fn a_certificate_is_closed_by_its_one_settlement() {
+        let dir = TempDir::new("closed-certificate");
+        let mut node = node(&dir);
+        let objective = lean_objective(10);
+        node.post_objective(&objective, TS).expect("post");
+        assert!(!node.objective_is_closed(&objective));
+
+        node.append(
+            SETTLEMENT,
+            Value::object([
+                ("objective_id", Value::string(objective.id())),
+                ("claim_id", Value::string("sha256:claim")),
+                ("submitter", Value::string("alice")),
+                ("reward", Value::Int(10)),
+            ]),
+            TS,
+        )
+        .expect("append");
+        assert!(node.objective_is_closed(&objective));
     }
 
     #[test]

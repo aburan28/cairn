@@ -27,10 +27,17 @@
 //!
 //! # Filtering
 //!
-//! `CAIRN_LOG` picks the level: `error`, `warn`, `info`, `debug`, `trace`,
-//! or `off`. Default `info`, which is the daemon's ordinary narration and
-//! nothing per-message. `debug` adds every p2p protocol message with its peer
-//! and direction; `trace` is the same plus payload detail.
+//! `CAIRN_LOG_LEVEL` picks the level: `error`, `warn`, `info`, `debug`,
+//! `trace`, or `off`. Default `info`, which is the daemon's ordinary narration
+//! and nothing per-message. `debug` adds every p2p protocol message with its
+//! peer and direction; `trace` is the same plus payload detail.
+//!
+//! It was `CAIRN_LOG` until that name turned out to be doing two jobs: the
+//! `cairn` CLI read it as the ledger *path*, so `CAIRN_LOG=debug` exported for
+//! a daemon sent `cairn audit` to a nonexistent file called `debug`, which
+//! opens as an empty log and audits clean. `CAIRN_LOG` is still honoured here
+//! when it holds a level, so an operator's existing shell keeps working; the
+//! CLI refuses that same value, which is the half that was dangerous.
 //!
 //! Deliberately one global level rather than per-module filtering. A directive
 //! grammar (`p2p=debug,swarm=trace`) is a parser, a spec, and a thing to get
@@ -44,7 +51,14 @@ use log::{LevelFilter, Log, Metadata, Record};
 use std::io::Write;
 
 /// The environment variable that sets the level.
-pub const LEVEL_VAR: &str = "CAIRN_LOG";
+pub const LEVEL_VAR: &str = "CAIRN_LOG_LEVEL";
+
+/// The name the level used to live under, shared with the ledger path.
+///
+/// Read only when [`LEVEL_VAR`] is unset *and* the value parses as a level:
+/// a path here was aimed at the `cairn` CLI, not at this logger, and is not
+/// this logger's business to complain about.
+pub const LEGACY_LEVEL_VAR: &str = "CAIRN_LOG";
 
 /// Writes every record to stderr, prefixed with a UTC timestamp and level.
 struct StderrLogger {
@@ -96,34 +110,71 @@ pub fn parse_level(text: &str) -> Option<LevelFilter> {
     }
 }
 
-/// Install the logger, reading [`LEVEL_VAR`] for the level.
+/// Where a level came from, so [`init`] can say so once the logger is up.
+#[derive(Debug, PartialEq, Eq)]
+enum Resolution {
+    /// Nothing asked; `info`.
+    Default,
+    /// [`LEVEL_VAR`] named it.
+    Explicit,
+    /// [`LEGACY_LEVEL_VAR`] named it, and the operator should move.
+    Legacy,
+    /// [`LEVEL_VAR`] held this, which is not a level; `info` is used.
+    Unparseable(String),
+}
+
+/// Pick the level from the two variables' values, without touching the
+/// environment, so the precedence can be tested as a function.
+///
+/// [`LEVEL_VAR`] wins whenever it is set, even when it is wrong: a typo in the
+/// new name should be reported as one, not silently papered over by an old
+/// setting that happens to be lying around. The legacy name is consulted only
+/// in its absence, and only when its value is actually a level.
+fn resolve(explicit: Option<&str>, legacy: Option<&str>) -> (LevelFilter, Resolution) {
+    match explicit.filter(|text| !text.is_empty()) {
+        Some(text) => match parse_level(text) {
+            Some(level) => (level, Resolution::Explicit),
+            None => (LevelFilter::Info, Resolution::Unparseable(text.to_string())),
+        },
+        None => match legacy.and_then(parse_level) {
+            Some(level) => (level, Resolution::Legacy),
+            None => (LevelFilter::Info, Resolution::Default),
+        },
+    }
+}
+
+/// Install the logger, reading [`LEVEL_VAR`] for the level, and
+/// [`LEGACY_LEVEL_VAR`] when that is unset and the old one holds a level.
 ///
 /// Idempotent and never fatal: a second call, or a binary whose library
 /// already installed one, is a no-op rather than an error. Nothing here is
 /// worth failing a node's startup over.
 ///
-/// An unparseable `CAIRN_LOG` warns *through the logger it just installed*
-/// and keeps the default, which is the honest order — refusing to start
-/// because a diagnostic setting was misspelled would be worse than the typo.
+/// An unparseable `CAIRN_LOG_LEVEL` warns *through the logger it just
+/// installed* and keeps the default, which is the honest order -- refusing to
+/// start because a diagnostic setting was misspelled would be worse than the
+/// typo. A level taken from the legacy name warns the same way, once, so the
+/// operator learns the new name from the daemon they were tuning.
 pub fn init() {
-    let requested = std::env::var(LEVEL_VAR).ok();
-    let level = requested
-        .as_deref()
-        .and_then(parse_level)
-        .unwrap_or(LevelFilter::Info);
+    let explicit = std::env::var(LEVEL_VAR).ok();
+    let legacy = std::env::var(LEGACY_LEVEL_VAR).ok();
+    let (level, resolution) = resolve(explicit.as_deref(), legacy.as_deref());
 
     let logger = Box::new(StderrLogger { level });
     if log::set_boxed_logger(logger).is_ok() {
         log::set_max_level(level);
     }
 
-    if let Some(text) = requested {
-        if parse_level(&text).is_none() {
-            log::warn!(
-                "{LEVEL_VAR}={text:?} is not a level (off, error, warn, info, debug, trace); \
-                 using info"
-            );
-        }
+    match resolution {
+        Resolution::Unparseable(text) => log::warn!(
+            "{LEVEL_VAR}={text:?} is not a level (off, error, warn, info, debug, trace); \
+             using info"
+        ),
+        Resolution::Legacy => log::warn!(
+            "{LEGACY_LEVEL_VAR} is deprecated for the log level; set {LEVEL_VAR} instead \
+             (the cairn CLI reads {LEGACY_LEVEL_VAR} as a ledger path and refuses a level)"
+        ),
+        Resolution::Default | Resolution::Explicit => {}
     }
 }
 
@@ -142,6 +193,58 @@ mod tests {
         // nobody chose.
         assert_eq!(parse_level("verbose"), None);
         assert_eq!(parse_level(""), None);
+    }
+
+    #[test]
+    fn the_new_name_wins_and_the_old_one_counts_only_as_a_level() {
+        assert_eq!(
+            resolve(None, None),
+            (LevelFilter::Info, Resolution::Default)
+        );
+        assert_eq!(
+            resolve(Some("debug"), None),
+            (LevelFilter::Debug, Resolution::Explicit)
+        );
+        // The old name still turns the level up, so a shell that exported it
+        // for a daemon keeps working -- but it is flagged, not silent.
+        assert_eq!(
+            resolve(None, Some("trace")),
+            (LevelFilter::Trace, Resolution::Legacy)
+        );
+        assert_eq!(
+            resolve(None, Some("  ERROR ")),
+            (LevelFilter::Error, Resolution::Legacy)
+        );
+        // A path in the old name was aimed at the CLI, not here. Ignored, not
+        // reported: the CLI is the one that reads it and can say so.
+        assert_eq!(
+            resolve(None, Some("/srv/cairn/cairn.jsonl")),
+            (LevelFilter::Info, Resolution::Default)
+        );
+        assert_eq!(
+            resolve(None, Some("cairn.jsonl")),
+            (LevelFilter::Info, Resolution::Default)
+        );
+        // The new name takes precedence over the old even when it is wrong,
+        // and says so; an old setting must not quietly override a typo in the
+        // one the operator is actually editing.
+        assert_eq!(
+            resolve(Some("verbose"), Some("trace")),
+            (
+                LevelFilter::Info,
+                Resolution::Unparseable(String::from("verbose"))
+            )
+        );
+        assert_eq!(
+            resolve(Some("warn"), Some("trace")),
+            (LevelFilter::Warn, Resolution::Explicit)
+        );
+        // Empty is unset. `CAIRN_LOG_LEVEL= cairn-serve` should not report a
+        // typo in nothing.
+        assert_eq!(
+            resolve(Some(""), Some("debug")),
+            (LevelFilter::Debug, Resolution::Legacy)
+        );
     }
 
     #[test]

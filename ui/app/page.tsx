@@ -49,9 +49,20 @@ export default function Page() {
   }, []);
 
   const objectives = feed?.objectives ?? SNAPSHOT.objectives;
-  const open = objectives.filter((o) => !o.settled);
+  // `open` is the node's field, not `!settled` computed here: the node is the
+  // one place the rule lives, and for a while `settled` meant "a settlement
+  // record exists", which a ratchet satisfies from its first paid slice.
+  const open = objectives.filter((o) => o.open);
   const pool = objectives.reduce((sum, o) => sum + o.reward, 0);
-  const paid = objectives.reduce((sum, o) => sum + (o.frontier?.paid_cumulative ?? 0), 0);
+  // A ratchet's payouts are summed in its frontier and its `settlement` is
+  // null; a certificate has no frontier and one `settlement`. Adding both
+  // therefore never counts a payment twice, and leaving either out did:
+  // this summed only frontiers, so the shipped log's 100,000 certificate
+  // payout was missing from the number under "paid out".
+  const paid = objectives.reduce(
+    (sum, o) => sum + (o.frontier?.paid_cumulative ?? 0) + (o.settlement?.reward ?? 0),
+    0,
+  );
 
   // While a request is in flight the page shows the snapshot, and says
   // "reading…" rather than labelling it as the snapshot: the label is a claim
@@ -160,6 +171,13 @@ export default function Page() {
                         </span>
                       )}
                     </>
+                  ) : o.settlement ? (
+                    <span className="dim">
+                      {" · settled — "}
+                      <code>{units(o.settlement.reward)}</code> paid to{" "}
+                      <code>{o.settlement.submitter}</code> for claim{" "}
+                      <code title={o.settlement.claim_id}>{short(o.settlement.claim_id)}</code>
+                    </span>
                   ) : (
                     <span className="dim"> · no claim yet</span>
                   )}

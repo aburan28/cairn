@@ -1,3 +1,0 @@
-cairn-serve: listening on 127.0.0.1:8787
-cairn-serve: accepting submissions into /Volumes/SSD990/distributed-researcher/queue
-cairn-serve:   admitted by `cairn-p2p --queue /Volumes/SSD990/distributed-researcher/queue` if a daemon is running, or `cairn drain --queue /Volumes/SSD990/distributed-researcher/queue` if not

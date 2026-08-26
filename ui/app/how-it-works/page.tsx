@@ -75,7 +75,7 @@ export default function Page() {
         are not guarded against here — they are unrepresentable.
       </p>
 
-      <h2>four verifiers, four trust assumptions</h2>
+      <h2>five verifiers, five trust assumptions</h2>
       <div className="tableWrap">
         <table className="grid">
           <thead>
@@ -102,6 +102,17 @@ export default function Page() {
               <td>scores a candidate against a pinned fitness function</td>
               <td>1 evaluation</td>
               <td>evaluator is pinned and pure</td>
+            </tr>
+            <tr>
+              <td>
+                <code>statistical</code>
+              </td>
+              <td>
+                re-runs a pinned test statistic at a pinned seed against a
+                pre-registered threshold
+              </td>
+              <td>1 run of the statistic</td>
+              <td>statistic is pinned and pure; the criterion was fixed before the data</td>
             </tr>
             <tr>
               <td>

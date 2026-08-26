@@ -264,7 +264,7 @@ same rule `sync` applies, and for the same reason.
 
 `--data-dir`, or `$CAIRN_DATA`. **Not adopting it changes nothing**: without
 it, the log is still a bare `cairn.jsonl` in the working directory, and
-`--log` / `$CAIRN_LOG` still override everything. Quietly relocating an
+`--log` / `$CAIRN_LOG_PATH` still override everything. Quietly relocating an
 existing operator's log on upgrade would be the worst possible way to introduce
 this.
 

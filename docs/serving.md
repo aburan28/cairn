@@ -16,13 +16,20 @@ cairn-serve --log cairn.jsonl --root . --listen 0.0.0.0:8080
 Read-only. Add `--queue ./queue` to accept submissions, and `--checkpoint
 checkpoint.json` to publish what you signed.
 
+The log is appended without `fsync`: a power loss can lose the last records
+written, which a peer still holds, and the next open reports a torn tail
+rather than silently reading it. If yours is the one node contributors submit
+to, so that a lost tail is a lost claim rather than a re-sync, set
+`CAIRN_LEDGER_FSYNC=1` in the daemon's environment to pay one `fsync` per
+record instead.
+
 ## The endpoints
 
 | endpoint | what it is |
 |---|---|
 | `GET /log` | the log, byte for byte as it is on disk |
 | `GET /checkpoint` | the signed `(root, height, signature)`, if you publish one |
-| `GET /objectives` | every objective, with its frontier |
+| `GET /objectives` | every objective, with its frontier and whether it is still payable |
 | `GET /objective/{id}` | one full record, verifier spec included |
 | `GET /frontier/{id}` | best score, who holds it, what to cite, pool remaining |
 | `GET /chain` | the epoch chain: `links` and `head` are the chain's, `height` and `ledger_head` are the ledger's — the units a checkpoint signs, and not interchangeable with the first two |
@@ -31,6 +38,17 @@ checkpoint.json` to publish what you signed.
 | `POST /submit` | queue a commitment or a claim (only with `--queue`) |
 
 Everything except `/log` is a convenience. `/log` is the product.
+
+Both objective views carry the same three lifecycle fields. `settled` means *no
+longer payable* -- for a certificate, that a settlement exists; for a ratchet,
+that the frontier is at the target or the span left under it is smaller than
+`min_improvement`, so no claim can settle there again. It does **not** mean "a
+settlement record exists": a ratchet writes one on every paying move, and by
+that reading a progressive objective was settled from its first slice onward
+with most of its pool untouched. `open` is its complement, published rather
+than left for a reader to negate. `settlement` is `{claim_id, submitter,
+reward}` for a settled certificate and `null` otherwise -- a ratchet's payouts
+are many, and `frontier.paid_cumulative` carries them.
 
 ## What a contributor should actually do
 

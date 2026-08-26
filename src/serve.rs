@@ -54,7 +54,7 @@ use std::time::Duration;
 use crate::canonical::{digest_bytes, Value};
 use crate::ledger::{Codec, Ledger};
 use crate::node::Node;
-use crate::records::{Claim, Commitment};
+use crate::records::{Claim, Commitment, Objective};
 
 /// Largest request body accepted, in bytes.
 ///
@@ -819,11 +819,8 @@ fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             ),
             ("reward", Value::Int(i128::from(objective.reward))),
             ("funder", Value::string(objective.funder.clone())),
-            ("settled", Value::Bool(node.settlement_of(&id).is_some())),
         ];
-        if let Some(frontier) = node.frontier_of(&id) {
-            fields.push(("frontier", frontier_value(&frontier, objective.reward)));
-        }
+        fields.extend(lifecycle_fields(&node, &id, &objective));
         items.push(Value::object(fields));
     }
     json(
@@ -863,10 +860,61 @@ fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Res
             ),
         ),
     ];
+    fields.extend(lifecycle_fields(&node, id, objective));
+    json(stream, 200, &Value::object(fields))
+}
+
+/// Where one objective stands: `settled`, `open`, `settlement`, and
+/// `frontier` when there is one.
+///
+/// Shared by the listing and the detail view so the two cannot disagree about
+/// whether a bounty is still payable, and thin on purpose: the judgement is
+/// [`Node::objective_is_closed`]'s, and this only writes it down.
+///
+/// `settled` keeps its name and gains its honest meaning, *no longer payable*.
+/// It used to be "a settlement record exists", which for a ratchet is true
+/// from the first paid slice onward -- so a progressive objective with most of
+/// its pool untouched was listed as settled, and every page that derived
+/// `open = !settled` hid it. `open` is published alongside rather than left
+/// for readers to negate, so that no reader has to know the two are
+/// complements.
+///
+/// `settlement` is the certificate's one payment: who was paid, how much, for
+/// which claim. It is `null` for a ratchet, whose payouts are many and are
+/// carried per move by `frontier.paid_cumulative` -- the first settlement of a
+/// ratchet is only its first paid step, and naming it here would read as the
+/// whole.
+fn lifecycle_fields(node: &Node, id: &str, objective: &Objective) -> Vec<(&'static str, Value)> {
+    let closed = node.objective_is_closed(objective);
+    let settlement = if objective.ratchet.is_some() {
+        Value::Null
+    } else {
+        node.settlement_of(id)
+            .map(|payload| settlement_value(&payload))
+            .unwrap_or(Value::Null)
+    };
+    let mut fields = vec![
+        ("settled", Value::Bool(closed)),
+        ("open", Value::Bool(!closed)),
+        ("settlement", settlement),
+    ];
     if let Some(frontier) = node.frontier_of(id) {
         fields.push(("frontier", frontier_value(&frontier, objective.reward)));
     }
-    json(stream, 200, &Value::object(fields))
+    fields
+}
+
+/// The three fields of a settlement record a reader acts on, copied out of
+/// the payload rather than the payload re-served whole: `objective_id` is the
+/// key the caller asked by, and anything else a future record kind adds is
+/// not this route's to promise.
+fn settlement_value(payload: &Value) -> Value {
+    let field = |key: &str| payload.get(key).cloned().unwrap_or(Value::Null);
+    Value::object([
+        ("claim_id", field("claim_id")),
+        ("submitter", field("submitter")),
+        ("reward", field("reward")),
+    ])
 }
 
 fn frontier(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
@@ -1665,6 +1713,129 @@ mod tests {
         // would-be hex pair ended in the middle of a multi-byte character.
         assert_eq!(percent_decode("%aé"), "%aé");
     }
+
+    fn field<'a>(value: &'a Value, key: &str) -> &'a Value {
+        value
+            .get(key)
+            .unwrap_or_else(|| panic!("no `{key}` in {value:?}"))
+    }
+
+    /// The published log ships one settled certificate and one ratchet paid
+    /// out to its target. Both are closed, and the certificate says who was
+    /// paid; the ratchet leaves that to its frontier.
+    #[test]
+    fn the_shipped_log_publishes_a_settled_certificate_with_its_settlement() {
+        let log = concat!(env!("CARGO_MANIFEST_DIR"), "/launch/cairn.jsonl");
+        let ledger = Ledger::open(log).expect("the shipped log");
+        let node = Node::new(ledger, env!("CARGO_MANIFEST_DIR"));
+        let objectives = node.objectives();
+        assert!(
+            !objectives.is_empty(),
+            "launch/cairn.jsonl carries objectives"
+        );
+
+        let mut saw_certificate = false;
+        let mut saw_ratchet = false;
+        for (id, objective) in &objectives {
+            let fields = Value::object(lifecycle_fields(&node, id, objective));
+            assert_eq!(field(&fields, "settled"), &Value::Bool(true), "{id}");
+            assert_eq!(field(&fields, "open"), &Value::Bool(false), "{id}");
+            if objective.ratchet.is_some() {
+                saw_ratchet = true;
+                assert_eq!(field(&fields, "settlement"), &Value::Null);
+                let frontier = field(&fields, "frontier");
+                assert_eq!(field(frontier, "pool_remaining"), &Value::Int(0));
+            } else {
+                saw_certificate = true;
+                let settlement = field(&fields, "settlement");
+                assert_eq!(
+                    field(settlement, "reward"),
+                    &Value::Int(i128::from(objective.reward))
+                );
+                assert!(field(settlement, "submitter").as_str().is_some());
+                assert!(field(settlement, "claim_id")
+                    .as_str()
+                    .is_some_and(|claim| claim.starts_with("sha256:")));
+                assert!(
+                    fields.get("frontier").is_none(),
+                    "a certificate has no frontier"
+                );
+            }
+        }
+        assert!(saw_certificate && saw_ratchet, "{objectives:?}");
+    }
+
+    /// A ratchet with most of its pool untouched is open, whatever settlement
+    /// records it has already written -- which is where the old `settled`
+    /// came from, and why it hid exactly the objectives worth working.
+    #[test]
+    fn a_ratchet_with_pool_remaining_is_published_as_open() {
+        use crate::frontier::FrontierEntry;
+
+        let dir = TempDir::new("open-ratchet");
+        let ts = "2026-07-28T00:00:00+00:00";
+        let objective = Objective::new(
+            "G",
+            "maximize the score",
+            Value::object([
+                ("kind", Value::string("evaluator")),
+                ("evaluator", Value::string("e.py")),
+                ("evaluator_sha256", Value::string("00".repeat(32))),
+                ("entrypoint", Value::string("score")),
+                ("threshold", Value::Int(0)),
+                ("direction", Value::string("maximize")),
+            ]),
+            1_000_000,
+            "treasury",
+            ts,
+            None,
+            Some(Value::object([
+                ("baseline", Value::Int(0)),
+                ("target", Value::Int(100)),
+                ("reward", Value::Int(1_000_000)),
+                ("direction", Value::string("maximize")),
+                ("min_improvement", Value::Int(1)),
+            ])),
+        )
+        .expect("valid objective");
+        let id = objective.id();
+
+        // Written as the node would have written them after one paying
+        // advance to 40: a frontier and the settlement for that slice.
+        let mut ledger = Ledger::open(dir.path.join("log.jsonl")).expect("open");
+        ledger
+            .append("objective", objective.to_value(), ts)
+            .expect("objective");
+        ledger
+            .append(
+                "frontier",
+                FrontierEntry::new(id.clone(), "sha256:c1", "alice", 40, 400_000).to_value(),
+                ts,
+            )
+            .expect("frontier");
+        ledger
+            .append(
+                "settlement",
+                Value::object([
+                    ("objective_id", Value::string(id.clone())),
+                    ("claim_id", Value::string("sha256:c1")),
+                    ("submitter", Value::string("alice")),
+                    ("reward", Value::Int(400_000)),
+                ]),
+                ts,
+            )
+            .expect("settlement");
+        let node = Node::new(ledger, &dir.path);
+        assert!(node.settlement_of(&id).is_some(), "the old rule's evidence");
+
+        let fields = Value::object(lifecycle_fields(&node, &id, &objective));
+        assert_eq!(field(&fields, "settled"), &Value::Bool(false));
+        assert_eq!(field(&fields, "open"), &Value::Bool(true));
+        assert_eq!(field(&fields, "settlement"), &Value::Null);
+        let frontier = field(&fields, "frontier");
+        assert_eq!(field(frontier, "pool_remaining"), &Value::Int(600_000));
+    }
+
     #[test]
     fn a_full_queue_refuses_new_records_but_still_accepts_resends() {
         // Unbounded, distinct records each write a file and a stranger fills
