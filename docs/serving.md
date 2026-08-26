@@ -16,6 +16,13 @@ cairn-serve --log cairn.jsonl --root . --listen 0.0.0.0:8080
 Read-only. Add `--queue ./queue` to accept submissions, and `--checkpoint
 checkpoint.json` to publish what you signed.
 
+The log is appended without `fsync`: a power loss can lose the last records
+written, which a peer still holds, and the next open reports a torn tail
+rather than silently reading it. If yours is the one node contributors submit
+to, so that a lost tail is a lost claim rather than a re-sync, set
+`CAIRN_LEDGER_FSYNC=1` in the daemon's environment to pay one `fsync` per
+record instead.
+
 ## The endpoints
 
 | endpoint | what it is |

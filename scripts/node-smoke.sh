@@ -197,10 +197,32 @@ await_kind "$HTTP" claim \
   || { cat "$A/node.log" >&2; fail "the daemon never admitted the claim"; }
 echo "  the claim reached the log with no external drain"
 
+rule "the claim settles with no peer and nothing queued"
+# This node has no bootstrap peer and its spool is empty, so the only thing
+# that can close the epoch is the daemon's own tick. It used to settle only
+# after a drain that admitted something (and every p2p session settles for
+# itself), so a node run alone -- which is how every node starts -- left its
+# contributors' accepted claims unpaid until somebody happened to dial it.
+#
+# Two epochs, not one: the reveal epoch must close *and* wait out the finality
+# delay before its batch is due. Six-second epochs and a five-second tick put
+# that inside twenty seconds; `await_kind` allows thirty.
+await_kind "$HTTP" batch \
+  || { cat "$A/node.log" >&2; fail "the daemon never settled the reveal epoch on its own"; }
+curl -s "http://127.0.0.1:$HTTP/log" | grep -q '"kind": *"settlement"' \
+  || fail "the epoch closed but the claim was not paid"
+grep -q "settle: 1 claim(s) in batch, 1 paid" "$A/node.log" \
+  || fail "the daemon did not report the settlement"
+echo "  the reveal epoch settled on the daemon's own tick, 1 claim paid"
+# Checked after a settlement rather than before, so it is the post-settlement
+# checkpoint that has to be whole. The daemon rewrites this file every round
+# that changes the log; `fs::write` in place would leave a torn one behind a
+# kill, and this reads it the way a stranger does.
+curl -s "http://127.0.0.1:$HTTP/checkpoint" | python3 -c 'import json,sys; json.load(sys.stdin)' \
+  || fail "GET /checkpoint is not whole JSON after settlement"
+echo "  GET /checkpoint is one complete document"
+
 rule "the log audits, and it audits from outside the process"
-# Two waits, not one: an epoch must close *and* wait out the finality delay
-# before anything settles. The daemon settles on its own tick after a drain.
-sleep 12.6
 curl -s "http://127.0.0.1:$HTTP/log" >"$WORK/fetched.jsonl"
 if head -c 7 "$LOG" | grep -q '^pwenc1:'; then
   # A sealed log is unsealed on the way out -- serving ciphertext would hand a
