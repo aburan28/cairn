@@ -626,6 +626,16 @@ enum Command {
         root_key: String,
         out: Option<String>,
     },
+    /// Issue a signed submission receipt, or judge one against this log.
+    ///
+    /// The censorship half of what the root key signs: a checkpoint pins what
+    /// the operator *included*, a receipt pins what *reached* them. Held
+    /// together, an admissible record that is in neither past its epoch is a
+    /// proof of withholding any third party can check -- see
+    /// `cairn::receipt`.
+    Receipt {
+        action: ReceiptAction,
+    },
     /// Admit records queued by `cairn-serve` into the log.
     ///
     /// Separate from the server on purpose: the server is a transport and this
@@ -1288,6 +1298,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "drand-round" => parse_drand_round(&mut cursor)?,
         "drand-verify" => parse_drand_verify(&mut cursor)?,
         "checkpoint" => parse_checkpoint(&mut cursor)?,
+        "receipt" => parse_receipt(&mut cursor)?,
         "drain" => parse_drain(&mut cursor)?,
         "audit" => parse_audit(&mut cursor)?,
         "verify" => parse_verify(&mut cursor)?,
@@ -1686,6 +1697,88 @@ fn parse_checkpoint(cursor: &mut Cursor) -> Result<Command, CliError> {
         root_key: require(root_key, "checkpoint", "--root-key FILE")?,
         out,
     })
+}
+
+/// What `cairn receipt` was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReceiptAction {
+    /// Sign a receipt for a record file, as an operator accepting it.
+    Issue {
+        record: String,
+        kind: String,
+        root_key: String,
+        out: Option<String>,
+    },
+    /// Judge a signed receipt against this log and a pinned key.
+    Verify {
+        receipt: String,
+        root_key: String,
+        record: Option<String>,
+    },
+}
+
+fn parse_receipt(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let verb = cursor
+        .take()
+        .ok_or_else(|| CliError::Usage(String::from("receipt: expected `issue` or `verify`")))?;
+    match verb.as_str() {
+        "issue" => {
+            let mut record: Option<String> = None;
+            let mut kind: Option<String> = None;
+            let mut root_key: Option<String> = None;
+            let mut out: Option<String> = None;
+            while let Some(token) = cursor.take() {
+                match token.as_str() {
+                    "--record" => record = Some(cursor.value("--record")?),
+                    "--kind" => kind = Some(cursor.value("--kind")?),
+                    "--root-key" => root_key = Some(cursor.value("--root-key")?),
+                    "--out" => out = Some(cursor.value("--out")?),
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "receipt issue: unknown option {other:?}"
+                        )))
+                    }
+                }
+            }
+            Ok(Command::Receipt {
+                action: ReceiptAction::Issue {
+                    record: require(record, "receipt issue", "--record FILE")?,
+                    kind: kind.unwrap_or_else(|| String::from("claim")),
+                    root_key: require(root_key, "receipt issue", "--root-key FILE")?,
+                    out,
+                },
+            })
+        }
+        "verify" => {
+            let mut receipt: Option<String> = None;
+            let mut root_key: Option<String> = None;
+            let mut record: Option<String> = None;
+            while let Some(token) = cursor.take() {
+                match token.as_str() {
+                    "--root-key" => root_key = Some(cursor.value("--root-key")?),
+                    "--record" => record = Some(cursor.value("--record")?),
+                    other if !other.starts_with("--") && receipt.is_none() => {
+                        receipt = Some(other.to_string())
+                    }
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "receipt verify: unknown option {other:?}"
+                        )))
+                    }
+                }
+            }
+            Ok(Command::Receipt {
+                action: ReceiptAction::Verify {
+                    receipt: require(receipt, "receipt verify", "RECEIPT-FILE")?,
+                    root_key: require(root_key, "receipt verify", "--root-key HEX|FILE")?,
+                    record,
+                },
+            })
+        }
+        other => Err(CliError::Usage(format!(
+            "receipt: unknown action {other:?} (expected `issue` or `verify`)"
+        ))),
+    }
 }
 
 fn parse_drain(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -3280,6 +3373,22 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      sign the log's current height, head, and Merkle root",
     );
+    say(
+        out,
+        "  receipt issue --record FILE [--kind commitment|claim] --root-key FILE [--out FILE]",
+    );
+    say(
+        out,
+        "      sign the operator's word that a submitted record arrived",
+    );
+    say(
+        out,
+        "  receipt verify FILE --root-key HEX|FILE [--record FILE]",
+    );
+    say(
+        out,
+        "      judge a receipt against this log: included, refused, or withheld (exit 2)",
+    );
     say(out, "  drain --queue DIR [--dry-run]");
     say(
         out,
@@ -4593,6 +4702,122 @@ fn cmd_checkpoint(
         "  alongside what it authenticates authenticates nothing.",
     );
     Ok(0)
+}
+
+/// Sign a submission receipt for a record file, as its operator.
+///
+/// The operator-side half of the accountability pair `cairn::receipt`
+/// documents. `cairn-serve` signs one into every `POST /submit` answer;
+/// this is the same statement for a record accepted out of band -- handed
+/// over on disk, mailed, or replayed from a spool -- so a submitter who
+/// never touched HTTP can still hold the operator's word.
+fn cmd_receipt_issue(
+    out: &mut dyn Write,
+    record_path: &str,
+    kind: &str,
+    root_key: &str,
+    destination: Option<&str>,
+) -> Result<i32, CliError> {
+    let key = read_root_key_file(root_key)?;
+    let record = read_json(record_path)?;
+    let receipt = cairn::receipt::Receipt::for_record(kind, &record, timestamp());
+    let signed = cairn::receipt::SignedReceipt::sign(&key, receipt);
+    let text = signed.to_value().canonical_string();
+    match destination {
+        Some(path) => {
+            fs::write(path, format!("{text}\n")).map_err(|error| CliError::Io {
+                context: format!("writing {path}"),
+                source: error,
+            })?;
+            say(out, format!("wrote {path}"));
+        }
+        None => say(out, &text),
+    }
+    say(
+        out,
+        format!(
+            "  record {}  kind {}  received {}",
+            short(&signed.receipt.record),
+            signed.receipt.kind,
+            signed.receipt.received_at
+        ),
+    );
+    say(
+        out,
+        "  This is a promise: the record must be in the log, or refusable by its",
+    );
+    say(
+        out,
+        "  rules, by the close of this epoch. `cairn receipt verify` holds you to it.",
+    );
+    Ok(0)
+}
+
+/// Judge a signed receipt against this log.
+///
+/// Exit codes are the point of the command -- a script watches them:
+/// `0` discharged (included, or the refusal re-derives), `2` **withholding
+/// proven**, `3` not yet decidable (epoch still open, or no record bytes to
+/// test admissibility with). The signature is checked first, against a key
+/// the caller pinned; a verdict against an unpinned key would be a verdict
+/// about nothing.
+fn cmd_receipt_verify(
+    out: &mut dyn Write,
+    options: &Options,
+    receipt_path: &str,
+    root_key: &str,
+    record_path: Option<&str>,
+) -> Result<i32, CliError> {
+    let signed = cairn::receipt::SignedReceipt::from_value(&read_json(receipt_path)?)
+        .map_err(|error| CliError::Usage(format!("{receipt_path}: {error}")))?;
+    let expected = read_root_key(root_key)?;
+    signed
+        .verify(&expected)
+        .map_err(|error| CliError::Refused(error.to_string()))?;
+    say(
+        out,
+        format!(
+            "signature ok: record {}  kind {}  received {}",
+            short(&signed.receipt.record),
+            signed.receipt.kind,
+            signed.receipt.received_at
+        ),
+    );
+
+    let record = match record_path {
+        Some(path) => Some(read_json(path)?),
+        None => None,
+    };
+    let node = open_node(options)?;
+    let scratch = env::temp_dir().join(format!("cairn-receipt-verify-{}", std::process::id()));
+    let standing = cairn::receipt::standing(
+        &signed.receipt,
+        ledger_of(&node),
+        record.as_ref(),
+        Path::new(options.root.as_str()),
+        &scratch,
+    )
+    .map_err(|error| CliError::Refused(error.to_string()))?;
+    let _ = fs::remove_dir_all(&scratch);
+
+    say(out, format!("{standing}"));
+    Ok(match standing {
+        cairn::receipt::Standing::Included { .. } | cairn::receipt::Standing::Refused { .. } => 0,
+        cairn::receipt::Standing::Withheld { .. } => {
+            say(
+                out,
+                "  Keep the receipt, the record, and this log together: any third party",
+            );
+            say(
+                out,
+                "  holding the operator's pinned key can re-derive this verdict from them.",
+            );
+            2
+        }
+        cairn::receipt::Standing::Pending { .. } | cairn::receipt::Standing::Undecidable { .. } => {
+            3
+        }
+    })
 }
 
 /// Load the ML-DSA-65 root key from the file `cairn-p2p` writes.
@@ -8536,6 +8761,19 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             root_key,
             out: path,
         } => cmd_checkpoint(out, options, root_key, path.as_deref()),
+        Command::Receipt { action } => match action {
+            ReceiptAction::Issue {
+                record,
+                kind,
+                root_key,
+                out: path,
+            } => cmd_receipt_issue(out, record, kind, root_key, path.as_deref()),
+            ReceiptAction::Verify {
+                receipt,
+                root_key,
+                record,
+            } => cmd_receipt_verify(out, options, receipt, root_key, record.as_deref()),
+        },
         Command::Drain { queue, dry_run } => cmd_drain(out, options, queue, *dry_run),
         Command::Audit { rerun } => cmd_audit(out, options, *rerun),
         Command::Verify {
@@ -10009,6 +10247,192 @@ mod tests {
             "the reader should be told which check failed"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The censorship pair, run end to end: an operator receipts a
+    /// commitment, the log moves past the epoch without it, and the verifier
+    /// proves the withholding -- exit 2, the code a watching script acts on.
+    #[test]
+    fn a_receipt_the_log_never_honours_becomes_a_withholding_proof() {
+        let dir = scratch_dir("receipt");
+        let options = Options {
+            log: dir.join("log.jsonl").display().to_string(),
+            log_chosen: true,
+            root: dir.display().to_string(),
+            data: None,
+            key_file: None,
+            passphrase_file: None,
+            max_size: None,
+        };
+        // Fixed instants, mid-epoch: real wall time here would make the test
+        // flake whenever it ran in the last tenth of an epoch, where the
+        // withholding grace rightly answers "undecidable" instead of exit 2.
+        let now = String::from("2026-08-18T00:01:00+00:00");
+        {
+            let mut node = Node::new(Ledger::open(&options.log).expect("open"), &dir);
+            let objective = Objective::new(
+                "GOAL-receipt-cli",
+                "a fixture objective",
+                Value::object([
+                    ("kind", Value::string("certificate")),
+                    ("checker", Value::string("checker.py")),
+                    ("checker_sha256", Value::string("aa".repeat(32))),
+                    ("entrypoint", Value::string("check")),
+                ]),
+                1,
+                "treasury",
+                now.clone(),
+                None,
+                None,
+            )
+            .expect("objective");
+            node.post_objective(&objective, &now).expect("post");
+            let commitment = Commitment::new(
+                objective.id(),
+                "alice",
+                cairn::records::commitment_hash(
+                    &objective.id(),
+                    "alice",
+                    &Value::object([("answer", Value::Int(7))]),
+                    "n1",
+                ),
+                now.clone(),
+            );
+            let record_path = dir.join("commitment.json");
+            std::fs::write(&record_path, commitment.to_value().canonical_string())
+                .expect("write record");
+        }
+
+        let key = cairn::checkpoint::RootKey::generate();
+        let key_path = dir.join("key.json");
+        std::fs::write(
+            &key_path,
+            Value::object([
+                ("public", Value::string(hex_of(&key.public_key()))),
+                ("secret", Value::string(hex_of(&key.to_secret_bytes()[..]))),
+            ])
+            .canonical_string(),
+        )
+        .expect("write key");
+        let published = dir.join("root-key.pub");
+        std::fs::write(&published, hex_of(&key.public_key())).expect("write pubkey");
+
+        let receipt_path = dir.join("receipt.json");
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_receipt_issue(
+                &mut sink,
+                &dir.join("commitment.json").display().to_string(),
+                "commitment",
+                &key_path.display().to_string(),
+                Some(&receipt_path.display().to_string()),
+            )
+            .expect("issue"),
+            0
+        );
+
+        // The receipt's epoch is still open: nothing is proven yet.
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_receipt_verify(
+                &mut sink,
+                &options,
+                &receipt_path.display().to_string(),
+                &published.display().to_string(),
+                Some(&dir.join("commitment.json").display().to_string()),
+            )
+            .expect("verify"),
+            3
+        );
+
+        // `issue` stamps the wall clock; the verdict needs a receipt inside
+        // the fixture's epoch, so sign one at the fixture instant directly.
+        let record = Value::from_json(
+            &std::fs::read_to_string(dir.join("commitment.json")).expect("read record"),
+        )
+        .expect("record json");
+        let fixed = cairn::receipt::SignedReceipt::sign(
+            &key,
+            cairn::receipt::Receipt::for_record("commitment", &record, "2026-08-18T00:01:30+00:00"),
+        );
+        std::fs::write(&receipt_path, fixed.to_value().canonical_string()).expect("write receipt");
+
+        // The operator's log moves two epochs on -- without the record.
+        {
+            let mut ledger = Ledger::open(&options.log).expect("reopen");
+            let later = cairn::time::format_iso8601_utc(
+                cairn::time::parse_rfc3339(&now).expect("now parses") + 1200,
+            );
+            ledger
+                .append("note", Value::Int(1), &later)
+                .expect("append");
+        }
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(
+            cmd_receipt_verify(
+                &mut sink,
+                &options,
+                &receipt_path.display().to_string(),
+                &published.display().to_string(),
+                Some(&dir.join("commitment.json").display().to_string()),
+            )
+            .expect("verify"),
+            2
+        );
+        let report = String::from_utf8(sink).expect("utf-8");
+        assert!(report.contains("WITHHELD"), "{report}");
+
+        // Against the wrong pinned key, no verdict at all.
+        let other = dir.join("other-key.pub");
+        std::fs::write(
+            &other,
+            hex_of(&cairn::checkpoint::RootKey::generate().public_key()),
+        )
+        .expect("write other");
+        let mut sink: Vec<u8> = Vec::new();
+        assert!(matches!(
+            cmd_receipt_verify(
+                &mut sink,
+                &options,
+                &receipt_path.display().to_string(),
+                &other.display().to_string(),
+                None,
+            ),
+            Err(CliError::Refused(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn receipt_parses_its_own_arguments() {
+        assert_eq!(
+            parse(argv(&[
+                "receipt",
+                "verify",
+                "r.json",
+                "--root-key",
+                "k.pub",
+                "--record",
+                "c.json"
+            ]))
+            .expect("parses")
+            .command,
+            Command::Receipt {
+                action: ReceiptAction::Verify {
+                    receipt: String::from("r.json"),
+                    root_key: String::from("k.pub"),
+                    record: Some(String::from("c.json")),
+                }
+            }
+        );
+        assert!(matches!(
+            parse(argv(&["receipt", "verify", "r.json"])).expect_err("needs a pinned key"),
+            CliError::Usage(_)
+        ));
+        assert!(matches!(
+            parse(argv(&["receipt", "shred"])).expect_err("unknown verb"),
+            CliError::Usage(_)
+        ));
     }
 
     /// A proof against a taller log than the reader's checkpoint is the

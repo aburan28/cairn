@@ -784,7 +784,18 @@ downstream is unbacked.
       recommendation 3, still open. The VDF is the answer that needs no
       outsider, and it is now the one that is built first.
 - [ ] Forced inclusion via a base layer. Censorship is the primary threat --
-      withholding a reveal steals a bounty -- and Stage 0 has no defence.
+      withholding a reveal steals a bounty -- and nothing below a base layer
+      *prevents* it. What Stage 0 now has is the accountability half, in
+      **signed submission receipts** (`src/receipt.rs`, `cairn receipt`,
+      receipted `POST /submit`): the operator's root key signs "this record
+      reached me at T", admission is a pure function of the log, and a
+      receipted record that is neither in the log nor refusable by its rules
+      once its epoch closes is a withholding proof any third party re-derives
+      -- silent censorship becomes signed censorship, and a submitter learns
+      at submission time, not never, whether this operator stands behind
+      receipts at all. That is the "still signed receipts" the Stage 1
+      header always assumed, built. It does not force inclusion, which is
+      what this line remains open for.
 
 ## Stage 3 — decentralized settlement
 

@@ -351,6 +351,9 @@ pub struct Serving {
     /// server would be doing an attacker's work for them. [`listen`] refuses
     /// that combination at startup rather than discovering it under load.
     key: Option<KeySource>,
+    /// Signs a [`crate::receipt::SignedReceipt`] for every queued submission,
+    /// when the operator chose to. See [`Serving::with_receipts`].
+    receipts: Option<Arc<crate::checkpoint::RootKey>>,
 }
 
 /// How this server obtains the at-rest key, when the log is sealed.
@@ -367,6 +370,7 @@ impl Serving {
             spool: None,
             checkpoint: None,
             key: None,
+            receipts: None,
         }
     }
 
@@ -417,6 +421,22 @@ impl Serving {
     /// Serve a signed checkpoint at `/checkpoint`.
     pub fn with_checkpoint(mut self, path: impl Into<PathBuf>) -> Serving {
         self.checkpoint = Some(path.into());
+        self
+    }
+
+    /// Sign a submission receipt into every `POST /submit` answer.
+    ///
+    /// The key is the checkpoint root key, so the receipt verifies against
+    /// the public key readers already pin -- see the module docs of
+    /// [`crate::receipt`] for what the pair of statements proves. Optional,
+    /// because holding the root secret is a custody decision: a read-only
+    /// mirror should not carry it, and without it `POST /submit` answers
+    /// exactly as before. An operator who queues submissions *should* pass
+    /// it; a queue answer without a receipt is a proposal the operator can
+    /// silently drop, which is the censorship shape `docs/threat-model.md`
+    /// names.
+    pub fn with_receipts(mut self, key: impl Into<Arc<crate::checkpoint::RootKey>>) -> Serving {
+        self.receipts = Some(key.into());
         self
     }
 
@@ -1318,24 +1338,39 @@ fn submit(
     }
 
     match spool.offer(&kind, &value) {
-        Ok(id) => json(
-            stream,
-            202,
-            &Value::object([
+        Ok(id) => {
+            let mut fields = vec![
                 ("queued", Value::string(id)),
-                ("kind", Value::string(kind)),
+                ("kind", Value::string(kind.clone())),
                 (
                     "note",
-                    Value::string(
+                    Value::string(if serving.receipts.is_some() {
+                        "Queued, not admitted. The operator's node re-derives every rule \
+                         against the whole log when it drains the queue -- epoch, citations, \
+                         duplicate artifacts -- so admission is still the log's to decide. \
+                         The receipt is the operator's signed word that this record reached \
+                         them now: keep it. If the record is neither in the log nor \
+                         refusable by its rules once this epoch closes, \
+                         `cairn receipt verify` turns the pair into a proof of \
+                         withholding. Watch GET /log for the record, and \
+                         GET /frontier/{id} for the outcome."
+                    } else {
                         "Queued, not admitted. The operator's node re-derives every rule \
                          against the whole log when it drains the queue -- epoch, citations, \
                          duplicate artifacts -- so this is a proposal and not a receipt. \
                          Watch GET /log for the record, and GET /frontier/{id} for the \
-                         outcome.",
-                    ),
+                         outcome."
+                    }),
                 ),
-            ]),
-        ),
+            ];
+            if let Some(key) = &serving.receipts {
+                let receipt =
+                    crate::receipt::Receipt::for_record(&kind, &value, crate::time::timestamp());
+                let signed = crate::receipt::SignedReceipt::sign(key, receipt);
+                fields.push(("receipt", signed.to_value()));
+            }
+            json(stream, 202, &Value::object(fields))
+        }
         // 429, not 500: a full queue is a fact about how recently the
         // operator drained, not a broken node, and the submitter should
         // retry rather than assume their work is unwelcome.
@@ -1572,6 +1607,88 @@ mod tests {
             body
         ));
         assert!(simple.starts_with("http/1.1 415"), "{simple}");
+    }
+
+    /// A queue that receipts hands back a signed, verifiable statement that
+    /// the exact bytes arrived -- and one that does not receipts nothing,
+    /// because a receipt minted by a key nobody pinned would only look like
+    /// accountability.
+    #[test]
+    fn submit_answers_with_a_verifiable_receipt_when_the_operator_receipts() {
+        let dir = TempDir::new("receipt");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let key = crate::checkpoint::RootKey::generate();
+        let pinned = key.public_key();
+
+        let post = |serving: Serving| -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            std::thread::spawn(move || {
+                let _ = serve_on(listener, serving);
+            });
+            let body = Commitment::new(
+                "sha256:aa",
+                "alice",
+                "sha256:bb",
+                "2026-08-18T00:01:00+00:00",
+            )
+            .to_value()
+            .canonical_string();
+            let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+            socket
+                .write_all(
+                    format!(
+                        "POST /submit?kind=commitment HTTP/1.1\r\nHost: x\r\n\
+                         Content-Type: application/json\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .expect("write");
+            let mut response = String::new();
+            let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+            response
+        };
+
+        let with = post(
+            Serving::new(&log, ".")
+                .accepting_into(dir.path.join("queue"))
+                .with_receipts(key),
+        );
+        assert!(with.starts_with("HTTP/1.1 202"), "{with}");
+        let json = with.split("\r\n\r\n").nth(1).expect("body");
+        let answer = Value::from_json(json).expect("json body");
+        let signed = crate::receipt::SignedReceipt::from_value(
+            answer.get("receipt").expect("a receipt in the answer"),
+        )
+        .expect("decodes");
+        signed
+            .verify(&pinned)
+            .expect("verifies against the pinned key");
+        let expected = Commitment::new(
+            "sha256:aa",
+            "alice",
+            "sha256:bb",
+            "2026-08-18T00:01:00+00:00",
+        )
+        .to_value()
+        .digest();
+        assert_eq!(signed.receipt.record, expected);
+        assert_eq!(signed.receipt.kind, "commitment");
+
+        let without = post(Serving::new(&log, ".").accepting_into(dir.path.join("queue2")));
+        assert!(without.starts_with("HTTP/1.1 202"), "{without}");
+        let json = without.split("\r\n\r\n").nth(1).expect("body");
+        assert!(
+            Value::from_json(json)
+                .expect("json")
+                .get("receipt")
+                .is_none(),
+            "no key, no receipt: {json}"
+        );
     }
 
     /// `GET /chain` publishes the ledger's height and head *beside* the epoch

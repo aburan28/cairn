@@ -54,7 +54,10 @@ fn usage(code: i32) -> ! {
          --queue       accept POST /submit into this spool directory; omit for read-only\n\
          --max-queue   refuse submissions past this many undrained records\n\
          --checkpoint  signed checkpoint to publish at GET /checkpoint\n\
-         --key-file    at-rest key, if the log is sealed (default: the CLI's own)\n\n\
+         --key-file    at-rest key, if the log is sealed (default: the CLI's own)\n\
+         --receipt-key sign a submission receipt into every POST /submit answer,\n              \
+         with the checkpoint root key at this path -- the operator's\n              \
+         word the record arrived, verifiable with `cairn receipt verify`\n\n\
          ALSO BE A NODE\n    \
          Add --p2p-listen and this runs the p2p daemon in the same process,\n    \
          which is what lets it admit what it queues -- a log has one writer.\n\n\
@@ -82,6 +85,7 @@ fn main() {
     let mut checkpoint: Option<PathBuf> = None;
     let mut max_queue = serve::DEFAULT_MAX_QUEUED;
     let mut key_file: Option<PathBuf> = None;
+    let mut receipt_key: Option<PathBuf> = None;
 
     // The p2p half. All absent is the ordinary publisher.
     let mut p2p_listen: Option<String> = None;
@@ -120,6 +124,7 @@ fn main() {
             }
             "--checkpoint" => checkpoint = Some(PathBuf::from(next("--checkpoint"))),
             "--key-file" => key_file = Some(PathBuf::from(next("--key-file"))),
+            "--receipt-key" => receipt_key = Some(PathBuf::from(next("--receipt-key"))),
             "--p2p-listen" => p2p_listen = Some(next("--p2p-listen")),
             "--identity" => identity = Some(PathBuf::from(next("--identity"))),
             "--root-key" => root_key = Some(PathBuf::from(next("--root-key"))),
@@ -158,6 +163,14 @@ fn main() {
             std::process::exit(2)
         });
 
+        if receipt_key.is_some() {
+            // Refused, not ignored: the daemon signs receipts with its
+            // --root-key already, and a second key here would either be the
+            // same file said twice or a different authority than the
+            // checkpoints readers pin -- both mistakes worth naming.
+            eprintln!("cairn-serve: --receipt-key applies to the publisher; a node receipts with its --root-key");
+            std::process::exit(2);
+        }
         let mut config = Config::new(identity, root_key, checkpoint, addr, log, root);
         config.bootstrap = bootstrap;
         config.population = population;
@@ -207,6 +220,18 @@ fn main() {
     }
     if let Some(path) = checkpoint {
         serving = serving.with_checkpoint(path);
+    }
+    if let Some(path) = receipt_key {
+        // Strict load: a receipt minted under a key nobody has pinned
+        // authenticates nothing, so an absent file is an error here where the
+        // daemon would generate one.
+        match cairn::checkpoint::RootKey::load(&path) {
+            Ok(key) => serving = serving.with_receipts(key),
+            Err(error) => {
+                eprintln!("cairn-serve: --receipt-key: {error}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // Separately from `listen`, which also checks: this one owns the message.

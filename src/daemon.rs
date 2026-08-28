@@ -415,13 +415,21 @@ fn persist(state: &State, checkpoint: &Path, key: &RootKey, population: Option<&
 ///
 /// Separated from the spawn so the bind failure is the caller's to report,
 /// before anything else starts. See the module docs.
-fn bind_http(config: &Config) -> Result<Option<(TcpListener, serve::Serving)>, String> {
+fn bind_http(
+    config: &Config,
+    root_key: &Arc<RootKey>,
+) -> Result<Option<(TcpListener, serve::Serving)>, String> {
     let Some(addr) = &config.serve else {
         return Ok(None);
     };
     let listener = TcpListener::bind(addr.as_str())
         .map_err(|error| format!("cannot bind the HTTP listener on {addr}: {error}"))?;
     let mut serving = serve::Serving::new(&config.log, &config.root);
+    // A daemon that queues submissions receipts them, unconditionally: it
+    // already holds the checkpoint root key -- the same authority -- so there
+    // is no custody decision left to defer to a flag, and a queue answer
+    // without a receipt is a proposal the operator could silently drop.
+    serving = serving.with_receipts(Arc::clone(root_key));
     // The same key the daemon opened the log with. Without it the HTTP half
     // reports the operator's own sealed log as altered on every request, while
     // the p2p half beside it reads it perfectly.
@@ -503,7 +511,7 @@ pub fn run(config: Config) -> Result<(), String> {
 
     // Bound before either loop starts, so a node that cannot publish refuses at
     // startup rather than looking healthy while serving nothing.
-    let http = bind_http(&config)?;
+    let http = bind_http(&config, &root_key)?;
 
     // Zero-configuration discovery on the local segment. Optional by design:
     // a host with no multicast route is a node without LAN discovery, not a

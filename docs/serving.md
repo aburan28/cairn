@@ -35,7 +35,7 @@ record instead.
 | `GET /chain` | the epoch chain: `links` and `head` are the chain's, `height` and `ledger_head` are the ledger's — the units a checkpoint signs, and not interchangeable with the first two |
 | `GET /chain.html` | the same, as a page with no build step |
 | `GET /health` | liveness, for whatever is watching the process |
-| `POST /submit` | queue a commitment or a claim (only with `--queue`) |
+| `POST /submit` | queue a commitment or a claim (only with `--queue`); the answer carries a signed receipt when the operator receipts — see below |
 
 Everything except `/log` is a convenience. `/log` is the product.
 
@@ -107,6 +107,33 @@ So the queue holds *proposals*. `202 Accepted` means queued, not admitted, and
 the response says so in those words. The record is checked exactly twice: once
 for shape at the boundary (so a typo is reported immediately rather than after
 a queue delay), and once for everything, by `node.rs`, at drain time.
+
+## Receipts: the queue answer stops being deniable
+
+A proposal an operator can silently drop is the censorship shape
+[threat-model.md](threat-model.md) names, so the `202` can now carry a
+**signed submission receipt**: the operator's ML-DSA-65 statement — under the
+same root key that signs checkpoints, so readers pin one key, not two — that
+this exact record reached them at this instant. A node run through the daemon
+receipts unconditionally (it holds the root key already); a bare publisher
+opts in with `--receipt-key`, which is a custody decision — a read-only
+mirror should not carry the root secret, and without the flag the answer is
+exactly what it always was.
+
+Keep the receipt. Admission is a pure function of the log, so once the log
+has moved past the receipt's epoch, `cairn receipt verify` settles what the
+absence of the record means: **included** (exit 0), **refused and the refusal
+re-derives** (exit 0 — an honest "no" discharges the receipt), still
+**pending** (exit 3), or **withheld** (exit 2) — admissible against
+everything the operator admitted in that epoch, and absent anyway, which is a
+proof of censorship any third party can re-derive from the receipt, the
+record, the published log and the pinned key. A receipt stamped in the final
+tenth of its epoch cannot carry that proof — the operator was not left time
+to drain before the boundary's own rules refused the record — so submit with
+time to spare, and eye the `received_at` on the receipt you are handed. `cairn receipt issue` signs
+the same statement for a record accepted out of band. See the module docs of
+`src/receipt.rs` and [censorship.md](censorship.md) for exactly what this
+does and does not buy: attribution, not forced inclusion.
 
 The write boundary accepts only `Content-Type: application/json` (parameters
 such as `charset=utf-8` are permitted). In particular it refuses browser-simple

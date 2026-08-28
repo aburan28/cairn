@@ -327,7 +327,46 @@ membership this section requires to be "diverse and rotated per epoch".
 - **A sequencer that includes nothing.** Blind inclusion stops *targeted*
   censorship; it does nothing about total refusal. That needs forced inclusion
   via a base layer — still the primary unresolved threat, and still the main
-  argument in `consensus.md`.
+  argument in `consensus.md`. What exists in the meantime is **receipts**,
+  below: refusal cannot be forced open, but it can be forced to leave a
+  signature.
+
+### Receipts: silent censorship becomes signed censorship
+
+The censorship attack worth the most is the quiet one: a record is offered,
+never appended, and the log — internally perfect — carries no trace it was
+ever offered. `src/receipt.rs` closes the *quiet* part. On `POST /submit` the
+operator signs, with the same ML-DSA-65 root key that signs checkpoints,
+"record `D` of kind `K` reached me at `T`" — a node run by the daemon does
+this unconditionally, and a bare publisher opts in with `--receipt-key`; an
+operator accepting records out of band signs the same statement with
+`cairn receipt issue`.
+
+The pair of signed statements is what bites. A checkpoint pins what the
+operator *included*; a receipt pins what *reached* them; and admission is a
+pure function of the log, re-derivable by anyone. So once the log has moved
+past the receipt's epoch, `cairn receipt verify` re-runs admission at the
+receipted time against everything the operator admitted in that epoch and
+lands on exactly one of: **included** (discharged), **refused, and the
+refusal re-derives** (discharged — an honest "no" was always a legal answer),
+or **withheld** — admissible, absent, past deadline, exit 2. The third is a
+proof any third party checks from `(receipt, record, log, pinned key)` alone;
+no clock is read, so two readers holding the same bytes reach the same
+verdict. One carve-out keeps the proof honest in both directions: a receipt
+stamped in the final tenth of its epoch cannot accuse — the operator's very
+next drain would land across the boundary, where the epoch-binding rule
+itself refuses the record, so a submitter could otherwise manufacture an
+accusation by submitting at 00:09:59.9. Submit with a tenth of an epoch to
+spare, and check the receipt's `received_at` against your own clock when you
+accept it, because a stamp back-dated toward a boundary buys that exemption.
+
+Stated at its true strength: this is detection and attribution, not
+prevention. An operator can decline to receipt — but that refusal happens in
+the submitter's face at submission time, which is the moment to take the work
+elsewhere, where the silent drop was visible to nobody ever. An operator can
+stop appending entirely — and stop advancing their checkpoints, which is its
+own announcement. What no receipt can do is force the record in; that remains
+the base layer's job, one section down.
 - **Coercion of a known participant.** That is an unlinkability problem, and
   cryptography helps only up to the point where someone knows your name anyway.
 - **A verifier that must see the artifact.** ZK moves this, at a cost that rules
@@ -342,7 +381,8 @@ membership this section requires to be "diverse and rotated per epoch".
 |---|---|---|---|
 | network observer | read submissions | transport encryption + sealed envelopes | **built** |
 | sequencer | drop submissions it dislikes | blind inclusion — it cannot see what it drops | **built** |
-| sequencer | drop everything | forced inclusion on a base layer | **unsolved at Stage 0** |
+| sequencer | drop a submission *silently* | signed receipts — an admissible receipted record absent past its epoch is a provable withholding (`cairn receipt verify`, exit 2) | **built** — proof, not prevention |
+| sequencer | drop everything | forced inclusion on a base layer; until then, refusing to receipt is visible at submission time and stalled checkpoints are visible to everyone | **unsolved at Stage 0** |
 | competitor | front-run an in-flight artifact | threshold reveal, and a share published before the commitment's epoch closes is refused | **built** |
 | attacker | stop a submitter from revealing | committee reveals without them, from records | **built** |
 | a member | publish for somebody else's seat | the draw names the identity, the signature proves it | **built** |

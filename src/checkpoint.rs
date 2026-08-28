@@ -98,6 +98,75 @@ impl RootKey {
     pub fn sign_ledger(&self, ledger: &Ledger, issued_at: impl Into<String>) -> SignedCheckpoint {
         SignedCheckpoint::sign(&self.0, Checkpoint::from_ledger(ledger, issued_at))
     }
+
+    /// Sign arbitrary bytes with this authority.
+    ///
+    /// `pub(crate)` and message-agnostic on purpose: every caller is expected
+    /// to have built a domain-separated canonical payload first, the way
+    /// [`SignedCheckpoint`] and [`crate::receipt::SignedReceipt`] do. Exposing
+    /// this publicly would invite signing un-domain-separated bytes, and two
+    /// signed statements that can be confused for each other are worse than
+    /// none.
+    pub(crate) fn sign_raw(&self, message: &[u8]) -> Vec<u8> {
+        let signature: Signature<MlDsa65> = self.0.sign(message);
+        signature.encode().to_vec()
+    }
+
+    /// Load the key from the JSON file `cairn-p2p` writes: `{"public": hex,
+    /// "secret": hex}`.
+    ///
+    /// Refuses an absent file rather than generating one, unlike the daemon's
+    /// own loader. A caller reaching for this wants *the* pinned authority --
+    /// a receipt signed by a key minted on the spot verifies against nothing
+    /// any reader has pinned, so silently generating here would hand out
+    /// signatures that look like the operator's promise and are not.
+    pub fn load(path: &std::path::Path) -> Result<RootKey, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let value = Value::from_json(&text)
+            .map_err(|error| format!("{}: not usable JSON: {error}", path.display()))?;
+        let secret = value
+            .get("secret")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{}: no \"secret\" field", path.display()))?;
+        let bytes = hex_decode(secret)
+            .map_err(|_| format!("{}: \"secret\" is not lowercase hex", path.display()))?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| format!("{}: \"secret\" must be 32 bytes", path.display()))?;
+        let key = RootKey::from_secret_bytes(bytes);
+        if let Some(public) = value.get("public").and_then(Value::as_str) {
+            let declared = hex_decode(public)
+                .map_err(|_| format!("{}: \"public\" is not lowercase hex", path.display()))?;
+            if declared != key.public_key() {
+                return Err(format!(
+                    "{}: the public key does not match the secret",
+                    path.display()
+                ));
+            }
+        }
+        Ok(key)
+    }
+}
+
+/// Verify an ML-DSA-65 signature over `message` by `public_key`.
+///
+/// Shared by checkpoints and submission receipts, which differ only in the
+/// domain-separated payload they sign. The *caller* compares `public_key`
+/// against whatever it has pinned; this checks only that the mathematics
+/// holds.
+pub(crate) fn verify_ml_dsa(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), CheckpointError> {
+    let key_array = ml_dsa::EncodedVerifyingKey::<MlDsa65>::try_from(public_key)
+        .map_err(|_| CheckpointError::Invalid("public key encoding".into()))?;
+    let key = VerifyingKey::<MlDsa65>::decode(&key_array);
+    let signature = Signature::<MlDsa65>::try_from(signature)
+        .map_err(|_| CheckpointError::Invalid("signature encoding".into()))?;
+    key.verify(message, &signature)
+        .map_err(|_| CheckpointError::BadSignature)
 }
 
 impl fmt::Debug for RootKey {
@@ -237,15 +306,8 @@ impl SignedCheckpoint {
         if self.public_key != expected_key {
             return Err(CheckpointError::WrongSigner);
         }
-        let key_array =
-            ml_dsa::EncodedVerifyingKey::<MlDsa65>::try_from(self.public_key.as_slice())
-                .map_err(|_| CheckpointError::Invalid("public key encoding".into()))?;
-        let key = VerifyingKey::<MlDsa65>::decode(&key_array);
-        let signature = Signature::<MlDsa65>::try_from(self.signature.as_slice())
-            .map_err(|_| CheckpointError::Invalid("signature encoding".into()))?;
         let message = Self::signing_value(&self.checkpoint).canonical_bytes();
-        key.verify(&message, &signature)
-            .map_err(|_| CheckpointError::BadSignature)
+        verify_ml_dsa(&self.public_key, &message, &self.signature)
     }
 
     pub fn verify_against(
