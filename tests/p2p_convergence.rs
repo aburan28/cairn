@@ -128,11 +128,16 @@ fn records_of(node: &Node) -> Vec<Record> {
 /// — objectives before the claims that name them — and the point of the test is
 /// that the *outcome* does not depend on it.
 ///
-/// Each record is stamped with its own `created_at`, mirroring
-/// `p2p::service::apply_records`. The local clock would put a replayed
-/// commitment and the claim that opens it in the same epoch, and every claim
-/// would be refused; the record's own instant is also the only stamp two
-/// receivers agree on, which is what makes their epochs match.
+/// Each record is stamped with its own `created_at`, mirroring the cold
+/// replay path (`p2p::service::replay_records`). The local clock would put a
+/// replayed commitment and the claim that opens it in the same epoch, and
+/// every claim would be refused; the record's own instant is also the only
+/// stamp two receivers agree on, which is what makes their epochs match.
+/// The *live* boundary differs on one kind now: a commitment is admitted at
+/// the receiver's own time, so one whose epoch has already closed at first
+/// sight is refused -- that is the backdating fix in `apply_records`, and it
+/// is exactly why a cold reconstruction like this one must keep the record's
+/// stamp instead.
 fn apply(node: &mut Node, records: &[Record]) {
     for kind in ["objective", "commitment", "claim"] {
         for record in records.iter().filter(|r| r.kind == kind) {

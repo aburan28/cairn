@@ -71,6 +71,17 @@ bug is invisible: sync succeeds, the log just stops growing.
 `CAIRN_EPOCH_SECONDS` changes the epoch length for demos and changes no
 record bytes — epochs are derived, never stored.
 
+The refinement, and it is not a contradiction: the record's epoch is the
+record's, but its **admission time** at a *live* boundary is the receiving
+node's. Every live ingress — CLI, HTTP drain, MCP, and live p2p sync — stamps
+the ledger `ts` from its own clock, which is what makes the
+declared-vs-admitted binding check in `Node::commit` mean something; the sync
+path stamping the payload's own `created_at` is exactly how a peer once
+backdated commitments into closed epochs after reading their reveals (the
+threat model's **backdated priority** row). Cold replay of a fetched log keeps
+each entry's original `ts`, because those admissions already happened. If you
+touch how a record enters a log, keep both halves true.
+
 **`cites` pays and `relations` does not, and nothing may blur that.**
 Attribution, settlement and the frontier read `cites`. `knowledge` reads
 `relations`. If a relation ever reaches a payout, "I refute you" becomes a way

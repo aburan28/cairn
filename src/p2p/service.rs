@@ -905,24 +905,46 @@ pub fn replay_records(node: &mut Node, records: &[(String, crate::canonical::Val
 /// Replay records without allowing their author-controlled timestamps to move
 /// this node's wall clock into a later epoch.
 fn replay_records_at(node: &mut Node, records: &[(String, crate::canonical::Value)], now: &str) {
-    let now_epoch = crate::time::parse_rfc3339(now)
-        .and_then(|seconds| u64::try_from(seconds).ok())
-        .map(|seconds| crate::partition::epoch_of(seconds, crate::partition::epoch_seconds()));
-    replay_records_with_horizon(node, records, now_epoch);
+    replay_records_with_horizon(node, records, Some(now));
 }
 
 /// Shared replay machinery.
 ///
-/// `now_epoch` is present only at the live network boundary.  The public
+/// `now` is present only at the live network boundary.  The public
 /// deterministic replay helper deliberately has no wall-clock horizon: it is
 /// used for cold sync, historical reconstruction, and virtual-clock tests,
 /// none of which may depend on the machine's current time.  Live sessions go
 /// through `apply_records` and always supply a trusted local horizon.
+///
+/// At that live boundary a **commitment** is admitted at this node's own
+/// time, not at the time its author wrote into it. The rules engine binds a
+/// commitment's declared epoch to its admission epoch, and every live ingress
+/// -- the CLI, the HTTP spool, `cairn-mcp` -- stamps admission from the
+/// local clock; replaying the payload's `created_at` here made this the one
+/// ingress where the check compared the author's value with itself. That was
+/// the backdating hole in `docs/threat-model.md`: a peer who had read the
+/// reveals of a closed epoch could date a commitment into it and enter the
+/// settled race with an artifact copied from the winner. The record's *epoch*
+/// still derives from its own `created_at` everywhere -- nothing is
+/// restamped; a commitment whose epoch has already closed at first sight is
+/// refused, loudly, instead.
+///
+/// Claims keep their author stamp. A reveal legitimately crosses an epoch
+/// boundary in transit -- the finality delay exists because records arrive up
+/// to an epoch late -- and a claim is powerless without a matching commitment,
+/// which the rule above makes unforgeable into the past. The bounded residue
+/// (a submitter re-dating their own reveal within the still-open settlement
+/// window) is priced in the threat model.
 fn replay_records_with_horizon(
     node: &mut Node,
     records: &[(String, crate::canonical::Value)],
-    now_epoch: Option<u64>,
+    now: Option<&str>,
 ) {
+    let now_epoch = now.and_then(|now| {
+        crate::time::parse_rfc3339(now)
+            .and_then(|seconds| u64::try_from(seconds).ok())
+            .map(|seconds| crate::partition::epoch_of(seconds, crate::partition::epoch_seconds()))
+    });
     let held = |payload: &crate::canonical::Value| -> String {
         payload
             .get("created_at")
@@ -977,7 +999,35 @@ fn replay_records_with_horizon(
                 }
                 "commitment" => {
                     if let Ok(value) = Commitment::from_value(payload) {
-                        let _ = node.commit(&value, &stamp);
+                        // Local first sight, never the author's stamp -- see
+                        // the function docs. The cold path keeps the record's
+                        // own instant, because a historical reconstruction has
+                        // no meaningful "now" and its entries were bound at
+                        // their original admission.
+                        let admitted_at = now.unwrap_or(&stamp);
+                        match node.commit(&value, admitted_at) {
+                            Ok(_) => {}
+                            Err(crate::node::RuleViolation::CommitmentEpochMismatch {
+                                declared,
+                                admitted,
+                            }) => {
+                                // The one refusal that is security, not churn:
+                                // either a peer is replaying a commitment into
+                                // an epoch that had closed before this node
+                                // first saw it, or this node was offline for
+                                // that epoch and must catch up by obtaining a
+                                // log, not by replaying bare records. Repeated
+                                // on every sync round that re-offers it, which
+                                // is the point -- a quiet drop here is how the
+                                // original hole stayed invisible.
+                                log::warn!(
+                                    "sync: refused commitment {} for epoch {declared}: first \
+                                     seen in epoch {admitted}, after its epoch closed",
+                                    crate::canonical::short(&value.hash),
+                                );
+                            }
+                            Err(_) => {}
+                        }
                     }
                 }
                 "claim" => {
@@ -1064,22 +1114,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn delayed_replay_preserves_the_recorded_commitment_epoch() {
-        let root = std::env::temp_dir().join(format!(
-            "cairn-p2p-delayed-commitment-{}",
-            std::process::id()
-        ));
+    fn scratch_node(name: &str) -> (Node, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("cairn-p2p-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let ledger = Ledger::open(root.join("log.jsonl")).unwrap();
-        let mut node = Node::new(ledger, &root);
-        let objective_at = "2026-08-18T00:00:00+00:00";
-        let commitment_at = "2026-08-18T00:01:00+00:00";
-        let now = "2026-08-18T00:20:00+00:00";
-        let objective = Objective::new(
-            "GOAL-delayed-sync",
-            "a delayed peer must preserve consensus history",
+        (Node::new(ledger, &root), root)
+    }
+
+    fn certificate_objective(goal: &str, created_at: &str) -> Objective {
+        Objective::new(
+            goal,
+            "a fixture objective for replay-boundary tests",
             Value::object([
                 ("kind", Value::string("certificate")),
                 ("checker", Value::string("checker.py")),
@@ -1088,28 +1134,163 @@ mod tests {
             ]),
             1,
             "treasury",
-            objective_at,
+            created_at,
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// A peer that hears about a commitment late -- but inside the epoch the
+    /// commitment declares -- still files it, under the epoch the record
+    /// itself names. That is the surviving half of what "delayed replay
+    /// preserves the recorded commitment epoch" used to pin; the other half
+    /// is now the *refusal* below.
+    #[test]
+    fn delayed_replay_within_the_epoch_preserves_the_commitment() {
+        let (mut node, root) = scratch_node("delayed-commitment");
+        let objective = certificate_objective("GOAL-delayed-sync", "2026-08-18T00:00:00+00:00");
         let commitment = Commitment::new(
             objective.id(),
             "alice",
             "sha256:committed-before-sync",
-            commitment_at,
+            "2026-08-18T00:01:00+00:00",
         );
 
+        // Eight minutes late, same 600-second epoch: legitimate propagation.
         replay_records_at(
             &mut node,
             &[
                 ("objective".into(), objective.to_value()),
                 ("commitment".into(), commitment.to_value()),
             ],
-            now,
+            "2026-08-18T00:09:00+00:00",
         );
 
         assert_eq!(node.ledger().entries_of_kind("commitment").len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The backdating hole from `docs/threat-model.md`, closed: a commitment
+    /// whose declared epoch had already closed when this node first saw it is
+    /// refused at the live boundary. Before this, replay stamped admission
+    /// from the payload's own `created_at`, so the epoch-binding check
+    /// compared the author's value with itself and a peer could date a
+    /// commitment into any closed epoch -- after reading its reveals.
+    #[test]
+    fn a_commitment_for_a_closed_epoch_cannot_enter_through_live_sync() {
+        let (mut node, root) = scratch_node("backdated-commitment");
+        let objective = certificate_objective("GOAL-backdate", "2026-08-18T00:00:00+00:00");
+        let commitment = Commitment::new(
+            objective.id(),
+            "mallory",
+            "sha256:backdated-after-reveals",
+            "2026-08-18T00:01:00+00:00",
+        );
+
+        // First sight two epochs later: exactly the shape of the attack, and
+        // indistinguishable from it, so it must be refused.
+        replay_records_at(
+            &mut node,
+            &[
+                ("objective".into(), objective.to_value()),
+                ("commitment".into(), commitment.to_value()),
+            ],
+            "2026-08-18T00:20:00+00:00",
+        );
+
+        assert_eq!(node.ledger().entries_of_kind("objective").len(), 1);
+        assert!(node.ledger().entries_of_kind("commitment").is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The whole theft, refused end to end. A victim commits in epoch N and
+    /// reveals in N+1; an attacker who read that reveal backdates a
+    /// commitment into N and replays it, with a claim over the copied
+    /// artifact. The commitment is refused at first sight, and the claim then
+    /// has no commitment to open.
+    #[test]
+    fn a_backdated_commitment_cannot_steal_a_revealed_artifact() {
+        let (mut node, root) = scratch_node("backdate-theft");
+        let objective = certificate_objective("GOAL-theft", "2026-08-18T00:00:00+00:00");
+        let objective_id = objective.id();
+        let artifact = Value::object([("answer", Value::Int(42))]);
+
+        let victim_hash = crate::records::commitment_hash(&objective_id, "victim", &artifact, "n1");
+        let victim_commitment = Commitment::new(
+            objective_id.clone(),
+            "victim",
+            victim_hash,
+            "2026-08-18T00:01:00+00:00",
+        );
+        // Heard during its own epoch, as live gossip delivers it.
+        replay_records_at(
+            &mut node,
+            &[
+                ("objective".into(), objective.to_value()),
+                ("commitment".into(), victim_commitment.to_value()),
+            ],
+            "2026-08-18T00:02:00+00:00",
+        );
+
+        let victim_claim = Claim::new(
+            objective_id.clone(),
+            "victim",
+            artifact.clone(),
+            "n1",
+            "2026-08-18T00:10:30+00:00",
+            Vec::new(),
+        )
+        .unwrap();
+        replay_records_at(
+            &mut node,
+            &[("claim".into(), victim_claim.to_value())],
+            "2026-08-18T00:11:00+00:00",
+        );
+        assert_eq!(
+            node.ledger().entries_of_kind("claim").len(),
+            1,
+            "the victim's reveal must sync"
+        );
+
+        // The attacker has now read the artifact and antedates a commitment
+        // into the victim's epoch, plus a claim to open it.
+        let forged_hash =
+            crate::records::commitment_hash(&objective_id, "mallory", &artifact, "n2");
+        let forged_commitment = Commitment::new(
+            objective_id.clone(),
+            "mallory",
+            forged_hash,
+            "2026-08-18T00:05:00+00:00",
+        );
+        let forged_claim = Claim::new(
+            objective_id,
+            "mallory",
+            artifact,
+            "n2",
+            "2026-08-18T00:12:00+00:00",
+            Vec::new(),
+        )
+        .unwrap();
+        replay_records_at(
+            &mut node,
+            &[
+                ("commitment".into(), forged_commitment.to_value()),
+                ("claim".into(), forged_claim.to_value()),
+            ],
+            "2026-08-18T00:12:30+00:00",
+        );
+
+        assert_eq!(
+            node.ledger().entries_of_kind("commitment").len(),
+            1,
+            "the backdated commitment must be refused"
+        );
+        assert_eq!(
+            node.ledger().entries_of_kind("claim").len(),
+            1,
+            "with no commitment, the copied claim has nothing to open"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
