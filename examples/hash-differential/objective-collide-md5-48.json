@@ -1,0 +1,35 @@
+{
+  "artifact_schema": {
+    "description": "Two messages of equal length, both beginning with the pinned 64-byte prefix, as lowercase hex. The example's m is the prefix followed by one byte, so the prefix every submission has to carry is readable straight off this record.",
+    "example": {
+      "m": "aa34609ea84c691870a89506a66babb5c4ef2b6c2e11eb4d68e32d798b91ce65c6b782abc8ae04bb273b7f3fd4d1bac99002455bdcc24ca4065ed9aa018c82e800",
+      "m_prime": "aa34609ea84c691870a89506a66babb5c4ef2b6c2e11eb4d68e32d798b91ce65c6b782abc8ae04bb273b7f3fd4d1bac99002455bdcc24ca4065ed9aa018c82e801"
+    },
+    "properties": {
+      "m": {
+        "description": "The first message, lowercase hex, an even number of characters, at most 8192 of them.",
+        "type": "string"
+      },
+      "m_prime": {
+        "description": "The second message, same length as m and different from it.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "m",
+      "m_prime"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-29T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-hash-collide-md5-48",
+  "reward": 5000,
+  "statement": "Find a colliding pair for MD5 from a chaining value nobody chose. Both messages must begin with the same pinned 64-byte prefix -- exactly one message block for this function -- must have the same length, must differ somewhere, and must agree on the leading 48 of the 128 digest bits. The prefix is sha512(\"cairn hash-differential v1 md5-48\"), so it is re-derivable by anyone and was chosen by nobody: a funder who picks a prefix can pick one whose chaining value they have already collided, and that is the self-dealing row in docs/threat-model.md. Deriving it also puts every published collision for MD5 out of reach as a copy, since all of them start from the standard IV behind a prefix their own author chose. Equal length is required because a same-length collision composes -- H(m || x) = H(m' || x) for every x -- and that is the property worth paying for. Messages are at most 4096 bytes and travel as lowercase hex in {\"m\", \"m_prime\"}. Only 48 bits have to agree, so a generic birthday search settles this in about 2^24 compressions with no cryptanalysis in it at all. It is a demonstration and not a bounty: the answer ships in examples/hash-differential/artifacts/md5-48.json, which is what makes the commit-reveal-audit loop runnable end to end and what shows this family of checkers accepts anything -- a checker shown only to reject is indistinguishable from one that rejects everything. Settling it a second time earns exactly zero.",
+  "verifier": {
+    "checker": "examples/hash-differential/checkers/collide_md5_48.py",
+    "checker_sha256": "975384f00cf5736759bc8e9d7a3af5c721f6d9e951a09499672333654494a75b",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

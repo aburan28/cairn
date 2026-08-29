@@ -1,0 +1,35 @@
+{
+  "artifact_schema": {
+    "description": "Two messages of equal length, both beginning with the pinned 64-byte prefix, as lowercase hex. The example's m is the prefix followed by one byte, so the prefix every submission has to carry is readable straight off this record.",
+    "example": {
+      "m": "78713ad6f24281877c1e4a45ac2c123c5ba8cdb4e2e82d03be9ad53cc4c3dc0d330da2fd9a2876a05a18982edcb512886538931e43ffb12d30919b41f1cda4fb00",
+      "m_prime": "78713ad6f24281877c1e4a45ac2c123c5ba8cdb4e2e82d03be9ad53cc4c3dc0d330da2fd9a2876a05a18982edcb512886538931e43ffb12d30919b41f1cda4fb01"
+    },
+    "properties": {
+      "m": {
+        "description": "The first message, lowercase hex, an even number of characters, at most 8192 of them.",
+        "type": "string"
+      },
+      "m_prime": {
+        "description": "The second message, same length as m and different from it.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "m",
+      "m_prime"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-29T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-hash-collide-sha0",
+  "reward": 6000000,
+  "statement": "Find a colliding pair for SHA-0 from a chaining value nobody chose. Both messages must begin with the same pinned 64-byte prefix -- exactly one message block for this function -- must have the same length, must differ somewhere, and must agree on all 160 digest bits. The prefix is sha512(\"cairn hash-differential v1 sha0\"), so it is re-derivable by anyone and was chosen by nobody: a funder who picks a prefix can pick one whose chaining value they have already collided, and that is the self-dealing row in docs/threat-model.md. Deriving it also puts every published collision for SHA-0 out of reach as a copy, since all of them start from the standard IV behind a prefix their own author chose. Equal length is required because a same-length collision composes -- H(m || x) = H(m' || x) for every x -- and that is the property worth paying for. Messages are at most 4096 bytes and travel as lowercase hex in {\"m\", \"m_prime\"}. SHA-0 is SHA-1 with no rotation in its message expansion, and that missing rotation is the whole break: without it the expansion acts on the 32 bit positions independently, so its low-weight codewords can be enumerated rather than searched for. Cost is hours to days on one machine.",
+  "verifier": {
+    "checker": "examples/hash-differential/checkers/collide_sha0.py",
+    "checker_sha256": "2fdbf0c7630904e0cdc432efde4891b90477aaaa5225be121070f86e0667971e",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

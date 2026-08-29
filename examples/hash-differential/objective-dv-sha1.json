@@ -1,0 +1,61 @@
+{
+  "artifact_schema": {
+    "description": "Sixteen consecutive words of the disturbance vector, and the step index of the first. Each word is exactly 8 lowercase hex characters, most significant nibble first, in one spelling so one vector has one artifact and one digest. The example is this objective's own baseline -- it is a real, valid vector, it scores exactly 31, and it therefore clears the threshold while moving the frontier none of the way and minting nothing. It ships as artifacts/dv-sha1-baseline.json.",
+    "example": {
+      "offset": 0,
+      "window": [
+        "70000000",
+        "00000001",
+        "00000001",
+        "40000000",
+        "80000000",
+        "00000000",
+        "c0000000",
+        "00000001",
+        "20000001",
+        "00000001",
+        "00000001",
+        "40000000",
+        "00000001",
+        "00000000",
+        "c0000000",
+        "00000000"
+      ]
+    },
+    "properties": {
+      "offset": {
+        "description": "Step index of window[0]. An integer in [0, 64].",
+        "type": "integer"
+      },
+      "window": {
+        "description": "Exactly 16 words, each 8 lowercase hex characters: DV[offset] through DV[offset + 15].",
+        "type": "array"
+      }
+    },
+    "required": [
+      "offset",
+      "window"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-29T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-hash-dv-sha1",
+  "ratchet": {
+    "baseline": 31,
+    "direction": "minimize",
+    "min_improvement": 1,
+    "reward": 2500000,
+    "target": 24
+  },
+  "reward": 2500000,
+  "statement": "Find a light disturbance vector for the SHA-1 message expansion. A disturbance vector is a codeword of that expansion -- the difference pattern a collision attack cancels with local collisions, a disturbance at step i undone by corrections at steps i+1..i+5 -- and its weight is what the attack costs, at roughly two state conditions per disturbed bit. Score is the sum of the Hamming weights of DV[20] through DV[79], minimised: steps 0..19 are free because the first sixteen message words are chosen directly, so only the weight message modification cannot reach is billed. This is a proxy for attack cost and is stated as one -- true cost also turns on which bit positions are disturbed and on how local collisions overlap. Submit any sixteen consecutive words and the step index of the first; the evaluator expands forwards and backwards to all eighty, because the recurrence is invertible and published vectors are named by the window that generates them. A vector with a disturbance at step 75 or later is refused: there is no step 80, so its corrections have nowhere to go and it cannot be completed inside one compression. The all-zero vector is refused too, though it could not have won -- sixteen consecutive zero words force it everywhere, so a score of 0 is unreachable by the geometry of the code rather than by the guard. Baseline 31, target 24. Nothing here proves an optimum. SHA-1's expansion rotates, which couples the 32 bit positions: the code stops being 32 copies of a [80, 16] binary code and becomes one [2560, 512] code, where minimum-weight search is the hard problem it is everywhere else. Baseline 31 is an upper bound this repository established and holds -- a single-bit window, unbeaten by every pair of single-bit windows, by sampled three- and four-bit windows, and by a beam search over their XOR combinations -- so the vector already in hand settles for nothing and the pool pays only for beating it. Target 24 is a construction target: no argument here says a vector that light exists. The span is 7, so min_improvement 1 admits at most seven hops. Payment is proportional to the distance the frontier moves, and every submission must cite the frontier it beat.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/hash-differential/evaluators/dv_sha1.py",
+    "evaluator_sha256": "bffa17e686c7347356dfac6de24be5d0d53c888a949a0d3ca95cff16f4942de2",
+    "kind": "evaluator",
+    "threshold": 31
+  }
+}
