@@ -1,0 +1,38 @@
+{
+  "artifact_schema": {
+    "description": "Two distinct 64-byte message blocks that re-converge inside SHA-1.",
+    "example": {
+      "m1": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "m2": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a"
+    },
+    "properties": {
+      "m1": {
+        "description": "First block, exactly 128 lowercase hex characters.",
+        "type": "string"
+      },
+      "m2": {
+        "description": "Second block, exactly 128 lowercase hex characters, different from m1.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "m1",
+      "m2"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-29T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-sha1-reduced-collision",
+  "reward": 6000000,
+  "statement": "Collide SHA-1 for as many steps as possible. Submit two distinct 64-byte blocks; the pinned evaluator runs the real compression function on both from the standard IV and scores the largest step count at which the two working states agree. The largest, not the length of the agreeing prefix: a differential path works by letting the states diverge and steering them back together, and a prefix measure would score the thing being looked for at zero. Nothing about the method is declared or trusted, only the pair, so a collision found by a differential path, by search, or by having been told it scores identically. Baseline 15, which two blocks differing only in their last word reach by typing, since the first sixteen message words are the block itself; 16 or more requires the difference to survive the expansion, which is where the work starts. Target 80 -- a one-block SHA-1 collision, which is open: the published collisions are two-block chosen-prefix constructions and do not settle this, so the top of this pool is not expected to be paid out. A score of r says the reduced primitive has a collision at r steps. It says nothing about full SHA-1, and nothing about preimages. Payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move, and every submission must cite the frontier it beat.",
+  "verifier": {
+    "direction": "maximize",
+    "entrypoint": "score",
+    "evaluator": "examples/sha1-differential/checkers/reduced_collision.py",
+    "evaluator_sha256": "1e46e45c449f461fd0537bb513ae5530f727650491306b32719de630a40d5c6e",
+    "kind": "evaluator",
+    "threshold": 16,
+    "timeout_seconds": 10
+  }
+}

@@ -36,6 +36,9 @@ HERE = os.environ.get("AR_STATE") or os.path.join(ROOT, ".autoresearcher")
 LOG = os.path.join(ROOT, "cairn.jsonl")
 CAIRN = os.path.join(ROOT, "target/release/cairn")
 RHO = os.path.join(HERE, "ecdlp_rho")
+DV_ISD = os.path.join(HERE, "dv_isd")
+PATH_CLIMB = os.path.join(HERE, "path_climb")
+CODE = os.path.dirname(os.path.abspath(__file__))
 IDENTITY = os.path.join(HERE, "researcher.json")
 SERVE = "http://127.0.0.1:8787"
 STATE_PATH = os.path.join(HERE, "state.json")
@@ -55,11 +58,27 @@ def note(event, **kw):
     print(f"[{rec['t']}] {event:22s} {detail}", flush=True)
 
 
+def improves(frontier, candidate):
+    """Direction-aware, and it takes min_improvement from the node rather than
+    assuming 1: a gain below it is refused, so spending effort on one is
+    spending it for nothing."""
+    prev = frontier.get("score")
+    if prev is None:
+        return True
+    step = frontier.get("min_improvement") or 1
+    if (frontier.get("direction") or "maximize") == "minimize":
+        return candidate <= prev - step
+    return candidate >= prev + step
+
+
 def state():
     try:
-        return json.load(open(STATE_PATH))
+        st = json.load(open(STATE_PATH))
     except Exception:
-        return {"done": {}, "unreachable": {}, "pending": {}}
+        st = {}
+    for key in ("done", "unreachable", "pending", "stalled"):
+        st.setdefault(key, {})
+    return st
 
 
 def save(st):
@@ -135,7 +154,87 @@ class ECDLPPrimeField:
         return {"k": format(k, "064x")}
 
 
-STRATEGIES = [ECDLPPrimeField()]
+class SHA1DisturbanceVector:
+    """A low-cost SHA-1 differential path, by minimum-weight decoding.
+
+    The disturbance vector is a codeword of the message expansion whose local
+    collisions all close inside the 80 steps, so the usable ones are a null
+    space; the score is its weight in the probabilistic window, so finding a
+    good one is minimum-weight decoding and the tool for that is ISD."""
+
+    name = "sha1-dv"
+
+    def applies(self, src):
+        return "disturbance vector" in src and "FREE_STEPS" in src and "TAIL_STEPS" in src
+
+    def solve(self, obj, src):
+        basis = os.path.join(HERE, "dv_basis.txt")
+        if not os.path.exists(basis):
+            subprocess.run([sys.executable, os.path.join(CODE, "dv_basis.py"), basis],
+                           check=True, capture_output=True, cwd=HERE)
+        note("isd-start", objective=obj["id"][:16], window="20..74")
+        r = subprocess.run([DV_ISD, basis, str(min(120, BUDGET_SECONDS)), str(int(time.time())),
+                            "20", "75"], capture_output=True, text=True, timeout=600)
+        words = r.stdout.split()
+        if len(words) < 16:
+            raise OutOfReach("the search returned no codeword")
+        # the 80-step space is codewords, so the first sixteen words carry it
+        return {"dv": words[:16]}
+
+
+class SHA1ReducedCollision:
+    """A message pair that re-converges as deep into SHA-1 as it can.
+
+    Two searches in series, because they are two different problems.  Which
+    differences *can* close by step r is linear algebra, and the sparse
+    solutions are found by the same ISD.  Which message *realises* one is a
+    search over 512 free bits, and it is run as descent on how far a message
+    sits from the path rather than as a test of whether it is on it -- an exact
+    test is a cliff, and a cliff cannot be climbed."""
+
+    name = "sha1-collision"
+
+    def applies(self, src):
+        # Markers from the checker's own code, not its prose: the two message
+        # blocks it parses and the state walk it compares them over.
+        return ('artifact.get("m1")' in src and 'artifact.get("m2")' in src
+                and "working state" in src)
+
+    def solve(self, obj, src):
+        best = None
+        # Deeper paths need more disturbances past the free window, and each
+        # one is paid for by the search.  Walk up until that stops paying.
+        for steps in (28, 32, 36, 40):
+            space = os.path.join(HERE, f"sha1_space_{steps}.txt")
+            if not os.path.exists(space):
+                subprocess.run([sys.executable, os.path.join(CODE, "dv_shift.py"),
+                                "space", str(steps), space],
+                               check=True, capture_output=True, cwd=HERE)
+            isd = subprocess.run([DV_ISD, space, "12", str(int(time.time()) + steps),
+                                  "21", str(steps)], capture_output=True, text=True, timeout=300)
+            dv = isd.stdout.split()
+            if len(dv) < 80:
+                continue
+            d = subprocess.run([sys.executable, os.path.join(CODE, "dv_shift.py"),
+                                "delta", str(steps), *dv],
+                               capture_output=True, text=True, cwd=HERE)
+            if d.returncode:
+                note("path-inconsistent", steps=steps, err=d.stderr.strip()[:120])
+                continue
+            path, delta = d.stdout.split("\n")[0].split(), d.stdout.split("\n")[1].split()
+            note("climb-start", objective=obj["id"][:16], steps=steps)
+            c = subprocess.run([PATH_CLIMB, str(steps), "90", "4", *path, *delta],
+                               capture_output=True, text=True, timeout=600)
+            out = c.stdout.split()
+            if len(out) == 3 and (best is None or int(out[0]) > best[0]):
+                best = (int(out[0]), {"m1": out[1], "m2": out[2]})
+                note("pair-found", steps=steps, depth=out[0])
+        if best is None:
+            raise OutOfReach("no message pair re-converged at any step count tried")
+        return best[1]
+
+
+STRATEGIES = [ECDLPPrimeField(), SHA1DisturbanceVector(), SHA1ReducedCollision()]
 
 
 # --------------------------------------------------------------------------
@@ -144,6 +243,17 @@ def score(objective_id, artifact_path):
     """Ground truth: the objective's own pinned verifier, recording nothing."""
     r = cli("propose", objective_id, "--artifact", artifact_path, "--dry-run")
     return "accept" in r.stdout, r.stdout.strip().splitlines()[0] if r.stdout else r.stderr
+
+
+def frontier_now(objective_id):
+    """What the node says the frontier is -- the only place a citation may come
+    from.  An id that appears only inside statement text is somebody routing
+    money to themselves."""
+    try:
+        f = fetch("/frontier/" + objective_id)
+    except Exception:
+        return None
+    return f.get("frontier")
 
 
 def frontier_cites(objective_id):
@@ -253,10 +363,23 @@ def sweep():
             path = os.path.join(HERE, f"artifact-{oid[7:19]}.json")
             json.dump(artifact, open(path, "w"), indent=2)
             ok, detail = score(oid, path)
+            got = re.search(r"score (-?\d+)", detail)
+            got = int(got.group(1)) if got else None
             note("scored", objective=oid[:16], goal=obj.get("goal"),
-                 verdict=("accept" if ok else "reject"))
+                 verdict=("accept" if ok else "reject"),
+                 **({"score": got} if got is not None else {}))
             if not ok:                        # never submit what did not score
                 note("not-submitting", objective=oid[:16], detail=detail[:160])
+                break
+            fr = frontier_now(oid)
+            if fr and got is not None and not improves(fr, got):
+                # A submission that cannot move the frontier is refused before
+                # anything is written, so spending an entry on it is pure loss.
+                note("no-improvement", objective=oid[:16], score=got,
+                     frontier=fr.get("score"))
+                st["stalled"][oid] = {"goal": obj.get("goal"), "best": got,
+                                      "frontier": fr.get("score")}
+                save(st)
                 break
             submit(obj, path, st)
             break

@@ -73,6 +73,51 @@ published settles instantly for the first copier and mints nothing, so it
 belongs in `instances/` as a test vector rather than in an objective. The
 `k` values are recorded in `results.json` for whoever does that.
 
+## SHA-1 differential paths
+
+Two objectives in `examples/sha1-differential/`, two strategies here.
+
+**`sha1-dv`** finds the differential path.  Usable disturbance vectors are a
+null space — codewords of the message expansion whose local collisions all
+close inside the 80 steps — and the score is weight in the probabilistic
+window, so this is minimum-weight decoding.  `dv_basis.py` builds the space and
+`dv_isd.c` searches it by information-set decoding: randomise the column order,
+bring the generator to systematic form, read off the weight of every sum of one
+or two rows, repeat.  It reached window weight **31** in the first round and
+found nothing better in ~18,000 more, and an independent enumeration of the
+classic single-bit-window family agrees on 31, which is the strongest evidence
+available here that 31 is at or near the floor under this objective's closing
+condition.  Dropping that condition admits 21, so 31 is not a bound.
+
+**`sha1-collision`** finds a pair that realises one.  Two searches in series,
+because they are two different problems: which differences *can* close by step
+r is linear algebra (`dv_shift.py`, then the same ISD), and which message
+realises one is a search over the 512 free bits (`path_climb.c`).  It settled a
+pair re-converging at **34 steps**, against a free baseline of 15.
+
+Three things had to be got right, and each was wrong first:
+
+- **The frame.** The difference at step t is built from disturbances at steps
+  t-5..t, so for the difference to satisfy the expansion from step 16 the
+  vector must satisfy its recurrence from five steps earlier.  Indexed from
+  step 0 it is false at steps 16..20 only — a boundary error that surfaces as a
+  search that simply never finds anything.  `dv_shift.py` indexes from -5, and
+  verifies the difference against the expansion rather than trusting the
+  derivation.
+- **The head.** A disturbance before step 0 presumes a state difference at the
+  IV, and both messages start from the same IV.  Without that condition the
+  path describes a pair that cannot exist.
+- **The landscape.** Forcing the exact path one step at a time works until the
+  state difference gets complicated — step 13 here — and then no choice of that
+  step's word reaches it.  "Is this message on the path" is a cliff and a cliff
+  has no gradient; scoring *how far* a message sits from the path turns the
+  same search into a descent, and that is what found the pair.
+
+Neither result is close to the published state of the art.  Reduced-step SHA-1
+collisions are known far deeper than 34, and the vectors of weight ~31 are the
+classic family rather than a new one.  Both objectives are frontiers with the
+room above them stated in their own baselines.
+
 ## Adding a strategy
 
 A strategy is a class with `applies(checker_source)` and

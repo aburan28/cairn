@@ -1,0 +1,54 @@
+{
+  "artifact_schema": {
+    "description": "A SHA-1 disturbance vector, given as its sixteen words at steps 0..15.",
+    "example": {
+      "dv": [
+        "00003800",
+        "00008000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000"
+      ]
+    },
+    "properties": {
+      "dv": {
+        "description": "Sixteen 32-bit words, each exactly 8 lowercase hex characters, giving the disturbance vector at steps 0..15; the checker expands them with SHA-1's own recurrence to all 80 steps.",
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 16,
+        "minItems": 16,
+        "type": "array"
+      }
+    },
+    "required": [
+      "dv"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-29T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-sha1-disturbance-vector",
+  "reward": 2000000,
+  "statement": "Find a low-cost SHA-1 differential path. Submit a disturbance vector as its sixteen words at steps 0..15; the pinned evaluator expands them with SHA-1's own message-expansion recurrence, so a vector that is not a codeword cannot be declared into one, and scores the number of disturbances in steps 20..74, minimised. Steps 0..19 are excluded because a non-linear path absorbs them at no probabilistic cost, and disturbances in steps 75..79 are refused outright because a local collision starting there cannot close inside the 80 steps. The metric cannot be gamed by hiding weight in the excluded early steps: the expansion inverts, so sixty consecutive zero words force the whole vector to zero, and the floor is a real 1. Baseline 60, which a random codeword beats without trying. Target 24, a construction target and not a proved bound -- dropping the closing condition admits weight 21, so nothing here says 24 is unreachable, and nothing says it is reachable either. Score is a first-order proxy for attack cost: it counts disturbances, not conditions, and says nothing about where they sit, which is a judgement no verifier should be making. Payment is proportional to the distance the frontier moves, so publishing an improvement immediately is the profitable move, and every submission must cite the frontier it beat.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/sha1-differential/checkers/dv_cost.py",
+    "evaluator_sha256": "ad0fe1dc7083a3b0318ee15198dc4eb2fe1483dd97d903d479c9c346b55c8020",
+    "kind": "evaluator",
+    "threshold": 60,
+    "timeout_seconds": 10
+  }
+}

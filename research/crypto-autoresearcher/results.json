@@ -32,6 +32,44 @@
       "reward": 400000,
       "rho_steps": 1678059520,
       "seconds": 16.0
+    },
+    {
+      "goal": "GOAL-sha1-disturbance-vector",
+      "metric": "disturbances in steps 20..74, minimised",
+      "score": 31,
+      "baseline": 60,
+      "claim": "sha256:5c06842b0d98f26d543a02e379f5072ffdb78192a2f2e265d4c7d0a862bd4847",
+      "reward": 2000000,
+      "dv_words": [
+        "00001c00",
+        "00004000",
+        "00004000",
+        "00001000",
+        "00002000",
+        "00000000",
+        "00003000",
+        "00004000",
+        "00004800",
+        "00004000",
+        "00004000",
+        "00001000",
+        "00004000",
+        "00000000",
+        "00003000",
+        "00000000"
+      ],
+      "note": "information-set decoding; an independent enumeration of the single-bit-window family agrees on 31. Not a new class and not a proved minimum."
+    },
+    {
+      "goal": "GOAL-sha1-reduced-collision",
+      "metric": "deepest step the two blocks agree at, maximised",
+      "score": 34,
+      "baseline": 15,
+      "claim": "sha256:ea8c6c48962836a1c5e77eaea23c532407b10d361b52faad61e36ca37e05e0b0",
+      "reward": 6000000,
+      "m1": "201770b3e95f4f62a3c8600985484a7ca57270637f4569d7ed26b0f1600b589a98b87cb43ffaab810540e60136414316a4b06195e63e5f4cc4ef8aee176e53f6",
+      "m2": "001770b3e95f4f66a3c860098d484a78ad7270637f4569d3f526b0f1600b589ca0b87cb41bfaab810940e6051a414316acb06195ee3e5f4cecef8aee176e53f2",
+      "note": "path designed for 32 steps; the pair re-converges at 34. Far short of published reduced-step results."
     }
   ],
   "test_vectors_reproduced": [
@@ -49,5 +87,9 @@
       "goal": "GOAL-certicom-eccp131",
       "reason": "131-bit field exceeds the 64-bit lanes this engine multiplies in; ~2^65 group operations, ~11,000 years at measured throughput"
     }
+  ],
+  "objectives_posted": [
+    "examples/sha1-differential/objective-disturbance-vector.json",
+    "examples/sha1-differential/objective-reduced-collision.json"
   ]
 }
