@@ -108,6 +108,13 @@ pub struct Config {
     /// CLI does — so a daemon on a machine with `~/.cairn/key` opens the
     /// same logs the CLI writes, instead of reporting them as spliced.
     pub key_file: Option<PathBuf>,
+    /// How outbound dials leave this node, as a proxy configuration string.
+    ///
+    /// `None` or `"direct"` dials straight. `socks5://host:port` routes every
+    /// dial through a SOCKS5 proxy — a Tor client, an obfs4/Snowflake bridge, a
+    /// corporate egress — so a censoring firewall is something to route around
+    /// rather than something that stops the node. See [`crate::p2p::proxy`].
+    pub proxy: Option<String>,
 }
 
 impl Config {
@@ -134,6 +141,7 @@ impl Config {
             serve: None,
             max_queued: serve::DEFAULT_MAX_QUEUED,
             key_file: None,
+            proxy: None,
         }
     }
 
@@ -476,7 +484,21 @@ pub fn run(config: Config) -> Result<(), String> {
     let identity = Arc::new(load_identity(&config.identity).map_err(|e| format!("identity: {e}"))?);
     let root_key = Arc::new(load_root_key(&config.root_key).map_err(|e| format!("root key: {e}"))?);
 
-    let mut service = Service::new(Arc::clone(&identity));
+    // How this node's dials leave it. Parsed once, at startup, so a
+    // mistyped proxy is a refusal to start rather than a dial that silently
+    // falls back to direct and hands a censor the fingerprint the operator
+    // meant to hide.
+    let proxy = match config.proxy.as_deref() {
+        Some(text) => crate::p2p::proxy::Proxy::parse(text).map_err(|e| format!("proxy: {e}"))?,
+        None => crate::p2p::proxy::Proxy::Direct,
+    };
+    match &proxy {
+        crate::p2p::proxy::Proxy::Direct => {}
+        crate::p2p::proxy::Proxy::Socks5 { addr, .. } => {
+            log::info!("outbound dials route through SOCKS5 proxy {addr}");
+        }
+    }
+    let mut service = Service::with_proxy(Arc::clone(&identity), proxy);
     for path in &config.bootstrap {
         let (endpoint, placeholder) =
             load_endpoint(path).map_err(|e| format!("bootstrap {}: {e}", path.display()))?;

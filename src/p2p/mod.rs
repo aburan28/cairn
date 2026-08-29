@@ -34,6 +34,7 @@ pub mod multicast;
 pub mod peers;
 pub mod pop;
 pub mod portmap;
+pub mod proxy;
 pub mod service;
 pub mod session;
 pub mod swarm;

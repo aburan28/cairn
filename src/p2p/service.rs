@@ -7,6 +7,7 @@ use super::handshake::{PeerId, PeerIdentity, PeerPublic};
 use super::multicast;
 use super::peers::{self, PeerHintLimits, PeersReport};
 use super::pop::{PopLimits, PopReport};
+use super::proxy::Proxy;
 use super::session::{self, SessionError};
 use super::sync::{Peer, SyncError};
 use super::transport::{self, Connection, TransportError};
@@ -59,6 +60,16 @@ impl From<SessionError> for ServiceError {
 /// Owns the local identity, the non-consensus address book, and the DHT view.
 pub struct Service {
     identity: Arc<PeerIdentity>,
+    /// How outbound dials leave this node.
+    ///
+    /// [`Proxy::Direct`] by default. A node behind a censoring firewall sets a
+    /// SOCKS5 proxy — a Tor client, an obfs4/Snowflake bridge, a corporate
+    /// egress — and every dial this service makes goes through it, so the local
+    /// censor sees a connection to the proxy rather than the peer's blocked
+    /// address or cairn's distinctive fingerprint. See [`super::proxy`]. Only
+    /// dials are proxied: inbound accepts are for a public seed, which is not
+    /// the censored party. Immutable after construction, so no lock.
+    proxy: Proxy,
     /// Whom this node can dial, and the public key needed to do it.
     ///
     /// Behind a `Mutex` for the same reason the directory is: a DHT round can
@@ -96,15 +107,31 @@ pub struct Service {
 
 impl Service {
     pub fn new(identity: Arc<PeerIdentity>) -> Service {
+        Service::with_proxy(identity, Proxy::Direct)
+    }
+
+    /// A service whose outbound dials leave through `proxy`.
+    ///
+    /// The one call site is the daemon reading its `--proxy` configuration; the
+    /// rest of the API is unchanged, because the proxy interposes inside
+    /// [`super::transport::connect_through`] and nothing else in the dial path
+    /// has to know it is there.
+    pub fn with_proxy(identity: Arc<PeerIdentity>, proxy: Proxy) -> Service {
         let local = identity.id();
         Service {
             identity,
+            proxy,
             book: Mutex::new(AddressBook::new()),
             peer_hints: Mutex::new(peers::Hints::new()),
             directory: Mutex::new(Directory::new(local)),
             hints: Mutex::new(std::collections::BTreeMap::new()),
             bad_keys: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// How outbound dials leave this node.
+    pub fn proxy(&self) -> &Proxy {
+        &self.proxy
     }
 
     pub fn identity(&self) -> PeerId {
@@ -528,7 +555,8 @@ impl Service {
     where
         F: FnMut(&super::sync::Record) -> Result<(), SyncError>,
     {
-        let mut connection = transport::connect(&endpoint.peer, endpoint.addr, &self.identity)?;
+        let mut connection =
+            transport::connect_through(&self.proxy, &endpoint.peer, endpoint.addr, &self.identity)?;
         session::reconcile(&mut connection, peer, verify).map_err(Into::into)
     }
 
@@ -618,7 +646,8 @@ impl Service {
     where
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
-        let mut connection = transport::connect(&endpoint.peer, endpoint.addr, &self.identity)?;
+        let mut connection =
+            transport::connect_through(&self.proxy, &endpoint.peer, endpoint.addr, &self.identity)?;
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, Some(endpoint.addr))?;
         self.exchange_peer_hints_round(&mut connection, node)?;
@@ -654,7 +683,8 @@ impl Service {
     /// the log and still be unable to re-derive it, which is the whole gap this
     /// exists to close.
     pub fn dial_node_once(&self, endpoint: &Endpoint, node: &mut Node) -> Result<(), ServiceError> {
-        let mut connection = transport::connect(&endpoint.peer, endpoint.addr, &self.identity)?;
+        let mut connection =
+            transport::connect_through(&self.proxy, &endpoint.peer, endpoint.addr, &self.identity)?;
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, Some(endpoint.addr))?;
         self.exchange_peer_hints_round(&mut connection, node)?;

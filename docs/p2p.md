@@ -408,6 +408,19 @@ authenticate and encapsulate the reverse KEM leg before a shared channel exists.
 Unlinkability is a transport-layer problem — onion routing, or rendezvous under
 a derived key — and is not solved here.
 
+**And a firewall can fingerprint it.** That cleartext first flight is a fixed
+261,216-byte hello, the same length every time, its first 261,120 bytes a
+Classic McEliece public key with recognisable structure. That is about the most
+distinctive thing a DPI box can match, so a censor does not need to block an IP
+— they can block the protocol. The answer is not to obfuscate cairn by hand,
+which would be weaker than the tools built for it: [`p2p::proxy`](../src/p2p/proxy.rs)
+routes every dial through a SOCKS5 proxy (`cairn-p2p --proxy socks5://…`), so a
+Tor bridge running obfs4 or Snowflake carries the connection and cairn's bytes
+never appear on the censored link. The McEliece handshake runs end to end over
+the tunnel, so the proxy is one more untrusted hop — it sees ciphertext and the
+peer-id fingerprint and can drop or delay, nothing more. `docs/censorship.md`
+§5 has the full account of what that defeats and what it does not.
+
 **`p2p::swarm::tcp` runs over this transport too.** It did not for a long time — no
 handshake, no AEAD, no peer authentication, behind an off-by-default feature so
 it could not reach a binary by accident. The blocker was the identity mismatch
@@ -560,6 +573,11 @@ cairn-p2p --identity node.json --listen 127.0.0.1:9000 \
   --log cairn.jsonl --root . --bootstrap peer.json \
   --population population.json --fanout 3
 ```
+
+Behind a censoring firewall, add `--proxy socks5://127.0.0.1:9050` (a running
+Tor client, or a Tor bridge speaking obfs4/Snowflake on that port) and every
+dial leaves through it — see the transport-security section above and
+`docs/censorship.md` §5.
 
 `cairn-gen-bootstrap --addr HOST:PORT --out FILE` writes a file in that
 shape for a given address, with a freshly generated McEliece keypair standing

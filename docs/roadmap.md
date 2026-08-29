@@ -787,7 +787,28 @@ downstream is unbacked.
       recommendation 3, still open. The VDF is the answer that needs no
       outsider, and it is now the one that is built first.
 - [ ] Forced inclusion via a base layer. Censorship is the primary threat --
-      withholding a reveal steals a bounty -- and Stage 0 has no defence.
+      withholding a reveal steals a bounty -- and Stage 0 has no defence. This
+      is the *inclusion* half of censorship; the *reachability* half — a
+      firewall that blocks the transport by address or by DPI fingerprint — is
+      answered separately and earlier by the pluggable proxy below, since
+      reaching a peer at all is prior to being included by one.
+- [x] **Pluggable outbound transport** (`src/p2p/proxy.rs`, `cairn-p2p
+      --proxy socks5://…`). A node's very first outbound packet is a fixed
+      261,216-byte cleartext McEliece hello — about the most distinctive DPI
+      signature a protocol can have — sent to a fixed peer address, so a
+      firewall can block cairn by fingerprint or by IP without touching the
+      cryptography. Rather than roll a homegrown obfuscator (weaker than the
+      tools built for exactly this), every dial can route through a SOCKS5
+      proxy: a Tor client, a Tor bridge running obfs4 or Snowflake, meek,
+      shadowsocks, or a corporate egress. The local censor then sees a
+      connection to the proxy, and with an obfuscating bridge cairn's bytes
+      never appear on the censored link at all. The proxy is untrusted — the
+      McEliece handshake runs end to end over the tunnel, so a hostile proxy
+      sees ciphertext and the peer-id fingerprint and can only drop or delay.
+      Named residues: the proxy→peer hop is unobfuscated (a global adversary
+      still sees the fingerprint there), and SOCKS5 CONNECT needs a peer the
+      proxy can reach — an onion-service target closes both and is the next
+      step the seam is shaped for. See [censorship.md](censorship.md) §5.
 
 ## Stage 3 — decentralized settlement
 

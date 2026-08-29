@@ -233,12 +233,46 @@ complete.
 
 ## 5. The network layer
 
-Encrypted content over a blocked network is still blocked. This is out of scope
-for the library and must not be out of mind:
+Encrypted content over a blocked network is still blocked, and a firewall has
+three separate ways to block it that need three separate answers:
+
+1. **IP/port blocking** — drop packets to the peer's address.
+2. **DPI fingerprinting** — recognise cairn on the wire and drop it. cairn is
+   *trivially* fingerprintable: the initiator's first flight is a fixed
+   261,216-byte cleartext hello — the Classic McEliece public key, whose
+   Goppa-matrix bytes are recognisable, plus a 96-byte ciphertext — sent before
+   any key exists to encrypt it under (`p2p.md`, transport security). No amount
+   of the session encryption that follows hides that opening.
+3. **Endpoint enumeration** — block the bootstrap seeds. This is the discovery
+   problem §on peer discovery in `p2p.md` answers: peer records gossip as
+   routing hints, so any one reachable peer re-supplies the set and there is no
+   fixed list of seeds to block.
 
 - No single submission endpoint. A central API is a single IP to block.
-- Pluggable transports / Tor / mixnets for participants under active network
-  censorship.
+- **A pluggable outbound proxy, built** (`src/p2p/proxy.rs`, `cairn-p2p
+  --proxy socks5://…`). Every dial can route through a SOCKS5 proxy, which is
+  the interface the whole circumvention ecosystem already exposes — a Tor
+  client, a Tor bridge running `obfs4proxy` or `snowflake`, `meek`,
+  `shadowsocks`, or a plain corporate egress. This is deliberately **not** a
+  homegrown obfuscator: rolling one would be weaker than delegating to tools
+  built and attacked for exactly this. With a proxy set, the *local* censor
+  sees a connection to the proxy rather than the peer (mechanism 1 is reached
+  from the proxy's vantage point), and with an *obfuscating* proxy the bytes on
+  the local link are whatever obfs4/Snowflake disguises as, so cairn's
+  fingerprint (mechanism 2) never appears on the censored segment. What it does
+  not do is stated where it is built and in the threat table below: it does not
+  obfuscate cairn on the proxy→peer hop, and SOCKS5 CONNECT still needs a peer
+  the proxy can *reach* — an onion-service target that fixes the second is the
+  named next step, since a peer id is already a self-authenticating name and
+  SOCKS5 carries a domain address type.
+  The proxy is untrusted and that is safe by construction: the McEliece mutual
+  handshake runs end to end over the tunnel, so a hostile proxy sees ciphertext
+  and the peer-id fingerprint, may drop or delay, and cannot read, forge, or
+  redirect — a substituted endpoint fails the handshake exactly as hostile DNS
+  does.
+- Pluggable transports / Tor / mixnets are therefore reachable *today* for
+  participants under active network censorship, by pointing `--proxy` at one,
+  rather than being a future the library has no seam for.
 - **The gossip layer is already an asset here.** `gossip.rs` is a CRDT designed
   for partial connectivity and eventual convergence — a partitioned participant
   catches up automatically when reconnected, and there is no round or leader that
@@ -349,12 +383,20 @@ membership this section requires to be "diverse and rotated per epoch".
 - **A legal order against the operator.** Stage 0 has one operator; encryption
   does not change who can be served a subpoena. Only decentralized inclusion
   does.
+- **The protocol's own fingerprint, on any hop past the local proxy.** The
+  proxy relocates the observation point past the local firewall; it does not
+  make cairn look like anything else on the proxy→peer link. A network-level
+  obfuscation of cairn itself (a pluggable-transport shim on both ends, or an
+  onion-service target so there is no peer-visible hop at all) is what closes
+  that, and the proxy seam is what it would attach to.
 
 ## 8. Threat model summary
 
 | adversary | goal | defence | status |
 |---|---|---|---|
 | network observer | read submissions | transport encryption + sealed envelopes | **built** |
+| local firewall | block the peer's IP/port | dial through a SOCKS5 proxy — a Tor client, an obfs4/Snowflake bridge, an egress — so the peer is reached from the proxy's vantage point | **built** (`--proxy`) |
+| local firewall | fingerprint cairn's 261 KiB McEliece hello by DPI | route the local link through an *obfuscating* proxy (obfs4, Snowflake), so cairn's bytes never appear on the censored segment; the library delegates obfuscation rather than rolling its own | **built for the local link** — the proxy→peer hop is unobfuscated, and a global adversary sees the fingerprint there |
 | sequencer | drop submissions it dislikes | blind inclusion — it cannot see what it drops | **built** |
 | sequencer | drop everything | forced inclusion on a base layer | **unsolved at Stage 0** |
 | competitor | front-run an in-flight artifact | threshold reveal, and a share published before the commitment's epoch closes is refused | **built** |

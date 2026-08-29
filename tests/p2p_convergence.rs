@@ -1265,3 +1265,110 @@ fn a_peer_record_travels_as_a_routing_hint_and_never_reaches_the_ledger() {
         "a peer entry was appended over sync"
     );
 }
+
+#[test]
+fn a_full_sync_completes_through_a_socks5_proxy() {
+    // The firewall property, end to end. A censored node never dials its peer
+    // directly: it dials a SOCKS5 proxy (a Tor client, an obfs4 bridge, a
+    // corporate egress) that reaches the peer on its behalf, so the local
+    // censor sees a connection to the proxy rather than the peer's blocked
+    // address or cairn's 261 KiB McEliece fingerprint. This stands up a real
+    // in-process SOCKS5 proxy between alice and bob and checks that an ordinary
+    // objective still crosses -- the McEliece handshake runs end to end over
+    // the tunnel, so the proxy is just another untrusted hop.
+    use cairn::p2p::proxy::Proxy;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+
+    // A minimal SOCKS5 CONNECT proxy: one greeting, one CONNECT, then it splices
+    // the two streams. Enough to carry a real session, not a general proxy.
+    fn spawn_socks_proxy() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("proxy binds");
+        let addr = listener.local_addr().expect("proxy addr");
+        thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(mut client) = incoming else { continue };
+                thread::spawn(move || {
+                    let mut head = [0u8; 2];
+                    if client.read_exact(&mut head).is_err() {
+                        return;
+                    }
+                    let mut methods = vec![0u8; head[1] as usize];
+                    let _ = client.read_exact(&mut methods);
+                    // No-auth.
+                    let _ = client.write_all(&[0x05, 0x00]);
+                    // CONNECT header + IPv4 target (the fixtures dial loopback).
+                    let mut req = [0u8; 4];
+                    if client.read_exact(&mut req).is_err() {
+                        return;
+                    }
+                    let mut ip = [0u8; 4];
+                    let _ = client.read_exact(&mut ip);
+                    let mut port = [0u8; 2];
+                    let _ = client.read_exact(&mut port);
+                    let target = SocketAddr::from((ip, u16::from_be_bytes(port)));
+                    let Ok(mut upstream) = TcpStream::connect(target) else {
+                        let _ = client.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+                        return;
+                    };
+                    let _ = client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+                    // Splice both directions until either end closes.
+                    let mut a = client.try_clone().expect("clone");
+                    let mut b = upstream.try_clone().expect("clone");
+                    let up = thread::spawn(move || {
+                        let _ = std::io::copy(&mut client, &mut upstream);
+                    });
+                    let _ = std::io::copy(&mut b, &mut a);
+                    let _ = up.join();
+                });
+            }
+        });
+        addr
+    }
+
+    let proxy_addr = spawn_socks_proxy();
+
+    let objective = collatz_objective();
+    let bob_identity = Arc::new(PeerIdentity::generate());
+    let bob_public = bob_identity.to_public();
+    let bob_service = Service::new(bob_identity);
+    let listener = bob_service
+        .listen("127.0.0.1:0".parse().expect("loopback"))
+        .expect("listen");
+    let endpoint = Endpoint::new(listener.local_addr().expect("bound address"), bob_public);
+
+    let bob_objective = objective.clone();
+    let bob_thread = thread::spawn(move || {
+        let mut bob = node("bob-socks");
+        bob.post_objective(&bob_objective, TS).expect("post");
+        bob_service
+            .accept_node_once(&listener, &mut bob)
+            .expect("bob's round");
+    });
+
+    // Alice dials only through the proxy. Her Service holds no direct route that
+    // would let the test pass without the tunnel.
+    let alice_service = Service::with_proxy(
+        Arc::new(PeerIdentity::generate()),
+        Proxy::Socks5 {
+            addr: proxy_addr,
+            auth: None,
+        },
+    );
+    let mut alice = node("alice-socks");
+    alice_service
+        .dial_node_once(&endpoint, &mut alice)
+        .expect("alice's proxied round");
+    bob_thread.join().expect("bob's thread");
+
+    let objectives = alice.objectives();
+    assert_eq!(
+        objectives.len(),
+        1,
+        "the objective did not cross the SOCKS5 tunnel"
+    );
+    assert!(
+        objectives.contains_key(&objective.id()),
+        "alice imported some other objective through the tunnel"
+    );
+}
