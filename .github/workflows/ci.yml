@@ -337,3 +337,24 @@ jobs:
       # would hand the frontier and the whole pool to an empty list. That is not
       # visible in a passing artifact, so it gets its own adversarial battery.
       - run: python3 examples/faster-algorithms/tools/selftest.py
+      # The hash-differential family: eight pinned files that are nearly one
+      # file, six of them differing only in an instance block. `--check`
+      # re-renders every one from its generator and diffs, which is the only
+      # thing standing between them and the state five-correct-one-wrong that
+      # hand-maintained copies reach on their own.
+      - run: python3 examples/hash-differential/tools/build_pinned.py --check
+      # Re-proves the SHA-0 disturbance-vector optimum (2^16 codewords, about a
+      # second) and re-scores all three committed vectors through the *pinned*
+      # evaluators. The objectives' baselines and targets are those numbers, so
+      # a drift here is a ratchet pointed at the wrong place -- and on a
+      # minimise objective that is a pool paid out for nothing.
+      - run: python3 examples/hash-differential/tools/search_dv.py --check
+      # And the acceptance evidence. All six collision instances are open, so
+      # their checkers are otherwise only ever observed rejecting -- which a
+      # checker that rejects everything also does. This
+      # runs the one committed pair through its checker, the same pair through
+      # the full-MD5 checker built from the same template (which must refuse
+      # it), MD4 and SHA-0 against their published vectors since no modern
+      # OpenSSL carries either, and thirty-four malformed artifacts that must
+      # score rather than raise.
+      - run: python3 examples/hash-differential/tools/selftest.py

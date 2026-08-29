@@ -1,0 +1,35 @@
+{
+  "artifact_schema": {
+    "description": "Two messages of equal length, both beginning with the pinned 64-byte prefix, as lowercase hex. The example's m is the prefix followed by one byte, so the prefix every submission has to carry is readable straight off this record.",
+    "example": {
+      "m": "c7bc75a5c96e713d3f608092a08f595f421d7e8f3dcc967878f964abcc1c4f093ce4be66aa8f4059e1f69abc39e728f6958228ddd0afd6e2fd1ef98507db314900",
+      "m_prime": "c7bc75a5c96e713d3f608092a08f595f421d7e8f3dcc967878f964abcc1c4f093ce4be66aa8f4059e1f69abc39e728f6958228ddd0afd6e2fd1ef98507db314901"
+    },
+    "properties": {
+      "m": {
+        "description": "The first message, lowercase hex, an even number of characters, at most 8192 of them.",
+        "type": "string"
+      },
+      "m_prime": {
+        "description": "The second message, same length as m and different from it.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "m",
+      "m_prime"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-29T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-hash-collide-sha1-64",
+  "reward": 3000000,
+  "statement": "Find a colliding pair for SHA-1 reduced to its first 64 steps (the last 16 are not run; the reduced function is defined by the pinned checker and by nothing else) from a chaining value nobody chose. Both messages must begin with the same pinned 64-byte prefix -- exactly one message block for this function -- must have the same length, must differ somewhere, and must agree on all 160 digest bits. The prefix is sha512(\"cairn hash-differential v1 sha1-64\"), so it is re-derivable by anyone and was chosen by nobody: a funder who picks a prefix can pick one whose chaining value they have already collided, and that is the self-dealing row in docs/threat-model.md. Deriving it also puts every published collision for SHA-1 out of reach as a copy, since all of them start from the standard IV behind a prefix their own author chose. Equal length is required because a same-length collision composes -- H(m || x) = H(m' || x) for every x -- and that is the property worth paying for. Messages are at most 4096 bytes and travel as lowercase hex in {\"m\", \"m_prime\"}. This is the bridge rung. Full SHA-0 and full SHA-1 are nearly thirty bits of work apart, and 64-step collisions were found in 2006 at a cost one machine can still pay -- which is where the interesting path engineering sits.",
+  "verifier": {
+    "checker": "examples/hash-differential/checkers/collide_sha1_64.py",
+    "checker_sha256": "35111596e861f1cc383ccabe0d022bc667fe0e2cae5d06209787c95a055877a5",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}
