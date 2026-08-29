@@ -1178,3 +1178,90 @@ fn the_settlement_anchor_is_the_same_on_both_nodes() {
          records, so their beacons differ and their batches sort differently"
     );
 }
+
+#[test]
+fn a_peer_record_travels_as_a_routing_hint_and_never_reaches_the_ledger() {
+    // The censorship property and its guardrail, in one session. A peer record
+    // posted in *bob's* log must reach alice's routing table over an ordinary
+    // dial -- that is what makes discovery heal through the mesh instead of
+    // through an operator's bootstrap file, so blocking the seed addresses no
+    // longer partitions a newcomer who can reach any one peer. And it must
+    // arrive as a hint only: the sealed-submission committee is drawn from the
+    // log's peer records, so a gossiped record that replayed into alice's
+    // ledger would hand committee seats to whoever minted the most free
+    // identities. `docs/censorship.md` calls that caveat the one that swallows
+    // the others, and this test is what keeps it true under gossip.
+    use cairn::crypto::identity::Identity;
+    use cairn::p2p::dht::NodeId;
+    use cairn::records::PeerRecord;
+
+    let carol = Identity::from_secret_bytes([7u8; 32]);
+    let carol_transport = "cd".repeat(32);
+    let carol_record = PeerRecord::new(
+        carol.submitter_id(),
+        carol_transport.clone(),
+        "203.0.113.7:9000",
+        1,
+        TS,
+    )
+    .signed_with(&carol);
+
+    let bob_identity = Arc::new(PeerIdentity::generate());
+    let bob_public = bob_identity.to_public();
+    let bob_service = Service::new(bob_identity);
+    let listener = bob_service
+        .listen("127.0.0.1:0".parse().expect("loopback"))
+        .expect("listen");
+    let endpoint = Endpoint::new(listener.local_addr().expect("bound address"), bob_public);
+    let record_for_bob = carol_record.clone();
+    let bob_thread = thread::spawn(move || {
+        let mut bob = node("bob-peer-hints");
+        bob.post_peer(&record_for_bob, TS)
+            .expect("bob admits carol");
+        bob_service
+            .accept_node_once(&listener, &mut bob)
+            .expect("bob's round");
+    });
+
+    let mut alice = node("alice-peer-hints");
+    let alice_service = Service::new(Arc::new(PeerIdentity::generate()));
+    alice_service
+        .dial_node_once(&endpoint, &mut alice)
+        .expect("alice's round");
+    bob_thread.join().expect("bob's thread");
+
+    // The hint arrived and was folded into routing: carol is a contact alice
+    // can now route through once her key turns up, and the record's own signed
+    // seq travelled with it.
+    assert_eq!(alice_service.known_hints(), 1, "the hint did not arrive");
+    let mut transport_bytes = [0u8; 32];
+    for (i, slot) in transport_bytes.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&carol_transport[i * 2..i * 2 + 2], 16).expect("hex");
+    }
+    let carol_id = NodeId::from_bytes(transport_bytes);
+    let contact = alice_service.with_directory(|directory| {
+        directory
+            .routing()
+            .contacts()
+            .find(|contact| contact.id == carol_id)
+            .cloned()
+    });
+    let contact = contact.expect("carol is not in alice's routing table");
+    assert_eq!(
+        contact.seq, 1,
+        "the signed seq did not travel with the hint"
+    );
+
+    // And the guardrail: alice's ledger has no peer record. Her log -- and
+    // therefore every committee draw she computes -- still names only what her
+    // own operator admitted.
+    assert!(
+        alice.peers().is_empty(),
+        "a gossiped peer record reached the ledger; committee draws are now \
+         open to free identities"
+    );
+    assert!(
+        alice.ledger().entries_of_kind("peer").is_empty(),
+        "a peer entry was appended over sync"
+    );
+}

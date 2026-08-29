@@ -5,6 +5,7 @@ use super::dht::{Directory, NodeId, PeerContact};
 use super::discovery::{AddressBook, Endpoint};
 use super::handshake::{PeerId, PeerIdentity, PeerPublic};
 use super::multicast;
+use super::peers::{self, PeerHintLimits, PeersReport};
 use super::pop::{PopLimits, PopReport};
 use super::session::{self, SessionError};
 use super::sync::{Peer, SyncError};
@@ -72,6 +73,15 @@ pub struct Service {
     /// threading `&mut self` through would make two concurrent sessions
     /// impossible for a reason that has nothing to do with correctness.
     directory: Mutex<Directory>,
+    /// Signed peer records learned by gossip, feeding the routing table.
+    ///
+    /// Deliberately **not** the node's ledger, and the distinction is a
+    /// security boundary rather than storage taste: the sealed-submission
+    /// committee is drawn from the log's peer records, so a gossiped record
+    /// that could reach the log would hand committee seats to whoever minted
+    /// the most free identities. See [`super::peers`] for the whole argument.
+    /// Behind a `Mutex` for the reason the book is.
+    peer_hints: Mutex<peers::Hints>,
     /// Holders a finished lookup found, keyed by content address.
     ///
     /// Deliberately **not** in the provider store: these are relayed claims,
@@ -90,6 +100,7 @@ impl Service {
         Service {
             identity,
             book: Mutex::new(AddressBook::new()),
+            peer_hints: Mutex::new(peers::Hints::new()),
             directory: Mutex::new(Directory::new(local)),
             hints: Mutex::new(std::collections::BTreeMap::new()),
             bad_keys: std::sync::atomic::AtomicUsize::new(0),
@@ -367,6 +378,86 @@ impl Service {
         seeded
     }
 
+    /// How many peer identities the hint store currently holds.
+    pub fn known_hints(&self) -> usize {
+        let guard = self.peer_hints.lock().unwrap_or_else(|e| e.into_inner());
+        guard.len()
+    }
+
+    /// Pin the log's own peer records into the hint store.
+    ///
+    /// This is what a node *offers*: everything its own log vouches for, plus
+    /// whatever gossip already delivered. Pinned entries are exempt from the
+    /// store's cap — the log admitted them under `post_peer`'s rules, and a
+    /// gossip flood must not be able to crowd out a peer the log names.
+    /// Idempotent, so running it before every exchange costs a walk of the
+    /// peers map and nothing else.
+    fn pin_hints_from_log(&self, node: &Node) {
+        let records: Vec<PeerRecord> = node.peers().values().cloned().collect();
+        let mut hints = self.peer_hints.lock().unwrap_or_else(|e| e.into_inner());
+        for record in records {
+            // A log record that fails the store's checks is skipped, not
+            // fatal: `peers()` has already resolved and signature-checked
+            // them, so this cannot ordinarily fire.
+            let _ = hints.pin(record);
+        }
+    }
+
+    /// Fold every held hint into the routing table, exactly as
+    /// [`Service::seed_from_log`] folds the log's records: address resolved at
+    /// the edge, the record's own signed `seq` carried through, and the
+    /// McEliece key queued for any peer the book cannot yet dial.
+    ///
+    /// Hints and log records converge on the same two structures because they
+    /// are the same kind of claim with different custody — one the log
+    /// admitted, one gossip delivered — and the routing table is exactly the
+    /// place where an untrusted address hint is allowed to matter, because a
+    /// wrong one costs a dial and never a wrong peer.
+    fn seed_from_hints(&self) {
+        let records: Vec<PeerRecord> = {
+            let hints = self.peer_hints.lock().unwrap_or_else(|e| e.into_inner());
+            hints.records().cloned().collect()
+        };
+        for record in records {
+            let Some(transport) = decode_peer_id(&record.transport) else {
+                continue;
+            };
+            if transport == self.identity.id() {
+                continue;
+            }
+            let Some(addr) = crate::p2p::discovery::dialable(&record.addr) else {
+                continue;
+            };
+            self.note_contact_at(transport, addr, record.seq);
+            if self.with_book(|book| book.for_peer(&transport).is_empty()) {
+                self.with_directory(|directory| {
+                    directory.wants_key(NodeId::from_bytes(transport));
+                });
+            }
+        }
+    }
+
+    /// Run the peer-hint round on an established connection.
+    ///
+    /// Offer what the log vouches for, take what the peer's signatures prove,
+    /// and fold the union into routing. The ledger is never touched — see
+    /// [`super::peers`] for why that is the load-bearing property.
+    fn exchange_peer_hints_round(
+        &self,
+        connection: &mut Connection,
+        node: &Node,
+    ) -> Result<PeersReport, ServiceError> {
+        self.pin_hints_from_log(node);
+        let report = {
+            let mut hints = self.peer_hints.lock().unwrap_or_else(|e| e.into_inner());
+            session::exchange_peer_hints(connection, &mut hints, PeerHintLimits::default())?
+        };
+        if report.accepted > 0 {
+            self.seed_from_hints();
+        }
+        Ok(report)
+    }
+
     /// Fold beacons heard on the local segment into the routing table.
     ///
     /// The third hint source, and interchangeable with the other two by
@@ -479,9 +570,9 @@ impl Service {
     }
 
     /// Dial one endpoint and reconcile records, then verifier code, then the
-    /// DHT, then populations.
+    /// DHT, then peer hints, then populations.
     ///
-    /// Four rounds on one connection, in that order, and each boundary carries
+    /// Five rounds on one connection, in that order, and each boundary carries
     /// a dependency:
     ///
     /// - **records before code.** The set of blobs to ask for is derived from the
@@ -501,11 +592,17 @@ impl Service {
     ///   missing afterwards, or a peer that supplied everything would teach this
     ///   node nothing about who holds what.
     ///
-    /// Failures are contained rather than cascading. A code, DHT or population
-    /// failure is reported but does not undo the record round, which has already
-    /// been applied; any of them does skip what follows it, because they share a
-    /// connection whose message sequence is no longer where the peer thinks it
-    /// is.
+    /// - **peer hints after records.** The hint store offers what the log's
+    ///   peer records vouch for, so it is pinned from the log after this
+    ///   round's arrivals are applied — a peer record imported this session is
+    ///   offered onward this session. And before populations, so that nodes
+    ///   with no population to gossip (auditors) still learn peers.
+    ///
+    /// Failures are contained rather than cascading. A code, DHT, hint or
+    /// population failure is reported but does not undo the record round, which
+    /// has already been applied; any of them does skip what follows it, because
+    /// they share a connection whose message sequence is no longer where the
+    /// peer thinks it is.
     ///
     /// `rescore` is handed the node rather than closing over it, because it is
     /// called only after the record round has landed and must see the
@@ -524,6 +621,7 @@ impl Service {
         let mut connection = transport::connect(&endpoint.peer, endpoint.addr, &self.identity)?;
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, Some(endpoint.addr))?;
+        self.exchange_peer_hints_round(&mut connection, node)?;
         let settled: &Node = node;
         session::reconcile_population(&mut connection, population, limits, |candidate| {
             rescore(settled, candidate)
@@ -559,6 +657,7 @@ impl Service {
         let mut connection = transport::connect(&endpoint.peer, endpoint.addr, &self.identity)?;
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, Some(endpoint.addr))?;
+        self.exchange_peer_hints_round(&mut connection, node)?;
         Ok(())
     }
 
@@ -596,6 +695,7 @@ impl Service {
         let remote = connection.remote();
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
+        self.exchange_peer_hints_round(&mut connection, node)?;
         Ok(remote)
     }
 
@@ -617,6 +717,7 @@ impl Service {
         let remote = connection.remote();
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
+        self.exchange_peer_hints_round(&mut connection, node)?;
         let settled: &Node = node;
         let report =
             session::reconcile_population(&mut connection, population, limits, |candidate| {
@@ -815,10 +916,18 @@ fn needed_code(node: &Node, peer: &Peer) -> BTreeSet<String> {
     needs
 }
 
+/// The exchangeable slice of a node's ledger, staged for one sync session.
+///
+/// `peer` records are deliberately absent even though the ledger holds them:
+/// they travel as routing hints in their own family ([`super::peers`]), never
+/// on the record path, because the sealed-submission committee is drawn from
+/// the log's peer records and a synced record that replayed into the log would
+/// hand committee seats to free identities. `sync::EXCHANGEABLE` enforces the
+/// same boundary on the receiving side.
 fn records_from_node(node: &Node) -> Peer {
     let mut peer = Peer::new();
     for entry in node.ledger().entries() {
-        if ["objective", "commitment", "claim", "peer"].contains(&entry.kind.as_str()) {
+        if ["objective", "commitment", "claim"].contains(&entry.kind.as_str()) {
             let _ = peer.insert(super::sync::Record::new(
                 entry.kind.clone(),
                 entry.payload.clone(),
@@ -849,10 +958,9 @@ fn decode_record(record: &super::sync::Record) -> Result<(), SyncError> {
         "objective" => Objective::from_value(&record.payload).map(|_| ()),
         "commitment" => Commitment::from_value(&record.payload).map(|_| ()),
         "claim" => Claim::from_value(&record.payload).map(|_| ()),
-        // Peer records travel, and that is the point of them: a node that
-        // obtains the log obtains the network with it, rather than needing an
-        // address list from somewhere else.
-        "peer" => PeerRecord::from_value(&record.payload).map(|_| ()),
+        // No `peer` arm, on purpose: peer records travel as routing hints in
+        // their own family (`super::peers`), and must never replay into the
+        // log -- see `records_from_node`.
         other => return Err(SyncError::NotExchangeable { kind: other.into() }),
     };
     result.map_err(|error| SyncError::MalformedMessage {
@@ -995,11 +1103,14 @@ fn replay_records_with_horizon(
 ///
 /// A `"peer"`-kind match arm used to sit in the replay loop and was
 /// unreachable: the loop iterates `["objective", "commitment", "claim"]`, and
-/// `sync::EXCHANGEABLE` has never included `"peer"` — peer records travel by
-/// obtaining the log itself, not by anti-entropy. Whether they *should* be
-/// exchangeable is a real question (the roadmap's "obtaining the log is
-/// obtaining the address book" argues yes), but it is a sync-admission change,
-/// not something to smuggle in through dead code.
+/// `sync::EXCHANGEABLE` has never included `"peer"`. Whether it *should* was
+/// an open question here for a while, and the answer is a settled **no**:
+/// `docs/censorship.md` derives the sealed-submission committee from the log's
+/// peer records, so a stranger's record that could replay into the log would
+/// hand committee seats to whoever minted the most free identities. The
+/// "obtaining the log is obtaining the address book" property the roadmap
+/// wanted is delivered on the routing side instead — [`super::peers`] gossips
+/// the same signed records as capped, ledger-free hints.
 fn apply_records(node: &mut Node, peer: &Peer) {
     let records: Vec<(String, crate::canonical::Value)> = peer
         .ids()

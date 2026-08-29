@@ -106,8 +106,10 @@ behaviour ships and is tested, not that TLC has checked it.
 - [x] **Signed peer records** (`src/p2p/swarm/discovery.rs`) in the ENR shape --
       identity is an ed25519 key, location is a hint signed by it, `seq`
       supersedes -- plus peer exchange, so one address given once accumulates the
-      rest. This is the answer to "learning new peers is bootstrap-file only" in
-      the gossip entry above, and it is not yet wired into `p2p`'s address book.
+      rest. The *idea* this line carried — a signed, size-capped peer-list
+      exchange feeding the address book — now runs in `p2p` itself over the
+      log's own `records::PeerRecord` shape (`src/p2p/peers.rs`), so what
+      remains of this module's overlap with it is the fold below.
       Every hint source is equal because none is trusted, which is what makes DNS
       optional rather than load-bearing. See [discovery.md](discovery.md).
 - [x] **A Kademlia DHT** (`src/p2p/swarm/dht.rs`) for the question a fetch actually
@@ -374,10 +376,11 @@ behaviour ships and is tested, not that TLC has checked it.
       they can still act on it and the sequencer cannot reorder for profit.
 - [x] A gossip transport. The wire protocol is written: anti-entropy and digest
       reconciliation for candidate populations on the existing McEliece sessions,
-      and per-tick random peer sampling. Sampling chooses among the peers the
-      address book already knows; **learning** new peers is still bootstrap-file
-      only, and uniform sampling is not Sybil resistance. See
-      [p2p.md](p2p.md#still-open).
+      and per-tick random peer sampling. Learning new peers is no longer
+      bootstrap-file only: signed peer records gossip as capped routing hints
+      (`src/p2p/peers.rs`), deliberately never touching the log the
+      sealed-submission committee is drawn from. Uniform sampling is still not
+      Sybil resistance. See [p2p.md](p2p.md#still-open).
 
 ### Added in the launch pass
 

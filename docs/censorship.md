@@ -176,6 +176,14 @@ resistance. Grinding for a seat does cost a McEliece keypair — the draw ranks 
 the transport id, which is the hash of one — and a constant factor is not a
 defence.
 
+This caveat is now load-bearing in the p2p layer, not only a warning. Peer
+records gossip between nodes as *routing hints* — the discovery exchange in
+`p2p.md` — and they are kept out of the log **because of this paragraph**: an
+exchange that replayed a synced peer record into the ledger would be exactly
+the "anyone can append a peer record" it warns about, arriving as a transport
+feature. Hints feed the address book; the committee draw reads only records the
+node's own operator admitted, and a test pins the boundary.
+
 ## 3. Unlinkability, and why it fights attribution
 
 Encryption hides *what*. Against a state that wants to know **who is working on
@@ -236,6 +244,12 @@ for the library and must not be out of mind:
   catches up automatically when reconnected, and there is no round or leader that
   a partition can stall. Censorship resistance was not why it was built that way,
   but it is a real dividend.
+- **Peer discovery heals through the mesh.** Signed peer records travel between
+  nodes as routing hints (`p2p.md`), so the address book is no longer fed only
+  by an operator's bootstrap file: blocking the seed addresses no longer
+  partitions a newcomer who can reach any one peer, and a censor who wants to
+  stop discovery must block every peer rather than a list. The hints never
+  touch the log — §2's Stage 0 caveat is precisely why they must not.
 
 ## 6. Confidentiality classes
 
@@ -352,7 +366,8 @@ membership this section requires to be "diverse and rotated per epoch".
 | state | identify who worked on a topic | per-objective pseudonyms; ZK submission | partial — the citation graph is inherently public |
 | global observer | traffic analysis | fixed-size envelopes, cover traffic | partial, and expensive |
 | t colluding committee members | early decryption | per-epoch rotation by beacon, high threshold | mitigated, not prevented |
-| an attacker who can register peers | own a majority of every committee | costly identities | **unsolved at Stage 0** — see above |
+| an attacker who can register peers | own a majority of every committee | costly identities; gossiped peer records feed routing only, never the log the draw reads | **unsolved at Stage 0** — see above, and unwidened by discovery gossip |
+| state | block the bootstrap seeds to partition newcomers | peer records gossip as routing hints; any one reachable peer re-supplies the peer set | **built** — Sybil-priced identity still open |
 | anyone | forge a sealed artifact | the commitment binds the plaintext | handled |
 | legal process | force takedown | decentralized inclusion | unsolved at Stage 0 |
 

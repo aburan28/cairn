@@ -31,6 +31,7 @@ pub mod dht;
 pub mod discovery;
 pub mod handshake;
 pub mod multicast;
+pub mod peers;
 pub mod pop;
 pub mod portmap;
 pub mod service;

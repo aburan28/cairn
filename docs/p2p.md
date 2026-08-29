@@ -2,10 +2,11 @@
 
 Stage 0 runs one operator and one append-only file. This document is the design
 for removing the operator. The transport handshake, TCP framing, address book,
-set reconciliation, population anti-entropy, and per-tick random peer sampling
-are built. Peer *discovery* and frontier-conflict surfacing are not, and are
-marked as such — a p2p design that is half-implemented and fully described
-reads as finished if you do not say which half.
+set reconciliation, population anti-entropy, per-tick random peer sampling, and
+peer discovery over the mesh — signed peer records gossiped as routing hints —
+are built. Sybil-resistant peer identity and frontier-conflict surfacing are
+not, and are marked as such — a p2p design that is half-implemented and fully
+described reads as finished if you do not say which half.
 
 ## What actually needs agreement
 
@@ -169,6 +170,7 @@ is the payload's own content address, independent of where anyone filed it.
 |---|---|---|
 | `objective`, `commitment`, `claim` | **yes** | primary inputs |
 | `verdict`, `settlement`, `frontier` | **no** | derived by replaying the inputs |
+| `peer` | **never as a record** | travels as a signed routing hint in its own family — see [Peer discovery](#peer-discovery-signed-records-as-hints). A synced record that replayed into the log would hand sealed-submission committee seats to free identities |
 
 This is the security argument of the whole layer. Importing a peer's verdict
 would mean trusting its verification, which is exactly the trust this system
@@ -231,16 +233,18 @@ B -> A   PopRecords
 
 **Why not more record kinds.** The record path refuses `verdict`, `settlement`
 and `frontier` outright, because importing a peer's conclusion is the trust this
-project exists to remove. `peer` is the one kind added since, and it passes the
-same test: it is a *claim by a key about itself*, checked by signature and by a
-handshake that an impostor cannot complete, not a conclusion anybody has to
-believe. A shared message enum would mean one decoder, one set
-of ceilings and one `match` covering both families, and the next person to add a
-variant would have to notice that half of them must never reach the record path.
-So: separate type, separate limits, and a **separate AEAD context string**, which
-means a frame sealed for one family cannot be opened as the other even by a peer
-that wants to. `candidate` is also not an exchangeable record kind, so a body
-that somehow arrived on the record path is refused there too. Both halves are
+project exists to remove. `peer` fails a different test: the record itself is
+honest — a *claim by a key about itself*, checked by signature and by a
+handshake that an impostor cannot complete — but the log it would replay into
+is what sealed-submission committees are drawn from, so it travels as a routing
+hint in its own family (next section) and never on the record path. A shared
+message enum would mean one decoder, one set of ceilings and one `match`
+covering the families, and the next person to add a variant would have to
+notice which of them must never reach the record path. So: separate types,
+separate limits, and a **separate AEAD context string** per family, which means
+a frame sealed for one family cannot be opened as another even by a peer that
+wants to. `candidate` and `peer` are also not exchangeable record kinds, so a
+body that somehow arrived on the record path is refused there too. All of it is
 tested.
 
 **No bucket scheme.** A population holds at most `islands × capacity`
@@ -274,6 +278,66 @@ Two ordering facts that are easy to get wrong:
   drops the candidate and keeps the session — tearing the connection down over
   one bad candidate would be a cheap way to censor by annoyance.
 
+## Peer discovery: signed records as hints
+
+Built: [`src/p2p/peers.rs`](../src/p2p/peers.rs), driven by
+`session::exchange_peer_hints` on every node session — records, code, DHT,
+**peer hints**, populations.
+
+This is the signed, size-capped peer-list exchange the **Still open** list
+carried since the address book existed, and the reason it is worth a message
+family is censorship. An address book that grows only from an operator's
+bootstrap files is a chokepoint: block the handful of seed addresses and every
+newcomer is partitioned, however healthy the rest of the mesh is. With the
+exchange, any one reachable peer re-supplies the whole peer set, and
+reachability heals through the mesh instead of through an operator. Blocking
+discovery now means blocking every peer, which is the same forced move from
+targeted to indiscriminate that `censorship.md` counts as most of a win.
+
+The record gossiped is the log's own `records::PeerRecord` — same identity,
+same signature, same seq-supersedes rule — so there is one shape for "identity
+K answers on transport T at address A" rather than two that drift. What differs
+is custody, and the difference is the design:
+
+**A gossiped peer record never reaches the ledger.** `censorship.md` derives
+the sealed-submission committee from the log's peer records and calls the
+operator-only admission of those records the Stage 0 caveat that swallows the
+others: the moment anyone can append one, an attacker who registers enough free
+identities owns a majority of every drawn committee — early decryption and
+stalled reveals, the two attacks the committee exists to kill. So hints land in
+a bounded store on the routing side; `Node::peers`, and with it every committee
+draw and every audit, still reads only what the node's own operator admitted
+through `cairn peer` (the submission queue accepts only commitments and
+claims). `sync::EXCHANGEABLE` enforces the same boundary from the other
+direction, and both halves are pinned by tests.
+
+The exchange is the population family's shape: digest first, so two peers in
+sync exchange one message each way and stop; then wants; then bodies, with
+ceilings checked before allocation. Admission into the store is the record's
+own rules — structural validity, the ed25519 signature, a `seq` that advances —
+plus the store's cap. Past `MAX_HINTS` identities a *new* identity is refused
+rather than anything evicted, because an evicting store lets whoever sends last
+wash out every peer learned before the flood; records the node's own log names
+are pinned and exempt, so a flood can squat the free slots and can never
+displace a peer the log vouches for.
+
+Accepted hints feed the same two structures `seed_from_log` feeds: the routing
+table, carrying the record's signed `seq` so a replayed old address cannot
+displace a newer one, and the key-want queue, so the 261 KiB McEliece transport
+key is fetched on a later round and the contact becomes dialable. A lie still
+costs what a peer record lie always cost — one dial, never a wrong peer,
+because the peer id is the hash of the transport key. And the exchange spreads
+records that exist; it does not mint them. Announcing an identity still takes
+`cairn peer` against some log, whose operator answers for what they admit.
+
+**What this is not: Sybil resistance.** Identities are free, so an attacker can
+fill the unpinned half of every hint store on the network and, through the
+key-fetch path, dilute every address book — the same uniform-sampling eclipse
+the **Still open** list has always named, now reachable without compromising an
+operator's file. The cap bounds what a flood costs in memory and the pinning
+bounds what it can displace; neither prices identity. That is Stage 2, and no
+part of this section claims otherwise.
+
 ## Peer sampling
 
 Built: `AddressBook::sample`, used by `cairn-p2p` each tick.
@@ -300,10 +364,11 @@ anyone to the book but the operator.
 
 ## What is encrypted, and what is not
 
-Every frame on a `p2p` connection — records, verifier code, DHT, populations —
-is sealed with an AEAD keyed by the Classic McEliece handshake, with the
-family's context string bound into the tag. Adding a round means adding a
-context, not adding a socket write, and `p2p::dht` was added that way.
+Every frame on a `p2p` connection — records, verifier code, DHT, peer hints,
+populations — is sealed with an AEAD keyed by the Classic McEliece handshake,
+with the family's context string bound into the tag. Adding a round means
+adding a context, not adding a socket write; `p2p::dht` was added that way and
+`p2p::peers` after it.
 
 **ChaCha20-Poly1305, and there is no AES anywhere in the tree.** Not a
 preference: without hardware AES-NI, AES is either slow or a cache-timing side
@@ -554,16 +619,20 @@ does.
 
 ## Still open
 
-- **Peer discovery.** Sampling and provider lookup both choose *among* the peers
-  the address book already holds; nothing adds to it but `--bootstrap` files the
-  operator wrote. The design calls for a signed, size-capped peer-list exchange;
-  `p2p::swarm::discovery` implements exactly that against a different identity scheme
-  and is not wired in here, which is the "fold the two stacks together" item in
-  [roadmap.md](roadmap.md). Until it is, the peer set is an operator configuration decision, which
-  is a real limit and also the only thing currently standing between this node
-  and an eclipse: uniform sampling over a book an attacker can fill is uniform
-  sampling over the attacker. Structured overlays with identities that cost
-  something are Stage 2, and no amount of better sampling substitutes for them.
+- **Sybil-resistant peer identity.** The signed, size-capped peer-list exchange
+  this item used to ask for is built — see
+  [Peer discovery](#peer-discovery-signed-records-as-hints) — so the peer set is
+  no longer an operator configuration decision: hints gossip, the book grows
+  through the mesh, and blocking the bootstrap seeds no longer partitions a
+  newcomer who can reach any one peer. What that deliberately does not buy is
+  the half this item always named underneath: identities are free, so uniform
+  sampling over a book an attacker can now feed is uniform sampling over the
+  attacker. The hint store's cap and pinning bound what a flood costs and what
+  it can displace, not who it can be. Structured overlays with identities that
+  cost something are Stage 2, and no amount of better sampling substitutes for
+  them. (`p2p::swarm::discovery`'s ENR-shaped records still overlap
+  `records::PeerRecord`; folding the two stacks remains the scope decision in
+  [roadmap.md](roadmap.md).)
 - **Settlement order across peers.** Records converge and every node re-derives
   its own verdicts, but a batch's settlement order is keyed on that node's
   ledger head at the epoch boundary, and two independently ordered logs do not
