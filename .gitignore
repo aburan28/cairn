@@ -73,3 +73,9 @@ ui/tsconfig.tsbuildinfo
 # log, which carries whatever absolute paths the operator ran it from.
 *.pending.json
 *.log
+
+# Crypto autoresearcher runtime state: the submitter identity (whose secret
+# half IS the name, so a leak is impersonation and a loss is unrecoverable),
+# the solver binary, generated artifacts, and the journal. The code it runs is
+# tracked, under research/crypto-autoresearcher/.
+.autoresearcher/
