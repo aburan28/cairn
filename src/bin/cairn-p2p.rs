@@ -38,7 +38,8 @@ fn usage(code: i32) -> ! {
          cairn-p2p --identity FILE --root-key FILE --checkpoint FILE\n                  \
          --listen ADDR --log FILE --root DIR\n                  \
          [--bootstrap FILE ...] [--population FILE] [--queue DIR]\n                  \
-         [--fanout N] [--serve ADDR] [--max-queue N] [--key-file FILE]\n\n\
+         [--fanout N] [--serve ADDR] [--max-queue N] [--key-file FILE]\n                  \
+         [--proxy URL]\n\n\
          --identity    peer identity; generated on first use if absent\n\
          --root-key    checkpoint signing key; generated on first use if absent\n\
          --checkpoint  where the signed checkpoint is written each round\n\
@@ -51,7 +52,9 @@ fn usage(code: i32) -> ! {
          --fanout      peers dialled per round\n\
          --serve       ALSO publish the log over HTTP from this process\n\
          --max-queue   refuse submissions past this many undrained records\n\
-         --key-file    at-rest key for a sealed log (default: the CLI's own)\n\n\
+         --key-file    at-rest key for a sealed log (default: the CLI's own)\n\
+         --proxy       route every dial through a SOCKS5 proxy, e.g.\n                  \
+         socks5://127.0.0.1:9050 for a Tor client or obfs4 bridge\n\n\
          With --serve this is a whole node in one process: it holds the log's\n\
          write lock, so it is the only thing that *can* admit what it queues.\n"
     );
@@ -75,6 +78,7 @@ fn main() {
     let mut serve = None;
     let mut max_queue = None;
     let mut key_file = None;
+    let mut proxy = None;
     let mut bootstrap = Vec::new();
 
     let mut args = env::args().skip(1);
@@ -92,6 +96,7 @@ fn main() {
             "--serve" => &mut serve,
             "--max-queue" => &mut max_queue,
             "--key-file" => &mut key_file,
+            "--proxy" => &mut proxy,
             "--bootstrap" => {
                 bootstrap.push(args.next().unwrap_or_else(|| usage(2)));
                 continue;
@@ -119,6 +124,7 @@ fn main() {
     config.queue = queue.map(PathBuf::from);
     config.serve = serve;
     config.key_file = key_file.map(PathBuf::from);
+    config.proxy = proxy;
     if let Some(text) = fanout {
         config.fanout = text.parse().unwrap_or_else(|_| usage(2));
     }
