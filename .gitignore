@@ -79,3 +79,6 @@ ui/tsconfig.tsbuildinfo
 # the solver binary, generated artifacts, and the journal. The code it runs is
 # tracked, under research/crypto-autoresearcher/.
 .autoresearcher/
+
+# `make build` stages release binaries here; cargo's own output stays in target/.
+/bin/

@@ -22,10 +22,15 @@ LOG ?= $(abspath $(LOCAL_DIR)/cairn.jsonl)
 P2P_LOG ?= $(abspath $(LOCAL_DIR)/cairn-p2p.jsonl)
 MCP_LOG ?= $(abspath $(LOCAL_DIR)/cairn-mcp.jsonl)
 RELEASE_DIR ?= target/release
-CLI := $(RELEASE_DIR)/cairn
-MCP := $(RELEASE_DIR)/cairn-mcp
-P2P := $(RELEASE_DIR)/cairn-p2p
-SERVE := $(RELEASE_DIR)/cairn-serve
+# Where `make build` leaves the binaries. Cargo writes into target/, which is a
+# cache with no stable contract; bin/ is the one place a person, a script, or
+# an MCP client stanza can be pointed at without knowing cargo's layout.
+BIN_DIR ?= bin
+BINS := cairn cairn-mcp cairn-p2p cairn-serve cairn-gen-bootstrap arena
+CLI := $(BIN_DIR)/cairn
+MCP := $(BIN_DIR)/cairn-mcp
+P2P := $(BIN_DIR)/cairn-p2p
+SERVE := $(BIN_DIR)/cairn-serve
 FUZZ_CASES ?= 2000
 IDENTITY ?= $(abspath $(LOCAL_DIR)/node.identity.json)
 ROOT_KEY ?= $(abspath $(LOCAL_DIR)/root.key)
@@ -79,15 +84,15 @@ help:
 	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
 	  '  make node                One process: p2p sync AND HTTP, sharing a log.' \
-	  '  cairn run                Installed release: P2P + HTTP + embedded UI.' \
-	  '                           From a checkout, run make ui-build first.' \
+	  '  cairn run                Installed release: MCP + P2P + HTTP + embedded UI.' \
+	  '                           From a checkout, make ui-build then bin/cairn run.' \
 	  '  make install             Install the released binaries from GitHub.' \
 	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
 	  '  make ui-check            Typecheck, test and build the UI, as CI does.' \
 	  '  make ui-build            Export the site and build it INTO the binaries.' \
 	  '  make site-snapshot       Regenerate the site fallback from launch/.' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
-	  '  make build               Build every release binary.' \
+	  '  make build               Build every release binary and stage it in bin/.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
 	  '  make canary              Mint canaries and catch a rubber-stamper.' \
 	  '  make attest              Bonded verification, end to end, both implementations.' \
@@ -113,8 +118,19 @@ help:
 	  '                                     `make p2p` with a placeholder key -- see' \
 	  '                                     cairn-gen-bootstrap and docs/p2p.md'
 
+# Build, then stage into $(BIN_DIR). A copy rather than a symlink into target/
+# so `cargo clean` cannot leave bin/ full of dangling links, and so a build with
+# a different feature set (ui-build) replaces the staged file rather than
+# silently sharing it.
+define stage-bins
+	@mkdir -p "$(BIN_DIR)"
+	@for b in $(BINS); do cp -f "$(RELEASE_DIR)/$$b" "$(BIN_DIR)/$$b"; done
+	@echo "staged $(BINS) into $(BIN_DIR)/"
+endef
+
 build:
 	$(CARGO) build --release --bins
+	$(stage-bins)
 
 debug:
 	$(CARGO) build --bins
@@ -322,6 +338,7 @@ ui: $(ROOT)/ui/node_modules
 ui-build: site-snapshot
 	cd "$(ROOT)/ui" && npm ci && npm run build
 	$(CARGO) build --release --features ui --bins
+	$(stage-bins)
 
 # Regenerate the site's fallback snapshot from the settled log in launch/.
 #

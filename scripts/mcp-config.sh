@@ -67,7 +67,9 @@ OUT="${OUT:-$DEFAULT_OUT}"
 # Absolute, and normalised: the log is created on first write, so realpath must
 # not require it to exist yet.
 case "$LOG" in /*) ;; *) LOG="$REPO/$LOG" ;; esac
-MCP_BIN="$REPO/target/release/cairn-mcp"
+# The staged copy `make build` leaves in bin/, not cargo's target/: the stanza
+# outlives any one build, and bin/ is the path that is promised to stay put.
+MCP_BIN="${MCP_BIN:-$REPO/bin/cairn-mcp}"
 
 say() { printf '  %s\n' "$1"; }
 
