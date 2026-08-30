@@ -249,7 +249,7 @@ three separate ways to block it that need three separate answers:
    fixed list of seeds to block.
 
 - No single submission endpoint. A central API is a single IP to block.
-- **A pluggable outbound proxy, built** (`src/p2p/proxy.rs`, `cairn-p2p
+- **A pluggable outbound proxy, built** (`src/p2p/proxy.rs`, `cairn p2p
   --proxy socks5://…`). Every dial can route through a SOCKS5 proxy, which is
   the interface the whole circumvention ecosystem already exposes — a Tor
   client, a Tor bridge running `obfs4proxy` or `snowflake`, `meek`,

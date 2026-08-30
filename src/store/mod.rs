@@ -70,7 +70,7 @@ use std::path::{Path, PathBuf};
 /// It was a private function in `main.rs`, which meant the CLI could open a
 /// sealed log and the two daemons could not. On a machine with a key file --
 /// the arrangement `cairn store keygen` leaves behind -- every log the CLI
-/// wrote was sealed, and `cairn-serve` answered 500 to every request that
+/// wrote was sealed, and `cairn serve` answered 500 to every request that
 /// touched it, reporting the operator's own log as altered or spliced. Two
 /// answers to "how is this log encoded" is one answer too many.
 pub fn resolve_codec(

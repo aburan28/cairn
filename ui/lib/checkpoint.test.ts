@@ -11,7 +11,7 @@ const signed: Checkpoint = {
 describe("classifyCheckpoint", () => {
   const what = "this node/checkpoint";
 
-  // Byte for byte what `cairn-serve` answers at /checkpoint for a log it was
+  // Byte for byte what `cairn serve` answers at /checkpoint for a log it was
   // given no --checkpoint for (`checkpoint` in src/serve.rs, via `json_error`),
   // captured from a running node rather than typed from memory.
   const nodeNoCheckpoint =

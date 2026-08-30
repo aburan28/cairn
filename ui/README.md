@@ -42,7 +42,7 @@ objective *record's* id. Relating them means canonical encoding, and a third
 implementation of a consensus rule in JavaScript is a third place for it to
 drift. The script starts the real server and asks over HTTP instead.
 
-**You probably do not need to run this.** It is built into the binaries and
+**You probably do not need to run this.** It is built into the `cairn` binary and
 served by the node itself at **`/ui/`** — so on a machine that installed
 cairn with `install.sh`, reading your own node's chain is a URL, not a
 toolchain:
@@ -52,7 +52,7 @@ cairn run --listen 0.0.0.0:9000 --serve 0.0.0.0:8080
 # then http://localhost:8080/ui/
 ```
 
-To build it into the binaries from a checkout, run `make ui-build` (the `ui`
+To build it into the binary from a checkout, run `make ui-build` (the `ui`
 cargo feature is off by default, because `cargo build` must work without Node),
 then use `./target/release/cairn run`.
 
@@ -138,7 +138,8 @@ as a Node process — which is what lets the daemon carry it.
 
 ## There are still two of these, on purpose
 
-`cairn-serve` also renders the chain itself at **`GET /chain.html`**: one
+The HTTP server (`cairn serve`, and the same code inside `cairn run`) also
+renders the chain itself at **`GET /chain.html`**: one
 self-contained 3.7 KB page written in Rust, no build step of any kind. It is
 what `serve-smoke.sh` tests, and it is what a binary built *without* the `ui`
 feature has — `/ui/` then 404s with a message that says so, rather than a

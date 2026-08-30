@@ -10,8 +10,8 @@
 // files instead of as a Node process.
 //
 // That is what lets the daemon serve it: `build.rs` embeds this directory in
-// the binary behind the `ui` feature, and `cairn-p2p --serve` answers it
-// at /ui/. An operator reading their own node's chain should not have to
+// the binary behind the `ui` feature, and `cairn run` (or `cairn p2p --serve`)
+// answers it at /ui/. An operator reading their own node's chain should not have to
 // install a Node toolchain to do it.
 //
 // `basePath` is where this build will be mounted, and there are two answers.

@@ -14,17 +14,17 @@
 # queue path right in each; a typo produced a server queueing into a directory
 # no daemon was watching, and nothing anywhere reported it.
 #
-# Both entry points are exercised, because both build the same `daemon::Config`
-# and a mistake in either one's argument wiring is invisible to the other.
+# All three entry points -- `cairn p2p --serve`, `cairn serve --p2p-listen`
+# and `cairn run` -- are exercised, because each builds the same
+# `daemon::Config` and a mistake in one subcommand's wiring is invisible to
+# the others. `cairn run` additionally owns stdio for MCP.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/cairn}"
-P2P="${P2P_BIN:-./target/release/cairn-p2p}"
-SERVE="${SERVE_BIN:-./target/release/cairn-serve}"
 
-if [ ! -x "$RUST" ] || [ ! -x "$P2P" ] || [ ! -x "$SERVE" ]; then
-  echo "building release binaries..." >&2
+if [ ! -x "$RUST" ]; then
+  echo "building release binary..." >&2
   cargo build --release
 fi
 
@@ -53,6 +53,14 @@ s=socket.socket(); s.settimeout(0.2)
 sys.exit(0 if s.connect_ex(('127.0.0.1',$1))==0 else 1)" 2>/dev/null; then
       return 0
     fi
+    sleep 0.1
+  done
+  return 1
+}
+
+await_log() {  # file pattern
+  for _ in $(seq 1 60); do
+    grep -q "$2" "$1" 2>/dev/null && return 0
     sleep 0.1
   done
   return 1
@@ -123,7 +131,7 @@ PY
 }
 
 # --------------------------------------------------------------------------
-# One process, entered through cairn-p2p
+# One process, entered through `cairn p2p --serve`
 # --------------------------------------------------------------------------
 
 A="$WORK/a"; mkdir -p "$A"
@@ -136,13 +144,14 @@ OID=$("$RUST" --log "$LOG" --root . post examples/capset_progressive/objective.j
   | head -1 | awk '{print $2}')
 echo "  $OID"
 
-"$P2P" --identity "$A/id.json" --root-key "$A/rk.json" --checkpoint "$A/cp.json" \
-  --listen "127.0.0.1:$P2P_PORT" --log "$LOG" --root . \
+"$RUST" --log "$LOG" --root . p2p \
+  --identity "$A/id.json" --root-key "$A/rk.json" --checkpoint "$A/cp.json" \
+  --listen "127.0.0.1:$P2P_PORT" \
   --queue "$A/queue" --serve "127.0.0.1:$HTTP" >"$A/node.log" 2>&1 &
 NODE_PID=$!
 await_port "$HTTP" || { cat "$A/node.log" >&2; fail "the node never bound its HTTP port"; }
 kill -0 "$NODE_PID" 2>/dev/null || { cat "$A/node.log" >&2; fail "the node exited at startup"; }
-grep -q "publishing over HTTP from this process" "$A/node.log" \
+await_log "$A/node.log" "publishing over HTTP from this process" \
   || fail "the node did not report that it is serving"
 echo "  one PID, p2p on $P2P_PORT and HTTP on $HTTP"
 
@@ -270,18 +279,18 @@ wait "$NODE_PID" 2>/dev/null || true
 NODE_PID=""
 
 # --------------------------------------------------------------------------
-# The same node, entered through cairn-serve
+# The same node, entered through `cairn serve --p2p-listen`
 # --------------------------------------------------------------------------
 
-rule "cairn-serve --p2p-listen is the same daemon, not a second one"
+rule "cairn serve --p2p-listen is the same daemon, not a second one"
 B="$WORK/b"; mkdir -p "$B"
-"$SERVE" --log "$B/log.jsonl" --root . --listen "127.0.0.1:$((HTTP + 1))" \
+"$RUST" --log "$B/log.jsonl" --root . serve --listen "127.0.0.1:$((HTTP + 1))" \
   --p2p-listen "127.0.0.1:$((P2P_PORT + 1))" \
   --identity "$B/id.json" --root-key "$B/rk.json" --checkpoint "$B/cp.json" \
   --queue "$B/queue" >"$B/node.log" 2>&1 &
 NODE_PID=$!
 await_port "$((HTTP + 1))" || { cat "$B/node.log" >&2; fail "serve --p2p-listen never bound"; }
-grep -q "publishing over HTTP from this process" "$B/node.log" \
+await_log "$B/node.log" "publishing over HTTP from this process" \
   || fail "serve --p2p-listen did not start the daemon"
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$((HTTP + 1))/health")
 [ "$code" = "200" ] || fail "serve --p2p-listen: /health -> $code"
@@ -292,13 +301,90 @@ NODE_PID=""
 rule "the publisher refuses node flags rather than ignoring them"
 # Silently dropping these is how somebody ends up with a process that took no
 # lock, dialled nobody and drained nothing while looking like it had started.
-if "$SERVE" --log "$B/log.jsonl" --root . --identity "$B/id.json" >/dev/null 2>&1; then
+if "$RUST" --log "$B/log.jsonl" --root . serve --identity "$B/id.json" >/dev/null 2>&1; then
   fail "--identity without --p2p-listen was accepted"
 fi
 echo "  --identity without --p2p-listen -> refused"
-if "$SERVE" --log "$B/log.jsonl" --root . --p2p-listen 127.0.0.1:1 >/dev/null 2>&1; then
+if "$RUST" --log "$B/log.jsonl" --root . serve --p2p-listen 127.0.0.1:1 >/dev/null 2>&1; then
   fail "--p2p-listen without --identity was accepted"
 fi
 echo "  --p2p-listen without --identity -> refused"
 
-printf '\n\033[32mNODE SMOKE OK: one process queued, admitted, settled and published.\033[0m\n'
+# --------------------------------------------------------------------------
+# The complete local node, entered through cairn run
+# --------------------------------------------------------------------------
+
+if [ "$UI_CODE" = "200" ]; then
+  rule "cairn run starts MCP, P2P, HTTP, and the embedded UI in one process"
+  C="$WORK/c"; mkdir -p "$C"
+  C_HTTP=$((HTTP + 2))
+  C_P2P=$((P2P_PORT + 2))
+  C_LOG="$C/log.jsonl"
+  C_OID=$("$RUST" --log "$C_LOG" --root . post examples/capset_progressive/objective.json \
+    | head -1 | awk '{print $2}')
+  mkfifo "$C/mcp.in"
+  "$RUST" --log "$C_LOG" --root . --data-dir "$C/data" run \
+    --listen "127.0.0.1:$C_P2P" --serve "127.0.0.1:$C_HTTP" --no-queue \
+    <"$C/mcp.in" >"$C/mcp.out" 2>"$C/node.log" &
+  NODE_PID=$!
+  exec 9>"$C/mcp.in"
+  await_port "$C_HTTP" || { cat "$C/node.log" >&2; fail "cairn run never bound HTTP"; }
+  kill -0 "$NODE_PID" 2>/dev/null || { cat "$C/node.log" >&2; fail "cairn run exited"; }
+  CP_BEFORE=$(curl -s "http://127.0.0.1:$C_HTTP/checkpoint")
+
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"node-smoke","version":"1"}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_objectives","arguments":{}}}' >&9
+  python3 - "$C_OID" >&9 <<'PY'
+import json, sys
+artifact = json.load(open("examples/capset_progressive/artifact-12.json"))
+print(json.dumps({
+    "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+    "params": {"name": "submit_claim", "arguments": {
+        "objective_id": sys.argv[1], "submitter": "mcp-smoke",
+        "artifact": artifact, "cites": []
+    }}
+}, separators=(",", ":")))
+PY
+
+  for _ in $(seq 1 60); do
+    [ "$(wc -l < "$C/mcp.out")" -ge 4 ] && break
+    sleep 0.1
+  done
+  [ "$(wc -l < "$C/mcp.out")" -eq 4 ] \
+    || { cat "$C/mcp.out" >&2; cat "$C/node.log" >&2; fail "MCP did not return four responses"; }
+  python3 - "$C/mcp.out" "$C_OID" <<'PY'
+import json, sys
+lines = [json.loads(line) for line in open(sys.argv[1])]
+assert [line["id"] for line in lines] == [1, 2, 3, 4], lines
+assert any(tool["name"] == "score_candidate" for tool in lines[1]["result"]["tools"])
+assert sys.argv[2] in lines[2]["result"]["content"][0]["text"]
+assert "Committed in epoch" in lines[3]["result"]["content"][0]["text"]
+PY
+  grep -q "sharing daemon ledger" "$C/node.log" || fail "run did not report MCP ready"
+  code=$(curl -s -o "$C/ui.body" -w '%{http_code}' "http://127.0.0.1:$C_HTTP/ui/")
+  [ "$code" = "200" ] || fail "cairn run: GET /ui/ -> $code"
+  curl -s "http://127.0.0.1:$C_HTTP/objectives" | grep -q "$C_OID" \
+    || fail "HTTP and MCP did not see the same objective"
+  curl -s "http://127.0.0.1:$C_HTTP/log" | grep -q '"kind": *"commitment"' \
+    || fail "an MCP commitment did not reach the daemon's served log"
+  for _ in $(seq 1 60); do
+    CP_AFTER=$(curl -s "http://127.0.0.1:$C_HTTP/checkpoint")
+    [ "$CP_AFTER" != "$CP_BEFORE" ] && break
+    sleep 0.1
+  done
+  [ "$CP_AFTER" != "$CP_BEFORE" ] || fail "the MCP append did not refresh the checkpoint"
+  echo "  MCP listed and appended to the node served over HTTP; /ui/ -> 200"
+  echo "  the next daemon tick checkpointed the MCP append"
+  echo "  MCP stdout contained exactly four JSON-RPC responses"
+  exec 9>&-
+  kill "$NODE_PID" 2>/dev/null || true
+  wait "$NODE_PID" 2>/dev/null || true
+  NODE_PID=""
+else
+  rule "cairn run MCP smoke skipped: this build has no embedded UI"
+  echo "  build with make ui-build to exercise the complete launcher"
+fi
+
+printf '\n\033[32mNODE SMOKE OK: combined processes queued, admitted, settled and published.\033[0m\n'

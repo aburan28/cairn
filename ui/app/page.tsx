@@ -213,8 +213,9 @@ export default function Page() {
             payment, so every objective is an eval with a ground-truth reward
             signal.
           </div>
-          <pre>cairn-mcp</pre>
+          <pre>cairn run</pre>
           <div className="meta dim">
+            One stdio MCP server, live on the network.{" "}
             <a href={repoLink("docs/agents.md")}>agents.md</a> has the config
             stanza for each client.
           </div>
@@ -222,13 +223,15 @@ export default function Page() {
         <li className="card">
           <b>run a node</b>
           <div className="meta">
-            One process syncs with peers, serves the log over HTTP, and admits
-            what arrives — because it is the process holding the write lock.
-            Readers fetch the log and re-derive everything themselves, which is
-            the point: they need not trust the server that served it.
+            One process serves MCP, syncs with peers, serves the log over HTTP
+            with this reader, and admits what arrives — because it is the
+            process holding the write lock. Readers fetch the log and re-derive
+            everything themselves, which is the point: they need not trust the
+            server that served it.
           </div>
-          <pre>cairn-p2p --serve 0.0.0.0:8080 …</pre>
+          <pre>cairn run</pre>
           <div className="meta dim">
+            Loopback by default; pass a bootstrap file to join peers.{" "}
             <a href={repoLink("docs/serving.md")}>serving.md</a> and{" "}
             <a href={repoLink("docs/p2p.md")}>p2p.md</a>.
           </div>

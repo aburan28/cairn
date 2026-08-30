@@ -2,17 +2,18 @@
 //!
 //! # Why this is a library module and not a binary
 //!
-//! It used to be the body of `cairn-p2p`, and publishing the log was a
-//! *second* process running `cairn-serve` against the same file. That
+//! It used to be the body of `cairn-p2p` (a separate binary then; the
+//! `cairn p2p` subcommand now), and publishing the log was a *second* process
+//! running `cairn-serve` (now `cairn serve`) against the same file. That
 //! topology works — [`Ledger::open`] takes no lock, so a reader is safe beside
 //! the daemon's exclusive writer — but it makes an operator run two units, keep
 //! two sets of paths in agreement, and discover by reading `docs/serving.md`
 //! that the queue one process fills is drained by the other.
 //!
 //! The two loops share nothing but a directory, so there was never a reason for
-//! them to share nothing but a directory. [`run`] starts both, and both binaries
-//! call it, so there is one implementation of "be a node" rather than one per
-//! entry point.
+//! them to share nothing but a directory. [`run`] starts both, and all three
+//! entry points call it, so there is one implementation of "be a node" rather
+//! than one per entry point.
 //!
 //! # What sharing a process does and does not change
 //!
@@ -69,7 +70,7 @@ const BEACONS_PER_TICK: usize = 64;
 /// Seconds between sync rounds.
 const TICK_SECONDS: u64 = 5;
 
-/// Everything [`run`] needs. Both binaries build one of these from their flags.
+/// Everything [`run`] needs. All three entry points build one from their flags.
 ///
 /// Paths are taken as owned values rather than borrowed: the daemon outlives
 /// every scope a caller would lend them from, and threading lifetimes through a
@@ -115,6 +116,15 @@ pub struct Config {
     /// corporate egress — so a censoring firewall is something to route around
     /// rather than something that stops the node. See [`crate::p2p::proxy`].
     pub proxy: Option<String>,
+    /// Serve MCP over this process's stdin/stdout against the same node state.
+    ///
+    /// Off for the standalone p2p and HTTP binaries. `cairn run` enables it so
+    /// an MCP client can launch one process without creating a second ledger
+    /// writer.
+    pub mcp: bool,
+    /// Ed25519 identity used to sign MCP submissions. This is deliberately
+    /// separate from [`Config::identity`], which is the transport KEM key.
+    pub mcp_identity: Option<PathBuf>,
 }
 
 impl Config {
@@ -142,6 +152,8 @@ impl Config {
             max_queued: serve::DEFAULT_MAX_QUEUED,
             key_file: None,
             proxy: None,
+            mcp: false,
+            mcp_identity: None,
         }
     }
 
@@ -398,9 +410,13 @@ impl RoundScorer {
 /// connection, so the second lock would only ever be taken with the first
 /// already held. Two locks always acquired in the same order is a deadlock
 /// waiting for the first person who reverses them.
-struct State {
-    node: Node,
+pub(crate) struct State {
+    pub(crate) node: Node,
     population: Population,
+    /// An in-process MCP request appended to `node`; the daemon consumes this
+    /// flag on its next tick and rewrites the checkpoint before advertising
+    /// the new head.
+    pub(crate) dirty: bool,
 }
 
 /// Write out everything a round may have changed.
@@ -511,7 +527,7 @@ pub fn run(config: Config) -> Result<(), String> {
             // screen before the first dial rather than absent from all of them.
             log::warn!(
                 "bootstrap {}: still carries the PLACEHOLDER key \
-                 `cairn-gen-bootstrap` generated, which authenticates nobody. \
+                 `cairn gen-bootstrap` generated, which authenticates nobody. \
                  Dials to {} will fail their handshake and report a plain transport \
                  error. Replace \"public\" in that file with the seed's real key -- \
                  the seed operator can print theirs from the \"public\" field of \
@@ -564,6 +580,12 @@ pub fn run(config: Config) -> Result<(), String> {
 
     // Exclusive, opened above: the daemon appends every record it imports from
     // a peer, so it is a writer and must not share a log with another one.
+    // Never `interactive()`, even with MCP on: this registry is the one the
+    // shared node settles, admits and audits with, and those must honour the
+    // objective's own declared bound or the same claim settles differently on
+    // `cairn run` than on `cairn p2p` over the same log. The MCP server keeps
+    // its client responsive by applying the ceiling to its own throwaway clone
+    // in `score_candidate`, which records nothing.
     let node = Node::new(ledger, &config.root);
     // `Spool::at` only names a directory; the server creates it when it first
     // queues something, and an absent one simply drains nothing.
@@ -586,7 +608,11 @@ pub fn run(config: Config) -> Result<(), String> {
     log::info!("verifier code: {servable} servable, {missing} unmet");
 
     let registry = node.registry().clone();
-    let state = Arc::new(Mutex::new(State { node, population }));
+    let state = Arc::new(Mutex::new(State {
+        node,
+        population,
+        dirty: false,
+    }));
     {
         let guard = state
             .lock()
@@ -594,6 +620,20 @@ pub fn run(config: Config) -> Result<(), String> {
         write_checkpoint(&config.checkpoint, &root_key, &guard.node)
             .map_err(|e| format!("checkpoint: {e}"))?;
     }
+
+    let mcp_finished = if config.mcp {
+        Some(
+            crate::mcp::start_shared_stdio(
+                Arc::clone(&state),
+                config.mcp_identity.as_deref(),
+                &config.log,
+                &config.key_path(),
+            )
+            .map_err(|error| format!("mcp: {error}"))?,
+        )
+    } else {
+        None
+    };
 
     // The HTTP half. Spawned after the checkpoint exists, so the first request
     // for `/checkpoint` finds one.
@@ -640,7 +680,9 @@ pub fn run(config: Config) -> Result<(), String> {
         let mut guard = accept_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let State { node, population } = &mut *guard;
+        let State {
+            node, population, ..
+        } = &mut *guard;
         let outcome = match accept_population {
             Some(_) => {
                 let mut scorer = RoundScorer::new(accept_registry.clone());
@@ -678,6 +720,15 @@ pub fn run(config: Config) -> Result<(), String> {
     });
 
     loop {
+        if mcp_finished.as_ref().is_some_and(|finished| {
+            !matches!(
+                finished.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            )
+        }) {
+            log::info!("mcp: stdin closed; stopping the combined node");
+            return Ok(());
+        }
         // Peers with a reason to be useful first, then a random sample.
         //
         // Dialling every peer every tick is quadratic in the network, and the
@@ -702,7 +753,7 @@ pub fn run(config: Config) -> Result<(), String> {
         //
         // The daemon *is* the operator's node and already holds the lock, so it
         // drains. The rules come from `serve::drain_into`, one copy shared with
-        // the CLI: a second copy of admission in a second binary is the same
+        // the CLI: a second copy of admission behind a second subcommand is the same
         // mistake as a second copy in a request handler, which is the argument
         // `docs/serving.md` already makes.
         //
@@ -713,7 +764,7 @@ pub fn run(config: Config) -> Result<(), String> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let now = timestamp();
-            let mut changed = false;
+            let mut changed = std::mem::take(&mut guard.dirty);
             if let Some(queue) = &spool {
                 let admissions = serve::drain_into(&mut guard.node, queue, &now, false);
                 changed |= !admissions.is_empty();
@@ -759,7 +810,9 @@ pub fn run(config: Config) -> Result<(), String> {
             let mut guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let State { node, population } = &mut *guard;
+            let State {
+                node, population, ..
+            } = &mut *guard;
             let outcome = match config.population {
                 Some(_) => {
                     let mut scorer = RoundScorer::new(registry.clone());

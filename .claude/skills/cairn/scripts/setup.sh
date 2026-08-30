@@ -34,10 +34,10 @@ rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 say()  { printf '  %s\n' "$1"; }
 
 rule "build"
-if [ ! -x target/release/cairn ] || [ ! -x target/release/cairn-mcp ]; then
+if [ ! -x target/release/cairn ]; then
   cargo build --release --locked
 fi
-say "cairn, cairn-mcp, cairn-serve"
+say "cairn (one binary: the CLI, plus the mcp, serve, p2p and run subcommands)"
 
 # The jail matters more than it looks: objectives carry code somebody else
 # wrote, and this node runs it. Say plainly whether there is one rather than
@@ -107,6 +107,6 @@ if [ "$SERVE" = "1" ]; then
   say "http://127.0.0.1:$PORT/objectives   (queue at $REPO/queue)"
   say "admit submissions with: cairn drain --queue $REPO/queue"
   say "Ctrl-C to stop"
-  exec ./target/release/cairn-serve \
-    --log "$LOG" --root "$REPO" --listen "127.0.0.1:$PORT" --queue "$REPO/queue"
+  exec ./target/release/cairn --log "$LOG" --root "$REPO" \
+    serve --listen "127.0.0.1:$PORT" --queue "$REPO/queue"
 fi

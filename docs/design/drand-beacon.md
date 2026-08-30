@@ -374,7 +374,7 @@ edited by hand.
 
 Not built:
 
-- [ ] `cairn-p2p` drawing one per epoch on a timer — inherited from
+- [ ] the daemon (`cairn p2p` / `cairn run`) drawing one per epoch on a timer — inherited from
       chain-beacon.md and unchanged by any of this. Until it exists, a beacon
       is something an operator runs a script for, and an epoch whose script did
       not run keeps the fallback.

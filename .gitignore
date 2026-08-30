@@ -51,7 +51,7 @@ venv/
 opencode.json
 
 # Bootstrap addresses are local configuration, never repository content.
-# `cairn-p2p`'s own module doc says it: "Identity files and bootstrap files
+# The p2p daemon's own module doc says it: "Identity files and bootstrap files
 # are local configuration. They are never placed in the append-only ledger."
 # `.local/seed.json` above already covers the one `make p2p` generates; these
 # catch a hand-written one beside it.
@@ -67,7 +67,7 @@ ui/out/
 ui/next-env.d.ts
 ui/tsconfig.tsbuildinfo
 
-# cairn-mcp's nonce sidecar (`<log>.pending.json`) holds unrevealed artifacts
+# The MCP server's nonce sidecar (`<log>.pending.json`) holds unrevealed artifacts
 # and the nonces that bind them; publishing one hands a copier everything it
 # needs to front-run the commitment. Never tracked. Same for a server's stderr
 # log, which carries whatever absolute paths the operator ran it from.
@@ -79,3 +79,6 @@ ui/tsconfig.tsbuildinfo
 # the solver binary, generated artifacts, and the journal. The code it runs is
 # tracked, under research/crypto-autoresearcher/.
 .autoresearcher/
+
+# `make build` stages release binaries here; cargo's own output stays in target/.
+/bin/

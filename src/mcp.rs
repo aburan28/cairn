@@ -1,4 +1,4 @@
-//! `cairn-mcp` — a Model Context Protocol server over stdio.
+//! Model Context Protocol server over stdio.
 //!
 //! One integration for every agent that speaks MCP (Claude Code, Codex,
 //! OpenCode), rather than three bespoke ones.
@@ -87,22 +87,26 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
 
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Map, Value as Json};
 
-use cairn::canonical::Value;
-use cairn::crypto::identity::Identity;
-use cairn::frontier::{Ratchet, Stall};
-use cairn::knowledge::{ConfidencePolicy, Standing};
-use cairn::ledger::Ledger;
-use cairn::node::{Node, RuleViolation};
-use cairn::partition::{assignment_for, epoch_of, epoch_seconds};
-use cairn::records::{commitment_hash, Claim, Commitment, Objective};
-use cairn::schema::validate_claim;
-use cairn::time::{parse_rfc3339, timestamp};
-use cairn::verifiers::VerifierRegistry;
+use crate::canonical::Value;
+use crate::crypto::identity::Identity;
+use crate::frontier::{Ratchet, Stall};
+use crate::knowledge::{ConfidencePolicy, Standing};
+use crate::ledger::Ledger;
+use crate::node::{Node, RuleViolation};
+use crate::partition::{assignment_for, epoch_of, epoch_seconds};
+use crate::records::{commitment_hash, Claim, Commitment, Objective};
+use crate::schema::validate_claim;
+use crate::time::{parse_rfc3339, timestamp};
+use crate::verifiers::VerifierRegistry;
 
 /// Protocol versions this server implements. The first is the default when a
 /// client asks for something unrecognised.
@@ -114,15 +118,23 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Bytes of commit–reveal nonce. Never leaves this process.
 const NONCE_BYTES: usize = 32;
 
-fn main() {
+/// Run `cairn mcp`: the standalone stdio server, owning its own ledger.
+///
+/// [`crate::daemon`] uses the same protocol engine with the daemon's
+/// already-open node, which is how `cairn run` remains one writer. `args` are
+/// the tokens after the subcommand name; `globals` are the `--log`, `--root`
+/// and `--key-file` the `cairn` parser resolved before it, used as defaults
+/// and overridable here so a stanza written for the old `cairn-mcp` binary
+/// still reads the same.
+pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
     // Before anything that could log. Stderr only -- see `logging` -- which
     // matters most here in the MCP server, where stdout is the protocol.
-    cairn::logging::init();
-    let mut log = PathBuf::from("cairn.jsonl");
-    let mut root = PathBuf::from(".");
+    crate::logging::init();
+    let mut log = globals.log;
+    let mut root = globals.root;
     let mut identity_path: Option<PathBuf> = None;
-    let mut key_file: Option<PathBuf> = None;
-    let mut args = std::env::args().skip(1);
+    let mut key_file: Option<PathBuf> = globals.key_file;
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--log" => match args.next() {
@@ -143,16 +155,18 @@ fn main() {
             },
             "--help" | "-h" => {
                 eprintln!(
-                    "cairn-mcp — MCP server over stdio\n\n\
-                     USAGE\n    cairn-mcp [--log <path>] [--root <dir>]\n\n\
+                    "cairn mcp — MCP server over stdio, on a log of its own\n\n\
+                     USAGE\n    cairn [--log <path>] [--root <dir>] mcp [--identity <file>]\n\n\
                      --log       append-only ledger (default cairn.jsonl)\n\
                      --root      bundle root that pinned verifier paths resolve against\n\
                      --identity  sign submissions with this key; its public half\n\
                                  becomes the submitter, and nobody else can claim it\n\
                      --key-file  at-rest key, if the ledger is sealed (default: the\n\
-                                 CLI's own, so a sealed log opens with no flag)\n"
+                                 CLI's own, so a sealed log opens with no flag)\n\n\
+                     For an agent whose work should reach peers live, configure the\n\
+                     client to launch `cairn run` instead: same protocol, one node.\n"
                 );
-                return;
+                return 0;
             }
             other => fail(&format!("unknown argument {other:?}")),
         }
@@ -162,18 +176,12 @@ fn main() {
     // the same function. Without this, an agent pointed at a log the CLI wrote
     // on a machine with a key file -- which is every machine that has run
     // `cairn keygen` -- got "altered, reordered, or spliced" for its own log.
-    let key_path = key_file.unwrap_or_else(|| cairn::store::Store::new(&root).default_key_path());
-    let sealed_pending = matches!(cairn::store::first_line_is_sealed(&log), Ok(Some(true)))
-        || (!log.exists() && key_path.exists());
-    let pending_cipher = if sealed_pending {
-        match cairn::store::atrest::Cipher::read_key_file(&key_path, None) {
-            Ok(cipher) => Some(cipher),
-            Err(e) => fail(&format!("pending-store key: {e}")),
-        }
-    } else {
-        None
+    let key_path = key_file.unwrap_or_else(|| crate::store::Store::new(&root).default_key_path());
+    let pending_cipher = match pending_cipher(&log, &key_path) {
+        Ok(cipher) => cipher,
+        Err(e) => fail(&e),
     };
-    let codec = match cairn::store::resolve_codec(&log, &key_path, None) {
+    let codec = match crate::store::resolve_codec(&log, &key_path, None) {
         Ok(codec) => codec,
         Err(e) => fail(&format!("at-rest key: {e}")),
     };
@@ -196,17 +204,64 @@ fn main() {
         Some(Ok(identity)) => Some(identity),
         Some(Err(why)) => fail(&why),
     };
-    let mut server = Server::new_with_pending_cipher(
+    let server = Server::new_with_pending_cipher(
         Node::with_registry(ledger, registry),
         identity,
         pending_cipher,
     );
 
     eprintln!(
-        "cairn-mcp {SERVER_VERSION}: ledger {}, root {}",
+        "cairn mcp {SERVER_VERSION}: ledger {}, root {}",
         log.display(),
         root.display()
     );
+    report_identity(&server, "--identity");
+    serve_stdio(server);
+    0
+}
+
+/// Start MCP on a daemon's stdio, sharing the daemon's one rules engine and
+/// exclusive ledger rather than opening a second writer.
+pub(crate) fn start_shared_stdio(
+    state: Arc<Mutex<crate::daemon::State>>,
+    identity_path: Option<&Path>,
+    log: &Path,
+    key_path: &Path,
+) -> Result<Receiver<()>, String> {
+    let identity = identity_path.map(load_identity).transpose()?;
+    let cipher = pending_cipher(log, key_path)?;
+    let server = Server::new_shared(state, identity, cipher);
+    eprintln!(
+        "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, stdio ready",
+        log.display()
+    );
+    report_identity(&server, "--mcp-identity");
+    let (finished, completion) = mpsc::channel();
+    thread::Builder::new()
+        .name(String::from("cairn-mcp-stdio"))
+        .spawn(move || {
+            serve_stdio(server);
+            let _ = finished.send(());
+        })
+        .map_err(|error| format!("cannot start stdio thread: {error}"))?;
+    Ok(completion)
+}
+
+fn pending_cipher(
+    log: &Path,
+    key_path: &Path,
+) -> Result<Option<crate::store::atrest::Cipher>, String> {
+    let sealed = matches!(crate::store::first_line_is_sealed(log), Ok(Some(true)))
+        || (!log.exists() && key_path.exists());
+    if !sealed {
+        return Ok(None);
+    }
+    crate::store::atrest::Cipher::read_key_file(key_path, None)
+        .map(Some)
+        .map_err(|error| format!("pending-store key: {error}"))
+}
+
+fn report_identity(server: &Server, flag: &str) {
     match server.identity.as_ref() {
         Some(identity) => eprintln!(
             "signing submissions as {} -- this name is a public key, so it cannot be \
@@ -215,10 +270,12 @@ fn main() {
         ),
         None => eprintln!(
             "not signing: submissions use whatever `submitter` the agent sends, which \
-             authenticates nothing. Pass --identity to make the name provably yours."
+             authenticates nothing. Pass {flag} to make the name provably yours."
         ),
     }
+}
 
+fn serve_stdio(mut server: Server) {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
@@ -249,7 +306,7 @@ fn main() {
 /// halves disagree signs under a name its owner cannot prove, and an agent
 /// would discover that only when a reveal was refused an epoch later.
 fn load_identity(path: &std::path::Path) -> Result<Identity, String> {
-    let text = cairn::secret_file::read_to_string(path)
+    let text = crate::secret_file::read_to_string(path)
         .map_err(|error| format!("cannot read identity {}: {error}", path.display()))?;
     let value = Value::from_json(&text)
         .map_err(|error| format!("{}: not usable JSON: {error}", path.display()))?;
@@ -288,7 +345,7 @@ fn load_identity(path: &std::path::Path) -> Result<Identity, String> {
 }
 
 fn fail(message: &str) -> ! {
-    eprintln!("cairn-mcp: {message}");
+    eprintln!("cairn mcp: {message}");
     std::process::exit(2);
 }
 
@@ -316,11 +373,11 @@ struct Pending {
 struct PendingStore {
     path: PathBuf,
     entries: Vec<Pending>,
-    cipher: Option<cairn::store::atrest::Cipher>,
+    cipher: Option<crate::store::atrest::Cipher>,
 }
 
 impl PendingStore {
-    fn load(log: &std::path::Path, cipher: Option<cairn::store::atrest::Cipher>) -> PendingStore {
+    fn load(log: &std::path::Path, cipher: Option<crate::store::atrest::Cipher>) -> PendingStore {
         let path = log.with_extension("pending.json");
         // Loud on anything but a missing file. The entries here are the only
         // copies of live nonces -- the agent deliberately has none -- so a
@@ -331,14 +388,14 @@ impl PendingStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => {
                 eprintln!(
-                    "cairn-mcp: cannot read pending commitments {}: {error}; \
+                    "cairn mcp: cannot read pending commitments {}: {error}; \
                      any open commitment is stranded until the file is restored",
                     path.display()
                 );
                 Vec::new()
             }
             Ok(text) => {
-                let plaintext = if cairn::store::atrest::is_sealed_line(text.trim()) {
+                let plaintext = if crate::store::atrest::is_sealed_line(text.trim()) {
                     match cipher
                         .as_ref()
                         .ok_or_else(|| "encrypted pending store has no key".to_string())
@@ -352,7 +409,7 @@ impl PendingStore {
                         Ok(text) => text,
                         Err(error) => {
                             eprintln!(
-                                "cairn-mcp: cannot decrypt pending commitments {}: {error}; \
+                                "cairn mcp: cannot decrypt pending commitments {}: {error}; \
                                  any open commitment is stranded until the key is restored",
                                 path.display()
                             );
@@ -366,7 +423,7 @@ impl PendingStore {
                     Ok(Json::Array(items)) => items.iter().filter_map(Pending::from_json).collect(),
                     Ok(_) | Err(_) => {
                         eprintln!(
-                            "cairn-mcp: pending commitments file {} is corrupt; \
+                            "cairn mcp: pending commitments file {} is corrupt; \
                          any open commitment is stranded until the file is restored",
                             path.display()
                         );
@@ -424,7 +481,7 @@ impl PendingStore {
         let text = match serde_json::to_string_pretty(&Json::Array(items)) {
             Ok(text) => text,
             Err(error) => {
-                eprintln!("cairn-mcp: cannot serialize pending commitments: {error}");
+                eprintln!("cairn mcp: cannot serialize pending commitments: {error}");
                 return;
             }
         };
@@ -432,7 +489,7 @@ impl PendingStore {
             Some(cipher) => match cipher.seal_line(0, text.as_bytes(), &mut OsRng) {
                 Ok(line) => line,
                 Err(error) => {
-                    eprintln!("cairn-mcp: cannot encrypt pending commitments: {error}");
+                    eprintln!("cairn mcp: cannot encrypt pending commitments: {error}");
                     return;
                 }
             },
@@ -440,7 +497,7 @@ impl PendingStore {
         };
         if let Err(error) = write_private(&self.path, &stored) {
             eprintln!(
-                "cairn-mcp: cannot save pending commitments to {}: {error}",
+                "cairn mcp: cannot save pending commitments to {}: {error}",
                 self.path.display()
             );
         }
@@ -484,11 +541,94 @@ impl Pending {
 /// of live nonces, and a torn write would strand every open commitment
 /// permanently.
 fn write_private(path: &std::path::Path, text: &str) -> io::Result<()> {
-    cairn::secret_file::replace(path, text.as_bytes())
+    crate::secret_file::replace(path, text.as_bytes())
+}
+
+enum NodeSource {
+    Owned(Node),
+    Shared(Arc<Mutex<crate::daemon::State>>),
+}
+
+enum NodeRead<'a> {
+    Owned(&'a Node),
+    Shared(MutexGuard<'a, crate::daemon::State>),
+}
+
+impl Deref for NodeRead<'_> {
+    type Target = Node;
+
+    fn deref(&self) -> &Node {
+        match self {
+            NodeRead::Owned(node) => node,
+            NodeRead::Shared(state) => &state.node,
+        }
+    }
+}
+
+enum NodeWrite<'a> {
+    Owned(&'a mut Node),
+    Shared {
+        state: MutexGuard<'a, crate::daemon::State>,
+        initial_len: usize,
+    },
+}
+
+impl Deref for NodeWrite<'_> {
+    type Target = Node;
+
+    fn deref(&self) -> &Node {
+        match self {
+            NodeWrite::Owned(node) => node,
+            NodeWrite::Shared { state, .. } => &state.node,
+        }
+    }
+}
+
+impl DerefMut for NodeWrite<'_> {
+    fn deref_mut(&mut self) -> &mut Node {
+        match self {
+            NodeWrite::Owned(node) => node,
+            NodeWrite::Shared { state, .. } => &mut state.node,
+        }
+    }
+}
+
+impl Drop for NodeWrite<'_> {
+    fn drop(&mut self) {
+        if let NodeWrite::Shared { state, initial_len } = self {
+            state.dirty |= state.node.ledger().len() != *initial_len;
+        }
+    }
+}
+
+impl NodeSource {
+    fn read(&self) -> NodeRead<'_> {
+        match self {
+            NodeSource::Owned(node) => NodeRead::Owned(node),
+            NodeSource::Shared(state) => NodeRead::Shared(
+                state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ),
+        }
+    }
+
+    fn write(&mut self) -> NodeWrite<'_> {
+        match self {
+            NodeSource::Owned(node) => NodeWrite::Owned(node),
+            NodeSource::Shared(state) => {
+                let state = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let initial_len = state.node.ledger().len();
+                NodeWrite::Shared { state, initial_len }
+            }
+        }
+    }
 }
 
 struct Server {
-    node: Node,
+    node: NodeSource,
     /// Claim ids this server handed the agent through a *structured* field —
     /// a frontier holder, or the id of a claim the agent itself submitted.
     ///
@@ -521,9 +661,26 @@ impl Server {
     fn new_with_pending_cipher(
         node: Node,
         identity: Option<Identity>,
-        pending_cipher: Option<cairn::store::atrest::Cipher>,
+        pending_cipher: Option<crate::store::atrest::Cipher>,
     ) -> Server {
-        let pending = PendingStore::load(node.ledger().path(), pending_cipher);
+        Self::new_with_source(NodeSource::Owned(node), identity, pending_cipher)
+    }
+
+    fn new_shared(
+        node: Arc<Mutex<crate::daemon::State>>,
+        identity: Option<Identity>,
+        pending_cipher: Option<crate::store::atrest::Cipher>,
+    ) -> Server {
+        Self::new_with_source(NodeSource::Shared(node), identity, pending_cipher)
+    }
+
+    fn new_with_source(
+        node: NodeSource,
+        identity: Option<Identity>,
+        pending_cipher: Option<crate::store::atrest::Cipher>,
+    ) -> Server {
+        let ledger_path = node.read().ledger().path().to_path_buf();
+        let pending = PendingStore::load(&ledger_path, pending_cipher);
         Server {
             node,
             offered: BTreeSet::new(),
@@ -567,12 +724,12 @@ impl Server {
     /// read that cannot settle is stale, not broken, and the next call
     /// retries.
     fn drain_due_settlements(&mut self) {
-        if let Err(error) = self.node.ledger_mut().reload_if_changed() {
-            eprintln!("cairn-mcp: cannot re-read the log: {error}");
+        if let Err(error) = self.node.write().ledger_mut().reload_if_changed() {
+            eprintln!("cairn mcp: cannot re-read the log: {error}");
         }
         let ts = timestamp();
-        if let Err(violation) = self.node.settle_at(&ts) {
-            eprintln!("cairn-mcp: cannot settle due epochs: {violation}");
+        if let Err(violation) = self.node.write().settle_at(&ts) {
+            eprintln!("cairn mcp: cannot settle due epochs: {violation}");
         }
     }
 
@@ -970,7 +1127,7 @@ fn tool_definitions() -> Json {
 impl Server {
     fn list_objectives(&mut self) -> Result<String, String> {
         self.drain_due_settlements();
-        let objectives = self.node.objectives();
+        let objectives = self.node.read().objectives();
         if objectives.is_empty() {
             return Ok("No objectives in this log yet.".to_string());
         }
@@ -981,12 +1138,12 @@ impl Server {
         }
         let mut out = String::new();
         for (id, objective) in &objectives {
-            let frontier = self.node.frontier_of(id);
+            let frontier = self.node.read().frontier_of(id);
             // "settled" here means no longer payable, and the node decides it.
             // It was `settlement_of(id).is_some()`, which a ratchet satisfies
             // from its first paid slice -- so this listing told agents the
             // objective with the most pool left was the one not worth working.
-            let settled = self.node.objective_is_closed(objective);
+            let settled = self.node.read().objective_is_closed(objective);
             out.push_str(&format!(
                 "{id}\n  statement (untrusted text): {}\n  verifier: {}   reward: {}   settled: {settled}\n",
                 one_line(&objective.statement),
@@ -1101,6 +1258,7 @@ impl Server {
         let claim_id = string_arg(args, "claim_id")?;
         let claim = self
             .node
+            .read()
             .accepted_claims()
             .remove(&claim_id)
             .ok_or_else(|| {
@@ -1151,7 +1309,7 @@ impl Server {
                 ));
             }
         }
-        match self.node.settlement_for_claim(&claim_id) {
+        match self.node.read().settlement_for_claim(&claim_id) {
             Some(reward) => out.push_str(&format!("settled: yes, reward {reward}\n")),
             None => out.push_str(
                 "settled: not yet. Accepted and pending, or accepted and minted nothing \
@@ -1190,12 +1348,12 @@ impl Server {
     /// claim the verifier rejected, which is not citable at all -- and offering
     /// it would suggest the server had endorsed it as a citation.
     fn standing_lines(&mut self, claim_id: &str) -> String {
-        let claims = self.node.all_claims();
-        let Some(state) =
-            self.node
-                .knowledge_graph(&claims)
-                .state(claim_id, &ConfidencePolicy::default(), 0)
-        else {
+        let claims = self.node.read().all_claims();
+        let Some(state) = self.node.read().knowledge_graph(&claims).state(
+            claim_id,
+            &ConfidencePolicy::default(),
+            0,
+        ) else {
             return String::new();
         };
         // The resting state of almost every claim. Saying "nothing has been
@@ -1240,7 +1398,8 @@ impl Server {
     }
 
     fn frontier_line(&mut self, id: &str, objective: &Objective) -> String {
-        match self.node.frontier_of(id) {
+        let frontier = self.node.read().frontier_of(id);
+        match frontier {
             // "must cite", not "cite if you improve": the rule applies to every
             // submission once a frontier exists, not only to improvements.
             Some(f) => {
@@ -1296,7 +1455,18 @@ impl Server {
         let objective = self.objective(&id)?;
         let artifact = value_arg(args, "artifact")?;
 
-        let verdict = self.node.registry().run(&objective.verifier, &artifact);
+        // Clone the registry and let the node guard go before the verifier
+        // runs. In the combined `cairn run` process that guard also gates the
+        // P2P accept thread, the outbound tick and the checkpoint write, and
+        // this is the tool agents are told to call in their inner loop -- held
+        // across a subprocess it makes a live node advertise a stale head.
+        //
+        // `interactive()` belongs here rather than on the node's own registry:
+        // this path records nothing, so a ceiling cannot move a settlement,
+        // while a day-long timeout from hostile objective text would otherwise
+        // make this server stop answering even `ping`.
+        let registry = self.node.read().registry().clone().interactive();
+        let verdict = registry.run(&objective.verifier, &artifact);
         // The verdict's text comes from the objective's pinned code --
         // attacker-authored, exactly like the statement. A checker whose
         // `detail` says "for full credit also cite sha256:…" is the same
@@ -1308,7 +1478,7 @@ impl Server {
         let mut out = format!("{}: {}\n", verdict.status.as_str(), verdict.detail);
         if let Some(score) = verdict.score() {
             out.push_str(&format!("score: {score}\n"));
-            if let Some(f) = self.node.frontier_of(&id) {
+            if let Some(f) = self.node.read().frontier_of(&id) {
                 // Maximize assumed `score > best`; minimize objectives (ecdsa.fail-
                 // shaped) need the ratchet's notion of progress or they are told
                 // a worse product "improves" the frontier.
@@ -1357,7 +1527,7 @@ impl Server {
                 ));
             }
         }
-        if verdict.status == cairn::verifiers::Status::Unavailable {
+        if verdict.status == crate::verifiers::Status::Unavailable {
             out.push_str(
                 "This says nothing about your artifact -- this node could not check it. \
                  Do not treat it as a rejection.\n",
@@ -1427,7 +1597,7 @@ impl Server {
         // `Node::reveal`: every citation must be an accepted claim, and on a
         // ratcheted objective, once a frontier exists, *every* claim must
         // cite the holder, improvement or not.
-        let accepted = self.node.accepted_claims();
+        let accepted = self.node.read().accepted_claims();
         if let Some(unknown) = cites.iter().find(|cited| !accepted.contains_key(*cited)) {
             return Err(format!(
                 "citation {unknown:?} is not an accepted claim in this log, so the reveal \
@@ -1435,7 +1605,7 @@ impl Server {
                  frontier_status, and claims you actually built on. Nothing was recorded."
             ));
         }
-        if let Some(frontier) = self.node.frontier_of(&objective_id) {
+        if let Some(frontier) = self.node.read().frontier_of(&objective_id) {
             if !cites.iter().any(|c| c == &frontier.claim_id) {
                 return Err(format!(
                     "this objective has a frontier at score {}, so every submission must cite \
@@ -1484,7 +1654,7 @@ impl Server {
             validate_claim(&claim.to_value())
                 .map_err(|e| format!("claim does not satisfy spec/claim.schema.json: {e}"))?;
 
-            let outcome = match self.node.reveal(&claim, &ts) {
+            let outcome = match self.node.write().reveal(&claim, &ts) {
                 Ok(outcome) => outcome,
                 Err(violation) => {
                     // Some refusals are final for this commitment: the epoch
@@ -1542,7 +1712,7 @@ impl Server {
                      when each node happened to hear about the work. Any later call -- \
                      frontier_status included -- applies the settlement once it is due.\n",
                     now,
-                    cairn::partition::finality_epochs(),
+                    crate::partition::finality_epochs(),
                     epoch_seconds(),
                 ));
             } else if outcome.reward == 0 && outcome.verdict.accepted() {
@@ -1575,6 +1745,7 @@ impl Server {
             None => commitment,
         };
         self.node
+            .write()
             .commit(&commitment, &ts)
             .map_err(|e| format!("commit refused: {e}"))?;
         self.pending.remember(Pending {
@@ -1683,7 +1854,7 @@ impl Server {
         // head as of the epoch's *start*, not the live head -- the live head
         // moves on every append, which would reshuffle every node's slice
         // mid-epoch and make "anyone can recompute a peer's region" false.
-        let anchor = match self.node.anchor_of_epoch(epoch) {
+        let anchor = match self.node.read().anchor_of_epoch(epoch) {
             anchor if anchor.is_empty() => "genesis".to_string(),
             anchor => anchor,
         };
@@ -1715,11 +1886,11 @@ impl Server {
         // server answers nothing else while it runs. The chain and batch
         // checks below are cheap and always on.
         let rerun = args.get("rerun").and_then(Json::as_bool).unwrap_or(false);
-        let problems = self.node.audit(rerun);
+        let problems = self.node.read().audit(rerun);
         if problems.is_empty() {
             Ok(format!(
                 "log verified: {} entries, chain intact{}\n",
-                self.node.ledger().len(),
+                self.node.read().ledger().len(),
                 if rerun {
                     ", every settled claim re-verified"
                 } else {
@@ -1737,6 +1908,7 @@ impl Server {
 
     fn objective(&self, id: &str) -> Result<Objective, String> {
         self.node
+            .read()
             .objectives()
             .get(id)
             .cloned()
@@ -1868,7 +2040,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let source = "def check(artifact):\n    return True\n";
         std::fs::write(dir.join("c.py"), source).unwrap();
-        let sha = cairn::canonical::digest_bytes(source.as_bytes())
+        let sha = crate::canonical::digest_bytes(source.as_bytes())
             .trim_start_matches("sha256:")
             .to_string();
 
@@ -1890,20 +2062,24 @@ mod tests {
             None,
         )
         .expect("valid objective");
-        let objective_id = server.node.post_objective(&objective, TS).expect("posted");
+        let objective_id = server
+            .node
+            .write()
+            .post_objective(&objective, TS)
+            .expect("posted");
 
         let submitter = match signer {
             Some(identity) => identity.submitter_id(),
             None => "rival".to_string(),
         };
-        let hash = cairn::records::commitment_hash(&objective_id, &submitter, &artifact, "n1");
-        let commitment = cairn::records::Commitment::new(&objective_id, &submitter, hash, TS);
+        let hash = crate::records::commitment_hash(&objective_id, &submitter, &artifact, "n1");
+        let commitment = crate::records::Commitment::new(&objective_id, &submitter, hash, TS);
         let commitment = match signer {
             Some(identity) => commitment.signed_with(identity),
             None => commitment,
         };
-        server.node.commit(&commitment, TS).expect("commit");
-        let claim = cairn::records::Claim::new(
+        server.node.write().commit(&commitment, TS).expect("commit");
+        let claim = crate::records::Claim::new(
             &objective_id,
             &submitter,
             artifact,
@@ -1916,7 +2092,7 @@ mod tests {
             Some(identity) => claim.signed_with(identity),
             None => claim,
         };
-        let outcome = server.node.reveal(&claim, LATER).expect("reveal");
+        let outcome = server.node.write().reveal(&claim, LATER).expect("reveal");
         assert!(
             outcome.verdict.accepted(),
             "fixture needs an accepted claim, got {:?}",
@@ -2162,7 +2338,7 @@ mod tests {
         // leaving an orphan commitment behind on every retry. An agent loops,
         // so that is a log-spam vector as well as litter.
         let mut s = server();
-        let before = s.node.ledger().len();
+        let before = s.node.read().ledger().len();
         let out = call(
             &mut s,
             "submit_claim",
@@ -2173,7 +2349,11 @@ mod tests {
             }),
         );
         assert!(out.contains("no objective"), "{out}");
-        assert_eq!(s.node.ledger().len(), before, "a refusal wrote to the log");
+        assert_eq!(
+            s.node.read().ledger().len(),
+            before,
+            "a refusal wrote to the log"
+        );
     }
 
     // -- citation provenance ------------------------------------------------
@@ -2327,6 +2507,7 @@ mod tests {
         .expect("valid objective");
         let id = s
             .node
+            .write()
             .post_objective(&objective, "2026-07-28T00:00:00+00:00")
             .expect("posted");
         (s, id, planted)
@@ -2364,7 +2545,7 @@ mod tests {
                 "{render}: {out}"
             );
             assert_eq!(
-                s.node.ledger().len(),
+                s.node.read().ledger().len(),
                 1,
                 "{render}: a refusal must write nothing beyond the objective"
             );
@@ -2400,6 +2581,7 @@ mod tests {
         // ground -- the limit `Standing::Withdrawn` documents.
         let first = server
             .node
+            .read()
             .objectives()
             .values()
             .next()
@@ -2416,29 +2598,38 @@ mod tests {
             None,
         )
         .expect("valid objective");
-        let second_id = server.node.post_objective(&second, TS).expect("posted");
+        let second_id = server
+            .node
+            .write()
+            .post_objective(&second, TS)
+            .expect("posted");
 
         let who = author.submitter_id();
         let artifact = Value::object([("n", Value::Int(43))]);
-        let hash = cairn::records::commitment_hash(&second_id, &who, &artifact, "n2");
+        let hash = crate::records::commitment_hash(&second_id, &who, &artifact, "n2");
         server
             .node
+            .write()
             .commit(
-                &cairn::records::Commitment::new(&second_id, &who, hash, LATER)
+                &crate::records::Commitment::new(&second_id, &who, hash, LATER)
                     .signed_with(&author),
                 LATER,
             )
             .expect("commit");
         let retraction =
-            cairn::records::Claim::new(&second_id, &who, artifact, "n2", LATEST, Vec::new())
+            crate::records::Claim::new(&second_id, &who, artifact, "n2", LATEST, Vec::new())
                 .expect("valid claim")
-                .relating(vec![cairn::records::ClaimRelation::new(
-                    cairn::records::Relation::Retracts,
+                .relating(vec![crate::records::ClaimRelation::new(
+                    crate::records::Relation::Retracts,
                     &claim_id,
                 )])
                 .expect("valid claim")
                 .signed_with(&author);
-        server.node.reveal(&retraction, LATEST).expect("reveal");
+        server
+            .node
+            .write()
+            .reveal(&retraction, LATEST)
+            .expect("reveal");
 
         let out = call(&mut server, "get_claim", json!({ "claim_id": claim_id }));
         assert!(out.contains("standing: withdrawn"), "{out}");
@@ -2479,7 +2670,7 @@ mod tests {
         let shown = call(&mut s, "get_claim", json!({ "claim_id": claim_id }));
         assert!(shown.contains(&planted), "the fixture planted nothing");
 
-        let objective_id = s.node.objectives().keys().next().unwrap().clone();
+        let objective_id = s.node.read().objectives().keys().next().unwrap().clone();
         // Same refusal a planted citation in a statement earns.
         let out = call(
             &mut s,
@@ -2612,6 +2803,7 @@ mod tests {
         )
         .expect("valid objective");
         s.node
+            .write()
             .post_objective(&another, "2026-07-28T00:00:00+00:00")
             .expect("posted");
         let second = ask(&mut s);
@@ -2666,6 +2858,7 @@ mod tests {
         .expect("valid schema");
         let id = s
             .node
+            .write()
             .post_objective(&objective, "2026-07-28T00:00:00+00:00")
             .expect("posted");
 
@@ -2717,6 +2910,7 @@ mod tests {
         .expect("valid schema");
         let id = s
             .node
+            .write()
             .post_objective(&objective, "2026-07-28T00:00:00+00:00")
             .expect("posted");
 
@@ -2784,10 +2978,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("log.jsonl");
         let key_path = dir.join("key");
-        cairn::store::atrest::Cipher::generate(&mut OsRng)
+        crate::store::atrest::Cipher::generate(&mut OsRng)
             .write_key_file(&key_path, None, &mut OsRng)
             .unwrap();
-        let cipher = cairn::store::atrest::Cipher::read_key_file(&key_path, None).unwrap();
+        let cipher = crate::store::atrest::Cipher::read_key_file(&key_path, None).unwrap();
         let mut pending = PendingStore::load(&log, Some(cipher));
         pending.remember(Pending {
             objective_id: "sha256:objective".into(),
@@ -2799,11 +2993,11 @@ mod tests {
         pending.save();
 
         let disk = std::fs::read_to_string(log.with_extension("pending.json")).unwrap();
-        assert!(cairn::store::atrest::is_sealed_line(disk.trim()));
+        assert!(crate::store::atrest::is_sealed_line(disk.trim()));
         assert!(!disk.contains("nonce-that-must-not-leak"));
         let reopened = PendingStore::load(
             &log,
-            Some(cairn::store::atrest::Cipher::read_key_file(&key_path, None).unwrap()),
+            Some(crate::store::atrest::Cipher::read_key_file(&key_path, None).unwrap()),
         );
         assert_eq!(reopened.entries, pending.entries);
         let _ = std::fs::remove_dir_all(dir);
@@ -2815,7 +3009,7 @@ mod tests {
         // burned the wait. The pre-flight makes the refusal free -- and must
         // write nothing.
         let (mut s, objective_id, _) = server_with_injected_objective();
-        let before = s.node.ledger().len();
+        let before = s.node.read().ledger().len();
         let unknown = format!("sha256:{}", "f".repeat(64));
         let capability = s.offer(&unknown);
         let out = call(
@@ -2831,7 +3025,7 @@ mod tests {
         assert!(out.contains("not an accepted claim"), "{out}");
         assert!(out.contains("Nothing was recorded"), "{out}");
         assert_eq!(
-            s.node.ledger().len(),
+            s.node.read().ledger().len(),
             before,
             "the refusal wrote to the log"
         );
@@ -2874,6 +3068,7 @@ mod tests {
         .expect("valid objective");
         let objective_id = server
             .node
+            .write()
             .post_objective(&objective, "2026-07-28T00:00:00+00:00")
             .expect("posted");
 
@@ -2890,7 +3085,8 @@ mod tests {
 
         // The commitment in the log carries the key's name and a signature
         // that verifies -- not the name the agent asked for.
-        let commitments = server.node.ledger().entries_of_kind("commitment");
+        let node = server.node.read();
+        let commitments = node.ledger().entries_of_kind("commitment");
         let recorded = Commitment::from_value(&commitments[0].payload).expect("decodes");
         assert_eq!(recorded.submitter, identity.submitter_id());
         assert_ne!(recorded.submitter, "not-my-name");
@@ -2915,7 +3111,8 @@ mod tests {
             }),
         );
         assert!(out.contains("Committed in epoch"), "{out}");
-        let commitments = s.node.ledger().entries_of_kind("commitment");
+        let node = s.node.read();
+        let commitments = node.ledger().entries_of_kind("commitment");
         let recorded = Commitment::from_value(&commitments[0].payload).expect("decodes");
         assert_eq!(recorded.submitter, "alice");
         assert!(recorded.signature.is_none());

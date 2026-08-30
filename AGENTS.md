@@ -126,7 +126,7 @@ claim and you hand every submitter a free lottery ticket per restamp.
 - `./scripts/demo.sh`, `./scripts/ratchet-demo.sh` and `./scripts/try-demo.sh`
   if you touched the CLI or the rules; they are the only checks that exercise
   epoch boundaries against a real clock rather than a fixture timestamp
-- `cargo run --release --bin arena` if you touched any *incentive*: a bond, a
+- `cargo run --release -- arena` (`cairn arena`) if you touched any *incentive*: a bond, a
   pool split, a slash, a window, or what a settlement mints. It plays attack
   strategies for money against the real rules engine and prints what each one
   earned. A defence that stops working shows up as a verdict changing from

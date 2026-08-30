@@ -764,10 +764,32 @@ enum Command {
         /// payout rather than a "settles when epoch N closes".
         settle: bool,
     },
-    /// Start the local node: P2P synchronization, HTTP publishing, and the
-    /// embedded reader, all against one exclusive ledger.
+    /// Start the local node: MCP, P2P synchronization, HTTP publishing, and
+    /// the embedded reader, all against one exclusive ledger.
     Run {
         request: RunRequest,
+    },
+    /// The standalone MCP server on a log of its own (was `cairn-mcp`).
+    /// Everything after the name is the subcommand's to parse; the globals
+    /// before it become its defaults.
+    Mcp {
+        args: Vec<String>,
+    },
+    /// The daemon alone: p2p sync and optionally HTTP (was `cairn-p2p`).
+    P2p {
+        args: Vec<String>,
+    },
+    /// Publish a log over HTTP, optionally as the node too (was `cairn-serve`).
+    Serve {
+        args: Vec<String>,
+    },
+    /// Write a placeholder bootstrap file (was `cairn-gen-bootstrap`).
+    GenBootstrap {
+        args: Vec<String>,
+    },
+    /// Play the attack scenarios for money (was the `arena` binary).
+    Arena {
+        args: Vec<String>,
     },
     /// Score candidate artifacts locally and submit only the ones that already
     /// pass. The proposer loop.
@@ -857,6 +879,8 @@ struct RunRequest {
     bootstrap: Vec<String>,
     fanout: Option<usize>,
     max_queue: Option<usize>,
+    mcp_identity: Option<String>,
+    no_mcp: bool,
 }
 
 /// How a sweep's table is written.
@@ -1189,6 +1213,14 @@ impl Cursor {
             Some(_) => self.take().ok_or_else(missing),
         }
     }
+
+    /// Everything not yet consumed, for a subcommand that parses its own
+    /// arguments (`mcp`, `p2p`, `serve`, `gen-bootstrap`, `arena`).
+    fn rest(&mut self) -> Vec<String> {
+        let rest = self.tokens.get(self.at..).unwrap_or(&[]).to_vec();
+        self.at = self.tokens.len();
+        rest
+    }
 }
 
 /// Does this token look like an option rather than a value?
@@ -1305,6 +1337,24 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "scaffold" => parse_scaffold(&mut cursor)?,
         "try" => parse_try(&mut cursor)?,
         "run" => parse_run(&mut cursor)?,
+        // These parse their own tail, including `--help`: they were separate
+        // binaries with their own usage text, and that text is still the
+        // right answer to `cairn p2p --help`.
+        "mcp" => Command::Mcp {
+            args: cursor.rest(),
+        },
+        "p2p" => Command::P2p {
+            args: cursor.rest(),
+        },
+        "serve" => Command::Serve {
+            args: cursor.rest(),
+        },
+        "gen-bootstrap" => Command::GenBootstrap {
+            args: cursor.rest(),
+        },
+        "arena" => Command::Arena {
+            args: cursor.rest(),
+        },
         "canon" => {
             let mut input: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1395,11 +1445,23 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
 /// It is consulted last so that `--log` and `$CAIRN_LOG_PATH` both beat it,
 /// and skipped for `help` because a request for the manual should never be
 /// answered with a complaint about the environment.
+///
+/// A *level* is also left alone for the daemon subcommands, which were the
+/// separate binaries that read this name as the stderr level and still do
+/// through [`cairn::logging::init`]. Refusing it here would mean
+/// `CAIRN_LOG=debug cairn run` -- the documented way to turn a node's logging
+/// up -- never starting, and the promised rename of `cairn-mcp` to
+/// `cairn mcp` changing behaviour rather than only the binary name.
 fn apply_legacy_log(invocation: &mut Invocation, legacy: Option<&str>) -> Result<(), CliError> {
     if invocation.options.log_chosen || invocation.command == Command::Help {
         return Ok(());
     }
     if let Some(value) = legacy.filter(|v| !v.is_empty()) {
+        if reads_legacy_log_as_a_level(&invocation.command)
+            && cairn::logging::parse_level(value).is_some()
+        {
+            return Ok(());
+        }
         invocation.options.log = legacy_log_path(value)?;
         invocation.options.log_chosen = true;
         eprintln!(
@@ -1408,6 +1470,20 @@ fn apply_legacy_log(invocation: &mut Invocation, legacy: Option<&str>) -> Result
         );
     }
     Ok(())
+}
+
+/// Whether this command is one of the former daemon binaries, for which
+/// `$CAIRN_LOG` holding a level is still the stderr level and not a ledger.
+fn reads_legacy_log_as_a_level(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Run { .. }
+            | Command::Mcp { .. }
+            | Command::P2p { .. }
+            | Command::Serve { .. }
+            | Command::GenBootstrap { .. }
+            | Command::Arena { .. }
+    )
 }
 
 /// Parse `run`'s node-specific flags.
@@ -1429,6 +1505,8 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
         bootstrap: Vec::new(),
         fanout: None,
         max_queue: None,
+        mcp_identity: None,
+        no_mcp: false,
     };
 
     while let Some(token) = cursor.take() {
@@ -1470,6 +1548,8 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
                     )));
                 }
             }
+            "--mcp-identity" => request.mcp_identity = Some(cursor.value("run: --mcp-identity")?),
+            "--no-mcp" => request.no_mcp = true,
             "--help" | "-h" => return Ok(Command::Help),
             other => return Err(CliError::Usage(format!("run: unknown option {other:?}"))),
         }
@@ -3463,7 +3543,7 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "      start P2P, HTTP, the submission queue, and the embedded UI in one node",
+        "      start MCP, P2P, HTTP, the submission queue, and the embedded UI in one node",
     );
     say(
         out,
@@ -3471,7 +3551,49 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "      use --no-queue for a read-only HTTP node; stop with Ctrl-C",
+        "      MCP uses stdio; pass --mcp-identity FILE to sign its submissions",
+    );
+    say(
+        out,
+        "      use --no-mcp or --no-queue to disable either input; stop with Ctrl-C",
+    );
+    say(out, "  mcp [--identity FILE]");
+    say(
+        out,
+        "      the MCP server alone, on a log of its own; --log/--root before or after",
+    );
+    say(
+        out,
+        "  p2p --identity FILE --root-key FILE --checkpoint FILE --listen HOST:PORT ...",
+    );
+    say(
+        out,
+        "      the daemon alone: p2p sync, and --serve HOST:PORT to publish too",
+    );
+    say(
+        out,
+        "  serve [--listen HOST:PORT] [--queue DIR] [--p2p-listen HOST:PORT ...]",
+    );
+    say(
+        out,
+        "      publish the log over HTTP; read-only unless --queue, a node with --p2p-listen",
+    );
+    say(
+        out,
+        "  gen-bootstrap --addr HOST:PORT --out FILE [--identity-out FILE]",
+    );
+    say(
+        out,
+        "      a placeholder --bootstrap file for p2p, with a fresh key to replace",
+    );
+    say(out, "  arena [--seed N]");
+    say(
+        out,
+        "      play the attack strategies for money; exits 1 while one still pays",
+    );
+    say(
+        out,
+        "      each of these prints its own --help; they were separate binaries once",
     );
     say(
         out,
@@ -3597,6 +3719,20 @@ fn print_help(out: &mut dyn Write) {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// What the daemon-shaped subcommands inherit from the global flags.
+///
+/// `--log`, `--root`, `--data-dir` and `--key-file` before the command name
+/// mean the same thing for `mcp`, `p2p` and `serve` as for every other
+/// command; the subcommand may still override them after its own name, which
+/// is how a stanza written for the old separate binaries keeps reading.
+fn cli_globals(options: &Options) -> cairn::cli::Globals {
+    cairn::cli::Globals {
+        log: PathBuf::from(&options.log),
+        root: PathBuf::from(&options.root),
+        key_file: options.key_file.as_ref().map(PathBuf::from),
+    }
+}
+
 /// Start the combined local node used by `cairn run`.
 ///
 /// This is intentionally a direct call into [`cairn::daemon::run`], not a
@@ -3605,7 +3741,7 @@ fn print_help(out: &mut dyn Write) {
 /// a submission accepted over HTTP can actually be admitted on the next tick.
 /// A wrapper would have to rediscover binary paths and would make the release's
 /// promise of one node process less clear.
-fn cmd_run(out: &mut dyn Write, options: &Options, request: &RunRequest) -> Result<i32, CliError> {
+fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Result<i32, CliError> {
     if !cfg!(feature = "ui") {
         return Err(CliError::Usage(String::from(
             "run requires the embedded UI; build with `make ui-build` or \
@@ -3673,6 +3809,8 @@ fn cmd_run(out: &mut dyn Write, options: &Options, request: &RunRequest) -> Resu
     config.max_queued = request
         .max_queue
         .unwrap_or(cairn::serve::DEFAULT_MAX_QUEUED);
+    config.mcp = !request.no_mcp;
+    config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
     if !request.no_queue {
         config.queue = Some(
             request
@@ -3683,12 +3821,22 @@ fn cmd_run(out: &mut dyn Write, options: &Options, request: &RunRequest) -> Resu
         );
     }
 
-    say(out, "cairn node starting");
-    say(out, format!("  ui:   http://{serve}/ui/"));
-    say(out, format!("  http: {serve}"));
-    say(out, format!("  p2p:  {listen}"));
-    say(out, format!("  log:  {}", log.display()));
-    say(out, "  stop with Ctrl-C");
+    // The daemon narrates through `log`, and nothing in the ordinary CLI has
+    // installed a logger: without this every "listening on", "checkpoint
+    // written" and peer-dial line from `daemon::run` is dropped on the floor,
+    // and an operator watching `cairn run` sees the banner below and then
+    // silence. Stderr only, which is what `run` needs -- see `logging`.
+    cairn::logging::init();
+
+    // `run` is itself a valid stdio MCP command, so stdout belongs exclusively
+    // to JSON-RPC. Operational status follows the rest of the daemon to stderr.
+    eprintln!("cairn node starting");
+    eprintln!("  mcp:  {}", if config.mcp { "stdio" } else { "disabled" });
+    eprintln!("  ui:   http://{serve}/ui/");
+    eprintln!("  http: {serve}");
+    eprintln!("  p2p:  {listen}");
+    eprintln!("  log:  {}", log.display());
+    eprintln!("  stop with Ctrl-C");
 
     daemon::run(config).map_err(CliError::Daemon)?;
     Ok(0)
@@ -8605,6 +8753,11 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             },
         ),
         Command::Run { request } => cmd_run(out, options, request),
+        Command::Mcp { args } => Ok(cairn::cli::mcp(args.clone(), cli_globals(options))),
+        Command::P2p { args } => Ok(cairn::cli::p2p(args.clone(), cli_globals(options))),
+        Command::Serve { args } => Ok(cairn::cli::serve(args.clone(), cli_globals(options))),
+        Command::GenBootstrap { args } => Ok(cairn::cli::gen_bootstrap(args.clone())),
+        Command::Arena { args } => Ok(cairn::cli::arena(args.clone())),
         Command::Propose {
             objective,
             artifacts,
@@ -8688,8 +8841,11 @@ fn arguments() -> Result<Vec<String>, CliError> {
 }
 
 fn main() {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    // Do not hold stdout's process-wide lock across `run`: the `cairn run`
+    // command never returns, and its MCP thread owns stdout for JSON-RPC. The
+    // unlocked handle still serializes each ordinary CLI write internally,
+    // while allowing that thread to take the lock when it has a response.
+    let mut out = io::stdout();
 
     let code = match arguments().and_then(|argv| run(argv, &mut out)) {
         Ok(code) => code,
@@ -8798,6 +8954,30 @@ mod tests {
         let mut level = parse(argv(&["audit"])).expect("parses");
         let error = apply_legacy_log(&mut level, Some("debug")).expect_err("a level is refused");
         assert!(matches!(error, CliError::Usage(_)), "got {error:?}");
+    }
+
+    /// The daemons this binary absorbed still read a level in the old name as
+    /// a level, so exporting one must not stop them starting. A *path* there
+    /// still moves their ledger, with the same warning as anywhere else.
+    #[test]
+    fn a_legacy_level_does_not_refuse_the_former_daemon_binaries() {
+        for command in [
+            vec!["run"],
+            vec!["mcp"],
+            vec!["p2p"],
+            vec!["serve"],
+            vec!["gen-bootstrap"],
+            vec!["arena"],
+        ] {
+            let mut daemon = parse(argv(&command)).expect("parses");
+            apply_legacy_log(&mut daemon, Some("debug"))
+                .unwrap_or_else(|error| panic!("{command:?} refused a level: {error:?}"));
+            assert!(!daemon.options.log_chosen);
+
+            let mut ledger = parse(argv(&command)).expect("parses");
+            apply_legacy_log(&mut ledger, Some("legacy/cairn.jsonl")).expect("a path is honoured");
+            assert_eq!(ledger.options.log, "legacy/cairn.jsonl");
+        }
     }
 
     #[test]
@@ -10571,6 +10751,7 @@ mod tests {
                 assert_eq!(request.listen, "127.0.0.1:9000");
                 assert_eq!(request.serve, "127.0.0.1:8080");
                 assert!(!request.no_queue);
+                assert!(!request.no_mcp);
                 assert!(
                     request.queue.is_none(),
                     "the data-dir default is resolved at run time"
@@ -10588,6 +10769,9 @@ mod tests {
             "--bootstrap",
             "seed.json",
             "--no-queue",
+            "--mcp-identity",
+            "agent.json",
+            "--no-mcp",
         ]))
         .expect("run overrides parse");
         match parsed.command {
@@ -10596,6 +10780,8 @@ mod tests {
                 assert_eq!(request.serve, "0.0.0.0:8080");
                 assert_eq!(request.bootstrap, vec![String::from("seed.json")]);
                 assert!(request.no_queue);
+                assert!(request.no_mcp);
+                assert_eq!(request.mcp_identity.as_deref(), Some("agent.json"));
             }
             other => panic!("expected run, got {other:?}"),
         }
@@ -10603,6 +10789,51 @@ mod tests {
         assert!(parse(argv(&["run", "--fanout", "0"])).is_err());
         assert!(parse(argv(&["run", "--max-queue", "nope"])).is_err());
         assert!(parse(argv(&["run", "--wat"])).is_err());
+    }
+
+    /// The former binaries parse their own tail. The `cairn` parser must
+    /// hand it over untouched -- including flags it would otherwise refuse,
+    /// like `--wat`, and `--help`, which each subcommand answers itself --
+    /// while still resolving the globals that came before the name.
+    #[test]
+    fn former_binaries_get_their_whole_tail_and_the_globals_before_it() {
+        let parsed = parse(argv(&[
+            "--log",
+            "agent.jsonl",
+            "--root",
+            "/repo",
+            "mcp",
+            "--identity",
+            "id.json",
+            "--wat",
+        ]))
+        .expect("mcp passes its tail through");
+        assert_eq!(parsed.options.log, "agent.jsonl");
+        assert_eq!(parsed.options.root, "/repo");
+        assert_eq!(
+            parsed.command,
+            Command::Mcp {
+                args: argv(&["--identity", "id.json", "--wat"])
+            }
+        );
+
+        // `--flag=value` is expanded before the hand-over, so every subcommand
+        // sees one spelling, as the rest of the CLI does.
+        let parsed = parse(argv(&["p2p", "--listen=0.0.0.0:9000", "--help"])).expect("p2p");
+        assert_eq!(
+            parsed.command,
+            Command::P2p {
+                args: argv(&["--listen", "0.0.0.0:9000", "--help"])
+            }
+        );
+
+        for (name, expected) in [
+            ("serve", Command::Serve { args: vec![] }),
+            ("gen-bootstrap", Command::GenBootstrap { args: vec![] }),
+            ("arena", Command::Arena { args: vec![] }),
+        ] {
+            assert_eq!(parse(argv(&[name])).expect(name).command, expected);
+        }
     }
 
     #[test]
