@@ -579,16 +579,13 @@ pub fn run(config: Config) -> Result<(), String> {
 
     // Exclusive, opened above: the daemon appends every record it imports from
     // a peer, so it is a writer and must not share a log with another one.
-    let node = if config.mcp {
-        // An MCP client must remain responsive even when hostile objective text
-        // asks for a day-long verifier run. The standalone MCP server applies
-        // the same ceiling. In the combined process this registry is also the
-        // node's registry because there must be only one rules engine over the
-        // one writer.
-        Node::with_registry(ledger, VerifierRegistry::new(&config.root).interactive())
-    } else {
-        Node::new(ledger, &config.root)
-    };
+    // Never `interactive()`, even with MCP on: this registry is the one the
+    // shared node settles, admits and audits with, and those must honour the
+    // objective's own declared bound or the same claim settles differently on
+    // `cairn run` than on `cairn-p2p` over the same log. The MCP server keeps
+    // its client responsive by applying the ceiling to its own throwaway clone
+    // in `score_candidate`, which records nothing.
+    let node = Node::new(ledger, &config.root);
     // `Spool::at` only names a directory; the server creates it when it first
     // queues something, and an absent one simply drains nothing.
     let spool = config.queue.as_ref().map(serve::Spool::at);

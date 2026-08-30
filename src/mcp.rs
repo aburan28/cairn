@@ -1448,11 +1448,18 @@ impl Server {
         let objective = self.objective(&id)?;
         let artifact = value_arg(args, "artifact")?;
 
-        let verdict = self
-            .node
-            .read()
-            .registry()
-            .run(&objective.verifier, &artifact);
+        // Clone the registry and let the node guard go before the verifier
+        // runs. In the combined `cairn run` process that guard also gates the
+        // P2P accept thread, the outbound tick and the checkpoint write, and
+        // this is the tool agents are told to call in their inner loop -- held
+        // across a subprocess it makes a live node advertise a stale head.
+        //
+        // `interactive()` belongs here rather than on the node's own registry:
+        // this path records nothing, so a ceiling cannot move a settlement,
+        // while a day-long timeout from hostile objective text would otherwise
+        // make this server stop answering even `ping`.
+        let registry = self.node.read().registry().clone().interactive();
+        let verdict = registry.run(&objective.verifier, &artifact);
         // The verdict's text comes from the objective's pinned code --
         // attacker-authored, exactly like the statement. A checker whose
         // `detail` says "for full credit also cite sha256:…" is the same
