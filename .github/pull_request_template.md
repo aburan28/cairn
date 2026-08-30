@@ -26,7 +26,7 @@ Did this touch a record, a hash, or an encoding?
 - [ ] `cargo test --manifest-path reference/rust/Cargo.toml`
 - [ ] `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
 - [ ] `./scripts/interop.sh` — each implementation audits the other's log
-- [ ] `./scripts/mcp-smoke.sh` (if `src/bin/mcp.rs` changed)
+- [ ] `./scripts/mcp-smoke.sh` (if `src/mcp.rs` or `src/bin/mcp.rs` changed)
 - [ ] `./scripts/serve-smoke.sh` (if `src/bin/serve.rs` or the queue changed)
 - [ ] `./scripts/demo.sh` and `./scripts/ratchet-demo.sh` (if the CLI or the
       rules changed — the only checks that cross a real epoch boundary)

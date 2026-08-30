@@ -318,7 +318,7 @@ ui: $(ROOT)/ui/node_modules
 # Two steps because they need two toolchains, and separating them is what keeps
 # `cargo build` working for somebody with no Node installed: the `ui` feature is
 # off by default, and this is the target that turns it on. Afterwards
-# `cairn-p2p --serve ADDR` answers the reader at /ui/.
+# `cairn run` answers the reader at /ui/.
 ui-build: site-snapshot
 	cd "$(ROOT)/ui" && npm ci && npm run build
 	$(CARGO) build --release --features ui --bins

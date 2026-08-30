@@ -764,8 +764,8 @@ enum Command {
         /// payout rather than a "settles when epoch N closes".
         settle: bool,
     },
-    /// Start the local node: P2P synchronization, HTTP publishing, and the
-    /// embedded reader, all against one exclusive ledger.
+    /// Start the local node: MCP, P2P synchronization, HTTP publishing, and
+    /// the embedded reader, all against one exclusive ledger.
     Run {
         request: RunRequest,
     },
@@ -857,6 +857,8 @@ struct RunRequest {
     bootstrap: Vec<String>,
     fanout: Option<usize>,
     max_queue: Option<usize>,
+    mcp_identity: Option<String>,
+    no_mcp: bool,
 }
 
 /// How a sweep's table is written.
@@ -1429,6 +1431,8 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
         bootstrap: Vec::new(),
         fanout: None,
         max_queue: None,
+        mcp_identity: None,
+        no_mcp: false,
     };
 
     while let Some(token) = cursor.take() {
@@ -1470,6 +1474,8 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
                     )));
                 }
             }
+            "--mcp-identity" => request.mcp_identity = Some(cursor.value("run: --mcp-identity")?),
+            "--no-mcp" => request.no_mcp = true,
             "--help" | "-h" => return Ok(Command::Help),
             other => return Err(CliError::Usage(format!("run: unknown option {other:?}"))),
         }
@@ -3463,7 +3469,7 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "      start P2P, HTTP, the submission queue, and the embedded UI in one node",
+        "      start MCP, P2P, HTTP, the submission queue, and the embedded UI in one node",
     );
     say(
         out,
@@ -3471,7 +3477,11 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "      use --no-queue for a read-only HTTP node; stop with Ctrl-C",
+        "      MCP uses stdio; pass --mcp-identity FILE to sign its submissions",
+    );
+    say(
+        out,
+        "      use --no-mcp or --no-queue to disable either input; stop with Ctrl-C",
     );
     say(
         out,
@@ -3605,7 +3615,7 @@ fn print_help(out: &mut dyn Write) {
 /// a submission accepted over HTTP can actually be admitted on the next tick.
 /// A wrapper would have to rediscover binary paths and would make the release's
 /// promise of one node process less clear.
-fn cmd_run(out: &mut dyn Write, options: &Options, request: &RunRequest) -> Result<i32, CliError> {
+fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Result<i32, CliError> {
     if !cfg!(feature = "ui") {
         return Err(CliError::Usage(String::from(
             "run requires the embedded UI; build with `make ui-build` or \
@@ -3673,6 +3683,8 @@ fn cmd_run(out: &mut dyn Write, options: &Options, request: &RunRequest) -> Resu
     config.max_queued = request
         .max_queue
         .unwrap_or(cairn::serve::DEFAULT_MAX_QUEUED);
+    config.mcp = !request.no_mcp;
+    config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
     if !request.no_queue {
         config.queue = Some(
             request
@@ -3683,12 +3695,15 @@ fn cmd_run(out: &mut dyn Write, options: &Options, request: &RunRequest) -> Resu
         );
     }
 
-    say(out, "cairn node starting");
-    say(out, format!("  ui:   http://{serve}/ui/"));
-    say(out, format!("  http: {serve}"));
-    say(out, format!("  p2p:  {listen}"));
-    say(out, format!("  log:  {}", log.display()));
-    say(out, "  stop with Ctrl-C");
+    // `run` is itself a valid stdio MCP command, so stdout belongs exclusively
+    // to JSON-RPC. Operational status follows the rest of the daemon to stderr.
+    eprintln!("cairn node starting");
+    eprintln!("  mcp:  {}", if config.mcp { "stdio" } else { "disabled" });
+    eprintln!("  ui:   http://{serve}/ui/");
+    eprintln!("  http: {serve}");
+    eprintln!("  p2p:  {listen}");
+    eprintln!("  log:  {}", log.display());
+    eprintln!("  stop with Ctrl-C");
 
     daemon::run(config).map_err(CliError::Daemon)?;
     Ok(0)
@@ -8688,8 +8703,11 @@ fn arguments() -> Result<Vec<String>, CliError> {
 }
 
 fn main() {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    // Do not hold stdout's process-wide lock across `run`: the `cairn run`
+    // command never returns, and its MCP thread owns stdout for JSON-RPC. The
+    // unlocked handle still serializes each ordinary CLI write internally,
+    // while allowing that thread to take the lock when it has a response.
+    let mut out = io::stdout();
 
     let code = match arguments().and_then(|argv| run(argv, &mut out)) {
         Ok(code) => code,
@@ -10571,6 +10589,7 @@ mod tests {
                 assert_eq!(request.listen, "127.0.0.1:9000");
                 assert_eq!(request.serve, "127.0.0.1:8080");
                 assert!(!request.no_queue);
+                assert!(!request.no_mcp);
                 assert!(
                     request.queue.is_none(),
                     "the data-dir default is resolved at run time"
@@ -10588,6 +10607,9 @@ mod tests {
             "--bootstrap",
             "seed.json",
             "--no-queue",
+            "--mcp-identity",
+            "agent.json",
+            "--no-mcp",
         ]))
         .expect("run overrides parse");
         match parsed.command {
@@ -10596,6 +10618,8 @@ mod tests {
                 assert_eq!(request.serve, "0.0.0.0:8080");
                 assert_eq!(request.bootstrap, vec![String::from("seed.json")]);
                 assert!(request.no_queue);
+                assert!(request.no_mcp);
+                assert_eq!(request.mcp_identity.as_deref(), Some("agent.json"));
             }
             other => panic!("expected run, got {other:?}"),
         }

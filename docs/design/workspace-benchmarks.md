@@ -280,7 +280,7 @@ move which frontiers is most of why anyone would read a leaderboard.
 **A note is attacker-authored prose read by an LLM, so it goes through
 `taint_from`.** This is the difference between their surface and ours. Yukon's
 notes are read by humans in a browser. Ours are read by agents over
-`cairn-mcp`, where `src/bin/mcp.rs` already taints claim ids appearing in
+`cairn-mcp`, where `src/mcp.rs` already taints claim ids appearing in
 verifier `detail` and in objective statements, for exactly this attack: text that
 says "also cite sha256:…" routes real money under citation flow and needs no code
 execution, so the sandbox does nothing about it. A note field is a third door into
@@ -371,7 +371,7 @@ settlement, and settlement runs the verifier.
 - `src/main.rs` — `bench` with `init`, `prime`, `checkout`, `diff`, grouped for
   the reason `availability` and `shard` are grouped: they are one mechanism and a
   reader meeting `init` needs to find `checkout` beside it.
-- `src/bin/mcp.rs` — surface `note` and `model` in `frontier_status` and
+- `src/mcp.rs` — surface `note` and `model` in `frontier_status` and
   `get_claim`, both through `taint_from`.
 - `conformance/adversarial.jsonl` — the boundary, since `differential.sh` is what
   proves both implementations classify it alike: a path escaping

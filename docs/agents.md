@@ -213,7 +213,7 @@ claude mcp add cairn --scope project -- \
 Config schemas for these tools move between releases. If a stanza is rejected,
 check the tool's current docs rather than assuming the server is at fault — the
 server itself is standard stdio MCP and is exercised directly in
-`cargo test --bin cairn-mcp`.
+`cargo test --lib mcp`.
 
 ### Check the wiring before blaming the agent
 
@@ -266,8 +266,29 @@ still names both symptoms and exits non-zero:
   ! entry 1: prev is None, expected 'sha256:840c2118…'
 ```
 
-Two arrangements work today. Neither is a live bridge between an MCP server
-and the network, and it is worth being plain about that before choosing one.
+The complete one-client arrangement is now a live bridge between MCP and the
+network: configure the client to launch `cairn run`. That process owns one
+ledger and one rules engine, serves MCP on stdio, synchronizes it over P2P, and
+publishes the same state over HTTP and the embedded UI. MCP appends mark the
+daemon state dirty, so the next node tick rewrites the signed checkpoint before
+advertising the new head.
+
+```json
+{
+  "mcpServers": {
+    "cairn": { "command": "/abs/path/to/cairn", "args": ["run"] }
+  }
+}
+```
+
+Pass global storage options before `run` and node/MCP options after it, for
+example `args: ["--data-dir", "/srv/cairn", "run", "--mcp-identity",
+"/srv/cairn/agent.identity.json"]`. Do not also start `cairn run` manually:
+the MCP client is the process supervisor in this arrangement. A service manager
+that owns stdin should use `cairn run --no-mcp`.
+
+The standalone arrangement remains useful when an agent should work on a log
+that is intentionally offline from the network.
 
 **One log per agent.** Different model families are real search diversity, and
 [`gossip.rs`](../src/gossip.rs) preserves it deliberately, so this is the better
@@ -280,14 +301,12 @@ codex        → cairn-mcp --log ~/pw/codex.jsonl   --root /abs/repo
 opencode     → cairn-mcp --log ~/pw/opencode.jsonl --root /abs/repo
 ```
 
-What those logs do **not** do is reconcile with each other while the servers
-are running. `cairn-p2p` is the process that exchanges records with peers, and
-it takes the same exclusive lock `cairn-mcp` does — both append — so a daemon
-started on a log an MCP server holds is refused with the `another process is
-already writing` message above, and vice versa. The `Makefile` gives the two
-different files for exactly this reason (`MCP_LOG=.local/cairn-mcp.jsonl`,
-`P2P_LOG=.local/cairn-p2p.jsonl`). To get an agent's records onto the network,
-run the two in sequence:
+Those standalone logs do **not** reconcile while their MCP servers are running.
+`cairn-p2p` and standalone `cairn-mcp` both append, so a daemon started on a log
+an MCP server holds is refused with the `another process is already writing`
+message above, and vice versa. Use `cairn run` instead when the agent's records
+should reach peers live. The old stop/sync/restart sequence is still available
+for an intentionally offline agent:
 
 ```sh
 # 1. stop the MCP server (quit the client, or remove the server from its config)
@@ -303,14 +322,9 @@ re-derives its own verdicts, so nothing is imported that was not re-checked.
 What does *not* converge is settlement order — that is keyed to each node's own
 head at the epoch boundary, and `docs/p2p.md` says what is still open there.
 
-A live bridge — an MCP server whose submissions reach a running daemon without
-stopping either — **is not built.** `cairn run` does that for HTTP submissions
-(one process holds the lock and the HTTP thread queues into it), and nothing
-equivalent exists for the MCP transport yet. Until it does, an agent's work is
-on the network only after step 2 above has run.
-
-**Or run one client at a time** against a shared log. Simplest, and adequate for
-a single operator experimenting; the same sequencing with the daemon applies.
+`cairn run` serves one stdio MCP client. Several independently spawned clients
+still must not share its ledger or its default ports; give each complete node
+different paths and listeners, or run one client at a time.
 
 ## Driving it without an agent
 

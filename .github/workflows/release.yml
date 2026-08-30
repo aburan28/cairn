@@ -210,18 +210,23 @@ jobs:
 
           # The operator-facing path is `cairn run`, not a hand-assembled
           # cairn-p2p invocation. Start the unpacked release against an empty
-          # temporary store and ask the real HTTP listener for the embedded
-          # reader. This catches the exact packaging mistake a compile alone
-          # cannot: a release built with the UI feature but missing or mounting
-          # the exported files incorrectly.
+          # temporary store, ask the real HTTP listener for the embedded reader,
+          # and drive its stdio MCP transport. This catches packaging mistakes
+          # a compile alone cannot: a missing/mis-mounted UI or a launcher that
+          # writes operational prose into the JSON-RPC stream.
           NODE_DATA="$(mktemp -d)"
           NODE_OUT="$(mktemp)"
-          "/tmp/unpacked/cairn" --data-dir "$NODE_DATA" run >"$NODE_OUT" 2>&1 &
+          MCP_OUT="$(mktemp)"
+          mkfifo "$NODE_DATA/mcp.in"
+          "/tmp/unpacked/cairn" --data-dir "$NODE_DATA" run \
+            <"$NODE_DATA/mcp.in" >"$MCP_OUT" 2>"$NODE_OUT" &
           NODE_PID=$!
+          exec 9>"$NODE_DATA/mcp.in"
           cleanup_node() {
+            exec 9>&- || true
             kill "$NODE_PID" 2>/dev/null || true
             wait "$NODE_PID" 2>/dev/null || true
-            rm -rf "$NODE_DATA" "$NODE_OUT"
+            rm -rf "$NODE_DATA" "$NODE_OUT" "$MCP_OUT"
           }
           trap cleanup_node EXIT
           for attempt in {1..60}; do
@@ -239,7 +244,19 @@ jobs:
           test -s /tmp/cairn-release-ui.html
           grep -q "<html" /tmp/cairn-release-ui.html
           rm -f /tmp/cairn-release-ui.html
-          echo "cairn run serves the embedded UI"
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' >&9
+          for attempt in {1..60}; do
+            grep -q '"id":1' "$MCP_OUT" && break
+            if ! kill -0 "$NODE_PID" 2>/dev/null; then
+              cat "$NODE_OUT" >&2
+              echo "cairn run exited before answering MCP" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(wc -l < "$MCP_OUT")" -eq 1
+          grep -q '^{"id":1,"jsonrpc":"2.0","result":{}}$' "$MCP_OUT"
+          echo "cairn run serves the embedded UI and MCP"
 
       # v7. From v5 an artifact name may not be uploaded twice in a run, which
       # this matrix already satisfies -- one upload per target, and the target

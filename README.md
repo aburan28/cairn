@@ -108,11 +108,28 @@ An installed release has the complete local node behind one command:
 cairn run
 ```
 
-This starts P2P synchronization, the HTTP API, a local submission queue, and
-the embedded reader in one process. Open <http://127.0.0.1:8080/ui/>. Its local
-state lives under `.local/`; P2P listens on `127.0.0.1:9000`, so the default is
-safe for a first run and does not expose a node to the network. Stop it with
-Ctrl-C.
+This starts the MCP server, P2P synchronization, the HTTP API, a local
+submission queue, and the embedded reader in one process. Open
+<http://127.0.0.1:8080/ui/>. Its local state lives under `.local/`; P2P listens
+on `127.0.0.1:9000`, so the default is safe for a first run and does not expose
+a node to the network. MCP uses stdin/stdout, so an agent client can use `cairn`
+as its command with `run` as its only argument. Operational messages stay on
+stderr and stdout contains JSON-RPC only. Closing MCP stdin stops the combined
+node; an interactive operator can stop it with Ctrl-C.
+
+For example, a project-local Claude Code configuration can launch the complete
+node instead of the standalone `cairn-mcp` process:
+
+```json
+{
+  "mcpServers": {
+    "cairn": { "command": "cairn", "args": ["run"] }
+  }
+}
+```
+
+Use `--mcp-identity agent.identity.json` after `run` to sign agent submissions.
+Use `--no-mcp` when stdin belongs to something else, such as a service manager.
 
 To join through a known bootstrap file, pass it after `run`:
 
@@ -134,8 +151,8 @@ Working from a source checkout, build with the `ui` feature first (see
 default `cargo build` does not embed the reader and `cairn run` says so.
 
 Published release tarballs are built with the UI feature by the release
-workflow and are checked by starting `cairn run` and fetching `/ui/` from the
-unpacked binary.
+workflow and are checked by starting `cairn run`, completing an MCP handshake,
+and fetching `/ui/` from the same unpacked binary.
 
 ```sh
 cargo test                    # the full suite, loopback only

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end smoke test of the MCP server as a real process.
 #
-# The unit tests in src/bin/mcp.rs call `handle_line` directly, which cannot
+# The unit tests in src/mcp.rs call `handle_line` directly, which cannot
 # catch the failure mode that actually breaks MCP clients: something writing to
 # stdout that is not a JSON-RPC response. One stray `println!`, one library
 # banner, one panic message on the wrong stream, and the client sees a corrupt
