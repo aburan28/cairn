@@ -113,10 +113,37 @@ Three things had to be got right, and each was wrong first:
   has no gradient; scoring *how far* a message sits from the path turns the
   same search into a descent, and that is what found the pair.
 
+Both were first submitted against objectives posted **without a ratchet**,
+which meant no frontier existed and the first claim took the whole pool.  The
+statements promised proportional payment; the records did not carry it.
+Corrected objectives were posted and both artifacts re-submitted, paying
+1,611,111 of 2,000,000 and 1,753,846 of 6,000,000 -- the distance each
+actually moved from its baseline.  `examples/sha1-differential/README.md` has
+the detail; the researcher now reads `min_improvement` and the direction from
+the node before spending an entry it cannot win.
+
 Neither result is close to the published state of the art.  Reduced-step SHA-1
 collisions are known far deeper than 34, and the vectors of weight ~31 are the
 classic family rather than a new one.  Both objectives are frontiers with the
 room above them stated in their own baselines.
+
+## Two things a first unattended sweep got wrong
+
+Worth knowing before trusting a run of this thing.
+
+A **randomised search that comes up empty is not an unreachable objective.**
+The first sweep gave the collision climb one 90-second run per step count,
+found nothing at any of them, and wrote the objective off as out of reach --
+an objective a hand run had already settled at 34 steps. Descent settles into
+whichever local minimum it started nearest, so restarts are the search, not a
+retry of it. The strategy now restarts, and an empty run is recorded as
+stalled and picked up next sweep; `OutOfReach` is kept for what is actually
+permanent, like a 131-bit field in a 64-bit engine.
+
+The **ledger takes one writer.** The MCP server wired into a Claude Code
+session holds it for as long as the session does, so the CLI cannot post or
+submit while it runs, and it comes back on its own after a restart. Two
+daemons pointed at one log is the same hazard with none of the warning.
 
 ## Adding a strategy
 

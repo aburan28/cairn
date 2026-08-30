@@ -50,6 +50,28 @@ nothing about full SHA-1 and nothing about preimages.  Reaching 80 would be a
 one-block SHA-1 collision; the published collisions (SHAttered, 2017) are
 two-block chosen-prefix constructions and do not settle it.
 
+## A ratchet is a record, not a sentence
+
+Both objectives were first posted **without a `ratchet` stanza**, and the
+mistake is worth keeping written down because nothing complained.  The
+statements said payment is proportional to the distance the frontier moves and
+that every submission must cite the frontier it beat.  The records did not say
+it: with no ratchet there is no frontier, `frontier_status` reports "nothing to
+cite", and the first accepted claim takes the whole pool.  A 34-step pair
+collected six million where it had earned nineteen sixty-fifths of it.
+
+That is exactly the split the repository keeps insisting on -- the statement is
+prose a funder wrote, and the record is what the rules engine reads.  A
+promise that lives only in the statement is not a promise.
+
+The objectives here carry ratchets and are therefore *different objectives*:
+the id covers the whole record, so adding one forks rather than edits, and the
+first postings keep their settled claims.  The ids of both are in
+`research/crypto-autoresearcher/results.json`.  With the ratchet in place the
+same two artifacts paid 1,611,111 of 2,000,000 and 1,753,846 of 6,000,000 --
+the distance each actually moved -- and the rest of both pools is still there
+for whoever goes deeper.
+
 ## Checking it yourself
 
 ```sh

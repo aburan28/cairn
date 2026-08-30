@@ -103,7 +103,15 @@ def fetch(path):
 # says, with a reason, that it cannot.
 
 class OutOfReach(Exception):
-    pass
+    """The work is past budget or past what this engine can represent. Permanent:
+    the objective is recorded and not attempted again."""
+
+
+class SearchEmpty(Exception):
+    """This run found nothing. Not the same thing at all -- a randomised search
+    that came up empty says nothing about the next one, and recording it as
+    unreachable is how an objective that a longer run would settle gets retired
+    by a short one."""
 
 
 def _consts(src, names):
@@ -205,6 +213,7 @@ class SHA1ReducedCollision:
         # Deeper paths need more disturbances past the free window, and each
         # one is paid for by the search.  Walk up until that stops paying.
         for steps in (28, 32, 36, 40):
+            attempts = int(os.environ.get("AR_CLIMB_ATTEMPTS", "3"))
             space = os.path.join(HERE, f"sha1_space_{steps}.txt")
             if not os.path.exists(space):
                 subprocess.run([sys.executable, os.path.join(CODE, "dv_shift.py"),
@@ -222,15 +231,22 @@ class SHA1ReducedCollision:
                 note("path-inconsistent", steps=steps, err=d.stderr.strip()[:120])
                 continue
             path, delta = d.stdout.split("\n")[0].split(), d.stdout.split("\n")[1].split()
-            note("climb-start", objective=obj["id"][:16], steps=steps)
-            c = subprocess.run([PATH_CLIMB, str(steps), "90", "4", *path, *delta],
-                               capture_output=True, text=True, timeout=600)
-            out = c.stdout.split()
-            if len(out) == 3 and (best is None or int(out[0]) > best[0]):
-                best = (int(out[0]), {"m1": out[1], "m2": out[2]})
-                note("pair-found", steps=steps, depth=out[0])
+            note("climb-start", objective=obj["id"][:16], steps=steps,
+                 attempts=attempts)
+            # Descent settles into local minima, and which one depends on where
+            # it started.  One run reaching nothing and the next reaching the
+            # target is the normal spread here, so restart rather than conclude.
+            for _ in range(attempts):
+                c = subprocess.run([PATH_CLIMB, str(steps), "60", "4", *path, *delta],
+                                   capture_output=True, text=True, timeout=600)
+                out = c.stdout.split()
+                if len(out) == 3 and (best is None or int(out[0]) > best[0]):
+                    best = (int(out[0]), {"m1": out[1], "m2": out[2]})
+                    note("pair-found", steps=steps, depth=out[0])
+                if best and best[0] >= steps:
+                    break        # the path closed; a deeper one is the next rung
         if best is None:
-            raise OutOfReach("no message pair re-converged at any step count tried")
+            raise SearchEmpty("no message pair re-converged in this run")
         return best[1]
 
 
@@ -356,6 +372,13 @@ def sweep():
                 st["unreachable"][oid] = {"goal": obj.get("goal"), "reason": str(e)}
                 save(st)
                 note("out-of-reach", objective=oid[:16], goal=obj.get("goal"), why=str(e))
+                break
+            except SearchEmpty as e:
+                # Retryable, so it is not written to `unreachable`: the next
+                # sweep starts the randomised search somewhere else.
+                st["stalled"][oid] = {"goal": obj.get("goal"), "reason": str(e)}
+                save(st)
+                note("search-empty", objective=oid[:16], goal=obj.get("goal"), why=str(e))
                 break
             except Exception as e:
                 note("solve-failed", objective=oid[:16], err=str(e)[:200])
