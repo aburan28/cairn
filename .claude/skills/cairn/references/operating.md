@@ -66,14 +66,15 @@ the network refuses a record naming one without a valid signature from it — so
 an identity used once cannot be stolen. A nickname stays unauthenticated, which
 is what keeps older logs working.
 
-`cairn-mcp --identity <file>` does the same for an agent. Worth knowing
+`cairn mcp --identity <file>` (or `cairn run --mcp-identity <file>`) does the
+same for an agent. Worth knowing
 before you invite strangers: nothing yet lets an *objective* require key-shaped
 submitters, so a network with real value should say so in its statements.
 
 ## Serving to strangers
 
 ```sh
-cairn-serve --log LOG --root . --listen 127.0.0.1:8787 --queue ./queue
+cairn --log LOG --root . serve --listen 127.0.0.1:8787 --queue ./queue
 cairn drain --queue ./queue --log LOG --root .   # admit what arrived
 ```
 

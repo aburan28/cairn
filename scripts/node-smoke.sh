@@ -14,18 +14,17 @@
 # queue path right in each; a typo produced a server queueing into a directory
 # no daemon was watching, and nothing anywhere reported it.
 #
-# All three entry points are exercised, because each builds the same
-# `daemon::Config` and a mistake in one command's wiring is invisible to the
-# others. `cairn run` additionally owns stdio for MCP.
+# All three entry points -- `cairn p2p --serve`, `cairn serve --p2p-listen`
+# and `cairn run` -- are exercised, because each builds the same
+# `daemon::Config` and a mistake in one subcommand's wiring is invisible to
+# the others. `cairn run` additionally owns stdio for MCP.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/cairn}"
-P2P="${P2P_BIN:-./target/release/cairn-p2p}"
-SERVE="${SERVE_BIN:-./target/release/cairn-serve}"
 
-if [ ! -x "$RUST" ] || [ ! -x "$P2P" ] || [ ! -x "$SERVE" ]; then
-  echo "building release binaries..." >&2
+if [ ! -x "$RUST" ]; then
+  echo "building release binary..." >&2
   cargo build --release
 fi
 
@@ -132,7 +131,7 @@ PY
 }
 
 # --------------------------------------------------------------------------
-# One process, entered through cairn-p2p
+# One process, entered through `cairn p2p --serve`
 # --------------------------------------------------------------------------
 
 A="$WORK/a"; mkdir -p "$A"
@@ -145,8 +144,9 @@ OID=$("$RUST" --log "$LOG" --root . post examples/capset_progressive/objective.j
   | head -1 | awk '{print $2}')
 echo "  $OID"
 
-"$P2P" --identity "$A/id.json" --root-key "$A/rk.json" --checkpoint "$A/cp.json" \
-  --listen "127.0.0.1:$P2P_PORT" --log "$LOG" --root . \
+"$RUST" --log "$LOG" --root . p2p \
+  --identity "$A/id.json" --root-key "$A/rk.json" --checkpoint "$A/cp.json" \
+  --listen "127.0.0.1:$P2P_PORT" \
   --queue "$A/queue" --serve "127.0.0.1:$HTTP" >"$A/node.log" 2>&1 &
 NODE_PID=$!
 await_port "$HTTP" || { cat "$A/node.log" >&2; fail "the node never bound its HTTP port"; }
@@ -279,12 +279,12 @@ wait "$NODE_PID" 2>/dev/null || true
 NODE_PID=""
 
 # --------------------------------------------------------------------------
-# The same node, entered through cairn-serve
+# The same node, entered through `cairn serve --p2p-listen`
 # --------------------------------------------------------------------------
 
-rule "cairn-serve --p2p-listen is the same daemon, not a second one"
+rule "cairn serve --p2p-listen is the same daemon, not a second one"
 B="$WORK/b"; mkdir -p "$B"
-"$SERVE" --log "$B/log.jsonl" --root . --listen "127.0.0.1:$((HTTP + 1))" \
+"$RUST" --log "$B/log.jsonl" --root . serve --listen "127.0.0.1:$((HTTP + 1))" \
   --p2p-listen "127.0.0.1:$((P2P_PORT + 1))" \
   --identity "$B/id.json" --root-key "$B/rk.json" --checkpoint "$B/cp.json" \
   --queue "$B/queue" >"$B/node.log" 2>&1 &
@@ -301,11 +301,11 @@ NODE_PID=""
 rule "the publisher refuses node flags rather than ignoring them"
 # Silently dropping these is how somebody ends up with a process that took no
 # lock, dialled nobody and drained nothing while looking like it had started.
-if "$SERVE" --log "$B/log.jsonl" --root . --identity "$B/id.json" >/dev/null 2>&1; then
+if "$RUST" --log "$B/log.jsonl" --root . serve --identity "$B/id.json" >/dev/null 2>&1; then
   fail "--identity without --p2p-listen was accepted"
 fi
 echo "  --identity without --p2p-listen -> refused"
-if "$SERVE" --log "$B/log.jsonl" --root . --p2p-listen 127.0.0.1:1 >/dev/null 2>&1; then
+if "$RUST" --log "$B/log.jsonl" --root . serve --p2p-listen 127.0.0.1:1 >/dev/null 2>&1; then
   fail "--p2p-listen without --identity was accepted"
 fi
 echo "  --p2p-listen without --identity -> refused"

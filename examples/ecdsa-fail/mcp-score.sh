@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke the existing cairn-mcp tools against the ecdsa-fail MVP objective.
+# Smoke the existing `cairn mcp` tools against the ecdsa-fail MVP objective.
 # No new MCP tools — documents the natural wiring from docs/agents.md.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -9,10 +9,8 @@ rm -f "$LOG"
 OUT=$(mktemp /tmp/pw-ecdsa-mcp-out-XXXXXX.jsonl)
 trap 'rm -f "$OUT"' EXIT
 
-MCP="${CAIRN_MCP_BIN:-./target/release/cairn-mcp}"
 PW="${CAIRN_BIN:-./target/release/cairn}"
 [ -x "$PW" ] || cargo build --release
-[ -x "$MCP" ] || cargo build --release --bin cairn-mcp
 
 OID=$("$PW" --log "$LOG" --root . post examples/ecdsa-fail/objective.json | head -1 | awk '{print $2}')
 echo "objective $OID" >&2
@@ -24,7 +22,7 @@ ARTIFACT=$(python3 -c 'import json; print(json.dumps(json.load(open("examples/ec
   printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
   printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"score_candidate\",\"arguments\":{\"objective_id\":\"$OID\",\"artifact\":$ARTIFACT}}}"
   printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_objectives","arguments":{}}}'
-} | "$MCP" --log "$LOG" --root . >"$OUT" 2>/dev/null
+} | "$PW" --log "$LOG" --root . mcp >"$OUT" 2>/dev/null
 
 python3 - "$OUT" "$OID" <<'PY'
 import json, sys

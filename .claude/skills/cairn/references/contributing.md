@@ -47,7 +47,7 @@ To get one, the operator generates an identity and points the server at it:
 
 ```sh
 cairn identity --out alice.json
-cairn-mcp --identity /abs/path/alice.json --log ... --root ...
+cairn --log ... --root ... mcp --identity /abs/path/alice.json
 ```
 
 The server then signs every submission and the key's name replaces the
@@ -100,7 +100,7 @@ real diversity rather than nominal.
 
 ## Working against someone else's node
 
-If the operator runs `cairn-serve`, you need no MCP server and no shared
+If the operator runs `cairn serve` (or `cairn run`), you need no MCP server and no shared
 filesystem:
 
 ```sh

@@ -1,16 +1,17 @@
 # Serving a log to strangers
 
 Everything else in this repository assumes you already have the log. The CLI
-opens a file, `cairn-mcp` opens a file, and the p2p daemon reconciles with
+opens a file, `cairn mcp` opens a file, and the p2p daemon reconciles with
 peers who are already running nodes. None of that helps somebody who has only
 heard the project exists — and *"anyone can independently re-derive every
 settled result from the log alone"* is worth nothing to a person with no way to
 obtain the log.
 
-`cairn-serve` is that way.
+`cairn serve` is that way (once a separate `cairn-serve` binary; now a
+subcommand of the one `cairn` binary).
 
 ```sh
-cairn-serve --log cairn.jsonl --root . --listen 0.0.0.0:8080
+cairn --log cairn.jsonl --root . serve --listen 0.0.0.0:8080
 ```
 
 Read-only. Add `--queue ./queue` to accept submissions, and `--checkpoint
@@ -77,14 +78,14 @@ the operator's own node admits it — the daemon each round if it is running, or
 the CLI if it is not:
 
 ```sh
-cairn-p2p … --queue ./queue          # drains every round, holding the lock it has
+cairn p2p … --queue ./queue          # drains every round, holding the lock it has
 cairn drain --queue ./queue          # or --dry-run to look first
 ```
 
 **Both, not either, and that took a while to be true.** A `Ledger` is
 single-writer by enforcement, so `cairn drain` wants the write lock
-`cairn-p2p` holds: for as long as the daemon was the only thing that could
-run alongside `cairn-serve`, a node that was *online* could not accept a
+`cairn p2p` holds: for as long as the daemon was the only thing that could
+run alongside `cairn serve`, a node that was *online* could not accept a
 submission at all. For a network whose purpose is accepting submissions that is
 not a small gap. The daemon is the operator's node and already holds the lock,
 so it drains; the rules live in `serve::drain_into` and both callers use that

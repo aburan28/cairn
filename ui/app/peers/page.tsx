@@ -16,8 +16,9 @@ import { type CheckpointAnswer, readCheckpoint } from "@/lib/checkpoint";
  * The address book this node has been handed.
  *
  * Named "peers" and not "connected peers", because the second thing is not
- * available: live sessions live in `cairn-p2p`, which serves no HTTP, and
- * `cairn-serve` only reads a log file. The page says so rather than letting
+ * available: live sessions live in the p2p service, which publishes nothing
+ * over HTTP, and the HTTP server (`cairn serve`, or the `--serve` thread of
+ * `cairn p2p` / `cairn run`) only reads a log file. The page says so rather than letting
  * a reader assume a list of addresses is a list of connections.
  */
 export default function Page() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Point an MCP client at this checkout's cairn-mcp.
+# Point an MCP client at this checkout's `cairn mcp`.
 #
 #   ./scripts/mcp-config.sh                      # Claude Code -> .mcp.json
 #   ./scripts/mcp-config.sh --client opencode    # -> opencode.json
@@ -69,17 +69,21 @@ OUT="${OUT:-$DEFAULT_OUT}"
 case "$LOG" in /*) ;; *) LOG="$REPO/$LOG" ;; esac
 # The staged copy `make build` leaves in bin/, not cargo's target/: the stanza
 # outlives any one build, and bin/ is the path that is promised to stay put.
-MCP_BIN="${MCP_BIN:-$REPO/bin/cairn-mcp}"
+#
+# The command is the one `cairn` binary; the server is its `mcp` subcommand,
+# and the stanza's args carry the global `--log`/`--root` before it and the
+# subcommand's own `--identity` after it.
+CAIRN_BIN="${CAIRN_BIN:-$REPO/bin/cairn}"
 
 say() { printf '  %s\n' "$1"; }
 
-if [ ! -x "$MCP_BIN" ]; then
-  say "note: $MCP_BIN is not built yet -- 'make build' before starting a client"
+if [ ! -x "$CAIRN_BIN" ]; then
+  say "note: $CAIRN_BIN is not built yet -- 'make build' before starting a client"
 fi
 
 # An identity file that exists but is not a cairn identity is worse than no
 # identity at all: the stanza wires up, the client launches the server, and
-# cairn-mcp exits 2 before the MCP handshake -- which every client reports as
+# `cairn mcp` exits 2 before the MCP handshake -- which every client reports as
 # a bare connection failure with no mention of a key. The default filename is
 # one a p2p node key also answers to, and that key is the wrong shape by three
 # orders of magnitude. Check for what --identity actually takes, not for a
@@ -112,12 +116,12 @@ if any(c not in "0123456789abcdefABCDEF" for c in secret):
 fi
 
 if [ "$PRINT" = "1" ]; then
-  MCP_BIN="$MCP_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
+  CAIRN_BIN="$CAIRN_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
 import json, os
 b, log, repo, client, identity = (
-    os.environ[k] for k in ("MCP_BIN", "LOG", "REPO", "CLIENT", "IDENTITY")
+    os.environ[k] for k in ("CAIRN_BIN", "LOG", "REPO", "CLIENT", "IDENTITY")
 )
-args = ["--log", log, "--root", repo]
+args = ["--log", log, "--root", repo, "mcp"]
 if os.path.exists(identity):
     args += ["--identity", identity]
 if client == "claude":
@@ -145,24 +149,24 @@ if [ "$CLIENT" = "codex" ]; then
     exit 0
   fi
   [ -f "$OUT" ] && cp "$OUT" "$OUT.bak" && say "backed up -> $OUT.bak"
-  ARGS_TOML="\"--log\", \"$LOG\", \"--root\", \"$REPO\""
+  ARGS_TOML="\"--log\", \"$LOG\", \"--root\", \"$REPO\", \"mcp\""
   [ -f "$IDENTITY" ] && ARGS_TOML="$ARGS_TOML, \"--identity\", \"$IDENTITY\""
   {
     printf '\n# cairn -- written by scripts/mcp-config.sh\n'
     printf '[mcp_servers.cairn]\n'
-    printf 'command = "%s"\n' "$MCP_BIN"
+    printf 'command = "%s"\n' "$CAIRN_BIN"
     printf 'args = [%s]\n' "$ARGS_TOML"
   } >>"$OUT"
   say "appended [mcp_servers.cairn] -> $OUT"
 else
   [ -f "$OUT" ] && cp "$OUT" "$OUT.bak" && say "backed up -> $OUT.bak"
-  MCP_BIN="$MCP_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" OUT="$OUT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
+  CAIRN_BIN="$CAIRN_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" OUT="$OUT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
 import json, os, sys
 
 b, log, repo, client, out, identity = (
-    os.environ[k] for k in ("MCP_BIN", "LOG", "REPO", "CLIENT", "OUT", "IDENTITY")
+    os.environ[k] for k in ("CAIRN_BIN", "LOG", "REPO", "CLIENT", "OUT", "IDENTITY")
 )
-args = ["--log", log, "--root", repo]
+args = ["--log", log, "--root", repo, "mcp"]
 if os.path.exists(identity):
     args += ["--identity", identity]
 

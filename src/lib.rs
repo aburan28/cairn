@@ -25,6 +25,7 @@ pub mod canary;
 pub mod canonical;
 pub mod challenge;
 pub mod checkpoint;
+pub mod cli;
 pub mod corpus;
 pub mod crypto;
 pub mod daemon;
@@ -61,8 +62,6 @@ pub use frontier::{FrontierEntry, Ratchet, RatchetError};
 pub use gossip::{ingest, Candidate, Population};
 pub use incentive::{design::Report as IncentiveReport, NodeParams};
 pub use ledger::{Entry, Ledger, LedgerError};
-#[doc(hidden)]
-pub use mcp::standalone as mcp_standalone;
 pub use node::{Node, Outcome, RuleViolation};
 pub use partition::{assign, assignment_for, beacon, Assignment};
 pub use records::{commitment_hash, Claim, Commitment, Objective, RecordError};

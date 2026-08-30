@@ -384,7 +384,7 @@ behaviour ships and is tested, not that TLC has checked it.
 
 ### Added in the launch pass
 
-- [x] **A remote surface** (`src/serve.rs`, `cairn-serve`). `GET /log`
+- [x] **A remote surface** (`src/serve.rs`, `cairn serve`). `GET /log`
       returns the log byte for byte, with `/objectives`, `/objective/{id}`,
       `/frontier/{id}`, `/checkpoint` and `/health` as conveniences over it.
       This is what makes "anyone can re-derive every settled result from the
@@ -440,7 +440,7 @@ downstream is unbacked.
       submission removed, which is what an agent iterating actually wants; it
       needs no identity, because scoring writes nothing. Exit code 2 when
       nothing passed, so a script can tell "not ready yet" from a crash.
-- [x] Objective discovery API and a work queue. `cairn-serve` publishes
+- [x] Objective discovery API and a work queue. `cairn serve` publishes
       the log and the open objectives; `POST /submit` queues proposals that
       `cairn drain` admits through the same rules engine. See
       [serving.md](serving.md).
@@ -792,7 +792,7 @@ downstream is unbacked.
       firewall that blocks the transport by address or by DPI fingerprint — is
       answered separately and earlier by the pluggable proxy below, since
       reaching a peer at all is prior to being included by one.
-- [x] **Pluggable outbound transport** (`src/p2p/proxy.rs`, `cairn-p2p
+- [x] **Pluggable outbound transport** (`src/p2p/proxy.rs`, `cairn p2p
       --proxy socks5://…`). A node's very first outbound packet is a fixed
       261,216-byte cleartext McEliece hello — about the most distinctive DPI
       signature a protocol can have — sent to a fixed peer address, so a

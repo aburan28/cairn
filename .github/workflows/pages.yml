@@ -77,7 +77,7 @@ jobs:
       - run: npx tsc --noEmit
         working-directory: ui
 
-      # The snapshot check below builds `cairn-serve`, so this job needs a Rust
+      # The snapshot check below builds `cairn` (for `cairn serve`), so this job needs a Rust
       # toolchain and wants the same cache the other workflows use. Without it
       # every deploy pays a full cold release build to re-derive a 4 KB file.
       - uses: dtolnay/rust-toolchain@stable
@@ -89,7 +89,7 @@ jobs:
       - name: the committed snapshot matches the settled log
         run: |
           set -euo pipefail
-          cargo build --release --bin cairn-serve
+          cargo build --release --bin cairn
           cp ui/lib/snapshot.json /tmp/committed.json
           ./scripts/site-snapshot.sh
           diff -u /tmp/committed.json ui/lib/snapshot.json || {

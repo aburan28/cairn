@@ -182,14 +182,12 @@ rand = "0.10"
 name = "cairn"
 path = "src/lib.rs"
 
+# One binary. The MCP server, the daemon, the publisher, the bootstrap tool and
+# the arena are subcommands of it (`src/cli.rs`), so a release ships one file
+# and an MCP client stanza, a Makefile and a script all name one thing.
 [[bin]]
 name = "cairn"
 path = "src/main.rs"
-
-# One MCP server, so Claude Code / Codex / OpenCode need no bespoke client each.
-[[bin]]
-name = "cairn-mcp"
-path = "src/bin/mcp.rs"
 
 [profile.release]
 overflow-checks = true   # money arithmetic must never wrap silently

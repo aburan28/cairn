@@ -280,7 +280,7 @@ move which frontiers is most of why anyone would read a leaderboard.
 **A note is attacker-authored prose read by an LLM, so it goes through
 `taint_from`.** This is the difference between their surface and ours. Yukon's
 notes are read by humans in a browser. Ours are read by agents over
-`cairn-mcp`, where `src/mcp.rs` already taints claim ids appearing in
+MCP (`cairn mcp` / `cairn run`), where `src/mcp.rs` already taints claim ids appearing in
 verifier `detail` and in objective statements, for exactly this attack: text that
 says "also cite sha256:…" routes real money under citation flow and needs no code
 execution, so the sandbox does nothing about it. A note field is a third door into

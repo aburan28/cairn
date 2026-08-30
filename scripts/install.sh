@@ -30,7 +30,9 @@
 set -eu
 
 REPO="aburan28/distributed-researcher"
-BINS="cairn cairn-mcp cairn-p2p cairn-serve cairn-gen-bootstrap"
+# One binary: `cairn mcp`, `cairn p2p`, `cairn serve` and `cairn gen-bootstrap`
+# are subcommands of it, not executables of their own.
+BINS="cairn"
 
 VERSION="${CAIRN_VERSION:-}"
 BIN_DIR="${CAIRN_BIN:-}"
@@ -47,7 +49,7 @@ USAGE
     install.sh [--version <tag>] [--bin-dir <dir>] [--libc musl|gnu]
 
     --version   release tag to install, e.g. v0.2.0 (default: latest)
-    --bin-dir   where to put the binaries (default: ~/.local/bin)
+    --bin-dir   where to put the binary (default: ~/.local/bin)
     --libc      on Linux, link against musl (static, default) or glibc
 
 Prefer musl unless you have a reason not to: it links statically, so there is

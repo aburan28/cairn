@@ -2,8 +2,9 @@
 //!
 //! # Why this is a library module and not a binary
 //!
-//! It used to be the body of `cairn-p2p`, and publishing the log was a
-//! *second* process running `cairn-serve` against the same file. That
+//! It used to be the body of `cairn-p2p` (a separate binary then; the
+//! `cairn p2p` subcommand now), and publishing the log was a *second* process
+//! running `cairn-serve` (now `cairn serve`) against the same file. That
 //! topology works — [`Ledger::open`] takes no lock, so a reader is safe beside
 //! the daemon's exclusive writer — but it makes an operator run two units, keep
 //! two sets of paths in agreement, and discover by reading `docs/serving.md`
@@ -526,7 +527,7 @@ pub fn run(config: Config) -> Result<(), String> {
             // screen before the first dial rather than absent from all of them.
             log::warn!(
                 "bootstrap {}: still carries the PLACEHOLDER key \
-                 `cairn-gen-bootstrap` generated, which authenticates nobody. \
+                 `cairn gen-bootstrap` generated, which authenticates nobody. \
                  Dials to {} will fail their handshake and report a plain transport \
                  error. Replace \"public\" in that file with the seed's real key -- \
                  the seed operator can print theirs from the \"public\" field of \
@@ -582,7 +583,7 @@ pub fn run(config: Config) -> Result<(), String> {
     // Never `interactive()`, even with MCP on: this registry is the one the
     // shared node settles, admits and audits with, and those must honour the
     // objective's own declared bound or the same claim settles differently on
-    // `cairn run` than on `cairn-p2p` over the same log. The MCP server keeps
+    // `cairn run` than on `cairn p2p` over the same log. The MCP server keeps
     // its client responsive by applying the ceiling to its own throwaway clone
     // in `score_candidate`, which records nothing.
     let node = Node::new(ledger, &config.root);
@@ -752,7 +753,7 @@ pub fn run(config: Config) -> Result<(), String> {
         //
         // The daemon *is* the operator's node and already holds the lock, so it
         // drains. The rules come from `serve::drain_into`, one copy shared with
-        // the CLI: a second copy of admission in a second binary is the same
+        // the CLI: a second copy of admission behind a second subcommand is the same
         // mistake as a second copy in a request handler, which is the argument
         // `docs/serving.md` already makes.
         //

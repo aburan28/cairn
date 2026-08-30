@@ -93,7 +93,7 @@ jobs:
           #
           # No Windows target, and that is a decision rather than an oversight.
           # `src/verifiers`, `src/blobs.rs`, `src/store/{quota,atrest}.rs` and
-          # both binaries reach for `std::os::unix` and the seatbelt/bubblewrap
+          # the binary reach for `std::os::unix` and the seatbelt/bubblewrap
           # sandbox; shipping a Windows build would mean porting the sandbox,
           # and a node that verifies objective-authored code *without* one is
           # the configuration `CAIRN_REQUIRE_SANDBOX` exists to refuse.
@@ -151,21 +151,22 @@ jobs:
 
       - run: cargo build --release --locked --features ui --target ${{ matrix.target }}
 
-      # All five binaries ship together: a node operator needs the CLI, the MCP
-      # server, the p2p daemon, the serve daemon and the bootstrap generator to
-      # be the same commit, and separate tarballs invite mixing versions.
+      # One binary. The CLI, the MCP server, the p2p daemon, the HTTP publisher
+      # and the bootstrap generator are subcommands of it, so a node operator
+      # cannot mix versions between them -- which is what shipping five separate
+      # executables used to invite.
       #
-      # `gen-bootstrap` used to be left out, which made the shipped README
-      # wrong — it tells an operator to run it, and a release did not contain
-      # it. The loop below fails on a missing binary rather than quietly
-      # packaging four of five, because that is exactly how it went unnoticed.
+      # The loop stays, with one entry: it fails on a missing binary rather
+      # than quietly packaging an empty tarball. When there were five,
+      # `gen-bootstrap` was left out for a while and the shipped README told
+      # operators to run something the release did not contain.
       - name: package
         shell: bash
         run: |
           set -euo pipefail
           NAME="cairn-${VERSION}-${{ matrix.target }}"
           DIR="target/${{ matrix.target }}/release"
-          BINS="cairn cairn-mcp cairn-p2p cairn-serve cairn-gen-bootstrap"
+          BINS="cairn"
           for bin in $BINS; do
             [ -x "$DIR/$bin" ] || { echo "release is missing $bin" >&2; exit 1; }
           done
@@ -191,25 +192,27 @@ jobs:
       # here cross-compiles today, so this always runs, and the guard is here
       # so that adding a cross target later fails loudly rather than silently
       # skipping its only verification.
-      - name: the unpacked binaries run
+      - name: the unpacked binary runs
         shell: bash
         run: |
           set -euo pipefail
           NAME="cairn-${VERSION}-${{ matrix.target }}"
           mkdir -p /tmp/unpacked && tar -C /tmp/unpacked -xzf "$NAME.tar.gz"
-          for bin in cairn cairn-mcp cairn-serve cairn-p2p cairn-gen-bootstrap; do
-            "/tmp/unpacked/$bin" --help >/dev/null 2>&1 \
-              || { echo "$bin --help failed from the tarball" >&2; exit 1; }
+          /tmp/unpacked/cairn --help >/dev/null 2>&1 \
+            || { echo "cairn --help failed from the tarball" >&2; exit 1; }
+          for SUB in mcp p2p serve gen-bootstrap arena run; do
+            /tmp/unpacked/cairn $SUB --help >/dev/null 2>&1 \
+              || { echo "cairn $SUB --help failed from the tarball" >&2; exit 1; }
           done
           # And one real end-to-end check, not just `--help`: the published log
           # ships in the repository, so a release can verify it the way a
           # downloader would. This is the strongest single statement a release
           # artifact can make about itself.
           /tmp/unpacked/cairn --log launch/cairn.jsonl --root . audit
-          echo "unpacked binaries run and audit the published log"
+          echo "unpacked binary runs and audits the published log"
 
           # The operator-facing path is `cairn run`, not a hand-assembled
-          # cairn-p2p invocation. Start the unpacked release against an empty
+          # `cairn p2p` invocation. Start the unpacked release against an empty
           # temporary store, ask the real HTTP listener for the embedded reader,
           # and drive its stdio MCP transport. This catches packaging mistakes
           # a compile alone cannot: a missing/mis-mounted UI or a launcher that
@@ -287,9 +290,11 @@ jobs:
             version or a directory with `--version` / `--bin-dir`; on Linux it
             takes the static musl build unless you pass `--libc gnu`.
 
-            Binaries for `${{ github.ref_name }}`. Five to a tarball: `cairn`
-            (CLI), `cairn-mcp`, `cairn-p2p`, `cairn-serve`,
-            `cairn-gen-bootstrap`.
+            One binary for `${{ github.ref_name }}`: `cairn`. The CLI, the MCP
+            server (`cairn mcp`), the p2p daemon (`cairn p2p`), the HTTP
+            publisher (`cairn serve`), the bootstrap generator
+            (`cairn gen-bootstrap`) and the combined node (`cairn run`) are
+            all subcommands of it.
 
             | platform | target |
             |---|---|

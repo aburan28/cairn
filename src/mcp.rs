@@ -118,19 +118,23 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Bytes of commit–reveal nonce. Never leaves this process.
 const NONCE_BYTES: usize = 32;
 
-/// Run the standalone `cairn-mcp` process.
+/// Run `cairn mcp`: the standalone stdio server, owning its own ledger.
 ///
-/// This owns its ledger. [`crate::daemon`] uses the same protocol engine with
-/// the daemon's already-open node, which is how `cairn run` remains one writer.
-pub fn standalone() {
+/// [`crate::daemon`] uses the same protocol engine with the daemon's
+/// already-open node, which is how `cairn run` remains one writer. `args` are
+/// the tokens after the subcommand name; `globals` are the `--log`, `--root`
+/// and `--key-file` the `cairn` parser resolved before it, used as defaults
+/// and overridable here so a stanza written for the old `cairn-mcp` binary
+/// still reads the same.
+pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
     // Before anything that could log. Stderr only -- see `logging` -- which
     // matters most here in the MCP server, where stdout is the protocol.
     crate::logging::init();
-    let mut log = PathBuf::from("cairn.jsonl");
-    let mut root = PathBuf::from(".");
+    let mut log = globals.log;
+    let mut root = globals.root;
     let mut identity_path: Option<PathBuf> = None;
-    let mut key_file: Option<PathBuf> = None;
-    let mut args = std::env::args().skip(1);
+    let mut key_file: Option<PathBuf> = globals.key_file;
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--log" => match args.next() {
@@ -151,16 +155,18 @@ pub fn standalone() {
             },
             "--help" | "-h" => {
                 eprintln!(
-                    "cairn-mcp — MCP server over stdio\n\n\
-                     USAGE\n    cairn-mcp [--log <path>] [--root <dir>]\n\n\
+                    "cairn mcp — MCP server over stdio, on a log of its own\n\n\
+                     USAGE\n    cairn [--log <path>] [--root <dir>] mcp [--identity <file>]\n\n\
                      --log       append-only ledger (default cairn.jsonl)\n\
                      --root      bundle root that pinned verifier paths resolve against\n\
                      --identity  sign submissions with this key; its public half\n\
                                  becomes the submitter, and nobody else can claim it\n\
                      --key-file  at-rest key, if the ledger is sealed (default: the\n\
-                                 CLI's own, so a sealed log opens with no flag)\n"
+                                 CLI's own, so a sealed log opens with no flag)\n\n\
+                     For an agent whose work should reach peers live, configure the\n\
+                     client to launch `cairn run` instead: same protocol, one node.\n"
                 );
-                return;
+                return 0;
             }
             other => fail(&format!("unknown argument {other:?}")),
         }
@@ -205,12 +211,13 @@ pub fn standalone() {
     );
 
     eprintln!(
-        "cairn-mcp {SERVER_VERSION}: ledger {}, root {}",
+        "cairn mcp {SERVER_VERSION}: ledger {}, root {}",
         log.display(),
         root.display()
     );
     report_identity(&server, "--identity");
     serve_stdio(server);
+    0
 }
 
 /// Start MCP on a daemon's stdio, sharing the daemon's one rules engine and
@@ -225,7 +232,7 @@ pub(crate) fn start_shared_stdio(
     let cipher = pending_cipher(log, key_path)?;
     let server = Server::new_shared(state, identity, cipher);
     eprintln!(
-        "cairn-mcp {SERVER_VERSION}: sharing daemon ledger {}, stdio ready",
+        "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, stdio ready",
         log.display()
     );
     report_identity(&server, "--mcp-identity");
@@ -338,7 +345,7 @@ fn load_identity(path: &std::path::Path) -> Result<Identity, String> {
 }
 
 fn fail(message: &str) -> ! {
-    eprintln!("cairn-mcp: {message}");
+    eprintln!("cairn mcp: {message}");
     std::process::exit(2);
 }
 
@@ -381,7 +388,7 @@ impl PendingStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => {
                 eprintln!(
-                    "cairn-mcp: cannot read pending commitments {}: {error}; \
+                    "cairn mcp: cannot read pending commitments {}: {error}; \
                      any open commitment is stranded until the file is restored",
                     path.display()
                 );
@@ -402,7 +409,7 @@ impl PendingStore {
                         Ok(text) => text,
                         Err(error) => {
                             eprintln!(
-                                "cairn-mcp: cannot decrypt pending commitments {}: {error}; \
+                                "cairn mcp: cannot decrypt pending commitments {}: {error}; \
                                  any open commitment is stranded until the key is restored",
                                 path.display()
                             );
@@ -416,7 +423,7 @@ impl PendingStore {
                     Ok(Json::Array(items)) => items.iter().filter_map(Pending::from_json).collect(),
                     Ok(_) | Err(_) => {
                         eprintln!(
-                            "cairn-mcp: pending commitments file {} is corrupt; \
+                            "cairn mcp: pending commitments file {} is corrupt; \
                          any open commitment is stranded until the file is restored",
                             path.display()
                         );
@@ -474,7 +481,7 @@ impl PendingStore {
         let text = match serde_json::to_string_pretty(&Json::Array(items)) {
             Ok(text) => text,
             Err(error) => {
-                eprintln!("cairn-mcp: cannot serialize pending commitments: {error}");
+                eprintln!("cairn mcp: cannot serialize pending commitments: {error}");
                 return;
             }
         };
@@ -482,7 +489,7 @@ impl PendingStore {
             Some(cipher) => match cipher.seal_line(0, text.as_bytes(), &mut OsRng) {
                 Ok(line) => line,
                 Err(error) => {
-                    eprintln!("cairn-mcp: cannot encrypt pending commitments: {error}");
+                    eprintln!("cairn mcp: cannot encrypt pending commitments: {error}");
                     return;
                 }
             },
@@ -490,7 +497,7 @@ impl PendingStore {
         };
         if let Err(error) = write_private(&self.path, &stored) {
             eprintln!(
-                "cairn-mcp: cannot save pending commitments to {}: {error}",
+                "cairn mcp: cannot save pending commitments to {}: {error}",
                 self.path.display()
             );
         }
@@ -718,11 +725,11 @@ impl Server {
     /// retries.
     fn drain_due_settlements(&mut self) {
         if let Err(error) = self.node.write().ledger_mut().reload_if_changed() {
-            eprintln!("cairn-mcp: cannot re-read the log: {error}");
+            eprintln!("cairn mcp: cannot re-read the log: {error}");
         }
         let ts = timestamp();
         if let Err(violation) = self.node.write().settle_at(&ts) {
-            eprintln!("cairn-mcp: cannot settle due epochs: {violation}");
+            eprintln!("cairn mcp: cannot settle due epochs: {violation}");
         }
     }
 

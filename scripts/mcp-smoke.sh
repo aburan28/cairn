@@ -20,11 +20,12 @@ set -euo pipefail
 export CAIRN_KEY=/nonexistent/cairn-forces-plaintext
 cd "$(dirname "$0")/.."
 
+# One binary: the MCP server is `cairn mcp`, so the CLI that posts the
+# objective and the server that scores against it are the same executable.
 RUST="${RUST_BIN:-./target/release/cairn}"
-MCP="${MCP_BIN:-./target/release/cairn-mcp}"
 
-if [ ! -x "$RUST" ] || [ ! -x "$MCP" ]; then
-  echo "building release binaries..." >&2
+if [ ! -x "$RUST" ]; then
+  echo "building release binary..." >&2
   cargo build --release
 fi
 
@@ -65,7 +66,7 @@ ARTIFACT=$(python3 -c 'import json;print(json.dumps(json.load(open("examples/cap
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
   printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"score_candidate","arguments":{"objective_id":"%s","artifact":%s}}}\n' \
     "$OID" "$ARTIFACT"
-} | "$MCP" --log "$LOG" --root . > "$OUT" 2>"$ERR"
+} | "$RUST" --log "$LOG" --root . mcp > "$OUT" 2>"$ERR"
 check_stderr
 
 python3 - "$OUT" <<'PY'
@@ -121,7 +122,7 @@ kinds_in_log() { grep -c "\"kind\": *\"$1\"" "$LOG" || true; }
 
 # --- the server opens a sealed ledger ------------------------------------
 #
-# `cairn-mcp` used to open every log with the plaintext codec, so on any machine
+# The MCP server used to open every log with the plaintext codec, so on any machine
 # that had run `cairn keygen` -- where the CLI seals everything it writes -- an
 # agent got "altered, reordered, or spliced" for its operator's own ledger.
 # Checked here rather than by running the whole script sealed: exporting a
@@ -140,7 +141,7 @@ if [ -f "$KEY_PATH" ]; then
   SEALED_OUT=$(printf '%s\n' \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
     '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_objectives","arguments":{}}}' \
-    | CAIRN_KEY="$KEY_PATH" "$MCP" --log "$SEALED" --root . 2>/dev/null)
+    | CAIRN_KEY="$KEY_PATH" "$RUST" --log "$SEALED" --root . mcp 2>/dev/null)
   # The id of the objective just posted -- `list_objectives` prints ids and
   # statements, not goals, so this asserts the server decoded the ledger rather
   # than that it printed some string or other.
@@ -203,7 +204,7 @@ echo "  posted hostile objective $HOID"
   printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"work_assignment","arguments":{"objective_id":"%s","node_id":"agent-a","partitions":4,"epoch":7}}}\n' "$HOID"
   printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"work_assignment","arguments":{"objective_id":"%s","node_id":"agent-b","partitions":4,"epoch":7}}}\n' "$HOID"
   printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"work_assignment","arguments":{"objective_id":"%s","node_id":"agent-a"}}}\n' "$HOID"
-} | "$MCP" --log "$HOSTILE_LOG" --root . > "$OUT" 2>"$ERR"
+} | "$RUST" --log "$HOSTILE_LOG" --root . mcp > "$OUT" 2>"$ERR"
 check_stderr
 
 python3 - "$OUT" "$PLANTED" <<'PY'
@@ -286,7 +287,7 @@ rule "submit_claim commits, then reveals an epoch later"
 
 call_tool() {
   printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}\n' \
-    "$1" "$2" | "$MCP" --log "$LOG" --root . 2>>"$ERR" \
+    "$1" "$2" | "$RUST" --log "$LOG" --root . mcp 2>>"$ERR" \
     | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["result"]["content"][0]["text"])'
 }
 

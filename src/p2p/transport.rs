@@ -51,7 +51,7 @@ pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// can open a TCP connection, before any authentication has happened. A public
 /// address is port-scanned within minutes of existing, and a scanner that
 /// connects and sends nothing is the cheapest possible way to hold the accept
-/// path — which, in `cairn-p2p`, holds the node mutex. A real peer has its
+/// path — which, in the daemon (`cairn p2p`), holds the node mutex. A real peer has its
 /// hello in flight before the connection completes, so this is generous for
 /// every honest case.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -512,7 +512,7 @@ mod tests {
     /// A stranger that connects and says nothing must not hold the accept path.
     ///
     /// This is what a public address costs: an EC2 instance is port-scanned
-    /// within minutes of getting one, and `cairn-p2p` runs `accept` with
+    /// within minutes of getting one, and the daemon (`cairn p2p`) runs `accept` with
     /// the node mutex held. An unbounded `read_exact` here is a seed that
     /// wedges on the first scan and never talks to anybody again.
     #[test]

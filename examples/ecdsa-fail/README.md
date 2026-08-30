@@ -40,14 +40,14 @@ Free local scoring without writing the log: use MCP (below) or the adapter:
 
 ## MCP (natural wiring — no new tools)
 
-Point `cairn-mcp` at a log that already has this objective posted:
+Point `cairn mcp` at a log that already has this objective posted:
 
 ```json
 {
   "mcpServers": {
     "cairn": {
-      "command": "/ABS/distributed-researcher/target/release/cairn-mcp",
-      "args": ["--log", "/tmp/pw-ecdsa.jsonl", "--root", "/ABS/distributed-researcher"]
+      "command": "/ABS/distributed-researcher/target/release/cairn",
+      "args": ["--log", "/tmp/pw-ecdsa.jsonl", "--root", "/ABS/distributed-researcher", "mcp"]
     }
   }
 }

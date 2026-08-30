@@ -102,7 +102,7 @@ Everything numbered 1–8 in the original list below has been built, plus the
 CI and packaging items. What follows the closed list is what genuinely
 remains.
 
-1. **A remote surface exists.** `cairn-serve` publishes `GET /log` byte
+1. **A remote surface exists.** `cairn serve` publishes `GET /log` byte
    for byte, plus `/objectives`, `/objective/{id}`, `/frontier/{id}` and
    `/checkpoint`; `POST /submit` queues into a spool the operator drains with
    `cairn drain`, so admission stays in the rules engine and the log keeps
@@ -265,7 +265,7 @@ languages the two are written in.
    order `N` — which rules out Pohlig-Hellman on a smooth-order curve — but
    not every weak-curve family. Deriving the curve from the seed too is the
    stronger construction and is not done.
-8. **Rate limiting.** `cairn-serve` caps concurrent connections and body
+8. **Rate limiting.** `cairn serve` caps concurrent connections and body
    size and nothing else. An operator exposing it to the open internet should
    put it behind something that does rate limiting, the same as any other
    small service.
@@ -276,11 +276,11 @@ Everything above is now either built or disclosed, so the launch is no longer
 blocked on plumbing. What it is blocked on is a choice, and it is item 1:
 
 - **Launch as a single operator** — you post objectives, run
-  `cairn-serve`, and contributors fetch the log, work, and submit through
+  `cairn serve`, and contributors fetch the log, work, and submit through
   the queue. This works end to end today.
 - **Launch as an open network** — viable now. Contributors make an identity
   (`cairn identity --out alice.json`) and pass `--identity` to the CLI or
-  to `cairn-mcp`; such a name cannot be forged or replayed. Post objectives
+  to `cairn mcp`; such a name cannot be forged or replayed. Post objectives
   with `require_signed_submitter: true` and nicknames are refused outright, so
   every claim on that bounty is attributable to a key nobody else holds. What
   still argues for care is escrow, not identity: rewards are notional, so what

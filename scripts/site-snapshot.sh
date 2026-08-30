@@ -19,18 +19,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SERVE="${SERVE_BIN:-./target/release/cairn-serve}"
+RUST="${RUST_BIN:-./target/release/cairn}"
 LOG="${SNAPSHOT_LOG:-launch/cairn.jsonl}"
 OUT="${SNAPSHOT_OUT:-ui/lib/snapshot.json}"
 PORT="${SNAPSHOT_PORT:-38111}"
 
-[ -x "$SERVE" ] || { echo "building..." >&2; cargo build --release; }
+[ -x "$RUST" ] || { echo "building..." >&2; cargo build --release; }
 
 # The published log is plaintext and must stay readable by anyone, so this must
 # not pick up an operator's at-rest key and hand back something sealed.
 export CAIRN_KEY=/nonexistent/cairn-site-snapshot
 
-"$SERVE" --log "$LOG" --root . --listen "127.0.0.1:$PORT" >/tmp/site-snapshot.log 2>&1 &
+"$RUST" --log "$LOG" --root . serve --listen "127.0.0.1:$PORT" >/tmp/site-snapshot.log 2>&1 &
 PID=$!
 trap 'kill "$PID" 2>/dev/null || true' EXIT
 

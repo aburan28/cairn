@@ -9,8 +9,9 @@
  * gone for months.
  *
  * Live session state is not available to this UI at all. It lives inside
- * `cairn-p2p`, which serves no HTTP, and `cairn-serve` only ever reads
- * a log file. Presenting this as "connected" would be inventing a fact the
+ * the p2p service, which publishes nothing over HTTP, and the HTTP server
+ * (`cairn serve`, or the `--serve` thread of `cairn p2p` / `cairn run`) only
+ * ever reads a log file. Presenting this as "connected" would be inventing a fact the
  * network never published.
  */
 

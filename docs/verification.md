@@ -362,11 +362,12 @@ beside it is readable — was somewhere in the middle of them. Keys are now said
 first and never elided; the rest is capped with a count of what was left out.
 The alarm was always the exit code and the total, not the list.
 
-**`--help` exiting 2.** `cairn-serve` and `cairn-p2p` shared one usage
+**`--help` exiting 2.** `cairn-serve` and `cairn-p2p` (then separate
+binaries, now the `cairn serve` and `cairn p2p` subcommands) shared one usage
 function between "you asked for help" and "you used me wrong", so asking a
 question correctly returned a failure. `cmd --help >/dev/null || fail` is how a
 packaging check or a container healthcheck asks whether a binary runs at all.
-All four binaries now answer 0 for `--help` and 2 for misuse, and CI pins it.
+Every subcommand now answers 0 for `--help` and 2 for misuse, and CI pins it.
 
 **The reference could not audit a node that synced.** The case an independent
 check exists for — no bundle, no authored objective, verifier code obtained by
@@ -374,7 +375,7 @@ hash — and the reference had no content-addressed fallback at all: it read the
 pin from the bundle path and stopped. So on every peer that learned an objective
 over the wire, the independent auditor reported *"was settled but can no longer
 be re-verified"* for claims that re-verify perfectly. Found by running two
-`cairn-p2p` daemons and auditing the one that synced, which nothing had ever
+`cairn p2p` daemons and auditing the one that synced, which nothing had ever
 done — the daemon is the largest surface in the repository and `--help` was all
 CI touched. `scripts/p2p-demo.sh` now runs both sides.
 

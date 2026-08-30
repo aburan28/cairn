@@ -179,7 +179,7 @@ const BLOB_STORE: &str = ".cairn/blobs";
 /// objective. Without this, auditing such a node reported *"was settled but can
 /// no longer be re-verified"* for claims that re-verify perfectly, which is the
 /// independent check failing on exactly the nodes that most need one. Found by
-/// running two `cairn-p2p` daemons and auditing the one that synced.
+/// running two `cairn p2p` daemons and auditing the one that synced.
 ///
 /// Containment does not apply to the store: its filenames are hashes, not
 /// paths, and the hash check below is what makes a fetched blob admissible.

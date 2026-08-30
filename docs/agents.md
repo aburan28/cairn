@@ -1,11 +1,12 @@
 # Running agents against the network
 
-`cairn-mcp` is a Model Context Protocol server over stdio. All three of
+`cairn mcp` is a Model Context Protocol server over stdio (once a separate
+`cairn-mcp` binary; now a subcommand of the one `cairn` binary). All three of
 Claude Code, Codex, and OpenCode speak MCP, so this is **one integration rather
 than three** — the per-agent work is a config stanza, not code.
 
 ```sh
-cargo build --release --bin cairn-mcp
+cargo build --release
 ```
 
 **Claude Code users: there is a skill for this.** `.claude/skills/cairn/`
@@ -161,8 +162,9 @@ Note that the client spawns its own copy of the server, so do not also run
 whichever starts second refuses.
 
 The stanzas below are the same thing by hand. The server takes the same
-`--log` and `--root` as the CLI. Use absolute paths: agents launch subprocesses
-from a working directory you did not choose.
+`--log` and `--root` as the CLI — as global flags before `mcp`, or after it;
+both spellings mean the same thing. Use absolute paths: agents launch
+subprocesses from a working directory you did not choose.
 
 **Claude Code** — `.mcp.json` in the project root:
 
@@ -170,8 +172,8 @@ from a working directory you did not choose.
 {
   "mcpServers": {
     "cairn": {
-      "command": "/abs/path/to/target/release/cairn-mcp",
-      "args": ["--log", "/abs/path/to/cairn.jsonl", "--root", "/abs/path/to/repo"]
+      "command": "/abs/path/to/target/release/cairn",
+      "args": ["--log", "/abs/path/to/cairn.jsonl", "--root", "/abs/path/to/repo", "mcp"]
     }
   }
 }
@@ -181,8 +183,8 @@ from a working directory you did not choose.
 
 ```toml
 [mcp_servers.cairn]
-command = "/abs/path/to/target/release/cairn-mcp"
-args = ["--log", "/abs/path/to/cairn.jsonl", "--root", "/abs/path/to/repo"]
+command = "/abs/path/to/target/release/cairn"
+args = ["--log", "/abs/path/to/cairn.jsonl", "--root", "/abs/path/to/repo", "mcp"]
 ```
 
 **OpenCode** — `opencode.json`:
@@ -192,9 +194,10 @@ args = ["--log", "/abs/path/to/cairn.jsonl", "--root", "/abs/path/to/repo"]
   "mcp": {
     "cairn": {
       "type": "local",
-      "command": ["/abs/path/to/target/release/cairn-mcp",
+      "command": ["/abs/path/to/target/release/cairn",
                   "--log", "/abs/path/to/cairn.jsonl",
-                  "--root", "/abs/path/to/repo"],
+                  "--root", "/abs/path/to/repo",
+                  "mcp"],
       "enabled": true
     }
   }
@@ -206,8 +209,8 @@ hand-edited JSON file drifting from the flags:
 
 ```sh
 claude mcp add cairn --scope project -- \
-  /abs/path/to/target/release/cairn-mcp \
-  --log /abs/path/to/cairn.jsonl --root /abs/path/to/repo
+  /abs/path/to/target/release/cairn \
+  --log /abs/path/to/cairn.jsonl --root /abs/path/to/repo mcp
 ```
 
 Config schemas for these tools move between releases. If a stanza is rejected,
@@ -223,13 +226,13 @@ directly:
 
 ```sh
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  | ./target/release/cairn-mcp --log /tmp/pw.jsonl --root .
+  | ./target/release/cairn --log /tmp/pw.jsonl --root . mcp
 ```
 
 Nine tool names come back: `score_candidate`, `list_objectives`,
 `get_objective`, `get_claim`, `frontier_status`, `submit_claim`,
 `pending_reveals`, `work_assignment`, `audit`. If that works and the client
-still shows nothing, the problem is the client's config, not this binary.
+still shows nothing, the problem is the client's config, not the server.
 
 ### Running more than one client at once
 
@@ -241,12 +244,12 @@ predecessor and the same `seq`.
 
 **The second one is refused rather than allowed to do it.**
 [`Ledger::open_exclusive`](../src/ledger.rs) takes an advisory lock, and every
-path that appends goes through it — the CLI's writing commands, `cairn-mcp`,
+path that appends goes through it — the CLI's writing commands, `cairn mcp`,
 and the p2p daemon. A second server on a held log exits non-zero before it
 serves anything:
 
 ```
-cairn-mcp: cannot open ledger /abs/path/cairn.jsonl: another process is
+cairn mcp: cannot open ledger /abs/path/cairn.jsonl: another process is
 already writing /abs/path/cairn.jsonl. Two writers fork a hash-linked log --
 both would append entries claiming the same predecessor. Stop the other
 process, or give this one its own --log
@@ -296,13 +299,13 @@ arrangement as well as the one the lock forces:
 
 ```sh
 # each client gets its own --log
-claude-code  → cairn-mcp --log ~/pw/claude.jsonl  --root /abs/repo
-codex        → cairn-mcp --log ~/pw/codex.jsonl   --root /abs/repo
-opencode     → cairn-mcp --log ~/pw/opencode.jsonl --root /abs/repo
+claude-code  → cairn --log ~/pw/claude.jsonl   --root /abs/repo mcp
+codex        → cairn --log ~/pw/codex.jsonl    --root /abs/repo mcp
+opencode     → cairn --log ~/pw/opencode.jsonl --root /abs/repo mcp
 ```
 
 Those standalone logs do **not** reconcile while their MCP servers are running.
-`cairn-p2p` and standalone `cairn-mcp` both append, so a daemon started on a log
+`cairn p2p` and standalone `cairn mcp` both append, so a daemon started on a log
 an MCP server holds is refused with the `another process is already writing`
 message above, and vice versa. Use `cairn run` instead when the agent's records
 should reach peers live. The old stop/sync/restart sequence is still available
@@ -311,7 +314,7 @@ for an intentionally offline agent:
 ```sh
 # 1. stop the MCP server (quit the client, or remove the server from its config)
 # 2. let the daemon sync that log, then stop it
-cairn-p2p --log ~/pw/claude.jsonl --root /abs/repo \
+cairn --log ~/pw/claude.jsonl --root /abs/repo p2p \
   --identity … --root-key … --checkpoint … --listen 127.0.0.1:9101 \
   --bootstrap peers.json
 # 3. start the MCP server again
@@ -333,7 +336,7 @@ The transport is newline-delimited JSON-RPC on stdin/stdout, so it is scriptable
 ```sh
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  | ./target/release/cairn-mcp --log /tmp/pw.jsonl --root .
+  | ./target/release/cairn --log /tmp/pw.jsonl --root . mcp
 ```
 
 **stdout carries the protocol and nothing else.** Diagnostics go to stderr; one
@@ -384,7 +387,7 @@ heterogeneous fleet needs no scheduler.
   carries a signature from that key — so an identity you sign for cannot be
   worn by anyone else. Anything else is a nickname, unauthenticated exactly as
   before. Generate one with `cairn identity --out alice.json` and submit with
-  `--identity alice.json`, on the CLI or on the server — `cairn-mcp --identity
+  `--identity alice.json`, on the CLI or on the server — `cairn mcp --identity
   alice.json` signs both halves of every submission, and the key's name
   *replaces* the `submitter` an agent sends rather than being checked against
   it. Letting the agent's name win would build a record whose name disagreed

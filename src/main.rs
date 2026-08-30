@@ -769,6 +769,28 @@ enum Command {
     Run {
         request: RunRequest,
     },
+    /// The standalone MCP server on a log of its own (was `cairn-mcp`).
+    /// Everything after the name is the subcommand's to parse; the globals
+    /// before it become its defaults.
+    Mcp {
+        args: Vec<String>,
+    },
+    /// The daemon alone: p2p sync and optionally HTTP (was `cairn-p2p`).
+    P2p {
+        args: Vec<String>,
+    },
+    /// Publish a log over HTTP, optionally as the node too (was `cairn-serve`).
+    Serve {
+        args: Vec<String>,
+    },
+    /// Write a placeholder bootstrap file (was `cairn-gen-bootstrap`).
+    GenBootstrap {
+        args: Vec<String>,
+    },
+    /// Play the attack scenarios for money (was the `arena` binary).
+    Arena {
+        args: Vec<String>,
+    },
     /// Score candidate artifacts locally and submit only the ones that already
     /// pass. The proposer loop.
     Propose {
@@ -1191,6 +1213,14 @@ impl Cursor {
             Some(_) => self.take().ok_or_else(missing),
         }
     }
+
+    /// Everything not yet consumed, for a subcommand that parses its own
+    /// arguments (`mcp`, `p2p`, `serve`, `gen-bootstrap`, `arena`).
+    fn rest(&mut self) -> Vec<String> {
+        let rest = self.tokens.get(self.at..).unwrap_or(&[]).to_vec();
+        self.at = self.tokens.len();
+        rest
+    }
 }
 
 /// Does this token look like an option rather than a value?
@@ -1307,6 +1337,24 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "scaffold" => parse_scaffold(&mut cursor)?,
         "try" => parse_try(&mut cursor)?,
         "run" => parse_run(&mut cursor)?,
+        // These parse their own tail, including `--help`: they were separate
+        // binaries with their own usage text, and that text is still the
+        // right answer to `cairn p2p --help`.
+        "mcp" => Command::Mcp {
+            args: cursor.rest(),
+        },
+        "p2p" => Command::P2p {
+            args: cursor.rest(),
+        },
+        "serve" => Command::Serve {
+            args: cursor.rest(),
+        },
+        "gen-bootstrap" => Command::GenBootstrap {
+            args: cursor.rest(),
+        },
+        "arena" => Command::Arena {
+            args: cursor.rest(),
+        },
         "canon" => {
             let mut input: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -3483,6 +3531,44 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      use --no-mcp or --no-queue to disable either input; stop with Ctrl-C",
     );
+    say(out, "  mcp [--identity FILE]");
+    say(
+        out,
+        "      the MCP server alone, on a log of its own; --log/--root before or after",
+    );
+    say(
+        out,
+        "  p2p --identity FILE --root-key FILE --checkpoint FILE --listen HOST:PORT ...",
+    );
+    say(
+        out,
+        "      the daemon alone: p2p sync, and --serve HOST:PORT to publish too",
+    );
+    say(
+        out,
+        "  serve [--listen HOST:PORT] [--queue DIR] [--p2p-listen HOST:PORT ...]",
+    );
+    say(
+        out,
+        "      publish the log over HTTP; read-only unless --queue, a node with --p2p-listen",
+    );
+    say(
+        out,
+        "  gen-bootstrap --addr HOST:PORT --out FILE [--identity-out FILE]",
+    );
+    say(
+        out,
+        "      a placeholder --bootstrap file for p2p, with a fresh key to replace",
+    );
+    say(out, "  arena [--seed N]");
+    say(
+        out,
+        "      play the attack strategies for money; exits 1 while one still pays",
+    );
+    say(
+        out,
+        "      each of these prints its own --help; they were separate binaries once",
+    );
     say(
         out,
         "  scaffold <name> --kind <certificate|evaluator|statistical|replay|lean>",
@@ -3607,6 +3693,20 @@ fn print_help(out: &mut dyn Write) {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// What the daemon-shaped subcommands inherit from the global flags.
+///
+/// `--log`, `--root`, `--data-dir` and `--key-file` before the command name
+/// mean the same thing for `mcp`, `p2p` and `serve` as for every other
+/// command; the subcommand may still override them after its own name, which
+/// is how a stanza written for the old separate binaries keeps reading.
+fn cli_globals(options: &Options) -> cairn::cli::Globals {
+    cairn::cli::Globals {
+        log: PathBuf::from(&options.log),
+        root: PathBuf::from(&options.root),
+        key_file: options.key_file.as_ref().map(PathBuf::from),
+    }
+}
+
 /// Start the combined local node used by `cairn run`.
 ///
 /// This is intentionally a direct call into [`cairn::daemon::run`], not a
@@ -3694,6 +3794,13 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
                 .unwrap_or_else(|| default_path("queue")),
         );
     }
+
+    // The daemon narrates through `log`, and nothing in the ordinary CLI has
+    // installed a logger: without this every "listening on", "checkpoint
+    // written" and peer-dial line from `daemon::run` is dropped on the floor,
+    // and an operator watching `cairn run` sees the banner below and then
+    // silence. Stderr only, which is what `run` needs -- see `logging`.
+    cairn::logging::init();
 
     // `run` is itself a valid stdio MCP command, so stdout belongs exclusively
     // to JSON-RPC. Operational status follows the rest of the daemon to stderr.
@@ -8620,6 +8727,11 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             },
         ),
         Command::Run { request } => cmd_run(out, options, request),
+        Command::Mcp { args } => Ok(cairn::cli::mcp(args.clone(), cli_globals(options))),
+        Command::P2p { args } => Ok(cairn::cli::p2p(args.clone(), cli_globals(options))),
+        Command::Serve { args } => Ok(cairn::cli::serve(args.clone(), cli_globals(options))),
+        Command::GenBootstrap { args } => Ok(cairn::cli::gen_bootstrap(args.clone())),
+        Command::Arena { args } => Ok(cairn::cli::arena(args.clone())),
         Command::Propose {
             objective,
             artifacts,
@@ -10627,6 +10739,51 @@ mod tests {
         assert!(parse(argv(&["run", "--fanout", "0"])).is_err());
         assert!(parse(argv(&["run", "--max-queue", "nope"])).is_err());
         assert!(parse(argv(&["run", "--wat"])).is_err());
+    }
+
+    /// The former binaries parse their own tail. The `cairn` parser must
+    /// hand it over untouched -- including flags it would otherwise refuse,
+    /// like `--wat`, and `--help`, which each subcommand answers itself --
+    /// while still resolving the globals that came before the name.
+    #[test]
+    fn former_binaries_get_their_whole_tail_and_the_globals_before_it() {
+        let parsed = parse(argv(&[
+            "--log",
+            "agent.jsonl",
+            "--root",
+            "/repo",
+            "mcp",
+            "--identity",
+            "id.json",
+            "--wat",
+        ]))
+        .expect("mcp passes its tail through");
+        assert_eq!(parsed.options.log, "agent.jsonl");
+        assert_eq!(parsed.options.root, "/repo");
+        assert_eq!(
+            parsed.command,
+            Command::Mcp {
+                args: argv(&["--identity", "id.json", "--wat"])
+            }
+        );
+
+        // `--flag=value` is expanded before the hand-over, so every subcommand
+        // sees one spelling, as the rest of the CLI does.
+        let parsed = parse(argv(&["p2p", "--listen=0.0.0.0:9000", "--help"])).expect("p2p");
+        assert_eq!(
+            parsed.command,
+            Command::P2p {
+                args: argv(&["--listen", "0.0.0.0:9000", "--help"])
+            }
+        );
+
+        for (name, expected) in [
+            ("serve", Command::Serve { args: vec![] }),
+            ("gen-bootstrap", Command::GenBootstrap { args: vec![] }),
+            ("arena", Command::Arena { args: vec![] }),
+        ] {
+            assert_eq!(parse(argv(&[name])).expect(name).command, expected);
+        }
     }
 
     #[test]

@@ -32,7 +32,7 @@ fn create_private(path: &Path) -> io::Result<fs::File> {
 ///
 /// For state that is *meant* to be read by others. A checkpoint is served by
 /// `GET /checkpoint` and copied to readers; written 0600 by a daemon running
-/// as one user, it is unreadable to a `cairn-serve` running as another.
+/// as one user, it is unreadable to a `cairn serve` running as another.
 fn create_public(path: &Path) -> io::Result<fs::File> {
     OpenOptions::new().write(true).create_new(true).open(path)
 }

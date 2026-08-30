@@ -187,5 +187,5 @@ Remaining:
       against a pinned public key, on two different BLS libraries. An Ethereum
       `value` still cannot be checked without an Ethereum node, and that is a
       property of the source rather than of this record
-- [ ] `cairn-p2p` drawing one per epoch on a timer
+- [ ] the daemon (`cairn p2p` / `cairn run`) drawing one per epoch on a timer
 - [ ] whether to adopt this at all, per anchored-time.md's recommendation 3

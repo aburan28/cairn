@@ -3,7 +3,7 @@
 //! # Why this exists
 //!
 //! Everything else in this crate assumes the reader has the log on local disk.
-//! The CLI opens a file; `cairn-mcp` opens a file; the p2p daemon
+//! The CLI opens a file; `cairn mcp` opens a file; the p2p daemon
 //! reconciles with peers who are already running nodes. None of that gives a
 //! *stranger* a way in, and "anyone can independently re-derive every settled
 //! result from the log alone" is worth nothing to somebody with no way to
@@ -253,16 +253,17 @@ pub struct Admission {
 /// It was in `main.rs`, and that put it out of reach of the daemon — which is
 /// how the documented topology came not to compose. `docs/serving.md` says a
 /// submission "lands in a spool directory, and the operator's own node admits
-/// it", and `cairn-serve`'s own comment says the operator's node is
+/// it", and `cairn serve`'s own comment says the operator's node is
 /// appending while the server runs. But a `Ledger` is single-writer *by
-/// enforcement*, so `cairn drain` could not run while `cairn-p2p` held
+/// enforcement*, so `cairn drain` could not run while the daemon (then the
+/// separate `cairn-p2p` binary, now `cairn p2p`) held
 /// the log: a node that was online could not accept a submission at all, which
 /// for a network whose purpose is accepting submissions is not a small gap.
 ///
 /// The daemon is the operator's node and already holds the lock, so it drains.
 /// One copy of the rules, called from both places — the same argument
 /// `docs/serving.md` makes for why admission does not happen in a request
-/// handler applies just as well to a second copy in a second binary.
+/// handler applies just as well to a second copy behind a second subcommand.
 ///
 /// Settlement is deliberately *not* done here. A reveal admitted into an epoch
 /// that has since closed settles on the caller's next `settle`, and both
@@ -490,7 +491,7 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
     serving.check_startup()?;
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
-    eprintln!("cairn-serve: listening on {local}");
+    eprintln!("cairn serve: listening on {local}");
     if let Some(spool) = &serving.spool {
         // Both admitters are named, because which one applies depends on
         // something this process cannot see. `cairn drain` wants the
@@ -498,17 +499,17 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
         // pointing an operator at it alone is pointing half of them at a
         // command that will refuse.
         eprintln!(
-            "cairn-serve: accepting submissions into {}",
+            "cairn serve: accepting submissions into {}",
             spool.dir().display()
         );
         eprintln!(
-            "cairn-serve:   admitted by `cairn-p2p --queue {}` if a daemon \
+            "cairn serve:   admitted by `cairn p2p --queue {}` if a daemon \
              is running, or `cairn drain --queue {}` if not",
             spool.dir().display(),
             spool.dir().display()
         );
     } else {
-        eprintln!("cairn-serve: read-only; POST /submit will answer 405");
+        eprintln!("cairn serve: read-only; POST /submit will answer 405");
     }
     serve_on(listener, serving)
 }
@@ -750,8 +751,8 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
 ///
 /// # What this is not
 ///
-/// It is not a connection list. Live sessions belong to `cairn-p2p`, which
-/// has no HTTP surface at all, and this process only ever reads a log. A peer
+/// It is not a connection list. Live sessions belong to the p2p service,
+/// which has no HTTP surface at all, and this server only ever reads a log. A peer
 /// appears here because a `peer` record naming it reached this node, and it
 /// keeps appearing after that peer goes away forever -- the log is append-only,
 /// so nothing here can go stale in the direction a reader would want.
@@ -794,7 +795,7 @@ fn peers(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string(
                     "Known peers, from `peer` records in this log -- not open connections. \
                      A peer listed here may be long gone: the log is append-only and nothing \
-                     retracts a record. Live session state lives in cairn-p2p, which \
+                     retracts a record. Live session state lives in the p2p service, which \
                      serves no HTTP.",
                 ),
             ),

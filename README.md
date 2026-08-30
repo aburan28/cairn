@@ -70,7 +70,9 @@ curl -fsSL https://github.com/aburan28/distributed-researcher/releases/latest/do
 ```
 
 Detects the platform, downloads the matching tarball, checks it against the
-published `.sha256`, and installs all five binaries to `~/.local/bin`.
+published `.sha256`, and installs the one binary a release contains — `cairn`,
+whose subcommands (`run`, `mcp`, `p2p`, `serve`, `gen-bootstrap`, `arena`)
+replace what used to ship as separate executables — to `~/.local/bin`.
 `--version` pins a release, `--bin-dir` picks somewhere else, and on Linux
 `--libc gnu` takes the dynamically-linked build instead of the static musl one.
 Linux amd64/arm64 and macOS Intel/Apple Silicon; no Windows, because the
@@ -90,13 +92,13 @@ From source instead:
 
 ```sh
 make ui-build                          # exports the reader, then builds with `--features ui`
-cargo install --path . --features ui   # puts `cairn` and the other binaries on PATH
+cargo install --path . --features ui   # puts the single `cairn` binary on PATH
 ```
 
 The `ui` feature is **off by default**, and `cairn run` refuses to start
 without it — the reader it serves at `/ui/` has to be embedded at build time.
 A plain `cargo build --release` needs no Node toolchain and produces every
-other command, but not a working `cairn run`; `make ui-build` runs `npm ci &&
+other subcommand, but not a working `cairn run`; `make ui-build` runs `npm ci &&
 npm run build` in `ui/` first and then builds with the feature on. `cargo
 build --release --features ui` does the same if `ui/out` already exists.
 
@@ -118,7 +120,8 @@ stderr and stdout contains JSON-RPC only. Closing MCP stdin stops the combined
 node; an interactive operator can stop it with Ctrl-C.
 
 For example, a project-local Claude Code configuration can launch the complete
-node instead of the standalone `cairn-mcp` process:
+node instead of the standalone `cairn mcp` server (once a separate `cairn-mcp`
+binary):
 
 ```json
 {
@@ -150,9 +153,10 @@ Working from a source checkout, build with the `ui` feature first (see
 *Install* above — `make ui-build`, then `./target/release/cairn run`); the
 default `cargo build` does not embed the reader and `cairn run` says so.
 
-Published release tarballs are built with the UI feature by the release
-workflow and are checked by starting `cairn run`, completing an MCP handshake,
-and fetching `/ui/` from the same unpacked binary.
+Published release tarballs contain a single `cairn` binary. They are built
+with the UI feature by the release workflow and are checked by starting
+`cairn run`, completing an MCP handshake, and fetching `/ui/` from the same
+unpacked binary.
 
 ```sh
 cargo test                    # the full suite, loopback only
@@ -216,7 +220,7 @@ a log of twenty thousand.
 ### Publish your log so others can check it
 
 ```sh
-cairn-serve --log cairn.jsonl --root . --listen 0.0.0.0:8080
+cairn --log cairn.jsonl --root . serve --listen 0.0.0.0:8080
 ```
 
 `GET /log` returns the log byte for byte; `GET /objectives` and
@@ -235,9 +239,9 @@ process:
 ### One node, one process
 
 ```sh
-cairn-p2p --identity id.json --root-key root.key --checkpoint cp.json \
-    --listen 0.0.0.0:9000 --log cairn.jsonl --root . \
-    --queue ./queue --serve 0.0.0.0:8080
+cairn --log cairn.jsonl --root . p2p \
+    --identity id.json --root-key root.key --checkpoint cp.json \
+    --listen 0.0.0.0:9000 --queue ./queue --serve 0.0.0.0:8080
 ```
 
 `--serve` puts the HTTP server on a thread beside the sync loop, against the
@@ -245,15 +249,15 @@ same log. Because that process is the one holding the write lock, it drains the
 queue it fills: a submission arriving over HTTP is admitted on the next tick,
 with nobody running `cairn drain` at all.
 
-`cairn-serve --p2p-listen 0.0.0.0:9000 --identity … --root-key … --checkpoint …`
-is the same daemon entered from the other side — both call
+`cairn serve --p2p-listen 0.0.0.0:9000 --identity … --root-key … --checkpoint …`
+is the same daemon entered from the other side — both subcommands call
 `cairn::daemon::run`, so there is one implementation of "be a node" rather
-than one per binary. `make node` runs it with the repository's defaults, and
+than one per subcommand. `make node` runs it with the repository's defaults, and
 `./scripts/node-smoke.sh` is the test that a submission really does get admitted
 by the process that received it.
 
 The split topology still works and is still right for a read-only mirror:
-`cairn-serve` alone takes no lock and holds no `Node`, so it is safe to
+`cairn serve` alone takes no lock and holds no `Node`, so it is safe to
 point at a log something else is writing. What it cannot do is admit anything.
 
 ### Start a p2p node
@@ -337,7 +341,8 @@ network symptom.
 
 `CAIRN_LOG_LEVEL` sets the level — `error`, `warn`, `info` (default), `debug`,
 `trace`, or `off`. Everything goes to **stderr**, always, which is what makes it
-safe to raise on `cairn-mcp`, whose *stdout* is the JSON-RPC protocol.
+safe to raise on `cairn mcp` and `cairn run`, whose *stdout* is the JSON-RPC
+protocol.
 
 It used to be `CAIRN_LOG`, and the `cairn` CLI read that same name as the
 **ledger path** — so `CAIRN_LOG=debug` exported for a daemon sent `cairn audit`

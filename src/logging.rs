@@ -3,7 +3,8 @@
 //! # Why this exists
 //!
 //! Before it, every diagnostic in the crate was an unconditional `eprintln!`:
-//! seventy of them, twenty-four in `cairn-p2p` alone, none carrying a
+//! seventy of them, twenty-four in the p2p daemon (then the separate
+//! `cairn-p2p` binary) alone, none carrying a
 //! timestamp. A daemon that runs for days on a five-second tick could not say
 //! *when* anything happened, two nodes' output could not be lined up against
 //! each other, and there was no way to ask for more detail without editing the
@@ -14,7 +15,7 @@
 //! # Why the backend is ours
 //!
 //! The [`log`] facade is a dependency; what writes the bytes is here, and that
-//! is deliberate. **`cairn-mcp` speaks JSON-RPC on stdout.** A logger that
+//! is deliberate. **`cairn mcp` and `cairn run` speak JSON-RPC on stdout.** A logger that
 //! wrote a line there would not look untidy, it would corrupt the protocol
 //! mid-session and the client would blame itself — the exact failure
 //! `scripts/mcp-smoke.sh` exists to catch. Owning the writer is what turns
@@ -239,7 +240,7 @@ mod tests {
             resolve(Some("warn"), Some("trace")),
             (LevelFilter::Warn, Resolution::Explicit)
         );
-        // Empty is unset. `CAIRN_LOG_LEVEL= cairn-serve` should not report a
+        // Empty is unset. `CAIRN_LOG_LEVEL= cairn serve` should not report a
         // typo in nothing.
         assert_eq!(
             resolve(Some(""), Some("debug")),
@@ -268,7 +269,7 @@ mod tests {
 
     /// The property the MCP protocol depends on.
     ///
-    /// `cairn-mcp` writes JSON-RPC to stdout. One log line there is a
+    /// `cairn mcp` writes JSON-RPC to stdout. One log line there is a
     /// corrupt frame, and the client blames itself. Asserted on the real
     /// process rather than by reading the source, because the thing that would
     /// break this is a future edit reaching for `println!`.

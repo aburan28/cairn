@@ -2,10 +2,11 @@
 //!
 //! These strings land inside records whose digests must match the Python
 //! reference byte for byte, so the format is consensus-critical: `+00:00`, not
-//! `Z`, and seconds precision. It lives in the library rather than in a binary
-//! because more than one binary needs it -- `cairn` and `cairn-mcp` --
-//! and a second copy of a date formatter is a second chance to disagree about
-//! what time it is.
+//! `Z`, and seconds precision. It lives in the library rather than in the
+//! binary because more than one entry point needs it -- the CLI's writing
+//! commands and the MCP server (once a separate `cairn-mcp` binary, now
+//! `cairn mcp`) -- and a second copy of a date formatter is a second chance
+//! to disagree about what time it is.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Two `cairn-p2p` daemons: one with a settled log, one with nothing.
+# Two `cairn p2p` daemons: one with a settled log, one with nothing.
 #
 # The daemon is the largest surface in the repository -- service, sync, code
 # transfer, DHT, multicast, populations -- and until this script nothing ran it.
@@ -33,12 +33,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# The daemon and the HTTP publisher are `cairn p2p` and `cairn serve`: one
+# binary, so there is one thing to build and one thing to point at.
 RUST="${RUST_BIN:-./target/release/cairn}"
-DAEMON="${P2P_BIN:-./target/release/cairn-p2p}"
-SERVE="${SERVE_BIN:-./target/release/cairn-serve}"
 REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
-if [ ! -x "$RUST" ] || [ ! -x "$DAEMON" ] || [ ! -x "$SERVE" ]; then
-  echo "building release binaries..." >&2
+if [ ! -x "$RUST" ]; then
+  echo "building release binary..." >&2
   cargo build --release
 fi
 if [ ! -x "$REF" ]; then
@@ -135,9 +135,10 @@ cp "$A/checkpoint.json" "$B/checkpoint.json"
 
 rule "A serves, with a submission queue"
 mkdir -p "$A/queue"
-"$DAEMON" --identity "$A/id.json" --root-key "$A/rootkey.json" \
+"$RUST" --log "$A/log.jsonl" --root "$A" p2p \
+  --identity "$A/id.json" --root-key "$A/rootkey.json" \
   --checkpoint "$A/checkpoint.json" --listen "127.0.0.1:$A_PORT" \
-  --log "$A/log.jsonl" --root "$A" --queue "$A/queue" \
+  --queue "$A/queue" \
   --population "$A/population.json" > "$A/daemon.log" 2>&1 &
 APID=$!
 # The identity file appears after ~243 ms of Classic McEliece keygen. Poll for
@@ -183,9 +184,10 @@ echo "  listening on 127.0.0.1:$A_PORT"
 
 rule "B starts with an empty log and one address"
 : > "$B/log.jsonl"
-"$DAEMON" --identity "$B/id.json" --root-key "$B/rootkey.json" \
+"$RUST" --log "$B/log.jsonl" --root "$B" p2p \
+  --identity "$B/id.json" --root-key "$B/rootkey.json" \
   --checkpoint "$B/checkpoint.json" --listen "127.0.0.1:$B_PORT" \
-  --log "$B/log.jsonl" --root "$B" --bootstrap "$WORK/a-endpoint.json" \
+  --bootstrap "$WORK/a-endpoint.json" \
   --population "$B/population.json" > "$B/daemon.log" 2>&1 &
 BPID=$!
 
@@ -258,9 +260,9 @@ rule "a second daemon on the same log is refused, before it costs anything"
 # listener. The bound port is the part that bites -- during that window the
 # address is taken and released again, so a restart flaps a port somebody is
 # watching. It is the cheapest check and the likeliest failure, so it runs first.
-SECOND=$("$DAEMON" --identity "$WORK/second-id.json" --root-key "$A/rootkey.json" \
-  --checkpoint "$WORK/second-cp.json" --listen "127.0.0.1:0" \
-  --log "$A/log.jsonl" --root "$A" 2>&1 || true)
+SECOND=$("$RUST" --log "$A/log.jsonl" --root "$A" p2p \
+  --identity "$WORK/second-id.json" --root-key "$A/rootkey.json" \
+  --checkpoint "$WORK/second-cp.json" --listen "127.0.0.1:0" 2>&1 || true)
 echo "$SECOND" | sed 's/^/  /'
 echo "$SECOND" | grep -q "already writing" \
   || fail "a second daemon was allowed onto a log another one holds"
@@ -268,7 +270,7 @@ echo "$SECOND" | grep -q "already writing" \
   || fail "a daemon that could not start still wrote an identity file"
 
 rule "the whole documented topology, on one log"
-# `cairn-serve` beside the daemon, both on A's log. This is the deployment
+# `cairn serve` beside the daemon, both on A's log. This is the deployment
 # `docs/serving.md` describes and nothing ran until now: the server is a reader
 # and a spooler, the daemon is the single writer, and a submission crosses from
 # one to the other through the queue.
@@ -277,14 +279,14 @@ rule "the whole documented topology, on one log"
 # so for as long as the daemon was the only thing that could run alongside the
 # server, an *online* node could not accept a submission at all.
 SERVE_PORT=$(free_port)
-"$SERVE" --log "$A/log.jsonl" --root "$A" --listen "127.0.0.1:$SERVE_PORT" \
+"$RUST" --log "$A/log.jsonl" --root "$A" serve --listen "127.0.0.1:$SERVE_PORT" \
   --queue "$A/queue" > "$A/serve.log" 2>&1 &
 SERVE_PID=$!
 for _ in $(seq 1 100); do
   grep -q "listening on" "$A/serve.log" 2>/dev/null && break
   sleep 0.2
 done
-grep -q "listening on" "$A/serve.log" || fail "cairn-serve never bound"
+grep -q "listening on" "$A/serve.log" || fail "cairn serve never bound"
 sed 's/^/  /' "$A/serve.log"
 
 rule "A's main loop is still running, several ticks in"
