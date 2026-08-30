@@ -33,6 +33,11 @@ REPO="aburan28/distributed-researcher"
 # One binary: `cairn mcp`, `cairn p2p`, `cairn serve` and `cairn gen-bootstrap`
 # are subcommands of it, not executables of their own.
 BINS="cairn"
+# Names this project used to install, removed on upgrade. An MCP stanza written
+# against an older release still spawns `cairn-mcp` by name, so leaving the old
+# executable in place means the client keeps talking to the previous server and
+# the operator believes they upgraded.
+OBSOLETE_BINS="cairn-mcp cairn-p2p cairn-serve cairn-gen-bootstrap"
 
 VERSION="${CAIRN_VERSION:-}"
 BIN_DIR="${CAIRN_BIN:-}"
@@ -181,6 +186,15 @@ for bin in $BINS; do
     # Rename last, so an interrupted install cannot leave a half-written binary
     # under a name somebody's service file already points at.
     mv "$BIN_DIR/$bin.new" "$BIN_DIR/$bin"
+done
+
+# Only after the new binary is in place: an interrupted install must never
+# leave a directory with neither the old names nor the new one.
+for bin in $OBSOLETE_BINS; do
+    if [ -e "$BIN_DIR/$bin" ]; then
+        rm -f "$BIN_DIR/$bin" || die "cannot remove the superseded $BIN_DIR/$bin"
+        say "removed $BIN_DIR/$bin (now \`cairn ${bin#cairn-}\`)"
+    fi
 done
 
 say "installed $VERSION ($target) to $BIN_DIR"

@@ -1445,11 +1445,23 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
 /// It is consulted last so that `--log` and `$CAIRN_LOG_PATH` both beat it,
 /// and skipped for `help` because a request for the manual should never be
 /// answered with a complaint about the environment.
+///
+/// A *level* is also left alone for the daemon subcommands, which were the
+/// separate binaries that read this name as the stderr level and still do
+/// through [`cairn::logging::init`]. Refusing it here would mean
+/// `CAIRN_LOG=debug cairn run` -- the documented way to turn a node's logging
+/// up -- never starting, and the promised rename of `cairn-mcp` to
+/// `cairn mcp` changing behaviour rather than only the binary name.
 fn apply_legacy_log(invocation: &mut Invocation, legacy: Option<&str>) -> Result<(), CliError> {
     if invocation.options.log_chosen || invocation.command == Command::Help {
         return Ok(());
     }
     if let Some(value) = legacy.filter(|v| !v.is_empty()) {
+        if reads_legacy_log_as_a_level(&invocation.command)
+            && cairn::logging::parse_level(value).is_some()
+        {
+            return Ok(());
+        }
         invocation.options.log = legacy_log_path(value)?;
         invocation.options.log_chosen = true;
         eprintln!(
@@ -1458,6 +1470,20 @@ fn apply_legacy_log(invocation: &mut Invocation, legacy: Option<&str>) -> Result
         );
     }
     Ok(())
+}
+
+/// Whether this command is one of the former daemon binaries, for which
+/// `$CAIRN_LOG` holding a level is still the stderr level and not a ledger.
+fn reads_legacy_log_as_a_level(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Run { .. }
+            | Command::Mcp { .. }
+            | Command::P2p { .. }
+            | Command::Serve { .. }
+            | Command::GenBootstrap { .. }
+            | Command::Arena { .. }
+    )
 }
 
 /// Parse `run`'s node-specific flags.
@@ -8928,6 +8954,30 @@ mod tests {
         let mut level = parse(argv(&["audit"])).expect("parses");
         let error = apply_legacy_log(&mut level, Some("debug")).expect_err("a level is refused");
         assert!(matches!(error, CliError::Usage(_)), "got {error:?}");
+    }
+
+    /// The daemons this binary absorbed still read a level in the old name as
+    /// a level, so exporting one must not stop them starting. A *path* there
+    /// still moves their ledger, with the same warning as anywhere else.
+    #[test]
+    fn a_legacy_level_does_not_refuse_the_former_daemon_binaries() {
+        for command in [
+            vec!["run"],
+            vec!["mcp"],
+            vec!["p2p"],
+            vec!["serve"],
+            vec!["gen-bootstrap"],
+            vec!["arena"],
+        ] {
+            let mut daemon = parse(argv(&command)).expect("parses");
+            apply_legacy_log(&mut daemon, Some("debug"))
+                .unwrap_or_else(|error| panic!("{command:?} refused a level: {error:?}"));
+            assert!(!daemon.options.log_chosen);
+
+            let mut ledger = parse(argv(&command)).expect("parses");
+            apply_legacy_log(&mut ledger, Some("legacy/cairn.jsonl")).expect("a path is honoured");
+            assert_eq!(ledger.options.log, "legacy/cairn.jsonl");
+        }
     }
 
     #[test]
