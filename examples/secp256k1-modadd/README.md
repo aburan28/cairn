@@ -96,6 +96,20 @@ There is a lot left on the table. VBE spends roughly `4n` Toffolis per addition
 where Cuccaro-Draper-Kutin-Moulton spends about `2n`, and steps 2–4 each run a
 full-width adder where a purpose-built comparator would not.
 
+### How far down 600 is
+
+The target is not a guess about an unexplored space. Swapping VBE for CDKM and
+dropping one carry wire that carries no information reaches **836** — 19 wires,
+44 Toffolis — verified against this objective's own evaluator. So the target
+asks for roughly a further 30% off a construction that is already textbook-
+optimal per addition, which is meant to be hard rather than impossible.
+
+That circuit is deliberately not committed here. It is the improvement the
+objective exists to buy, and shipping it would leave the ratchet 236 of its
+2844-point span, which is not a bounty worth anyone's compute. Both routes to
+it are named two paragraphs up; neither is a secret, and rediscovering them is
+the point.
+
 ## Why the check is the payment condition
 
 The pinned evaluator simulates the submitted gate list on all 841 valid pairs
