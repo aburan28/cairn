@@ -1,0 +1,42 @@
+{
+  "artifact_schema": {
+    "properties": {
+      "gates": {
+        "description": "Gate list applied in order. Each gate is [name, ...wires] with wires indexed from 0, little-endian within each register: [\"X\", a] flips a; [\"CNOT\", a, b] flips b if a; [\"CCX\", a, b, c] flips c if a and b; [\"SWAP\", a, b] exchanges them. Operands must be distinct and below `qubits`. Only CCX counts toward the Toffoli total.",
+        "items": {
+          "type": "array"
+        },
+        "type": "array"
+      },
+      "qubits": {
+        "description": "Declared circuit width. Wires 0-4 are register A, 5-9 are register B, 10 and above are ancillas that must be returned to zero. Reserving a wire costs it whether or not the circuit uses it.",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "qubits",
+      "gates"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-26T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-secp256k1-modadd-cost",
+  "ratchet": {
+    "baseline": 3444,
+    "direction": "minimize",
+    "min_improvement": 25,
+    "reward": 1000000,
+    "target": 600
+  },
+  "reward": 1000000,
+  "statement": "Build the cheapest reversible modular adder for P = 29 = 2^5 - 2^1 - 1, a pseudo-Mersenne prime of the same shape as secp256k1's p = 2^256 - 2^32 - 977. Submit a circuit as {\"qubits\": <width>, \"gates\": [[name, ...wires], ...]}. Wires 0-4 hold register A (little-endian), wires 5-9 hold register B, and wires 10 and above are ancillas. The circuit must map |A>|B>|0...0> to |A>|(A+B) mod P>|0...0> for all 841 pairs with A and B below P: A is preserved, B receives the reduced sum, and every ancilla returns to zero. Inputs at or above P are not valid residues and are not constrained. Score is width x Toffoli count (CCX gates only); lower is better. The pinned evaluator simulates your circuit on every valid input pair and derives the score from the gates themselves, so declared metrics count for nothing. Baseline 3444 is a deliberately unoptimised textbook construction (42 qubits, 82 Toffolis); target 600. Modular addition is the primitive that dominates elliptic-curve point-add cost, and the conditional reduction is what makes it harder than truncated addition.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/secp256k1-modadd/evaluators/modadd_cost.py",
+    "evaluator_sha256": "762320bfd22f63adb03e2e3a0196631b9f2a817445504b9aa5198f9b904c5f5c",
+    "kind": "evaluator",
+    "threshold": 3444
+  }
+}
