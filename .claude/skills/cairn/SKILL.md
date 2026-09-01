@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: Launch a cairn research network and work its objectives for pay. Use this whenever the user wants to start, serve, or demo cairn; wire it into Claude Code over MCP; post or fund an objective; contribute compute to one; solve or improve a bounty on it; check what a node has settled; or asks how to earn on the network. Also use it for anything mentioning cairn-mcp, cairn-serve, score_candidate, submit_claim, the frontier, or a verified-results bounty — including when the user only says "run the network" or "let's try that research thing" in a repo that has a cairn.jsonl.
+description: Launch a cairn research network and work its objectives for pay. Use this whenever the user wants to start, serve, or demo cairn; wire it into Claude Code over MCP; post or fund an objective; contribute compute to one; solve or improve a bounty on it; check what a node has settled; or asks how to earn on the network. Also use it for anything mentioning `cairn mcp`, `cairn serve`, `cairn run` (or the old cairn-mcp / cairn-serve binary names), score_candidate, submit_claim, the frontier, or a verified-results bounty — including when the user only says "run the network" or "let's try that research thing" in a repo that has a cairn.jsonl.
 ---
 
 # cairn

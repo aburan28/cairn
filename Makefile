@@ -8,8 +8,8 @@ ROOT := $(abspath .)
 LOCAL_DIR ?= .local
 LOG ?= $(abspath $(LOCAL_DIR)/cairn.jsonl)
 # `make mcp` and `make p2p` each get their own log so they can run together in
-# one workspace. Both binaries append and both take the ledger's exclusive lock
-# (Ledger::open_exclusive) -- two writers over one hash-linked file each compute
+# one workspace. Both subcommands append and both take the ledger's exclusive
+# lock (Ledger::open_exclusive) -- two writers over one hash-linked file each compute
 # `prev` from their own view of the tail. Pointed at the same path, whichever
 # starts second dies at startup with "another process is already writing".
 #
@@ -22,10 +22,21 @@ LOG ?= $(abspath $(LOCAL_DIR)/cairn.jsonl)
 P2P_LOG ?= $(abspath $(LOCAL_DIR)/cairn-p2p.jsonl)
 MCP_LOG ?= $(abspath $(LOCAL_DIR)/cairn-mcp.jsonl)
 RELEASE_DIR ?= target/release
-CLI := $(RELEASE_DIR)/cairn
-MCP := $(RELEASE_DIR)/cairn-mcp
-P2P := $(RELEASE_DIR)/cairn-p2p
-SERVE := $(RELEASE_DIR)/cairn-serve
+# Where `make build` leaves the binary. Cargo writes into target/, which is a
+# cache with no stable contract; bin/ is the one place a person, a script, or
+# an MCP client stanza can be pointed at without knowing cargo's layout.
+BIN_DIR ?= bin
+# One binary. The MCP server, the p2p daemon, the HTTP publisher, the bootstrap
+# generator and the arena are all subcommands of it (was cairn-mcp, cairn-p2p,
+# cairn-serve, cairn-gen-bootstrap and arena, five separate executables).
+BINS := cairn
+CLI := $(BIN_DIR)/cairn
+# Unquoted at each use site: these are two words, and `exec "$(P2P)"` would
+# look for a file literally named `bin/cairn p2p`.
+MCP := $(CLI) mcp
+P2P := $(CLI) p2p
+SERVE := $(CLI) serve
+GEN_BOOTSTRAP := $(CLI) gen-bootstrap
 FUZZ_CASES ?= 2000
 IDENTITY ?= $(abspath $(LOCAL_DIR)/node.identity.json)
 ROOT_KEY ?= $(abspath $(LOCAL_DIR)/root.key)
@@ -34,7 +45,6 @@ CHECKPOINT ?= $(abspath $(LOCAL_DIR)/checkpoint.json)
 # needs to dial it. Serving strangers is `make seed`, which binds the wildcard
 # deliberately rather than by having everyone edit this.
 LISTEN ?= 127.0.0.1:9000
-GEN_BOOTSTRAP := $(RELEASE_DIR)/cairn-gen-bootstrap
 SEED_ADDR ?= 44.229.170.164:5000
 SEED_BOOTSTRAP ?= $(abspath $(LOCAL_DIR)/seed.json)
 BOOTSTRAP_ARGS ?= --bootstrap $(SEED_BOOTSTRAP)
@@ -79,15 +89,15 @@ help:
 	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
 	  '  make serve               Publish this log over HTTP (read-only).' \
 	  '  make node                One process: p2p sync AND HTTP, sharing a log.' \
-	  '  cairn run                Installed release: P2P + HTTP + embedded UI.' \
-	  '                           From a checkout, run make ui-build first.' \
-	  '  make install             Install the released binaries from GitHub.' \
+	  '  cairn run                Installed release: MCP + P2P + HTTP + embedded UI.' \
+	  '                           From a checkout, make ui-build then bin/cairn run.' \
+	  '  make install             Install the released binary from GitHub.' \
 	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
-	  '  make ui-check            Typecheck and build the UI, as CI does.' \
-	  '  make ui-build            Export the site and build it INTO the binaries.' \
+	  '  make ui-check            Typecheck, test and build the UI, as CI does.' \
+	  '  make ui-build            Export the site and build it INTO the binary.' \
 	  '  make site-snapshot       Regenerate the site fallback from launch/.' \
 	  '  make cli ARGS="..."      Run the release CLI against the local ledger.' \
-	  '  make build               Build every release binary.' \
+	  '  make build               Build the release binary and stage it in bin/cairn.' \
 	  '  make demo                Run the end-to-end walkthrough.' \
 	  '  make canary              Mint canaries and catch a rubber-stamper.' \
 	  '  make attest              Bonded verification, end to end, both implementations.' \
@@ -111,10 +121,21 @@ help:
 	  '             SEED_ADDR=44.229.170.164:5000  default bootstrap peer address;' \
 	  '                                     .local/seed.json is generated on first' \
 	  '                                     `make p2p` with a placeholder key -- see' \
-	  '                                     cairn-gen-bootstrap and docs/p2p.md'
+	  '                                     `cairn gen-bootstrap` and docs/p2p.md'
+
+# Build, then stage into $(BIN_DIR). A copy rather than a symlink into target/
+# so `cargo clean` cannot leave bin/ full of dangling links, and so a build with
+# a different feature set (ui-build) replaces the staged file rather than
+# silently sharing it.
+define stage-bins
+	@mkdir -p "$(BIN_DIR)"
+	@for b in $(BINS); do cp -f "$(RELEASE_DIR)/$$b" "$(BIN_DIR)/$$b"; done
+	@echo "staged $(BINS) into $(BIN_DIR)/ (mcp, p2p, serve, gen-bootstrap and arena are its subcommands)"
+endef
 
 build:
 	$(CARGO) build --release --bins
+	$(stage-bins)
 
 debug:
 	$(CARGO) build --bins
@@ -137,7 +158,7 @@ opencode.json: Makefile | $(LOCAL_DIR)
 # `exec` preserves the MCP process's stdin/stdout unchanged: stdout is protocol
 # data, so a wrapper must never add banners or diagnostics to it.
 mcp: build opencode.json | $(LOCAL_DIR)
-	exec "$(MCP)" --log "$(MCP_LOG)" --root "$(ROOT)"
+	exec $(MCP) --log "$(MCP_LOG)" --root "$(ROOT)"
 
 # Writes the client's config rather than running the server: the client spawns
 # its own copy. Depends on `build` so the path written is one that exists --
@@ -149,7 +170,7 @@ mcp-setup: build | $(LOCAL_DIR)
 # A placeholder bootstrap file for SEED_ADDR: structurally valid, but the key
 # inside is freshly generated, not the real seed's. It authenticates nobody
 # until "public" is replaced with the seed's actual key -- see
-# cairn-gen-bootstrap.rs. Regenerated only if missing, so a real key
+# `cairn gen-bootstrap --help`. Regenerated only if missing, so a real key
 # dropped in by hand is never overwritten.
 #
 # Never overwriting is right and it has a cost: change `SEED_ADDR` after the
@@ -159,7 +180,7 @@ mcp-setup: build | $(LOCAL_DIR)
 # calling the wrong number". Said here rather than left to be worked out from a
 # retry loop.
 $(SEED_BOOTSTRAP): build | $(LOCAL_DIR)
-	@test -f "$(SEED_BOOTSTRAP)" || "$(GEN_BOOTSTRAP)" --addr "$(SEED_ADDR)" --out "$(SEED_BOOTSTRAP)"
+	@test -f "$(SEED_BOOTSTRAP)" || $(GEN_BOOTSTRAP) --addr "$(SEED_ADDR)" --out "$(SEED_BOOTSTRAP)"
 	@have=$$(sed -n 's/.*"addr"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$(SEED_BOOTSTRAP)"); \
 	  if [ -n "$$have" ] && [ "$$have" != "$(SEED_ADDR)" ]; then \
 	    printf 'make: %s says addr %s, but SEED_ADDR is %s -- the file wins.\n' \
@@ -175,7 +196,7 @@ $(SEED_BOOTSTRAP): build | $(LOCAL_DIR)
 # this stays because a peer-to-peer problem is easier to read without two other
 # processes logging into the same terminal.
 p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
-	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
+	exec $(P2P) --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
 	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
 	  --log "$(P2P_LOG)" --root "$(ROOT)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
 
@@ -194,7 +215,7 @@ p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 seed: build | $(LOCAL_DIR)
 	@printf 'seeding on %s -- hand out this "public" key, not .local/seed.json:\n  %s\n' \
 	  "$(SEED_LISTEN)" "$(IDENTITY)"
-	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
+	exec $(P2P) --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
 	  --checkpoint "$(CHECKPOINT)" --listen "$(SEED_LISTEN)" \
 	  --log "$(P2P_LOG)" --root "$(ROOT)" $(SEED_BOOTSTRAP_ARGS) $(P2P_ARGS)
 
@@ -230,7 +251,7 @@ attest: build
 	./scripts/attestation-demo.sh
 
 arena: build
-	$(CARGO) run --release --bin arena
+	"$(CLI)" arena
 
 blob: build
 	./scripts/blob-demo.sh
@@ -254,17 +275,16 @@ interop: build
 	RUST_BIN="$(abspath $(CLI))" ./scripts/interop.sh
 
 mcp-smoke: build
-	RUST_BIN="$(abspath $(CLI))" MCP_BIN="$(abspath $(MCP))" ./scripts/mcp-smoke.sh
+	RUST_BIN="$(abspath $(CLI))" ./scripts/mcp-smoke.sh
 
 serve-smoke: build
-	RUST_BIN="$(abspath $(CLI))" SERVE_BIN="$(abspath $(SERVE))" ./scripts/serve-smoke.sh
+	RUST_BIN="$(abspath $(CLI))" ./scripts/serve-smoke.sh
 
 # The seam for `daemon::run`: one process that queues a submission over HTTP
 # and admits it itself. `serve-smoke` cannot cover that -- it drains with a
 # separate command, which is the topology this replaces.
 node-smoke: build
-	RUST_BIN="$(abspath $(CLI))" P2P_BIN="$(abspath $(P2P))" SERVE_BIN="$(abspath $(SERVE))" \
-	  ./scripts/node-smoke.sh
+	RUST_BIN="$(abspath $(CLI))" ./scripts/node-smoke.sh
 
 # Publish this node's log over HTTP. Read-only unless QUEUE is set, because
 # publishing is safe for anyone and accepting is a decision.
@@ -283,12 +303,12 @@ serve: build
 # admitted -- a Ledger has one writer. Uses the p2p log and identity, since
 # that is the half that needs them.
 node: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
-	exec "$(P2P)" --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
+	exec $(P2P) --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
 	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
 	  --log "$(P2P_LOG)" --root "$(ROOT)" \
 	  --serve "$(SERVE_LISTEN)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)
 
-# Install the *released* binaries, not this checkout's. The script resolves the
+# Install the *released* binary, not this checkout's. The script resolves the
 # latest tag, checks the tarball against its published sha256, and installs to
 # ~/.local/bin unless CAIRN_BIN says otherwise.
 install:
@@ -313,15 +333,16 @@ $(ROOT)/ui/node_modules: $(ROOT)/ui/package-lock.json
 ui: $(ROOT)/ui/node_modules
 	cd "$(ROOT)/ui" && npm run dev -- -p $(UI_PORT)
 
-# Export the reader and build it into the binaries.
+# Export the reader and build it into the binary.
 #
 # Two steps because they need two toolchains, and separating them is what keeps
 # `cargo build` working for somebody with no Node installed: the `ui` feature is
 # off by default, and this is the target that turns it on. Afterwards
-# `cairn-p2p --serve ADDR` answers the reader at /ui/.
+# `cairn run` answers the reader at /ui/.
 ui-build: site-snapshot
 	cd "$(ROOT)/ui" && npm ci && npm run build
 	$(CARGO) build --release --features ui --bins
+	$(stage-bins)
 
 # Regenerate the site's fallback snapshot from the settled log in launch/.
 #
@@ -336,6 +357,7 @@ site-snapshot: build
 # nothing about whether the thing compiles.
 ui-check: $(ROOT)/ui/node_modules
 	cd "$(ROOT)/ui" && npx tsc --noEmit
+	cd "$(ROOT)/ui" && npm test
 	cd "$(ROOT)/ui" && npm run build
 
 # `--locked`, `fmt` and `clippy` here as well as on the primary: CI gates the

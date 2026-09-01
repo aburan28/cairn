@@ -42,7 +42,7 @@ objective *record's* id. Relating them means canonical encoding, and a third
 implementation of a consensus rule in JavaScript is a third place for it to
 drift. The script starts the real server and asks over HTTP instead.
 
-**You probably do not need to run this.** It is built into the binaries and
+**You probably do not need to run this.** It is built into the `cairn` binary and
 served by the node itself at **`/ui/`** — so on a machine that installed
 cairn with `install.sh`, reading your own node's chain is a URL, not a
 toolchain:
@@ -52,7 +52,7 @@ cairn run --listen 0.0.0.0:9000 --serve 0.0.0.0:8080
 # then http://localhost:8080/ui/
 ```
 
-To build it into the binaries from a checkout, run `make ui-build` (the `ui`
+To build it into the binary from a checkout, run `make ui-build` (the `ui`
 cargo feature is off by default, because `cargo build` must work without Node),
 then use `./target/release/cairn run`.
 
@@ -73,7 +73,19 @@ comparing one node's head against a peer's must not need a redeploy.
 `npm ci` first. `cd ui && npm install && npm run dev` does the same thing by
 hand and *resolves* the lockfile rather than obeying it, which is the
 difference `npm ci` exists for. `make ui-check` runs what CI gates on:
-`tsc --noEmit` and a build.
+`tsc --noEmit`, `npm test`, and a build.
+
+The tests are `lib/*.test.ts`, run by vitest with no DOM and no mocking of a
+node: everything in `lib/` that is not a `fetch` is a pure function over what a
+node answered, and those are what the tests hold still — the chain check, the
+frontier join, NDJSON parsing with a bad line, the checkpoint-against-height
+comparison in its correct units, and which 404 at `/checkpoint` is the node's
+own (`{"error": "…checkpoint…"}`, meaning nobody has signed one) and which is a
+static host with no node behind it, which is what the public site gets for
+every fetch and must say nothing about. The pages themselves are exercised by `next
+build` and by `scripts/node-smoke.sh` against a real node. Each fetcher also
+asserts at runtime that the fields a page reads are present (`lib/shape.ts`),
+because an `as`-cast passes `tsc` for any field name at all.
 
 ## How the public site gets there
 
@@ -126,7 +138,8 @@ as a Node process — which is what lets the daemon carry it.
 
 ## There are still two of these, on purpose
 
-`cairn-serve` also renders the chain itself at **`GET /chain.html`**: one
+The HTTP server (`cairn serve`, and the same code inside `cairn run`) also
+renders the chain itself at **`GET /chain.html`**: one
 self-contained 3.7 KB page written in Rust, no build step of any kind. It is
 what `serve-smoke.sh` tests, and it is what a binary built *without* the `ui`
 feature has — `/ui/` then 404s with a message that says so, rather than a

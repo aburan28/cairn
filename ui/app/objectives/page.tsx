@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
   type Objective,
@@ -67,7 +68,11 @@ export default function Page() {
     void load(NODE_URL);
   }, [load]);
 
-  const open = objectives?.filter((o) => !o.settled) ?? [];
+  // Both are the node's fields. Deriving `open` as `!settled` here was how
+  // a ratchet with most of its pool left ended up under "settled": the node's
+  // `settled` meant "a settlement record exists", and a ratchet writes one on
+  // every paying move. The node now publishes both, and the rule lives there.
+  const open = objectives?.filter((o) => o.open) ?? [];
   const settled = objectives?.filter((o) => o.settled) ?? [];
 
   return (
@@ -266,7 +271,9 @@ function ObjectiveCard({
           )}
 
           <div className="meta">
-            frontier score <b className="accent">{objective.frontier.score}</b>{" "}
+            <Link href={`/frontier?id=${encodeURIComponent(objective.id)}`}>
+              frontier score <b className="accent">{objective.frontier.score}</b>
+            </Link>{" "}
             held by{" "}
             <code className="dim" title={objective.frontier.holder}>
               {short(objective.frontier.holder)}
@@ -310,6 +317,20 @@ function ObjectiveCard({
               any figure on this card.
             </div>
           )}
+        </div>
+      ) : objective.settlement ? (
+        /* A settled certificate: one claim, one payment, and nothing left to
+           cite. Without this branch the card wore a "settled" tag directly
+           above "no claim yet", which is two facts contradicting each other. */
+        <div className="meta">
+          settled — <b>{amount(objective.settlement.reward)}</b> paid to{" "}
+          <code className="dim" title={objective.settlement.submitter}>
+            {objective.settlement.submitter}
+          </code>{" "}
+          for claim{" "}
+          <code className="dim" title={objective.settlement.claim_id}>
+            {short(objective.settlement.claim_id)}
+          </code>
         </div>
       ) : (
         <div className="meta dim">

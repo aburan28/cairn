@@ -3,11 +3,17 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
+  type ChainFacts,
+  type CheckpointFacts,
   type Feed,
+  type Sourced,
   REPO,
   SNAPSHOT,
+  loadChain,
+  loadCheckpoint,
   loadObjectives,
   progress,
+  provenance,
   repoLink,
   short,
   units,
@@ -20,18 +26,57 @@ import {
  * a node at read time rather than from a build. That is the whole difference
  * between this and a marketing page: nothing here is typed in, and the command
  * that re-derives all of it is printed underneath.
+ *
+ * Three requests, not one, and each falls back on its own. The stats come from
+ * `/objectives`, the link count from `/chain`, the merkle root from
+ * `/checkpoint` — and a node can answer the first and not the third, because
+ * `cairn checkpoint` is a thing an operator chooses to run. So every stat and
+ * the checkpoint panel say where they came from. Before this, one sentence said
+ * "the numbers above came from <node>" while the link count and the root beside
+ * it always came from the snapshot.
  */
 export default function Page() {
   const [feed, setFeed] = useState<Feed | null>(null);
+  const [chain, setChain] = useState<Sourced<ChainFacts> | null>(null);
+  const [checkpoint, setCheckpoint] = useState<Sourced<CheckpointFacts> | null>(null);
 
   useEffect(() => {
+    // Independently, so a slow `/log`-sized answer on one does not hold the
+    // others, and a failure on one is that one's fallback and nobody else's.
     void loadObjectives().then(setFeed);
+    void loadChain().then(setChain);
+    void loadCheckpoint().then(setCheckpoint);
   }, []);
 
   const objectives = feed?.objectives ?? SNAPSHOT.objectives;
-  const open = objectives.filter((o) => !o.settled);
+  // `open` is the node's field, not `!settled` computed here: the node is the
+  // one place the rule lives, and for a while `settled` meant "a settlement
+  // record exists", which a ratchet satisfies from its first paid slice.
+  const open = objectives.filter((o) => o.open);
   const pool = objectives.reduce((sum, o) => sum + o.reward, 0);
-  const paid = objectives.reduce((sum, o) => sum + (o.frontier?.paid_cumulative ?? 0), 0);
+  // A ratchet's payouts are summed in its frontier and its `settlement` is
+  // null; a certificate has no frontier and one `settlement`. Adding both
+  // therefore never counts a payment twice, and leaving either out did:
+  // this summed only frontiers, so the shipped log's 100,000 certificate
+  // payout was missing from the number under "paid out".
+  const paid = objectives.reduce(
+    (sum, o) => sum + (o.frontier?.paid_cumulative ?? 0) + (o.settlement?.reward ?? 0),
+    0,
+  );
+
+  // While a request is in flight the page shows the snapshot, and says
+  // "reading…" rather than labelling it as the snapshot: the label is a claim
+  // about where a number came from, and until the node answers or fails that
+  // claim is not yet true.
+  const objectivesFrom = feed ? provenance(feed) : "reading…";
+  const chainFrom = chain ? provenance(chain) : "reading…";
+  const checkpointFrom = checkpoint ? provenance(checkpoint) : "reading…";
+  const links = chain?.value.links ?? SNAPSHOT.chain.links;
+  const signed = checkpoint?.value ?? SNAPSHOT.checkpoint;
+
+  const notes = [feed?.warning, chain?.note, checkpoint?.note].filter(
+    (note): note is string => typeof note === "string",
+  );
 
   return (
     <main>
@@ -61,12 +106,27 @@ export default function Page() {
       </div>
 
       <div className="row stats">
-        <Stat label="objectives" value={String(objectives.length)} />
-        <Stat label="open" value={String(open.length)} />
-        <Stat label="pool" value={units(pool)} />
-        <Stat label="paid out" value={units(paid)} />
-        <Stat label="chain links" value={String(SNAPSHOT.links)} />
+        <Stat label="objectives" value={String(objectives.length)} from={objectivesFrom} />
+        <Stat label="open" value={String(open.length)} from={objectivesFrom} />
+        <Stat label="pool" value={units(pool)} from={objectivesFrom} />
+        <Stat label="paid out" value={units(paid)} from={objectivesFrom} />
+        <Stat label="chain links" value={String(links)} from={chainFrom} />
       </div>
+
+      {/* A node that answered in a shape this page does not read, or that
+          answered `/objectives` and has no checkpoint. Said here rather than
+          folded silently into the fallback, because the first is a bug and
+          the second is the reason the panel below is labelled. */}
+      {notes.length > 0 && (
+        <div className="panel">
+          <b>showing the snapshot for part of this page</b>
+          {notes.map((note) => (
+            <div className="meta" key={note}>
+              {note}
+            </div>
+          ))}
+        </div>
+      )}
 
       <h2>challenges</h2>
       {objectives.length === 0 ? (
@@ -99,7 +159,10 @@ export default function Page() {
                   pool <code>{units(o.reward)}</code>
                   {o.frontier ? (
                     <>
-                      {" · "}best <code className="accent">{o.frontier.score}</code>
+                      {" · "}
+                      <Link href={`/frontier?id=${encodeURIComponent(o.id)}`}>
+                        best <code className="accent">{o.frontier.score}</code>
+                      </Link>
                       {" held by "}
                       <code>{o.frontier.holder}</code>
                       {pct !== null && (
@@ -108,6 +171,13 @@ export default function Page() {
                         </span>
                       )}
                     </>
+                  ) : o.settlement ? (
+                    <span className="dim">
+                      {" · settled — "}
+                      <code>{units(o.settlement.reward)}</code> paid to{" "}
+                      <code>{o.settlement.submitter}</code> for claim{" "}
+                      <code title={o.settlement.claim_id}>{short(o.settlement.claim_id)}</code>
+                    </span>
                   ) : (
                     <span className="dim"> · no claim yet</span>
                   )}
@@ -143,8 +213,9 @@ export default function Page() {
             payment, so every objective is an eval with a ground-truth reward
             signal.
           </div>
-          <pre>cairn-mcp</pre>
+          <pre>cairn run</pre>
           <div className="meta dim">
+            One stdio MCP server, live on the network.{" "}
             <a href={repoLink("docs/agents.md")}>agents.md</a> has the config
             stanza for each client.
           </div>
@@ -152,13 +223,15 @@ export default function Page() {
         <li className="card">
           <b>run a node</b>
           <div className="meta">
-            One process syncs with peers, serves the log over HTTP, and admits
-            what arrives — because it is the process holding the write lock.
-            Readers fetch the log and re-derive everything themselves, which is
-            the point: they need not trust the server that served it.
+            One process serves MCP, syncs with peers, serves the log over HTTP
+            with this reader, and admits what arrives — because it is the
+            process holding the write lock. Readers fetch the log and re-derive
+            everything themselves, which is the point: they need not trust the
+            server that served it.
           </div>
-          <pre>cairn-p2p --serve 0.0.0.0:8080 …</pre>
+          <pre>cairn run</pre>
           <div className="meta dim">
+            Loopback by default; pass a bootstrap file to join peers.{" "}
             <a href={repoLink("docs/serving.md")}>serving.md</a> and{" "}
             <a href={repoLink("docs/p2p.md")}>p2p.md</a>.
           </div>
@@ -167,11 +240,11 @@ export default function Page() {
 
       <h2>check it before you trust it</h2>
       <p className="lede">
-        {feed?.live
-          ? `The numbers above came from ${feed.origin}.`
-          : `No node answered, so the numbers above come from ${SNAPSHOT.source} — a real settled log that ships in the repository, not a mock.`}{" "}
-        Either way, re-derive them yourself. This recomputes every settlement
-        from the records and checks each batch against the anchor it recorded:
+        Every number above says where it came from: a node that answered, or{" "}
+        {SNAPSHOT.source} — a real settled log that ships in the repository,
+        not a mock. Either way, re-derive it yourself. This recomputes every
+        settlement from the records and checks each batch against the anchor
+        it recorded:
       </p>
       <div className="panel">
         <pre>{`git clone ${REPO}
@@ -179,10 +252,23 @@ cd distributed-researcher
 cairn --log launch/cairn.jsonl --root . audit`}</pre>
         <div className="meta">
           merkle root{" "}
-          <code className="accent" title={SNAPSHOT.merkle_root}>
-            {short(SNAPSHOT.merkle_root)}
+          <code className="accent" title={signed.root}>
+            {short(signed.root)}
           </code>{" "}
-          · signed at height {SNAPSHOT.height} · {SNAPSHOT.issued_at}
+          · signed at height {signed.height} · {signed.issued_at} · by{" "}
+          <code title={signed.public_key}>{short(signed.public_key)}</code>
+        </div>
+        {/* The label is the point of the panel. A live node's root and the
+            bundled log's signature are different facts, and the sentence that
+            says which this is must sit beside the number, not three paragraphs
+            up. The command above audits the bundled log either way — a live
+            node's log is at its /log, and its own reader is at /chain. */}
+        <div className="meta dim">
+          {checkpointFrom}
+          {checkpoint?.live &&
+            " — the command above audits the bundled log; this node's own log is at /log and its chain at "}
+          {checkpoint?.live && <Link href="/chain">/chain</Link>}
+          {checkpoint?.live && "."}
         </div>
       </div>
       <p className="lede dim">
@@ -202,11 +288,12 @@ cairn --log launch/cairn.jsonl --root . audit`}</pre>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, from }: { label: string; value: string; from: string }) {
   return (
     <div className="stat">
       <div className="statValue">{value}</div>
       <div className="statLabel">{label}</div>
+      <div className="statFrom dim">{from}</div>
     </div>
   );
 }

@@ -4,24 +4,38 @@
    `/chain.html` is self-contained. */
 :root {
   color-scheme: light dark;
-  --fg: #111;
-  --dim: #666;
+  --fg: #14161a;
+  --dim: #6b7178;
+  --faint: #9aa0a8;
   --bg: #fff;
-  --panel: #fafafa;
-  --line: #d8d8d8;
-  --accent: #0b6;
-  --bad: #c33;
+  --panel: #f7f7f8;
+  --panel-strong: #f0f1f2;
+  --line: #e0e1e3;
+  --line-strong: #c7c9cc;
+  --accent: #067a4d;
+  --accent-bg: rgba(6, 122, 77, 0.08);
+  --bad: #b03030;
+  --bad-bg: rgba(176, 48, 48, 0.07);
+  --shadow: 0 1px 2px rgba(20, 22, 26, 0.04);
+  --radius: 7px;
+  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --fg: #e6e6e6;
-    --dim: #999;
-    --bg: #111;
-    --panel: #181818;
-    --line: #333;
-    --accent: #3d8;
-    --bad: #f66;
+    --fg: #e7e8ea;
+    --dim: #9aa0a8;
+    --faint: #686e76;
+    --bg: #0d0e10;
+    --panel: #17181b;
+    --panel-strong: #1e2023;
+    --line: #292b2f;
+    --line-strong: #3a3d42;
+    --accent: #3ecf8e;
+    --accent-bg: rgba(62, 207, 142, 0.09);
+    --bad: #f0776f;
+    --bad-bg: rgba(240, 119, 111, 0.09);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   }
 }
 
@@ -29,27 +43,40 @@
   box-sizing: border-box;
 }
 
+::selection {
+  background: var(--accent-bg);
+  color: var(--fg);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
   font:
-    14px/1.55 ui-monospace,
+    14px/1.6 ui-monospace,
     SFMono-Regular,
     Menlo,
     Consolas,
     monospace;
+  font-feature-settings: "liga" 0;
+  -webkit-font-smoothing: antialiased;
 }
 
 main {
   max-width: 68rem;
   margin: 0 auto;
-  padding: 2rem 1.25rem 4rem;
+  padding: 2.25rem 1.25rem 4rem;
 }
 
 h1 {
-  font-size: 1.2rem;
-  margin: 0 0 0.35rem;
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.4rem;
 }
 
 p.lede {
@@ -60,66 +87,117 @@ p.lede {
 
 code {
   overflow-wrap: anywhere;
+  font-size: 0.95em;
 }
 
 a {
   color: var(--accent);
+  text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  text-underline-offset: 0.2em;
+  transition: text-decoration-color 0.12s var(--ease);
+}
+
+a:hover {
+  text-decoration-color: currentColor;
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .panel {
   border: 1px solid var(--line);
   border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
   background: var(--panel);
-  padding: 0.8rem 0.95rem;
+  padding: 0.85rem 1rem;
   margin-bottom: 1rem;
   overflow-wrap: anywhere;
 }
 
 .panel.bad {
   border-left-color: var(--bad);
+  background: var(--bad-bg);
 }
 
 .panel b {
   display: block;
-  font-weight: 400;
+  font-weight: 600;
   font-size: 0.85em;
   color: var(--dim);
-  margin-bottom: 0.2rem;
+  margin-bottom: 0.3rem;
+}
+
+.panel.bad b {
+  color: var(--bad);
 }
 
 .row {
   display: flex;
-  gap: 0.75rem;
+  gap: 0.6rem;
   align-items: baseline;
   flex-wrap: wrap;
   margin-bottom: 1.25rem;
 }
 
-input {
+input,
+.input {
   flex: 1 1 22rem;
   min-width: 0;
-  padding: 0.45rem 0.6rem;
+  padding: 0.5rem 0.7rem;
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--line);
+  border-radius: var(--radius);
   font: inherit;
+  transition:
+    border-color 0.12s var(--ease),
+    box-shadow 0.12s var(--ease);
 }
 
-button {
-  padding: 0.45rem 0.9rem;
+input:hover,
+.input:hover {
+  border-color: var(--line-strong);
+}
+
+input:focus-visible,
+.input:focus-visible {
+  border-color: var(--accent);
+}
+
+button,
+.button {
+  padding: 0.5rem 1rem;
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--line);
+  border-radius: var(--radius);
   font: inherit;
   cursor: pointer;
+  transition:
+    border-color 0.12s var(--ease),
+    color 0.12s var(--ease),
+    background 0.12s var(--ease);
 }
 
-button:hover:not(:disabled) {
+button:hover:not(:disabled),
+.button:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
+  background: var(--accent-bg);
 }
 
-button:disabled {
+button:active:not(:disabled),
+.button:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+button:disabled,
+.button:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -152,6 +230,7 @@ li.link::before {
   height: 0.7rem;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 0 3px var(--bg);
 }
 
 li.link.genesis::before {
@@ -166,7 +245,8 @@ li.link.genesis::before {
 .meta {
   color: var(--dim);
   font-size: 0.9em;
-  margin-top: 0.2rem;
+  margin-top: 0.25rem;
+  line-height: 1.6;
 }
 
 .claims {
@@ -202,9 +282,28 @@ li.link.genesis::before {
 .nav {
   max-width: 68rem;
   margin: 0 auto;
-  padding: 1rem 1.25rem 0;
+  padding: 1.1rem 1.25rem 0;
   display: flex;
-  gap: 1.25rem;
+  align-items: center;
+  gap: 1.4rem;
+}
+
+.nav a {
+  color: var(--dim);
+  text-decoration: none;
+}
+
+.nav a:hover {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* The wordmark reads as the app's identity, not another nav item, so it gets
+   the full-strength color the rest of the row deliberately doesn't. */
+.nav a:first-child {
+  color: var(--fg);
+  font-weight: 700;
 }
 
 /* -- objectives ----------------------------------------------------------- */
@@ -213,8 +312,9 @@ h2 {
   font-size: 0.95rem;
   font-weight: 600;
   color: var(--dim);
-  margin: 2rem 0 0.75rem;
+  margin: 2rem 0 0.85rem;
   text-transform: lowercase;
+  letter-spacing: 0.01em;
 }
 
 .cards {
@@ -227,9 +327,17 @@ h2 {
 
 .card {
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--panel);
-  padding: 1rem 1.1rem;
+  padding: 1.05rem 1.15rem;
+  box-shadow: var(--shadow);
+  transition:
+    border-color 0.15s var(--ease),
+    box-shadow 0.15s var(--ease);
+}
+
+li.card:hover {
+  border-color: var(--line-strong);
 }
 
 .card-head {
@@ -237,7 +345,7 @@ h2 {
   align-items: center;
   gap: 0.6rem;
   flex-wrap: wrap;
-  margin-bottom: 0.6rem;
+  margin-bottom: 0.65rem;
 }
 
 .goal {
@@ -246,15 +354,24 @@ h2 {
 
 .tag {
   font-size: 0.75rem;
-  padding: 0.1rem 0.45rem;
+  padding: 0.15rem 0.55rem;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--dim);
+  background: var(--bg);
+  display: inline-block;
+  line-height: 1.4;
+}
+
+button.tag {
+  font: inherit;
+  cursor: pointer;
 }
 
 .tag.open {
   color: var(--accent);
   border-color: var(--accent);
+  background: var(--accent-bg);
 }
 
 .tag.settled {
@@ -265,8 +382,8 @@ h2 {
    length). Indented and quoted so a sentence inside one cannot pass itself off
    as a field this page rendered. */
 .statement {
-  margin: 0 0 0.9rem;
-  padding-left: 0.8rem;
+  margin: 0 0 0.95rem;
+  padding-left: 0.85rem;
   border-left: 2px solid var(--line);
   color: var(--dim);
   font-style: normal;
@@ -276,18 +393,20 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 1.5rem;
-  margin: 0 0 0.9rem;
+  margin: 0 0 0.95rem;
 }
 
 .facts div {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.2rem;
 }
 
 .facts dt {
-  font-size: 0.75rem;
-  color: var(--dim);
+  font-size: 0.72rem;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .facts dd {
@@ -296,9 +415,9 @@ h2 {
 
 .frontier {
   border-top: 1px solid var(--line);
-  padding-top: 0.75rem;
+  padding-top: 0.8rem;
   display: grid;
-  gap: 0.4rem;
+  gap: 0.45rem;
 }
 
 /* A pool, not a progress bar: it drains as the frontier is paid out, so a full
@@ -314,6 +433,8 @@ h2 {
   display: block;
   height: 100%;
   background: var(--accent);
+  border-radius: inherit;
+  transition: width 0.3s var(--ease);
 }
 
 @media (min-width: 60rem) {
@@ -331,13 +452,13 @@ h2 {
 
 .ratchet {
   display: grid;
-  gap: 0.35rem;
-  margin-bottom: 0.6rem;
+  gap: 0.4rem;
+  margin-bottom: 0.65rem;
 }
 
 .verifier {
-  margin-top: 0.6rem;
-  padding-top: 0.6rem;
+  margin-top: 0.65rem;
+  padding-top: 0.65rem;
   border-top: 1px solid var(--line);
   word-break: break-all;
 }
@@ -345,18 +466,18 @@ h2 {
 /* --- the site: landing and challenge pages ------------------------------- */
 
 h2 {
-  font-size: 1rem;
-  margin: 2rem 0 0.5rem;
-  padding-top: 1rem;
+  font-size: 1.02rem;
+  margin: 2.25rem 0 0.6rem;
+  padding-top: 1.1rem;
   border-top: 1px solid var(--line);
 }
 
 pre {
   margin: 0.5rem 0;
-  padding: 0.6rem 0.75rem;
-  background: var(--bg);
+  padding: 0.65rem 0.8rem;
+  background: var(--panel-strong);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius);
   /* A curl one-liner is longer than any sensible column. Wrapping beats a
      horizontal scrollbar on the one element a visitor is meant to copy. */
   white-space: pre-wrap;
@@ -368,25 +489,36 @@ pre {
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
-  margin: 1.25rem 0;
+  margin: 1.4rem 0;
 }
 
 .stat {
   flex: 1 1 7rem;
-  padding: 0.6rem 0.75rem;
+  padding: 0.7rem 0.85rem;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 
 .statValue {
-  font-size: 1.15rem;
+  font-size: 1.2rem;
+  font-weight: 600;
   color: var(--accent);
+  font-variant-numeric: tabular-nums;
 }
 
 .statLabel {
   color: var(--dim);
   font-size: 0.85rem;
+  margin-top: 0.1rem;
+}
+
+/* Where a stat's number came from: a node, or the bundled log. Smaller than
+   the label and allowed to wrap, because an origin is a URL. */
+.statFrom {
+  font-size: 0.72rem;
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
 }
 
 ul.cards {
@@ -395,21 +527,8 @@ ul.cards {
   padding: 0;
 }
 
-.card {
-  padding: 0.75rem;
-  margin-bottom: 0.6rem;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-}
-
 .card a {
   color: inherit;
-}
-
-.tag.open {
-  color: var(--accent);
-  border-color: var(--accent);
 }
 
 /* A ratchet is a distance travelled between two known ends, so it gets a bar.
@@ -442,7 +561,7 @@ ul.cards {
 
 .ways .card b {
   display: block;
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.4rem;
 }
 
 /* `pre` breaks anywhere by default, which is right for the curl one-liner on
@@ -460,6 +579,8 @@ ul.cards {
 .tableWrap {
   overflow-x: auto;
   margin: 0.5rem 0 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
 }
 
 table.grid {
@@ -470,17 +591,31 @@ table.grid {
 
 table.grid th,
 table.grid td {
-  border: 1px solid var(--line);
-  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  padding: 0.5rem 0.7rem;
   text-align: left;
   vertical-align: top;
 }
 
+table.grid tr:last-child td {
+  border-bottom: none;
+}
+
 table.grid th {
   color: var(--dim);
-  font-weight: 400;
-  font-size: 0.85em;
-  background: var(--panel);
+  font-weight: 600;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--panel-strong);
+}
+
+table.grid tbody tr {
+  transition: background 0.1s var(--ease);
+}
+
+table.grid tbody tr:hover {
+  background: var(--panel-strong);
 }
 
 /* A list of statements, not a list of bullets: each item is a sentence or two,
@@ -506,7 +641,7 @@ ul.plain li {
 .foot {
   max-width: 68rem;
   margin: 0 auto;
-  padding: 1.25rem 1.25rem 3rem;
+  padding: 1.5rem 1.25rem 3rem;
   border-top: 1px solid var(--line);
   font-size: 0.9em;
 }
@@ -515,7 +650,15 @@ ul.plain li {
   display: flex;
   flex-wrap: wrap;
   gap: 1.25rem;
-  margin-bottom: 0.6rem;
+  margin-bottom: 0.7rem;
+}
+
+.footLinks a {
+  color: var(--dim);
+}
+
+.footLinks a:hover {
+  color: var(--accent);
 }
 
 .foot .dim {
@@ -526,7 +669,7 @@ ul.plain li {
 /* The nav wraps on a phone rather than pushing the last link off the edge. */
 .nav {
   flex-wrap: wrap;
-  row-gap: 0.4rem;
+  row-gap: 0.5rem;
 }
 
 .bar.wide {

@@ -70,7 +70,9 @@ curl -fsSL https://github.com/aburan28/distributed-researcher/releases/latest/do
 ```
 
 Detects the platform, downloads the matching tarball, checks it against the
-published `.sha256`, and installs all five binaries to `~/.local/bin`.
+published `.sha256`, and installs the one binary a release contains — `cairn`,
+whose subcommands (`run`, `mcp`, `p2p`, `serve`, `gen-bootstrap`, `arena`)
+replace what used to ship as separate executables — to `~/.local/bin`.
 `--version` pins a release, `--bin-dir` picks somewhere else, and on Linux
 `--libc gnu` takes the dynamically-linked build instead of the static musl one.
 Linux amd64/arm64 and macOS Intel/Apple Silicon; no Windows, because the
@@ -89,9 +91,16 @@ cairn --log launch/cairn.jsonl --root . audit
 From source instead:
 
 ```sh
-cargo build --release
-cargo install --path .        # puts `cairn` and the other binaries on PATH
+make ui-build                          # exports the reader, then builds with `--features ui`
+cargo install --path . --features ui   # puts the single `cairn` binary on PATH
 ```
+
+The `ui` feature is **off by default**, and `cairn run` refuses to start
+without it — the reader it serves at `/ui/` has to be embedded at build time.
+A plain `cargo build --release` needs no Node toolchain and produces every
+other subcommand, but not a working `cairn run`; `make ui-build` runs `npm ci &&
+npm run build` in `ui/` first and then builds with the feature on. `cargo
+build --release --features ui` does the same if `ui/out` already exists.
 
 ## Quick start
 
@@ -101,11 +110,29 @@ An installed release has the complete local node behind one command:
 cairn run
 ```
 
-This starts P2P synchronization, the HTTP API, a local submission queue, and
-the embedded reader in one process. Open <http://127.0.0.1:8080/ui/>. Its local
-state lives under `.local/`; P2P listens on `127.0.0.1:9000`, so the default is
-safe for a first run and does not expose a node to the network. Stop it with
-Ctrl-C.
+This starts the MCP server, P2P synchronization, the HTTP API, a local
+submission queue, and the embedded reader in one process. Open
+<http://127.0.0.1:8080/ui/>. Its local state lives under `.local/`; P2P listens
+on `127.0.0.1:9000`, so the default is safe for a first run and does not expose
+a node to the network. MCP uses stdin/stdout, so an agent client can use `cairn`
+as its command with `run` as its only argument. Operational messages stay on
+stderr and stdout contains JSON-RPC only. Closing MCP stdin stops the combined
+node; an interactive operator can stop it with Ctrl-C.
+
+For example, a project-local Claude Code configuration can launch the complete
+node instead of the standalone `cairn mcp` server (once a separate `cairn-mcp`
+binary):
+
+```json
+{
+  "mcpServers": {
+    "cairn": { "command": "cairn", "args": ["run"] }
+  }
+}
+```
+
+Use `--mcp-identity agent.identity.json` after `run` to sign agent submissions.
+Use `--no-mcp` when stdin belongs to something else, such as a service manager.
 
 To join through a known bootstrap file, pass it after `run`:
 
@@ -122,16 +149,13 @@ cairn run \
   --bootstrap .local/seed.json
 ```
 
-The source checkout's ordinary `cargo build` does not require Node and therefore
-does not embed the reader. Build the reader first when working from source:
+Working from a source checkout, build with the `ui` feature first (see
+*Install* above — `make ui-build`, then `./target/release/cairn run`); the
+default `cargo build` does not embed the reader and `cairn run` says so.
 
-```sh
-make ui-build
-./target/release/cairn run
-```
-
-Published release tarballs are built with the UI feature by the release
-workflow and are checked by starting `cairn run` and fetching `/ui/` from the
+Published release tarballs contain a single `cairn` binary. They are built
+with the UI feature by the release workflow and are checked by starting
+`cairn run`, completing an MCP handshake, and fetching `/ui/` from the same
 unpacked binary.
 
 ```sh
@@ -151,8 +175,10 @@ cairn incentives --sweep canary-rate=1/20..1/5:5 --out grid.csv
 cairn incentives --robustness   # ...and how far each parameter can move before it
                                     # breaks. Seventeen parameters walked out along a
                                     # twelve-rung ladder in both directions, the whole
-                                    # mechanism re-evaluated at every rung: ~6 minutes,
-                                    # with progress on stderr so stdout stays the report.
+                                    # mechanism re-evaluated at every rung: about a minute
+                                    # and a half on an Apple M4 Pro, a few minutes on slower
+                                    # hardware, with progress on stderr so stdout stays the
+                                    # report.
 ```
 
 On Linux, install [bubblewrap](https://github.com/containers/bubblewrap)
@@ -194,7 +220,7 @@ a log of twenty thousand.
 ### Publish your log so others can check it
 
 ```sh
-cairn-serve --log cairn.jsonl --root . --listen 0.0.0.0:8080
+cairn --log cairn.jsonl --root . serve --listen 0.0.0.0:8080
 ```
 
 `GET /log` returns the log byte for byte; `GET /objectives` and
@@ -213,9 +239,9 @@ process:
 ### One node, one process
 
 ```sh
-cairn-p2p --identity id.json --root-key root.key --checkpoint cp.json \
-    --listen 0.0.0.0:9000 --log cairn.jsonl --root . \
-    --queue ./queue --serve 0.0.0.0:8080
+cairn --log cairn.jsonl --root . p2p \
+    --identity id.json --root-key root.key --checkpoint cp.json \
+    --listen 0.0.0.0:9000 --queue ./queue --serve 0.0.0.0:8080
 ```
 
 `--serve` puts the HTTP server on a thread beside the sync loop, against the
@@ -223,15 +249,15 @@ same log. Because that process is the one holding the write lock, it drains the
 queue it fills: a submission arriving over HTTP is admitted on the next tick,
 with nobody running `cairn drain` at all.
 
-`cairn-serve --p2p-listen 0.0.0.0:9000 --identity … --root-key … --checkpoint …`
-is the same daemon entered from the other side — both call
+`cairn serve --p2p-listen 0.0.0.0:9000 --identity … --root-key … --checkpoint …`
+is the same daemon entered from the other side — both subcommands call
 `cairn::daemon::run`, so there is one implementation of "be a node" rather
-than one per binary. `make node` runs it with the repository's defaults, and
+than one per subcommand. `make node` runs it with the repository's defaults, and
 `./scripts/node-smoke.sh` is the test that a submission really does get admitted
 by the process that received it.
 
 The split topology still works and is still right for a read-only mirror:
-`cairn-serve` alone takes no lock and holds no `Node`, so it is safe to
+`cairn serve` alone takes no lock and holds no `Node`, so it is safe to
 point at a log something else is writing. What it cannot do is admit anything.
 
 ### Start a p2p node
@@ -313,15 +339,23 @@ network symptom.
 
 ### Turning up the logs
 
-`CAIRN_LOG` sets the level — `error`, `warn`, `info` (default), `debug`,
+`CAIRN_LOG_LEVEL` sets the level — `error`, `warn`, `info` (default), `debug`,
 `trace`, or `off`. Everything goes to **stderr**, always, which is what makes it
-safe to raise on `cairn-mcp`, whose *stdout* is the JSON-RPC protocol.
+safe to raise on `cairn mcp` and `cairn run`, whose *stdout* is the JSON-RPC
+protocol.
+
+It used to be `CAIRN_LOG`, and the `cairn` CLI read that same name as the
+**ledger path** — so `CAIRN_LOG=debug` exported for a daemon sent `cairn audit`
+to an empty file called `debug`, which audits clean. The two are now
+`CAIRN_LOG_LEVEL` (the level, every daemon) and `CAIRN_LOG_PATH` (the ledger,
+the CLI). The daemons still accept a level in `CAIRN_LOG` with a warning; the
+CLI refuses one outright and names both variables.
 
 `debug` adds every p2p protocol message, in both directions, with the peer it
 was exchanged with:
 
 ```
-$ CAIRN_LOG=debug make p2p
+$ CAIRN_LOG_LEVEL=debug make p2p
 … DEBUG cairn::p2p 59758322… -> Hello peer=083e078e… records=0
 … DEBUG cairn::p2p 59758322… <- Inventory records=1
 … DEBUG cairn::p2p 59758322… -> Want ids=1
@@ -407,12 +441,13 @@ cairn check proof.json --from checkpoint.json                # ... checked witho
 cairn drain --queue ./queue                                  # admit what arrived over HTTP
 ```
 
-### Four verifiers, four trust assumptions
+### Five verifiers, five trust assumptions
 
 | kind | checks | cost | trusts |
 |---|---|---|---|
 | `certificate` | recomputes an NP witness | ms | nothing |
 | `evaluator` | scores a candidate against a pinned fitness function | 1 evaluation | evaluator is pinned and pure |
+| `statistical` | re-runs a pinned test statistic at a pinned seed against a pre-registered threshold | 1 run of the statistic | statistic is pinned and pure; the criterion was fixed before the data |
 | `lean` | a proof assistant kernel accepts the proof | seconds | kernel soundness |
 | `replay` | re-runs a pinned computation, compares declared fields | full re-run | bit-reproducibility |
 
@@ -744,7 +779,7 @@ binary** and so had only ever been checked against itself. See
 
 The two address books look like a duplicate and are not, which took reading
 both to establish. `p2p::discovery::AddressBook` maps a transport id to an
-endpoint — an address *and* the 261 KiB McEliece key needed to dial it. It is a
+endpoint — an address *and* the 261,120-byte McEliece key needed to dial it. It is a
 local key cache and nothing about it is relayable. `swarm::discovery` holds
 **signed** peer records — ed25519 identity, addresses, a monotonic sequence — and
 exists to be handed to strangers: `offer` and `share` are peer exchange, with

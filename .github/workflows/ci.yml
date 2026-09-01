@@ -62,21 +62,22 @@ jobs:
       # The verdicts are asserted in `tests/arena.rs`; this run is the readable
       # payoff table, and it exits non-zero if an attack that should be closed
       # has re-opened.
-      - run: cargo run --release --bin arena
+      - run: cargo run --release --bin cairn -- arena
       # Runs the MCP server as a real process. The unit tests call handle_line
       # directly and structurally cannot catch a stray write to stdout, which is
       # the failure that breaks every MCP client and looks like their bug.
       - run: ./scripts/mcp-smoke.sh
       - run: ./scripts/identity-demo.sh
-      # Drives cairn-serve over a real socket. The only test in the repo
+      # Drives `cairn serve` over a real socket. The only test in the repo
       # where the client shares nothing with the node but an address, which is
       # the arrangement every outside contributor is in.
       - run: ./scripts/serve-smoke.sh
       # The same socket, one process. `serve-smoke` drains with a separate
       # command, so it cannot tell whether `daemon::run` wired the queue to the
       # loop that holds the write lock -- and that seam is the whole reason the
-      # unified node exists. Also the only check that both binaries build the
-      # same Config: an argument wired wrong in one is invisible to the other.
+      # unified node exists. Also the only check that `p2p --serve` and
+      # `serve --p2p-listen` build the same Config: an argument wired wrong in
+      # one subcommand is invisible to the other.
       - run: ./scripts/node-smoke.sh
       # Two processes sharing nothing but a socket: a node with only the log
       # fetches its pinned verifier from a stranger and settles a claim with it.
@@ -97,7 +98,7 @@ jobs:
       # itself -- is a script that drives it the way an operator would, across
       # separate invocations and separate directories.
       - run: ./scripts/shard-demo.sh
-      # Every binary answers `--help` with 0 and misuse with 2.
+      # The binary and every subcommand answer `--help` with 0 and misuse with 2.
       #
       # Two of them exited 2 for `--help`, which tells somebody who asked a
       # question, and asked it correctly, that they used the tool wrong.
@@ -105,12 +106,15 @@ jobs:
       # healthcheck asks whether a binary runs at all, so the wrong code here
       # fails a build for no reason. Cheap to pin, and it drifted once already.
       - run: |
-          # Every shipped binary, not a subset. `cairn-gen-bootstrap` was
-          # missing from this list and answered exit 2 to `--help` for its whole
-          # life; the release workflow's unpack check is what found it.
-          for BIN in cairn cairn-mcp cairn-serve cairn-p2p cairn-gen-bootstrap; do
-            ./target/release/$BIN --help >/dev/null 2>&1 \
-              || { echo "$BIN --help exited $?" >&2; exit 1; }
+          # Every shipped subcommand, not a subset. `gen-bootstrap` (then a
+          # binary of its own) was missing from this list and answered exit 2
+          # to `--help` for its whole life; the release workflow's unpack check
+          # is what found it.
+          ./target/release/cairn --help >/dev/null 2>&1 \
+            || { echo "cairn --help exited $?" >&2; exit 1; }
+          for SUB in mcp p2p serve gen-bootstrap arena run; do
+            ./target/release/cairn $SUB --help >/dev/null 2>&1 \
+              || { echo "cairn $SUB --help exited $?" >&2; exit 1; }
           done
           # `|| status=$?` rather than a bare call then `$?`: GitHub runs this
           # with `bash -e`, so a bare call that exits 2 -- which is the whole
@@ -119,11 +123,11 @@ jobs:
           # could never pass, and nobody saw it: until the clippy step ahead of
           # it went green this step was simply never reached, so the check meant
           # to pin the misuse codes had not run once since it was written.
-          for BIN in cairn-serve cairn-p2p; do
+          for SUB in serve p2p; do
             status=0
-            ./target/release/$BIN --definitely-not-a-flag >/dev/null 2>&1 || status=$?
+            ./target/release/cairn $SUB --definitely-not-a-flag >/dev/null 2>&1 || status=$?
             [ "$status" -eq 2 ] \
-              || { echo "$BIN exited $status on a bad argument, want 2" >&2; exit 1; }
+              || { echo "cairn $SUB exited $status on a bad argument, want 2" >&2; exit 1; }
           done
 
   reference:
@@ -223,7 +227,7 @@ jobs:
       # where both binaries already exist. Rotating a key changes every byte on
       # disk and must move neither a record nor the root -- the reference is
       # what makes that a claim about the log rather than about this binary.
-      # Two `cairn-p2p` daemons. Here rather than in the `main` job because
+      # Two `cairn p2p` daemons. Here rather than in the `main` job because
       # the last step needs the reference binary: auditing the node that
       # *synced* is the case that matters -- no bundle, no authored objective,
       # verifier code obtained by hash -- and it was broken, because the
@@ -278,7 +282,7 @@ jobs:
     # here rather than in somebody's browser.
     #
     # Deliberately not in the `rust` job. A Rust contributor should not need a
-    # Node toolchain, and `cairn-serve` renders the chain itself at
+    # Node toolchain, and `cairn serve` renders the chain itself at
     # /chain.html with no build step -- ui/ is the richer client, not the only
     # one. See ui/README.md.
     runs-on: ubuntu-latest
@@ -299,6 +303,12 @@ jobs:
       - run: npm ci
         working-directory: ui
       - run: npx tsc --noEmit
+        working-directory: ui
+      # The pure functions in ui/lib: the chain check, the frontier join,
+      # NDJSON parsing, the checkpoint comparison. `tsc` and `next build`
+      # prove the reader compiles, and for a while that was all this job
+      # proved -- a checkpoint compared in the wrong units passed both.
+      - run: npm test
         working-directory: ui
       - run: npm run build
         working-directory: ui
@@ -331,3 +341,24 @@ jobs:
       # would hand the frontier and the whole pool to an empty list. That is not
       # visible in a passing artifact, so it gets its own adversarial battery.
       - run: python3 examples/faster-algorithms/tools/selftest.py
+      # The hash-differential family: eight pinned files that are nearly one
+      # file, six of them differing only in an instance block. `--check`
+      # re-renders every one from its generator and diffs, which is the only
+      # thing standing between them and the state five-correct-one-wrong that
+      # hand-maintained copies reach on their own.
+      - run: python3 examples/hash-differential/tools/build_pinned.py --check
+      # Re-proves the SHA-0 disturbance-vector optimum (2^16 codewords, about a
+      # second) and re-scores all three committed vectors through the *pinned*
+      # evaluators. The objectives' baselines and targets are those numbers, so
+      # a drift here is a ratchet pointed at the wrong place -- and on a
+      # minimise objective that is a pool paid out for nothing.
+      - run: python3 examples/hash-differential/tools/search_dv.py --check
+      # And the acceptance evidence. All six collision instances are open, so
+      # their checkers are otherwise only ever observed rejecting -- which a
+      # checker that rejects everything also does. This
+      # runs the one committed pair through its checker, the same pair through
+      # the full-MD5 checker built from the same template (which must refuse
+      # it), MD4 and SHA-0 against their published vectors since no modern
+      # OpenSSL carries either, and thirty-four malformed artifacts that must
+      # score rather than raise.
+      - run: python3 examples/hash-differential/tools/selftest.py

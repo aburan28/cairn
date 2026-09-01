@@ -1,0 +1,61 @@
+{
+  "artifact_schema": {
+    "description": "Sixteen consecutive words of the disturbance vector, and the step index of the first. Each word is exactly 8 lowercase hex characters, most significant nibble first, in one spelling so one vector has one artifact and one digest. The example is this objective's own baseline -- it is a real, valid vector, it scores exactly 20, and it therefore clears the threshold while moving the frontier none of the way and minting nothing. It ships as artifacts/dv-sha0-baseline.json.",
+    "example": {
+      "offset": 49,
+      "window": [
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000000",
+        "00000001",
+        "00000000",
+        "00000000",
+        "00000000"
+      ]
+    },
+    "properties": {
+      "offset": {
+        "description": "Step index of window[0]. An integer in [0, 64].",
+        "type": "integer"
+      },
+      "window": {
+        "description": "Exactly 16 words, each 8 lowercase hex characters: DV[offset] through DV[offset + 15].",
+        "type": "array"
+      }
+    },
+    "required": [
+      "offset",
+      "window"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-29T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-hash-dv-sha0",
+  "ratchet": {
+    "baseline": 20,
+    "direction": "minimize",
+    "min_improvement": 1,
+    "reward": 300000,
+    "target": 17
+  },
+  "reward": 300000,
+  "statement": "Find a light disturbance vector for the SHA-0 message expansion. A disturbance vector is a codeword of that expansion -- the difference pattern a collision attack cancels with local collisions, a disturbance at step i undone by corrections at steps i+1..i+5 -- and its weight is what the attack costs, at roughly two state conditions per disturbed bit. Score is the sum of the Hamming weights of DV[20] through DV[79], minimised: steps 0..19 are free because the first sixteen message words are chosen directly, so only the weight message modification cannot reach is billed. This is a proxy for attack cost and is stated as one -- true cost also turns on which bit positions are disturbed and on how local collisions overlap. Submit any sixteen consecutive words and the step index of the first; the evaluator expands forwards and backwards to all eighty, because the recurrence is invertible and published vectors are named by the window that generates them. A vector with a disturbance at step 75 or later is refused: there is no step 80, so its corrections have nowhere to go and it cannot be completed inside one compression. The all-zero vector is refused too, though it could not have won -- sixteen consecutive zero words force it everywhere, so a score of 0 is unreachable by the geometry of the code rather than by the guard. Baseline 20, target 17. The target is a proved optimum, not a construction target, and the pool is exhausted exactly when it is reached: SHA-0's expansion has no rotation, so it acts on the 32 bit positions independently, a codeword is 32 independent codewords of one length-80 binary code, weights add, and the lightest vector overall is therefore the lightest in a single bit position -- which is 2^16 cases and a loop. The answer is 17 and it ships. Baseline 20 is the best single-bit window, which is the obvious construction. The span is 3, so min_improvement 1 admits at most three hops and citation-flow dilution is bounded by the geometry rather than by the parameter. Payment is proportional to the distance the frontier moves, and every submission must cite the frontier it beat.",
+  "verifier": {
+    "direction": "minimize",
+    "entrypoint": "score",
+    "evaluator": "examples/hash-differential/evaluators/dv_sha0.py",
+    "evaluator_sha256": "3dcf11b91f67411da31bc8820158d63d89bb7886e64b575589e918facff31106",
+    "kind": "evaluator",
+    "threshold": 20
+  }
+}

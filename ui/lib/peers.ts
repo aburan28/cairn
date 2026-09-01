@@ -9,10 +9,13 @@
  * gone for months.
  *
  * Live session state is not available to this UI at all. It lives inside
- * `cairn-p2p`, which serves no HTTP, and `cairn-serve` only ever reads
- * a log file. Presenting this as "connected" would be inventing a fact the
+ * the p2p service, which publishes nothing over HTTP, and the HTTP server
+ * (`cairn serve`, or the `--serve` thread of `cairn p2p` / `cairn run`) only
+ * ever reads a log file. Presenting this as "connected" would be inventing a fact the
  * network never published.
  */
+
+import { expectFields } from "./shape";
 
 export type Peer = {
   /** ed25519 identity — this *is* the submitter name. */
@@ -55,8 +58,12 @@ export async function fetchPeers(
   if (!response.ok) {
     throw new Error(`${base}/peers answered ${response.status}.`);
   }
-  const body = (await response.json()) as PeersResponse;
-  return { peers: body.peers ?? [], note: body.note ?? "" };
+  const body = expectFields<PeersResponse>(
+    await response.json(),
+    ["peers"],
+    `${base}/peers`,
+  );
+  return { peers: body.peers, note: body.note ?? "" };
 }
 
 /** A hash or key, short enough to scan a column of them. */

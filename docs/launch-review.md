@@ -1,5 +1,15 @@
 # Launch review — August 2026
 
+> **Refreshed 2026-08-25.** This file is a snapshot of one review and is left
+> as history rather than rewritten (see the note under *What still remains*).
+> Two counts in it had drifted from the tree and were corrected on that date,
+> nothing else was touched: the conformance vector count under *The reference
+> implementation is Rust* (it said 256; `cairn-reference conformance` prints
+> **448**), and the example count under *Fixed in this pass* item 7 (it said 12;
+> `examples/` now holds 19 directories and 32 `objective*.json` files, and
+> `scripts/check-examples.sh` walks all of them). Every other number here is
+> as the review found it and may have aged since.
+
 A full pass over the repository before opening it to outside contributors:
 three parallel reviews (the agent-facing MCP surface, the core protocol
 invariants, and operational readiness), the complete test and e2e suite, and
@@ -92,7 +102,7 @@ Everything numbered 1–8 in the original list below has been built, plus the
 CI and packaging items. What follows the closed list is what genuinely
 remains.
 
-1. **A remote surface exists.** `cairn-serve` publishes `GET /log` byte
+1. **A remote surface exists.** `cairn serve` publishes `GET /log` byte
    for byte, plus `/objectives`, `/objective/{id}`, `/frontier/{id}` and
    `/checkpoint`; `POST /submit` queues into a spool the operator drains with
    `cairn drain`, so admission stays in the rules engine and the log keeps
@@ -126,8 +136,10 @@ remains.
    not the attacker-authored statement. Omitted when absent, so it moved no
    ids: every pre-existing conformance vector is byte-identical.
 7. **CI is hardened.** `--locked` everywhere, `cargo audit` as a blocking job,
-   `scripts/check-examples.sh` re-pinning and posting all 12 examples (CI
-   previously exercised 3), dependabot, a release workflow, and `SECURITY.md`.
+   `scripts/check-examples.sh` re-pinning and posting every example objective
+   (12 at the time of the review; 32 across 19 directories as of the
+   2026-08-25 refresh — CI previously exercised 3), dependabot, a release
+   workflow, and `SECURITY.md`.
 8. **A discovery from building the artifact, now guarded.** A log written with
    `CAIRN_EPOCH_SECONDS=1` audits as *thoroughly broken* under the default
    600 — in both implementations, and both are right, because epochs are
@@ -140,8 +152,9 @@ remains.
 
 `reference/python/` is gone; `reference/rust/` replaces it as an independent
 second implementation, sharing no code with the primary and not even a cargo
-workspace. It reproduces all 256 frozen conformance vectors and passes interop
-in both directions.
+workspace. It reproduces all 448 frozen conformance vectors (the review said
+256; corrected 2026-08-25 to what `cairn-reference conformance` prints) and
+passes interop in both directions.
 
 Two Rust implementations share blind spots that Rust and Python did not — the
 reward-above-`u64` bound and the `"cites": "abc"` decode were both caught by
@@ -252,7 +265,7 @@ languages the two are written in.
    order `N` — which rules out Pohlig-Hellman on a smooth-order curve — but
    not every weak-curve family. Deriving the curve from the seed too is the
    stronger construction and is not done.
-8. **Rate limiting.** `cairn-serve` caps concurrent connections and body
+8. **Rate limiting.** `cairn serve` caps concurrent connections and body
    size and nothing else. An operator exposing it to the open internet should
    put it behind something that does rate limiting, the same as any other
    small service.
@@ -263,11 +276,11 @@ Everything above is now either built or disclosed, so the launch is no longer
 blocked on plumbing. What it is blocked on is a choice, and it is item 1:
 
 - **Launch as a single operator** — you post objectives, run
-  `cairn-serve`, and contributors fetch the log, work, and submit through
+  `cairn serve`, and contributors fetch the log, work, and submit through
   the queue. This works end to end today.
 - **Launch as an open network** — viable now. Contributors make an identity
   (`cairn identity --out alice.json`) and pass `--identity` to the CLI or
-  to `cairn-mcp`; such a name cannot be forged or replayed. Post objectives
+  to `cairn mcp`; such a name cannot be forged or replayed. Post objectives
   with `require_signed_submitter: true` and nicknames are refused outright, so
   every claim on that bounty is attributable to a key nobody else holds. What
   still argues for care is escrow, not identity: rewards are notional, so what

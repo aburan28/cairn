@@ -2,17 +2,18 @@
 //!
 //! # Why this is a library module and not a binary
 //!
-//! It used to be the body of `cairn-p2p`, and publishing the log was a
-//! *second* process running `cairn-serve` against the same file. That
+//! It used to be the body of `cairn-p2p` (a separate binary then; the
+//! `cairn p2p` subcommand now), and publishing the log was a *second* process
+//! running `cairn-serve` (now `cairn serve`) against the same file. That
 //! topology works — [`Ledger::open`] takes no lock, so a reader is safe beside
 //! the daemon's exclusive writer — but it makes an operator run two units, keep
 //! two sets of paths in agreement, and discover by reading `docs/serving.md`
 //! that the queue one process fills is drained by the other.
 //!
 //! The two loops share nothing but a directory, so there was never a reason for
-//! them to share nothing but a directory. [`run`] starts both, and both binaries
-//! call it, so there is one implementation of "be a node" rather than one per
-//! entry point.
+//! them to share nothing but a directory. [`run`] starts both, and all three
+//! entry points call it, so there is one implementation of "be a node" rather
+//! than one per entry point.
 //!
 //! # What sharing a process does and does not change
 //!
@@ -69,7 +70,7 @@ const BEACONS_PER_TICK: usize = 64;
 /// Seconds between sync rounds.
 const TICK_SECONDS: u64 = 5;
 
-/// Everything [`run`] needs. Both binaries build one of these from their flags.
+/// Everything [`run`] needs. All three entry points build one from their flags.
 ///
 /// Paths are taken as owned values rather than borrowed: the daemon outlives
 /// every scope a caller would lend them from, and threading lifetimes through a
@@ -108,6 +109,22 @@ pub struct Config {
     /// CLI does — so a daemon on a machine with `~/.cairn/key` opens the
     /// same logs the CLI writes, instead of reporting them as spliced.
     pub key_file: Option<PathBuf>,
+    /// How outbound dials leave this node, as a proxy configuration string.
+    ///
+    /// `None` or `"direct"` dials straight. `socks5://host:port` routes every
+    /// dial through a SOCKS5 proxy — a Tor client, an obfs4/Snowflake bridge, a
+    /// corporate egress — so a censoring firewall is something to route around
+    /// rather than something that stops the node. See [`crate::p2p::proxy`].
+    pub proxy: Option<String>,
+    /// Serve MCP over this process's stdin/stdout against the same node state.
+    ///
+    /// Off for the standalone p2p and HTTP binaries. `cairn run` enables it so
+    /// an MCP client can launch one process without creating a second ledger
+    /// writer.
+    pub mcp: bool,
+    /// Ed25519 identity used to sign MCP submissions. This is deliberately
+    /// separate from [`Config::identity`], which is the transport KEM key.
+    pub mcp_identity: Option<PathBuf>,
 }
 
 impl Config {
@@ -134,6 +151,9 @@ impl Config {
             serve: None,
             max_queued: serve::DEFAULT_MAX_QUEUED,
             key_file: None,
+            proxy: None,
+            mcp: false,
+            mcp_identity: None,
         }
     }
 
@@ -275,9 +295,19 @@ fn load_root_key(path: &Path) -> Result<RootKey, String> {
     Ok(key)
 }
 
+// Both files below go through `secret_file::replace_public` rather than
+// `fs::write`, which truncates in place: a daemon killed between the truncate
+// and the last byte left a torn checkpoint that failed every reader's
+// verification, or a torn population file that refused the next start -- and
+// the daemon is killed mid-write routinely, since it rewrites both every round
+// and an operator's `kill` lands wherever it lands. The public variant, not
+// `replace`: `GET /checkpoint` serves this file and a reader copies it, so
+// 0600 would be the wrong mode.
+
 fn write_checkpoint(path: &Path, key: &RootKey, node: &Node) -> Result<(), String> {
     let signed = key.sign_ledger(node.ledger(), timestamp());
-    fs::write(path, signed.to_value().canonical_string()).map_err(|e| e.to_string())
+    crate::secret_file::replace_public(path, signed.to_value().canonical_string().as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 /// Read the population file, or start empty if it is not there yet.
@@ -295,7 +325,43 @@ fn load_population(path: &Path) -> Result<Population, String> {
 }
 
 fn save_population(path: &Path, population: &Population) -> Result<(), String> {
-    fs::write(path, population.to_value().canonical_string()).map_err(|e| e.to_string())
+    crate::secret_file::replace_public(path, population.to_value().canonical_string().as_bytes())
+        .map_err(|e| e.to_string())
+}
+
+/// Settle every epoch that has come due, and say whether the log changed.
+///
+/// Run once per tick, unconditionally. It used to run only after a drain that
+/// admitted or refused something, and every p2p session settles on its own
+/// through `apply_records` -- so a node with no reachable peers and an empty
+/// spool never settled a closed epoch at all. Its contributors' claims sat
+/// accepted and unpaid, and its checkpoint stood still, for as long as nobody
+/// dialled it. That is the ordinary state of a node run alone, which is how
+/// every node starts.
+///
+/// The answer is what gates the checkpoint rewrite. Nothing due is the common
+/// case, and re-signing and rewriting the checkpoint every five seconds for a
+/// log that has not moved is churn a reader polling `/checkpoint` would see as
+/// change.
+fn settle_tick(node: &mut Node, now: &str) -> bool {
+    let before = node.ledger().len();
+    match node.settle_at(now) {
+        Ok(outcomes) => {
+            let paid = outcomes.iter().filter(|o| o.settled).count();
+            if !outcomes.is_empty() {
+                log::info!(
+                    "settle: {} claim(s) in batch, {paid} paid, {} entries now",
+                    outcomes.len(),
+                    node.ledger().len()
+                );
+            }
+        }
+        Err(error) => log::warn!("settle: {error}"),
+    }
+    // Measured on the log rather than on the outcomes: a batch record is
+    // appended even when every claim in it settled for zero, and it is the
+    // log that the checkpoint signs.
+    node.ledger().len() != before
 }
 
 /// A scorer for one sync round.
@@ -344,9 +410,13 @@ impl RoundScorer {
 /// connection, so the second lock would only ever be taken with the first
 /// already held. Two locks always acquired in the same order is a deadlock
 /// waiting for the first person who reverses them.
-struct State {
-    node: Node,
+pub(crate) struct State {
+    pub(crate) node: Node,
     population: Population,
+    /// An in-process MCP request appended to `node`; the daemon consumes this
+    /// flag on its next tick and rewrites the checkpoint before advertising
+    /// the new head.
+    pub(crate) dirty: bool,
 }
 
 /// Write out everything a round may have changed.
@@ -430,7 +500,21 @@ pub fn run(config: Config) -> Result<(), String> {
     let identity = Arc::new(load_identity(&config.identity).map_err(|e| format!("identity: {e}"))?);
     let root_key = Arc::new(load_root_key(&config.root_key).map_err(|e| format!("root key: {e}"))?);
 
-    let mut service = Service::new(Arc::clone(&identity));
+    // How this node's dials leave it. Parsed once, at startup, so a
+    // mistyped proxy is a refusal to start rather than a dial that silently
+    // falls back to direct and hands a censor the fingerprint the operator
+    // meant to hide.
+    let proxy = match config.proxy.as_deref() {
+        Some(text) => crate::p2p::proxy::Proxy::parse(text).map_err(|e| format!("proxy: {e}"))?,
+        None => crate::p2p::proxy::Proxy::Direct,
+    };
+    match &proxy {
+        crate::p2p::proxy::Proxy::Direct => {}
+        crate::p2p::proxy::Proxy::Socks5 { addr, .. } => {
+            log::info!("outbound dials route through SOCKS5 proxy {addr}");
+        }
+    }
+    let mut service = Service::with_proxy(Arc::clone(&identity), proxy);
     for path in &config.bootstrap {
         let (endpoint, placeholder) =
             load_endpoint(path).map_err(|e| format!("bootstrap {}: {e}", path.display()))?;
@@ -443,7 +527,7 @@ pub fn run(config: Config) -> Result<(), String> {
             // screen before the first dial rather than absent from all of them.
             log::warn!(
                 "bootstrap {}: still carries the PLACEHOLDER key \
-                 `cairn-gen-bootstrap` generated, which authenticates nobody. \
+                 `cairn gen-bootstrap` generated, which authenticates nobody. \
                  Dials to {} will fail their handshake and report a plain transport \
                  error. Replace \"public\" in that file with the seed's real key -- \
                  the seed operator can print theirs from the \"public\" field of \
@@ -496,6 +580,12 @@ pub fn run(config: Config) -> Result<(), String> {
 
     // Exclusive, opened above: the daemon appends every record it imports from
     // a peer, so it is a writer and must not share a log with another one.
+    // Never `interactive()`, even with MCP on: this registry is the one the
+    // shared node settles, admits and audits with, and those must honour the
+    // objective's own declared bound or the same claim settles differently on
+    // `cairn run` than on `cairn p2p` over the same log. The MCP server keeps
+    // its client responsive by applying the ceiling to its own throwaway clone
+    // in `score_candidate`, which records nothing.
     let node = Node::new(ledger, &config.root);
     // `Spool::at` only names a directory; the server creates it when it first
     // queues something, and an absent one simply drains nothing.
@@ -518,7 +608,11 @@ pub fn run(config: Config) -> Result<(), String> {
     log::info!("verifier code: {servable} servable, {missing} unmet");
 
     let registry = node.registry().clone();
-    let state = Arc::new(Mutex::new(State { node, population }));
+    let state = Arc::new(Mutex::new(State {
+        node,
+        population,
+        dirty: false,
+    }));
     {
         let guard = state
             .lock()
@@ -526,6 +620,20 @@ pub fn run(config: Config) -> Result<(), String> {
         write_checkpoint(&config.checkpoint, &root_key, &guard.node)
             .map_err(|e| format!("checkpoint: {e}"))?;
     }
+
+    let mcp_finished = if config.mcp {
+        Some(
+            crate::mcp::start_shared_stdio(
+                Arc::clone(&state),
+                config.mcp_identity.as_deref(),
+                &config.log,
+                &config.key_path(),
+            )
+            .map_err(|error| format!("mcp: {error}"))?,
+        )
+    } else {
+        None
+    };
 
     // The HTTP half. Spawned after the checkpoint exists, so the first request
     // for `/checkpoint` finds one.
@@ -572,7 +680,9 @@ pub fn run(config: Config) -> Result<(), String> {
         let mut guard = accept_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let State { node, population } = &mut *guard;
+        let State {
+            node, population, ..
+        } = &mut *guard;
         let outcome = match accept_population {
             Some(_) => {
                 let mut scorer = RoundScorer::new(accept_registry.clone());
@@ -610,6 +720,15 @@ pub fn run(config: Config) -> Result<(), String> {
     });
 
     loop {
+        if mcp_finished.as_ref().is_some_and(|finished| {
+            !matches!(
+                finished.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            )
+        }) {
+            log::info!("mcp: stdin closed; stopping the combined node");
+            return Ok(());
+        }
         // Peers with a reason to be useful first, then a random sample.
         //
         // Dialling every peer every tick is quadratic in the network, and the
@@ -634,32 +753,37 @@ pub fn run(config: Config) -> Result<(), String> {
         //
         // The daemon *is* the operator's node and already holds the lock, so it
         // drains. The rules come from `serve::drain_into`, one copy shared with
-        // the CLI: a second copy of admission in a second binary is the same
+        // the CLI: a second copy of admission behind a second subcommand is the same
         // mistake as a second copy in a request handler, which is the argument
         // `docs/serving.md` already makes.
         //
         // Before the dial, deliberately: a record admitted this tick is one a
         // peer can learn about this tick, rather than five seconds later.
-        if let Some(queue) = &spool {
+        {
             let mut guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let admissions = serve::drain_into(&mut guard.node, queue, &timestamp(), false);
-            let drained = !admissions.is_empty();
-            for (path, admission) in admissions {
-                log::info!("drain: {}", admission.note);
-                // Removed whether admitted or refused. Nearly every refusal is
-                // permanent -- a stale epoch, a citation that is not an
-                // accepted claim -- and a queue that retries one never empties.
-                if let Err(error) = queue.take(&path) {
-                    log::warn!("drain: cannot remove {}: {error}", path.display());
+            let now = timestamp();
+            let mut changed = std::mem::take(&mut guard.dirty);
+            if let Some(queue) = &spool {
+                let admissions = serve::drain_into(&mut guard.node, queue, &now, false);
+                changed |= !admissions.is_empty();
+                for (path, admission) in admissions {
+                    log::info!("drain: {}", admission.note);
+                    // Removed whether admitted or refused. Nearly every refusal
+                    // is permanent -- a stale epoch, a citation that is not an
+                    // accepted claim -- and a queue that retries one never
+                    // empties.
+                    if let Err(error) = queue.take(&path) {
+                        log::warn!("drain: cannot remove {}: {error}", path.display());
+                    }
                 }
             }
-            if drained {
-                // Settlement is deferred to the close of the reveal epoch, so a
-                // drain that admitted a reveal into an epoch that has already
-                // closed settles here rather than waiting for a peer to dial.
-                let _ = guard.node.settle_at(&timestamp());
+            // Settlement is deferred to the close of the reveal epoch, and the
+            // clock closes epochs whether or not anything arrived this tick.
+            // See `settle_tick` for what happened when this waited on a drain.
+            changed |= settle_tick(&mut guard.node, &now);
+            if changed {
                 persist(
                     &guard,
                     &config.checkpoint,
@@ -686,7 +810,9 @@ pub fn run(config: Config) -> Result<(), String> {
             let mut guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let State { node, population } = &mut *guard;
+            let State {
+                node, population, ..
+            } = &mut *guard;
             let outcome = match config.population {
                 Some(_) => {
                     let mut scorer = RoundScorer::new(registry.clone());
@@ -742,5 +868,98 @@ pub fn run(config: Config) -> Result<(), String> {
             }
         }
         thread::sleep(Duration::from_secs(TICK_SECONDS));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::records::{commitment_hash, Claim, Commitment};
+
+    // The same three instants `tests/p2p_convergence.rs` uses, for the same
+    // reason: commit, reveal one epoch later, settle after the reveal epoch
+    // has closed and waited out `FINALITY_EPOCHS`.
+    const TS: &str = "2026-07-29T00:00:00+00:00";
+    const TS_REVEAL: &str = "2026-07-29T00:10:00+00:00";
+    const TS_SETTLE: &str = "2026-07-29T00:30:00+00:00";
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// A scratch node under `target/`, so a failed run leaves evidence.
+    fn node(name: &str) -> Node {
+        let dir = repo_root().join("target").join("daemon-tests");
+        fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join(format!("{}-{name}.jsonl", std::process::id()));
+        let _ = fs::remove_file(&path);
+        Node::new(Ledger::open(path).expect("open ledger"), repo_root())
+    }
+
+    fn example(path: &str) -> Value {
+        let text = fs::read_to_string(repo_root().join(path)).expect("read example");
+        Value::from_json(&text).expect("parse")
+    }
+
+    /// One accepted claim in a closed epoch, and nobody else: no peer to dial,
+    /// nothing in a spool. This is the state the tick loop must settle from
+    /// on its own, and until `settle_tick` ran unconditionally it did not.
+    #[test]
+    fn a_tick_settles_a_due_epoch_with_no_peers_and_an_empty_spool() {
+        let mut node = node("settles-alone");
+        let objective = Objective::from_value(&example("examples/collatz/objective.json"))
+            .expect("objective decodes");
+        let objective_id = node.post_objective(&objective, TS).expect("post");
+        let artifact = example("examples/collatz/artifact.json");
+        let nonce = "n-alone";
+        let hash = commitment_hash(&objective_id, "alone", &artifact, nonce);
+        node.commit(&Commitment::new(&objective_id, "alone", &hash, TS), TS)
+            .expect("commit");
+        let claim =
+            Claim::new(&objective_id, "alone", artifact, nonce, TS_REVEAL, vec![]).expect("claim");
+        let revealed = node.reveal(&claim, TS_REVEAL).expect("reveal");
+        assert!(revealed.is_pending(), "{}", revealed.note);
+
+        // Before the epoch closes: nothing is due, and the tick must say so,
+        // or the checkpoint would be rewritten every five seconds for a log
+        // that has not moved.
+        let height = node.ledger().len();
+        assert!(!settle_tick(&mut node, TS_REVEAL));
+        assert_eq!(node.ledger().len(), height);
+
+        // After: the batch settles, and the answer gates the checkpoint.
+        assert!(settle_tick(&mut node, TS_SETTLE));
+        assert!(node.ledger().len() > height);
+        assert!(
+            node.settlement_for_claim(&revealed.claim_id).is_some(),
+            "the claim was not paid"
+        );
+
+        // And once, not once per tick: a settled epoch is not due again.
+        let height = node.ledger().len();
+        assert!(!settle_tick(&mut node, TS_SETTLE));
+        assert_eq!(node.ledger().len(), height);
+    }
+
+    /// Both files a round rewrites go through the atomic path: the file at the
+    /// destination is always a complete write, whatever is beside it.
+    #[test]
+    fn checkpoint_and_population_are_replaced_whole() {
+        let node = node("atomic-state");
+        let dir = repo_root().join("target").join("daemon-tests");
+        let checkpoint = dir.join(format!("{}-cp.json", std::process::id()));
+        let population = dir.join(format!("{}-pop.json", std::process::id()));
+        let key = RootKey::generate();
+        write_checkpoint(&checkpoint, &key, &node).expect("checkpoint");
+        let first = fs::read(&checkpoint).expect("read checkpoint");
+        save_population(&population, &Population::default()).expect("population");
+        // Overwritten, not appended to or truncated around: each rewrite is a
+        // whole file, and what was there before is gone with no seam.
+        write_checkpoint(&checkpoint, &key, &node).expect("checkpoint again");
+        let second = fs::read(&checkpoint).expect("read checkpoint");
+        assert_eq!(first.len(), second.len());
+        assert!(load_population(&population).is_ok());
+        let _ = fs::remove_file(checkpoint);
+        let _ = fs::remove_file(population);
     }
 }

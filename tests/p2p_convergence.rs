@@ -1178,3 +1178,197 @@ fn the_settlement_anchor_is_the_same_on_both_nodes() {
          records, so their beacons differ and their batches sort differently"
     );
 }
+
+#[test]
+fn a_peer_record_travels_as_a_routing_hint_and_never_reaches_the_ledger() {
+    // The censorship property and its guardrail, in one session. A peer record
+    // posted in *bob's* log must reach alice's routing table over an ordinary
+    // dial -- that is what makes discovery heal through the mesh instead of
+    // through an operator's bootstrap file, so blocking the seed addresses no
+    // longer partitions a newcomer who can reach any one peer. And it must
+    // arrive as a hint only: the sealed-submission committee is drawn from the
+    // log's peer records, so a gossiped record that replayed into alice's
+    // ledger would hand committee seats to whoever minted the most free
+    // identities. `docs/censorship.md` calls that caveat the one that swallows
+    // the others, and this test is what keeps it true under gossip.
+    use cairn::crypto::identity::Identity;
+    use cairn::p2p::dht::NodeId;
+    use cairn::records::PeerRecord;
+
+    let carol = Identity::from_secret_bytes([7u8; 32]);
+    let carol_transport = "cd".repeat(32);
+    let carol_record = PeerRecord::new(
+        carol.submitter_id(),
+        carol_transport.clone(),
+        "203.0.113.7:9000",
+        1,
+        TS,
+    )
+    .signed_with(&carol);
+
+    let bob_identity = Arc::new(PeerIdentity::generate());
+    let bob_public = bob_identity.to_public();
+    let bob_service = Service::new(bob_identity);
+    let listener = bob_service
+        .listen("127.0.0.1:0".parse().expect("loopback"))
+        .expect("listen");
+    let endpoint = Endpoint::new(listener.local_addr().expect("bound address"), bob_public);
+    let record_for_bob = carol_record.clone();
+    let bob_thread = thread::spawn(move || {
+        let mut bob = node("bob-peer-hints");
+        bob.post_peer(&record_for_bob, TS)
+            .expect("bob admits carol");
+        bob_service
+            .accept_node_once(&listener, &mut bob)
+            .expect("bob's round");
+    });
+
+    let mut alice = node("alice-peer-hints");
+    let alice_service = Service::new(Arc::new(PeerIdentity::generate()));
+    alice_service
+        .dial_node_once(&endpoint, &mut alice)
+        .expect("alice's round");
+    bob_thread.join().expect("bob's thread");
+
+    // The hint arrived and was folded into routing: carol is a contact alice
+    // can now route through once her key turns up, and the record's own signed
+    // seq travelled with it.
+    assert_eq!(alice_service.known_hints(), 1, "the hint did not arrive");
+    let mut transport_bytes = [0u8; 32];
+    for (i, slot) in transport_bytes.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&carol_transport[i * 2..i * 2 + 2], 16).expect("hex");
+    }
+    let carol_id = NodeId::from_bytes(transport_bytes);
+    let contact = alice_service.with_directory(|directory| {
+        directory
+            .routing()
+            .contacts()
+            .find(|contact| contact.id == carol_id)
+            .cloned()
+    });
+    let contact = contact.expect("carol is not in alice's routing table");
+    assert_eq!(
+        contact.seq, 1,
+        "the signed seq did not travel with the hint"
+    );
+
+    // And the guardrail: alice's ledger has no peer record. Her log -- and
+    // therefore every committee draw she computes -- still names only what her
+    // own operator admitted.
+    assert!(
+        alice.peers().is_empty(),
+        "a gossiped peer record reached the ledger; committee draws are now \
+         open to free identities"
+    );
+    assert!(
+        alice.ledger().entries_of_kind("peer").is_empty(),
+        "a peer entry was appended over sync"
+    );
+}
+
+#[test]
+fn a_full_sync_completes_through_a_socks5_proxy() {
+    // The firewall property, end to end. A censored node never dials its peer
+    // directly: it dials a SOCKS5 proxy (a Tor client, an obfs4 bridge, a
+    // corporate egress) that reaches the peer on its behalf, so the local
+    // censor sees a connection to the proxy rather than the peer's blocked
+    // address or cairn's 261 KiB McEliece fingerprint. This stands up a real
+    // in-process SOCKS5 proxy between alice and bob and checks that an ordinary
+    // objective still crosses -- the McEliece handshake runs end to end over
+    // the tunnel, so the proxy is just another untrusted hop.
+    use cairn::p2p::proxy::Proxy;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+
+    // A minimal SOCKS5 CONNECT proxy: one greeting, one CONNECT, then it splices
+    // the two streams. Enough to carry a real session, not a general proxy.
+    fn spawn_socks_proxy() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("proxy binds");
+        let addr = listener.local_addr().expect("proxy addr");
+        thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(mut client) = incoming else { continue };
+                thread::spawn(move || {
+                    let mut head = [0u8; 2];
+                    if client.read_exact(&mut head).is_err() {
+                        return;
+                    }
+                    let mut methods = vec![0u8; head[1] as usize];
+                    let _ = client.read_exact(&mut methods);
+                    // No-auth.
+                    let _ = client.write_all(&[0x05, 0x00]);
+                    // CONNECT header + IPv4 target (the fixtures dial loopback).
+                    let mut req = [0u8; 4];
+                    if client.read_exact(&mut req).is_err() {
+                        return;
+                    }
+                    let mut ip = [0u8; 4];
+                    let _ = client.read_exact(&mut ip);
+                    let mut port = [0u8; 2];
+                    let _ = client.read_exact(&mut port);
+                    let target = SocketAddr::from((ip, u16::from_be_bytes(port)));
+                    let Ok(mut upstream) = TcpStream::connect(target) else {
+                        let _ = client.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+                        return;
+                    };
+                    let _ = client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+                    // Splice both directions until either end closes.
+                    let mut a = client.try_clone().expect("clone");
+                    let mut b = upstream.try_clone().expect("clone");
+                    let up = thread::spawn(move || {
+                        let _ = std::io::copy(&mut client, &mut upstream);
+                    });
+                    let _ = std::io::copy(&mut b, &mut a);
+                    let _ = up.join();
+                });
+            }
+        });
+        addr
+    }
+
+    let proxy_addr = spawn_socks_proxy();
+
+    let objective = collatz_objective();
+    let bob_identity = Arc::new(PeerIdentity::generate());
+    let bob_public = bob_identity.to_public();
+    let bob_service = Service::new(bob_identity);
+    let listener = bob_service
+        .listen("127.0.0.1:0".parse().expect("loopback"))
+        .expect("listen");
+    let endpoint = Endpoint::new(listener.local_addr().expect("bound address"), bob_public);
+
+    let bob_objective = objective.clone();
+    let bob_thread = thread::spawn(move || {
+        let mut bob = node("bob-socks");
+        bob.post_objective(&bob_objective, TS).expect("post");
+        bob_service
+            .accept_node_once(&listener, &mut bob)
+            .expect("bob's round");
+    });
+
+    // Alice dials only through the proxy. Her Service holds no direct route that
+    // would let the test pass without the tunnel.
+    let alice_service = Service::with_proxy(
+        Arc::new(PeerIdentity::generate()),
+        Proxy::Socks5 {
+            addr: proxy_addr,
+            auth: None,
+        },
+    );
+    let mut alice = node("alice-socks");
+    alice_service
+        .dial_node_once(&endpoint, &mut alice)
+        .expect("alice's proxied round");
+    bob_thread.join().expect("bob's thread");
+
+    let objectives = alice.objectives();
+    assert_eq!(
+        objectives.len(),
+        1,
+        "the objective did not cross the SOCKS5 tunnel"
+    );
+    assert!(
+        objectives.contains_key(&objective.id()),
+        "alice imported some other objective through the tunnel"
+    );
+}

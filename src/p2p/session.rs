@@ -1,21 +1,22 @@
 //! Message driver for one encrypted connection.
 //!
-//! Four families run over the same session and never share a frame. Records use
+//! Five families run over the same session and never share a frame. Records use
 //! [`RECORD_CONTEXT`], populations use [`super::pop::CONTEXT`], verifier code
-//! uses [`super::code::CONTEXT`], provider lookup uses
-//! [`super::dht::CONTEXT`], and the AEAD binds the context into the tag — so a
-//! frame sealed for one family cannot be opened as another even by a peer that
-//! wants to. See [`super::pop`] and [`super::code`] for why that separation is a
-//! security boundary rather than housekeeping.
+//! uses [`super::code::CONTEXT`], provider lookup uses [`super::dht::CONTEXT`],
+//! peer hints use [`super::peers::CONTEXT`], and the AEAD binds the context
+//! into the tag — so a frame sealed for one family cannot be opened as another
+//! even by a peer that wants to. See [`super::pop`] and [`super::code`] for why
+//! that separation is a security boundary rather than housekeeping.
 //!
-//! The order on one connection is records, then code, then the DHT, then
-//! populations, and it is not arbitrary — see [`reconcile_code`] for the first
-//! boundary and [`exchange_dht`] for the third.
+//! The order on one connection is records, then code, then the DHT, then peer
+//! hints, then populations, and it is not arbitrary — see [`reconcile_code`]
+//! for the first boundary and [`exchange_dht`] for the third.
 
 use super::code::{self, CodeError, CodeLimits, CodeMessage, CodeReport};
 use super::dht::{
     DhtError, DhtMessage, Directory, NodeId, MAX_ASK_ADDRESSES, MAX_KEYS_PER_MESSAGE,
 };
+use super::peers::{self, PeerHintLimits, PeersError, PeersMessage, PeersReport};
 use super::pop::{self, PopError, PopLimits, PopMessage, PopReport};
 use super::sync::{Message, Peer, SyncError};
 use super::transport::{Connection, TransportError};
@@ -99,6 +100,18 @@ fn describe_pop(message: &PopMessage) -> String {
     }
 }
 
+fn describe_peers(message: &PeersMessage) -> String {
+    match message {
+        PeersMessage::Digest { digest, ids } => format!(
+            "peers.Digest digest={} ids={}",
+            crate::canonical::short(digest),
+            ids.len()
+        ),
+        PeersMessage::Want { ids } => format!("peers.Want ids={}", ids.len()),
+        PeersMessage::Records { records } => format!("peers.Records n={}", records.len()),
+    }
+}
+
 fn describe_dht(message: &DhtMessage) -> String {
     match message {
         // `NodeId`'s Display is already truncated to 16 hex characters.
@@ -149,6 +162,7 @@ pub enum SessionError {
     Pop(PopError),
     Code(CodeError),
     Dht(DhtError),
+    Peers(PeersError),
     Protocol(String),
 }
 
@@ -160,6 +174,7 @@ impl fmt::Display for SessionError {
             SessionError::Pop(e) => write!(f, "population: {e}"),
             SessionError::Code(e) => write!(f, "verifier code: {e}"),
             SessionError::Dht(e) => write!(f, "dht: {e}"),
+            SessionError::Peers(e) => write!(f, "peer hints: {e}"),
             SessionError::Protocol(e) => write!(f, "protocol: {e}"),
         }
     }
@@ -188,6 +203,11 @@ impl From<CodeError> for SessionError {
 impl From<DhtError> for SessionError {
     fn from(e: DhtError) -> Self {
         Self::Dht(e)
+    }
+}
+impl From<PeersError> for SessionError {
+    fn from(e: PeersError) -> Self {
+        Self::Peers(e)
     }
 }
 
@@ -581,6 +601,82 @@ pub struct DhtRound {
     /// a number an operator can see is the difference between diagnosing that
     /// and guessing.
     pub bad_keys: usize,
+}
+
+fn send_peers(connection: &mut Connection, message: PeersMessage) -> Result<(), SessionError> {
+    trace(connection, Dir::Send, describe_peers(&message));
+    connection
+        .send(&message.encode(), peers::CONTEXT)
+        .map_err(Into::into)
+}
+
+fn receive_peers(
+    connection: &mut Connection,
+    limits: PeerHintLimits,
+) -> Result<PeersMessage, SessionError> {
+    let message = PeersMessage::decode(&connection.receive(peers::CONTEXT)?, limits)?;
+    trace(connection, Dir::Recv, describe_peers(&message));
+    Ok(message)
+}
+
+/// Run one complete, symmetric peer-hint exchange.
+///
+/// Runs after [`exchange_dht`] on the same connection and is skipped entirely
+/// when the two digests match — the common steady state costs one message each
+/// way. It runs *before* the population round for a liveness reason rather
+/// than a data dependency: populations are optional (a node that only audits
+/// carries none), and a discovery round that only ran on candidate-gossiping
+/// nodes would leave exactly the auditors dependent on their bootstrap files.
+///
+/// The store decides what to believe — signature, sequence, cap — and a
+/// refused record is not a session error, for the reason a refused candidate
+/// is not: tearing the connection down over one bad record would let it cost
+/// the peer its record sync too, which is a cheap way to censor by annoyance.
+/// See [`super::peers`] for why accepted hints feed routing and never the
+/// ledger.
+pub fn exchange_peer_hints(
+    connection: &mut Connection,
+    hints: &mut peers::Hints,
+    limits: PeerHintLimits,
+) -> Result<PeersReport, SessionError> {
+    send_peers(
+        connection,
+        PeersMessage::Digest {
+            digest: hints.digest(),
+            ids: hints.ids(),
+        },
+    )?;
+    let (theirs, offered) = match receive_peers(connection, limits)? {
+        PeersMessage::Digest { digest, ids } => (digest, ids),
+        _ => return Err(SessionError::Protocol("expected peers_digest".into())),
+    };
+    if theirs == hints.digest() {
+        // Equal digests mean equal id sets: nothing to ask for and nothing to
+        // serve, and both sides reach that conclusion from the same
+        // comparison, so neither is left waiting for a message the other will
+        // not send.
+        return Ok(PeersReport::default());
+    }
+
+    let want = hints.missing_from(&offered);
+    send_peers(connection, PeersMessage::Want { ids: want.clone() })?;
+    let their_want = match receive_peers(connection, limits)? {
+        PeersMessage::Want { ids } => ids,
+        _ => return Err(SessionError::Protocol("expected peers_want".into())),
+    };
+    send_peers(
+        connection,
+        PeersMessage::Records {
+            records: hints.serve(&their_want, limits),
+        },
+    )?;
+    let incoming = match receive_peers(connection, limits)? {
+        PeersMessage::Records { records } => records,
+        _ => return Err(SessionError::Protocol("expected peers_records".into())),
+    };
+
+    let wanted: BTreeSet<String> = want.into_iter().collect();
+    Ok(peers::ingest_hints(hints, &wanted, incoming))
 }
 
 fn send_pop(connection: &mut Connection, message: PopMessage) -> Result<(), SessionError> {

@@ -1,0 +1,53 @@
+{
+  "node": "local cairn.jsonl",
+  "submitter": "b9f7f7232d940919bd4780a076eddbc80378d596144ba84edfa7029e2fe8b7b0",
+  "solved": [
+    {
+      "goal": "GOAL-ecdlp-intro",
+      "bits": 45,
+      "k_dec": "20492664910617",
+      "k_hex": "000000000000000000000000000000000000000000000000000012a352033319",
+      "claim": "sha256:cf08f7ef75f44",
+      "reward": 5000,
+      "note": "matches the answer shipped in examples/ecdlp/artifact.json"
+    },
+    {
+      "goal": "GOAL-ecdlp-nums-50",
+      "instance": "nums-50 (seed 'proofwork ecdlp nums v2 50')",
+      "bits": 50,
+      "k_dec": "858137592570900",
+      "k_hex": "00000000000000000000000000000000000000000000000000030c78ba5fa414",
+      "claim": "sha256:c1c2d60c59cbc2b0d7784ca6f9c77762cb09e036851d7a0a10d53b672e7ae357",
+      "reward": 120000,
+      "rho_steps": 50107904,
+      "seconds": 1.0
+    },
+    {
+      "goal": "GOAL-ecdlp-nums-60",
+      "instance": "nums-60 (seed 'proofwork ecdlp nums v1 60')",
+      "bits": 60,
+      "k_dec": "180348761845209993",
+      "k_hex": "0000000000000000000000000000000000000000000000000280ba3e4d771b89",
+      "claim": "sha256:ff992c8fd82f65a8f731634572901155f5f9d9cc2d58e02ddf38c99a00638660",
+      "reward": 400000,
+      "rho_steps": 1678059520,
+      "seconds": 16.0
+    }
+  ],
+  "test_vectors_reproduced": [
+    {
+      "name": "testvector-40",
+      "k_dec": "1015864291073"
+    },
+    {
+      "name": "testvector-50",
+      "k_dec": "588682124876062"
+    }
+  ],
+  "declined": [
+    {
+      "goal": "GOAL-certicom-eccp131",
+      "reason": "131-bit field exceeds the 64-bit lanes this engine multiplies in; ~2^65 group operations, ~11,000 years at measured throughput"
+    }
+  ]
+}

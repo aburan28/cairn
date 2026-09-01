@@ -11,6 +11,8 @@
  * a judgement about them.
  */
 
+import { expectFields } from "./shape";
+
 /** Where a ratcheted objective currently stands. Absent until the first claim. */
 export type Frontier = {
   claim_id: string;
@@ -23,13 +25,28 @@ export type Frontier = {
   score: number;
 };
 
+/**
+ * A certificate's one payment. `null` for a ratchet, whose payouts are many
+ * and are carried per move by `frontier.paid_cumulative`.
+ */
+export type Settlement = {
+  claim_id: string;
+  submitter: string;
+  reward: number;
+};
+
 export type Objective = {
   id: string;
   goal: string;
   funder: string;
   reward: number;
   statement: string;
+  /** No longer payable, as the node judges it -- not "a settlement exists",
+   *  which a ratchet satisfies from its first paid slice onward. */
   settled: boolean;
+  /** `!settled`, published by the node rather than negated here. */
+  open: boolean;
+  settlement: Settlement | null;
   /** "certificate" for pass/fail, "evaluator" for a scored ratchet. */
   verifier_kind: string;
   frontier?: Frontier;
@@ -66,8 +83,12 @@ export async function fetchObjectives(
   if (!response.ok) {
     throw new Error(`${base}/objectives answered ${response.status}.`);
   }
-  const body = (await response.json()) as Objectives;
-  return body.objectives ?? [];
+  const body = expectFields<Objectives>(
+    await response.json(),
+    ["objectives"],
+    `${base}/objectives`,
+  );
+  return body.objectives;
 }
 
 /**

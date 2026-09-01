@@ -1,0 +1,35 @@
+{
+  "artifact_schema": {
+    "description": "Two messages of equal length, both beginning with the pinned 64-byte prefix, as lowercase hex. The example's m is the prefix followed by one byte, so the prefix every submission has to carry is readable straight off this record.",
+    "example": {
+      "m": "1ecbec76180ec6ce67582973d359adfa1b4f8e4d0ee1d47ab9b2375bde6c35ffd7171b852db685ffff8ee570af6db329df2b17e1f062a34eee3790a60dc9bded00",
+      "m_prime": "1ecbec76180ec6ce67582973d359adfa1b4f8e4d0ee1d47ab9b2375bde6c35ffd7171b852db685ffff8ee570af6db329df2b17e1f062a34eee3790a60dc9bded01"
+    },
+    "properties": {
+      "m": {
+        "description": "The first message, lowercase hex, an even number of characters, at most 8192 of them.",
+        "type": "string"
+      },
+      "m_prime": {
+        "description": "The second message, same length as m and different from it.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "m",
+      "m_prime"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-08-29T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-hash-collide-sha1",
+  "reward": 50000000,
+  "statement": "Find a colliding pair for SHA-1 from a chaining value nobody chose. Both messages must begin with the same pinned 64-byte prefix -- exactly one message block for this function -- must have the same length, must differ somewhere, and must agree on all 160 digest bits. The prefix is sha512(\"cairn hash-differential v1 sha1\"), so it is re-derivable by anyone and was chosen by nobody: a funder who picks a prefix can pick one whose chaining value they have already collided, and that is the self-dealing row in docs/threat-model.md. Deriving it also puts every published collision for SHA-1 out of reach as a copy, since all of them start from the standard IV behind a prefix their own author chose. Equal length is required because a same-length collision composes -- H(m || x) = H(m' || x) for every x -- and that is the property worth paying for. Messages are at most 4096 bytes and travel as lowercase hex in {\"m\", \"m_prime\"}. This is not expected to settle and is posted anyway, so that the network carries one benchmark whose difficulty nobody local chose. Published estimates for the identical-prefix attack run between 2^61 and 2^63 compressions; it has been paid once, across a GPU cluster, over months.",
+  "verifier": {
+    "checker": "examples/hash-differential/checkers/collide_sha1.py",
+    "checker_sha256": "a8a310feb69948f9e46b6c4a6dc15c310d91dd5b859a06c4140f1398608b819a",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

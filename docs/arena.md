@@ -3,8 +3,9 @@
 *Strategies played for money against the real rules engine.*
 
 ```sh
-cargo run --release --bin arena          # every scenario, seed 1
-cargo run --release --bin arena -- --seed 7
+cairn arena                              # every scenario, seed 1
+cairn arena --seed 7
+# from a checkout: cargo run --release -- arena --seed 7
 ```
 
 Implemented in [`src/arena.rs`](../src/arena.rs) and

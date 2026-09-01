@@ -1,20 +1,28 @@
 # Serving a log to strangers
 
 Everything else in this repository assumes you already have the log. The CLI
-opens a file, `cairn-mcp` opens a file, and the p2p daemon reconciles with
+opens a file, `cairn mcp` opens a file, and the p2p daemon reconciles with
 peers who are already running nodes. None of that helps somebody who has only
 heard the project exists — and *"anyone can independently re-derive every
 settled result from the log alone"* is worth nothing to a person with no way to
 obtain the log.
 
-`cairn-serve` is that way.
+`cairn serve` is that way (once a separate `cairn-serve` binary; now a
+subcommand of the one `cairn` binary).
 
 ```sh
-cairn-serve --log cairn.jsonl --root . --listen 0.0.0.0:8080
+cairn --log cairn.jsonl --root . serve --listen 0.0.0.0:8080
 ```
 
 Read-only. Add `--queue ./queue` to accept submissions, and `--checkpoint
 checkpoint.json` to publish what you signed.
+
+The log is appended without `fsync`: a power loss can lose the last records
+written, which a peer still holds, and the next open reports a torn tail
+rather than silently reading it. If yours is the one node contributors submit
+to, so that a lost tail is a lost claim rather than a re-sync, set
+`CAIRN_LEDGER_FSYNC=1` in the daemon's environment to pay one `fsync` per
+record instead.
 
 ## The endpoints
 
@@ -22,13 +30,26 @@ checkpoint.json` to publish what you signed.
 |---|---|
 | `GET /log` | the log, byte for byte as it is on disk |
 | `GET /checkpoint` | the signed `(root, height, signature)`, if you publish one |
-| `GET /objectives` | every objective, with its frontier |
+| `GET /objectives` | every objective, with its frontier and whether it is still payable |
 | `GET /objective/{id}` | one full record, verifier spec included |
 | `GET /frontier/{id}` | best score, who holds it, what to cite, pool remaining |
+| `GET /chain` | the epoch chain: `links` and `head` are the chain's, `height` and `ledger_head` are the ledger's — the units a checkpoint signs, and not interchangeable with the first two |
+| `GET /chain.html` | the same, as a page with no build step |
 | `GET /health` | liveness, for whatever is watching the process |
 | `POST /submit` | queue a commitment or a claim (only with `--queue`) |
 
 Everything except `/log` is a convenience. `/log` is the product.
+
+Both objective views carry the same three lifecycle fields. `settled` means *no
+longer payable* -- for a certificate, that a settlement exists; for a ratchet,
+that the frontier is at the target or the span left under it is smaller than
+`min_improvement`, so no claim can settle there again. It does **not** mean "a
+settlement record exists": a ratchet writes one on every paying move, and by
+that reading a progressive objective was settled from its first slice onward
+with most of its pool untouched. `open` is its complement, published rather
+than left for a reader to negate. `settlement` is `{claim_id, submitter,
+reward}` for a settled certificate and `null` otherwise -- a ratchet's payouts
+are many, and `frontier.paid_cumulative` carries them.
 
 ## What a contributor should actually do
 
@@ -57,14 +78,14 @@ the operator's own node admits it — the daemon each round if it is running, or
 the CLI if it is not:
 
 ```sh
-cairn-p2p … --queue ./queue          # drains every round, holding the lock it has
+cairn p2p … --queue ./queue          # drains every round, holding the lock it has
 cairn drain --queue ./queue          # or --dry-run to look first
 ```
 
 **Both, not either, and that took a while to be true.** A `Ledger` is
 single-writer by enforcement, so `cairn drain` wants the write lock
-`cairn-p2p` holds: for as long as the daemon was the only thing that could
-run alongside `cairn-serve`, a node that was *online* could not accept a
+`cairn p2p` holds: for as long as the daemon was the only thing that could
+run alongside `cairn serve`, a node that was *online* could not accept a
 submission at all. For a network whose purpose is accepting submissions that is
 not a small gap. The daemon is the operator's node and already holds the lock,
 so it drains; the rules live in `serve::drain_into` and both callers use that

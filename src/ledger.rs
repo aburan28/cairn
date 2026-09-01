@@ -493,6 +493,21 @@ pub struct Ledger {
     /// Size and mtime of the file as of the last load, for
     /// [`Ledger::reload_if_changed`].
     loaded_stamp: Option<(u64, std::time::SystemTime)>,
+    /// `fsync` after every append. Off unless [`LEDGER_FSYNC_ENV`] says
+    /// otherwise; see [`Ledger::append`] for the trade.
+    fsync: bool,
+}
+
+/// Set to `1` to `fsync` the log after every append.
+///
+/// Opt-in, because the default trades the tail for throughput on purpose --
+/// see [`Ledger::append`]. An operator running the one node a network's
+/// contributors submit to is the one for whom a power loss is a lost claim
+/// rather than a re-sync, and that operator turns it on.
+pub const LEDGER_FSYNC_ENV: &str = "CAIRN_LEDGER_FSYNC";
+
+fn fsync_requested() -> bool {
+    matches!(std::env::var(LEDGER_FSYNC_ENV), Ok(value) if value.trim() == "1")
 }
 
 /// How lines are written to and read from the file.
@@ -594,6 +609,7 @@ impl Ledger {
             codec,
             _lock: None,
             loaded_stamp: None,
+            fsync: fsync_requested(),
         };
         if ledger.path.exists() {
             ledger.load()?;
@@ -720,7 +736,18 @@ impl Ledger {
             // handle would release the real one when the view dropped.
             _lock: None,
             loaded_stamp: None,
+            fsync: false,
         })
+    }
+
+    /// Override the environment's answer on whether appends `fsync`.
+    ///
+    /// For a caller that knows better than a process-wide variable -- and for
+    /// a test, which cannot set one without racing every other test in the
+    /// binary.
+    pub fn with_fsync(mut self, fsync: bool) -> Ledger {
+        self.fsync = fsync;
+        self
     }
 
     /// Whether this is a read-only prefix view rather than the log itself.
@@ -807,10 +834,15 @@ impl Ledger {
     /// failed append leaves the ledger exactly as it was rather than handing
     /// out a `prev` hash for an entry that is not on disk.
     ///
-    /// The write is not `fsync`ed, matching the reference implementation: a
-    /// power loss can lose the tail, which is a durability question, not an
-    /// integrity one. A *torn* tail -- a partially written line -- is caught on
-    /// the next [`open`](Ledger::open) as malformed JSON.
+    /// The write is not `fsync`ed by default, matching the reference
+    /// implementation: a power loss can lose the tail, which is a durability
+    /// question, not an integrity one. A *torn* tail -- a partially written
+    /// line -- is caught on the next [`open`](Ledger::open) as malformed JSON.
+    /// An operator who wants the tail to survive a power loss sets
+    /// [`LEDGER_FSYNC_ENV`] (or calls [`Ledger::with_fsync`]) and pays one
+    /// `fsync` per record; it stays opt-in because the cost lands on every
+    /// append, including the thousands a replay or a demo makes, and nothing
+    /// a lost tail loses is unrecoverable from a peer.
     pub fn append(&mut self, kind: &str, payload: Value, ts: &str) -> Result<&Entry, LedgerError> {
         if self.read_only_prefix {
             return Err(LedgerError::ReadOnlyPrefix {
@@ -857,6 +889,14 @@ impl Ledger {
         handle
             .write_all(line.as_bytes())
             .map_err(|e| io_error(format!("appending to {}", self.path.display()), e))?;
+        if self.fsync {
+            // Before the in-memory tail is extended, for the same reason the
+            // write is: an entry this handle vouches for must be one the disk
+            // has, not one the page cache has.
+            handle
+                .sync_data()
+                .map_err(|e| io_error(format!("syncing {}", self.path.display()), e))?;
+        }
 
         self.entries.push(entry);
         // Our own write must not read back as somebody else's change.
@@ -1074,6 +1114,30 @@ mod tests {
 
     fn note(i: i128) -> Value {
         Value::object([("i", Value::Int(i))])
+    }
+
+    /// Whether an append reached the platter is not observable from here; what
+    /// is observable is that the synced path writes the same bytes the unsynced
+    /// one does, and that a reader opening the file afterwards agrees. Also
+    /// that the default is *off*: the env is not consulted here, so a test
+    /// runner's environment cannot make this pass or fail by accident.
+    #[test]
+    fn fsync_is_opt_in_and_changes_no_bytes() {
+        let dir = TempDir::new("fsync");
+        let synced = dir.file("synced.jsonl");
+        let plain = dir.file("plain.jsonl");
+        let mut a = Ledger::open(&synced).unwrap().with_fsync(true);
+        let mut b = Ledger::open(&plain).unwrap().with_fsync(false);
+        assert!(a.fsync);
+        assert!(!b.fsync);
+        for i in 0..3 {
+            a.append("note", note(i), "t").unwrap();
+            b.append("note", note(i), "t").unwrap();
+        }
+        assert_eq!(fs::read(&synced).unwrap(), fs::read(&plain).unwrap());
+        let reopened = Ledger::open(&synced).unwrap();
+        assert_eq!(reopened.len(), 3);
+        assert!(reopened.verify_chain().is_empty());
     }
 
     fn read_lines(path: &Path) -> Vec<String> {
@@ -1487,6 +1551,7 @@ mod tests {
             codec: Codec::Plain,
             _lock: None,
             loaded_stamp: None,
+            fsync: false,
         };
         let problems = ledger.verify_chain();
         assert_eq!(problems.len(), 1, "{problems:?}");

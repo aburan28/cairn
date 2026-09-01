@@ -164,7 +164,7 @@ pointed at valuable problems should expect.
 ## What the margin table says about this design
 
 ```
-$ cairn incentives --robustness            # ~2.5 minutes at 100 nodes
+$ cairn incentives --robustness            # ~1.5 minutes at 100 nodes on an Apple M4 Pro
 
 robustness -- how far each parameter moves before honesty stops holding
   stake: 4000000 survives 1.25x, breaks lowering to 3200000

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test of cairn-serve as a real process.
+# End-to-end smoke test of `cairn serve` as a real process.
 #
 # The unit tests cover the spool. What they structurally cannot cover is the
 # thing this service exists for: a *stranger* -- a process that shares no
@@ -14,10 +14,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/cairn}"
-SERVE="${SERVE_BIN:-./target/release/cairn-serve}"
 
-if [ ! -x "$RUST" ] || [ ! -x "$SERVE" ]; then
-  echo "building release binaries..." >&2
+if [ ! -x "$RUST" ]; then
+  echo "building release binary..." >&2
   cargo build --release
 fi
 
@@ -51,7 +50,7 @@ echo "  $OID"
 # high one and let the bind fail loudly if it is taken.
 PORT=${CAIRN_SERVE_PORT:-38080}
 ADDR="127.0.0.1:$PORT"
-"$SERVE" --log "$LOG" --root . --listen "$ADDR" --queue "$QUEUE" >"$WORK/serve.out" 2>&1 &
+"$RUST" --log "$LOG" --root . serve --listen "$ADDR" --queue "$QUEUE" >"$WORK/serve.out" 2>&1 &
 SERVER_PID=$!
 
 # Wait for the listener rather than sleeping a fixed amount.
@@ -290,7 +289,7 @@ print(f"  GET /chain -> {chain['links']} link(s) after settlement, "
 PY
 
 rule "a read-only server refuses submissions"
-"$SERVE" --log "$LOG" --root . --listen "127.0.0.1:$((PORT+1))" >"$WORK/ro.out" 2>&1 &
+"$RUST" --log "$LOG" --root . serve --listen "127.0.0.1:$((PORT+1))" >"$WORK/ro.out" 2>&1 &
 RO_PID=$!
 for _ in $(seq 1 50); do
   python3 -c "

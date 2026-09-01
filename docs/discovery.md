@@ -304,7 +304,7 @@ produce a key hashing to somebody else's id. That is the rule above, applied:
 DNS carries the hint, and the hash decides.
 
 Bootstrap files are local configuration and are gitignored, which is why
-nothing generates one into the repository. `cairn-gen-bootstrap` writes a
+nothing generates one into the repository. `cairn gen-bootstrap` writes a
 structurally valid file for an address you name — `make p2p` calls it for
 `SEED_ADDR` on first run — and it accepts a hostname for the same reason the
 daemon does. The key it writes is a **placeholder**: only the seed's real public

@@ -3,7 +3,7 @@
 //! # Why this exists
 //!
 //! Everything else in this crate assumes the reader has the log on local disk.
-//! The CLI opens a file; `cairn-mcp` opens a file; the p2p daemon
+//! The CLI opens a file; `cairn mcp` opens a file; the p2p daemon
 //! reconciles with peers who are already running nodes. None of that gives a
 //! *stranger* a way in, and "anyone can independently re-derive every settled
 //! result from the log alone" is worth nothing to somebody with no way to
@@ -54,7 +54,7 @@ use std::time::Duration;
 use crate::canonical::{digest_bytes, Value};
 use crate::ledger::{Codec, Ledger};
 use crate::node::Node;
-use crate::records::{Claim, Commitment};
+use crate::records::{Claim, Commitment, Objective};
 
 /// Largest request body accepted, in bytes.
 ///
@@ -253,16 +253,17 @@ pub struct Admission {
 /// It was in `main.rs`, and that put it out of reach of the daemon — which is
 /// how the documented topology came not to compose. `docs/serving.md` says a
 /// submission "lands in a spool directory, and the operator's own node admits
-/// it", and `cairn-serve`'s own comment says the operator's node is
+/// it", and `cairn serve`'s own comment says the operator's node is
 /// appending while the server runs. But a `Ledger` is single-writer *by
-/// enforcement*, so `cairn drain` could not run while `cairn-p2p` held
+/// enforcement*, so `cairn drain` could not run while the daemon (then the
+/// separate `cairn-p2p` binary, now `cairn p2p`) held
 /// the log: a node that was online could not accept a submission at all, which
 /// for a network whose purpose is accepting submissions is not a small gap.
 ///
 /// The daemon is the operator's node and already holds the lock, so it drains.
 /// One copy of the rules, called from both places — the same argument
 /// `docs/serving.md` makes for why admission does not happen in a request
-/// handler applies just as well to a second copy in a second binary.
+/// handler applies just as well to a second copy behind a second subcommand.
 ///
 /// Settlement is deliberately *not* done here. A reveal admitted into an epoch
 /// that has since closed settles on the caller's next `settle`, and both
@@ -490,7 +491,7 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
     serving.check_startup()?;
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
-    eprintln!("cairn-serve: listening on {local}");
+    eprintln!("cairn serve: listening on {local}");
     if let Some(spool) = &serving.spool {
         // Both admitters are named, because which one applies depends on
         // something this process cannot see. `cairn drain` wants the
@@ -498,17 +499,17 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
         // pointing an operator at it alone is pointing half of them at a
         // command that will refuse.
         eprintln!(
-            "cairn-serve: accepting submissions into {}",
+            "cairn serve: accepting submissions into {}",
             spool.dir().display()
         );
         eprintln!(
-            "cairn-serve:   admitted by `cairn-p2p --queue {}` if a daemon \
+            "cairn serve:   admitted by `cairn p2p --queue {}` if a daemon \
              is running, or `cairn drain --queue {}` if not",
             spool.dir().display(),
             spool.dir().display()
         );
     } else {
-        eprintln!("cairn-serve: read-only; POST /submit will answer 405");
+        eprintln!("cairn serve: read-only; POST /submit will answer 405");
     }
     serve_on(listener, serving)
 }
@@ -750,8 +751,8 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
 ///
 /// # What this is not
 ///
-/// It is not a connection list. Live sessions belong to `cairn-p2p`, which
-/// has no HTTP surface at all, and this process only ever reads a log. A peer
+/// It is not a connection list. Live sessions belong to the p2p service,
+/// which has no HTTP surface at all, and this server only ever reads a log. A peer
 /// appears here because a `peer` record naming it reached this node, and it
 /// keeps appearing after that peer goes away forever -- the log is append-only,
 /// so nothing here can go stale in the direction a reader would want.
@@ -794,7 +795,7 @@ fn peers(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string(
                     "Known peers, from `peer` records in this log -- not open connections. \
                      A peer listed here may be long gone: the log is append-only and nothing \
-                     retracts a record. Live session state lives in cairn-p2p, which \
+                     retracts a record. Live session state lives in the p2p service, which \
                      serves no HTTP.",
                 ),
             ),
@@ -819,11 +820,8 @@ fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             ),
             ("reward", Value::Int(i128::from(objective.reward))),
             ("funder", Value::string(objective.funder.clone())),
-            ("settled", Value::Bool(node.settlement_of(&id).is_some())),
         ];
-        if let Some(frontier) = node.frontier_of(&id) {
-            fields.push(("frontier", frontier_value(&frontier, objective.reward)));
-        }
+        fields.extend(lifecycle_fields(&node, &id, &objective));
         items.push(Value::object(fields));
     }
     json(
@@ -863,10 +861,61 @@ fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Res
             ),
         ),
     ];
+    fields.extend(lifecycle_fields(&node, id, objective));
+    json(stream, 200, &Value::object(fields))
+}
+
+/// Where one objective stands: `settled`, `open`, `settlement`, and
+/// `frontier` when there is one.
+///
+/// Shared by the listing and the detail view so the two cannot disagree about
+/// whether a bounty is still payable, and thin on purpose: the judgement is
+/// [`Node::objective_is_closed`]'s, and this only writes it down.
+///
+/// `settled` keeps its name and gains its honest meaning, *no longer payable*.
+/// It used to be "a settlement record exists", which for a ratchet is true
+/// from the first paid slice onward -- so a progressive objective with most of
+/// its pool untouched was listed as settled, and every page that derived
+/// `open = !settled` hid it. `open` is published alongside rather than left
+/// for readers to negate, so that no reader has to know the two are
+/// complements.
+///
+/// `settlement` is the certificate's one payment: who was paid, how much, for
+/// which claim. It is `null` for a ratchet, whose payouts are many and are
+/// carried per move by `frontier.paid_cumulative` -- the first settlement of a
+/// ratchet is only its first paid step, and naming it here would read as the
+/// whole.
+fn lifecycle_fields(node: &Node, id: &str, objective: &Objective) -> Vec<(&'static str, Value)> {
+    let closed = node.objective_is_closed(objective);
+    let settlement = if objective.ratchet.is_some() {
+        Value::Null
+    } else {
+        node.settlement_of(id)
+            .map(|payload| settlement_value(&payload))
+            .unwrap_or(Value::Null)
+    };
+    let mut fields = vec![
+        ("settled", Value::Bool(closed)),
+        ("open", Value::Bool(!closed)),
+        ("settlement", settlement),
+    ];
     if let Some(frontier) = node.frontier_of(id) {
         fields.push(("frontier", frontier_value(&frontier, objective.reward)));
     }
-    json(stream, 200, &Value::object(fields))
+    fields
+}
+
+/// The three fields of a settlement record a reader acts on, copied out of
+/// the payload rather than the payload re-served whole: `objective_id` is the
+/// key the caller asked by, and anything else a future record kind adds is
+/// not this route's to promise.
+fn settlement_value(payload: &Value) -> Value {
+    let field = |key: &str| payload.get(key).cloned().unwrap_or(Value::Null);
+    Value::object([
+        ("claim_id", field("claim_id")),
+        ("submitter", field("submitter")),
+        ("reward", field("reward")),
+    ])
 }
 
 fn frontier(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
@@ -968,6 +1017,10 @@ fn log(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
 /// Published because comparing chains is how two operators find *where* they
 /// diverged rather than only that they did — the head alone says a mismatch
 /// exists and nothing about which epoch caused it.
+///
+/// Also carries the ledger's `height` and `ledger_head`, which a checkpoint
+/// signs and the chain's `links` and `head` are not: see the comment at the
+/// body below.
 fn chain(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let node = match serving.node() {
         Ok(node) => node,
@@ -978,9 +1031,24 @@ fn chain(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         .last()
         .map(|link| link.link.clone())
         .unwrap_or_default();
+    // The ledger's own height and head, alongside the epoch chain's. They are
+    // different units: `links` counts settled epochs and `head` is the last
+    // *link*, while a checkpoint (`GET /checkpoint`) signs the ledger's entry
+    // count and the last *entry's* hash -- exactly what `Checkpoint::from_ledger`
+    // reads. A reader comparing a checkpoint against this endpoint had only
+    // `links` to compare `height` with, and since a log always holds at least
+    // as many entries as batches, "the checkpoint is behind the head" could
+    // never be observed. Both come from state the node already loaded to fold
+    // the chain, so publishing them costs nothing.
+    let ledger = node.ledger();
     let body = Value::object([
         ("head", Value::string(head)),
         ("links", Value::Int(links.len() as i128)),
+        ("height", Value::Int(ledger.len() as i128)),
+        (
+            "ledger_head",
+            Value::string(ledger.head().unwrap_or_default()),
+        ),
         (
             "chain",
             Value::Array(
@@ -1008,7 +1076,10 @@ fn chain(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 "Derived from GET /log, not stored: each link is \
                  H({prev, epoch, sorted claim ids}). Two nodes that settled the same claims \
                  in the same epochs compute the same head. A head that differs from a peer's \
-                 means a fork -- compare link by link to find the epoch it started at.",
+                 means a fork -- compare link by link to find the epoch it started at. \
+                 `height` and `ledger_head` are the ledger's entry count and last entry \
+                 hash, the units a checkpoint signs; `links` and `head` are the epoch \
+                 chain's, and the two are not comparable.",
             ),
         ),
     ]);
@@ -1145,6 +1216,13 @@ fn escape(text: &str) -> String {
     out
 }
 
+/// Serve the signed checkpoint, or a 404 that says why there is none.
+///
+/// Both 404 bodies are `{"error": "…checkpoint…"}`, and the reader keys on
+/// exactly that (`classifyCheckpoint` in `ui/lib/checkpoint.ts`): a JSON
+/// `error` naming a checkpoint is this node saying it has none, which the
+/// page reports, while any other 404 -- a static host with no node behind it
+/// -- is nothing to say anything about. Reword the message and keep the word.
 fn checkpoint(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let Some(path) = &serving.checkpoint else {
         return json_error(
@@ -1497,6 +1575,81 @@ mod tests {
         assert!(simple.starts_with("http/1.1 415"), "{simple}");
     }
 
+    /// `GET /chain` publishes the ledger's height and head *beside* the epoch
+    /// chain's link count and head, in the units a checkpoint signs.
+    ///
+    /// The fixture is chosen so the two pairs differ: three entries, one of
+    /// them a batch, so `links` is 1 while `height` is 3, and `head` is a link
+    /// hash while `ledger_head` is an entry hash. A reader that compared a
+    /// checkpoint's `height` against `links` -- which is what the reader in
+    /// `ui/` did -- could never see a checkpoint fall behind, because a log
+    /// holds at least as many entries as batches.
+    #[test]
+    fn chain_publishes_the_ledger_height_and_head_in_the_units_a_checkpoint_signs() {
+        let dir = TempDir::new("chain-height");
+        let log = dir.path.join("log.jsonl");
+        let ts = "2026-01-01T00:00:00+00:00";
+        let last_entry_hash = {
+            let mut ledger = Ledger::open(&log).expect("ledger");
+            ledger
+                .append("note", Value::object([("n", Value::Int(1))]), ts)
+                .expect("append");
+            ledger
+                .append(
+                    "batch",
+                    Value::object([
+                        ("epoch", Value::Int(1)),
+                        ("anchor", Value::string("")),
+                        ("claims", Value::Array(vec![])),
+                    ]),
+                    ts,
+                )
+                .expect("append");
+            ledger
+                .append("note", Value::object([("n", Value::Int(2))]), ts)
+                .expect("append")
+                .hash
+                .clone()
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, ".");
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        socket
+            .write_all(b"GET /chain HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .expect("write");
+        let mut response = String::new();
+        let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("a body");
+        let chain = Value::from_json(body).expect("json");
+
+        assert_eq!(chain.get("links").and_then(Value::as_i128), Some(1));
+        assert_eq!(chain.get("height").and_then(Value::as_i128), Some(3));
+        assert_eq!(
+            chain.get("ledger_head").and_then(Value::as_str),
+            Some(last_entry_hash.as_str())
+        );
+        let head = chain.get("head").and_then(Value::as_str).expect("head");
+        assert!(
+            !head.is_empty(),
+            "one batch settled, so the chain has a head"
+        );
+        assert_ne!(
+            head, last_entry_hash,
+            "the chain head is a link hash and the ledger head is an entry hash; \
+             if these ever coincide the fixture proves nothing"
+        );
+    }
+
     #[test]
     fn a_spool_is_content_addressed_so_a_retry_is_not_a_duplicate() {
         // A submitter whose connection drops mid-response retries. That must
@@ -1561,6 +1714,129 @@ mod tests {
         // would-be hex pair ended in the middle of a multi-byte character.
         assert_eq!(percent_decode("%aé"), "%aé");
     }
+
+    fn field<'a>(value: &'a Value, key: &str) -> &'a Value {
+        value
+            .get(key)
+            .unwrap_or_else(|| panic!("no `{key}` in {value:?}"))
+    }
+
+    /// The published log ships one settled certificate and one ratchet paid
+    /// out to its target. Both are closed, and the certificate says who was
+    /// paid; the ratchet leaves that to its frontier.
+    #[test]
+    fn the_shipped_log_publishes_a_settled_certificate_with_its_settlement() {
+        let log = concat!(env!("CARGO_MANIFEST_DIR"), "/launch/cairn.jsonl");
+        let ledger = Ledger::open(log).expect("the shipped log");
+        let node = Node::new(ledger, env!("CARGO_MANIFEST_DIR"));
+        let objectives = node.objectives();
+        assert!(
+            !objectives.is_empty(),
+            "launch/cairn.jsonl carries objectives"
+        );
+
+        let mut saw_certificate = false;
+        let mut saw_ratchet = false;
+        for (id, objective) in &objectives {
+            let fields = Value::object(lifecycle_fields(&node, id, objective));
+            assert_eq!(field(&fields, "settled"), &Value::Bool(true), "{id}");
+            assert_eq!(field(&fields, "open"), &Value::Bool(false), "{id}");
+            if objective.ratchet.is_some() {
+                saw_ratchet = true;
+                assert_eq!(field(&fields, "settlement"), &Value::Null);
+                let frontier = field(&fields, "frontier");
+                assert_eq!(field(frontier, "pool_remaining"), &Value::Int(0));
+            } else {
+                saw_certificate = true;
+                let settlement = field(&fields, "settlement");
+                assert_eq!(
+                    field(settlement, "reward"),
+                    &Value::Int(i128::from(objective.reward))
+                );
+                assert!(field(settlement, "submitter").as_str().is_some());
+                assert!(field(settlement, "claim_id")
+                    .as_str()
+                    .is_some_and(|claim| claim.starts_with("sha256:")));
+                assert!(
+                    fields.get("frontier").is_none(),
+                    "a certificate has no frontier"
+                );
+            }
+        }
+        assert!(saw_certificate && saw_ratchet, "{objectives:?}");
+    }
+
+    /// A ratchet with most of its pool untouched is open, whatever settlement
+    /// records it has already written -- which is where the old `settled`
+    /// came from, and why it hid exactly the objectives worth working.
+    #[test]
+    fn a_ratchet_with_pool_remaining_is_published_as_open() {
+        use crate::frontier::FrontierEntry;
+
+        let dir = TempDir::new("open-ratchet");
+        let ts = "2026-07-28T00:00:00+00:00";
+        let objective = Objective::new(
+            "G",
+            "maximize the score",
+            Value::object([
+                ("kind", Value::string("evaluator")),
+                ("evaluator", Value::string("e.py")),
+                ("evaluator_sha256", Value::string("00".repeat(32))),
+                ("entrypoint", Value::string("score")),
+                ("threshold", Value::Int(0)),
+                ("direction", Value::string("maximize")),
+            ]),
+            1_000_000,
+            "treasury",
+            ts,
+            None,
+            Some(Value::object([
+                ("baseline", Value::Int(0)),
+                ("target", Value::Int(100)),
+                ("reward", Value::Int(1_000_000)),
+                ("direction", Value::string("maximize")),
+                ("min_improvement", Value::Int(1)),
+            ])),
+        )
+        .expect("valid objective");
+        let id = objective.id();
+
+        // Written as the node would have written them after one paying
+        // advance to 40: a frontier and the settlement for that slice.
+        let mut ledger = Ledger::open(dir.path.join("log.jsonl")).expect("open");
+        ledger
+            .append("objective", objective.to_value(), ts)
+            .expect("objective");
+        ledger
+            .append(
+                "frontier",
+                FrontierEntry::new(id.clone(), "sha256:c1", "alice", 40, 400_000).to_value(),
+                ts,
+            )
+            .expect("frontier");
+        ledger
+            .append(
+                "settlement",
+                Value::object([
+                    ("objective_id", Value::string(id.clone())),
+                    ("claim_id", Value::string("sha256:c1")),
+                    ("submitter", Value::string("alice")),
+                    ("reward", Value::Int(400_000)),
+                ]),
+                ts,
+            )
+            .expect("settlement");
+        let node = Node::new(ledger, &dir.path);
+        assert!(node.settlement_of(&id).is_some(), "the old rule's evidence");
+
+        let fields = Value::object(lifecycle_fields(&node, &id, &objective));
+        assert_eq!(field(&fields, "settled"), &Value::Bool(false));
+        assert_eq!(field(&fields, "open"), &Value::Bool(true));
+        assert_eq!(field(&fields, "settlement"), &Value::Null);
+        let frontier = field(&fields, "frontier");
+        assert_eq!(field(frontier, "pool_remaining"), &Value::Int(600_000));
+    }
+
     #[test]
     fn a_full_queue_refuses_new_records_but_still_accepts_resends() {
         // Unbounded, distinct records each write a file and a stranger fills

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
   type Peer,
@@ -8,19 +9,24 @@ import {
   fetchPeers,
   short,
 } from "@/lib/peers";
+import { type Chain, fetchChain } from "@/lib/chain";
+import { type CheckpointAnswer, readCheckpoint } from "@/lib/checkpoint";
 
 /**
  * The address book this node has been handed.
  *
  * Named "peers" and not "connected peers", because the second thing is not
- * available: live sessions live in `cairn-p2p`, which serves no HTTP, and
- * `cairn-serve` only reads a log file. The page says so rather than letting
+ * available: live sessions live in the p2p service, which publishes nothing
+ * over HTTP, and the HTTP server (`cairn serve`, or the `--serve` thread of
+ * `cairn p2p` / `cairn run`) only reads a log file. The page says so rather than letting
  * a reader assume a list of addresses is a list of connections.
  */
 export default function Page() {
   const [base, setBase] = useState(NODE_URL);
   const [peers, setPeers] = useState<Peer[] | null>(null);
   const [note, setNote] = useState("");
+  const [chain, setChain] = useState<Chain | null>(null);
+  const [checkpoint, setCheckpoint] = useState<CheckpointAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -31,8 +37,21 @@ export default function Page() {
       const body = await fetchPeers(url);
       setPeers(body.peers);
       setNote(body.note);
+      // Neither blocks the page on failure: a node older than the epoch
+      // chain has no `/chain`, and an unchecked node has no `/checkpoint` --
+      // `readCheckpoint` never throws and names which of its states this is,
+      // and `fetchChain` is wrapped here rather than imported for its
+      // throwing behaviour, which the chain page wants and this one does not.
+      const [nextChain, answer] = await Promise.all([
+        fetchChain(url).catch(() => null),
+        readCheckpoint(url),
+      ]);
+      setChain(nextChain);
+      setCheckpoint(answer);
     } catch (cause) {
       setPeers(null);
+      setChain(null);
+      setCheckpoint(null);
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
@@ -58,6 +77,34 @@ export default function Page() {
         retracts one. Read this as “who this node could try”, never as “who this
         node is talking to”.
       </p>
+
+      {(chain || checkpoint?.kind === "signed") && (
+        <div className="row stats">
+          {chain && <Stat label="chain links" value={String(chain.links)} />}
+          {checkpoint?.kind === "signed" && (
+            <Stat
+              label="checkpoint"
+              value={`height ${checkpoint.value.checkpoint.height}`}
+            />
+          )}
+        </div>
+      )}
+      {/* Only the node's own "no checkpoint" earns this sentence. A
+          `/checkpoint` that answered wrongly is said as that, and a 404 that
+          is not the node's says nothing about a node at all. */}
+      {checkpoint?.kind === "unsigned" && chain && (
+        <p className="meta dim" style={{ marginTop: "-0.75rem", marginBottom: "1.25rem" }}>
+          This node has never signed a checkpoint. See the{" "}
+          <Link href="/chain">chain</Link> page for what a signature would
+          cover, and this node&apos;s <Link href="/log">full log</Link>.
+        </p>
+      )}
+      {checkpoint?.kind === "unreadable" && (
+        <div className="panel bad">
+          <b>could not read this node&apos;s checkpoint</b>
+          {checkpoint.message}
+        </div>
+      )}
 
       <div className="row">
         <input
@@ -155,5 +202,14 @@ export default function Page() {
         </p>
       )}
     </main>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="stat">
+      <div className="statValue">{value}</div>
+      <div className="statLabel">{label}</div>
+    </div>
   );
 }

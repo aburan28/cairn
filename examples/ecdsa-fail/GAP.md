@@ -40,7 +40,7 @@ Pinned benchmark (CLI, no id argument): `gpsanant/ecdsafail-challenge`,
 | Local check | `score_candidate` (MCP) / registry run — free, records nothing |
 | Accept rule | Pinned pure function; `UNAVAILABLE ≠ REJECT` |
 | Submit | Epoch-batched commit → reveal → settle; cite frontier on ratchet |
-| Agent surface | `cairn-mcp`: list / get / score / frontier / submit / audit |
+| Agent surface | `cairn mcp`: list / get / score / frontier / submit / audit |
 
 Existing close cousins: `examples/ecdlp/` and `examples/first-blood/` are
 **certificate** (recover `k`); ecdsa.fail is **evaluator minimize** (circuit

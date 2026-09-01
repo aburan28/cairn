@@ -51,7 +51,7 @@ pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// can open a TCP connection, before any authentication has happened. A public
 /// address is port-scanned within minutes of existing, and a scanner that
 /// connects and sends nothing is the cheapest possible way to hold the accept
-/// path — which, in `cairn-p2p`, holds the node mutex. A real peer has its
+/// path — which, in the daemon (`cairn p2p`), holds the node mutex. A real peer has its
 /// hello in flight before the connection completes, so this is generous for
 /// every honest case.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -60,7 +60,13 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum TransportError {
     Io(io::Error),
     Handshake(HandshakeError),
-    FrameTooLarge { size: u32 },
+    /// The proxy interposed on the dial refused or misbehaved. Distinct from
+    /// [`TransportError::Io`] so "the peer is down" reads differently from "the
+    /// egress proxy would not carry the connection".
+    Proxy(super::proxy::ProxyError),
+    FrameTooLarge {
+        size: u32,
+    },
     FrameTruncated,
 }
 
@@ -69,6 +75,7 @@ impl fmt::Display for TransportError {
         match self {
             TransportError::Io(e) => write!(f, "transport I/O: {e}"),
             TransportError::Handshake(e) => write!(f, "handshake: {e}"),
+            TransportError::Proxy(e) => write!(f, "proxy: {e}"),
             TransportError::FrameTooLarge { size } => write!(f, "frame too large: {size} bytes"),
             TransportError::FrameTruncated => f.write_str("truncated transport frame"),
         }
@@ -84,6 +91,11 @@ impl From<io::Error> for TransportError {
 impl From<HandshakeError> for TransportError {
     fn from(value: HandshakeError) -> Self {
         TransportError::Handshake(value)
+    }
+}
+impl From<super::proxy::ProxyError> for TransportError {
+    fn from(value: super::proxy::ProxyError) -> Self {
+        TransportError::Proxy(value)
     }
 }
 
@@ -346,12 +358,33 @@ fn read_exact_resilient(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result
 }
 
 /// Dial a known endpoint and complete the initiator side of the handshake.
+///
+/// The direct path. [`connect_through`] is the same with a proxy interposed;
+/// this delegates to it so there is one handshake body, not two.
 pub fn connect(
     endpoint: &PeerPublic,
     addr: SocketAddr,
     local: &PeerIdentity,
 ) -> Result<Connection, TransportError> {
-    let mut stream = TcpStream::connect_timeout(&addr, DIAL_TIMEOUT)?;
+    connect_through(&super::proxy::Proxy::Direct, endpoint, addr, local)
+}
+
+/// Dial a known endpoint through a proxy, completing the initiator handshake.
+///
+/// The only difference from [`connect`] is *how the TCP stream is obtained* —
+/// straight, or through a SOCKS5 proxy that puts the peer's address on the far
+/// side of a firewall. Everything after the connect is identical, because the
+/// McEliece handshake runs end to end over whatever stream it is handed and a
+/// proxy is just another untrusted hop: it sees ciphertext and the peer-id
+/// fingerprint, and cannot forge an identity whose hash it does not hold. See
+/// [`super::proxy`] for what this defends and what it does not.
+pub fn connect_through(
+    proxy: &super::proxy::Proxy,
+    endpoint: &PeerPublic,
+    addr: SocketAddr,
+    local: &PeerIdentity,
+) -> Result<Connection, TransportError> {
+    let mut stream = proxy.dial(addr, DIAL_TIMEOUT)?;
     // Before the write, not after: a peer that
     // accepted the connection and then stalled would otherwise hold this
     // thread in `write_all` with the caller's lock still taken.
@@ -479,7 +512,7 @@ mod tests {
     /// A stranger that connects and says nothing must not hold the accept path.
     ///
     /// This is what a public address costs: an EC2 instance is port-scanned
-    /// within minutes of getting one, and `cairn-p2p` runs `accept` with
+    /// within minutes of getting one, and the daemon (`cairn p2p`) runs `accept` with
     /// the node mutex held. An unbounded `read_exact` here is a seed that
     /// wedges on the first scan and never talks to anybody again.
     #[test]
