@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.1.0](https://github.com/aburan28/cairn/compare/v1.0.1...v1.1.0) (2026-09-01)
+
+
+### Features
+
+* **examples:** differential-path bounties for MD4, MD5, SHA-0 and SHA-1 ([#127](https://github.com/aburan28/cairn/issues/127)) ([08979b5](https://github.com/aburan28/cairn/commit/08979b5621c61297e2ba10a791fd2363fc1b0a49))
+* one `cairn` binary — `run` serves MCP, the other binaries become subcommands, `make build` stages bin/ ([#128](https://github.com/aburan28/cairn/issues/128)) ([6897143](https://github.com/aburan28/cairn/commit/689714325b9f5e8b9f4300cc389160e29105b205))
+* **site:** publish to Pages, and add the two pages a visitor needs ([#95](https://github.com/aburan28/cairn/issues/95)) ([ff10af2](https://github.com/aburan28/cairn/commit/ff10af295069e45d80e944958f45981be36304ee))
+* **ui:** a records explorer and a frontier page ([#116](https://github.com/aburan28/cairn/issues/116)) ([17919cf](https://github.com/aburan28/cairn/commit/17919cf29151d015d6f2a2737d48d3f9025e3246))
+
+
+### Fixes
+
+* **reference:** rustfmt the drift blocking [#116](https://github.com/aburan28/cairn/issues/116)'s reference job ([#118](https://github.com/aburan28/cairn/issues/118)) ([2aa56e8](https://github.com/aburan28/cairn/commit/2aa56e82ba3282414400b0fab92b055d89fe5d2b))
+* **ui:** compare a checkpoint in its own units, label every number's origin, and put ui/lib under test ([#124](https://github.com/aburan28/cairn/issues/124)) ([d860339](https://github.com/aburan28/cairn/commit/d860339728c92ff72f550cd095380a2313a0ee50))
+
+
+### Documentation
+
+* **agents:** fix two stale "Known limits" claims ([#101](https://github.com/aburan28/cairn/issues/101)) ([165195a](https://github.com/aburan28/cairn/commit/165195ad02c6bcded175a61940037b22d7cfa6c9))
+* bring nine claims back in step with the tree, and name two gaps ([#121](https://github.com/aburan28/cairn/issues/121)) ([d3c835c](https://github.com/aburan28/cairn/commit/d3c835c1026ba8e8327abb16ef5008b53c64a157))
+* **pages:** record why the site is still not published ([#97](https://github.com/aburan28/cairn/issues/97)) ([8e0d265](https://github.com/aburan28/cairn/commit/8e0d265f9c03b12e7738c7ec873cb15785817ee8))
+
 ## [1.0.1](https://github.com/aburan28/distributed-researcher/compare/v1.0.0...v1.0.1) (2026-08-15)
 
 
