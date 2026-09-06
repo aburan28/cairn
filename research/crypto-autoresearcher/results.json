@@ -49,5 +49,104 @@
       "goal": "GOAL-certicom-eccp131",
       "reason": "131-bit field exceeds the 64-bit lanes this engine multiplies in; ~2^65 group operations, ~11,000 years at measured throughput"
     }
+  ],
+  "runs": [
+    {
+      "date": "2026-09-05",
+      "node": "cairn run over .autoresearcher/cairn.jsonl (MCP over stdio, HTTP 127.0.0.1:8090)",
+      "submitter": "7cd5254be80c24d51537771530cfe9b2afd8e4832787379a7ef5176ba40713d3",
+      "epoch_seconds": 5,
+      "threads": 14,
+      "solved": [
+        {
+          "goal": "GOAL-ecdlp-intro",
+          "claim": "sha256:ea223f7ccf11bfda03e6230782143c7d4c51a08059142dd8113017f52d5370d3",
+          "reward": 5000,
+          "settled": true
+        },
+        {
+          "goal": "GOAL-ecdlp-nums-50",
+          "claim": "sha256:50a6f3654c4c33c89efcaaaf173d49a77869665501aa3d545fd0f5b0c5b99ee8",
+          "reward": 120000,
+          "settled": true
+        },
+        {
+          "goal": "GOAL-ecdlp-nums-60",
+          "claim": "sha256:ed1545543f70ab12dcdce2d04930f107af056401c468b5fc6e31f72241ae468a",
+          "reward": 400000,
+          "settled": true
+        },
+        {
+          "goal": "GOAL-hash-collide-md5-48",
+          "claim": "sha256:026b84afb518d827cd88ad5d1c732b9ae7ccd7d729f4fe3fc0a02edf60be16f9",
+          "reward": 5000,
+          "settled": true
+        }
+      ],
+      "declined": [
+        {
+          "goal": "GOAL-ecdlp-first-blood",
+          "reason": "88-bit field exceeds the 64-bit lanes this engine multiplies in; rho would need ~2^44 group operations (~0 years here)"
+        },
+        {
+          "goal": "GOAL-ecdlp-first-blood",
+          "reason": "128-bit field exceeds the 64-bit lanes this engine multiplies in; rho would need ~2^64 group operations (~1,381 years here)"
+        },
+        {
+          "goal": "GOAL-ecdlp-first-blood",
+          "reason": "112-bit field exceeds the 64-bit lanes this engine multiplies in; rho would need ~2^56 group operations (~5 years here)"
+        },
+        {
+          "goal": "GOAL-ecdlp-first-blood",
+          "reason": "96-bit field exceeds the 64-bit lanes this engine multiplies in; rho would need ~2^47 group operations (~0 years here)"
+        },
+        {
+          "goal": "GOAL-hash-collide-md5",
+          "reason": "a full 128-bit collision on MD5 needs a differential-path attack, which this repertoire does not carry; the generic birthday bound is 2^64 compressions (~39,041 years here)"
+        },
+        {
+          "goal": "GOAL-hash-dv-sha0",
+          "reason": "no strategy in this researcher's repertoire"
+        },
+        {
+          "goal": "GOAL-hash-collide-sha1-64",
+          "reason": "a full 160-bit collision on SHA0 needs a differential-path attack, which this repertoire does not carry; the generic birthday bound is 2^80 compressions (~2,558,573,163 years here)"
+        },
+        {
+          "goal": "GOAL-hash-dv-sha1",
+          "reason": "no strategy in this researcher's repertoire"
+        },
+        {
+          "goal": "GOAL-hash-collide-sha1",
+          "reason": "a full 160-bit collision on SHA0 needs a differential-path attack, which this repertoire does not carry; the generic birthday bound is 2^80 compressions (~2,558,573,163 years here)"
+        },
+        {
+          "goal": "GOAL-ecdlp-first-blood",
+          "reason": "80-bit field exceeds the 64-bit lanes this engine multiplies in; rho would need ~2^40 group operations (~0 years here)"
+        },
+        {
+          "goal": "GOAL-hash-collide-sha0",
+          "reason": "a full 160-bit collision on SHA0 needs a differential-path attack, which this repertoire does not carry; the generic birthday bound is 2^80 compressions (~2,558,573,163 years here)"
+        },
+        {
+          "goal": "GOAL-hash-collide-md4",
+          "reason": "a full 128-bit collision on MD4 needs a differential-path attack, which this repertoire does not carry; the generic birthday bound is 2^64 compressions (~39,041 years here)"
+        },
+        {
+          "goal": "GOAL-ecdsa-fail-circuit-cost",
+          "reason": "no strategy in this researcher's repertoire"
+        },
+        {
+          "goal": "GOAL-secp256k1-modadd-cost",
+          "reason": "no strategy in this researcher's repertoire"
+        },
+        {
+          "goal": "GOAL-certicom-eccp131",
+          "reason": "131-bit field exceeds the 64-bit lanes this engine multiplies in; rho would need ~2^65 group operations (~3,165 years here)"
+        }
+      ],
+      "audit": "log verified: chain intact, every settled claim re-verified (39 entries)",
+      "spendable_after": 530000
+    }
   ]
 }
