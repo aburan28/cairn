@@ -20,6 +20,12 @@ struct SettingsView: View {
                 TextField("HTTP address", text: $model.httpAddress).disabled(model.isRunning)
                 TextField("P2P address", text: $model.p2pAddress).disabled(model.isRunning)
                 Stepper("Epoch length: \(model.epochSeconds)s", value: $model.epochSeconds, in: 1...600).disabled(model.isRunning)
+                HStack {
+                    TextField("Bootstrap file(s), colon-separated (optional)", text: $model.bootstrapFile).disabled(model.isRunning)
+                    Button("Choose…") { chooseBootstrap() }.disabled(model.isRunning)
+                }
+                Text("Peers on this LAN are found by themselves. To reach a seed elsewhere, give the node a bootstrap file with the seed's address and real public key; `cairn gen-bootstrap` writes the shape, and a placeholder key is warned about at start.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Text("Short epochs make a local trial quick; a real round takes 600s. The node, the researcher and the audit all read the same value. 8080/9000 are what an operator's own cairn run binds, which is why the defaults are 8090/9010.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -51,6 +57,16 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The log and every outcome go; a fresh node and a fresh log are created on the next Start.")
+        }
+    }
+
+    private func chooseBootstrap() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Use as bootstrap"
+        if panel.runModal() == .OK {
+            model.bootstrapFile = panel.urls.map(\.path).joined(separator: ":")
         }
     }
 

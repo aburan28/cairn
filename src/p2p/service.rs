@@ -3,7 +3,7 @@
 use super::code::{CodeLimits, CodeReport};
 use super::dht::{Directory, NodeId, PeerContact};
 use super::discovery::{AddressBook, Endpoint};
-use super::handshake::{PeerId, PeerIdentity, PeerPublic};
+use super::handshake::{peer_id_hex, PeerId, PeerIdentity, PeerPublic};
 use super::multicast;
 use super::peers::{self, PeerHintLimits, PeersReport};
 use super::pop::{PopLimits, PopReport};
@@ -16,11 +16,12 @@ use crate::node::Node;
 use crate::records::{Claim, Commitment, Objective, PeerRecord};
 use crate::time::timestamp;
 use rand_core::OsRng;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Endpoints dialled per tick when the caller does not choose.
 ///
@@ -28,6 +29,14 @@ use std::sync::Mutex;
 /// fanout near the size of the network; three gets a message everywhere in
 /// `O(log n)` rounds while keeping the per-tick cost of a node constant.
 pub const DEFAULT_FANOUT: usize = 3;
+
+/// Direct key fetches attempted per tick. Each is a blocking dial on the
+/// daemon's loop, bounded by `DIAL_TIMEOUT`; four dead addresses cost forty
+/// seconds, which is the most one tick may be allowed to lose to them.
+pub const KEY_FETCHES_PER_TICK: usize = 4;
+
+/// How long a contact that did not answer a key request is left alone.
+pub const KEY_FETCH_BACKOFF: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub enum ServiceError {
@@ -77,6 +86,13 @@ pub struct Service {
     /// table only heard about into one this node can reach — and the dial and
     /// accept paths that learn it hold `&self`.
     book: Mutex<AddressBook>,
+    /// Keyless contacts whose key this node tried to fetch directly, and when.
+    ///
+    /// A contact that will not answer a key request is retried after
+    /// [`KEY_FETCH_BACKOFF`], not every tick: the daemon ticks every five
+    /// seconds and a dial that times out costs ten, so without this one dead
+    /// address would pin the loop.
+    key_fetches: Mutex<BTreeMap<PeerId, Instant>>,
     /// Who holds which blob, and whom to route through to find out.
     ///
     /// Behind a `Mutex` because every dial and accept path takes `&self` — a
@@ -122,6 +138,7 @@ impl Service {
             identity,
             proxy,
             book: Mutex::new(AddressBook::new()),
+            key_fetches: Mutex::new(BTreeMap::new()),
             peer_hints: Mutex::new(peers::Hints::new()),
             directory: Mutex::new(Directory::new(local)),
             hints: Mutex::new(std::collections::BTreeMap::new()),
@@ -371,6 +388,7 @@ impl Service {
     /// Returns how many contacts were taken.
     pub fn seed_from_log(&self, node: &Node) -> usize {
         let mut seeded = 0;
+        let mut keyless = Vec::new();
         for record in node.peers().values() {
             let Some(transport) = decode_peer_id(&record.transport) else {
                 continue;
@@ -399,9 +417,14 @@ impl Service {
             let node_id = NodeId::from_bytes(transport);
             if self.with_book(|book| book.for_peer(&transport).is_empty()) {
                 self.with_directory(|directory| directory.wants_key(node_id));
+                keyless.push((transport, addr));
             }
             seeded += 1;
         }
+        // A log-named peer with an address and no key was, until now, a
+        // contact this node could only reach through some third peer. Ask it
+        // directly, the way a beacon contact is asked.
+        self.fetch_missing_keys(&keyless, KEY_FETCHES_PER_TICK);
         seeded
     }
 
@@ -441,6 +464,7 @@ impl Service {
     /// place where an untrusted address hint is allowed to matter, because a
     /// wrong one costs a dial and never a wrong peer.
     fn seed_from_hints(&self) {
+        let mut keyless = Vec::new();
         let records: Vec<PeerRecord> = {
             let hints = self.peer_hints.lock().unwrap_or_else(|e| e.into_inner());
             hints.records().cloned().collect()
@@ -460,8 +484,10 @@ impl Service {
                 self.with_directory(|directory| {
                     directory.wants_key(NodeId::from_bytes(transport));
                 });
+                keyless.push((transport, addr));
             }
         }
+        self.fetch_missing_keys(&keyless, KEY_FETCHES_PER_TICK);
     }
 
     /// Run the peer-hint round on an established connection.
@@ -501,21 +527,86 @@ impl Service {
     /// Returns how many contacts were taken.
     pub fn absorb_beacons(&self, responder: &multicast::Responder, limit: usize) -> usize {
         let mut taken = 0;
+        let mut keyless = Vec::new();
         for (peer, addr) in responder.poll(limit) {
             if peer == self.identity.id() {
                 continue;
             }
             self.note_contact(peer, addr);
-            // Same as `seed_from_log`: a beacon carries a transport *id*, not
-            // the 261 KiB key needed to dial it, so the key is queued and one
-            // round with any peer that has it turns the contact into an
-            // endpoint.
+            // A beacon carries a transport *id*, not the 261 KiB key needed to
+            // dial it. Queue the key for the next DHT round as before, and
+            // also ask the peer itself: on a LAN with no bootstrap there is
+            // no "next round" until somebody has a key, which is the circle
+            // `transport::request_key` exists to break.
             if self.with_book(|book| book.for_peer(&peer).is_empty()) {
                 self.with_directory(|directory| directory.wants_key(NodeId::from_bytes(peer)));
+                keyless.push((peer, addr));
             }
             taken += 1;
         }
+        self.fetch_missing_keys(&keyless, KEY_FETCHES_PER_TICK);
         taken
+    }
+
+    /// Fetch the transport key of contacts this node can name but not dial,
+    /// straight from the contact, and file the result as an endpoint.
+    ///
+    /// Direct dials only: a node whose dials go through a proxy has a censor
+    /// to hide from, and a plain connection to a LAN address is not what it
+    /// asked for. Bounded per call and backed off per peer, because every
+    /// attempt here is a blocking dial on the daemon's tick thread.
+    pub fn fetch_missing_keys(&self, contacts: &[(PeerId, SocketAddr)], limit: usize) -> usize {
+        if !matches!(self.proxy, Proxy::Direct) {
+            return 0;
+        }
+        let mut learned = 0;
+        let now = Instant::now();
+        for (peer, addr) in contacts.iter().take(limit) {
+            if *peer == self.identity.id() || self.with_book(|book| !book.for_peer(peer).is_empty())
+            {
+                continue;
+            }
+            {
+                let mut fetches = self.key_fetches.lock().unwrap_or_else(|e| e.into_inner());
+                if fetches
+                    .get(peer)
+                    .is_some_and(|last| now.duration_since(*last) < KEY_FETCH_BACKOFF)
+                {
+                    continue;
+                }
+                fetches.insert(*peer, now);
+            }
+            // A beacon's address is the datagram's source, which for a node
+            // bound to every interface is the host's LAN address -- and a
+            // node on *this* host that listens on loopback only is not there.
+            // So a refused request is retried on loopback at the same port.
+            // Reaching some other local node that way is harmless: its key
+            // does not hash to the id asked for and is dropped.
+            let mut attempt = transport::request_key(*addr, *peer).map(|public| (public, *addr));
+            if attempt.is_err() && !addr.ip().is_loopback() {
+                let local = SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port());
+                if let Ok(public) = transport::request_key(local, *peer) {
+                    attempt = Ok((public, local));
+                }
+            }
+            match attempt {
+                Ok((public, reached)) => {
+                    log::info!(
+                        "learned the transport key of {} from {reached}; it is dialable now",
+                        peer_id_hex(peer)
+                    );
+                    self.with_book(|book| book.insert(Endpoint::new(reached, public)));
+                    self.with_directory(|directory| {
+                        directory.resolved_key(NodeId::from_bytes(*peer));
+                    });
+                    learned += 1;
+                }
+                Err(error) => {
+                    log::debug!("key request to {addr} for {}: {error}", peer_id_hex(peer));
+                }
+            }
+        }
+        learned
     }
 
     /// The transport key this node holds for `peer`, if any.
@@ -722,7 +813,23 @@ impl Service {
         stream: std::net::TcpStream,
         node: &mut Node,
     ) -> Result<PeerId, ServiceError> {
-        let mut connection = transport::accept(stream, &self.identity)?;
+        self.serve_inbound_once(transport::Inbound::read(stream)?, node)
+    }
+
+    /// Answer a key request on an inbound connection, needing nothing but
+    /// this node's own identity -- and so no lock. `Ok(true)` served it.
+    pub fn answer_key_request(&self, inbound: transport::Inbound) -> Result<bool, ServiceError> {
+        Ok(inbound.answer_key_request(&self.identity)?)
+    }
+
+    /// [`Self::serve_node_once`] for a hello already read, so a caller can
+    /// answer key requests before taking whatever lock guards `node`.
+    pub fn serve_inbound_once(
+        &self,
+        inbound: transport::Inbound,
+        node: &mut Node,
+    ) -> Result<PeerId, ServiceError> {
+        let mut connection = inbound.complete(&self.identity)?;
         let remote = connection.remote();
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
@@ -739,12 +846,28 @@ impl Service {
         node: &mut Node,
         population: &mut Population,
         limits: PopLimits,
+        rescore: F,
+    ) -> Result<(PeerId, PopReport), ServiceError>
+    where
+        F: FnMut(&Node, &Candidate) -> Option<i64>,
+    {
+        let inbound = transport::Inbound::read(stream)?;
+        self.serve_inbound_and_population(inbound, node, population, limits, rescore)
+    }
+
+    /// [`Self::serve_node_and_population`] for a hello already read.
+    pub fn serve_inbound_and_population<F>(
+        &self,
+        inbound: transport::Inbound,
+        node: &mut Node,
+        population: &mut Population,
+        limits: PopLimits,
         mut rescore: F,
     ) -> Result<(PeerId, PopReport), ServiceError>
     where
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
-        let mut connection = transport::accept(stream, &self.identity)?;
+        let mut connection = inbound.complete(&self.identity)?;
         let remote = connection.remote();
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;

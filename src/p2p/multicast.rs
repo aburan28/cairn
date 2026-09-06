@@ -197,10 +197,13 @@ pub fn hear(bytes: &[u8], source: IpAddr, us: &PeerId) -> Heard {
 /// The port is bound plainly, without `SO_REUSEADDR`. Setting it would need
 /// either a new dependency or sixty lines of `sockaddr_in` FFI with a different
 /// layout on every platform, and it buys exactly one thing: two nodes on *one
-/// host* both hearing beacons. That is a development arrangement, not a
-/// deployment. The second node gets an `AddrInUse` from [`Responder::bind`],
-/// carries on without LAN discovery, and dials from its bootstrap addresses like
-/// every node did before this module existed.
+/// host* both hearing beacons. That was once treated as a development
+/// arrangement and the second node was left deaf; it is an everyday one now (a
+/// researcher's node beside the operator's), so [`Responder::bind`] asks the
+/// kernel to share the port and both hear every beacon. A bind that still fails
+/// -- an older node on the host that never asked to share -- is reported, and
+/// the node carries on without LAN discovery, dialling from its bootstrap
+/// addresses like every node did before this module existed.
 ///
 /// `port` is therefore a parameter rather than the constant, so two nodes on one
 /// host can still each have a beacon socket by agreeing on a different one --
@@ -225,7 +228,7 @@ impl Responder {
     /// reason a node cannot join the network -- it is a reason it needs a
     /// bootstrap address, which was the only option before this existed.
     pub fn bind(us: PeerId, session_port: u16, beacon_port: u16) -> io::Result<Responder> {
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, beacon_port))?;
+        let socket = bind_shared(beacon_port)?;
         socket.join_multicast_v4(&GROUP, &Ipv4Addr::UNSPECIFIED)?;
         socket.set_multicast_ttl_v4(TTL)?;
         // Loopback on, so a node hears its own beacon. Deliberate: it is the
@@ -278,6 +281,125 @@ impl Responder {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
+}
+
+/// Bind the beacon port so that more than one node on this host can hold it.
+///
+/// # Why a plain `UdpSocket::bind` is not enough
+///
+/// A multicast receiver is the one kind of socket several processes are
+/// *meant* to bind to one port: every node on the host must hear every beacon.
+/// The kernel allows that only when each socket asked for it before binding
+/// (`SO_REUSEADDR`, and on the BSDs `SO_REUSEPORT` as well), and the standard
+/// library binds in the same call that creates the socket, with no room to
+/// ask. So the second node on a host got `AddrInUse` and carried on deaf --
+/// which stopped being a development curiosity once a researcher's node and
+/// the operator's own node routinely share a machine.
+///
+/// On the BSDs every socket on the port must have set `SO_REUSEPORT`, so a
+/// node built before this change still excludes a node built after it until
+/// it restarts. The error path is unchanged either way: a bind that fails is
+/// reported and stepped over.
+///
+/// This crate has no `libc` dependency and does not grow one for three calls;
+/// `src/verifiers/mod.rs` declares its two the same way. The constants are the
+/// platform's own and are pinned per target rather than guessed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn bind_shared(port: u16) -> io::Result<UdpSocket> {
+    use std::os::fd::FromRawFd as _;
+
+    #[cfg(target_os = "macos")]
+    mod sys {
+        pub const SOL_SOCKET: i32 = 0xffff;
+        pub const SO_REUSEADDR: i32 = 0x0004;
+        pub const SO_REUSEPORT: i32 = 0x0200;
+        #[repr(C)]
+        pub struct SockAddrIn {
+            pub len: u8,
+            pub family: u8,
+            pub port: u16,
+            pub addr: u32,
+            pub zero: [u8; 8],
+        }
+        pub fn addr(port: u16) -> SockAddrIn {
+            SockAddrIn {
+                len: std::mem::size_of::<SockAddrIn>() as u8,
+                family: 2,
+                port: port.to_be(),
+                addr: 0,
+                zero: [0; 8],
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    mod sys {
+        pub const SOL_SOCKET: i32 = 1;
+        pub const SO_REUSEADDR: i32 = 2;
+        pub const SO_REUSEPORT: i32 = 15;
+        #[repr(C)]
+        pub struct SockAddrIn {
+            pub family: u16,
+            pub port: u16,
+            pub addr: u32,
+            pub zero: [u8; 8],
+        }
+        pub fn addr(port: u16) -> SockAddrIn {
+            SockAddrIn {
+                family: 2,
+                port: port.to_be(),
+                addr: 0,
+                zero: [0; 8],
+            }
+        }
+    }
+
+    unsafe extern "C" {
+        #[link_name = "socket"]
+        fn c_socket(domain: i32, kind: i32, protocol: i32) -> i32;
+        #[link_name = "setsockopt"]
+        fn c_setsockopt(fd: i32, level: i32, name: i32, value: *const i32, len: u32) -> i32;
+        #[link_name = "bind"]
+        fn c_bind(fd: i32, addr: *const sys::SockAddrIn, len: u32) -> i32;
+        #[link_name = "close"]
+        fn c_close(fd: i32) -> i32;
+    }
+
+    const AF_INET: i32 = 2;
+    const SOCK_DGRAM: i32 = 2;
+
+    // SAFETY: plain C calls with the arguments the platform documents. The
+    // descriptor is owned here from `socket` until it is either handed to
+    // `UdpSocket::from_raw_fd`, which takes ownership, or closed on the error
+    // path below, so it is neither leaked nor closed twice.
+    unsafe {
+        let fd = c_socket(AF_INET, SOCK_DGRAM, 0);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let one: i32 = 1;
+        let size = std::mem::size_of::<i32>() as u32;
+        for name in [sys::SO_REUSEADDR, sys::SO_REUSEPORT] {
+            if c_setsockopt(fd, sys::SOL_SOCKET, name, &one, size) != 0 {
+                let error = io::Error::last_os_error();
+                c_close(fd);
+                return Err(error);
+            }
+        }
+        let addr = sys::addr(port);
+        if c_bind(fd, &addr, std::mem::size_of::<sys::SockAddrIn>() as u32) != 0 {
+            let error = io::Error::last_os_error();
+            c_close(fd);
+            return Err(error);
+        }
+        Ok(UdpSocket::from_raw_fd(fd))
+    }
+}
+
+/// Everywhere else: the standard bind, and the second node on a host is deaf,
+/// exactly as before.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn bind_shared(port: u16) -> io::Result<UdpSocket> {
+    UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
 }
 
 #[cfg(test)]
@@ -430,6 +552,49 @@ mod tests {
         // Loopback is on, so the datagram came back -- and produced no contact,
         // because a node must never dial itself.
         assert_eq!(responder.poll(8), Vec::new());
+    }
+
+    /// Two nodes on one host is the arrangement a researcher beside an
+    /// operator's node produces every day, and it used to leave the second
+    /// one deaf. Both must bind the one port, and each must hear the other.
+    #[test]
+    fn two_nodes_on_one_host_share_the_beacon_port_and_hear_each_other() {
+        // Its own offset: now that a port can be shared, two tests on one
+        // port would hear each other's beacons.
+        let port = beacon_port().wrapping_add(4).max(40_000);
+        let Ok(first) = Responder::bind(peer(21), 9001, port) else {
+            eprintln!("skipped: multicast unavailable on this host");
+            return;
+        };
+        let second = match Responder::bind(peer(22), 9002, port) {
+            Ok(second) => second,
+            Err(error) => {
+                panic!("the second node on this host could not bind the beacon port: {error}")
+            }
+        };
+        if first.announce(port).is_err() || second.announce(port).is_err() {
+            eprintln!("skipped: multicast send unavailable on this host");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let heard_by_second = second.poll(8);
+        let heard_by_first = first.poll(8);
+        if heard_by_second.is_empty() && heard_by_first.is_empty() {
+            eprintln!("skipped: no multicast delivery on this host");
+            return;
+        }
+        assert!(
+            heard_by_second
+                .iter()
+                .any(|(id, addr)| *id == peer(21) && addr.port() == 9001),
+            "the second node must hear the first: {heard_by_second:?}"
+        );
+        assert!(
+            heard_by_first
+                .iter()
+                .any(|(id, addr)| *id == peer(22) && addr.port() == 9002),
+            "the first node must hear the second: {heard_by_first:?}"
+        );
     }
 
     #[test]

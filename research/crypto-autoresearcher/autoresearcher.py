@@ -32,8 +32,8 @@ What it will not do, deliberately:
     autoresearcher.py [--once] [--root DIR] [--state DIR] [--post FILE ...]
 
 Every path and port is also an environment variable (AR_ROOT, AR_STATE,
-AR_LOG, AR_CAIRN, AR_HTTP, AR_P2P, AR_BUDGET_SECONDS, AR_INTERVAL,
-CAIRN_EPOCH_SECONDS) so a launcher can set them once.
+AR_LOG, AR_CAIRN, AR_HTTP, AR_P2P, AR_BOOTSTRAP, AR_BUDGET_SECONDS,
+AR_INTERVAL, CAIRN_EPOCH_SECONDS) so a launcher can set them once.
 """
 import argparse
 import glob
@@ -64,6 +64,10 @@ LOG = os.environ.get("AR_LOG") or os.path.join(STATE, "cairn.jsonl")
 # researcher's node is a second node on the same machine.
 HTTP = os.environ.get("AR_HTTP", "127.0.0.1:8090")
 P2P = os.environ.get("AR_P2P", "127.0.0.1:9010")
+# Bootstrap files for the node, colon-separated. None by default: the
+# researcher's node finds peers on the local segment by itself, and reaching
+# a seed elsewhere is the operator's decision (see docs/p2p.md).
+BOOTSTRAP = [b for b in os.environ.get("AR_BOOTSTRAP", "").split(":") if b]
 BUDGET_SECONDS = float(os.environ.get("AR_BUDGET_SECONDS", "1800"))
 INTERVAL = int(os.environ.get("AR_INTERVAL", "120"))
 EPOCH_SECONDS = int(os.environ.get("CAIRN_EPOCH_SECONDS", "5"))
@@ -231,6 +235,8 @@ class Node:
                 "--listen", P2P, "--serve", HTTP,
                 "--queue", os.path.join(STATE, "queue"),
                 "--mcp-identity", IDENTITY]
+        for b in BOOTSTRAP:
+            argv += ["--bootstrap", b]
         self.stderr = open(NODE_LOG, "ab")
         self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.stderr, cwd=ROOT, env=env)
