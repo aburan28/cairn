@@ -22,11 +22,10 @@ enum Pane: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject var model: ResearcherModel
-    @State private var pane: Pane? = .overview
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $pane) {
+            List(selection: $model.pane) {
                 ForEach(Pane.allCases) { p in
                     Label { Text(p.rawValue) } icon: { Image(systemName: p.icon) }
                         .badge(badge(for: p))
@@ -36,7 +35,7 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
             .safeAreaInset(edge: .bottom) { StatusFooter() }
         } detail: {
-            switch pane ?? .overview {
+            switch model.pane ?? .overview {
             case .overview: OverviewView()
             case .objectives: ObjectivesView()
             case .catalog: CatalogView()
@@ -49,8 +48,11 @@ struct ContentView: View {
             ToolbarItem(placement: .navigation) {
                 HStack(spacing: 8) {
                     if model.isRunning || model.isBuilding { ProgressView().controlSize(.small) }
-                    Text(model.isBuilding ? "building cairn…" : (model.status?.phase ?? (model.isRunning ? "starting…" : "stopped")))
+                    Text(model.isBuilding ? "working…" : (model.status?.phase ?? (model.isRunning ? "starting…" : "stopped")))
                         .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                    Text("epoch \(model.currentEpoch) · \(model.secondsToNextEpoch)s")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                        .help("Epochs are derived from the clock: unix time divided by the epoch length")
                 }
             }
             ToolbarItemGroup(placement: .primaryAction) {
@@ -91,7 +93,7 @@ struct ContentView: View {
 
     private func badge(for p: Pane) -> Int {
         switch p {
-        case .objectives: return model.open.count
+        case .objectives: return model.open.count + model.pendingReveals.count
         case .catalog: return model.selectedObjectives.count
         default: return 0
         }
@@ -134,7 +136,7 @@ struct Tile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.title2.monospacedDigit().bold()).foregroundStyle(color)
+            Text(value).font(.title2.monospacedDigit().bold()).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.55)
             if let caption { Text(caption).font(.caption2).foregroundStyle(.tertiary).lineLimit(1) }
         }
         .padding(12)

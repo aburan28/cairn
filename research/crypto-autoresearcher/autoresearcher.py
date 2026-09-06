@@ -386,10 +386,12 @@ class ECDLPPrimeField:
     def applies(self, src, path):
         return self._instance(src, path) is not None and "k*G does not equal" in src
 
-    def solve(self, obj, src, path):
+    def estimate(self, src, path):
+        """Seconds the solve is expected to take, or raise OutOfReach.  The
+        same arithmetic `solve` runs first, exposed so a plan can be drawn
+        before any compute is spent."""
         inst = self._instance(src, path)
         n = inst["n"]
-        bits = n.bit_length()
         steps = math.sqrt(math.pi * n / 4)
         secs = steps / RHO_RATE
         if inst["p"].bit_length() > 62:
@@ -401,6 +403,14 @@ class ECDLPPrimeField:
             raise OutOfReach(
                 f"~2^{math.log2(steps):.0f} group operations, ~{secs / 3600:.1f}h at "
                 f"measured throughput, over the {BUDGET_SECONDS / 3600:.1f}h budget")
+        return secs
+
+    def solve(self, obj, src, path):
+        inst = self._instance(src, path)
+        n = inst["n"]
+        bits = n.bit_length()
+        steps = math.sqrt(math.pi * n / 4)
+        secs = self.estimate(src, path)
         qx, qy = inst["target"]()
         dbits = max(6, min(24, bits // 2 - 15))
         note("rho-start", objective=obj["id"][:16], bits=bits,
@@ -446,7 +456,7 @@ class HashCollision:
     def applies(self, src, path):
         return self._instance(src) is not None and "m_prime" in src
 
-    def solve(self, obj, src, path):
+    def estimate(self, src, path):
         inst = self._instance(src)
         bits = 8 * inst["digest_bytes"]
         birthday = 2.0 ** (bits / 2)
@@ -461,6 +471,12 @@ class HashCollision:
         secs = 3 * birthday / MD5_RATE
         if secs > BUDGET_SECONDS:
             raise OutOfReach(f"~2^{bits // 2} compressions, ~{secs / 3600:.1f}h, over budget")
+        return secs
+
+    def solve(self, obj, src, path):
+        inst = self._instance(src)
+        bits = 8 * inst["digest_bytes"]
+        secs = self.estimate(src, path)
         note("birthday-start", objective=obj["id"][:16], bits=bits, steps=inst["steps"],
              expected=f"2^{bits // 2}", est_seconds=round(secs, 1))
         t0 = time.time()
@@ -476,6 +492,43 @@ class HashCollision:
 
 
 STRATEGIES = [ECDLPPrimeField(), HashCollision()]
+
+
+def plan(files):
+    """For each objective file: the strategy that applies and what it would
+    decide at the current budget.  Reads the pinned checker exactly as a
+    sweep does and spends no compute, so a dashboard can show the verdict
+    before anything runs and again when the budget changes."""
+    out = []
+    for f in files:
+        row = {"path": os.path.relpath(f, ROOT)}
+        try:
+            obj = json.load(open(f))
+            row["goal"] = obj.get("goal")
+            ver = obj.get("verifier") or {}
+            checker = ver.get("checker") or ver.get("evaluator")
+            if not checker:
+                row.update(decision="none", reason=f"verifier kind {ver.get('kind')!r} names no source to read")
+                out.append(row)
+                continue
+            path = os.path.join(ROOT, checker)
+            src = open(path).read()
+            for strat in STRATEGIES:
+                if not strat.applies(src, path):
+                    continue
+                row["strategy"] = strat.name
+                try:
+                    secs = strat.estimate(src, path)
+                    row.update(decision="solve", est_seconds=round(secs, 1))
+                except OutOfReach as e:
+                    row.update(decision="decline", reason=str(e))
+                break
+            else:
+                row.update(decision="none", reason="no strategy in this researcher's repertoire")
+        except Exception as e:
+            row.update(decision="error", reason=str(e)[:200])
+        out.append(row)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -612,11 +665,16 @@ def objectives_of(node):
     return node.get("/objectives")["objectives"]
 
 
+ONLY = []
+
+
 def sweep(node, st, submitter):
     objectives = objectives_of(node)
     publish_status(node, st, objectives, "sweeping", submitter)
     for obj in objectives:
         oid = obj["id"]
+        if ONLY and not any(oid.startswith(p) for p in ONLY):
+            continue
         if oid in st["done"] or oid in st["unreachable"]:
             continue
         if oid in st["pending"]:
@@ -741,7 +799,18 @@ def main():
     ap.add_argument("--post", nargs="*", default=[],
                     help="objective files, globs, or a list file to post before the node starts")
     ap.add_argument("--interval", type=int, default=INTERVAL)
+    ap.add_argument("--only", nargs="*", default=[],
+                    help="work only these objective ids (prefixes accepted); the rest are left alone")
+    ap.add_argument("--plan", nargs="*", metavar="FILE",
+                    help="print, as JSON, what a sweep would decide for these objective files, and exit")
     args = ap.parse_args()
+
+    if args.plan is not None:
+        json.dump(plan(expand(args.plan)), sys.stdout, indent=1)
+        print()
+        return
+    global ONLY
+    ONLY = args.only
 
     cairn = cairn_binary()
     os.makedirs(STATE, exist_ok=True)

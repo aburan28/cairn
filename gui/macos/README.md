@@ -25,28 +25,43 @@ order, the accepted claims, and the researcher's state.
 
 **Objectives.** Every objective the researcher has seen, filterable by outcome
 and searchable by goal, id or reason. Selecting one shows its outcome
-(strategy, solve time, claim, verdict, settlement), the statement as the node
-serves it (flagged as untrusted text), the frontier, and the artifact that was
-submitted. Actions: **Retry on next sweep** forgets a declined outcome so the
-next sweep looks again (while stopped, since the researcher owns its state
-file while it runs); **Score a file…** runs the objective's pinned verifier on
-an artifact JSON of your own through `cairn propose --dry-run`, recording
-nothing; **Open in reader** jumps to the node's page for it. The context menu
-copies ids.
+(strategy, solve time, claim, verdict, settlement, and for a commitment when
+its reveal opens), the statement as the node serves it (flagged as untrusted
+text), the frontier, and the artifact that was submitted. Actions: **Solve
+this one** runs a sweep restricted to that objective -- node up, one
+decision, node down; **Retry on next sweep** forgets a declined outcome
+(while stopped, since the researcher owns its state file while it runs);
+**Journal** filters the journal to that objective; **Score a file…** runs the
+objective's pinned verifier on an artifact JSON of your own through
+`cairn propose --dry-run`, recording nothing; **Open in reader** jumps to the
+node's page for it. The context menu copies ids.
 
 **Catalog.** Every `examples/**/objective*.json` in the checkout, grouped by
-family, with a checkbox each. The checked set is what the researcher posts at
-the next Start; *Researcher default* restores the crypto set it ships with.
-Objectives the log already holds are marked *posted* and left alone on a
-re-post, which is refused by id.
+family, with a checkbox each and the researcher's own verdict under it,
+computed by `autoresearcher.py --plan` at the current budget and recomputed
+when the budget changes: *would solve it, about 15s*, *declines: 131-bit
+field…*, or *no strategy in the repertoire*. *Solvable only* filters to the
+first kind; the Select menu can check exactly those. The checked set is what
+the researcher posts at the next Start, or **Post now** appends the unposted
+ones with the CLI while no node holds the log. Objectives the log already
+holds are marked *posted* and left alone on a re-post, which is refused by
+id.
 
-**Node.** Health, ledger height, epoch links, peers and objective count from
-the node's routes; balances for every holder from `cairn balances`; records by
-kind; and the node's own reader, chain page, objectives JSON and log JSON in an
-embedded web view.
+**Node.** Health, the current epoch with a countdown to the next, ledger
+height, epoch links, peers and objective count from the node's routes;
+balances for every holder from `cairn balances`; the identity's public key
+with copy and reveal; records by kind; then a native **Ledger** table of
+every entry, a **Peers** table, and the node's own reader, chain page,
+objectives JSON and log JSON in an embedded web view. **Audit log** runs
+`cairn audit` and shows whether every settled claim re-verifies.
 
 **Journal.** Every event the researcher records, live, colour-coded by kind,
-filterable, with an *Outcomes only* switch and follow-tail.
+filterable, with an *Outcomes only* switch and follow-tail. A row about an
+objective links to it; the context menu narrows the journal to one objective.
+
+**Overview** also lists commitments waiting for the epoch to turn, with the
+seconds until their reveal opens, and the toolbar shows the current epoch.
+The Dock icon carries the count of open objectives while a run is on.
 
 **Console.** The process's own stdout and stderr.
 

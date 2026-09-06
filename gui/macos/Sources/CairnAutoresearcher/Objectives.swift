@@ -4,7 +4,6 @@ import UniformTypeIdentifiers
 
 struct ObjectivesView: View {
     @EnvironmentObject var model: ResearcherModel
-    @State private var selection: ObjectiveRow.ID?
     @State private var search = ""
     @State private var filter = "all"
     @State private var scoreOutput: String?
@@ -35,7 +34,7 @@ struct ObjectivesView: View {
                     TextField("Search goal, id or reason", text: $search).textFieldStyle(.roundedBorder).frame(width: 260)
                 }
                 .padding(8)
-                Table(rows, selection: $selection) {
+                Table(rows, selection: $model.selectedObjective) {
                     TableColumn("") { r in Image(systemName: r.icon).foregroundStyle(r.color) }.width(18)
                     TableColumn("Goal") { r in Text(r.title) }
                     TableColumn("Status") { r in Text(r.statusLabel).foregroundStyle(r.color) }.width(80)
@@ -54,7 +53,9 @@ struct ObjectivesView: View {
                         if let c = r.claim { Button("Copy claim id") { copy(c) } }
                         if model.nodeReachable { Link("Open in reader", destination: model.readerURL(for: r.id)) }
                         Divider()
+                        Button("Solve this one now") { model.solveOne(r) }.disabled(model.isRunning || model.isBuilding)
                         Button("Retry on next sweep") { model.retry(r) }.disabled(model.isRunning || r.status == "open")
+                        Button("Show in journal") { model.showJournal(for: r) }
                     }
                 }
             }
@@ -72,7 +73,7 @@ struct ObjectivesView: View {
     }
 
     @ViewBuilder private var detail: some View {
-        if let r = model.rows.first(where: { $0.id == selection }) {
+        if let r = model.rows.first(where: { $0.id == model.selectedObjective }) {
             ObjectiveDetail(row: r, scoreOutput: $scoreOutput, scoring: $scoring)
         } else {
             Text("Select an objective to see its statement, frontier, outcome and artifact.")
@@ -140,7 +141,10 @@ struct ObjectiveDetail: View {
                 if row.status == "solved" {
                     KeyValueRow(key: "Settled", value: row.settled == true ? "yes, \(row.paid.formatted()) paid\(row.settled_at.map { " at \($0)" } ?? "")" : "not yet")
                 }
-                if let e = row.epoch { KeyValueRow(key: "Committed in", value: "epoch \(e)") }
+                if let e = row.epoch {
+                    KeyValueRow(key: "Committed in", value: "epoch \(e)" + (row.status == "committed"
+                        ? (model.currentEpoch > e ? " — revealable now" : " — reveal opens in \(model.secondsToNextEpoch)s") : ""))
+                }
                 if let v = row.verifier { KeyValueRow(key: "Verifier", value: v) }
                 if let p = row.reward, row.status != "solved" { KeyValueRow(key: "Pool", value: p.formatted()) }
             }
@@ -204,10 +208,19 @@ struct ObjectiveDetail: View {
     private var actions: some View {
         HStack {
             Button {
+                model.solveOne(row)
+            } label: { Label("Solve this one", systemImage: "bolt") }
+                .disabled(model.isRunning || model.isBuilding)
+                .help("One sweep restricted to this objective: forget its outcome, start the node, work it, stop. What the plan says it would decide is what happens.")
+            Button {
                 model.retry(row)
             } label: { Label("Retry on next sweep", systemImage: "arrow.counterclockwise") }
                 .disabled(model.isRunning || row.status == "open")
                 .help(model.isRunning ? "Stop the researcher first" : "Forget this outcome so the next sweep looks again")
+            Button {
+                model.showJournal(for: row)
+            } label: { Label("Journal", systemImage: "text.book.closed") }
+                .help("Every journal line about this objective")
             Button {
                 pickAndScore()
             } label: { Label("Score a file…", systemImage: "checkmark.shield") }

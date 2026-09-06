@@ -21,6 +21,7 @@ struct OverviewView: View {
                     Tile(title: "Spendable", value: model.mySpendable.map { $0.formatted() } ?? "–", color: .teal,
                          caption: "from cairn balances")
                 }
+                if !model.pendingReveals.isEmpty { pendingCard }
                 if model.earningsSeries.count > 0 { earningsCard }
                 HStack(alignment: .top, spacing: 14) {
                     settledCard.frame(maxWidth: .infinity)
@@ -132,6 +133,27 @@ struct OverviewView: View {
         } label: { Label("Earnings, in settlement order (bars per claim, line cumulative)", systemImage: "chart.bar.xaxis") }
     }
 
+    /// A commitment is opened in a strictly later epoch; until then it is
+    /// bound but hidden, and the researcher is waiting for the clock.
+    private var pendingCard: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(model.pendingReveals) { r in
+                    HStack {
+                        Image(systemName: "lock.fill").foregroundStyle(.blue)
+                        Text(r.title).bold()
+                        Spacer()
+                        if let e = r.epoch {
+                            Text(model.currentEpoch > e ? "revealable now" : "reveal opens in \(model.secondsToNextEpoch)s")
+                                .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: { Label("Committed, waiting for the epoch to turn", systemImage: "clock") }
+    }
+
     private var settledCard: some View {
         GroupBox {
             if model.solved.isEmpty {
@@ -167,7 +189,7 @@ struct OverviewView: View {
                 KeyValueRow(key: "Phase", value: model.status?.phase ?? (model.isRunning ? "starting" : "stopped"))
                 KeyValueRow(key: "Node", value: model.nodeReachable ? model.nodeURL.absoluteString : "not running")
                 KeyValueRow(key: "Submitter", value: model.status?.submitter.map { String($0.prefix(16)) + "…" } ?? "–", mono: true)
-                KeyValueRow(key: "Epoch", value: "\(model.status?.epoch_seconds ?? model.epochSeconds)s")
+                KeyValueRow(key: "Epoch", value: "\(model.currentEpoch), next in \(model.secondsToNextEpoch)s (\(model.epochLength)s long)")
                 KeyValueRow(key: "Budget", value: "\(model.budgetMinutes) min per objective")
                 KeyValueRow(key: "Selected", value: "\(model.selectedObjectives.count) objectives to post")
                 KeyValueRow(key: "Updated", value: model.status?.updated ?? "–")
