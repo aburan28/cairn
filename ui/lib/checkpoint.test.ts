@@ -94,6 +94,39 @@ describe("classifyCheckpoint", () => {
       value: { checkpoint: signed, public_key: "c9af03a0" },
     });
   });
+
+  it("reads a fresh node's signed-but-empty checkpoint as signed, not absent", () => {
+    // `cairn run` signs the ledger at startup, so a node with no entries yet
+    // serves a checkpoint that is genuinely signed and has no root or head --
+    // captured from one rather than typed from memory (key and signature
+    // shortened; the nulls are the point). For a while the landing page
+    // crashed on exactly this: `Hash` called `.replace` on the null root.
+    // Nulls are in-contract -- `head`/`root` are `Option<String>` in
+    // `src/checkpoint.rs` -- so this stays `signed` and the page renders "—".
+    const empty = JSON.stringify({
+      checkpoint: {
+        head: null,
+        height: 0,
+        issued_at: "2026-09-06T18:23:39+00:00",
+        root: null,
+      },
+      public_key: "0f303bae",
+      signature: "21d68fb1",
+    });
+    expect(classifyCheckpoint(200, empty, what)).toEqual({
+      kind: "signed",
+      value: {
+        checkpoint: {
+          head: null,
+          height: 0,
+          issued_at: "2026-09-06T18:23:39+00:00",
+          root: null,
+        },
+        public_key: "0f303bae",
+        signature: "21d68fb1",
+      },
+    });
+  });
 });
 
 describe("coversHead", () => {

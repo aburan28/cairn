@@ -90,9 +90,11 @@ export type ChainFacts = {
 
 /** `launch/checkpoint.json`'s signed body, plus the key that signed it. */
 export type CheckpointFacts = {
-  head: string;
+  /** `null` on a fresh node: signed over an empty log, so there is no head
+   *  or root yet. See `Checkpoint` in `./checkpoint`. */
+  head: string | null;
   height: number;
-  root: string;
+  root: string | null;
   issued_at: string;
   public_key: string;
 };
