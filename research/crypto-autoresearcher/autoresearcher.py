@@ -32,8 +32,8 @@ What it will not do, deliberately:
     autoresearcher.py [--once] [--root DIR] [--state DIR] [--post FILE ...]
 
 Every path and port is also an environment variable (AR_ROOT, AR_STATE,
-AR_LOG, AR_CAIRN, AR_HTTP, AR_P2P, AR_BUDGET_SECONDS, AR_INTERVAL,
-CAIRN_EPOCH_SECONDS) so a launcher can set them once.
+AR_LOG, AR_CAIRN, AR_HTTP, AR_P2P, AR_BOOTSTRAP, AR_BUDGET_SECONDS,
+AR_INTERVAL, CAIRN_EPOCH_SECONDS) so a launcher can set them once.
 """
 import argparse
 import glob
@@ -64,6 +64,10 @@ LOG = os.environ.get("AR_LOG") or os.path.join(STATE, "cairn.jsonl")
 # researcher's node is a second node on the same machine.
 HTTP = os.environ.get("AR_HTTP", "127.0.0.1:8090")
 P2P = os.environ.get("AR_P2P", "127.0.0.1:9010")
+# Bootstrap files for the node, colon-separated. None by default: the
+# researcher's node finds peers on the local segment by itself, and reaching
+# a seed elsewhere is the operator's decision (see docs/p2p.md).
+BOOTSTRAP = [b for b in os.environ.get("AR_BOOTSTRAP", "").split(":") if b]
 BUDGET_SECONDS = float(os.environ.get("AR_BUDGET_SECONDS", "1800"))
 INTERVAL = int(os.environ.get("AR_INTERVAL", "120"))
 EPOCH_SECONDS = int(os.environ.get("CAIRN_EPOCH_SECONDS", "5"))
@@ -104,7 +108,54 @@ def solver(name):
 
 
 # --------------------------------------------------------------------------
-# journal, state, status
+# journal, state, status, progress
+
+PROGRESS_PATH = os.path.join(STATE, "progress.json")
+
+
+def run_engine(argv, objective, engine, timeout):
+    """Run a solver, mirroring its stderr into progress.json as it goes so a
+    dashboard can show the walk instead of a spinner.  Returns (stdout,
+    last stderr line); raises on a non-zero exit."""
+    started = time.time()
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    last = ""
+
+    def publish(done=False):
+        doc = {"objective": objective, "engine": engine, "started": started,
+               "elapsed": round(time.time() - started, 1), "line": last.strip(), "done": done}
+        tmp = PROGRESS_PATH + ".tmp"
+        json.dump(doc, open(tmp, "w"))
+        os.replace(tmp, PROGRESS_PATH)
+
+    publish()
+    # The rho engine redraws one line with \r; split on either terminator.
+    buf = ""
+    tick = time.time()
+    while True:
+        ch = proc.stderr.read(1)
+        if not ch:
+            break
+        if ch in "\r\n":
+            if buf.strip():
+                last = buf
+            buf = ""
+            if time.time() - tick > 0.5:
+                publish()
+                tick = time.time()
+        else:
+            buf += ch
+        if time.time() - started > timeout:
+            proc.kill()
+            raise TimeoutError(f"{engine} exceeded {timeout:.0f}s")
+    out = proc.stdout.read()
+    proc.wait()
+    if buf.strip():
+        last = buf
+    publish(done=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{engine} failed: {last.strip()[-200:]}")
+    return out, last.strip()
 
 def note(event, **kw):
     rec = dict(t=time.strftime("%Y-%m-%dT%H:%M:%S"), event=event, **kw)
@@ -130,12 +181,19 @@ def save(st):
 
 LAST_OBJECTIVES = []
 
+# The pass in progress, for the dashboard: which one it is, when it began,
+# how long the last took, and how far along the objective list it is.
+# Reported, never consulted -- the loop reads nothing back from here.
+SWEEP = {"n": 0, "started": None, "seconds": None, "finished": None, "index": 0, "total": 0}
 
-def publish_status(node, st, objectives, phase, submitter):
+
+def publish_status(node, st, objectives, phase, submitter, **extra):
     """One JSON file with everything a dashboard needs, rewritten on every
     change: the launcher reads this rather than parsing the journal.  With
     `objectives` None the last list is reused, so a stop does not erase the
-    table it is reporting the end of."""
+    table it is reporting the end of.  `extra` keys go in as they are;
+    `next_sweep_at` is the one the idle phase adds, so a dashboard can count
+    down instead of showing the interval as a constant."""
     global LAST_OBJECTIVES
     if objectives is None:
         objectives = LAST_OBJECTIVES
@@ -156,7 +214,9 @@ def publish_status(node, st, objectives, phase, submitter):
            "http": f"http://{HTTP}", "submitter": submitter, "log": LOG,
            "epoch_seconds": EPOCH_SECONDS, "pid": os.getpid(),
            "node_pid": node.proc.pid if node and node.proc else None,
-           "balance": st.get("balance"), "objectives": rows}
+           "balance": st.get("balance"), "interval": INTERVAL, "sweep": dict(SWEEP),
+           "objectives": rows}
+    doc.update(extra)
     tmp = STATUS_PATH + ".tmp"
     json.dump(doc, open(tmp, "w"), indent=1)
     os.replace(tmp, STATUS_PATH)
@@ -184,6 +244,8 @@ class Node:
                 "--listen", P2P, "--serve", HTTP,
                 "--queue", os.path.join(STATE, "queue"),
                 "--mcp-identity", IDENTITY]
+        for b in BOOTSTRAP:
+            argv += ["--bootstrap", b]
         self.stderr = open(NODE_LOG, "ab")
         self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.stderr, cwd=ROOT, env=env)
@@ -339,10 +401,12 @@ class ECDLPPrimeField:
     def applies(self, src, path):
         return self._instance(src, path) is not None and "k*G does not equal" in src
 
-    def solve(self, obj, src, path):
+    def estimate(self, src, path):
+        """Seconds the solve is expected to take, or raise OutOfReach.  The
+        same arithmetic `solve` runs first, exposed so a plan can be drawn
+        before any compute is spent."""
         inst = self._instance(src, path)
         n = inst["n"]
-        bits = n.bit_length()
         steps = math.sqrt(math.pi * n / 4)
         secs = steps / RHO_RATE
         if inst["p"].bit_length() > 62:
@@ -354,22 +418,30 @@ class ECDLPPrimeField:
             raise OutOfReach(
                 f"~2^{math.log2(steps):.0f} group operations, ~{secs / 3600:.1f}h at "
                 f"measured throughput, over the {BUDGET_SECONDS / 3600:.1f}h budget")
+        return secs
+
+    def solve(self, obj, src, path):
+        inst = self._instance(src, path)
+        n = inst["n"]
+        bits = n.bit_length()
+        steps = math.sqrt(math.pi * n / 4)
+        secs = self.estimate(src, path)
         qx, qy = inst["target"]()
         dbits = max(6, min(24, bits // 2 - 15))
         note("rho-start", objective=obj["id"][:16], bits=bits,
              expected_steps=f"2^{math.log2(steps):.1f}", est_seconds=round(secs, 1),
              threads=THREADS)
         t0 = time.time()
-        r = subprocess.run(
+        out, last = run_engine(
             [solver("ecdlp_rho"), str(inst["p"]), str(inst["a"]), str(n), str(inst["gx"]),
              str(inst["gy"]), str(qx), str(qy), str(dbits), str(THREADS), "512",
              str(int(time.time()))],
-            capture_output=True, text=True, timeout=BUDGET_SECONDS * 3)
-        if r.returncode != 0 or not r.stdout.strip():
-            raise RuntimeError("rho engine failed: " + r.stderr.strip()[-200:])
-        k = int(r.stdout.strip())
+            obj["id"], "ecdlp_rho", BUDGET_SECONDS * 3)
+        if not out.strip():
+            raise RuntimeError("rho engine printed no answer: " + last[-200:])
+        k = int(out.strip())
         note("rho-solved", objective=obj["id"][:16], seconds=round(time.time() - t0, 1),
-             detail=r.stderr.strip().splitlines()[-1][:80] if r.stderr.strip() else "")
+             detail=last[:80])
         return {"k": format(k, "064x") if inst["hex_k"] else k}
 
 
@@ -399,7 +471,7 @@ class HashCollision:
     def applies(self, src, path):
         return self._instance(src) is not None and "m_prime" in src
 
-    def solve(self, obj, src, path):
+    def estimate(self, src, path):
         inst = self._instance(src)
         bits = 8 * inst["digest_bytes"]
         birthday = 2.0 ** (bits / 2)
@@ -414,21 +486,64 @@ class HashCollision:
         secs = 3 * birthday / MD5_RATE
         if secs > BUDGET_SECONDS:
             raise OutOfReach(f"~2^{bits // 2} compressions, ~{secs / 3600:.1f}h, over budget")
+        return secs
+
+    def solve(self, obj, src, path):
+        inst = self._instance(src)
+        bits = 8 * inst["digest_bytes"]
+        secs = self.estimate(src, path)
         note("birthday-start", objective=obj["id"][:16], bits=bits, steps=inst["steps"],
              expected=f"2^{bits // 2}", est_seconds=round(secs, 1))
         t0 = time.time()
-        r = subprocess.run([solver("md5_birthday"), inst["prefix"], str(inst["steps"]),
-                            str(inst["digest_bytes"]), str(int(time.time()))],
-                           capture_output=True, text=True, timeout=BUDGET_SECONDS * 3)
-        lines = r.stdout.split()
-        if r.returncode != 0 or len(lines) != 2:
-            raise RuntimeError("birthday engine failed: " + r.stderr.strip()[-200:])
+        out, last = run_engine([solver("md5_birthday"), inst["prefix"], str(inst["steps"]),
+                                str(inst["digest_bytes"]), str(int(time.time()))],
+                               obj["id"], "md5_birthday", BUDGET_SECONDS * 3)
+        lines = out.split()
+        if len(lines) != 2:
+            raise RuntimeError("birthday engine printed no pair: " + last[-200:])
         note("birthday-solved", objective=obj["id"][:16], seconds=round(time.time() - t0, 1),
-             detail=r.stderr.strip().splitlines()[-1][:80])
+             detail=last[:80])
         return {"m": lines[0], "m_prime": lines[1]}
 
 
 STRATEGIES = [ECDLPPrimeField(), HashCollision()]
+
+
+def plan(files):
+    """For each objective file: the strategy that applies and what it would
+    decide at the current budget.  Reads the pinned checker exactly as a
+    sweep does and spends no compute, so a dashboard can show the verdict
+    before anything runs and again when the budget changes."""
+    out = []
+    for f in files:
+        row = {"path": os.path.relpath(f, ROOT)}
+        try:
+            obj = json.load(open(f))
+            row["goal"] = obj.get("goal")
+            ver = obj.get("verifier") or {}
+            checker = ver.get("checker") or ver.get("evaluator")
+            if not checker:
+                row.update(decision="none", reason=f"verifier kind {ver.get('kind')!r} names no source to read")
+                out.append(row)
+                continue
+            path = os.path.join(ROOT, checker)
+            src = open(path).read()
+            for strat in STRATEGIES:
+                if not strat.applies(src, path):
+                    continue
+                row["strategy"] = strat.name
+                try:
+                    secs = strat.estimate(src, path)
+                    row.update(decision="solve", est_seconds=round(secs, 1))
+                except OutOfReach as e:
+                    row.update(decision="decline", reason=str(e))
+                break
+            else:
+                row.update(decision="none", reason="no strategy in this researcher's repertoire")
+        except Exception as e:
+            row.update(decision="error", reason=str(e)[:200])
+        out.append(row)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -461,7 +576,7 @@ def frontier_citation(node, oid):
     return []
 
 
-def submit(node, obj, artifact, st, submitter):
+def submit(node, obj, artifact, st, submitter, strategy=None, seconds=None):
     """commit, wait for the epoch to turn, reveal: two calls to submit_claim
     with the same artifact.  A commitment nobody opens is never paid."""
     oid = obj["id"]
@@ -476,7 +591,7 @@ def submit(node, obj, artifact, st, submitter):
         note("commit-unexpected", objective=oid[:16], out=text.strip()[:220])
         return False
     st["pending"][oid] = {"artifact": artifact, "cites": cites, "epoch": int(m.group(1)),
-                          "goal": obj.get("goal")}
+                          "goal": obj.get("goal"), "strategy": strategy, "seconds": seconds}
     save(st)
     note("committed", objective=oid[:16], epoch=int(m.group(1)))
     return reveal(node, obj, st, submitter)
@@ -511,7 +626,9 @@ def reveal(node, obj, st, submitter):
         st["pending"].pop(oid, None)
         st["done"][oid] = {"claim": claim.group(1), "goal": obj.get("goal"),
                            "verdict": verdict.group(1) if verdict else "?",
-                           "reward": 0, "settled": False}
+                           "reward": 0, "settled": False, "settled_at": None,
+                           "artifact": p.get("artifact"), "strategy": p.get("strategy"),
+                           "seconds": p.get("seconds")}
         save(st)
         note("revealed", objective=oid[:16], claim=claim.group(1)[:20],
              verdict=st["done"][oid]["verdict"])
@@ -534,7 +651,8 @@ def settle(node, st, submitter):
             text, err = node.call("get_claim", claim_id=d["claim"])
             m = re.search(r"^settled: yes, reward (\d+)", text, re.M)
             if m:
-                d.update(settled=True, reward=int(m.group(1)))
+                d.update(settled=True, reward=int(m.group(1)),
+                         settled_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
                 note("settled", objective=oid[:16], reward=int(m.group(1)))
                 break
             time.sleep(EPOCH_SECONDS + 1)
@@ -562,11 +680,18 @@ def objectives_of(node):
     return node.get("/objectives")["objectives"]
 
 
+ONLY = []
+
+
 def sweep(node, st, submitter):
     objectives = objectives_of(node)
     publish_status(node, st, objectives, "sweeping", submitter)
-    for obj in objectives:
+    SWEEP["total"] = len(objectives)
+    for i, obj in enumerate(objectives):
         oid = obj["id"]
+        SWEEP["index"] = i + 1
+        if ONLY and not any(oid.startswith(p) for p in ONLY):
+            continue
         if oid in st["done"] or oid in st["unreachable"]:
             continue
         if oid in st["pending"]:
@@ -597,6 +722,7 @@ def sweep(node, st, submitter):
         for strat in STRATEGIES:
             if not strat.applies(src, path):
                 continue
+            t_solve = time.time()
             try:
                 artifact = strat.solve(obj, src, path)
             except OutOfReach as e:
@@ -608,14 +734,15 @@ def sweep(node, st, submitter):
             except Exception as e:
                 note("solve-failed", objective=oid[:16], err=str(e)[:200])
                 break
-            json.dump(artifact, open(os.path.join(STATE, f"artifact-{oid[7:19]}.json"), "w"),
-                      indent=2)
+            artifact_path = os.path.join(STATE, f"artifact-{oid[7:19]}.json")
+            json.dump(artifact, open(artifact_path, "w"), indent=2)
             status, detail = score(node, oid, artifact)
             note("scored", objective=oid[:16], goal=obj.get("goal"), verdict=status)
             if status != "accept":                # never submit what did not score
                 note("not-submitting", objective=oid[:16], detail=detail[:160])
                 break
-            submit(node, obj, artifact, st, submitter)
+            submit(node, obj, artifact, st, submitter, strategy=strat.name,
+                   seconds=round(time.time() - t_solve, 1))
             publish_status(node, st, objectives, "sweeping", submitter)
             break
         else:
@@ -684,12 +811,24 @@ def port_free(addr):
 
 
 def main():
+    global ONLY, INTERVAL
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--once", action="store_true", help="one sweep, then stop the node and exit")
     ap.add_argument("--post", nargs="*", default=[],
                     help="objective files, globs, or a list file to post before the node starts")
     ap.add_argument("--interval", type=int, default=INTERVAL)
+    ap.add_argument("--only", nargs="*", default=[],
+                    help="work only these objective ids (prefixes accepted); the rest are left alone")
+    ap.add_argument("--plan", nargs="*", metavar="FILE",
+                    help="print, as JSON, what a sweep would decide for these objective files, and exit")
     args = ap.parse_args()
+
+    if args.plan is not None:
+        json.dump(plan(expand(args.plan)), sys.stdout, indent=1)
+        print()
+        return
+    ONLY = args.only
+    INTERVAL = args.interval
 
     cairn = cairn_binary()
     os.makedirs(STATE, exist_ok=True)
@@ -703,13 +842,23 @@ def main():
 
     node = Node(cairn)
     stopping = threading.Event()
+    # SIGUSR1 ends the idle wait early: a launcher's "sweep now" is this one
+    # signal, which needs no socket and nothing listening. During a sweep the
+    # request is noted and dropped -- one is already running.
+    wake = threading.Event()
 
     def on_signal(signum, _frame):
         note("signal", signal=signal.Signals(signum).name)
         stopping.set()
+        wake.set()
+
+    def on_wake(_signum, _frame):
+        note("sweep-requested")
+        wake.set()
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGUSR1, on_wake)
 
     st = state()
     try:
@@ -717,16 +866,23 @@ def main():
         note("node-up", server=init.get("serverInfo", {}).get("name"),
              http=f"http://{HTTP}", ui=f"http://{HTTP}/ui/", pid=node.proc.pid)
         while not stopping.is_set():
+            SWEEP.update(n=SWEEP["n"] + 1, started=time.time(), index=0)
             try:
                 sweep(node, st, submitter)
             except Exception as e:
                 note("sweep-error", err=str(e)[:200])
                 if node.proc.poll() is not None:
                     raise RuntimeError(f"the node exited ({node.proc.returncode}); see {NODE_LOG}")
+            SWEEP.update(seconds=round(time.time() - SWEEP["started"], 1),
+                         finished=time.strftime("%Y-%m-%dT%H:%M:%S"))
+            note("sweep-done", n=SWEEP["n"], seconds=SWEEP["seconds"], solved=len(st["done"]),
+                 unreachable=len(st["unreachable"]), pending=len(st["pending"]))
             if args.once:
                 break
-            publish_status(node, st, objectives_of(node), f"idle, next sweep in {args.interval}s", submitter)
-            stopping.wait(args.interval)
+            wake.clear()
+            publish_status(node, st, objectives_of(node), f"idle, next sweep in {args.interval}s", submitter,
+                           next_sweep_at=time.time() + args.interval)
+            wake.wait(args.interval)
     finally:
         try:
             publish_status(None, st, None, "stopped", submitter)

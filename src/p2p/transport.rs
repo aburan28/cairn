@@ -68,6 +68,14 @@ pub enum TransportError {
         size: u32,
     },
     FrameTruncated,
+    /// The connection was a [`request_key`] and this side answered it. Not a
+    /// session and not a failure: the caller should note it and move on.
+    KeyServed,
+    /// A key request named some other peer's id; nothing was sent.
+    KeyRefused,
+    /// The bytes a peer returned to [`request_key`] do not hash to the id
+    /// asked for. Whoever answered is not who the beacon said, or lied.
+    WrongKey,
 }
 
 impl fmt::Display for TransportError {
@@ -78,6 +86,11 @@ impl fmt::Display for TransportError {
             TransportError::Proxy(e) => write!(f, "proxy: {e}"),
             TransportError::FrameTooLarge { size } => write!(f, "frame too large: {size} bytes"),
             TransportError::FrameTruncated => f.write_str("truncated transport frame"),
+            TransportError::KeyServed => f.write_str("served our transport key to a key request"),
+            TransportError::KeyRefused => f.write_str("key request named another peer; refused"),
+            TransportError::WrongKey => {
+                f.write_str("the key returned does not hash to the id asked for")
+            }
         }
     }
 }
@@ -417,45 +430,166 @@ pub fn connect_through(
     Ok(connection)
 }
 
-/// Accept an inbound connection only after authenticating the initiator's
-/// public key and completing encrypted key confirmation in both directions.
-pub fn accept(mut stream: TcpStream, local: &PeerIdentity) -> Result<Connection, TransportError> {
-    stream.set_nonblocking(false)?;
-    let mut hello = vec![0u8; HELLO_BYTES];
-    // The tight one first, then the session default once a hello has actually
-    // arrived: an unauthenticated stranger gets `HANDSHAKE_TIMEOUT` to say
-    // something, and a peer that has said something gets `IO_TIMEOUT` per call
-    // for the rest of the session.
+/// Prefix of a key request: a hello-sized frame that asks for the responder's
+/// public key instead of opening a session.
+///
+/// # Why a session cannot be the only way to learn a key
+///
+/// The initiator's hello carries *its* public key in the clear, so a responder
+/// always learns who is calling. The reverse is the problem: to encapsulate
+/// to a peer at all, the initiator must already hold that peer's 261 KiB key,
+/// and until now the only source was [`super::dht::DhtMessage::GetKey`] over
+/// an existing session with some peer that had it. Two fresh nodes on a LAN
+/// heard each other's beacons every tick and could never connect, because a
+/// beacon carries an id and neither side had a session to ask through. A
+/// bootstrap file breaks that circle by shipping the key by hand; this
+/// message breaks it on the wire.
+///
+/// # What it costs and what it exposes
+///
+/// The key is public by definition -- it is the thing bootstrap files hand
+/// out -- so serving it authenticates nobody and reveals nothing. The
+/// responder does no decapsulation for a key request, so it is *cheaper* than
+/// a hello, and the answer is the same size as the request (both are one
+/// hello), so there is no amplification, and TCP means no spoofed source. The
+/// requester checks `sha256(bytes) == id`, so a wrong or hostile answer costs
+/// one failed dial and never a wrong peer -- the property every hint source
+/// in this stack already relies on.
+///
+/// Same length as a hello so `accept` reads one fixed frame and then decides,
+/// rather than growing a length field on an unauthenticated path. A genuine
+/// McEliece key beginning with these eight bytes is a probability of 2^-64 and
+/// would only make its owner's hello read as a key request, which serves
+/// them a public key and drops the connection: an inconvenience to that one
+/// peer, not a hole.
+pub const KEY_REQUEST_MAGIC: [u8; 8] = *b"PWKEYRQ1";
+
+/// Ask the node at `addr` for its transport public key, and check that it
+/// hashes to `expected` before returning it.
+pub fn request_key(addr: SocketAddr, expected: PeerId) -> Result<PeerPublic, TransportError> {
+    let mut stream = TcpStream::connect_timeout(&addr, DIAL_TIMEOUT)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    read_exact_resilient(&mut stream, &mut hello).map_err(|e| {
+    let mut request = vec![0u8; HELLO_BYTES];
+    request[..KEY_REQUEST_MAGIC.len()].copy_from_slice(&KEY_REQUEST_MAGIC);
+    request[KEY_REQUEST_MAGIC.len()..KEY_REQUEST_MAGIC.len() + 32].copy_from_slice(&expected);
+    stream.write_all(&request)?;
+    stream.flush()?;
+    let mut key = vec![0u8; PUBLIC_KEY_BYTES];
+    read_exact_resilient(&mut stream, &mut key).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
-            TransportError::FrameTruncated
+            TransportError::KeyRefused
         } else {
             TransportError::Io(e)
         }
     })?;
-    let remote_public = PeerPublic::from_bytes(&hello[..PUBLIC_KEY_BYTES])?;
-    let remote = remote_public.id();
-    let first = local.accept(remote, &hello[PUBLIC_KEY_BYTES..])?;
-    let (reverse, second) = remote_public.initiate(local.id());
-    stream.write_all(&reverse)?;
-    stream.flush()?;
-    let mut connection = Connection {
-        stream,
-        channel: first.mix(second),
-        local: local.id(),
-        remote,
-        remote_authenticated: true,
-        max_frame: CONFIRM_MAX_FRAME,
-    };
-    connection.send(RESPONDER_CONFIRMED, CONFIRM_CONTEXT)?;
-    if connection.receive(CONFIRM_CONTEXT)? != INITIATOR_CONFIRMED {
-        return Err(HandshakeError::NotAuthentic.into());
+    let public = PeerPublic::from_bytes(&key)?;
+    if public.id() != expected {
+        return Err(TransportError::WrongKey);
     }
-    connection.max_frame = MAX_FRAME;
-    connection.set_timeouts(Some(IO_TIMEOUT), Some(IO_TIMEOUT))?;
-    Ok(connection)
+    Ok(public)
+}
+
+/// An inbound connection whose first frame has been read but not yet acted
+/// on: either a hello, or a key request.
+///
+/// Split from [`accept`] so a caller can find out *which* before it commits
+/// anything expensive -- in the daemon, the node lock. Answering a key
+/// request needs no lock, and taking one first is a deadlock: two fresh nodes
+/// that discover each other in the same tick each hold their own lock while
+/// waiting for the other's key, until a handshake timeout breaks it.
+pub struct Inbound {
+    stream: TcpStream,
+    hello: Vec<u8>,
+}
+
+impl Inbound {
+    /// Read the first frame, under the handshake timeout.
+    pub fn read(mut stream: TcpStream) -> Result<Inbound, TransportError> {
+        stream.set_nonblocking(false)?;
+        let mut hello = vec![0u8; HELLO_BYTES];
+        // The tight one first, then the session default once a hello has
+        // actually arrived: an unauthenticated stranger gets
+        // `HANDSHAKE_TIMEOUT` to say something, and a peer that has said
+        // something gets `IO_TIMEOUT` per call for the rest of the session.
+        stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        read_exact_resilient(&mut stream, &mut hello).map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                TransportError::FrameTruncated
+            } else {
+                TransportError::Io(e)
+            }
+        })?;
+        Ok(Inbound { stream, hello })
+    }
+
+    /// Whether the frame is a key request rather than a hello.
+    pub fn is_key_request(&self) -> bool {
+        self.hello[..KEY_REQUEST_MAGIC.len()] == KEY_REQUEST_MAGIC
+    }
+
+    /// Answer a key request: `Ok(true)` when it named `local` and the key was
+    /// sent, `Ok(false)` when it named someone else and nothing was.
+    pub fn answer_key_request(mut self, local: &PeerIdentity) -> Result<bool, TransportError> {
+        let asked = &self.hello[KEY_REQUEST_MAGIC.len()..KEY_REQUEST_MAGIC.len() + 32];
+        if asked != local.id() {
+            return Ok(false);
+        }
+        self.stream.write_all(local.public_key())?;
+        self.stream.flush()?;
+        Ok(true)
+    }
+
+    /// Finish the responder side of the handshake for a hello.
+    pub fn complete(self, local: &PeerIdentity) -> Result<Connection, TransportError> {
+        let Inbound { mut stream, hello } = self;
+        if hello[..KEY_REQUEST_MAGIC.len()] == KEY_REQUEST_MAGIC {
+            return Err(TransportError::KeyRefused);
+        }
+        let remote_public = PeerPublic::from_bytes(&hello[..PUBLIC_KEY_BYTES])?;
+        let remote = remote_public.id();
+        let first = local.accept(remote, &hello[PUBLIC_KEY_BYTES..])?;
+        let (reverse, second) = remote_public.initiate(local.id());
+        stream.write_all(&reverse)?;
+        stream.flush()?;
+        let mut connection = Connection {
+            stream,
+            channel: first.mix(second),
+            local: local.id(),
+            remote,
+            remote_authenticated: true,
+            max_frame: CONFIRM_MAX_FRAME,
+        };
+        connection.send(RESPONDER_CONFIRMED, CONFIRM_CONTEXT)?;
+        if connection.receive(CONFIRM_CONTEXT)? != INITIATOR_CONFIRMED {
+            return Err(HandshakeError::NotAuthentic.into());
+        }
+        connection.max_frame = MAX_FRAME;
+        connection.set_timeouts(Some(IO_TIMEOUT), Some(IO_TIMEOUT))?;
+        Ok(connection)
+    }
+}
+
+/// Accept an inbound connection only after authenticating the initiator's
+/// public key and completing encrypted key confirmation in both directions.
+///
+/// A frame that begins with [`KEY_REQUEST_MAGIC`] is not a hello: if it names
+/// this node's id, the public key is written back and the connection is done
+/// (`Err(KeyServed)`); if it names someone else, nothing is written
+/// (`Err(KeyRefused)`). Both are outcomes for the caller to log, not sessions.
+/// A caller that must not hold a lock across a key request reads an
+/// [`Inbound`] first and decides for itself.
+pub fn accept(stream: TcpStream, local: &PeerIdentity) -> Result<Connection, TransportError> {
+    let inbound = Inbound::read(stream)?;
+    if inbound.is_key_request() {
+        return Err(if inbound.answer_key_request(local)? {
+            TransportError::KeyServed
+        } else {
+            TransportError::KeyRefused
+        });
+    }
+    inbound.complete(local)
 }
 
 #[cfg(test)]
@@ -500,6 +634,68 @@ mod tests {
                 "{side} would block forever on a peer that stops reading"
             );
         }
+    }
+
+    /// The circle a beacon could not close: a key learned from nothing but an
+    /// id and an address, checked against the id, and usable for a real dial.
+    #[test]
+    fn a_key_request_returns_the_responders_key_and_opens_no_session() {
+        let responder = Arc::new(PeerIdentity::generate());
+        let expected = responder.to_public();
+        let listener = listen("127.0.0.1:0".parse().expect("addr")).expect("binds");
+        let addr = listener.local_addr().expect("addr");
+        let served = {
+            let responder = Arc::clone(&responder);
+            thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accepts");
+                accept(stream, &responder)
+            })
+        };
+        let key = request_key(addr, expected.id()).expect("the key is served");
+        assert_eq!(key.id(), expected.id());
+        assert!(
+            matches!(
+                served.join().expect("accept thread"),
+                Err(TransportError::KeyServed)
+            ),
+            "a key request must end the connection without a session"
+        );
+        // And the key really dials: the whole point of fetching it.
+        let listener = listen("127.0.0.1:0".parse().expect("addr")).expect("binds");
+        let addr = listener.local_addr().expect("addr");
+        let accepted = {
+            let responder = Arc::clone(&responder);
+            thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accepts");
+                accept(stream, &responder).expect("handshake")
+            })
+        };
+        let initiator = PeerIdentity::generate();
+        let dialed = connect(&key, addr, &initiator).expect("connects with the fetched key");
+        assert!(dialed.remote_authenticated());
+        accepted.join().expect("accept thread");
+    }
+
+    /// A request for somebody else's key gets nothing: the responder is not a
+    /// directory, and a wrong id is a wrong beacon.
+    #[test]
+    fn a_key_request_naming_another_peer_is_refused() {
+        let responder = PeerIdentity::generate();
+        let listener = listen("127.0.0.1:0".parse().expect("addr")).expect("binds");
+        let addr = listener.local_addr().expect("addr");
+        let served = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accepts");
+            accept(stream, &responder)
+        });
+        let other = PeerIdentity::generate().id();
+        assert!(matches!(
+            request_key(addr, other),
+            Err(TransportError::KeyRefused)
+        ));
+        assert!(matches!(
+            served.join().expect("accept thread"),
+            Err(TransportError::KeyRefused)
+        ));
     }
 
     #[test]

@@ -623,6 +623,26 @@ down sends an RST in microseconds.
 Multicast discovery does not work on EC2 and is not supposed to; the daemon
 reports that and continues without LAN discovery.
 
+Two nodes on one host both hear beacons: the beacon socket is bound with the
+port shared (`SO_REUSEADDR`, and `SO_REUSEPORT` on the BSDs), so a
+researcher's node beside an operator's is the ordinary case rather than a
+deaf one. On macOS every socket on the port must have asked to share, so a
+node built before that change still excludes newer ones until it restarts.
+
+A beacon carries a peer id and a port, not the 261 KiB key a dial needs.
+Once a node hears an id it holds no key for, it asks the peer directly: a
+hello-sized key request on the transport port, answered with the public key
+and nothing else (`transport::request_key`). The requester checks that the
+bytes hash to the id, so a wrong answer costs one dial. That is what lets two
+fresh nodes on a LAN connect with no bootstrap file at all; the DHT's
+`GetKey` still serves peers heard of by relay. Log-named and gossiped peers
+without a key are asked the same way, a few per tick with a one-minute
+backoff per peer.
+
+`CAIRN_BEACON_PORT=off` turns beacons off for one node, and a port number
+moves them; the test scripts set `off` so a node under test talks only to the
+nodes the script started.
+
 `--population` is optional and turns on the second half of each round. Given it,
 the daemon loads the file at startup, reconciles populations after records on
 every session, and writes the file back afterwards. Without it, no population

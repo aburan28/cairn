@@ -19,7 +19,15 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/CairnAutoresearcher"
 cp "$HERE/Info.plist" "$APP/Contents/Info.plist"
-[ -f "$HERE/Resources/AppIcon.icns" ] && cp "$HERE/Resources/AppIcon.icns" "$APP/Contents/Resources/" || true
+# The icon is rendered from code at build time, so nothing binary is
+# committed and the source of the picture is the picture.
+ICONSET="$OUT/AppIcon.iconset"
+if swift "$HERE/Resources/render-icon.swift" "$ICONSET" >/dev/null 2>&1 \
+   && iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns" 2>/dev/null; then
+  :
+else
+  echo "note: could not render the icon; the app will use the generic one" >&2
+fi
 # Ad-hoc signature: required for a locally built binary to launch on Apple
 # silicon at all, and enough for an app that is never distributed.
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true

@@ -19,14 +19,28 @@ without it), compiles the solvers on first use, creates the researcher's
 identity, posts `objectives.txt`, runs the loop, and audits the finished log
 with the same epoch length the node used. The node answers on
 `127.0.0.1:8090` (HTTP and the reader at `/ui/`) and `127.0.0.1:9010` (P2P) --
-not 8080/9000, which are what an operator's own `cairn run` binds. Every
-path, port and budget is an environment variable; the header of
-`autoresearcher.py` lists them.
+not 8080/9000, which are what an operator's own `cairn run` binds. It finds
+other nodes on the LAN by itself (beacons, then a direct key request); set
+`AR_BOOTSTRAP` to one or more bootstrap files, colon-separated, to reach a
+seed elsewhere. Every path, port and budget is an environment variable; the
+header of `autoresearcher.py` lists them.
 
 Code lives here; runtime state -- the identity key, the node's log and keys,
 the journal, `status.json`, the solver binaries, generated artifacts -- lives
 in `.autoresearcher/`, which is not tracked. The identity's secret half is the
 submitter name itself, so it is never committed.
+
+`status.json` is written for a dashboard to read rather than for the loop to
+consult: besides the objective table it carries the sweep interval, the unix
+time the next sweep is due while the phase is idle, and a `sweep` block
+naming the pass number, how long the last one took and how far through the
+list this one is. Nothing is read back out of it, so a reader that ignores it
+loses nothing.
+
+**`SIGUSR1` ends the idle wait early** -- a launcher's "sweep now" is that one
+signal, which needs no socket and nothing listening. Sent during a sweep it
+is noted in the journal and dropped, since one is already running. `SIGTERM`
+still stops the researcher, which closes the node's stdin and stops it too.
 
 ## How it talks to the node
 

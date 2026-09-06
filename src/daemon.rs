@@ -52,8 +52,13 @@ use crate::node::Node;
 use crate::p2p::discovery::{peer_id_string, Endpoint};
 use crate::p2p::handshake::{PeerIdentity, PeerPublic};
 use crate::p2p::multicast;
+
+/// Moves the LAN beacon port, or `off` disables beacons. See `run` in this
+/// module for why a node must be able to opt out.
+pub const BEACON_PORT_ENV: &str = "CAIRN_BEACON_PORT";
 use crate::p2p::pop::PopLimits;
 use crate::p2p::service::Service;
+use crate::p2p::transport;
 use crate::records::Objective;
 use crate::serve;
 use crate::time::timestamp;
@@ -514,6 +519,15 @@ pub fn run(config: Config) -> Result<(), String> {
             log::info!("outbound dials route through SOCKS5 proxy {addr}");
         }
     }
+    // This node's own transport id, said out loud once. It is the one thing a
+    // peer needs from here that is not on the wire yet: `cairn peer` vouches
+    // for a transport id, a bootstrap file carries the key that hashes to it,
+    // and until now an operator asked to hand over "your peer id" had to
+    // derive it from a 261 KiB key file themselves.
+    log::info!(
+        "peer id {} -- give this and the address below to anyone adding this node",
+        peer_id_string(&identity.to_public().id())
+    );
     let mut service = Service::with_proxy(Arc::clone(&identity), proxy);
     for path in &config.bootstrap {
         let (endpoint, placeholder) =
@@ -546,15 +560,39 @@ pub fn run(config: Config) -> Result<(), String> {
     // Zero-configuration discovery on the local segment. Optional by design:
     // a host with no multicast route is a node without LAN discovery, not a
     // node that cannot start, so a failure here is reported and stepped over.
-    let beacon =
-        match multicast::Responder::bind(service.identity(), config.listen.port(), multicast::PORT)
-        {
+    //
+    // `CAIRN_BEACON_PORT` moves the beacon port, or `off` turns beacons off.
+    // For tests and demos, which learned this the hard way: once two nodes on
+    // one host could really hear each other, a smoke test's node found the
+    // developer's live node on the same segment, synced with it, and failed
+    // because its claim had been settled somewhere else. A node meant to be
+    // alone must be able to say so.
+    let beacon_port = match std::env::var(BEACON_PORT_ENV) {
+        Ok(raw) if raw.trim().eq_ignore_ascii_case("off") || raw.trim() == "0" => None,
+        Ok(raw) => match raw.trim().parse::<u16>() {
+            Ok(port) => Some(port),
+            Err(_) => {
+                log::warn!(
+                    "{BEACON_PORT_ENV}={raw:?} is neither a port nor `off`; using {}",
+                    multicast::PORT
+                );
+                Some(multicast::PORT)
+            }
+        },
+        Err(_) => Some(multicast::PORT),
+    };
+    let beacon = beacon_port.and_then(|port| {
+        match multicast::Responder::bind(service.identity(), config.listen.port(), port) {
             Ok(responder) => Some(responder),
             Err(error) => {
                 log::warn!("multicast: {error} -- continuing without LAN discovery");
                 None
             }
-        };
+        }
+    });
+    if beacon.is_none() && beacon_port.is_none() {
+        log::info!("multicast: off ({BEACON_PORT_ENV}); no LAN discovery for this node");
+    }
 
     let listener = service.listen(config.listen).map_err(|e| {
         // The one bind failure worth explaining, because the address that
@@ -677,6 +715,27 @@ pub fn run(config: Config) -> Result<(), String> {
                 continue;
             }
         };
+        // The first frame is read **before** the lock, so a key request is
+        // answered with nothing held. The tick thread below holds this lock
+        // while it dials, and a peer's tick thread holds *its* lock while it
+        // waits for our key; two fresh nodes that found each other in the
+        // same tick sat like that until a handshake timeout, then one of
+        // them saw a reset and backed off for a minute.
+        let inbound = match transport::Inbound::read(stream) {
+            Ok(inbound) => inbound,
+            Err(error) => {
+                log::warn!("inbound session: {error}");
+                continue;
+            }
+        };
+        if inbound.is_key_request() {
+            match accept_service.answer_key_request(inbound) {
+                Ok(true) => log::info!("served our transport key to a peer that heard our beacon"),
+                Ok(false) => log::debug!("refused a key request that named another peer"),
+                Err(error) => log::warn!("key request: {error}"),
+            }
+            continue;
+        }
         let mut guard = accept_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -687,8 +746,8 @@ pub fn run(config: Config) -> Result<(), String> {
             Some(_) => {
                 let mut scorer = RoundScorer::new(accept_registry.clone());
                 accept_service
-                    .serve_node_and_population(
-                        stream,
+                    .serve_inbound_and_population(
+                        inbound,
                         node,
                         population,
                         PopLimits::default(),
@@ -696,7 +755,7 @@ pub fn run(config: Config) -> Result<(), String> {
                     )
                     .map(|(remote, _)| remote)
             }
-            None => accept_service.serve_node_once(stream, node),
+            None => accept_service.serve_inbound_once(inbound, node),
         };
         match outcome {
             Ok(remote) => {
@@ -801,8 +860,14 @@ pub fn run(config: Config) -> Result<(), String> {
             if let Some(responder) = &beacon {
                 // Announce first, then listen: a node that has just started
                 // becomes findable this tick rather than next.
-                let _ = responder.announce(multicast::PORT);
-                service.absorb_beacons(responder, BEACONS_PER_TICK);
+                let _ = responder.announce(beacon_port.unwrap_or(multicast::PORT));
+                let heard = service.absorb_beacons(responder, BEACONS_PER_TICK);
+                // Discovery used to be silent until a session succeeded, which
+                // reads as "not working" from outside for as long as the key
+                // exchange takes. One line per tick that heard anything.
+                if heard > 0 {
+                    log::info!("beacons: heard {heard} peer(s) on the local segment this tick");
+                }
             }
             guard.node.missing_code()
         };
