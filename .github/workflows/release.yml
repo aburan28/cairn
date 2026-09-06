@@ -16,6 +16,14 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Tags cut by release-please arrive via the API, which emits no `push`
+  # event -- so without this the tag-to-assets automation never fires and a
+  # published release sits empty until somebody dispatches the build by hand
+  # (which is what v1.2.0 needed). `create` also fires for new branches, so
+  # every job below skips those; the one overlap this leaves is a tag pushed
+  # by hand over git, which fires both events and builds twice from the same
+  # bytes -- harmless, and nobody pushes tags by hand here.
+  create:
   workflow_dispatch:
 
 permissions:
@@ -35,6 +43,8 @@ jobs:
   # reproduce, which is the same reason the Rust build passes `--locked`.
   ui:
     name: reader
+    # `create` fires for branches too; a branch is never a version.
+    if: github.event_name != 'create' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -61,6 +71,7 @@ jobs:
 
   build:
     name: ${{ matrix.target }}
+    if: github.event_name != 'create' || github.ref_type == 'tag'
     needs: ui
     strategy:
       # One target's toolchain failing should not hide whether the others
@@ -347,6 +358,7 @@ jobs:
   # one upload.
   installer:
     name: install.sh
+    if: github.event_name != 'create' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
