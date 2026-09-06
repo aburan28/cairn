@@ -25,10 +25,15 @@ struct ObjectiveRow: Identifiable, Decodable, Equatable, Hashable {
     /// The Python side writes the researcher's payout under `reward` on a
     /// solved row and the pool on any other row.
     var paid: Int { status == "solved" ? (reward ?? 0) : 0 }
+    // Sort keys for the table; an Optional is not Comparable.
+    var rewardValue: Int { reward ?? 0 }
+    var verifierLabel: String { verifier ?? "" }
+    var strategyLabel: String { strategy ?? "" }
+    var solveSeconds: Double { seconds ?? 0 }
 }
 
 /// `status.json`, rewritten by the researcher on every change.
-struct Status: Decodable {
+struct Status: Decodable, Equatable {
     var updated: String
     var phase: String
     var http: String
@@ -38,7 +43,22 @@ struct Status: Decodable {
     var pid: Int?
     var node_pid: Int?
     var balance: Int?
+    var interval: Int?
+    /// Unix time the next sweep starts; present while the phase is idle.
+    var next_sweep_at: Double?
+    var sweep: SweepInfo?
     var objectives: [ObjectiveRow]
+}
+
+/// The researcher's account of its passes, inside `status.json`: which pass
+/// this is, how long the last took, and how far along the list it is.
+struct SweepInfo: Decodable, Equatable {
+    var n: Int?
+    var started: Double?
+    var seconds: Double?
+    var finished: String?
+    var index: Int?
+    var total: Int?
 }
 
 /// `progress.json`, rewritten twice a second while a solver runs.
@@ -63,7 +83,7 @@ struct JournalEntry: Identifiable, Equatable {
         case "out-of-reach", "no-strategy", "already-posted", "settle-pending": return .muted
         case _ where event.contains("fail") || event.contains("refused") || event.contains("error")
             || event.contains("timeout") || event == "not-submitting": return .bad
-        case "committed", "scored", "rho-start", "birthday-start", "compiling": return .active
+        case "committed", "scored", "rho-start", "birthday-start", "compiling", "sweep-done", "sweep-requested": return .active
         default: return .plain
         }
     }
@@ -176,6 +196,10 @@ final class ResearcherModel: ObservableObject {
     // Live state from the researcher's files.
     @Published private(set) var isRunning = false
     @Published private(set) var isBuilding = false
+    /// A researcher this app did not start -- run.sh from a terminal, say --
+    /// alive by the pid in status.json. Shown like our own, never stopped
+    /// from here: whoever started it owns it.
+    @Published private(set) var foreignPid: Int?
     @Published private(set) var status: Status?
     @Published private(set) var progress: Progress?
     @Published private(set) var journal: [JournalEntry] = []
@@ -208,6 +232,14 @@ final class ResearcherModel: ObservableObject {
     @Published var pane: Pane? = .overview
     @Published var selectedObjective: String?
     @Published var journalFilter: String = ""
+    /// Lives here rather than in the Objectives view so a tile or a decline
+    /// group on the Overview can send the reader to the rows it counted.
+    @Published var objectivesFilter: String = "all"
+
+    func showObjectives(_ filter: String) {
+        objectivesFilter = filter
+        pane = .objectives
+    }
 
     // Wall clock, for the epoch display.
     @Published private(set) var now = Date()
@@ -215,6 +247,9 @@ final class ResearcherModel: ObservableObject {
     /// What the node's own log says about finding peers, tailed live.
     struct Discovery: Equatable {
         var multicast: String?          // nil until the node said anything
+        /// This node's own transport id, as the daemon prints it at startup.
+        /// The half of "add me as a peer" that is not the address.
+        var peerId: String?
         var beaconTicks = 0
         var inboundOK = 0
         var outboundOK = 0
@@ -451,6 +486,10 @@ final class ResearcherModel: ObservableObject {
 
     func start(once: Bool, only: [String] = []) {
         guard !isRunning, !isBuilding else { return }
+        if let pid = foreignPid {
+            lastError = "A researcher started outside this app is already running (pid \(String(pid))) on this state directory. Stop it where it was started."
+            return
+        }
         guard ready else {
             lastError = checks.first { !$0.ok }.map { "\($0.title): \($0.detail)" } ?? "not ready"
             return
@@ -479,7 +518,7 @@ final class ResearcherModel: ObservableObject {
     }
 
     func build() {
-        guard !isRunning, !isBuilding, hasCheckout else { return }
+        guard !isLive, !isBuilding, hasCheckout else { return }
         lastError = nil
         console = ""
         isBuilding = true
@@ -549,7 +588,7 @@ final class ResearcherModel: ObservableObject {
     /// Only while stopped: the researcher holds its own copy of state.json
     /// while it runs and would write it back over this edit.
     func retry(_ row: ObjectiveRow) {
-        guard !isRunning else { lastError = "Stop the researcher first; it owns state.json while it runs."; return }
+        guard !isLive else { lastError = "Stop the researcher first; it owns state.json while it runs."; return }
         let path = stateDir + "/state.json"
         guard let data = FileManager.default.contents(atPath: path),
               var st = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
@@ -571,7 +610,7 @@ final class ResearcherModel: ObservableObject {
     /// Start over: a fresh log, fresh node keys, no outcomes. The identity
     /// is worth keeping -- it is the name payments went to.
     func resetState(keepIdentity: Bool) {
-        guard !isRunning else { lastError = "Stop the researcher first."; return }
+        guard !isLive else { lastError = "Stop the researcher first."; return }
         let fm = FileManager.default
         let identity = stateDir + "/researcher.json"
         let saved = keepIdentity ? fm.contents(atPath: identity) : nil
@@ -586,7 +625,7 @@ final class ResearcherModel: ObservableObject {
     /// One sweep restricted to one objective: forget its outcome first so
     /// the sweep looks at it, then run with --only.
     func solveOne(_ row: ObjectiveRow) {
-        guard !isRunning else { lastError = "Stop the researcher first."; return }
+        guard !isLive else { lastError = "Stop the researcher first."; return }
         if row.status != "open" { retry(row); infoMessage = nil }
         start(once: true, only: [row.id])
     }
@@ -594,7 +633,7 @@ final class ResearcherModel: ObservableObject {
     /// Post catalog items to the researcher's log now, with the CLI. Only
     /// while nothing runs: a ledger has one writer, and the node is it.
     func postNow(_ items: [CatalogItem]) {
-        guard !isRunning, !isBuilding else { lastError = "Stop the researcher first; the node holds the log's lock."; return }
+        guard !isLive, !isBuilding else { lastError = "Stop the researcher first; the node holds the log's lock."; return }
         guard hasBinary else { lastError = "bin/cairn is missing."; return }
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
         console = ""
@@ -607,6 +646,103 @@ final class ResearcherModel: ObservableObject {
             self?.pollBalances()
             self?.infoMessage = "Posted; the rows appear once a node serves the log."
         }
+    }
+
+    // MARK: adding a peer
+    //
+    // The network has two halves to this and they are not alternatives:
+    // a peer record in the log is how *other* readers of the log learn the
+    // address, and a bootstrap file is how *this* node dials before it has
+    // one. Neither is trust: the transport id is a hash of the key the
+    // handshake proves, so a wrong entry costs a dial and never a wrong
+    // result. The sheet offers both and says which is which.
+
+    /// A transport id is sha256 of a McEliece public key, hex.
+    static func isPeerId(_ s: String) -> Bool {
+        s.count == 64 && s.allSatisfy(\.isHexDigit)
+    }
+
+    /// `host:port`, split at the last colon so `[::1]:9010` works. Not a
+    /// resolve: the peer may be down, or named by a host that resolves only
+    /// from somewhere else, and the CLI takes the same view.
+    static func isHostPort(_ s: String) -> Bool {
+        guard let i = s.lastIndex(of: ":") else { return false }
+        let host = s[s.startIndex..<i], port = s[s.index(after: i)...]
+        return !host.isEmpty && (UInt16(port).map { $0 != 0 } ?? false)
+    }
+
+    /// Announce a peer in the log with `cairn peer`. The log has one writer,
+    /// so this needs the node stopped -- the same rule as posting.
+    func addPeerRecord(transport: String, addr: String, completion: @escaping (String?) -> Void) {
+        guard !isLive, !isBuilding else {
+            completion("Stop the researcher first; its node holds the log's lock.")
+            return
+        }
+        guard hasBinary else { completion("bin/cairn is missing."); return }
+        guard FileManager.default.fileExists(atPath: stateDir + "/researcher.json") else {
+            completion("No identity yet. Start the researcher once; the first run creates the key that signs a peer record.")
+            return
+        }
+        run(cairnBinary, ["--log", logPath, "--root", root, "peer",
+                          "--identity", stateDir + "/researcher.json",
+                          "--transport", transport, "--addr", addr]) { [weak self] code, text in
+            if code == 0 {
+                self?.infoMessage = "Peer \(transport.prefix(12))… announced at \(addr)"
+                self?.pollNode()
+                completion(nil)
+            } else {
+                completion(text.isEmpty ? "cairn peer exited with status \(code)" : text)
+            }
+        }
+    }
+
+    /// `cairn gen-bootstrap` writes a structurally valid file with a freshly
+    /// generated key standing in. The daemon keeps warning until the peer's
+    /// real key replaces it, which is why the sheet says so rather than
+    /// pretending the file is finished.
+    func generateBootstrap(addr: String, to url: URL, completion: @escaping (String?) -> Void) {
+        guard hasBinary else { completion("bin/cairn is missing."); return }
+        run(cairnBinary, ["gen-bootstrap", "--addr", addr, "--out", url.path]) { [weak self] code, text in
+            if code == 0 {
+                self?.useBootstrap(url.path)
+                completion(nil)
+            } else {
+                completion(text.isEmpty ? "gen-bootstrap exited with status \(code)" : text)
+            }
+        }
+    }
+
+    /// Add a bootstrap file to the node's list. Colon-separated, as the
+    /// daemon's own flag takes them; takes effect at the next Start.
+    func useBootstrap(_ path: String) {
+        var paths = bootstrapFile.split(separator: ":").map(String.init)
+        guard !paths.contains(path) else { infoMessage = "Already in the bootstrap list."; return }
+        paths.append(path)
+        bootstrapFile = paths.joined(separator: ":")
+        infoMessage = isLive ? "Added; it is read at the next Start." : "Added to the bootstrap list."
+    }
+
+    func removeBootstrap(_ path: String) {
+        bootstrapFile = bootstrapFile.split(separator: ":").map(String.init)
+            .filter { $0 != path }.joined(separator: ":")
+    }
+
+    var bootstrapPaths: [String] { bootstrapFile.split(separator: ":").map(String.init) }
+
+    /// Run a short-lived command and hand back its status and merged output.
+    private func run(_ executable: String, _ arguments: [String], _ done: @escaping (Int32, String) -> Void) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = arguments
+        p.environment = environment()
+        p.currentDirectoryURL = URL(fileURLWithPath: root)
+        let pipe = Pipe()
+        p.standardOutput = pipe; p.standardError = pipe
+        p.terminationHandler = { proc in
+            let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            Task { @MainActor in done(proc.terminationStatus, text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        }
+        do { try p.run() } catch { done(-1, error.localizedDescription) }
     }
 
     /// `cairn audit` re-derives the whole log. Read-only, safe beside the node.
@@ -652,6 +788,71 @@ final class ResearcherModel: ObservableObject {
         pane = .journal
     }
 
+    // MARK: the sweep clock
+
+    /// Ours or somebody else's: a researcher is writing the state directory.
+    var isLive: Bool { isRunning || foreignPid != nil }
+    var isIdle: Bool { isLive && (status?.phase.hasPrefix("idle") ?? false) }
+
+    /// Cut the idle wait short. SIGUSR1 is the researcher's "sweep now";
+    /// during a sweep it is noted and dropped, so the button is only offered
+    /// while idle.
+    func sweepNow() {
+        guard isIdle else { return }
+        let pid: pid_t? = process.map(\.processIdentifier) ?? foreignPid.map { pid_t($0) }
+        guard let pid, kill(pid, SIGUSR1) == 0 else { lastError = "Could not signal the researcher."; return }
+        infoMessage = "Sweep requested"
+    }
+
+    var secondsToNextSweep: Int? {
+        guard isIdle, let at = status?.next_sweep_at else { return nil }
+        return max(0, Int((at - now.timeIntervalSince1970).rounded(.up)))
+    }
+
+    /// How much of the idle wait has passed, for a bar.
+    var idleFraction: Double? {
+        guard let s = secondsToNextSweep, let interval = status?.interval, interval > 0 else { return nil }
+        return min(1, max(0, 1 - Double(s) / Double(interval)))
+    }
+
+    /// The pass in progress, when the researcher is between objectives.
+    var sweepProgress: (n: Int, index: Int, total: Int)? {
+        guard isLive, !isIdle, progress == nil, let sw = status?.sweep,
+              let n = sw.n, let i = sw.index, let t = sw.total, t > 0 else { return nil }
+        return (n, i, t)
+    }
+
+    /// One line for the toolbar and the menu bar: what is happening now.
+    var phaseLine: String {
+        if isBuilding { return "working…" }
+        guard isLive else { return "stopped" }
+        if let p = progress {
+            let goal = rows.first { $0.id == p.objective }?.title ?? p.objective
+            return "\(p.engine) on \(goal) · \(Int(max(0, now.timeIntervalSince1970 - p.started)))s"
+        }
+        if let s = secondsToNextSweep { return "idle · next sweep in \(ResearcherModel.clock(s))" }
+        guard let st = status else { return "starting…" }
+        if let sp = sweepProgress {
+            let goal = st.phase.hasPrefix("working ") ? String(st.phase.dropFirst(8)) : st.phase
+            return "sweep \(sp.n) · \(sp.index) of \(sp.total) · \(goal)"
+        }
+        return st.phase
+    }
+
+    static func clock(_ s: Int) -> String {
+        s >= 60 ? String(format: "%d:%02d", s / 60, s % 60) : "\(s)s"
+    }
+
+    /// Is the pid in status.json alive, and not ours? kill(0) probes without
+    /// signalling; EPERM still means somebody is there.
+    private func checkForeign() {
+        var found: Int?
+        if !isRunning, let s = status, s.phase != "stopped", let pid = s.pid, pid > 0 {
+            if kill(pid_t(pid), 0) == 0 || errno == EPERM { found = pid }
+        }
+        if found != foreignPid { foreignPid = found }
+    }
+
     // Epochs are derived from the clock, never stored: epoch = unix / length.
     var epochLength: Int { status?.epoch_seconds ?? epochSeconds }
     var currentEpoch: Int { Int(now.timeIntervalSince1970) / max(1, epochLength) }
@@ -688,6 +889,7 @@ final class ResearcherModel: ObservableObject {
         ticks += 1
         now = Date()
         readStatus()
+        checkForeign()
         readProgress()
         readJournal()
         readNodeLog()
@@ -699,7 +901,7 @@ final class ResearcherModel: ObservableObject {
     }
 
     private func updateDockBadge() {
-        let label = isRunning ? (progress != nil ? "…" : (open.isEmpty ? "" : "\(open.count)")) : ""
+        let label = isLive ? (progress != nil ? "…" : (open.isEmpty ? "" : "\(open.count)")) : ""
         if NSApp.dockTile.badgeLabel != (label.isEmpty ? nil : label) {
             NSApp.dockTile.badgeLabel = label.isEmpty ? nil : label
         }
@@ -710,14 +912,17 @@ final class ResearcherModel: ObservableObject {
             if status != nil { status = nil }
             return
         }
-        if let s = try? JSONDecoder().decode(Status.self, from: data),
-           s.updated != status?.updated || s.phase != status?.phase || s.objectives != status?.objectives {
+        // Whole-document comparison, not a few fields: the pid decides
+        // whether a researcher outside this app is alive, and a version of
+        // this that compared only `updated`, `phase` and `objectives` held a
+        // stale pid for as long as those three happened to match.
+        if let s = try? JSONDecoder().decode(Status.self, from: data), s != status {
             status = s
         }
     }
 
     private func readProgress() {
-        guard isRunning, let data = FileManager.default.contents(atPath: stateDir + "/progress.json"),
+        guard isLive, let data = FileManager.default.contents(atPath: stateDir + "/progress.json"),
               let p = try? JSONDecoder().decode(Progress.self, from: data), !p.done else {
             if progress != nil { progress = nil }
             return
@@ -752,6 +957,10 @@ final class ResearcherModel: ObservableObject {
                     : (l.components(separatedBy: "multicast: ").last ?? l)
             } else if l.contains("listening on") && l.contains("cairn::daemon") && d.multicast == nil {
                 d.multicast = "bound; announcing every 30s on 239.255.41.96:47396"
+            }
+            if let r = l.range(of: "peer id "), d.peerId == nil {
+                let rest = l[r.upperBound...].prefix(64)
+                if rest.count == 64, rest.allSatisfy(\.isHexDigit) { d.peerId = String(rest) }
             }
             if l.contains("beacons: heard") { d.beaconTicks += 1 }
             if l.contains("inbound session:") && l.contains(" ok") { d.inboundOK += 1 }
@@ -792,7 +1001,7 @@ final class ResearcherModel: ObservableObject {
             journalCount += 1
             let entry = JournalEntry(id: journalCount, time: String(t.suffix(8)), event: event, detail: detail, fields: fields)
             journal.append(entry)
-            if event == "settled", isRunning { notifySettled(entry) }
+            if event == "settled", isLive { notifySettled(entry) }
         }
         journalOffset += UInt64(consumed)
         if journal.count > 3000 { journal.removeFirst(journal.count - 3000) }
@@ -825,7 +1034,28 @@ final class ResearcherModel: ObservableObject {
     private struct ObjectivesDoc: Decodable { var objectives: [NodeObjective] }
     private struct FrontierDoc: Decodable { var frontier: FrontierInfo? }
 
+    /// Every few seconds: the two small routes. The whole log and a
+    /// frontier per objective are re-read only when the chain says the log
+    /// grew -- those were forty-odd requests every three seconds on a node
+    /// that mostly sits idle.
     private func pollNode() {
+        fetch("/chain", as: ChainInfo.self) { [weak self] c in
+            guard let self else { return }
+            let grew = c.height != self.chain?.height || c.links != self.chain?.links
+            if c.height != self.chain?.height || c.links != self.chain?.links || c.head != self.chain?.head { self.chain = c }
+            if grew || self.ledger.isEmpty || self.ticks - self.lastFullPoll >= 60 { self.pollLog() }
+        }
+        fetch("/peers", as: PeersRawDoc.self) { [weak self] p in
+            let rows = p.peers.map { PeerRow(identity: $0.identity ?? "?", addr: $0.addr ?? "", transport: $0.transport ?? "", createdAt: $0.created_at ?? "") }
+            self?.peerCount = rows.count
+            if rows != self?.peers { self?.peers = rows }
+        }
+    }
+
+    private var lastFullPoll = 0
+
+    private func pollLog() {
+        lastFullPoll = ticks
         fetch("/objectives", as: ObjectivesDoc.self) { [weak self] doc in
             self?.nodeObjectives = doc.objectives
             for o in doc.objectives {
@@ -833,12 +1063,6 @@ final class ResearcherModel: ObservableObject {
                     if let fr = f.frontier { self?.frontiers[o.id] = fr } else { self?.frontiers.removeValue(forKey: o.id) }
                 }
             }
-        }
-        fetch("/chain", as: ChainInfo.self) { [weak self] c in self?.chain = c }
-        fetch("/peers", as: PeersRawDoc.self) { [weak self] p in
-            let rows = p.peers.map { PeerRow(identity: $0.identity ?? "?", addr: $0.addr ?? "", transport: $0.transport ?? "", createdAt: $0.created_at ?? "") }
-            self?.peerCount = rows.count
-            if rows != self?.peers { self?.peers = rows }
         }
         var request = URLRequest(url: URL(string: "http://\(httpAddress)/log")!)
         request.timeoutInterval = 5
@@ -931,6 +1155,34 @@ final class ResearcherModel: ObservableObject {
     var mySpendable: Int? {
         guard let sub = status?.submitter else { return status?.balance }
         return balances.first { sub.hasPrefix($0.name) }?.spendable ?? status?.balance
+    }
+
+    /// Declined objectives, gathered by who declined them. A run's outcome
+    /// is mostly this list, and "37 declined" alone says nothing about
+    /// whether the researcher was out of its depth or out of budget --
+    /// which is the difference between raising the budget and writing a
+    /// strategy.
+    struct DeclineGroup: Identifiable {
+        var id: String { label }
+        var label: String
+        var rows: [ObjectiveRow]
+        var pool: Int
+        /// Longest reason in the group, as the one worth reading.
+        var example: String
+    }
+
+    var declineGroups: [DeclineGroup] {
+        Dictionary(grouping: unreachable) { $0.strategy ?? "" }
+            .map { strategy, rows in
+                DeclineGroup(label: strategy.isEmpty ? "Out of the repertoire" : "\(strategy): over budget",
+                             rows: rows,
+                             pool: rows.reduce(0) { $0 + ($1.reward ?? 0) },
+                             example: rows.compactMap(\.reason).max { $0.count < $1.count } ?? "")
+            }
+            // Most rows first, ties broken by label. Written out rather than
+            // as a tuple comparison: a comparator that is not a strict weak
+            // ordering is undefined behaviour in `sorted`, not a cosmetic bug.
+            .sorted { $0.rows.count != $1.rows.count ? $0.rows.count > $1.rows.count : $0.label < $1.label }
     }
 
     struct EarningPoint: Identifiable { var id: Int; var label: String; var reward: Int; var cumulative: Int }

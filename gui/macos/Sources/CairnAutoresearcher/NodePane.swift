@@ -8,6 +8,7 @@ struct NodeView: View {
     @State private var tab = "ledger"
     @State private var page = 0
     @State private var showAudit = false
+    @State private var showAddPeer = false
 
     var body: some View {
         VSplitView {
@@ -60,6 +61,8 @@ struct NodeView: View {
                         .pickerStyle(.segmented).frame(width: 360)
                     }
                     Spacer()
+                    Button { showAddPeer = true } label: { Label("Add peer…", systemImage: "person.badge.plus") }
+                        .help("Announce a peer in the log, add a bootstrap file, or read off what to give somebody adding this node")
                     Button {
                         model.audit(); showAudit = true
                     } label: { Label(model.auditing ? "Auditing…" : "Audit log", systemImage: "checkmark.shield") }
@@ -78,6 +81,7 @@ struct NodeView: View {
             .frame(minHeight: 240)
         }
         .sheet(isPresented: $showAudit) { auditSheet }
+        .sheet(isPresented: $showAddPeer) { AddPeerSheet(isPresented: $showAddPeer).environmentObject(model) }
     }
 
     // MARK: cards
@@ -226,10 +230,11 @@ struct NodeView: View {
         }
         .overlay {
             if model.peers.isEmpty {
-                VStack(spacing: 6) {
+                VStack(spacing: 8) {
                     Text("No peer records in this log.").foregroundStyle(.secondary)
                     Text("Peers appear when the node is given a bootstrap file or hears one on the LAN; this researcher's node runs alone by default.")
                         .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
+                    Button("Add a peer…") { showAddPeer = true }
                 }
             }
         }

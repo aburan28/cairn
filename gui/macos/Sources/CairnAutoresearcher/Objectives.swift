@@ -5,25 +5,29 @@ import UniformTypeIdentifiers
 struct ObjectivesView: View {
     @EnvironmentObject var model: ResearcherModel
     @State private var search = ""
-    @State private var filter = "all"
     @State private var scoreOutput: String?
     @State private var scoring = false
+    // Reward descending: the objectives worth the most are the ones an
+    // operator looks at first.
+    @State private var sortOrder = [KeyPathComparator(\ObjectiveRow.rewardValue, order: .reverse)]
 
     var rows: [ObjectiveRow] {
-        model.rows.filter { r in
+        let filter = model.objectivesFilter
+        return model.rows.filter { r in
             (filter == "all" || (filter == "solved" && r.status == "solved")
              || (filter == "declined" && r.status == "unreachable")
              || (filter == "open" && r.status != "solved" && r.status != "unreachable"))
             && (search.isEmpty || r.title.localizedCaseInsensitiveContains(search)
                 || r.id.contains(search) || (r.reason ?? "").localizedCaseInsensitiveContains(search))
         }
+        .sorted(using: sortOrder)
     }
 
     var body: some View {
         VSplitView {
             VStack(spacing: 0) {
                 HStack {
-                    Picker("", selection: $filter) {
+                    Picker("", selection: $model.objectivesFilter) {
                         Text("All \(model.rows.count)").tag("all")
                         Text("Solved \(model.solved.count)").tag("solved")
                         Text("Declined \(model.unreachable.count)").tag("declined")
@@ -34,15 +38,20 @@ struct ObjectivesView: View {
                     TextField("Search goal, id or reason", text: $search).textFieldStyle(.roundedBorder).frame(width: 260)
                 }
                 .padding(8)
-                Table(rows, selection: $model.selectedObjective) {
+                Table(rows, selection: $model.selectedObjective, sortOrder: $sortOrder) {
                     TableColumn("") { r in Image(systemName: r.icon).foregroundStyle(r.color) }.width(18)
-                    TableColumn("Goal") { r in Text(r.title) }
-                    TableColumn("Status") { r in Text(r.statusLabel).foregroundStyle(r.color) }.width(80)
-                    TableColumn("Pool / paid") { r in
+                    TableColumn("Goal", value: \.title) { r in Text(r.title) }
+                    TableColumn("Status", value: \.statusLabel) { r in
+                        Text(r.statusLabel).foregroundStyle(r.color)
+                    }.width(80)
+                    TableColumn("Pool / paid", value: \.rewardValue) { r in
                         Text(r.reward.map { $0.formatted() } ?? "").monospacedDigit()
                     }.width(90)
-                    TableColumn("Verifier") { r in Text(r.verifier ?? "") }.width(80)
-                    TableColumn("Strategy") { r in Text(r.strategy ?? "") }.width(100)
+                    TableColumn("Verifier", value: \.verifierLabel) { r in Text(r.verifierLabel) }.width(80)
+                    TableColumn("Strategy", value: \.strategyLabel) { r in Text(r.strategyLabel) }.width(100)
+                    TableColumn("Time", value: \.solveSeconds) { r in
+                        Text(r.seconds.map { "\(Int($0))s" } ?? "").monospacedDigit().foregroundStyle(.secondary)
+                    }.width(55)
                     TableColumn("Outcome") { r in
                         Text(r.reason ?? r.claim.map { "claim \($0.prefix(20))…" } ?? "").foregroundStyle(.secondary)
                     }
@@ -53,8 +62,8 @@ struct ObjectivesView: View {
                         if let c = r.claim { Button("Copy claim id") { copy(c) } }
                         if model.nodeReachable { Link("Open in reader", destination: model.readerURL(for: r.id)) }
                         Divider()
-                        Button("Solve this one now") { model.solveOne(r) }.disabled(model.isRunning || model.isBuilding)
-                        Button("Retry on next sweep") { model.retry(r) }.disabled(model.isRunning || r.status == "open")
+                        Button("Solve this one now") { model.solveOne(r) }.disabled(model.isLive || model.isBuilding)
+                        Button("Retry on next sweep") { model.retry(r) }.disabled(model.isLive || r.status == "open")
                         Button("Show in journal") { model.showJournal(for: r) }
                     }
                 }
@@ -210,13 +219,13 @@ struct ObjectiveDetail: View {
             Button {
                 model.solveOne(row)
             } label: { Label("Solve this one", systemImage: "bolt") }
-                .disabled(model.isRunning || model.isBuilding)
+                .disabled(model.isLive || model.isBuilding)
                 .help("One sweep restricted to this objective: forget its outcome, start the node, work it, stop. What the plan says it would decide is what happens.")
             Button {
                 model.retry(row)
             } label: { Label("Retry on next sweep", systemImage: "arrow.counterclockwise") }
-                .disabled(model.isRunning || row.status == "open")
-                .help(model.isRunning ? "Stop the researcher first" : "Forget this outcome so the next sweep looks again")
+                .disabled(model.isLive || row.status == "open")
+                .help(model.isLive ? "Stop the researcher first" : "Forget this outcome so the next sweep looks again")
             Button {
                 model.showJournal(for: row)
             } label: { Label("Journal", systemImage: "text.book.closed") }

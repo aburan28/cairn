@@ -30,6 +30,18 @@ the journal, `status.json`, the solver binaries, generated artifacts -- lives
 in `.autoresearcher/`, which is not tracked. The identity's secret half is the
 submitter name itself, so it is never committed.
 
+`status.json` is written for a dashboard to read rather than for the loop to
+consult: besides the objective table it carries the sweep interval, the unix
+time the next sweep is due while the phase is idle, and a `sweep` block
+naming the pass number, how long the last one took and how far through the
+list this one is. Nothing is read back out of it, so a reader that ignores it
+loses nothing.
+
+**`SIGUSR1` ends the idle wait early** -- a launcher's "sweep now" is that one
+signal, which needs no socket and nothing listening. Sent during a sweep it
+is noted in the journal and dropped, since one is already running. `SIGTERM`
+still stops the researcher, which closes the node's stdin and stops it too.
+
 ## How it talks to the node
 
 The researcher owns the node: it spawns `cairn run` with MCP on the child's

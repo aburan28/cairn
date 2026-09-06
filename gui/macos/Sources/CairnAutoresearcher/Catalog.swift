@@ -42,7 +42,7 @@ struct CatalogView: View {
                     Button("None") { model.selectNone() }
                 }
                 .frame(width: 90)
-                .disabled(model.isRunning)
+                .disabled(model.isLive)
                 Button { model.rescanCatalog() } label: { Image(systemName: "arrow.clockwise") }.help("Rescan examples/ and re-plan")
             }
             .padding(8)
@@ -63,7 +63,7 @@ struct CatalogView: View {
                                 }
                             }
                             .buttonStyle(.plain).foregroundStyle(.blue).font(.caption)
-                            .disabled(model.isRunning)
+                            .disabled(model.isLive)
                         }
                     }
                 }
@@ -81,7 +81,7 @@ struct CatalogView: View {
                 Button {
                     model.postNow(selectedUnposted)
                 } label: { Label("Post \(selectedUnposted.count) now", systemImage: "tray.and.arrow.down") }
-                    .disabled(selectedUnposted.isEmpty || model.isRunning || model.isBuilding)
+                    .disabled(selectedUnposted.isEmpty || model.isLive || model.isBuilding)
                     .help("Append the unposted checked objectives to the researcher's log with the CLI. Needs the node stopped: a ledger has one writer.")
             }
             .padding(8)
@@ -99,7 +99,7 @@ struct CatalogRow: View {
                 get: { model.selectedObjectives.contains(item.path) },
                 set: { on in if on { model.selectedObjectives.insert(item.path) } else { model.selectedObjectives.remove(item.path) } }))
             .labelsHidden()
-            .disabled(model.isRunning)
+            .disabled(model.isLive)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(item.goal).bold()

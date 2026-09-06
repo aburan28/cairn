@@ -519,6 +519,15 @@ pub fn run(config: Config) -> Result<(), String> {
             log::info!("outbound dials route through SOCKS5 proxy {addr}");
         }
     }
+    // This node's own transport id, said out loud once. It is the one thing a
+    // peer needs from here that is not on the wire yet: `cairn peer` vouches
+    // for a transport id, a bootstrap file carries the key that hashes to it,
+    // and until now an operator asked to hand over "your peer id" had to
+    // derive it from a 261 KiB key file themselves.
+    log::info!(
+        "peer id {} -- give this and the address below to anyone adding this node",
+        peer_id_string(&identity.to_public().id())
+    );
     let mut service = Service::with_proxy(Arc::clone(&identity), proxy);
     for path in &config.bootstrap {
         let (endpoint, placeholder) =

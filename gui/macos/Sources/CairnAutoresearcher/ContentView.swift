@@ -47,8 +47,8 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 HStack(spacing: 8) {
-                    if model.isRunning || model.isBuilding { ProgressView().controlSize(.small) }
-                    Text(model.isBuilding ? "working…" : (model.status?.phase ?? (model.isRunning ? "starting…" : "stopped")))
+                    if model.isLive || model.isBuilding { ProgressView().controlSize(.small) }
+                    Text(model.phaseLine)
                         .font(.callout).foregroundStyle(.secondary).lineLimit(1)
                     Text("epoch \(model.currentEpoch) · \(model.secondsToNextEpoch)s")
                         .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
@@ -56,10 +56,14 @@ struct ContentView: View {
                 }
             }
             ToolbarItemGroup(placement: .primaryAction) {
+                if model.isIdle {
+                    Button { model.sweepNow() } label: { Label("Sweep now", systemImage: "arrow.clockwise") }
+                        .help("Cut the wait short and start the next sweep")
+                }
                 if model.isRunning {
                     Button { model.stop() } label: { Label("Stop", systemImage: "stop.fill") }
                         .help("Stop the researcher; it takes its node down with it")
-                } else {
+                } else if model.foreignPid == nil {
                     Button { model.start(once: false) } label: { Label("Start", systemImage: "play.fill") }
                         .disabled(model.isBuilding)
                         .help("Post the selected objectives, start the node, and keep sweeping")
@@ -68,7 +72,7 @@ struct ContentView: View {
                         .help("One pass over every objective, then stop")
                 }
                 Button { model.build() } label: { Label("Build", systemImage: "hammer") }
-                    .disabled(model.isRunning || model.isBuilding)
+                    .disabled(model.isLive || model.isBuilding)
                     .help("make ui-build: the binary cairn run needs")
                 Link(destination: model.readerURL) { Label("Reader", systemImage: "safari") }
                     .disabled(!model.nodeReachable)
@@ -106,8 +110,9 @@ struct StatusFooter: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Divider()
-            dot(model.isRunning ? .green : (model.isBuilding ? .orange : .gray),
-                model.isRunning ? "researcher running" : (model.isBuilding ? "building" : "researcher stopped"))
+            dot(model.isLive ? .green : (model.isBuilding ? .orange : .gray),
+                model.foreignPid != nil ? "researcher running elsewhere"
+                    : (model.isRunning ? "researcher running" : (model.isBuilding ? "building" : "researcher stopped")))
             dot(model.nodeReachable ? .green : .gray,
                 model.nodeReachable ? "node on \(model.httpAddress)" : "no node on \(model.httpAddress)")
             if let s = model.mySpendable {
@@ -127,21 +132,34 @@ struct StatusFooter: View {
 
 // MARK: small shared pieces
 
+/// A counted fact. Given an `action` it becomes a way in to the rows it
+/// counted, which is what an operator wants from a number they disagree with.
 struct Tile: View {
     var title: String
     var value: String
     var color: Color
     var caption: String? = nil
+    var action: (() -> Void)? = nil
+    @State private var hovering = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let face = VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.title2.monospacedDigit().bold()).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.55)
             if let caption { Text(caption).font(.caption2).foregroundStyle(.tertiary).lineLimit(1) }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .background(color.opacity(hovering && action != nil ? 0.18 : 0.08), in: RoundedRectangle(cornerRadius: 8))
+
+        if let action {
+            Button(action: action) { face }
+                .buttonStyle(.plain)
+                .onHover { hovering = $0 }
+                .help("Show these")
+        } else {
+            face
+        }
     }
 }
 

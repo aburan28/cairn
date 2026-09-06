@@ -181,12 +181,19 @@ def save(st):
 
 LAST_OBJECTIVES = []
 
+# The pass in progress, for the dashboard: which one it is, when it began,
+# how long the last took, and how far along the objective list it is.
+# Reported, never consulted -- the loop reads nothing back from here.
+SWEEP = {"n": 0, "started": None, "seconds": None, "finished": None, "index": 0, "total": 0}
 
-def publish_status(node, st, objectives, phase, submitter):
+
+def publish_status(node, st, objectives, phase, submitter, **extra):
     """One JSON file with everything a dashboard needs, rewritten on every
     change: the launcher reads this rather than parsing the journal.  With
     `objectives` None the last list is reused, so a stop does not erase the
-    table it is reporting the end of."""
+    table it is reporting the end of.  `extra` keys go in as they are;
+    `next_sweep_at` is the one the idle phase adds, so a dashboard can count
+    down instead of showing the interval as a constant."""
     global LAST_OBJECTIVES
     if objectives is None:
         objectives = LAST_OBJECTIVES
@@ -207,7 +214,9 @@ def publish_status(node, st, objectives, phase, submitter):
            "http": f"http://{HTTP}", "submitter": submitter, "log": LOG,
            "epoch_seconds": EPOCH_SECONDS, "pid": os.getpid(),
            "node_pid": node.proc.pid if node and node.proc else None,
-           "balance": st.get("balance"), "objectives": rows}
+           "balance": st.get("balance"), "interval": INTERVAL, "sweep": dict(SWEEP),
+           "objectives": rows}
+    doc.update(extra)
     tmp = STATUS_PATH + ".tmp"
     json.dump(doc, open(tmp, "w"), indent=1)
     os.replace(tmp, STATUS_PATH)
@@ -677,8 +686,10 @@ ONLY = []
 def sweep(node, st, submitter):
     objectives = objectives_of(node)
     publish_status(node, st, objectives, "sweeping", submitter)
-    for obj in objectives:
+    SWEEP["total"] = len(objectives)
+    for i, obj in enumerate(objectives):
         oid = obj["id"]
+        SWEEP["index"] = i + 1
         if ONLY and not any(oid.startswith(p) for p in ONLY):
             continue
         if oid in st["done"] or oid in st["unreachable"]:
@@ -800,6 +811,7 @@ def port_free(addr):
 
 
 def main():
+    global ONLY, INTERVAL
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--once", action="store_true", help="one sweep, then stop the node and exit")
     ap.add_argument("--post", nargs="*", default=[],
@@ -815,8 +827,8 @@ def main():
         json.dump(plan(expand(args.plan)), sys.stdout, indent=1)
         print()
         return
-    global ONLY
     ONLY = args.only
+    INTERVAL = args.interval
 
     cairn = cairn_binary()
     os.makedirs(STATE, exist_ok=True)
@@ -830,13 +842,23 @@ def main():
 
     node = Node(cairn)
     stopping = threading.Event()
+    # SIGUSR1 ends the idle wait early: a launcher's "sweep now" is this one
+    # signal, which needs no socket and nothing listening. During a sweep the
+    # request is noted and dropped -- one is already running.
+    wake = threading.Event()
 
     def on_signal(signum, _frame):
         note("signal", signal=signal.Signals(signum).name)
         stopping.set()
+        wake.set()
+
+    def on_wake(_signum, _frame):
+        note("sweep-requested")
+        wake.set()
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGUSR1, on_wake)
 
     st = state()
     try:
@@ -844,16 +866,23 @@ def main():
         note("node-up", server=init.get("serverInfo", {}).get("name"),
              http=f"http://{HTTP}", ui=f"http://{HTTP}/ui/", pid=node.proc.pid)
         while not stopping.is_set():
+            SWEEP.update(n=SWEEP["n"] + 1, started=time.time(), index=0)
             try:
                 sweep(node, st, submitter)
             except Exception as e:
                 note("sweep-error", err=str(e)[:200])
                 if node.proc.poll() is not None:
                     raise RuntimeError(f"the node exited ({node.proc.returncode}); see {NODE_LOG}")
+            SWEEP.update(seconds=round(time.time() - SWEEP["started"], 1),
+                         finished=time.strftime("%Y-%m-%dT%H:%M:%S"))
+            note("sweep-done", n=SWEEP["n"], seconds=SWEEP["seconds"], solved=len(st["done"]),
+                 unreachable=len(st["unreachable"]), pending=len(st["pending"]))
             if args.once:
                 break
-            publish_status(node, st, objectives_of(node), f"idle, next sweep in {args.interval}s", submitter)
-            stopping.wait(args.interval)
+            wake.clear()
+            publish_status(node, st, objectives_of(node), f"idle, next sweep in {args.interval}s", submitter,
+                           next_sweep_at=time.time() + args.interval)
+            wake.wait(args.interval)
     finally:
         try:
             publish_status(None, st, None, "stopped", submitter)
