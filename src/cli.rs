@@ -488,6 +488,375 @@ pub fn gen_bootstrap(args: Vec<String>) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// seeds
+// ---------------------------------------------------------------------------
+
+// The published URL is deliberately *not* a constant here. This binary never
+// fetches it -- `scripts/seeds-fetch.sh` does, and the Makefile has its own
+// overridable copy -- so a third one in the crate would be a value that can
+// drift from the two that are used, with nothing checking it against them.
+
+/// Largest key file this will read, in bytes.
+///
+/// A transport key is 261,120 bytes and its hex is exactly 522,240 characters,
+/// so anything past that is not a key file and there is no reason to hold it in
+/// memory to find out. The fetch script is pointed at a URL a stranger controls
+/// and this is the thing that reads what it downloaded.
+const MAX_KEY_FILE: u64 = 600_000;
+
+fn seeds_usage(code: i32) -> ! {
+    exit_with(
+        code,
+        "usage: cairn seeds resolve --list FILE [--keys DIR] --out DIR\n       \
+         cairn seeds publish --identity FILE --out DIR\n\n\
+         resolve  check a downloaded seed list against its key files and write a\n         \
+           --bootstrap file for every entry that verifies. Refuses the rest.\n\
+         publish  write this node's own <transport>.key, to be added to the list\n         \
+           by pull request.\n\n\
+         The list is fetched by ./scripts/seeds-fetch.sh, not by this binary:\n\
+         tests/cipher_policy.rs fails the build if a TLS crate enters the tree,\n\
+         and an HTTP client is how one arrives. Same split as the drand beacon.",
+    )
+}
+
+/// `cairn seeds`: turn a published seed list into bootstrap files, or publish
+/// this node's key into one.
+///
+/// # Why the fetch is not here
+///
+/// `tests/cipher_policy.rs` fails the build if a TLS crate is in the resolved
+/// dependency tree, and an HTTP client is the usual way one arrives -- that
+/// test's own docs say so. `scripts/drand-beacon.sh` already settled the shape
+/// this takes: the shell does the transport, the binary does the checking, and
+/// the check is the part that had to be testable. So this reads local files
+/// that something else downloaded, and cannot be talked into a network request.
+///
+/// # What verification means here, and what it does not
+///
+/// A key file is named for the peer id of the key inside it, and a peer id
+/// **is** `sha256(public key)`. So `resolve` decodes the hex, hands it to
+/// [`crate::p2p::handshake::PeerPublic::from_bytes`] -- which derives the id
+/// itself rather than taking one on trust -- and refuses the file unless the
+/// derived id is the name it arrived under. That check needs no trust in
+/// whoever served it: a hostile mirror can withhold a key or serve a different
+/// one, and cannot serve a *different key under the same name*.
+///
+/// What it does not do is make the address trustworthy, and nothing can. The
+/// address is a dial hint; the handshake authenticates the key. An attacker who
+/// controls the list can send every new node to a machine of their choosing --
+/// and that machine cannot complete a handshake as the seed, so the cost is a
+/// wasted dial and a node that is still looking. That is the same bound a
+/// hostile DNS answer gets in `p2p::discovery::dialable`, and it is why this
+/// file is safe to publish somewhere nobody has to trust.
+pub fn seeds(args: Vec<String>) -> i32 {
+    let mut args = args.into_iter();
+    match args.next().as_deref() {
+        Some("resolve") => seeds_resolve(args.collect()),
+        Some("publish") => seeds_publish(args.collect()),
+        Some("-h") | Some("--help") => seeds_usage(0),
+        Some(other) => {
+            eprintln!("seeds: unknown verb {other:?}");
+            seeds_usage(2)
+        }
+        None => seeds_usage(2),
+    }
+}
+
+/// One entry's outcome, so the summary can say what was skipped and why rather
+/// than printing a count.
+enum Resolved {
+    Wrote(String),
+    Refused { name: String, why: String },
+}
+
+fn seeds_resolve(args: Vec<String>) -> i32 {
+    let mut list: Option<String> = None;
+    let mut keys: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            seeds_usage(0);
+        }
+        let slot = match arg.as_str() {
+            "--list" => &mut list,
+            "--keys" => &mut keys,
+            "--out" => &mut out,
+            _ => {
+                eprintln!("seeds resolve: unknown option {arg:?}");
+                seeds_usage(2)
+            }
+        };
+        *slot = Some(args.next().unwrap_or_else(|| seeds_usage(2)));
+    }
+    let list = PathBuf::from(list.unwrap_or_else(|| seeds_usage(2)));
+    let out = PathBuf::from(out.unwrap_or_else(|| seeds_usage(2)));
+    // The key files sit beside the list unless told otherwise, because that is
+    // how they are published and how the fetch script downloads them.
+    let keys = keys.map(PathBuf::from).unwrap_or_else(|| {
+        list.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("seeds")
+    });
+
+    let text = match std::fs::read_to_string(&list) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("{}: {e}", list.display());
+            return 2;
+        }
+    };
+    let value = match Value::from_json(&text) {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("{}: {e}", list.display());
+            return 2;
+        }
+    };
+    let entries = match value.get("seeds").and_then(Value::as_array) {
+        Some(entries) => entries,
+        None => {
+            eprintln!("{}: no \"seeds\" array", list.display());
+            return 2;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&out) {
+        eprintln!("{}: {e}", out.display());
+        return 2;
+    }
+
+    let mut results = Vec::new();
+    for entry in entries {
+        results.push(resolve_one(entry, &keys, &out));
+    }
+
+    let mut wrote = 0usize;
+    for result in &results {
+        match result {
+            Resolved::Wrote(path) => {
+                wrote += 1;
+                eprintln!("verified: {path}");
+            }
+            // Every refusal is printed. A seed list is edited by strangers via
+            // pull request and downloaded over a network, so "three of four
+            // entries were silently dropped" is the state an operator most
+            // needs to be able to see -- and a count would not name which.
+            Resolved::Refused { name, why } => eprintln!("refused {name}: {why}"),
+        }
+    }
+    if wrote == 0 {
+        eprintln!(
+            "no seed in {} verified, so nothing was written to {}. \
+             A list with no published transport keys is a list of addresses, and an \
+             address authenticates nobody -- see docs/discovery.md.",
+            list.display(),
+            out.display()
+        );
+        return 1;
+    }
+    eprintln!(
+        "wrote {wrote} bootstrap file(s) to {}; pass each with --bootstrap",
+        out.display()
+    );
+    0
+}
+
+fn resolve_one(entry: &Value, keys: &Path, out: &Path) -> Resolved {
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("<unnamed>")
+        .to_string();
+    // A name becomes a filename, so it may not steer the write anywhere. The
+    // list is fetched from a URL and edited by pull request; `../../.ssh` in a
+    // `name` would otherwise be a file write chosen by whoever served it.
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Resolved::Refused {
+            name,
+            why: "name must be non-empty and only letters, digits, - and _".into(),
+        };
+    }
+    let Some(addr) = entry.get("addr").and_then(Value::as_str) else {
+        return Resolved::Refused {
+            name,
+            why: "no addr: an HTTP-only entry is for the site to read, not to dial".into(),
+        };
+    };
+    let Some(transport) = entry.get("transport").and_then(Value::as_str) else {
+        return Resolved::Refused {
+            name,
+            why: "no transport key published, so nothing here can authenticate it".into(),
+        };
+    };
+    if transport.len() != 64 || !transport.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Resolved::Refused {
+            name,
+            why: format!("transport {transport:?} is not a 64-character peer id"),
+        };
+    }
+
+    let path = keys.join(format!("{transport}.key"));
+    let size = match std::fs::metadata(&path) {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            return Resolved::Refused {
+                name,
+                why: format!("{}: {e}", path.display()),
+            }
+        }
+    };
+    if size > MAX_KEY_FILE {
+        return Resolved::Refused {
+            name,
+            why: format!("{}: {size} bytes is not a transport key", path.display()),
+        };
+    }
+    let hex = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => {
+            return Resolved::Refused {
+                name,
+                why: format!("{}: {e}", path.display()),
+            }
+        }
+    };
+    let Some(bytes) = crate::hex::decode(hex.trim()) else {
+        return Resolved::Refused {
+            name,
+            why: format!("{}: not hexadecimal", path.display()),
+        };
+    };
+    // `from_bytes` derives the id from the key rather than accepting one, so
+    // this comparison is the whole check: a file cannot be a key for a peer
+    // other than the one its own bytes hash to.
+    let public = match crate::p2p::handshake::PeerPublic::from_bytes(&bytes) {
+        Ok(public) => public,
+        Err(e) => {
+            return Resolved::Refused {
+                name,
+                why: format!("{}: {e}", path.display()),
+            }
+        }
+    };
+    let derived = crate::p2p::discovery::peer_id_string(&public.id());
+    if derived != transport {
+        return Resolved::Refused {
+            name,
+            why: format!(
+                "{} contains the key for {derived}, not {transport}. \
+                 Whoever served this list served a key under the wrong name.",
+                path.display()
+            ),
+        };
+    }
+
+    // The shape `load_endpoint` reads, and nothing else: extra fields are
+    // ignored by every reader, and a bootstrap file is local configuration
+    // that never enters the log.
+    let bootstrap = Value::object([
+        ("addr", Value::string(addr)),
+        ("public", Value::string(hex.trim())),
+    ]);
+    let written = out.join(format!("{name}.json"));
+    if let Err(e) = std::fs::write(&written, bootstrap.canonical_string()) {
+        return Resolved::Refused {
+            name,
+            why: format!("{}: {e}", written.display()),
+        };
+    }
+    Resolved::Wrote(written.display().to_string())
+}
+
+/// Write this node's transport key under the name the list will reference.
+///
+/// Run on the seed host, against the identity the daemon persists, and open a
+/// pull request adding the file plus an entry. There is no upload path and
+/// there should not be: publishing is a reviewed change to a repository, which
+/// is the property that makes the anchor replaceable by someone other than
+/// whoever holds the server.
+fn seeds_publish(args: Vec<String>) -> i32 {
+    let mut identity: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            seeds_usage(0);
+        }
+        let slot = match arg.as_str() {
+            "--identity" => &mut identity,
+            "--out" => &mut out,
+            _ => {
+                eprintln!("seeds publish: unknown option {arg:?}");
+                seeds_usage(2)
+            }
+        };
+        *slot = Some(args.next().unwrap_or_else(|| seeds_usage(2)));
+    }
+    let identity = PathBuf::from(identity.unwrap_or_else(|| seeds_usage(2)));
+    let out = PathBuf::from(out.unwrap_or_else(|| seeds_usage(2)));
+
+    // An identity file holds a secret beside the public half, so it is read
+    // through `secret_file` like every other reader of one -- and only the
+    // public half is ever written out below.
+    let text = match crate::secret_file::read_to_string(&identity) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("{}: {e}", identity.display());
+            return 2;
+        }
+    };
+    let value = match Value::from_json(&text) {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("{}: {e}", identity.display());
+            return 2;
+        }
+    };
+    let Some(public_hex) = value.get("public").and_then(Value::as_str) else {
+        eprintln!("{}: public missing", identity.display());
+        return 2;
+    };
+    let Some(bytes) = crate::hex::decode(public_hex) else {
+        eprintln!("{}: public is not hexadecimal", identity.display());
+        return 2;
+    };
+    let public = match crate::p2p::handshake::PeerPublic::from_bytes(&bytes) {
+        Ok(public) => public,
+        Err(e) => {
+            eprintln!("{}: public: {e}", identity.display());
+            return 2;
+        }
+    };
+    let transport = crate::p2p::discovery::peer_id_string(&public.id());
+
+    if let Err(e) = std::fs::create_dir_all(&out) {
+        eprintln!("{}: {e}", out.display());
+        return 2;
+    }
+    let path = out.join(format!("{transport}.key"));
+    if let Err(e) = std::fs::write(&path, format!("{public_hex}\n")) {
+        eprintln!("{}: {e}", path.display());
+        return 2;
+    }
+    eprintln!("wrote {}", path.display());
+    eprintln!(
+        "add to launch/seeds.json:\n  \
+         {{\"name\": \"...\", \"addr\": \"<public host:port>\", \
+         \"transport\": \"{transport}\", \"http\": null, \
+         \"operator\": \"...\", \"note\": \"...\"}}"
+    );
+    eprintln!(
+        "the address is the one strangers can reach, not the one you --listen on: \
+         a seed binds 0.0.0.0 and publishes its public address. See docs/p2p.md."
+    );
+    0
+}
+
+// ---------------------------------------------------------------------------
 // arena
 // ---------------------------------------------------------------------------
 
@@ -560,5 +929,179 @@ mod tests {
         assert!(!is_host_port(":5000"));
         assert!(!is_host_port("host:0"));
         assert!(!is_host_port("host:notaport"));
+    }
+
+    /// A scratch directory that removes itself, so a failing assertion does not
+    /// leave half a megabyte of key file in `$TMPDIR` on every run.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let path =
+                std::env::temp_dir().join(format!("cairn-seeds-{tag}-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("scratch");
+            Scratch(path)
+        }
+        fn join(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// One generated identity, published and then resolved back, so the two
+    /// halves of `cairn seeds` are checked against each other rather than
+    /// against a fixture somebody would have to keep in step.
+    ///
+    /// Keygen is the expensive part, so the four cases below share one.
+    fn published() -> (Scratch, String, String) {
+        let scratch = Scratch::new("roundtrip");
+        let identity = PeerIdentity::generate();
+        let public_hex = hex_encode(identity.public_key());
+        let transport = crate::p2p::discovery::peer_id_string(&identity.to_public().id());
+        let keys = scratch.join("seeds");
+        std::fs::create_dir_all(&keys).expect("keys dir");
+        std::fs::write(
+            keys.join(format!("{transport}.key")),
+            format!("{public_hex}\n"),
+        )
+        .expect("key file");
+        (scratch, transport, public_hex)
+    }
+
+    fn entry(json: &str) -> Value {
+        Value::from_json(json).expect("entry")
+    }
+
+    /// The written file is the shape `--bootstrap` reads, and the key in it is
+    /// the key the list named.
+    ///
+    /// The second half is the one worth a test: the address is copied through
+    /// unchecked because an address is only ever a hint, so the key is the only
+    /// thing here that can be wrong in a way that matters.
+    #[test]
+    fn a_published_key_resolves_into_a_usable_bootstrap_file() {
+        let (scratch, transport, public_hex) = published();
+        let out = scratch.join("out");
+        std::fs::create_dir_all(&out).expect("out dir");
+
+        let result = resolve_one(
+            &entry(&format!(
+                r#"{{"name":"us-west","addr":"203.0.113.10:5000","transport":"{transport}"}}"#
+            )),
+            &scratch.join("seeds"),
+            &out,
+        );
+        assert!(matches!(result, Resolved::Wrote(_)), "refused a good entry");
+
+        let written =
+            Value::from_json(&std::fs::read_to_string(out.join("us-west.json")).expect("written"))
+                .expect("canonical json");
+        assert_eq!(
+            written.get("addr").and_then(Value::as_str),
+            Some("203.0.113.10:5000")
+        );
+        // Not a string comparison against `public_hex`: the property is that a
+        // reader who parses this file arrives at the peer the list named.
+        let bytes = crate::hex::decode(
+            written
+                .get("public")
+                .and_then(Value::as_str)
+                .expect("public"),
+        )
+        .expect("hex");
+        let peer = crate::p2p::handshake::PeerPublic::from_bytes(&bytes).expect("key");
+        assert_eq!(crate::p2p::discovery::peer_id_string(&peer.id()), transport);
+        assert_eq!(bytes, crate::hex::decode(&public_hex).expect("hex"));
+    }
+
+    /// The whole security claim of publishing this list on a host nobody
+    /// controls: a mirror can withhold a key or serve a different one, and
+    /// cannot serve a different key *under the same name*.
+    #[test]
+    fn a_key_that_is_not_the_one_named_is_refused() {
+        let (scratch, transport, _) = published();
+        let out = scratch.join("out");
+        std::fs::create_dir_all(&out).expect("out dir");
+        let keys = scratch.join("seeds");
+
+        // The same real key, filed under somebody else's id -- which is what a
+        // substitution attack produces, and what a length or hex check misses.
+        let impostor = "0".repeat(64);
+        std::fs::copy(
+            keys.join(format!("{transport}.key")),
+            keys.join(format!("{impostor}.key")),
+        )
+        .expect("copy");
+
+        let result = resolve_one(
+            &entry(&format!(
+                r#"{{"name":"impostor","addr":"203.0.113.10:5000","transport":"{impostor}"}}"#
+            )),
+            &keys,
+            &out,
+        );
+        match result {
+            Resolved::Refused { why, .. } => assert!(why.contains(&transport), "{why}"),
+            Resolved::Wrote(_) => panic!("wrote a bootstrap file for a key under the wrong name"),
+        }
+        assert!(!out.join("impostor.json").exists());
+    }
+
+    /// An entry with no key is refused rather than written with a placeholder.
+    ///
+    /// Writing one would reproduce exactly the failure this whole path exists
+    /// to end: a structurally valid bootstrap file that authenticates nobody,
+    /// whose handshake failure is indistinguishable from a closed port.
+    #[test]
+    fn an_entry_with_no_published_key_writes_nothing() {
+        let (scratch, _, _) = published();
+        let out = scratch.join("out");
+        std::fs::create_dir_all(&out).expect("out dir");
+
+        for json in [
+            r#"{"name":"nokey","addr":"203.0.113.11:5000"}"#,
+            r#"{"name":"nokey","addr":"203.0.113.11:5000","transport":null}"#,
+            r#"{"name":"httponly","transport":"00"}"#,
+        ] {
+            assert!(
+                matches!(
+                    resolve_one(&entry(json), &scratch.join("seeds"), &out),
+                    Resolved::Refused { .. }
+                ),
+                "accepted {json}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(&out).expect("out").count(), 0);
+    }
+
+    /// `name` becomes a filename and the list arrives over the network, so it
+    /// may not choose where the write lands.
+    #[test]
+    fn a_name_cannot_steer_the_write_out_of_the_output_directory() {
+        let (scratch, transport, _) = published();
+        let out = scratch.join("out");
+        std::fs::create_dir_all(&out).expect("out dir");
+
+        for name in ["../escape", "/etc/cairn", "a/b", "", "dot.dot"] {
+            let json = format!(
+                r#"{{"name":"{name}","addr":"203.0.113.10:5000","transport":"{transport}"}}"#
+            );
+            assert!(
+                matches!(
+                    resolve_one(&entry(&json), &scratch.join("seeds"), &out),
+                    Resolved::Refused { .. }
+                ),
+                "accepted name {name:?}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(&out).expect("out").count(), 0);
     }
 }

@@ -787,6 +787,11 @@ enum Command {
     GenBootstrap {
         args: Vec<String>,
     },
+    /// Verify a downloaded seed list into `--bootstrap` files, or publish this
+    /// node's transport key into one.
+    Seeds {
+        args: Vec<String>,
+    },
     /// Play the attack scenarios for money (was the `arena` binary).
     Arena {
         args: Vec<String>,
@@ -1352,6 +1357,9 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "gen-bootstrap" => Command::GenBootstrap {
             args: cursor.rest(),
         },
+        "seeds" => Command::Seeds {
+            args: cursor.rest(),
+        },
         "arena" => Command::Arena {
             args: cursor.rest(),
         },
@@ -1482,6 +1490,7 @@ fn reads_legacy_log_as_a_level(command: &Command) -> bool {
             | Command::P2p { .. }
             | Command::Serve { .. }
             | Command::GenBootstrap { .. }
+            | Command::Seeds { .. }
             | Command::Arena { .. }
     )
 }
@@ -3585,6 +3594,18 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      a placeholder --bootstrap file for p2p, with a fresh key to replace",
+    );
+    say(
+        out,
+        "  seeds resolve --list FILE --out DIR | seeds publish --identity FILE --out DIR",
+    );
+    say(
+        out,
+        "      verify a downloaded seed list into --bootstrap files, or publish your own",
+    );
+    say(
+        out,
+        "      key for it; ./scripts/seeds-fetch.sh does the download this checks",
     );
     say(out, "  arena [--seed N]");
     say(
@@ -8757,6 +8778,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::P2p { args } => Ok(cairn::cli::p2p(args.clone(), cli_globals(options))),
         Command::Serve { args } => Ok(cairn::cli::serve(args.clone(), cli_globals(options))),
         Command::GenBootstrap { args } => Ok(cairn::cli::gen_bootstrap(args.clone())),
+        Command::Seeds { args } => Ok(cairn::cli::seeds(args.clone())),
         Command::Arena { args } => Ok(cairn::cli::arena(args.clone())),
         Command::Propose {
             objective,
@@ -8967,6 +8989,7 @@ mod tests {
             vec!["p2p"],
             vec!["serve"],
             vec!["gen-bootstrap"],
+            vec!["seeds"],
             vec!["arena"],
         ] {
             let mut daemon = parse(argv(&command)).expect("parses");
@@ -10830,6 +10853,7 @@ mod tests {
         for (name, expected) in [
             ("serve", Command::Serve { args: vec![] }),
             ("gen-bootstrap", Command::GenBootstrap { args: vec![] }),
+            ("seeds", Command::Seeds { args: vec![] }),
             ("arena", Command::Arena { args: vec![] }),
         ] {
             assert_eq!(parse(argv(&[name])).expect(name).command, expected);

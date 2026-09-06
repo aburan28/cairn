@@ -4,7 +4,9 @@
   "private": true,
   "description": "A reader for a cairn node's knowledge chain.",
   "scripts": {
+    "predev": "node scripts/sync-seeds.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/sync-seeds.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",

@@ -83,6 +83,56 @@ It is to make it:
 Signed peer records give (1) and (3). Treating every hint source as equal, with
 none privileged in code, gives (2).
 
+### The anchor this project actually ships
+
+`launch/seeds.json`, deployed to GitHub Pages by `.github/workflows/pages.yml`
+and served at
+<https://aburan28.github.io/cairn/seeds.json>. Beside it,
+`seeds/<transport>.key` — the 261,120-byte McEliece transport key of each seed,
+in a file **named for its own `sha256`**, which is the peer id.
+
+That naming is the whole design, and it is worth being precise about what it
+buys. `cairn seeds resolve` decodes the key and hands it to
+`PeerPublic::from_bytes`, which derives the id rather than accepting one, and
+refuses the file unless the derived id is the name it arrived under. So whoever
+serves this list — GitHub today, a fork or a mirror or a USB stick tomorrow —
+can do exactly two things:
+
+- **withhold a seed**, costing liveness, which peer exchange then repairs from
+  any other seed that did answer;
+- **point you at a machine of their choosing**, which cannot complete a
+  handshake as that seed and costs one dial.
+
+And exactly one thing they cannot do: **serve a different key under the same
+name.** That is the same bound a hostile DNS answer gets in
+`p2p::discovery::dialable`, obtained the same way, and it is why this file needs
+no signature of its own and no domain anybody has to keep.
+
+Against the three properties above: it is (1) a key rather than an address,
+since the address is the field that may change and the id is the field that
+decides; (2) replaceable without a code change, since `SEEDS_URL` /
+`CAIRN_SEEDS_URL` takes a fork, a mirror, a hidden service or a `file://` path,
+and no source is privileged in code; and (3) self-verifying, so a compromised
+anchor lies about who is *reachable* and never about who is *who*.
+
+**The fetch is deliberately outside the binary.** `tests/cipher_policy.rs` fails
+the build if a TLS crate enters the dependency tree, and an HTTP client is how
+one arrives. So `scripts/seeds-fetch.sh` does the transport with `curl` and
+`cairn seeds resolve` does the checking — the same split
+`scripts/drand-beacon.sh` makes, and for the same reason, with the added benefit
+that the half that has to be right is the half written in Rust with tests
+against it.
+
+**The site reads the same file, for a different half of it.** `ui/lib/seeds.ts`
+fetches the list from the browser and uses the `http` field — an HTTPS
+`cairn serve` endpoint — to find a live node, where before it fell straight
+through to the log bundled in the repository. It verifies nothing and does not
+need to: a browser does not dial peers, and what a node answers authenticates
+itself through the hash chain and the signed checkpoint, which is what every
+page's provenance label is about. Endpoints must be `https://` because the
+published site is, and a browser blocks a plain-`http` subresource before it
+leaves.
+
 ## The techniques, assessed
 
 **Peer exchange (PEX).** Ask peers you already have about peers they have. The
@@ -255,9 +305,31 @@ to whoever you happen to be talking to.
 
 ## Where this is wrong
 
-- **The anchor is still there.** It is now one address you are told once instead
-  of a name in the source, which is better and is not nothing. A node with an
-  empty address book and no `--peer` still cannot start.
+- **The anchor is still there.** It is now a list you fetch from somewhere,
+  rather than a name in the source, and the list is self-verifying — but a node
+  with an empty address book, no `--peer` and no reachable seed source still
+  cannot start. Moving the anchor is not removing it, and this document opened
+  by saying nobody removes it.
+- **Publishing on GitHub Pages concentrates observation.** Everyone who
+  bootstraps fetches one URL, so whoever serves it learns the IP of every new
+  node at the moment it joins — which is not a correctness problem and is a
+  real privacy one, and is the same trade this document criticises DoH for
+  making above. Mirrors and `CAIRN_SEEDS_URL` spread it; nothing forces them to
+  be used.
+- **Omission in the seed list is unchecked.** The naming rule stops a hostile
+  list substituting a key; nothing stops it *leaving honest seeds out* and
+  offering only its own. For a node that already knows one honest peer that is
+  a liveness cost peer exchange repairs. For a genuinely cold node with no
+  `--bootstrap` file, no LAN and one list, it is an eclipse by a party that
+  never had to forge anything, and there is no signal to read. Signing the
+  list, or comparing independently-served copies of it, is the fix and is not
+  built. [threat-model.md](threat-model.md) carries this under *eclipse via
+  peer sampling*.
+- **The published list has no key in it yet.** The one entry names an address
+  and no transport, so it resolves to nothing and says so. That is honest
+  rather than finished: until a seed operator runs `cairn seeds publish` and
+  opens a pull request, `make p2p` still falls back to the placeholder key that
+  authenticates nobody.
 - **No NAT traversal.** A node behind a home router can fetch and cannot seed,
   which quietly makes the network more centralised than the protocol suggests.
 - **`seq` is wall-clock seconds.** It only has to increase, and a clock that goes

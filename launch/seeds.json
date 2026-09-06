@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "note": "Dial hints, not authority. An entry here can send you to the wrong machine and cannot make you trust it: a peer id is sha256 of its McEliece transport key, so the handshake decides who answered and this file decides nothing. That is why publishing it on GitHub Pages is safe, and why losing GitHub Pages costs a hint rather than the network. See docs/discovery.md.",
+  "published_at": "https://aburan28.github.io/cairn/seeds.json",
+  "key_files": "seeds/<transport>.key, relative to this file: the hex transport public key, 522240 characters. The file is named by the sha256 of the bytes it decodes to, so `cairn seeds` checks the name against the content and refuses a mismatch.",
+  "seeds": [
+    {
+      "name": "us-west",
+      "addr": "44.229.170.164:5000",
+      "transport": null,
+      "http": null,
+      "operator": "the repository maintainer",
+      "note": "UNVERIFIED, and deliberately left that way rather than filled in with something plausible. No transport key has been published for this address, so there is no seeds/<transport>.key to check and `cairn seeds` refuses this entry and writes no bootstrap file for it. Until the operator runs `cairn seeds publish` on the seed host and opens a PR adding the key, dialling this address authenticates nobody -- which is exactly what the placeholder in .local/seed.json already did, said out loud."
+    }
+  ]
+}

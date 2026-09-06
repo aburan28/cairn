@@ -64,6 +64,11 @@ bootstrap.*.json
 ui/node_modules/
 ui/.next/
 ui/out/
+# `ui/scripts/sync-seeds.mjs` copies launch/seeds.json here on every build so
+# the static export publishes it. A copy, never a source: two committed answers
+# to "which seeds does this project publish" is exactly the thing the seed list
+# exists to stop being ambiguous.
+ui/public/
 ui/next-env.d.ts
 ui/tsconfig.tsbuildinfo
 

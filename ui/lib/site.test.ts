@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { SNAPSHOT, progress, provenance, short, units } from "./site";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  SNAPSHOT,
+  forgetResolvedNode,
+  progress,
+  provenance,
+  resolveNode,
+  short,
+  units,
+} from "./site";
 
 describe("progress (site.ts copy, as a percentage)", () => {
   const maximize = { baseline: 9, target: 20, direction: "maximize" };
@@ -88,5 +96,99 @@ describe("formatting", () => {
     expect(units(1_100_000)).toBe("1,100,000");
     expect(units(undefined)).toBe("—");
     expect(units(null)).toBe("—");
+  });
+});
+
+/**
+ * Which node the site reads, and in what order it asks.
+ *
+ * Driven through a stubbed `fetch` rather than a live server, because the whole
+ * behaviour under test is *which URLs get requested* — the answers are beside
+ * the point and a real node would only be able to play one of the four roles
+ * below at a time.
+ */
+describe("resolveNode", () => {
+  afterEach(() => {
+    forgetResolvedNode();
+    vi.unstubAllGlobals();
+  });
+
+  /** `ok` at `<base>/health`, and 404 everywhere else. */
+  const nodeAt = (...up: string[]) => {
+    const asked: string[] = [];
+    const fetchStub = vi.fn(async (url: string) => {
+      asked.push(url);
+      if (url.endsWith("/seeds.json")) {
+        return {
+          ok: true,
+          json: async () => ({
+            version: 1,
+            seeds: [
+              { name: "a", addr: null, transport: null, http: "https://a.example" },
+              { name: "b", addr: null, transport: null, http: "https://b.example" },
+            ],
+          }),
+        };
+      }
+      const base = url.replace(/\/health$/, "");
+      return up.includes(base)
+        ? { ok: true, text: async () => "ok\n" }
+        : { ok: false, text: async () => "not found" };
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    return asked;
+  };
+
+  /** The embedded case: the daemon serves this page, so it is the node to ask
+   *  and the seed list is never fetched at all. */
+  it("prefers a node on the page's own origin and stops there", async () => {
+    const asked = nodeAt("");
+    expect(await resolveNode()).toBe("");
+    expect(asked).toEqual(["/health"]);
+  });
+
+  /** The public site: nothing local answers, so the list decides. This is the
+   *  case that used to fall straight through to the bundled log. */
+  it("falls through to the first published seed that answers", async () => {
+    const asked = nodeAt("https://b.example");
+    expect(await resolveNode()).toBe("https://b.example");
+    expect(asked).toEqual([
+      "/health",
+      "/seeds.json",
+      "https://a.example/health",
+      "https://b.example/health",
+    ]);
+  });
+
+  /** With nobody up, `""` — so every loader makes the relative request it
+   *  always made and falls back to the snapshot, labelled, exactly as before. */
+  it("returns the empty base when no node and no seed answers", async () => {
+    nodeAt();
+    expect(await resolveNode()).toBe("");
+  });
+
+  /**
+   * A 200 that is not a node is not a node. GitHub Pages answers an unknown
+   * path with an HTML page, and a probe that only checked the status would
+   * read the site's own 404 as "a node lives here" and never try a seed.
+   */
+  it("does not mistake an HTML 404 page for a node", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.endsWith("/seeds.json")
+          ? { ok: true, json: async () => ({ version: 1, seeds: [] }) }
+          : { ok: true, text: async () => "<!DOCTYPE html><title>404</title>" },
+      ),
+    );
+    expect(await resolveNode()).toBe("");
+  });
+
+  /** One round of probing for a page that calls three loaders. */
+  it("asks once and shares the answer", async () => {
+    const asked = nodeAt("");
+    const [a, b, c] = await Promise.all([resolveNode(), resolveNode(), resolveNode()]);
+    expect([a, b, c]).toEqual(["", "", ""]);
+    expect(asked).toEqual(["/health"]);
   });
 });

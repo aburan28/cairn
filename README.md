@@ -71,7 +71,8 @@ curl -fsSL https://github.com/aburan28/cairn/releases/latest/download/install.sh
 
 Detects the platform, downloads the matching tarball, checks it against the
 published `.sha256`, and installs the one binary a release contains — `cairn`,
-whose subcommands (`run`, `mcp`, `p2p`, `serve`, `gen-bootstrap`, `arena`)
+whose subcommands (`run`, `mcp`, `p2p`, `serve`, `gen-bootstrap`, `seeds`,
+`arena`)
 replace what used to ship as separate executables — to `~/.local/bin`.
 `--version` pins a release, `--bin-dir` picks somewhere else, and on Linux
 `--libc gnu` takes the dynamically-linked build instead of the static musl one.
@@ -284,13 +285,40 @@ The first two are private keys; `.local/` is gitignored, keep it that way.
 publisher and (if built with the `ui` feature) the reader all come up from one
 process against one log, as described above.
 
-**One thing will stop this working, and it is not the network.** With no
-explicit `BOOTSTRAP_ARGS`, the first run generates `.local/seed.json` for
-`SEED_ADDR` with a **placeholder** public key — a real key, freshly minted, that
-belongs to nobody. The address is only ever a dial hint; `p2p::handshake`
-authenticates the *key*, so a placeholder authenticates nobody and every
-handshake fails. Until you paste the seed's real key into `"public"`, the daemon
-says so at startup:
+**Get a real bootstrap first.**
+
+```sh
+make seeds
+```
+
+Downloads the seed list this project publishes at
+<https://aburan28.github.io/cairn/seeds.json>, checks each
+entry against the transport key beside it, and writes one bootstrap file per
+verified seed into `.local/seeds/`. `make p2p` and `make node` then use those
+instead of the placeholder below, automatically. Re-run it whenever you like: a
+seed that moves publishes a new address under the same key, and this is how you
+pick that up.
+
+Nothing about that fetch has to be trusted, which is the point of putting it on
+a host this project does not control. A peer id **is** `sha256` of the McEliece
+transport key, so `cairn seeds resolve` re-derives it from the bytes before it
+writes anything: a hostile mirror can withhold a seed, or serve a key that does
+not match its name — both refused — and cannot serve a *different key under the
+same name*. The worst it can do is send you to a machine of its choosing, which
+then fails the handshake, and costs you one dial. Point it elsewhere if you
+prefer — a fork, a mirror, a `file://` copy — since none of them is privileged:
+
+```sh
+make seeds SEEDS_URL=https://example.invalid/seeds.json
+```
+
+**And if nothing verifies, one thing will stop this working, and it is not the
+network.** With no verified seed and no explicit `BOOTSTRAP_ARGS`, the first run
+falls back to generating `.local/seed.json` for `SEED_ADDR` with a
+**placeholder** public key — a real key, freshly minted, that belongs to nobody.
+The address is only ever a dial hint; `p2p::handshake` authenticates the *key*,
+so a placeholder authenticates nobody and every handshake fails. Until you paste
+the seed's real key into `"public"`, the daemon says so at startup:
 
 ```
 bootstrap .local/seed.json: still carries the PLACEHOLDER key ...
@@ -327,7 +355,17 @@ seed that is simply down:
   produces no error on either end — just silence until a timeout.
 - **Distribute your real key.** Hand out the `"public"` field from your
   `--identity` file (`.local/node.identity.json`), not your own `.local/seed.json`,
-  which holds a placeholder for somebody *else*.
+  which holds a placeholder for somebody *else*. The published way to do that:
+
+  ```sh
+  cairn seeds publish --identity .local/node.identity.json --out launch/seeds/
+  ```
+
+  It writes `<your peer id>.key` and prints the entry to add to
+  `launch/seeds.json`; open a pull request with both and `make seeds` finds you.
+  There is no upload endpoint, deliberately — publishing is a reviewed change to
+  a repository, which is what makes this anchor replaceable by somebody other
+  than whoever holds the server. See [launch/seeds/README.md](launch/seeds/README.md).
 
 **Is it actually connected?** Successful sessions are logged, not just failures:
 

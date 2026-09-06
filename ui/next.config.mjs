@@ -32,5 +32,13 @@ const nextConfig = {
   basePath,
   trailingSlash: true,
   images: { unoptimized: true },
+  // `basePath` again, this time readable from the browser. Next rewrites
+  // `<Link>` and `next/image` with it and gives client code no way to ask what
+  // it was, so `lib/seeds.ts` -- which fetches a plain file rather than a route
+  // -- would have to guess. Guessing by counting path segments breaks on
+  // `/objectives/` versus `/`; hardcoding "/ui" breaks the deployed site.
+  // Inlined from the same constant is the only version that cannot disagree
+  // with the mount point it describes.
+  env: { NEXT_PUBLIC_BASE_PATH: basePath },
 };
 export default nextConfig;
