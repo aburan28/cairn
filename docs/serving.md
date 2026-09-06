@@ -36,7 +36,8 @@ record instead.
 | `GET /chain` | the epoch chain: `links` and `head` are the chain's, `height` and `ledger_head` are the ledger's — the units a checkpoint signs, and not interchangeable with the first two |
 | `GET /chain.html` | the same, as a page with no build step |
 | `GET /health` | liveness, for whatever is watching the process |
-| `POST /submit` | queue a commitment or a claim (only with `--queue`) |
+| `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type` |
+| `POST /objective/prepare` | canonicalize a draft objective and return the exact bytes its funder must sign — see below |
 
 Everything except `/log` is a convenience. `/log` is the product.
 
@@ -70,6 +71,24 @@ The one thing the transport *cannot* establish is that the root key is the
 operator's. Get it from somewhere else — the project's repository, a signed
 release, a person. A key served alongside the thing it authenticates
 authenticates nothing.
+
+## `POST /objective/prepare`: the bytes a funder signs
+
+A funder authorizes an objective by signing `Objective::funding_signing_payload`
+in its canonical encoding, and canonical encoding is consensus-critical: it
+lives in `src/` and `reference/rust/`, which must agree, and nowhere else.
+A browser wallet therefore never *builds* the payload. The reader at `/ui/submit`
+posts the draft here, gets `payload_hex` back, and hands those bytes to the
+wallet unread. Any Ed25519 wallet works — a Solana key *is* a cairn funder id —
+and the signature it returns is checked by the same `verify_funding_signature`
+that checks one from `cairn identity`.
+
+The answer is a convenience and never a source of truth. Admission recomputes
+the payload from the record it is given, so a server that returned the wrong
+bytes yields a signature that fails at the door (`/submit` checks it eagerly)
+rather than one that passes. The route reads no log and writes nothing; it is
+a `POST` only because it has a body, which also means a browser preflights it
+and, like `/submit`, it is reachable from the node's own origin alone.
 
 ## Why `POST /submit` queues instead of appending
 

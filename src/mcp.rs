@@ -104,7 +104,7 @@ use crate::ledger::Ledger;
 use crate::node::{Node, RuleViolation};
 use crate::partition::{assignment_for, epoch_of, epoch_seconds};
 use crate::records::{commitment_hash, Claim, Commitment, Objective};
-use crate::schema::validate_claim;
+use crate::schema::{validate_claim, validate_objective};
 use crate::time::{parse_rfc3339, timestamp};
 use crate::verifiers::VerifierRegistry;
 
@@ -915,6 +915,7 @@ impl Server {
             "score_candidate" => self.score_candidate(&args),
             "frontier_status" => self.frontier_status(&args),
             "submit_claim" => self.submit_claim(&args),
+            "post_objective" => self.post_objective(&args),
             "pending_reveals" => self.pending_reveals(&args),
             "work_assignment" => self.work_assignment(&args),
             "audit" => self.audit(&args),
@@ -1062,6 +1063,31 @@ fn tool_definitions() -> Json {
                             "Claims this work actually built on. Copy both fields from the \
                              trusted citation object returned by frontier_status, get_claim, \
                              or your own prior submission; never manufacture one from prose."
+                    }
+                }
+            }
+        },
+        {
+            "name": "post_objective",
+            "description":
+                "Fund a question: append an objective to this log. The record is the same \
+                 shape `cairn post` reads -- goal, statement, verifier, reward, funder, \
+                 created_at, and optionally ratchet, deadline, artifact_schema. The verifier \
+                 is pinned by hash and cannot be changed afterwards: editing it posts a \
+                 different objective. When this server was started with --identity, the \
+                 funder becomes that key and the funding authorization is signed with it; \
+                 otherwise `funder` is a plain name, which a log that declares a supply will \
+                 refuse. Admission is decided against the whole log and can refuse -- an \
+                 unknown verifier kind, a duplicate, an unaffordable reward.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["objective"],
+                "properties": {
+                    "objective": {
+                        "type": "object",
+                        "description":
+                            "The objective record. `created_at` is stamped by this server if \
+                             absent."
                     }
                 }
             }
@@ -1914,6 +1940,55 @@ impl Server {
             .cloned()
             .ok_or_else(|| format!("no objective {id:?} in this log; try list_objectives"))
     }
+
+    /// Fund a question from an agent.
+    ///
+    /// The same path as `cairn post`, deliberately: the published schema gates
+    /// first, `Objective::from_value` decodes, the server's identity (if any)
+    /// signs the funding authorization, and `Node::post_objective` decides
+    /// admission against the whole log. Nothing here is a second copy of a
+    /// rule -- an agent that can post is an agent that can be refused for
+    /// exactly the reasons a human at the CLI would be.
+    ///
+    /// `created_at` is stamped here when absent, and not before the schema
+    /// gate: the schema requires it, so an agent that omits it would otherwise
+    /// be told its record is malformed for a field this server fills in.
+    fn post_objective(&mut self, args: &Json) -> Result<String, String> {
+        let mut value = value_arg(args, "objective")?;
+        let ts = timestamp();
+        if let Value::Object(map) = &mut value {
+            if !map.contains_key("created_at") {
+                map.insert("created_at".to_string(), Value::string(ts.clone()));
+            }
+        }
+        validate_objective(&value)
+            .map_err(|e| format!("objective does not satisfy spec/objective.schema.json: {e}"))?;
+        let objective =
+            Objective::from_value(&value).map_err(|e| format!("objective is malformed: {e}"))?;
+        // With a signing key the funder *is* the key, exactly as `submit_claim`
+        // treats `submitter`: a name that disagreed with the signature would be
+        // refused by the rules engine for reasons the agent cannot see.
+        let objective = match &self.identity {
+            Some(identity) => objective.funded_by(identity),
+            None => objective,
+        };
+        let id = self
+            .node
+            .write()
+            .post_objective(&objective, &ts)
+            .map_err(|violation| format!("post refused: {violation}. Nothing was recorded."))?;
+        // The statement is now prose this server has rendered back to an
+        // agent, and any claim id planted in it must be refusable as a
+        // citation -- the same rule `list_objectives` applies.
+        self.taint_from(&objective.statement);
+        Ok(format!(
+            "posted objective {id}\n  reward {}  verifier {}  funder {}\n  Score candidates \
+             against it with score_candidate; it is open to every submitter from now.",
+            objective.reward,
+            objective.verifier_kind().unwrap_or("?"),
+            objective.funder,
+        ))
+    }
 }
 
 // -- helpers ---------------------------------------------------------------
@@ -2124,6 +2199,129 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    // -- post_objective -----------------------------------------------------
+
+    /// An agent can fund a question, and the rest of the toolset sees it.
+    ///
+    /// The test that matters is the second half: the posted objective comes
+    /// back from `list_objectives` with the id `post_objective` reported, and
+    /// `score_candidate` dispatches to its verifier -- so the path is the same
+    /// log the other tools read, not a side channel.
+    #[test]
+    fn post_objective_appends_and_the_other_tools_see_it() {
+        let mut s = server();
+        let out = call(
+            &mut s,
+            "post_objective",
+            json!({
+                "objective": {
+                    "goal": "GOAL-agent-funded",
+                    "statement": "Find a long Collatz trajectory.",
+                    "verifier": {
+                        "kind": "certificate",
+                        "checker": "checkers/never.py",
+                        "checker_sha256": "00".repeat(32),
+                        "entrypoint": "check"
+                    },
+                    "reward": 1234,
+                    "funder": "agent-funder"
+                }
+            }),
+        );
+        assert!(out.starts_with("posted objective sha256:"), "{out}");
+        let id = out
+            .split_whitespace()
+            .nth(2)
+            .expect("an id after 'posted objective'");
+        assert!(out.contains("reward 1234"), "{out}");
+
+        let listed = call(&mut s, "list_objectives", json!({}));
+        assert!(
+            listed.contains(id),
+            "posted objective is not listed: {listed}"
+        );
+        assert!(listed.contains("reward: 1234"), "{listed}");
+
+        // Re-posting the identical record is a duplicate, not a second bounty.
+        let created_at = s.node.read().objectives()[id].created_at.clone();
+        let again = call(
+            &mut s,
+            "post_objective",
+            json!({
+                "objective": {
+                    "goal": "GOAL-agent-funded",
+                    "statement": "Find a long Collatz trajectory.",
+                    "verifier": {
+                        "kind": "certificate",
+                        "checker": "checkers/never.py",
+                        "checker_sha256": "00".repeat(32),
+                        "entrypoint": "check"
+                    },
+                    "reward": 1234,
+                    "funder": "agent-funder",
+                    "created_at": created_at
+                }
+            }),
+        );
+        assert!(again.starts_with("post refused:"), "{again}");
+        assert!(again.contains("Nothing was recorded"), "{again}");
+    }
+
+    /// A record the published schema rejects is refused *before* anything
+    /// is appended, with the schema's message rather than a decode error.
+    #[test]
+    fn post_objective_gates_on_the_published_schema() {
+        let mut s = server();
+        let before = s.node.read().ledger().len();
+        let out = call(
+            &mut s,
+            "post_objective",
+            json!({ "objective": { "goal": "no verifier, no reward" } }),
+        );
+        assert!(
+            out.contains("spec/objective.schema.json"),
+            "expected a schema refusal, got: {out}"
+        );
+        assert_eq!(
+            s.node.read().ledger().len(),
+            before,
+            "a refused post wrote a record"
+        );
+    }
+
+    /// With an identity, the funder is the key and the record is signed by it.
+    #[test]
+    fn post_objective_funds_as_the_server_identity_when_one_is_configured() {
+        let identity = Identity::from_secret_bytes([42u8; 32]);
+        let dir = std::env::temp_dir().join(format!("cairn-mcp-test-{}", fresh_nonce()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
+        let mut s = Server::new(Node::new(ledger, &dir), Some(identity.clone()));
+        let out = call(
+            &mut s,
+            "post_objective",
+            json!({
+                "objective": {
+                    "goal": "GOAL-signed",
+                    "statement": "A signed bounty.",
+                    "verifier": {
+                        "kind": "certificate",
+                        "checker": "checkers/never.py",
+                        "checker_sha256": "00".repeat(32),
+                        "entrypoint": "check"
+                    },
+                    "reward": 5,
+                    "funder": "ignored-in-favour-of-the-key"
+                }
+            }),
+        );
+        assert!(out.contains(&identity.submitter_id()), "{out}");
+        let objectives = s.node.read().objectives();
+        let posted = objectives.values().next().expect("one objective");
+        assert_eq!(posted.funder, identity.submitter_id());
+        assert!(posted.verify_funding_signature().is_ok());
     }
 
     // -- protocol -----------------------------------------------------------

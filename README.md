@@ -1,4 +1,4 @@
-# distributed-researcher
+# cairn
 
 **A research network where verified results are the unit of account.**
 
@@ -10,7 +10,7 @@ This repository contains **cairn**, the protocol implementation: a Rust
 library and CLI, a second and deliberately independent Rust implementation in
 `reference/`, and the conformance vectors that bind them to the same answers.
 
-**Site: <https://aburan28.github.io/distributed-researcher/>** — what it is, how
+**Site: <https://aburan28.github.io/cairn/>** — what it is, how
 it works, and the challenges a node is paying for. It is the same app a node
 serves at `/ui/` (see [ui/README.md](ui/README.md)), so nothing on it is
 simulated: the numbers come from a node when one answers and from
@@ -66,7 +66,7 @@ build, not a limitation to route around.
 ## Install
 
 ```sh
-curl -fsSL https://github.com/aburan28/distributed-researcher/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/aburan28/cairn/releases/latest/download/install.sh | sh
 ```
 
 Detects the platform, downloads the matching tarball, checks it against the
@@ -228,9 +228,13 @@ cairn --log cairn.jsonl --root . serve --listen 0.0.0.0:8080
 re-derives everything themselves with `cairn verify --from`, which is the
 whole point — they need not trust the server that served it.
 
-Add `--queue ./queue` to accept `POST /submit`. Submissions are *queued*, never
-appended: the operator's node admits them, re-checking every rule against the
-whole log. See [serving.md](docs/serving.md).
+Add `--queue ./queue` to accept `POST /submit` — objectives, commitments and
+claims alike. Submissions are *queued*, never appended: the operator's node
+admits them, re-checking every rule against the whole log. The embedded reader
+at `/ui/submit` posts an objective from a form and lets an Ed25519 browser
+wallet (Phantom, Solflare, Backpack) sign its funding authorization; the node
+supplies the canonical bytes at `POST /objective/prepare` so no encoding rule is
+re-implemented in a browser. See [serving.md](docs/serving.md).
 
 Which raises the question of who admits them — a `Ledger` has one writer, so a
 publisher on its own can only ever queue. The answer is usually not a second

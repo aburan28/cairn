@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install cairn from a published release.
 #
-#   curl -fsSL https://raw.githubusercontent.com/aburan28/distributed-researcher/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/aburan28/cairn/main/scripts/install.sh | sh
 #
 # What this does and does not prove
 # ---------------------------------
@@ -29,7 +29,7 @@
 
 set -eu
 
-REPO="aburan28/distributed-researcher"
+REPO="aburan28/cairn"
 # One binary: `cairn mcp`, `cairn p2p`, `cairn serve` and `cairn gen-bootstrap`
 # are subcommands of it, not executables of their own.
 BINS="cairn"
@@ -227,7 +227,7 @@ cat <<EOF
     Check it before you trust it. This re-derives a real settled log:
 
         git clone https://github.com/$REPO
-        cd distributed-researcher
+        cd cairn
         $BIN_DIR/cairn --log launch/cairn.jsonl --root . audit
 
 EOF

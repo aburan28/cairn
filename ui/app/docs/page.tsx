@@ -223,7 +223,7 @@ const GROUPS: Group[] = [
 
 export default function Page() {
   return (
-    <main>
+    <div className="prose-page">
       <h1>docs</h1>
       <p className="lede">
         The design notes live in the repository and this is an index of them —
@@ -261,6 +261,6 @@ export default function Page() {
         or read <a href={REPO}>the repository</a> itself; the module docs in{" "}
         <code>src/</code> carry the constraints that are load-bearing.
       </p>
-    </main>
+    </div>
   );
 }

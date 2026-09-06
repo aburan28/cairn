@@ -8,8 +8,9 @@ A small Next.js app that is two things at once, from one build:
   the same pages read the node that served them.
 
 Routes: `/` the landing page, `/how-it-works` the protocol, `/docs` an index of
-the design notes, `/challenge?id=…` one objective, `/chain` the epoch chain,
-`/objectives`, `/peers`.
+the design notes, `/challenge?id=…` one objective, `/frontier?id=…` its move
+history, `/chain` the epoch chain, `/objectives`, `/peers`, `/log`, and
+`/submit` — a form that posts an objective to the node that served the page.
 
 The first three are static prose and read no node; the rest are the reader. Both
 kinds ship in both mounts, which is the same "one app, not two" decision — an
@@ -22,6 +23,35 @@ markdown pipeline here would put a *copy* of every design note behind an
 official-looking URL, with no build step anywhere that could notice the copy
 going stale — and it would carry several hundred KB of prose into every node
 binary, since `build.rs` embeds this app whole.
+
+## Posting a challenge, and what a wallet is doing there
+
+`/submit` composes an objective and queues it at `POST /submit?kind=objective`.
+A cairn `funder` is an Ed25519 public key in hex, and `funding_signature` is
+that key's signature over the objective's canonical funding payload — so a
+Solana wallet's key already *is* a funder identity, and its `signMessage` is
+the real authorization the node verifies. `lib/wallet.ts` drives Phantom,
+Solflare and Backpack through their injected providers with no SDK, and
+refuses EVM wallets by name rather than offering one that cannot sign Ed25519.
+
+The page never computes the bytes it asks the wallet to sign. It posts the
+draft to `POST /objective/prepare`, which canonicalizes it in Rust and returns
+`payload_hex`; the browser relays that unread. Canonical encoding is a
+consensus rule with exactly two implementations that must agree, and a third
+in TypeScript is the drift AGENTS.md forbids. `lib/submit.ts` explains the rest,
+including why a 202 is a queue receipt and not an admission, and why the form
+only works from the node's own origin (writes are same-origin by design; the
+page says so instead of showing a network error).
+
+## Styling
+
+Tailwind v4 as a PostCSS plugin — build-time only, compiled into one static
+stylesheet, no runtime, no CDN, no webfont. Semantic colour tokens (`surface`,
+`edge`, `ink`, `accent`) are CSS variables that flip with the theme, so
+utilities need no `dark:` variants and the header toggle can switch the theme
+by attribute. The small component layer is in `components/`; it is hand-written
+because a headless library would add runtime JavaScript to every node binary
+for a button and a progress bar.
 
 ## Nothing on it is simulated
 

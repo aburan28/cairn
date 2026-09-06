@@ -277,6 +277,29 @@ pub fn drain_into(
     let mut out = Vec::new();
     for (path, kind, record) in spool.pending() {
         let outcome = match kind.as_str() {
+            // Deliberately first, and deliberately no different in kind from
+            // the two below it: a queued objective is a *proposal to spend*
+            // that `post_objective` re-decides from the whole log -- verifier
+            // registration, duplicate id, ratchet coherence, the funding
+            // signature, and whether the funder can afford it in the right
+            // tier. None of that is re-implemented here, which is the same
+            // reason `commit` and `reveal` are called rather than inlined.
+            "objective" => Objective::from_value(&record)
+                .map_err(|error| error.to_string())
+                .and_then(|objective| {
+                    if dry_run {
+                        return Ok(String::from("would admit objective"));
+                    }
+                    node.post_objective(&objective, ts)
+                        .map(|id| {
+                            format!(
+                                "objective {}  reward {}",
+                                crate::canonical::short(&id),
+                                objective.reward
+                            )
+                        })
+                        .map_err(|violation| violation.to_string())
+                }),
             "commitment" => Commitment::from_value(&record)
                 .map_err(|error| error.to_string())
                 .and_then(|commitment| {
@@ -577,6 +600,7 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         }
         ("GET", path) if path == "/ui" || path.starts_with("/ui/") => ui_asset(stream, path),
         ("POST", "/submit") => submit(stream, &mut reader, serving, &request),
+        ("POST", "/objective/prepare") => prepare_objective(stream, &mut reader, &request),
         ("GET", _) | ("HEAD", _) => respond(
             stream,
             404,
@@ -1256,25 +1280,9 @@ fn submit(
             "this node is read-only; it accepts no submissions",
         );
     };
-    if request.content_type.as_deref() != Some("application/json") {
-        return json_error(stream, 415, "POST /submit requires application/json");
-    }
-    if request.length == 0 {
-        return json_error(stream, 400, "empty body");
-    }
-    // Bounded by the declared length, which was checked against
-    // MAX_BODY_BYTES before we got here.
-    let mut body = Vec::new();
-    if reader.take(request.length).read_to_end(&mut body).is_err() {
-        return json_error(stream, 400, "could not read the body");
-    }
-    let text = match String::from_utf8(body) {
-        Ok(text) => text,
-        Err(_) => return json_error(stream, 400, "body is not UTF-8"),
-    };
-    let value = match Value::from_json(&text) {
+    let value = match read_json_body(reader, request, "/submit") {
         Ok(value) => value,
-        Err(error) => return json_error(stream, 400, &format!("body is not usable JSON: {error}")),
+        Err((status, message)) => return json_error(stream, status, &message),
     };
 
     // The kind comes from the query string or the record's own `type`, and is
@@ -1295,8 +1303,27 @@ fn submit(
         "commitment" => Commitment::from_value(&value)
             .map(|_| ())
             .map_err(|e| e.to_string()),
+        // An objective is a *proposal to spend*, so the one thing worth
+        // checking here is the thing a submitter cannot fix later: the funding
+        // authorization. `post_objective` checks it again at drain time
+        // against the whole log, and that check is the one that decides -- but
+        // a wallet that signed the wrong bytes should hear about it while the
+        // wallet is still open, not after the operator's next drain.
+        //
+        // A nickname funder carries no signature and none is demanded, exactly
+        // as `verify_funding_signature` has always behaved. What that buys on
+        // a log with no declared supply is a bounty anyone may post; on one
+        // with a supply, `post_objective` refuses the nickname outright.
+        "objective" => Objective::from_value(&value)
+            .map_err(|e| e.to_string())
+            .and_then(|objective| {
+                objective
+                    .verify_funding_signature()
+                    .map_err(|e| e.to_string())
+            }),
         other => Err(format!(
-            "unknown record kind {other:?}; this endpoint accepts \"commitment\" and \"claim\""
+            "unknown record kind {other:?}; this endpoint accepts \"objective\", \
+             \"commitment\" and \"claim\""
         )),
     };
     if let Err(why) = decoded {
@@ -1347,6 +1374,125 @@ fn submit(
             &format!("cannot queue the submission: {error}"),
         ),
     }
+}
+
+/// Read a JSON request body, or the status and message to answer with.
+///
+/// Shared by the two POST routes so they cannot disagree about the content
+/// type they demand or the length they trust. The length was checked against
+/// `MAX_BODY_BYTES` before the request reached a handler, and `take` bounds
+/// the read to it -- nothing here allocates on a declared size.
+fn read_json_body(
+    reader: &mut BufReader<TcpStream>,
+    request: &Request,
+    route: &str,
+) -> Result<Value, (u16, String)> {
+    if request.content_type.as_deref() != Some("application/json") {
+        return Err((415, format!("POST {route} requires application/json")));
+    }
+    if request.length == 0 {
+        return Err((400, "empty body".to_string()));
+    }
+    let mut body = Vec::new();
+    if reader.take(request.length).read_to_end(&mut body).is_err() {
+        return Err((400, "could not read the body".to_string()));
+    }
+    let text = String::from_utf8(body).map_err(|_| (400, "body is not UTF-8".to_string()))?;
+    Value::from_json(&text).map_err(|error| (400, format!("body is not usable JSON: {error}")))
+}
+
+/// Canonicalize a draft objective and hand back the exact bytes its funder
+/// must sign.
+///
+/// # Why the server does this and the client does not
+///
+/// A funder authorizes an objective by signing
+/// [`Objective::funding_signing_payload`] in its canonical encoding. Canonical
+/// encoding is consensus-critical: two implementations that disagree about an
+/// object's bytes disagree about its identity. This crate and
+/// `reference/rust/` are the two that exist and must agree, and AGENTS.md is
+/// explicit that a third -- in JavaScript, in a browser, unversioned and
+/// impossible to run the conformance vectors against -- is not a thing to add.
+///
+/// So a browser wallet does not *build* the payload. It sends the draft here,
+/// gets bytes back, and asks the wallet to sign those. The bytes are a
+/// convenience and never a source of truth: `post_objective` recomputes them
+/// from the submitted record when it verifies the signature, so a server that
+/// returned the wrong payload produces a signature that fails admission rather
+/// than one that sneaks through. Nothing downstream trusts this answer.
+///
+/// Read-only, and it takes no `Serving`: it touches no log, no spool and no
+/// key. It is a POST because it has a body, not because it writes -- which
+/// also means a browser preflights it, so like `/submit` it is reachable only
+/// from the node's own origin. That is the right posture for both: a page that
+/// could canonicalize against any node it can reach is a page that could ask a
+/// visitor's wallet to sign bytes chosen by somebody else.
+fn prepare_objective(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    request: &Request,
+) -> io::Result<()> {
+    let value = match read_json_body(reader, request, "/objective/prepare") {
+        Ok(value) => value,
+        Err((status, message)) => return json_error(stream, status, &message),
+    };
+
+    // Decoding is the validation. `from_value` ends in `validate`, so a draft
+    // with an empty goal or a reward that is not an integer is refused here
+    // with the same message it would earn at drain time.
+    let draft = match Objective::from_value(&value) {
+        Ok(objective) => objective,
+        Err(error) => return json_error(stream, 400, &format!("objective is malformed: {error}")),
+    };
+    // Any signature on the draft is dropped before the payload is derived.
+    // Signing over a payload that included a previous signature would be a
+    // record whose authorization covered itself, and a client that round-trips
+    // a signed objective through here should get the same bytes it did the
+    // first time rather than different ones.
+    let unsigned = Objective {
+        funding_signature: None,
+        ..draft
+    };
+    let payload = unsigned.funding_signing_payload();
+    let bytes = payload.canonical_bytes();
+
+    json(
+        stream,
+        200,
+        &Value::object([
+            // Hex rather than base64: every other byte string this project
+            // puts on the wire is hex, and a client that has to guess which
+            // encoding a field uses will eventually guess wrong.
+            ("payload_hex", Value::string(crate::hex::encode(&bytes))),
+            // The same bytes as text, so a funder can *read* what they are
+            // about to authorize instead of taking a hex blob on faith. A
+            // wallet shows the message it signs; this is what it will show.
+            (
+                "payload",
+                Value::string(String::from_utf8_lossy(&bytes).into_owned()),
+            ),
+            ("digest", Value::string(digest_bytes(&bytes))),
+            // What the objective's id *will* be once this exact signature is
+            // attached. Predicted, not promised: the id covers the signature,
+            // so it is only this if the funder signs these bytes with the key
+            // in `funder`.
+            ("funder", Value::string(unsigned.funder.clone())),
+            (
+                "signature_required",
+                Value::Bool(crate::records::signed_submitter(&unsigned.funder).is_some()),
+            ),
+            (
+                "note",
+                Value::string(
+                    "Sign `payload_hex` with the key named in `funder` and post the \
+                     objective to /submit?kind=objective with the signature in \
+                     `funding_signature`. These bytes are a convenience: the node \
+                     recomputes them from the record it is given, so a wrong payload \
+                     fails admission rather than passing it.",
+                ),
+            ),
+        ]),
+    )
 }
 
 // -- responses --------------------------------------------------------------
@@ -1443,6 +1589,9 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        415 => "Unsupported Media Type",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "Error",
     };
@@ -1450,7 +1599,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     // *read* this. Everything served here is public by construction -- the log,
     // the objectives, the signed checkpoint -- so there is nothing for a
     // same-origin policy to protect, and the site at
-    // aburan28.github.io/distributed-researcher reads a live node through it.
+    // aburan28.github.io/cairn reads a live node through it.
     //
     // It does **not** open cross-origin writes, and that is worth stating
     // because the reason is indirect. `POST /submit` takes `application/json`,
@@ -1648,6 +1797,247 @@ mod tests {
             "the chain head is a link hash and the ledger head is an entry hash; \
              if these ever coincide the fixture proves nothing"
         );
+    }
+
+    /// A draft objective, as a browser form would build one.
+    fn draft(funder: &str) -> Value {
+        Value::object([
+            ("goal", Value::string("GOAL-wallet-funded")),
+            (
+                "statement",
+                Value::string("Find an integer whose Collatz trajectory is long."),
+            ),
+            (
+                "verifier",
+                Value::object([
+                    ("kind", Value::string("certificate")),
+                    (
+                        "checker",
+                        Value::string("examples/collatz/checkers/long_trajectory.py"),
+                    ),
+                    ("entrypoint", Value::string("check")),
+                    ("checker_sha256", Value::string("00".repeat(32))),
+                ]),
+            ),
+            ("reward", Value::Int(1000)),
+            ("funder", Value::string(funder)),
+            ("created_at", Value::string("2026-01-01T00:00:00+00:00")),
+        ])
+    }
+
+    /// Ask a server one request and get `(status line, body)` back.
+    fn ask_json(addr: std::net::SocketAddr, route: &str, body: &str) -> (String, Value) {
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        socket
+            .write_all(
+                format!(
+                    "POST {route} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .as_bytes(),
+            )
+            .expect("write");
+        let mut response = String::new();
+        let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+        let (head, body) = response.split_once("\r\n\r\n").expect("a body");
+        let status = head.lines().next().unwrap_or_default().to_string();
+        (status, Value::from_json(body).unwrap_or(Value::Null))
+    }
+
+    /// The whole wallet path, end to end: the server hands over the bytes to
+    /// sign, an Ed25519 key signs *those bytes and nothing else*, and the
+    /// resulting objective is admitted.
+    ///
+    /// This is the test that makes `/objective/prepare` safe to have. The
+    /// endpoint exists so a browser never re-implements canonical encoding --
+    /// but it is only worth anything if what it returns is what
+    /// `verify_funding_signature` will check. Signing the returned bytes
+    /// literally, with no re-derivation on the signing side, is what pins the
+    /// two together: if `prepare` ever returned a payload that was merely
+    /// *similar*, admission below would refuse it.
+    #[test]
+    fn a_wallet_signs_the_bytes_prepare_returned_and_the_objective_is_admitted() {
+        use crate::crypto::identity::Identity;
+
+        let dir = TempDir::new("prepare");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let queue = dir.path.join("queue");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, ".").accepting_into(&queue);
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let wallet = Identity::from_secret_bytes([7u8; 32]);
+        let funder = wallet.submitter_id();
+        let draft = draft(&funder);
+
+        let (status, prepared) = ask_json(addr, "/objective/prepare", &draft.canonical_string());
+        assert!(status.starts_with("HTTP/1.1 200"), "{status} {prepared:?}");
+        assert_eq!(
+            prepared.get("signature_required"),
+            Some(&Value::Bool(true)),
+            "a key-shaped funder must be told a signature is required"
+        );
+
+        // The wallet's whole contribution: sign these bytes. It parses nothing
+        // and canonicalizes nothing, which is the property being tested.
+        let bytes = crate::hex::decode(
+            prepared
+                .get("payload_hex")
+                .and_then(Value::as_str)
+                .expect("payload_hex"),
+        )
+        .expect("payload_hex is hex");
+        let signature = wallet.sign_bytes(&bytes).to_hex();
+
+        let mut signed = draft.clone();
+        if let Value::Object(map) = &mut signed {
+            map.insert(
+                "funding_signature".to_string(),
+                Value::string(signature.clone()),
+            );
+        }
+
+        let (status, queued) = ask_json(addr, "/submit?kind=objective", &signed.canonical_string());
+        assert!(status.starts_with("HTTP/1.1 202"), "{status} {queued:?}");
+        assert_eq!(
+            queued.get("kind").and_then(Value::as_str),
+            Some("objective")
+        );
+
+        // Queued is not admitted. The drain is what decides, against the log.
+        let mut node = Node::new(Ledger::open(&log).expect("ledger"), ".");
+        let spool = Spool::at(&queue);
+        let admissions = drain_into(&mut node, &spool, "2026-01-01T00:00:10+00:00", false);
+        assert_eq!(admissions.len(), 1);
+        let (_, admission) = &admissions[0];
+        assert!(admission.admitted, "{}", admission.note);
+
+        let posted = Objective::from_value(&signed).expect("decodes");
+        assert!(
+            node.objectives().contains_key(&posted.id()),
+            "the objective the browser built is the one in the log"
+        );
+    }
+
+    /// A signature over anything but the prepared bytes is refused, and refused
+    /// at the door rather than after the operator's next drain.
+    ///
+    /// The failure this guards against is quiet: a wallet that signs a
+    /// *similar* payload -- the record without its domain tag, say, or with
+    /// keys in insertion order rather than sorted -- produces a well-formed
+    /// 128-hex signature that only fails when someone tries to verify it. A
+    /// 202 there would tell a funder their bounty was on its way when it was
+    /// already dead.
+    #[test]
+    fn an_objective_signed_over_the_wrong_bytes_is_refused_at_submission() {
+        use crate::crypto::identity::Identity;
+
+        let dir = TempDir::new("prepare-wrong");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, ".").accepting_into(dir.path.join("queue"));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let wallet = Identity::from_secret_bytes([9u8; 32]);
+        let mut signed = draft(&wallet.submitter_id());
+        if let Value::Object(map) = &mut signed {
+            // The record itself, without the `cairn/objective-funding/v1`
+            // domain wrapper: the single most likely thing a client
+            // re-implementing the payload would produce.
+            let naive = wallet.sign_value(&draft(&wallet.submitter_id())).to_hex();
+            map.insert("funding_signature".to_string(), Value::string(naive));
+        }
+        let (status, refused) =
+            ask_json(addr, "/submit?kind=objective", &signed.canonical_string());
+        assert!(status.starts_with("HTTP/1.1 400"), "{status} {refused:?}");
+
+        // And a key-shaped funder with no signature at all is refused too,
+        // rather than being treated as the permissive nickname case.
+        let (status, unsigned) = ask_json(
+            addr,
+            "/submit?kind=objective",
+            &draft(&wallet.submitter_id()).canonical_string(),
+        );
+        assert!(status.starts_with("HTTP/1.1 400"), "{status} {unsigned:?}");
+    }
+
+    /// `prepare` refuses a draft it cannot decode, with the decoder's own
+    /// message, rather than handing back bytes for a record that can never be
+    /// admitted.
+    #[test]
+    fn prepare_refuses_a_draft_that_could_never_be_admitted() {
+        let dir = TempDir::new("prepare-bad");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, ".");
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let mut broken = draft("alice");
+        if let Value::Object(map) = &mut broken {
+            map.remove("goal");
+        }
+        let (status, body) = ask_json(addr, "/objective/prepare", &broken.canonical_string());
+        assert!(status.starts_with("HTTP/1.1 400"), "{status} {body:?}");
+
+        // A nickname funder is told no signature is required, which is what
+        // lets a supplyless demo log be driven from the page without a wallet.
+        let (status, prepared) = ask_json(
+            addr,
+            "/objective/prepare",
+            &draft("alice").canonical_string(),
+        );
+        assert!(status.starts_with("HTTP/1.1 200"), "{status} {prepared:?}");
+        assert_eq!(
+            prepared.get("signature_required"),
+            Some(&Value::Bool(false))
+        );
+    }
+
+    /// Re-preparing an already-signed objective returns the same bytes.
+    ///
+    /// A funder who signs, walks away, comes back and re-signs must be signing
+    /// the same thing. If `prepare` folded an existing `funding_signature`
+    /// into the payload, the second signature would cover the first and no two
+    /// attempts would ever agree.
+    #[test]
+    fn prepare_ignores_a_signature_already_on_the_draft() {
+        let dir = TempDir::new("prepare-resign");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, ".");
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let funder = crate::crypto::identity::Identity::from_secret_bytes([3u8; 32]).submitter_id();
+        let clean = draft(&funder);
+        let mut carrying = clean.clone();
+        if let Value::Object(map) = &mut carrying {
+            map.insert(
+                "funding_signature".to_string(),
+                Value::string("ab".repeat(64)),
+            );
+        }
+
+        let (_, first) = ask_json(addr, "/objective/prepare", &clean.canonical_string());
+        let (_, again) = ask_json(addr, "/objective/prepare", &carrying.canonical_string());
+        assert_eq!(first.get("payload_hex"), again.get("payload_hex"));
     }
 
     #[test]
