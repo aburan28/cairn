@@ -1442,9 +1442,7 @@ fn prepare_objective(
     // with the same message it would earn at drain time.
     let draft = match Objective::from_value(&value) {
         Ok(objective) => objective,
-        Err(error) => {
-            return json_error(stream, 400, &format!("objective is malformed: {error}"))
-        }
+        Err(error) => return json_error(stream, 400, &format!("objective is malformed: {error}")),
     };
     // Any signature on the draft is dropped before the payload is derived.
     // Signing over a payload that included a previous signature would be a
@@ -1907,7 +1905,10 @@ mod tests {
 
         let (status, queued) = ask_json(addr, "/submit?kind=objective", &signed.canonical_string());
         assert!(status.starts_with("HTTP/1.1 202"), "{status} {queued:?}");
-        assert_eq!(queued.get("kind").and_then(Value::as_str), Some("objective"));
+        assert_eq!(
+            queued.get("kind").and_then(Value::as_str),
+            Some("objective")
+        );
 
         // Queued is not admitted. The drain is what decides, against the log.
         let mut node = Node::new(Ledger::open(&log).expect("ledger"), ".");
@@ -1956,7 +1957,8 @@ mod tests {
             let naive = wallet.sign_value(&draft(&wallet.submitter_id())).to_hex();
             map.insert("funding_signature".to_string(), Value::string(naive));
         }
-        let (status, refused) = ask_json(addr, "/submit?kind=objective", &signed.canonical_string());
+        let (status, refused) =
+            ask_json(addr, "/submit?kind=objective", &signed.canonical_string());
         assert!(status.starts_with("HTTP/1.1 400"), "{status} {refused:?}");
 
         // And a key-shaped funder with no signature at all is refused too,
@@ -1993,7 +1995,11 @@ mod tests {
 
         // A nickname funder is told no signature is required, which is what
         // lets a supplyless demo log be driven from the page without a wallet.
-        let (status, prepared) = ask_json(addr, "/objective/prepare", &draft("alice").canonical_string());
+        let (status, prepared) = ask_json(
+            addr,
+            "/objective/prepare",
+            &draft("alice").canonical_string(),
+        );
         assert!(status.starts_with("HTTP/1.1 200"), "{status} {prepared:?}");
         assert_eq!(
             prepared.get("signature_required"),
