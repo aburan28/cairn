@@ -104,7 +104,54 @@ def solver(name):
 
 
 # --------------------------------------------------------------------------
-# journal, state, status
+# journal, state, status, progress
+
+PROGRESS_PATH = os.path.join(STATE, "progress.json")
+
+
+def run_engine(argv, objective, engine, timeout):
+    """Run a solver, mirroring its stderr into progress.json as it goes so a
+    dashboard can show the walk instead of a spinner.  Returns (stdout,
+    last stderr line); raises on a non-zero exit."""
+    started = time.time()
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    last = ""
+
+    def publish(done=False):
+        doc = {"objective": objective, "engine": engine, "started": started,
+               "elapsed": round(time.time() - started, 1), "line": last.strip(), "done": done}
+        tmp = PROGRESS_PATH + ".tmp"
+        json.dump(doc, open(tmp, "w"))
+        os.replace(tmp, PROGRESS_PATH)
+
+    publish()
+    # The rho engine redraws one line with \r; split on either terminator.
+    buf = ""
+    tick = time.time()
+    while True:
+        ch = proc.stderr.read(1)
+        if not ch:
+            break
+        if ch in "\r\n":
+            if buf.strip():
+                last = buf
+            buf = ""
+            if time.time() - tick > 0.5:
+                publish()
+                tick = time.time()
+        else:
+            buf += ch
+        if time.time() - started > timeout:
+            proc.kill()
+            raise TimeoutError(f"{engine} exceeded {timeout:.0f}s")
+    out = proc.stdout.read()
+    proc.wait()
+    if buf.strip():
+        last = buf
+    publish(done=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{engine} failed: {last.strip()[-200:]}")
+    return out, last.strip()
 
 def note(event, **kw):
     rec = dict(t=time.strftime("%Y-%m-%dT%H:%M:%S"), event=event, **kw)
@@ -360,16 +407,16 @@ class ECDLPPrimeField:
              expected_steps=f"2^{math.log2(steps):.1f}", est_seconds=round(secs, 1),
              threads=THREADS)
         t0 = time.time()
-        r = subprocess.run(
+        out, last = run_engine(
             [solver("ecdlp_rho"), str(inst["p"]), str(inst["a"]), str(n), str(inst["gx"]),
              str(inst["gy"]), str(qx), str(qy), str(dbits), str(THREADS), "512",
              str(int(time.time()))],
-            capture_output=True, text=True, timeout=BUDGET_SECONDS * 3)
-        if r.returncode != 0 or not r.stdout.strip():
-            raise RuntimeError("rho engine failed: " + r.stderr.strip()[-200:])
-        k = int(r.stdout.strip())
+            obj["id"], "ecdlp_rho", BUDGET_SECONDS * 3)
+        if not out.strip():
+            raise RuntimeError("rho engine printed no answer: " + last[-200:])
+        k = int(out.strip())
         note("rho-solved", objective=obj["id"][:16], seconds=round(time.time() - t0, 1),
-             detail=r.stderr.strip().splitlines()[-1][:80] if r.stderr.strip() else "")
+             detail=last[:80])
         return {"k": format(k, "064x") if inst["hex_k"] else k}
 
 
@@ -417,14 +464,14 @@ class HashCollision:
         note("birthday-start", objective=obj["id"][:16], bits=bits, steps=inst["steps"],
              expected=f"2^{bits // 2}", est_seconds=round(secs, 1))
         t0 = time.time()
-        r = subprocess.run([solver("md5_birthday"), inst["prefix"], str(inst["steps"]),
-                            str(inst["digest_bytes"]), str(int(time.time()))],
-                           capture_output=True, text=True, timeout=BUDGET_SECONDS * 3)
-        lines = r.stdout.split()
-        if r.returncode != 0 or len(lines) != 2:
-            raise RuntimeError("birthday engine failed: " + r.stderr.strip()[-200:])
+        out, last = run_engine([solver("md5_birthday"), inst["prefix"], str(inst["steps"]),
+                                str(inst["digest_bytes"]), str(int(time.time()))],
+                               obj["id"], "md5_birthday", BUDGET_SECONDS * 3)
+        lines = out.split()
+        if len(lines) != 2:
+            raise RuntimeError("birthday engine printed no pair: " + last[-200:])
         note("birthday-solved", objective=obj["id"][:16], seconds=round(time.time() - t0, 1),
-             detail=r.stderr.strip().splitlines()[-1][:80])
+             detail=last[:80])
         return {"m": lines[0], "m_prime": lines[1]}
 
 
@@ -461,7 +508,7 @@ def frontier_citation(node, oid):
     return []
 
 
-def submit(node, obj, artifact, st, submitter):
+def submit(node, obj, artifact, st, submitter, strategy=None, seconds=None):
     """commit, wait for the epoch to turn, reveal: two calls to submit_claim
     with the same artifact.  A commitment nobody opens is never paid."""
     oid = obj["id"]
@@ -476,7 +523,7 @@ def submit(node, obj, artifact, st, submitter):
         note("commit-unexpected", objective=oid[:16], out=text.strip()[:220])
         return False
     st["pending"][oid] = {"artifact": artifact, "cites": cites, "epoch": int(m.group(1)),
-                          "goal": obj.get("goal")}
+                          "goal": obj.get("goal"), "strategy": strategy, "seconds": seconds}
     save(st)
     note("committed", objective=oid[:16], epoch=int(m.group(1)))
     return reveal(node, obj, st, submitter)
@@ -511,7 +558,9 @@ def reveal(node, obj, st, submitter):
         st["pending"].pop(oid, None)
         st["done"][oid] = {"claim": claim.group(1), "goal": obj.get("goal"),
                            "verdict": verdict.group(1) if verdict else "?",
-                           "reward": 0, "settled": False}
+                           "reward": 0, "settled": False, "settled_at": None,
+                           "artifact": p.get("artifact"), "strategy": p.get("strategy"),
+                           "seconds": p.get("seconds")}
         save(st)
         note("revealed", objective=oid[:16], claim=claim.group(1)[:20],
              verdict=st["done"][oid]["verdict"])
@@ -534,7 +583,8 @@ def settle(node, st, submitter):
             text, err = node.call("get_claim", claim_id=d["claim"])
             m = re.search(r"^settled: yes, reward (\d+)", text, re.M)
             if m:
-                d.update(settled=True, reward=int(m.group(1)))
+                d.update(settled=True, reward=int(m.group(1)),
+                         settled_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
                 note("settled", objective=oid[:16], reward=int(m.group(1)))
                 break
             time.sleep(EPOCH_SECONDS + 1)
@@ -597,6 +647,7 @@ def sweep(node, st, submitter):
         for strat in STRATEGIES:
             if not strat.applies(src, path):
                 continue
+            t_solve = time.time()
             try:
                 artifact = strat.solve(obj, src, path)
             except OutOfReach as e:
@@ -608,14 +659,15 @@ def sweep(node, st, submitter):
             except Exception as e:
                 note("solve-failed", objective=oid[:16], err=str(e)[:200])
                 break
-            json.dump(artifact, open(os.path.join(STATE, f"artifact-{oid[7:19]}.json"), "w"),
-                      indent=2)
+            artifact_path = os.path.join(STATE, f"artifact-{oid[7:19]}.json")
+            json.dump(artifact, open(artifact_path, "w"), indent=2)
             status, detail = score(node, oid, artifact)
             note("scored", objective=oid[:16], goal=obj.get("goal"), verdict=status)
             if status != "accept":                # never submit what did not score
                 note("not-submitting", objective=oid[:16], detail=detail[:160])
                 break
-            submit(node, obj, artifact, st, submitter)
+            submit(node, obj, artifact, st, submitter, strategy=strat.name,
+                   seconds=round(time.time() - t_solve, 1))
             publish_status(node, st, objectives, "sweeping", submitter)
             break
         else:
