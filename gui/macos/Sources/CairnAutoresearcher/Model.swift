@@ -119,6 +119,35 @@ struct AnyCodable: Decodable {
     init(from decoder: Decoder) throws { _ = try? decoder.singleValueContainer() }
 }
 
+/// One row of `autoresearcher.py --plan`: what a sweep would decide for an
+/// objective file at the current budget, computed without any compute.
+struct PlanRow: Decodable, Equatable {
+    var path: String
+    var goal: String?
+    var strategy: String?
+    var decision: String      // solve | decline | none | error
+    var reason: String?
+    var est_seconds: Double?
+}
+
+/// One ledger entry as `/log` serves it.
+struct LedgerEntry: Identifiable, Equatable {
+    var id: Int { seq }
+    var seq: Int
+    var kind: String
+    var hash: String
+    var createdAt: String
+    var summary: String
+}
+
+struct PeerRow: Identifiable, Equatable {
+    var id: String { identity + addr }
+    var identity: String
+    var addr: String
+    var transport: String
+    var createdAt: String
+}
+
 /// Setup facts the Overview reports before anything can run.
 struct SetupCheck: Identifiable {
     var id: String { title }
@@ -136,7 +165,7 @@ final class ResearcherModel: ObservableObject {
     @Published var httpAddress: String { didSet { defaults.set(httpAddress, forKey: "http") } }
     @Published var p2pAddress: String { didSet { defaults.set(p2pAddress, forKey: "p2p") } }
     @Published var epochSeconds: Int { didSet { defaults.set(epochSeconds, forKey: "epoch") } }
-    @Published var budgetMinutes: Int { didSet { defaults.set(budgetMinutes, forKey: "budget") } }
+    @Published var budgetMinutes: Int { didSet { defaults.set(budgetMinutes, forKey: "budget"); replan() } }
     @Published var intervalSeconds: Int { didSet { defaults.set(intervalSeconds, forKey: "interval") } }
     @Published var notifyOnSettle: Bool { didSet { defaults.set(notifyOnSettle, forKey: "notify") } }
     @Published var selectedObjectives: Set<String> {
@@ -165,6 +194,22 @@ final class ResearcherModel: ObservableObject {
     // The checkout.
     @Published private(set) var catalog: [CatalogItem] = []
     @Published private(set) var checks: [SetupCheck] = []
+    @Published private(set) var plan: [String: PlanRow] = [:]     // by catalog path
+    @Published private(set) var planning = false
+
+    // More of the node.
+    @Published private(set) var ledger: [LedgerEntry] = []
+    @Published private(set) var peers: [PeerRow] = []
+    @Published private(set) var auditOutput: String?
+    @Published private(set) var auditing = false
+
+    // Navigation the panes share: a journal row can open its objective.
+    @Published var pane: Pane? = .overview
+    @Published var selectedObjective: String?
+    @Published var journalFilter: String = ""
+
+    // Wall clock, for the epoch display.
+    @Published private(set) var now = Date()
 
     private let defaults = UserDefaults.standard
     private var process: Process?
@@ -300,8 +345,32 @@ final class ResearcherModel: ObservableObject {
         let base = root + "/examples"
         Task.detached(priority: .utility) {
             let items = ResearcherModel.scanCatalog(base: base)
-            await MainActor.run { self.catalog = items }
+            await MainActor.run { self.catalog = items; self.replan() }
         }
+    }
+
+    /// Ask the researcher what it would decide for every catalog item, at
+    /// the current budget. Its own arithmetic, so the Catalog cannot drift
+    /// from what a sweep does.
+    func replan() {
+        guard hasCheckout, !catalog.isEmpty, !planning else { return }
+        planning = true
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["python3", scriptDir + "/autoresearcher.py", "--plan"] + catalog.map { root + "/" + $0.path }
+        p.environment = environment()
+        p.currentDirectoryURL = URL(fileURLWithPath: root)
+        let pipe = Pipe()
+        p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
+        p.terminationHandler = { [weak self] _ in
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let rows = (try? JSONDecoder().decode([PlanRow].self, from: data)) ?? []
+            Task { @MainActor in
+                self?.plan = Dictionary(uniqueKeysWithValues: rows.map { ($0.path, $0) })
+                self?.planning = false
+            }
+        }
+        do { try p.run() } catch { planning = false }
     }
 
     nonisolated private static func scanCatalog(base: String) -> [CatalogItem] {
@@ -364,7 +433,7 @@ final class ResearcherModel: ObservableObject {
         if isRunning { stop() } else { start(once: once) }
     }
 
-    func start(once: Bool) {
+    func start(once: Bool, only: [String] = []) {
         guard !isRunning, !isBuilding else { return }
         guard ready else {
             lastError = checks.first { !$0.ok }.map { "\($0.title): \($0.detail)" } ?? "not ready"
@@ -379,7 +448,9 @@ final class ResearcherModel: ObservableObject {
         console = ""
         var args = [scriptDir + "/autoresearcher.py", "--post", stateDir + "/objectives.txt"]
         if once { args.append("--once") }
-        launch(executable: "/usr/bin/env", arguments: ["python3"] + args, label: once ? "one sweep" : "researcher") { [weak self] in
+        if !only.isEmpty { args += ["--only"] + only }
+        let label = only.isEmpty ? (once ? "one sweep" : "researcher") : "solve \(only.count == 1 ? only[0].prefix(16) : "\(only.count) objectives")"
+        launch(executable: "/usr/bin/env", arguments: ["python3"] + args, label: label) { [weak self] in
             self?.isRunning = false
             self?.progress = nil
         }
@@ -496,6 +567,81 @@ final class ResearcherModel: ObservableObject {
         infoMessage = keepIdentity ? "State cleared; the identity was kept." : "State cleared, identity included."
     }
 
+    /// One sweep restricted to one objective: forget its outcome first so
+    /// the sweep looks at it, then run with --only.
+    func solveOne(_ row: ObjectiveRow) {
+        guard !isRunning else { lastError = "Stop the researcher first."; return }
+        if row.status != "open" { retry(row); infoMessage = nil }
+        start(once: true, only: [row.id])
+    }
+
+    /// Post catalog items to the researcher's log now, with the CLI. Only
+    /// while nothing runs: a ledger has one writer, and the node is it.
+    func postNow(_ items: [CatalogItem]) {
+        guard !isRunning, !isBuilding else { lastError = "Stop the researcher first; the node holds the log's lock."; return }
+        guard hasBinary else { lastError = "bin/cairn is missing."; return }
+        try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
+        console = ""
+        var argv = ["sh", "-c"]
+        let posts = items.map { "\"\(cairnBinary)\" --log \"\(logPath)\" --root \"\(root)\" post \"\(root)/\($0.path)\"" }
+        argv.append(posts.joined(separator: "; "))
+        isBuilding = true
+        launch(executable: "/usr/bin/env", arguments: argv, label: "post \(items.count) objective\(items.count == 1 ? "" : "s")") { [weak self] in
+            self?.isBuilding = false
+            self?.pollBalances()
+            self?.infoMessage = "Posted; the rows appear once a node serves the log."
+        }
+    }
+
+    /// `cairn audit` re-derives the whole log. Read-only, safe beside the node.
+    func audit() {
+        guard hasBinary, !auditing else { return }
+        auditing = true
+        auditOutput = nil
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: cairnBinary)
+        p.arguments = ["--log", logPath, "--root", root, "audit"]
+        p.environment = environment()
+        let pipe = Pipe()
+        p.standardOutput = pipe; p.standardError = pipe
+        p.terminationHandler = { [weak self] proc in
+            let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            Task { @MainActor in
+                self?.auditOutput = text.trimmingCharacters(in: .whitespacesAndNewlines) + (proc.terminationStatus == 0 ? "" : "\n[exit \(proc.terminationStatus)]")
+                self?.auditing = false
+            }
+        }
+        do { try p.run() } catch { auditOutput = error.localizedDescription; auditing = false }
+    }
+
+    var identityPublic: String? {
+        guard let data = FileManager.default.contents(atPath: stateDir + "/researcher.json"),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return obj["public"] as? String
+    }
+
+    func revealIdentityInFinder() {
+        NSWorkspace.shared.selectFile(stateDir + "/researcher.json", inFileViewerRootedAtPath: stateDir)
+    }
+
+    /// From a journal row to the objective it names.
+    func open(objectivePrefix: String) {
+        guard let row = rows.first(where: { $0.id.hasPrefix(objectivePrefix) }) else { return }
+        selectedObjective = row.id
+        pane = .objectives
+    }
+
+    func showJournal(for row: ObjectiveRow) {
+        journalFilter = String(row.id.prefix(16))
+        pane = .journal
+    }
+
+    // Epochs are derived from the clock, never stored: epoch = unix / length.
+    var epochLength: Int { status?.epoch_seconds ?? epochSeconds }
+    var currentEpoch: Int { Int(now.timeIntervalSince1970) / max(1, epochLength) }
+    var secondsToNextEpoch: Int { epochLength - Int(now.timeIntervalSince1970) % max(1, epochLength) }
+    var pendingReveals: [ObjectiveRow] { rows.filter { $0.status == "committed" } }
+
     func revealStateInFinder() {
         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: stateDir)
     }
@@ -524,6 +670,7 @@ final class ResearcherModel: ObservableObject {
 
     private func tick() {
         ticks += 1
+        now = Date()
         readStatus()
         readProgress()
         readJournal()
@@ -531,6 +678,14 @@ final class ResearcherModel: ObservableObject {
         if ticks % 5 == 1 { runChecks() }
         if nodeReachable && ticks % 3 == 0 { pollNode() }
         if ticks % 10 == 2 { pollBalances() }
+        if ticks % 5 == 3 { updateDockBadge() }
+    }
+
+    private func updateDockBadge() {
+        let label = isRunning ? (progress != nil ? "…" : (open.isEmpty ? "" : "\(open.count)")) : ""
+        if NSApp.dockTile.badgeLabel != (label.isEmpty ? nil : label) {
+            NSApp.dockTile.badgeLabel = label.isEmpty ? nil : label
+        }
     }
 
     private func readStatus() {
@@ -592,7 +747,7 @@ final class ResearcherModel: ObservableObject {
                 guard let self else { return }
                 if self.nodeReachable != ok {
                     self.nodeReachable = ok
-                    if ok { self.pollNode() } else { self.nodeObjectives = []; self.chain = nil; self.peerCount = nil; self.logKinds = [:] }
+                    if ok { self.pollNode() } else { self.nodeObjectives = []; self.chain = nil; self.peerCount = nil; self.logKinds = [:]; self.peers = []; self.ledger = [] }
                 }
             }
         }.resume()
@@ -608,7 +763,6 @@ final class ResearcherModel: ObservableObject {
     }
 
     private struct ObjectivesDoc: Decodable { var objectives: [NodeObjective] }
-    private struct PeersDoc: Decodable { var peers: [[String: AnyCodable]] }
     private struct FrontierDoc: Decodable { var frontier: FrontierInfo? }
 
     private func pollNode() {
@@ -621,24 +775,44 @@ final class ResearcherModel: ObservableObject {
             }
         }
         fetch("/chain", as: ChainInfo.self) { [weak self] c in self?.chain = c }
-        fetch("/peers", as: PeersDoc.self) { [weak self] p in self?.peerCount = p.peers.count }
+        fetch("/peers", as: PeersRawDoc.self) { [weak self] p in
+            let rows = p.peers.map { PeerRow(identity: $0.identity ?? "?", addr: $0.addr ?? "", transport: $0.transport ?? "", createdAt: $0.created_at ?? "") }
+            self?.peerCount = rows.count
+            if rows != self?.peers { self?.peers = rows }
+        }
         var request = URLRequest(url: URL(string: "http://\(httpAddress)/log")!)
         request.timeoutInterval = 5
         URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             guard let data, let text = String(data: data, encoding: .utf8) else { return }
             var kinds: [String: Int] = [:]
-            for line in text.split(separator: "\n") {
-                for marker in ["\"kind\":\"", "\"kind\": \""] {
-                    if let r = line.range(of: marker) {
-                        let rest = line[r.upperBound...]
-                        if let end = rest.firstIndex(of: "\"") { kinds[String(rest[..<end]), default: 0] += 1 }
-                        break
-                    }
+            var entries: [LedgerEntry] = []
+            for (i, line) in text.split(separator: "\n").enumerated() {
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+                let kind = obj["kind"] as? String ?? "?"
+                kinds[kind, default: 0] += 1
+                let payload = obj["payload"] as? [String: Any] ?? [:]
+                let summary: String
+                switch kind {
+                case "objective": summary = (payload["goal"] as? String ?? "") + "  reward \(payload["reward"] ?? "")"
+                case "commitment": summary = "by \((payload["submitter"] as? String ?? "").prefix(12))  for \((payload["objective_id"] as? String ?? "").prefix(20))"
+                case "claim": summary = "by \((payload["submitter"] as? String ?? "").prefix(12))  for \((payload["objective_id"] as? String ?? "").prefix(20))  cites \((payload["cites"] as? [Any])?.count ?? 0)"
+                case "verdict": summary = "\(payload["status"] ?? "")  claim \((payload["claim_id"] as? String ?? "").prefix(20))"
+                case "settlement": summary = "epoch \(payload["epoch"] ?? "")  paid \(payload["reward"] ?? payload["amount"] ?? "")"
+                default: summary = payload.keys.sorted().prefix(4).joined(separator: ", ")
                 }
+                entries.append(LedgerEntry(seq: obj["seq"] as? Int ?? i + 1, kind: kind,
+                                           hash: obj["hash"] as? String ?? "", createdAt: payload["created_at"] as? String ?? "",
+                                           summary: summary))
             }
-            Task { @MainActor in if kinds != self?.logKinds { self?.logKinds = kinds } }
+            Task { @MainActor in
+                if kinds != self?.logKinds { self?.logKinds = kinds }
+                if entries != self?.ledger { self?.ledger = entries }
+            }
         }.resume()
     }
+
+    private struct PeerRaw: Decodable { var identity: String?; var addr: String?; var transport: String?; var created_at: String? }
+    private struct PeersRawDoc: Decodable { var peers: [PeerRaw] }
 
     /// `cairn balances` is read-only and takes no lock, so it is safe to run
     /// beside the node. Names come back truncated to eight characters.

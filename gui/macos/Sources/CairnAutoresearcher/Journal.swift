@@ -3,21 +3,24 @@ import AppKit
 
 struct JournalView: View {
     @EnvironmentObject var model: ResearcherModel
-    @State private var search = ""
     @State private var onlyImportant = false
     @State private var follow = true
 
     var entries: [JournalEntry] {
-        model.journal.filter { e in
+        let q = model.journalFilter
+        return model.journal.filter { e in
             (!onlyImportant || e.kind == .good || e.kind == .bad)
-            && (search.isEmpty || e.event.localizedCaseInsensitiveContains(search) || e.detail.localizedCaseInsensitiveContains(search))
+            && (q.isEmpty || e.event.localizedCaseInsensitiveContains(q) || e.detail.localizedCaseInsensitiveContains(q))
         }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                TextField("Filter events", text: $search).textFieldStyle(.roundedBorder).frame(width: 240)
+                TextField("Filter events, ids, goals", text: $model.journalFilter).textFieldStyle(.roundedBorder).frame(width: 260)
+                if !model.journalFilter.isEmpty {
+                    Button { model.journalFilter = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary)
+                }
                 Toggle("Outcomes only", isOn: $onlyImportant).toggleStyle(.checkbox)
                     .help("Settlements, reveals, solves, and anything that failed")
                 Toggle("Follow", isOn: $follow).toggleStyle(.checkbox)
@@ -33,9 +36,24 @@ struct JournalView: View {
                         Text(e.time).font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 60, alignment: .leading)
                         Text(e.event).font(.callout.monospaced().bold()).foregroundStyle(color(e.kind)).frame(width: 160, alignment: .leading)
                         Text(e.detail).font(.callout.monospaced()).textSelection(.enabled)
+                        Spacer(minLength: 0)
+                        if let oid = e.fields["objective"], model.rows.contains(where: { $0.id.hasPrefix(oid) }) {
+                            Button { model.open(objectivePrefix: oid) } label: { Image(systemName: "arrow.right.circle") }
+                                .buttonStyle(.plain).foregroundStyle(.blue).help("Open this objective")
+                        }
                     }
                     .listRowSeparator(.hidden)
                     .id(e.id)
+                    .contextMenu {
+                        if let oid = e.fields["objective"] {
+                            Button("Show only this objective") { model.journalFilter = oid }
+                            Button("Open objective") { model.open(objectivePrefix: oid) }
+                        }
+                        Button("Copy line") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString("[\(e.time)] \(e.event)  \(e.detail)", forType: .string)
+                        }
+                    }
                 }
                 .onChange(of: model.journal.last?.id) { id in
                     if follow, let id { proxy.scrollTo(id, anchor: .bottom) }
@@ -45,6 +63,8 @@ struct JournalView: View {
             .overlay {
                 if model.journal.isEmpty {
                     Text("The journal is empty. Every event the researcher records appears here as it happens.").foregroundStyle(.secondary)
+                } else if entries.isEmpty {
+                    Text("Nothing matches the filter.").foregroundStyle(.secondary)
                 }
             }
         }
@@ -75,7 +95,7 @@ struct ConsoleView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("stdout and stderr of the researcher, or of make ui-build").font(.caption).foregroundStyle(.secondary)
+                Text("stdout and stderr of the researcher, a post, or make ui-build").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Toggle("Follow", isOn: $follow).toggleStyle(.checkbox)
                 Button("Copy") {
