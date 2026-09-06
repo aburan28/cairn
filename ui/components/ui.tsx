@@ -122,6 +122,12 @@ export function Stat({
  * Truncation without a way back to the whole string is the single most
  * annoying thing a page like this can do — the reason to look at an id is
  * almost always to compare it with one somewhere else.
+ *
+ * `null` is a value with nothing to compare: a fresh node's checkpoint signs
+ * an empty log, so its root and head are null, and that rendered as a crash
+ * (`value.replace` on `null`) on every new node's landing page. An absent
+ * value is an em-dash with no copy button, not an empty string that looks
+ * like a hash got lost.
  */
 export function Hash({
   value,
@@ -129,11 +135,19 @@ export function Hash({
   chars = 10,
   label,
 }: {
-  value: string;
+  value: string | null | undefined;
   href?: string;
   chars?: number;
   label?: string;
 }) {
+  if (value == null) {
+    return (
+      <span className="inline-flex max-w-full items-center gap-1">
+        {label && <span className="text-[11px] text-ink-3">{label}</span>}
+        <span className="mono text-[12px] text-ink-3">—</span>
+      </span>
+    );
+  }
   const bare = value.replace(/^sha256:/, "");
   const shown = bare.length > chars * 2 ? `${bare.slice(0, chars)}…${bare.slice(-4)}` : bare;
   const body = (

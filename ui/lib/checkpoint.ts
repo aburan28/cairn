@@ -25,12 +25,17 @@
 import { ShapeMismatch, expectFields } from "./shape";
 
 export type Checkpoint = {
-  /** Ledger head the signature covers. */
-  head: string;
+  /** Ledger head the signature covers. `null` on a log with no entries yet:
+   *  the daemon signs the empty ledger at startup, so a fresh node serves a
+   *  signed checkpoint with nothing in it rather than no checkpoint at all.
+   *  That is still `signed` below -- the key and signature are real -- and
+   *  the page renders the root as absent rather than crashing on it. */
+  head: string | null;
   /** Entry count at signing time. */
   height: number;
-  /** Merkle root over the whole log at that height. */
-  root: string;
+  /** Merkle root over the whole log at that height. `null` for the same
+   *  empty-log reason as `head`. */
+  root: string | null;
   /** When the operator signed — self-reported, like every timestamp here. */
   issued_at: string;
 };
