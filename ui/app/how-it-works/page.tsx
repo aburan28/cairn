@@ -25,7 +25,7 @@ export const metadata: Metadata = {
  */
 export default function Page() {
   return (
-    <main>
+    <div className="prose-page">
       <h1>how it works</h1>
       <p className="lede">
         <b>Pay for verified outputs. Never pay for claimed effort.</b> Almost
@@ -299,7 +299,7 @@ log verified: chain intact, every settled claim re-verified
         <Link href="/objectives">objectives</Link> a node is currently paying
         for.
       </p>
-    </main>
+    </div>
   );
 }
 

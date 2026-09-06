@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
-import Link from "next/link";
-import { REPO, repoLink } from "@/lib/site";
+import { Shell } from "@/components/Shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -30,53 +29,36 @@ export const metadata: Metadata = {
   },
 };
 
+/**
+ * Apply the stored theme before the first paint.
+ *
+ * A static export has no server to read a cookie, so without this the page
+ * renders in the *system* theme and then swaps once React hydrates — a white
+ * flash on every navigation for anyone who chose dark on a light machine.
+ *
+ * Inline, and it must stay inline: a separate file would be a second request,
+ * and this app is built on the promise that it makes none. It is also the
+ * whole of the script — no analytics, no font loader, nothing else has any
+ * business running before paint.
+ *
+ * Wrapped in try/catch because `localStorage` *throws* on access in a browser
+ * set to block site data, rather than returning null, and an exception here
+ * would take the rest of the document with it.
+ */
+const THEME_SCRIPT = `try{var t=localStorage.getItem("cairn-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}`;
+
 export default function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body>
-        {/* Plain links rather than an active-state nav: knowing which page you
-            are on is what the <h1> under it is for.
-
-            The same nav serves the public site and the reader a node embeds at
-            /ui/, which is why "how it works" sits beside "chain". One app, so
-            an operator gets the explanation too, rather than a second site
-            drifting from this one. */}
-        <nav className="nav">
-          <Link href="/">cairn</Link>
-          <Link href="/how-it-works">how it works</Link>
-          <Link href="/objectives">objectives</Link>
-          <Link href="/chain">chain</Link>
-          <Link href="/peers">peers</Link>
-          <Link href="/log">log</Link>
-          <Link href="/docs">docs</Link>
-        </nav>
-        {children}
-        <footer className="foot">
-          <div className="footLinks">
-            <a href={REPO}>source</a>
-            <a href={`${REPO}/releases/latest`}>releases</a>
-            <Link href="/docs">docs</Link>
-            <a href={repoLink("docs/threat-model.md")}>threat model</a>
-            <a href={repoLink("LICENSE")}>Apache-2.0</a>
-          </div>
-          <div className="dim">
-            Stage 0 — one operator, no token, no consensus. What it does provide
-            is the property that matters: anyone can independently re-derive
-            every result the network has settled, from nothing but a copy of the
-            log.
-          </div>
-          {/* Worth saying on the page and not only in ui/README.md: an operator
-              reading their own node through an SSH tunnel can confirm it by
-              watching the network tab stay empty. */}
-          <div className="dim">
-            This page loads no font, script, or image from anywhere but where it
-            was served. The only host it talks to is the node you point it at.
-          </div>
-        </footer>
+        <Shell>{children}</Shell>
       </body>
     </html>
   );

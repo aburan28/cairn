@@ -1,686 +1,493 @@
-/* System fonts only, no webfont. A node operator often reads this over an SSH
-   tunnel on a box with no route to the internet, and a page that fetched a font
-   would render wrong exactly then. Same reason the server-rendered
-   `/chain.html` is self-contained. */
-:root {
-  color-scheme: light dark;
-  --fg: #14161a;
-  --dim: #6b7178;
-  --faint: #9aa0a8;
-  --bg: #fff;
-  --panel: #f7f7f8;
-  --panel-strong: #f0f1f2;
-  --line: #e0e1e3;
-  --line-strong: #c7c9cc;
-  --accent: #067a4d;
-  --accent-bg: rgba(6, 122, 77, 0.08);
-  --bad: #b03030;
-  --bad-bg: rgba(176, 48, 48, 0.07);
-  --shadow: 0 1px 2px rgba(20, 22, 26, 0.04);
-  --radius: 7px;
-  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
-}
+@import "tailwindcss";
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --fg: #e7e8ea;
-    --dim: #9aa0a8;
-    --faint: #686e76;
-    --bg: #0d0e10;
-    --panel: #17181b;
-    --panel-strong: #1e2023;
-    --line: #292b2f;
-    --line-strong: #3a3d42;
-    --accent: #3ecf8e;
-    --accent-bg: rgba(62, 207, 142, 0.09);
-    --bad: #f0776f;
-    --bad-bg: rgba(240, 119, 111, 0.09);
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-  }
-}
+/* The design system for the cairn site and the reader a node embeds at /ui/.
+   One stylesheet for both, because they are one app.
 
-* {
-  box-sizing: border-box;
-}
+   # Two constraints that shape everything below
 
-::selection {
-  background: var(--accent-bg);
-  color: var(--fg);
-}
+   **No external request of any kind.** An operator reads this over an SSH
+   tunnel on a box with no route out, and the page must render correctly
+   exactly then. So: system fonts only, no webfont, no CDN, no icon font, no
+   remote stylesheet. Tailwind is a build-time dependency that compiles to the
+   one static file this rule allows; its play-CDN build would break the rule and
+   must never appear here.
 
-html {
-  -webkit-text-size-adjust: 100%;
-}
+   **Every byte ships inside every node binary.** `build.rs` embeds `ui/out`,
+   so the stylesheet is not free the way a stylesheet on a web server is. That
+   is the argument for a token layer plus a small component layer rather than a
+   component library: the utilities that go unused are compiled away, and what
+   is left is the part the pages actually reference.
 
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font:
-    14px/1.6 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Consolas,
+   # Why the theme is variables rather than `dark:` variants
+
+   Colour is defined once as a semantic token — `surface`, `edge`, `ink`,
+   `accent` — and the token's *value* flips. Utilities like `bg-surface` then
+   work in both themes with no variant, which is what keeps a page's markup
+   about structure instead of about palette. It also means the theme can be
+   flipped by an attribute at runtime, which is what the toggle in the header
+   does, without a second set of classes to keep in step. */
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  /* System stacks. The sans face carries prose and chrome; the mono face
+     carries every hash, id, amount and command — anything a reader might
+     compare character by character, which on this site is most of the data. */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
     monospace;
-  font-feature-settings: "liga" 0;
-  -webkit-font-smoothing: antialiased;
+
+  /* Semantic colours. Values live in `:root` below and flip with the theme;
+     these entries are what turn them into `bg-*`, `text-*` and `border-*`
+     utilities. */
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-edge: var(--edge);
+  --color-edge-strong: var(--edge-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+
+  --radius-card: 0.75rem;
+
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-main {
-  max-width: 68rem;
-  margin: 0 auto;
-  padding: 2.25rem 1.25rem 4rem;
+:root {
+  color-scheme: light;
+
+  --canvas: #fbfbfa;
+  --surface: #ffffff;
+  --surface-2: #f5f5f4;
+  --surface-3: #ebebe9;
+  --edge: #e4e4e1;
+  --edge-strong: #cfcfcb;
+  --ink: #16181c;
+  --ink-2: #5c6169;
+  --ink-3: #8b9098;
+
+  --accent: #0a7d52;
+  --accent-ink: #076441;
+  --accent-soft: #0a7d520f;
+  --accent-line: #0a7d5233;
+
+  --warn: #9a6206;
+  --warn-soft: #9a62060f;
+  --bad: #b3261e;
+  --bad-soft: #b3261e0f;
+  --info: #1c5fb8;
+  --info-soft: #1c5fb80f;
+
+  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
-h1 {
-  font-size: 1.25rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 0 0 0.4rem;
-}
+/* The default when nobody has chosen: follow the system. Guarded on
+   `:not([data-theme="light"])` so an explicit light choice still wins on a
+   machine set to dark. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
 
-p.lede {
-  color: var(--dim);
-  margin: 0.35rem 0 1.5rem;
-  max-width: 52rem;
-}
+    --canvas: #0b0c0e;
+    --surface: #141619;
+    --surface-2: #1b1e22;
+    --surface-3: #24272c;
+    --edge: #282b30;
+    --edge-strong: #3b3f46;
+    --ink: #e8eaed;
+    --ink-2: #a0a6ae;
+    --ink-3: #6e747c;
 
-code {
-  overflow-wrap: anywhere;
-  font-size: 0.95em;
-}
+    --accent: #35d08a;
+    --accent-ink: #6ee7b0;
+    --accent-soft: #35d08a14;
+    --accent-line: #35d08a3d;
 
-a {
-  color: var(--accent);
-  text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
-  text-underline-offset: 0.2em;
-  transition: text-decoration-color 0.12s var(--ease);
-}
-
-a:hover {
-  text-decoration-color: currentColor;
-}
-
-a:focus-visible,
-button:focus-visible,
-input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 2px;
-}
-
-.panel {
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--accent);
-  border-radius: 0 var(--radius) var(--radius) 0;
-  background: var(--panel);
-  padding: 0.85rem 1rem;
-  margin-bottom: 1rem;
-  overflow-wrap: anywhere;
-}
-
-.panel.bad {
-  border-left-color: var(--bad);
-  background: var(--bad-bg);
-}
-
-.panel b {
-  display: block;
-  font-weight: 600;
-  font-size: 0.85em;
-  color: var(--dim);
-  margin-bottom: 0.3rem;
-}
-
-.panel.bad b {
-  color: var(--bad);
-}
-
-.row {
-  display: flex;
-  gap: 0.6rem;
-  align-items: baseline;
-  flex-wrap: wrap;
-  margin-bottom: 1.25rem;
-}
-
-input,
-.input {
-  flex: 1 1 22rem;
-  min-width: 0;
-  padding: 0.5rem 0.7rem;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  font: inherit;
-  transition:
-    border-color 0.12s var(--ease),
-    box-shadow 0.12s var(--ease);
-}
-
-input:hover,
-.input:hover {
-  border-color: var(--line-strong);
-}
-
-input:focus-visible,
-.input:focus-visible {
-  border-color: var(--accent);
-}
-
-button,
-.button {
-  padding: 0.5rem 1rem;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  font: inherit;
-  cursor: pointer;
-  transition:
-    border-color 0.12s var(--ease),
-    color 0.12s var(--ease),
-    background 0.12s var(--ease);
-}
-
-button:hover:not(:disabled),
-.button:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-bg);
-}
-
-button:active:not(:disabled),
-.button:active:not(:disabled) {
-  transform: translateY(0.5px);
-}
-
-button:disabled,
-.button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-/* The chain itself. A vertical spine with a node per link, so "each link
-   commits to the one before it" is visible rather than only stated. */
-ol.chain {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-li.link {
-  position: relative;
-  padding: 0 0 1.5rem 1.75rem;
-  border-left: 2px solid var(--line);
-}
-
-li.link:last-child {
-  border-left-color: transparent;
-  padding-bottom: 0;
-}
-
-li.link::before {
-  content: "";
-  position: absolute;
-  left: -0.4rem;
-  top: 0.35rem;
-  width: 0.7rem;
-  height: 0.7rem;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--bg);
-}
-
-li.link.genesis::before {
-  background: var(--bg);
-  border: 2px solid var(--accent);
-}
-
-.epoch {
-  font-weight: 700;
-}
-
-.meta {
-  color: var(--dim);
-  font-size: 0.9em;
-  margin-top: 0.25rem;
-  line-height: 1.6;
-}
-
-.claims {
-  margin-top: 0.45rem;
-  padding-left: 0;
-  list-style: none;
-}
-
-.claims li {
-  font-size: 0.9em;
-  padding: 0.1rem 0;
-}
-
-.dim {
-  color: var(--dim);
-}
-
-.accent {
-  color: var(--accent);
-}
-
-.bad {
-  color: var(--bad);
-}
-
-.empty {
-  color: var(--dim);
-  padding: 2rem 0;
-}
-
-/* -- nav ------------------------------------------------------------------ */
-
-.nav {
-  max-width: 68rem;
-  margin: 0 auto;
-  padding: 1.1rem 1.25rem 0;
-  display: flex;
-  align-items: center;
-  gap: 1.4rem;
-}
-
-.nav a {
-  color: var(--dim);
-  text-decoration: none;
-}
-
-.nav a:hover {
-  color: var(--fg);
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
-}
-
-/* The wordmark reads as the app's identity, not another nav item, so it gets
-   the full-strength color the rest of the row deliberately doesn't. */
-.nav a:first-child {
-  color: var(--fg);
-  font-weight: 700;
-}
-
-/* -- objectives ----------------------------------------------------------- */
-
-h2 {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--dim);
-  margin: 2rem 0 0.85rem;
-  text-transform: lowercase;
-  letter-spacing: 0.01em;
-}
-
-.cards {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 1rem;
-}
-
-.card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel);
-  padding: 1.05rem 1.15rem;
-  box-shadow: var(--shadow);
-  transition:
-    border-color 0.15s var(--ease),
-    box-shadow 0.15s var(--ease);
-}
-
-li.card:hover {
-  border-color: var(--line-strong);
-}
-
-.card-head {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-  margin-bottom: 0.65rem;
-}
-
-.goal {
-  font-weight: 600;
-}
-
-.tag {
-  font-size: 0.75rem;
-  padding: 0.15rem 0.55rem;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--dim);
-  background: var(--bg);
-  display: inline-block;
-  line-height: 1.4;
-}
-
-button.tag {
-  font: inherit;
-  cursor: pointer;
-}
-
-.tag.open {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-bg);
-}
-
-.tag.settled {
-  color: var(--dim);
-}
-
-/* Objective statements are attacker-supplied text (src/bin/mcp.rs says so at
-   length). Indented and quoted so a sentence inside one cannot pass itself off
-   as a field this page rendered. */
-.statement {
-  margin: 0 0 0.95rem;
-  padding-left: 0.85rem;
-  border-left: 2px solid var(--line);
-  color: var(--dim);
-  font-style: normal;
-}
-
-.facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1.5rem;
-  margin: 0 0 0.95rem;
-}
-
-.facts div {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-
-.facts dt {
-  font-size: 0.72rem;
-  color: var(--faint);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.facts dd {
-  margin: 0;
-}
-
-.frontier {
-  border-top: 1px solid var(--line);
-  padding-top: 0.8rem;
-  display: grid;
-  gap: 0.45rem;
-}
-
-/* A pool, not a progress bar: it drains as the frontier is paid out, so a full
-   bar means nothing has been claimed yet rather than that the work is done. */
-.bar {
-  height: 6px;
-  background: var(--line);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.bar span {
-  display: block;
-  height: 100%;
-  background: var(--accent);
-  border-radius: inherit;
-  transition: width 0.3s var(--ease);
-}
-
-@media (min-width: 60rem) {
-  .cards {
-    grid-template-columns: 1fr 1fr;
-    /* Cards size to their own content. Without this a grid row stretches every
-       card to the tallest in it, and one long statement leaves its neighbour as
-       a tall empty box -- which reads as missing data rather than as a short
-       objective. */
-    align-items: start;
+    --warn: #e0a83a;
+    --warn-soft: #e0a83a14;
+    --bad: #f2827a;
+    --bad-soft: #f2827a14;
+    --info: #6aa8f5;
+    --info-soft: #6aa8f514;
   }
 }
 
-/* -- objective detail ------------------------------------------------------ */
+/* And the explicit choice, in both directions. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
 
-.ratchet {
-  display: grid;
-  gap: 0.4rem;
-  margin-bottom: 0.65rem;
+  --canvas: #0b0c0e;
+  --surface: #141619;
+  --surface-2: #1b1e22;
+  --surface-3: #24272c;
+  --edge: #282b30;
+  --edge-strong: #3b3f46;
+  --ink: #e8eaed;
+  --ink-2: #a0a6ae;
+  --ink-3: #6e747c;
+
+  --accent: #35d08a;
+  --accent-ink: #6ee7b0;
+  --accent-soft: #35d08a14;
+  --accent-line: #35d08a3d;
+
+  --warn: #e0a83a;
+  --warn-soft: #e0a83a14;
+  --bad: #f2827a;
+  --bad-soft: #f2827a14;
+  --info: #6aa8f5;
+  --info-soft: #6aa8f514;
 }
 
-.verifier {
-  margin-top: 0.65rem;
-  padding-top: 0.65rem;
-  border-top: 1px solid var(--line);
-  word-break: break-all;
-}
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
 
-/* --- the site: landing and challenge pages ------------------------------- */
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
 
-h2 {
-  font-size: 1.02rem;
-  margin: 2.25rem 0 0.6rem;
-  padding-top: 1.1rem;
-  border-top: 1px solid var(--line);
-}
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 
-pre {
-  margin: 0.5rem 0;
-  padding: 0.65rem 0.8rem;
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  /* A curl one-liner is longer than any sensible column. Wrapping beats a
-     horizontal scrollbar on the one element a visitor is meant to copy. */
-  white-space: pre-wrap;
-  word-break: break-all;
-  overflow-x: auto;
-}
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
 
-.row.stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  margin: 1.4rem 0;
-}
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--ink);
+  }
 
-.stat {
-  flex: 1 1 7rem;
-  padding: 0.7rem 0.85rem;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
+  /* One focus treatment everywhere. Keyboard navigation is not a nicety on a
+     page whose job is comparing two long hex strings. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
 
-.statValue {
-  font-size: 1.2rem;
-  font-weight: 600;
-  color: var(--accent);
-  font-variant-numeric: tabular-nums;
-}
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
 
-.statLabel {
-  color: var(--dim);
-  font-size: 0.85rem;
-  margin-top: 0.1rem;
-}
-
-/* Where a stat's number came from: a node, or the bundled log. Smaller than
-   the label and allowed to wrap, because an origin is a URL. */
-.statFrom {
-  font-size: 0.72rem;
-  margin-top: 0.25rem;
-  overflow-wrap: anywhere;
-}
-
-ul.cards {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.card a {
-  color: inherit;
-}
-
-/* A ratchet is a distance travelled between two known ends, so it gets a bar.
-   Display only -- the payout is integer arithmetic in frontier.rs. */
-.bar {
-  display: inline-block;
-  vertical-align: middle;
-  width: 6rem;
-  height: 0.45rem;
-  margin-left: 0.5rem;
-  background: var(--line);
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-/* --- prose pages: how it works, docs --------------------------------------- */
-
-/* Three roles, three cards, side by side where there is room. `.cards` is two
-   columns because an objective card is dense; these are short, so a third fits
-   and the reader sees all three roles without scrolling past one. */
-@media (min-width: 60rem) {
-  .cards.ways {
-    grid-template-columns: repeat(3, 1fr);
-    /* Stretched, unlike the objective cards above -- these three are written
-       to a similar length and a ragged bottom edge on a row of three reads as
-       a layout fault rather than as three different amounts of content. */
-    align-items: stretch;
+  /* Scrollbars that do not repaint the page in a different design language. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--edge-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--edge-strong);
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
   }
 }
 
-.ways .card b {
-  display: block;
-  margin-bottom: 0.4rem;
+@layer components {
+  /* -- surfaces ---------------------------------------------------------- */
+
+  .card {
+    @apply rounded-[var(--radius-card)] border border-edge bg-surface;
+  }
+
+  .card-pad {
+    @apply p-4 sm:p-5;
+  }
+
+  /* A titled aside. The left rule is the accent, and turns red on `.is-bad`,
+     which is how a broken chain link and a failed fetch look different at a
+     glance rather than only in their words. */
+  .note {
+    @apply rounded-r-[var(--radius-card)] border border-l-[3px] border-edge
+           border-l-accent bg-surface px-4 py-3;
+  }
+
+  .note-bad {
+    @apply border-l-bad bg-bad-soft;
+  }
+
+  .note-warn {
+    @apply border-l-warn bg-warn-soft;
+  }
+
+  .note-title {
+    @apply mb-1 text-[11px] font-semibold tracking-[0.08em] text-ink-2 uppercase;
+  }
+
+  /* -- controls ---------------------------------------------------------- */
+
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2
+           rounded-lg border border-edge bg-surface px-3 py-2 text-[13px]
+           font-medium whitespace-nowrap text-ink transition-all
+           duration-150 ease-[var(--ease-out-quint)]
+           hover:border-edge-strong hover:bg-surface-2
+           disabled:pointer-events-none disabled:opacity-45;
+  }
+
+  .btn-primary {
+    @apply border-transparent bg-accent text-canvas
+           hover:bg-accent-ink hover:brightness-105;
+  }
+
+  .btn-ghost {
+    @apply border-transparent bg-transparent hover:bg-surface-2;
+  }
+
+  .btn-sm {
+    @apply px-2 py-1 text-[12px];
+  }
+
+  .field {
+    @apply w-full rounded-lg border border-edge bg-surface px-3 py-2 text-[13px]
+           text-ink transition-all duration-150 ease-[var(--ease-out-quint)]
+           placeholder:text-ink-3 hover:border-edge-strong
+           focus:border-accent focus:shadow-[var(--ring)] focus:outline-none;
+  }
+
+  .field-mono {
+    @apply font-mono text-[12.5px];
+  }
+
+  .label {
+    @apply mb-1.5 block text-[12px] font-medium text-ink-2;
+  }
+
+  .hint {
+    @apply mt-1.5 text-[12px] leading-relaxed text-ink-3;
+  }
+
+  /* -- data -------------------------------------------------------------- */
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-md border border-edge
+           bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-ink-2;
+  }
+
+  .badge-accent {
+    @apply border-accent-line bg-accent-soft text-accent;
+  }
+
+  .badge-warn {
+    @apply border-warn/30 bg-warn-soft text-warn;
+  }
+
+  .badge-bad {
+    @apply border-bad/30 bg-bad-soft text-bad;
+  }
+
+  .badge-info {
+    @apply border-info/30 bg-info-soft text-info;
+  }
+
+  /* Every hash, id, key and amount on the site. Tabular figures so two
+     numbers in a column line up digit for digit, and `anywhere` wrapping so a
+     64-character key never widens the page it is in. */
+  .mono {
+    @apply font-mono [font-variant-numeric:tabular-nums] [overflow-wrap:anywhere];
+  }
+
+  .kbd {
+    @apply inline-flex h-5 min-w-5 items-center justify-center rounded border
+           border-edge bg-surface-2 px-1 font-mono text-[10.5px] text-ink-2;
+  }
+
+  .prose-block {
+    @apply max-w-[68ch] leading-[1.7] text-ink-2;
+  }
+
+  .prose-block a {
+    @apply text-accent underline decoration-accent-line underline-offset-[3px]
+           transition-colors hover:decoration-current;
+  }
+
+  /* A shell for code and canonical payloads: scrolls inside itself so a long
+     line never makes the page scroll sideways. */
+  .code {
+    @apply overflow-x-auto rounded-lg border border-edge bg-surface-2 p-3
+           font-mono text-[12px] leading-relaxed text-ink;
+  }
+
+  .skeleton {
+    @apply animate-pulse rounded bg-surface-3;
+  }
+
+  .divide-edge-y > * + * {
+    @apply border-t border-edge;
+  }
 }
 
-/* `pre` breaks anywhere by default, which is right for the curl one-liner on
-   the landing page and wrong here: these are two-word commands, and mid-word
-   breaks turned `certificate` into `certi ficate`. Wrap at the spaces. */
-.ways .card pre {
-  font-size: 0.85em;
-  word-break: normal;
-  overflow-wrap: break-word;
+@layer utilities {
+  /* Content-visibility for long lists (the log page renders thousands of
+     rows). Cheap, and invisible when it is not needed. */
+  .contain-rows {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 3rem;
+  }
 }
 
-/* A table wide enough to need a scrollbar gets its own, rather than making the
-   page scroll sideways -- on a phone that is the difference between a readable
-   column and a page that drifts every time you swipe. */
-.tableWrap {
-  overflow-x: auto;
-  margin: 0.5rem 0 1rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
+/* -- long-form prose pages --------------------------------------------------
 
-table.grid {
-  border-collapse: collapse;
-  min-width: 34rem;
-  width: 100%;
-}
+   `/how-it-works` and `/docs` are essays, not readouts. They carry their
+   structure in semantic class names rather than in utility strings, and that
+   is the right shape for them: a paragraph of argument does not become clearer
+   for having eight utilities on it, and the two pages are edited as writing.
 
-table.grid th,
-table.grid td {
-  border-bottom: 1px solid var(--line);
-  padding: 0.5rem 0.7rem;
-  text-align: left;
-  vertical-align: top;
-}
+   These are the same tokens everything else uses, so the essays cannot drift
+   into a second visual language — which is the failure mode a "legacy
+   stylesheet" usually has, and the reason these live here rather than in a
+   file of their own. */
 
-table.grid tr:last-child td {
-  border-bottom: none;
-}
+@layer components {
+  .prose-page h1 {
+    @apply mb-2 text-[26px] font-semibold;
+  }
 
-table.grid th {
-  color: var(--dim);
-  font-weight: 600;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  background: var(--panel-strong);
-}
+  .prose-page h2 {
+    @apply mt-10 mb-2 text-[17px] font-semibold;
+  }
 
-table.grid tbody tr {
-  transition: background 0.1s var(--ease);
-}
+  .prose-page h3 {
+    @apply mt-6 mb-1 text-[14px] font-semibold;
+  }
 
-table.grid tbody tr:hover {
-  background: var(--panel-strong);
-}
+  .prose-page .lede {
+    @apply mb-4 max-w-[68ch] text-[14px] leading-[1.7] text-ink-2;
+  }
 
-/* A list of statements, not a list of bullets: each item is a sentence or two,
-   and the marker adds nothing a line break does not. */
-ul.plain {
-  list-style: none;
-  margin: 0 0 1rem;
-  padding: 0;
-  max-width: 52rem;
-}
+  .prose-page .lede a,
+  .prose-page li a {
+    @apply text-accent underline decoration-accent-line underline-offset-[3px]
+           transition-colors hover:decoration-current;
+  }
 
-ul.plain li {
-  margin-bottom: 0.6rem;
-}
+  .prose-page code {
+    @apply font-mono text-[0.92em] [overflow-wrap:anywhere];
+  }
 
-.docList li {
-  padding-left: 1rem;
-  text-indent: -1rem; /* wrapped blurbs hang under the filename, not level with it */
-}
+  .prose-page pre {
+    @apply overflow-x-auto rounded-lg border border-edge bg-surface-2 p-3
+           font-mono text-[12px] leading-relaxed;
+  }
 
-/* --- footer ---------------------------------------------------------------- */
+  .prose-page .panel {
+    @apply mb-4 rounded-r-[var(--radius-card)] border border-l-[3px] border-edge
+           border-l-accent bg-surface px-4 py-3 text-[13px] text-ink-2;
+  }
 
-.foot {
-  max-width: 68rem;
-  margin: 0 auto;
-  padding: 1.5rem 1.25rem 3rem;
-  border-top: 1px solid var(--line);
-  font-size: 0.9em;
-}
+  .prose-page .panel.bad {
+    @apply border-l-bad bg-bad-soft;
+  }
 
-.footLinks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1.25rem;
-  margin-bottom: 0.7rem;
-}
+  .prose-page .panel > b {
+    @apply mb-1.5 block text-[11px] font-semibold tracking-[0.08em]
+           text-ink-2 uppercase;
+  }
 
-.footLinks a {
-  color: var(--dim);
-}
+  .prose-page .panel pre {
+    @apply mt-1 border-0 bg-transparent p-0;
+  }
 
-.footLinks a:hover {
-  color: var(--accent);
-}
+  .prose-page .meta {
+    @apply text-[13px] leading-relaxed text-ink-2;
+  }
 
-.foot .dim {
-  max-width: 52rem;
-  margin-top: 0.4rem;
-}
+  .prose-page .dim {
+    @apply text-ink-3;
+  }
 
-/* The nav wraps on a phone rather than pushing the last link off the edge. */
-.nav {
-  flex-wrap: wrap;
-  row-gap: 0.5rem;
-}
+  .prose-page ul.plain {
+    @apply list-none p-0;
+  }
 
-.bar.wide {
-  display: block;
-  width: 100%;
-  margin: 0.5rem 0;
-  height: 0.6rem;
-}
+  .prose-page ul.docList > li {
+    @apply border-b border-edge py-2 text-[13px] last:border-b-0;
+  }
 
-.bar > span {
-  display: block;
-  height: 100%;
-  background: var(--accent);
+  /* The stepper on /how-it-works, and the same spine the chain page draws:
+     one visual for "each of these rests on the one before it", used in both
+     places it is true. */
+  .prose-page ol.chain {
+    @apply mt-2 list-none p-0;
+  }
+
+  .prose-page li.link {
+    @apply relative border-l-2 border-edge pb-6 pl-6 last:border-l-transparent last:pb-0;
+  }
+
+  .prose-page li.link::before {
+    content: "";
+    @apply absolute top-1.5 -left-[7px] h-3 w-3 rounded-full bg-accent
+           ring-4 ring-canvas;
+  }
+
+  .prose-page li.link.genesis::before {
+    @apply border-2 border-accent bg-canvas;
+  }
+
+  .prose-page .epoch {
+    @apply mb-0.5 text-[13px] font-semibold text-ink;
+  }
+
+  .prose-page .tableWrap {
+    @apply mb-4 overflow-x-auto rounded-[var(--radius-card)] border border-edge;
+  }
+
+  .prose-page table.grid {
+    @apply w-full border-collapse text-left text-[12.5px];
+  }
+
+  .prose-page table.grid th {
+    @apply border-b border-edge bg-surface-2 px-3 py-2 font-medium text-ink-2;
+  }
+
+  .prose-page table.grid td {
+    @apply border-b border-edge px-3 py-2 align-top text-ink-2;
+  }
+
+  .prose-page table.grid tr:last-child td {
+    @apply border-b-0;
+  }
 }

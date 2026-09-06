@@ -228,9 +228,13 @@ cairn --log cairn.jsonl --root . serve --listen 0.0.0.0:8080
 re-derives everything themselves with `cairn verify --from`, which is the
 whole point — they need not trust the server that served it.
 
-Add `--queue ./queue` to accept `POST /submit`. Submissions are *queued*, never
-appended: the operator's node admits them, re-checking every rule against the
-whole log. See [serving.md](docs/serving.md).
+Add `--queue ./queue` to accept `POST /submit` — objectives, commitments and
+claims alike. Submissions are *queued*, never appended: the operator's node
+admits them, re-checking every rule against the whole log. The embedded reader
+at `/ui/submit` posts an objective from a form and lets an Ed25519 browser
+wallet (Phantom, Solflare, Backpack) sign its funding authorization; the node
+supplies the canonical bytes at `POST /objective/prepare` so no encoding rule is
+re-implemented in a browser. See [serving.md](docs/serving.md).
 
 Which raises the question of who admits them — a `Ledger` has one writer, so a
 publisher on its own can only ever queue. The answer is usually not a second
