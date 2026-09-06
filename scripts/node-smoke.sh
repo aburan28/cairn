@@ -42,6 +42,11 @@ trap cleanup EXIT
 # The daemon drains every five seconds. Six-second test epochs leave enough
 # room for a record posted near the boundary to be drained in the same epoch,
 # while keeping the commit/reveal smoke short.
+# No LAN beacons: a node in this script must talk only to the nodes this
+# script starts. With discovery working, one that beaconed found a developer's
+# live node on the same segment, synced with it, and failed here because its
+# claim had been settled elsewhere.
+export CAIRN_BEACON_PORT=off
 export CAIRN_EPOCH_SECONDS=6
 
 # Wait for a listener rather than sleeping a fixed amount.

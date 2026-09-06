@@ -19,9 +19,11 @@ without it), compiles the solvers on first use, creates the researcher's
 identity, posts `objectives.txt`, runs the loop, and audits the finished log
 with the same epoch length the node used. The node answers on
 `127.0.0.1:8090` (HTTP and the reader at `/ui/`) and `127.0.0.1:9010` (P2P) --
-not 8080/9000, which are what an operator's own `cairn run` binds. Every
-path, port and budget is an environment variable; the header of
-`autoresearcher.py` lists them.
+not 8080/9000, which are what an operator's own `cairn run` binds. It finds
+other nodes on the LAN by itself (beacons, then a direct key request); set
+`AR_BOOTSTRAP` to one or more bootstrap files, colon-separated, to reach a
+seed elsewhere. Every path, port and budget is an environment variable; the
+header of `autoresearcher.py` lists them.
 
 Code lives here; runtime state -- the identity key, the node's log and keys,
 the journal, `status.json`, the solver binaries, generated artifacts -- lives

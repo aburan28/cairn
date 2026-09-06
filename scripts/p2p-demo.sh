@@ -68,6 +68,11 @@ trap cleanup EXIT
 # boundaries. Epochs are derived from record timestamps and never stored, so an
 # auditor using a different length reports an honest batch as mis-ordered --
 # `cairn audit` says so itself when every batch faults at once.
+# No LAN beacons: a node in this script must talk only to the nodes this
+# script starts. With discovery working, one that beaconed found a developer's
+# live node on the same segment, synced with it, and failed here because its
+# claim had been settled elsewhere.
+export CAIRN_BEACON_PORT=off
 export CAIRN_EPOCH_SECONDS=1
 # Two free ports, taken by binding and releasing rather than guessed: a fixed
 # port makes this script fail for whoever is already using it.

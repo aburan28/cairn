@@ -27,7 +27,11 @@ struct NodeView: View {
                              caption: "\(model.frontiers.count) with a frontier")
                     }
                     HStack(alignment: .top, spacing: 14) {
-                        balancesCard.frame(maxWidth: .infinity)
+                        VStack(spacing: 14) {
+                            discoveryCard
+                            balancesCard
+                        }
+                        .frame(maxWidth: .infinity)
                         VStack(spacing: 14) {
                             identityCard
                             kindsCard
@@ -108,6 +112,50 @@ struct NodeView: View {
                     .font(.caption).foregroundStyle(.secondary).padding(.top, 6)
             }
         } label: { Label("Balances", systemImage: "banknote") }
+    }
+
+    /// Discovery, as the node's own log tells it: whether the beacon socket
+    /// bound, how often beacons were heard, sessions that worked, and the
+    /// last failures verbatim. Nothing here is inferred.
+    private var discoveryCard: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 6) {
+                let d = model.discovery
+                HStack(spacing: 8) {
+                    Image(systemName: d.multicast == nil ? "circle.dashed" : (d.multicast!.contains("already held") ? "exclamationmark.triangle.fill" : "antenna.radiowaves.left.and.right"))
+                        .foregroundStyle(d.multicast == nil ? Color.secondary : (d.multicast!.contains("already held") ? .orange : .green))
+                    Text(d.multicast ?? (model.nodeReachable ? "waiting for the node's log" : "no node running"))
+                        .textSelection(.enabled)
+                }
+                HStack(spacing: 14) {
+                    stat("beacon ticks", d.beaconTicks)
+                    stat("inbound ok", d.inboundOK)
+                    stat("outbound ok", d.outboundOK)
+                    stat("bootstrap", d.bootstrap.count)
+                }
+                if let last = d.failures.last {
+                    Text(String(last.split(separator: " ", maxSplits: 3).last ?? "")).font(.caption.monospaced()).foregroundStyle(.red).lineLimit(2)
+                }
+                if let b = d.bootstrap.last, b.contains("PLACEHOLDER") {
+                    Text("The bootstrap file still carries the placeholder key; dials to that seed will fail their handshake. Put the seed's real public key in it.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                if d.multicast?.contains("already held") == true {
+                    Text("Another node on this Mac bound the beacon port first without sharing it. Nodes built after this change share the port; restart the older node on a current build and both will hear each other.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text(model.bootstrapFile.isEmpty ? "No bootstrap file: LAN peers only. Set one in Settings to reach a seed." : "Bootstrap: \(model.bootstrapFile)")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: { Label("Discovery", systemImage: "dot.radiowaves.left.and.right") }
+    }
+
+    private func stat(_ label: String, _ n: Int) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("\(n)").font(.title3.monospacedDigit().bold())
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+        }
     }
 
     private var identityCard: some View {

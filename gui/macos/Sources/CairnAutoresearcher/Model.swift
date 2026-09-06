@@ -168,6 +168,7 @@ final class ResearcherModel: ObservableObject {
     @Published var budgetMinutes: Int { didSet { defaults.set(budgetMinutes, forKey: "budget"); replan() } }
     @Published var intervalSeconds: Int { didSet { defaults.set(intervalSeconds, forKey: "interval") } }
     @Published var notifyOnSettle: Bool { didSet { defaults.set(notifyOnSettle, forKey: "notify") } }
+    @Published var bootstrapFile: String { didSet { defaults.set(bootstrapFile, forKey: "bootstrap") } }
     @Published var selectedObjectives: Set<String> {
         didSet { defaults.set(Array(selectedObjectives).sorted(), forKey: "selected") }
     }
@@ -211,6 +212,19 @@ final class ResearcherModel: ObservableObject {
     // Wall clock, for the epoch display.
     @Published private(set) var now = Date()
 
+    /// What the node's own log says about finding peers, tailed live.
+    struct Discovery: Equatable {
+        var multicast: String?          // nil until the node said anything
+        var beaconTicks = 0
+        var inboundOK = 0
+        var outboundOK = 0
+        var failures: [String] = []     // last few outbound failures
+        var bootstrap: [String] = []    // bootstrap lines, warnings included
+        var lines: [String] = []        // last discovery-related lines
+    }
+    @Published private(set) var discovery = Discovery()
+    private var nodeLogOffset: UInt64 = 0
+
     private let defaults = UserDefaults.standard
     private var process: Process?
     private var timer: AnyCancellable?
@@ -229,6 +243,7 @@ final class ResearcherModel: ObservableObject {
         budgetMinutes = defaults.object(forKey: "budget") as? Int ?? 30
         intervalSeconds = defaults.object(forKey: "interval") as? Int ?? 120
         notifyOnSettle = defaults.object(forKey: "notify") as? Bool ?? true
+        bootstrapFile = defaults.string(forKey: "bootstrap") ?? ""
         selectedObjectives = Set(defaults.stringArray(forKey: "selected") ?? [])
         timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
             .sink { [weak self] _ in self?.tick() }
@@ -423,6 +438,7 @@ final class ResearcherModel: ObservableObject {
         env["AR_BUDGET_SECONDS"] = String(budgetMinutes * 60)
         env["AR_INTERVAL"] = String(intervalSeconds)
         env["CAIRN_EPOCH_SECONDS"] = String(epochSeconds)
+        if !bootstrapFile.trimmingCharacters(in: .whitespaces).isEmpty { env["AR_BOOTSTRAP"] = bootstrapFile }
         env["PYTHONUNBUFFERED"] = "1"
         let path = env["PATH"] ?? ""
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:" + path
@@ -563,7 +579,7 @@ final class ResearcherModel: ObservableObject {
         try? fm.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
         if let saved { fm.createFile(atPath: identity, contents: saved, attributes: [.posixPermissions: 0o600]) }
         status = nil; progress = nil; journal = []; journalOffset = 0; journalCount = 0
-        balances = []; frontiers = [:]
+        balances = []; frontiers = [:]; discovery = Discovery(); nodeLogOffset = 0
         infoMessage = keepIdentity ? "State cleared; the identity was kept." : "State cleared, identity included."
     }
 
@@ -674,6 +690,7 @@ final class ResearcherModel: ObservableObject {
         readStatus()
         readProgress()
         readJournal()
+        readNodeLog()
         probeNode()
         if ticks % 5 == 1 { runChecks() }
         if nodeReachable && ticks % 3 == 0 { pollNode() }
@@ -706,6 +723,49 @@ final class ResearcherModel: ObservableObject {
             return
         }
         if p != progress { progress = p }
+    }
+
+    private func readNodeLog() {
+        let path = stateDir + "/node.log"
+        guard let handle = FileHandle(forReadingAtPath: path) else {
+            if discovery != Discovery() { discovery = Discovery(); nodeLogOffset = 0 }
+            return
+        }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        if size < nodeLogOffset { discovery = Discovery(); nodeLogOffset = 0 }
+        guard size > nodeLogOffset else { return }
+        try? handle.seek(toOffset: nodeLogOffset)
+        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else { return }
+        var d = discovery
+        var consumed = 0
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false).dropLast() {
+            consumed += line.utf8.count + 1
+            let l = String(line)
+            if l.contains("cairn node starting") {
+                // A fresh node: its discovery starts over, its log does not.
+                d = Discovery()
+            }
+            if l.contains("multicast:") {
+                d.multicast = l.contains("Address already in use")
+                    ? "beacon port already held by another node on this host; LAN discovery is off for this node"
+                    : (l.components(separatedBy: "multicast: ").last ?? l)
+            } else if l.contains("listening on") && l.contains("cairn::daemon") && d.multicast == nil {
+                d.multicast = "bound; announcing every 30s on 239.255.41.96:47396"
+            }
+            if l.contains("beacons: heard") { d.beaconTicks += 1 }
+            if l.contains("inbound session:") && l.contains(" ok") { d.inboundOK += 1 }
+            if l.contains("outbound session:") && l.contains(" ok") { d.outboundOK += 1 }
+            if l.contains("outbound session to") || (l.contains("inbound session:") && !l.contains(" ok")) {
+                d.failures.append(l); if d.failures.count > 5 { d.failures.removeFirst() }
+            }
+            if l.contains("bootstrap") { d.bootstrap.append(l); if d.bootstrap.count > 5 { d.bootstrap.removeFirst() } }
+            if l.contains("multicast") || l.contains("beacon") || l.contains("session") || l.contains("bootstrap") || l.contains("listening on") {
+                d.lines.append(l); if d.lines.count > 40 { d.lines.removeFirst() }
+            }
+        }
+        nodeLogOffset += UInt64(consumed)
+        if d != discovery { discovery = d }
     }
 
     private func readJournal() {
