@@ -291,7 +291,7 @@ export default function Page() {
         </p>
         <Card className="card-pad">
           <pre className="code">{`git clone ${REPO}
-cd distributed-researcher
+cd cairn
 cairn --log launch/cairn.jsonl --root . audit`}</pre>
           <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-ink-2">
             <span className="flex items-center gap-1">

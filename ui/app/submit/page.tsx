@@ -1,21 +1,31 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type Draft,
   type Prepared,
   type Queued,
   EMPTY_DRAFT,
   VERIFIER_KINDS,
-  NodeUnreachableForWrites,
+  fromRecord,
+  isScored,
+  kindInfo,
   prepare,
   problems,
   reachableForWrites,
+  sha256Hex,
   submit,
   toRecord,
 } from "@/lib/submit";
-import { type Wallet, available, connect, hasEvmOnly, isKeyShaped, signPayload } from "@/lib/wallet";
+import {
+  type Wallet,
+  available,
+  connect,
+  hasEvmOnly,
+  isKeyShaped,
+  signPayload,
+} from "@/lib/wallet";
 import { NODE_URL } from "@/lib/objectives";
 import { repoLink } from "@/lib/site";
 import { Badge, Card, CopyButton, Hash, Note, SectionHeading } from "@/components/ui";
@@ -45,6 +55,15 @@ import { Badge, Card, CopyButton, Hash, Note, SectionHeading } from "@/component
  * A 202 is a queue receipt. The operator's `cairn drain` re-decides every rule
  * against the whole log, and can refuse. The success panel says so in those
  * words, because a green tick that means "probably" is worse than no tick.
+ *
+ * # Where the checker hash comes from
+ *
+ * It is the pin, and it is the one field a person retypes wrong. So the form
+ * offers two honest sources before a text box: load the `objective.json` that
+ * `cairn scaffold` wrote, which already carries it, or pick the checker file
+ * itself and let WebCrypto hash it — the same `shasum -a 256` a funder would
+ * run, and not a consensus rule, since the node checks the pinned file against
+ * the declared hash on its own before trusting either.
  */
 export default function Page() {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
@@ -57,6 +76,13 @@ export default function Page() {
   const [wallets, setWallets] = useState<{ kind: string; label: string }[]>([]);
   const [evmOnly, setEvmOnly] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
+
+  const [loadNote, setLoadNote] = useState<{ tone: "accent" | "warn" | "bad"; text: string } | null>(
+    null,
+  );
+  const [hashNote, setHashNote] = useState<string | null>(null);
+  const objectiveFile = useRef<HTMLInputElement>(null);
+  const checkerFile = useRef<HTMLInputElement>(null);
 
   const [prepared, setPrepared] = useState<Prepared | null>(null);
   const [signature, setSignature] = useState<string | null>(null);
@@ -100,14 +126,21 @@ export default function Page() {
 
   // Any edit invalidates a signature made over the previous draft. Silently
   // keeping it would submit a record whose authorization covers something else.
-  const set = useCallback(<K extends keyof Draft>(key: K, value: Draft[K]) => {
-    setDraft((d) => ({ ...d, [key]: value }));
-    setTouched((t) => ({ ...t, [key]: true }));
+  const invalidate = useCallback(() => {
     setPrepared(null);
     setSignature(null);
     setReceipt(null);
     setError(null);
   }, []);
+
+  const set = useCallback(
+    <K extends keyof Draft>(key: K, value: Draft[K]) => {
+      setDraft((d) => ({ ...d, [key]: value }));
+      setTouched((t) => ({ ...t, [key]: true }));
+      invalidate();
+    },
+    [invalidate],
+  );
 
   async function onConnect(kind: string) {
     setWalletError(null);
@@ -117,6 +150,46 @@ export default function Page() {
       set("funder", connected.funder);
     } catch (cause) {
       setWalletError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function onLoadObjective(file: File | undefined) {
+    if (!file) return;
+    try {
+      const { draft: loaded, dropped } = fromRecord(JSON.parse(await file.text()));
+      // A connected wallet stays the funder: the file's funder is whoever
+      // scaffolded it, and the person at this page is the one about to sign.
+      setDraft(wallet ? { ...loaded, funder: wallet.funder } : loaded);
+      setTouched({});
+      invalidate();
+      setLoadNote(
+        dropped.length > 0
+          ? {
+              tone: "warn",
+              text:
+                `Loaded ${file.name}. Not carried: ${dropped.join(", ")} — the form has ` +
+                "no control for them, so the posted objective will differ from the file there.",
+            }
+          : { tone: "accent", text: `Loaded ${file.name}. Every field of it is in the form.` },
+      );
+    } catch (cause) {
+      setLoadNote({
+        tone: "bad",
+        text: `${file.name} is not an objective: ${cause instanceof Error ? cause.message : String(cause)}`,
+      });
+    }
+  }
+
+  async function onHashChecker(file: File | undefined) {
+    if (!file) return;
+    setHashNote(null);
+    try {
+      const digest = await sha256Hex(await file.arrayBuffer());
+      set("programSha256", digest);
+      if (!draft.program.trim()) set("program", file.name);
+      setHashNote(`sha256 of ${file.name} (${file.size.toLocaleString()} bytes), hashed here.`);
+    } catch (cause) {
+      setHashNote(cause instanceof Error ? cause.message : String(cause));
     }
   }
 
@@ -163,6 +236,8 @@ export default function Page() {
 
   const needsSignature = isKeyShaped(draft.funder.trim());
   const readyToSubmit = complete && (!needsSignature || Boolean(signature));
+  const kind = kindInfo(draft.verifierKind);
+  const scored = isScored(draft.verifierKind);
 
   const objectiveJson = record ? JSON.stringify(record, null, 2) : "";
   const signedJson = record
@@ -200,6 +275,42 @@ export default function Page() {
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_26rem]">
         {/* -- the form ---------------------------------------------------- */}
         <div className="flex flex-col gap-6">
+          <Card className="card-pad">
+            <SectionHeading
+              aside={
+                <>
+                  <input
+                    ref={objectiveFile}
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={(event) => void onLoadObjective(event.target.files?.[0])}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => objectiveFile.current?.click()}
+                  >
+                    Load objective.json
+                  </button>
+                </>
+              }
+            >
+              Start from a scaffold
+            </SectionHeading>
+            <p className="text-[12.5px] leading-relaxed text-ink-2">
+              <span className="mono">cairn scaffold my-challenge --kind {draft.verifierKind}</span>{" "}
+              writes an <span className="mono">objective.json</span> with the checker
+              already hashed. Load it here and only the bounty and the funder are left
+              to decide. Nothing leaves this page: the file is read in the browser.
+            </p>
+            {loadNote && (
+              <div className="mt-3">
+                <Note tone={loadNote.tone}>{loadNote.text}</Note>
+              </div>
+            )}
+          </Card>
+
           <Card className="card-pad">
             <SectionHeading>Who is funding it</SectionHeading>
 
@@ -332,24 +443,46 @@ export default function Page() {
                 </p>
                 <Problem of="statement" found={found} touched={touched} />
               </div>
+
+              <div>
+                <label className="label" htmlFor="schema">
+                  Artifact shape <span className="text-ink-3">(optional, JSON)</span>
+                </label>
+                <textarea
+                  id="schema"
+                  className="field field-mono min-h-20 resize-y"
+                  value={draft.artifactSchema}
+                  onChange={(event) => set("artifactSchema", event.target.value)}
+                  placeholder='{"type":"object","required":["n"],"properties":{"n":{"type":"integer"}}}'
+                  spellCheck={false}
+                />
+                <p className="hint">
+                  What the checker expects, for a solver who has only the record.
+                  Documentation, not a rule — nothing validates against it, and nothing
+                  may: the pinned verifier is the only thing that decides what passes.
+                </p>
+                <Problem of="artifactSchema" found={found} touched={touched} />
+              </div>
             </div>
           </Card>
 
           <Card className="card-pad">
             <SectionHeading>The checker</SectionHeading>
             <p className="mb-4 text-[13px] leading-relaxed text-ink-2">
-              The verifier is what actually decides payment, and it is pinned by hash
-              so it cannot be swapped after work starts.
+              The verifier is what actually decides payment. The published schema
+              requires only its <span className="mono">kind</span>; the fields each
+              kind needs are checked by the verifier itself, when a verdict is first
+              wanted — so they are pinned here, before money moves.
             </p>
 
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {VERIFIER_KINDS.map((kind) => {
-                const active = draft.verifierKind === kind.kind;
+              {VERIFIER_KINDS.map((option) => {
+                const active = draft.verifierKind === option.kind;
                 return (
                   <button
-                    key={kind.kind}
+                    key={option.kind}
                     type="button"
-                    onClick={() => set("verifierKind", kind.kind)}
+                    onClick={() => set("verifierKind", option.kind)}
                     aria-pressed={active}
                     className={`rounded-lg border p-3 text-left transition-all ${
                       active
@@ -357,9 +490,9 @@ export default function Page() {
                         : "border-edge bg-surface hover:border-edge-strong"
                     }`}
                   >
-                    <div className="text-[13px] font-medium">{kind.title}</div>
+                    <div className="text-[13px] font-medium">{option.title}</div>
                     <div className="mt-1 text-[12px] leading-snug text-ink-2">
-                      {kind.blurb}
+                      {option.blurb}
                     </div>
                   </button>
                 );
@@ -367,53 +500,243 @@ export default function Page() {
             </div>
 
             <div className="mt-4 flex flex-col gap-4">
-              <div className="grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-                <div>
-                  <label className="label" htmlFor="checker">
-                    Checker path
-                  </label>
-                  <input
-                    id="checker"
-                    className="field field-mono"
-                    value={draft.checker}
-                    onChange={(event) => set("checker", event.target.value)}
-                    placeholder="examples/collatz/checkers/long_trajectory.py"
-                  />
-                  <Problem of="checker" found={found} touched={touched} />
+              {kind.program && (
+                <>
+                  <div className="grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                    <div>
+                      <label className="label" htmlFor="program">
+                        {kind.program === "statistic" ? "Statistic path" : `${cap(kind.program)} path`}
+                      </label>
+                      <input
+                        id="program"
+                        className="field field-mono"
+                        value={draft.program}
+                        onChange={(event) => set("program", event.target.value)}
+                        placeholder={`examples/my-challenge/${kind.program}s/${kind.program}.py`}
+                      />
+                      <p className="hint">Relative to the objective bundle root.</p>
+                      <Problem of="program" found={found} touched={touched} />
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="entrypoint">
+                        Entrypoint
+                      </label>
+                      <input
+                        id="entrypoint"
+                        className="field field-mono"
+                        value={draft.entrypoint}
+                        onChange={(event) => set("entrypoint", event.target.value)}
+                        placeholder={draft.verifierKind === "evaluator" ? "score" : "check"}
+                      />
+                      <Problem of="entrypoint" found={found} touched={touched} />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between gap-2">
+                      <label className="label mb-0" htmlFor="sha">
+                        {cap(kind.program)} sha256
+                      </label>
+                      <input
+                        ref={checkerFile}
+                        type="file"
+                        className="hidden"
+                        onChange={(event) => void onHashChecker(event.target.files?.[0])}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => checkerFile.current?.click()}
+                      >
+                        Hash a file
+                      </button>
+                    </div>
+                    <input
+                      id="sha"
+                      className="field field-mono"
+                      value={draft.programSha256}
+                      onChange={(event) => set("programSha256", event.target.value.trim())}
+                      placeholder="64 lowercase hex characters"
+                      spellCheck={false}
+                    />
+                    <p className="hint">
+                      {hashNote ?? (
+                        <>
+                          This is the pin. Without it the objective says &ldquo;run this
+                          path&rdquo;, which is a promise about a file anyone can edit after
+                          work has started. Pick the file to hash it here, or{" "}
+                          <span className="mono">
+                            shasum -a 256 {draft.program || `<${kind.program}>`}
+                          </span>
+                          .
+                        </>
+                      )}
+                    </p>
+                    <Problem of="programSha256" found={found} touched={touched} />
+                  </div>
+                </>
+              )}
+
+              {scored && (
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="label" htmlFor="threshold">
+                      Threshold
+                    </label>
+                    <input
+                      id="threshold"
+                      className="field field-mono"
+                      inputMode="decimal"
+                      value={draft.threshold}
+                      onChange={(event) => set("threshold", event.target.value)}
+                      placeholder="20"
+                    />
+                    <p className="hint">The score at which a candidate passes at all.</p>
+                    <Problem of="threshold" found={found} touched={touched} />
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="direction">
+                      Direction
+                    </label>
+                    <select
+                      id="direction"
+                      className="field"
+                      value={draft.direction}
+                      onChange={(event) => set("direction", event.target.value)}
+                    >
+                      <option value="maximize">maximize — higher is better</option>
+                      <option value="minimize">minimize — lower is better</option>
+                    </select>
+                    <p className="hint">Shared with the ratchet below; they cannot disagree.</p>
+                  </div>
                 </div>
-                <div>
-                  <label className="label" htmlFor="entrypoint">
-                    Entrypoint
-                  </label>
-                  <input
-                    id="entrypoint"
-                    className="field field-mono"
-                    value={draft.entrypoint}
-                    onChange={(event) => set("entrypoint", event.target.value)}
-                    placeholder="check"
-                  />
+              )}
+
+              {draft.verifierKind === "lean" && (
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <label className="label" htmlFor="lean-statement">
+                      Statement
+                    </label>
+                    <textarea
+                      id="lean-statement"
+                      className="field field-mono min-h-24 resize-y"
+                      value={draft.leanStatement}
+                      onChange={(event) => set("leanStatement", event.target.value)}
+                      placeholder="theorem two_plus_two : 2 + 2 = 4"
+                      spellCheck={false}
+                    />
+                    <p className="hint">
+                      The theorem, as Lean source. A submitter supplies the proof term;
+                      the toolchain is the checker.
+                    </p>
+                    <Problem of="leanStatement" found={found} touched={touched} />
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                    <div>
+                      <label className="label" htmlFor="lean-preamble">
+                        Preamble <span className="text-ink-3">(optional)</span>
+                      </label>
+                      <textarea
+                        id="lean-preamble"
+                        className="field field-mono min-h-16 resize-y"
+                        value={draft.leanPreamble}
+                        onChange={(event) => set("leanPreamble", event.target.value)}
+                        placeholder="import Mathlib"
+                        spellCheck={false}
+                      />
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="lean-timeout">
+                        Timeout, seconds <span className="text-ink-3">(optional)</span>
+                      </label>
+                      <input
+                        id="lean-timeout"
+                        className="field field-mono"
+                        inputMode="numeric"
+                        value={draft.timeoutSeconds}
+                        onChange={(event) => set("timeoutSeconds", event.target.value)}
+                        placeholder="60"
+                      />
+                      <Problem of="timeoutSeconds" found={found} touched={touched} />
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {draft.verifierKind === "replay" && (
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <label className="label" htmlFor="replay-command">
+                      Command
+                    </label>
+                    <textarea
+                      id="replay-command"
+                      className="field field-mono min-h-20 resize-y"
+                      value={draft.replayCommand}
+                      onChange={(event) => set("replayCommand", event.target.value)}
+                      placeholder={"python3\nrun.py\n--seed\n1"}
+                      spellCheck={false}
+                    />
+                    <p className="hint">
+                      One argument per line. Runs in a jail with no network, read-only
+                      under the objective root.
+                    </p>
+                    <Problem of="replayCommand" found={found} touched={touched} />
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                    <div>
+                      <label className="label" htmlFor="replay-fields">
+                        Reproducible fields
+                      </label>
+                      <input
+                        id="replay-fields"
+                        className="field field-mono"
+                        value={draft.replayFields}
+                        onChange={(event) => set("replayFields", event.target.value)}
+                        placeholder="relations_found, degree"
+                      />
+                      <p className="hint">
+                        Comma-separated. The fields of the result that must match on
+                        re-run; machine-dependent ones like timings are refused.
+                      </p>
+                      <Problem of="replayFields" found={found} touched={touched} />
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="replay-cwd">
+                        Working directory <span className="text-ink-3">(optional)</span>
+                      </label>
+                      <input
+                        id="replay-cwd"
+                        className="field field-mono"
+                        value={draft.replayCwd}
+                        onChange={(event) => set("replayCwd", event.target.value)}
+                        placeholder="."
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div>
-                <label className="label" htmlFor="sha">
-                  Checker sha256
+                <label className="label" htmlFor="extras">
+                  Other verifier fields <span className="text-ink-3">(optional, JSON)</span>
                 </label>
-                <input
-                  id="sha"
-                  className="field field-mono"
-                  value={draft.checkerSha256}
-                  onChange={(event) => set("checkerSha256", event.target.value.trim())}
-                  placeholder="64 lowercase hex characters"
+                <textarea
+                  id="extras"
+                  className="field field-mono min-h-16 resize-y"
+                  value={draft.verifierExtras}
+                  onChange={(event) => set("verifierExtras", event.target.value)}
+                  placeholder='{"timeout_seconds": 30}'
                   spellCheck={false}
                 />
                 <p className="hint">
-                  This is the pin. Without it the objective says &ldquo;run this
-                  path&rdquo;, which is a promise about a file anyone can edit after
-                  work has started.{" "}
-                  <span className="mono">shasum -a 256 {draft.checker || "<checker>"}</span>
+                  Anything this form has no control for — <span className="mono">stepper</span>,{" "}
+                  <span className="mono">seed</span>, a certificate&rsquo;s{" "}
+                  <span className="mono">timeout_seconds</span>. Merged into the verifier
+                  as written; a loaded file&rsquo;s extra fields land here.
                 </p>
-                <Problem of="checkerSha256" found={found} touched={touched} />
+                <Problem of="verifierExtras" found={found} touched={touched} />
               </div>
             </div>
           </Card>
@@ -496,7 +819,7 @@ export default function Page() {
             <Problem of="useRatchet" found={found} touched={touched} />
 
             {draft.useRatchet && (
-              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <div className="mt-4 grid gap-4 sm:grid-cols-3">
                 <div>
                   <label className="label" htmlFor="baseline">
                     Baseline
@@ -526,20 +849,6 @@ export default function Page() {
                   <Problem of="target" found={found} touched={touched} />
                 </div>
                 <div>
-                  <label className="label" htmlFor="direction">
-                    Direction
-                  </label>
-                  <select
-                    id="direction"
-                    className="field"
-                    value={draft.direction}
-                    onChange={(event) => set("direction", event.target.value)}
-                  >
-                    <option value="maximize">maximize — higher is better</option>
-                    <option value="minimize">minimize — lower is better</option>
-                  </select>
-                </div>
-                <div>
                   <label className="label" htmlFor="minimprovement">
                     Minimum improvement
                   </label>
@@ -552,10 +861,7 @@ export default function Page() {
                   />
                   <p className="hint">
                     The smallest move that pays. Set it deliberately: it is currently
-                    the only thing bounding how finely a span can be sliced, and the
-                    shipped cap-set example ran at <span className="mono">1</span> over
-                    a span of <span className="mono">11</span> before this was
-                    understood.{" "}
+                    the only thing bounding how finely a span can be sliced.{" "}
                     <a
                       className="text-accent hover:underline"
                       href={repoLink("docs/threat-model.md")}
@@ -657,9 +963,7 @@ export default function Page() {
               {error && (
                 <div className="mt-4">
                   <Note
-                    title={
-                      error.includes("same-origin") ? "cannot reach the node" : "refused"
-                    }
+                    title={error.includes("same-origin") ? "cannot reach the node" : "refused"}
                     tone="bad"
                   >
                     {error}
@@ -675,9 +979,7 @@ export default function Page() {
                   These bytes, exactly. The domain tag is what stops a signature made
                   here being replayed as some other kind of authorization.
                 </p>
-                <pre className="code max-h-52 overflow-auto text-[11.5px]">
-                  {prepared.payload}
-                </pre>
+                <pre className="code max-h-52 overflow-auto text-[11.5px]">{prepared.payload}</pre>
                 <div className="mt-2 flex items-center gap-2 text-[12px] text-ink-2">
                   <span>digest</span>
                   <Hash value={prepared.digest} chars={10} />
@@ -720,7 +1022,8 @@ export default function Page() {
               <SectionHeading>Or post it from a terminal</SectionHeading>
               <p className="mb-2 text-[12.5px] leading-relaxed text-ink-2">
                 For a key that lives in a file rather than a wallet, or from a page
-                that cannot write to the node.
+                that cannot write to the node. An agent can do the same over MCP with{" "}
+                <span className="mono">post_objective</span>.
               </p>
               <div className="relative">
                 <pre className="code max-h-64 overflow-auto text-[11.5px]">
@@ -743,6 +1046,10 @@ export default function Page() {
       </div>
     </>
   );
+}
+
+function cap(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
 }
 
 function Problem({
@@ -779,9 +1086,7 @@ function Step({
       <span
         className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full
                     border text-[11px] font-medium ${
-                      done
-                        ? "border-accent bg-accent text-canvas"
-                        : "border-edge text-ink-3"
+                      done ? "border-accent bg-accent text-canvas" : "border-edge text-ink-3"
                     }`}
         aria-hidden
       >

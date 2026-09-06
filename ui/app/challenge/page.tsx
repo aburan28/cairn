@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { type Objective, loadObjective, progress, short, units } from "@/lib/site";
+import { type Objective, loadObjective, progress, repoLink, short, units } from "@/lib/site";
 import {
   Badge,
   Card,
+  CopyButton,
   EmptyState,
   Hash,
   Note,
@@ -15,6 +16,58 @@ import {
   Skeleton,
   Stat,
 } from "@/components/ui";
+
+/**
+ * The Claude Code stanza from docs/agents.md, with placeholder paths. The
+ * other two clients spell the same three arguments differently and the doc
+ * has them; one copy here is enough to get someone started, and three would
+ * be three things to keep in step with the doc.
+ */
+const MCP_STANZA = `{
+  "mcpServers": {
+    "cairn": {
+      "command": "/abs/path/to/cairn",
+      "args": ["--log", "/abs/path/to/cairn.jsonl", "--root", "/abs/path/to/repo", "mcp"]
+    }
+  }
+}`;
+
+/**
+ * The tool calls, with this objective's id filled in.
+ *
+ * `cites` is included only when there is a frontier to cite, and then with
+ * the claim id the node published -- a submission against a ratcheted
+ * objective that omits it is refused, and that is the rule an agent most
+ * often trips over. The capability half is deliberately left as a
+ * placeholder: it is session-local proof the id came from a server field,
+ * and this page cannot mint one.
+ */
+function mcpCalls(id: string, mustCite: string | undefined): string {
+  const cite = mustCite
+    ? `,\n  "cites": [{ "claim_id": "${mustCite}", "capability": "<from frontier_status>" }]`
+    : "";
+  return `get_objective   { "objective_id": "${id}" }
+score_candidate { "objective_id": "${id}", "artifact": { … } }
+submit_claim    { "objective_id": "${id}", "submitter": "me", "artifact": { … }${cite} }`;
+}
+
+/**
+ * `try` scores without writing. `commit` binds the artifact in this epoch and
+ * prints the nonce; `reveal` opens it in a later one, and that is where the
+ * citation goes -- `commit` takes none, because the commitment hash covers
+ * the artifact and the submitter and nothing else.
+ */
+function cliCalls(id: string, mustCite: string | undefined): string {
+  const cite = mustCite ? ` \\\n    --cites ${mustCite}` : "";
+  return `cairn --log my.jsonl --root . try ${id} \\
+    --submitter me --artifact my-artifact.json
+
+cairn --log my.jsonl --root . commit ${id} \\
+    --submitter me --artifact my-artifact.json
+# … the epoch turns …
+cairn --log my.jsonl --root . reveal ${id} \\
+    --submitter me --artifact my-artifact.json --nonce <from commit>${cite}`;
+}
 
 /**
  * One challenge: what it pays, who holds the frontier, and what beating them
@@ -218,19 +271,57 @@ function Challenge() {
       </section>
 
       <section className="mb-8">
-        <SectionHeading>How to submit</SectionHeading>
-        <Card className="card-pad">
-          <pre className="code">{`cairn --log my.jsonl --root . try \\
-    --objective ${objective.id} \\
-    --artifact my-artifact.json \\
-    --submitter me`}</pre>
-          <p className="hint">
-            Score locally first — it is free, it is the same pinned checker the network
-            runs, and it is ground truth. Submissions are commit–reveal: your artifact is
-            bound in one epoch and revealed in a later one, so nobody can copy it and
-            nobody can front-run it.
-          </p>
-        </Card>
+        <SectionHeading>Work on this</SectionHeading>
+        <p className="prose-block mb-4">
+          Two ways in, and both start with scoring locally: it is free, it is the same
+          pinned checker the network runs, and it is ground truth. Submissions are
+          commit–reveal — the artifact is bound in one epoch and revealed in a later
+          one, so nobody can copy it and nobody can front-run it.
+        </p>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Card className="card-pad flex flex-col gap-2">
+            <h3 className="text-[13px] font-semibold">From an agent, over MCP</h3>
+            <p className="text-[12.5px] leading-relaxed text-ink-2">
+              One stanza in the client&rsquo;s config; Claude Code, Codex and OpenCode all
+              speak it. Then the loop is{" "}
+              <span className="mono">get_objective → score_candidate ×N → submit_claim</span>
+              , with the ids below already filled in.
+            </p>
+            <div className="relative">
+              <pre className="code text-[11.5px]">{MCP_STANZA}</pre>
+              <div className="absolute top-2 right-2">
+                <CopyButton value={MCP_STANZA} />
+              </div>
+            </div>
+            <div className="relative">
+              <pre className="code text-[11.5px]">{mcpCalls(objective.id, frontier?.must_cite)}</pre>
+              <div className="absolute top-2 right-2">
+                <CopyButton value={mcpCalls(objective.id, frontier?.must_cite)} />
+              </div>
+            </div>
+            <p className="hint">
+              <span className="mono">cites</span> is checked, not requested — it is how the
+              previous holder is paid out of what you earn.{" "}
+              <a className="text-accent hover:underline" href={repoLink("docs/agents.md")}>
+                agents.md
+              </a>{" "}
+              has the Codex and OpenCode spellings.
+            </p>
+          </Card>
+          <Card className="card-pad flex flex-col gap-2">
+            <h3 className="text-[13px] font-semibold">From a terminal</h3>
+            <p className="text-[12.5px] leading-relaxed text-ink-2">
+              <span className="mono">try</span> scores an artifact without touching the
+              log; the second command commits and reveals it.
+            </p>
+            <div className="relative">
+              <pre className="code text-[11.5px]">{cliCalls(objective.id, frontier?.must_cite)}</pre>
+              <div className="absolute top-2 right-2">
+                <CopyButton value={cliCalls(objective.id, frontier?.must_cite)} />
+              </div>
+            </div>
+          </Card>
+        </div>
       </section>
 
       <p className="text-[12.5px] text-ink-3">

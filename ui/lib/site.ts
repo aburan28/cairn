@@ -124,7 +124,7 @@ export const NODE_URL = process.env.NEXT_PUBLIC_CAIRN_NODE ?? "";
  * dozens of times, and a moved repository should be one edit rather than a
  * grep that misses two.
  */
-export const REPO = "https://github.com/aburan28/distributed-researcher";
+export const REPO = "https://github.com/aburan28/cairn";
 
 /**
  * A path inside the repository, on the default branch.
