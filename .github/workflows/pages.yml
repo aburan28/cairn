@@ -13,6 +13,14 @@ name: pages
 # `launch/cairn.jsonl` -- a genuinely settled log that ships in the repository
 # and audits -- and says on the page that that is what it is doing. Nothing here
 # is simulated.
+#
+# The site also publishes `launch/seeds.json` and the transport keys beside it,
+# at `<site>/seeds.json`. That file is how a new node finds the network and how
+# this page finds a node to read, and it is safe to serve from a host nobody
+# controls for the reason `docs/discovery.md` gives: a peer id is `sha256` of a
+# transport key, so a hostile mirror can withhold a seed or serve a key that
+# does not match its name -- both refused -- and cannot serve a different key
+# under the same name. Losing this deployment costs a hint, not the network.
 on:
   push:
     branches: [main]
@@ -96,6 +104,22 @@ jobs:
             echo "ui/lib/snapshot.json is stale; re-run ./scripts/site-snapshot.sh" >&2
             exit 1
           }
+
+      # The seed list is what a stranger points `scripts/seeds-fetch.sh` at, so
+      # deploying one that resolves to nothing is worse than deploying none: the
+      # operator gets "refused us-west" with no way to tell a bad commit from a
+      # hostile mirror. `resolve` here is exactly what their machine will run,
+      # against the tree about to be published.
+      #
+      # Exit 1 means "no entry verified", which is the state this repository is
+      # in until somebody publishes a key -- true, and not a reason to refuse a
+      # deploy. Anything else is a malformed list and stops the run.
+      - name: the published seed list resolves
+        run: |
+          set -euo pipefail
+          ./target/release/cairn seeds resolve \
+            --list launch/seeds.json --keys launch/seeds --out /tmp/seeds \
+            || [ "$?" = 1 ]
 
       # `configure-pages` reports the origin and path the site will be served
       # from, so the base path is taken from it rather than hard-coded -- a

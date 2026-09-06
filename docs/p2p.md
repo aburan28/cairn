@@ -581,15 +581,38 @@ Tor client, or a Tor bridge speaking obfs4/Snowflake on that port) and every
 dial leaves through it — see the transport-security section above and
 `docs/censorship.md` §5.
 
-`cairn gen-bootstrap --addr HOST:PORT --out FILE` writes a file in that
-shape for a given address, with a freshly generated McEliece keypair standing
-in for the seed's own key. It cannot make the address trustworthy -- only the
+`cairn seeds resolve` is where a real one comes from. `make seeds` runs
+`scripts/seeds-fetch.sh`, which downloads the list this project publishes at
+<https://aburan28.github.io/cairn/seeds.json> together with
+the transport key beside each entry, and `cairn seeds resolve` writes one
+bootstrap file per entry whose key hashes to the peer id the list named.
+`make p2p` and `make node` use `.local/seeds/*.json` when they exist.
+
+Nothing in that path trusts the server, and it is worth saying why rather than
+where. A key file is named for the `sha256` of the bytes inside it, a peer id
+**is** that hash, and `resolve` re-derives it before writing anything -- so a
+mirror can withhold a seed or serve a key that does not match its name, both
+refused, and cannot serve a different key under the same name. What it can do
+is send you to a machine of its choosing, which then fails the handshake at a
+cost of one dial. Same bound as a hostile DNS answer, for the same reason. The
+URL is overridable (`SEEDS_URL`, `CAIRN_SEEDS_URL`) precisely because no hint
+source here is privileged; see `docs/discovery.md`.
+
+The fetch is a shell script and not part of the binary because
+`tests/cipher_policy.rs` fails the build if a TLS crate enters the dependency
+tree, and an HTTP client is how one arrives -- the same split as
+`scripts/drand-beacon.sh`.
+
+`cairn gen-bootstrap --addr HOST:PORT --out FILE` is the fallback when there is
+no published seed to resolve. It writes a file in that shape for a given
+address, with a freshly generated McEliece keypair standing in for the seed's
+own key. It cannot make the address trustworthy -- only the
 key in the file does that, per `p2p::handshake` -- so `"public"` must be
 replaced with the real seed's public key (or the seed operator's own
 `cairn p2p --identity FILE` must be pointed at the generated file) before
 the connection means anything. `make p2p` calls it automatically to produce
-`.local/seed.json` for `SEED_ADDR` when no other `--bootstrap` is given; see
-the README.
+`.local/seed.json` for `SEED_ADDR` when `make seeds` has verified nothing and
+no other `--bootstrap` is given; see the README.
 
 ### Running a seed on a public host
 
@@ -604,6 +627,20 @@ public DNS name, which survives a restart that moves the IP) in the bootstrap
 file you hand out. That is safe because a bootstrap address is only a dial hint:
 the peer id is the hash of the key, so the key decides who answered and the
 address decides nothing.
+
+**Publish your key where strangers can get it.** Handing out a file is what
+does not scale, and it is the step that is skipped:
+
+```sh
+cairn seeds publish --identity .local/node.identity.json --out launch/seeds/
+```
+
+writes `<your peer id>.key` and prints the `launch/seeds.json` entry to go with
+it. Open a pull request with both, and everyone's `make seeds` finds you on the
+next deploy. There is no upload endpoint on purpose -- a reviewed change to a
+repository is what keeps the anchor replaceable by somebody other than whoever
+holds the server. If you also front `cairn serve` with TLS, put that base URL in
+the entry's `http` field and the published site can read your node too.
 
 **Open the port inbound.** A security group that does not admit the p2p port
 does not refuse connections, it *drops* them. There is no RST, so nothing on

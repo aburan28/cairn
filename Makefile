@@ -47,7 +47,25 @@ CHECKPOINT ?= $(abspath $(LOCAL_DIR)/checkpoint.json)
 LISTEN ?= 127.0.0.1:9000
 SEED_ADDR ?= 44.229.170.164:5000
 SEED_BOOTSTRAP ?= $(abspath $(LOCAL_DIR)/seed.json)
-BOOTSTRAP_ARGS ?= --bootstrap $(SEED_BOOTSTRAP)
+# The published seed list, and where `make seeds` writes what verified out of
+# it. Overridable because an anchor you cannot repoint without editing the
+# source is the anchor docs/discovery.md says not to build: a fork, a mirror, a
+# file:// copy and a hidden service are all equally acceptable here, because
+# none of them is trusted -- `cairn seeds resolve` re-derives every peer id from
+# the key bytes before it writes anything.
+SEEDS_URL ?= https://aburan28.github.io/cairn/seeds.json
+SEEDS_DIR ?= $(abspath $(LOCAL_DIR)/seeds)
+# Evaluated when make parses this file, which is correct: `make seeds` is a
+# separate invocation, so a run that fetched seeds and a run that uses them are
+# never the same process.
+VERIFIED_SEEDS := $(wildcard $(SEEDS_DIR)/*.json)
+# Verified seeds when there are any, and the placeholder otherwise. The
+# placeholder is a real address with a key that authenticates nobody, so it
+# fails the handshake with an error indistinguishable from a closed port --
+# which is the whole reason the published list exists. Preferring the list is
+# therefore not a convenience: it is the difference between a bootstrap that
+# can work and one that cannot.
+BOOTSTRAP_ARGS ?= $(if $(VERIFIED_SEEDS),$(foreach seed,$(VERIFIED_SEEDS),--bootstrap $(seed)),--bootstrap $(SEED_BOOTSTRAP))
 # Derived from SEED_ADDR, never written twice. `LISTEN` and `SEED_ADDR` are two
 # independently-editable defaults that have to agree about a port, and they did
 # not: clients dialled :5000 while a seed operator running `make p2p` bound
@@ -72,7 +90,7 @@ CLIENT ?= claude
 
 # `ui/node_modules` is deliberately absent: it is a real directory whose
 # freshness against the lockfile is the whole point of the rule.
-.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui \
+.PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui \
 	interop differential fuzz mcp-smoke serve-smoke node-smoke canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
 	test-reference fmt clippy docs tla check
@@ -84,6 +102,8 @@ help:
 	  '  make mcp-setup           Wire an MCP client to this checkout (default: Claude Code).' \
 	  '  make mcp-setup CLIENT=opencode   ...or opencode / codex.' \
 	  '  make p2p                 The daemon alone, with no HTTP and no reader.' \
+	  '  make seeds               Fetch the published seed list and verify it into' \
+	  '                           .local/seeds/*.json, which make p2p then uses.' \
 	  '  make mcp MCP_LOG=my-path  Use a custom MCP ledger path.' \
 	  '  make p2p P2P_LOG=my-path  Use a custom P2P ledger path.' \
 	  '  make opencode.json       (Re)write the OpenCode MCP config without starting the server.' \
@@ -120,10 +140,15 @@ help:
 	  'P2P overrides: LISTEN=127.0.0.1:9000 BOOTSTRAP_ARGS="--bootstrap peer.json"' \
 	  '             IDENTITY=.local/node.identity.json ROOT_KEY=.local/root.key' \
 	  '             CHECKPOINT=.local/checkpoint.json' \
-	  '             SEED_ADDR=44.229.170.164:5000  default bootstrap peer address;' \
-	  '                                     .local/seed.json is generated on first' \
-	  '                                     `make p2p` with a placeholder key -- see' \
-	  '                                     `cairn gen-bootstrap` and docs/p2p.md'
+	  '             SEED_ADDR=44.229.170.164:5000  fallback bootstrap peer address,' \
+	  '                                     used only when make seeds has verified' \
+	  '                                     nothing. .local/seed.json is generated' \
+	  '                                     on first `make p2p` with a placeholder' \
+	  '                                     key that authenticates nobody -- see' \
+	  '                                     `cairn gen-bootstrap` and docs/p2p.md' \
+	  '             SEEDS_URL=<the GitHub Pages list>  where make seeds fetches from;' \
+	  '                                     point it at a fork or a file:// copy' \
+	  '             SEEDS_DIR=.local/seeds  verified bootstrap files land here'
 
 # Build, then stage into $(BIN_DIR). A copy rather than a symlink into target/
 # so `cargo clean` cannot leave bin/ full of dangling links, and so a build with
@@ -132,7 +157,7 @@ help:
 define stage-bins
 	@mkdir -p "$(BIN_DIR)"
 	@for b in $(BINS); do cp -f "$(RELEASE_DIR)/$$b" "$(BIN_DIR)/$$b"; done
-	@echo "staged $(BINS) into $(BIN_DIR)/ (mcp, p2p, serve, gen-bootstrap and arena are its subcommands)"
+	@echo "staged $(BINS) into $(BIN_DIR)/ (mcp, p2p, serve, gen-bootstrap, seeds and arena are its subcommands)"
 endef
 
 build:
@@ -190,6 +215,19 @@ $(SEED_BOOTSTRAP): build | $(LOCAL_DIR)
 	    printf '      rm %s to regenerate it for the new address.\n' "$(SEED_BOOTSTRAP)" >&2; \
 	  fi
 
+# Fetch the published seed list and verify it into bootstrap files.
+#
+# The download is `scripts/seeds-fetch.sh` and the checking is `cairn seeds
+# resolve`, and the split is not tidiness: `tests/cipher_policy.rs` fails the
+# build if a TLS crate enters the dependency tree, so this binary cannot fetch
+# an https URL and must not learn how. Same shape as `make beacon`.
+#
+# Safe to re-run, and worth re-running: a seed that moved publishes a new
+# address under the same key, and this is how you pick it up.
+seeds: build | $(LOCAL_DIR)
+	CAIRN_BIN="$(abspath $(CLI))" CAIRN_SEEDS_URL="$(SEEDS_URL)" \
+	  CAIRN_SEEDS_DIR="$(SEEDS_DIR)" ./scripts/seeds-fetch.sh
+
 # The daemon creates the identity, root key, and signed checkpoint files on the
 # first run. Keep them under .local by default; these files contain secrets and
 # must not be committed.
@@ -197,7 +235,10 @@ $(SEED_BOOTSTRAP): build | $(LOCAL_DIR)
 # The daemon alone, with no HTTP and no reader. `make node` is the one to run;
 # this stays because a peer-to-peer problem is easier to read without two other
 # processes logging into the same terminal.
-p2p: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
+# The placeholder is a prerequisite only when nothing verified: generating one
+# beside a real seed would leave a file that dials an address and
+# authenticates nobody sitting next to files that do both.
+p2p: build $(if $(VERIFIED_SEEDS),,$(SEED_BOOTSTRAP)) | $(LOCAL_DIR)
 	exec $(P2P) --identity "$(IDENTITY)" --root-key "$(ROOT_KEY)" \
 	  --checkpoint "$(CHECKPOINT)" --listen "$(LISTEN)" \
 	  --log "$(P2P_LOG)" --root "$(ROOT)" $(BOOTSTRAP_ARGS) $(P2P_ARGS)

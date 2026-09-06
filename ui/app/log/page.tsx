@@ -10,6 +10,7 @@ import {
   summarize,
 } from "@/lib/log";
 import { Badge, Card, EmptyState, Hash, Note } from "@/components/ui";
+import { resolveNode } from "@/lib/site";
 
 /**
  * Every record this node holds, in the order it admitted them.
@@ -48,12 +49,23 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    // Show *which* origin, rather than the empty string NODE_URL now holds.
-    // Empty is right for fetching -- it keeps every request relative, so the
-    // page works behind a tunnel or a proxy on an unknown path -- and wrong for
-    // displaying, because nobody can retype "" after they clear the box.
-    setBase(NODE_URL || window.location.origin);
-    void load(NODE_URL);
+    // Ask which node to read before reading it. Same-origin when one answers --
+    // the daemon serves this page at /ui/, so that is the common case and it
+    // costs one /health -- and otherwise the first seed from the published list
+    // that is up. On the public site there is no same-origin node at all, and
+    // before this the box showed github.io and every request 404'd into the
+    // snapshot.
+    //
+    // Shown *and* used, which is the part worth being careful about: the box
+    // has to name the origin the numbers below came from, or a reader comparing
+    // two nodes is comparing one node against a label. Empty stays empty for
+    // fetching -- relative requests survive a tunnel or a proxy on an unknown
+    // path -- and becomes this page's own origin for display, because nobody
+    // can retype "" after clearing the box.
+    void resolveNode().then((url) => {
+      setBase(url || window.location.origin);
+      void load(url);
+    });
   }, [load]);
 
   const counts = useMemo(() => (records ? kindCounts(records) : []), [records]);

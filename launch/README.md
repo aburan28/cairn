@@ -13,7 +13,17 @@ cairn.jsonl    the log: objectives, commitments, claims, verdicts,
                    settlements, frontier moves, and the settlement batches
 checkpoint.json    (height, head, merkle_root) signed with ML-DSA-65
 root-key.pub       the public half, hex
+seeds.json         where to find running nodes -- addresses to dial, and
+                   HTTPS endpoints the published site reads
+seeds/             one transport key per seed, named for its own sha256
 ```
+
+`seeds.json` and `seeds/` are the network's entry point rather than part of this
+artifact: they are deployed to GitHub Pages alongside the site and fetched by
+`make seeds`. Nothing about them has to be trusted, which is why they can live
+on a host this project does not control -- see
+[seeds/README.md](seeds/README.md) and
+[docs/discovery.md](../docs/discovery.md).
 
 ## Check it
 
