@@ -1,0 +1,23 @@
+# The cryptographic objectives in examples/, one per line, posted by
+# `autoresearcher.py --post research/crypto-autoresearcher/objectives.txt`
+# before the node starts. Everything here is either in this researcher's
+# repertoire or declined by it with a reason -- both outcomes are the point.
+examples/ecdlp/objective.json
+examples/certicom-ecdlp/objective-nums-50.json
+examples/certicom-ecdlp/objective-nums-60.json
+examples/certicom-ecdlp/objective-certicom-eccp131.json
+examples/first-blood/objective_80.json
+examples/first-blood/objective_88.json
+examples/first-blood/objective_96.json
+examples/first-blood/objective_112.json
+examples/first-blood/objective_128.json
+examples/hash-differential/objective-collide-md5-48.json
+examples/hash-differential/objective-collide-md4.json
+examples/hash-differential/objective-collide-md5.json
+examples/hash-differential/objective-collide-sha1-64.json
+examples/hash-differential/objective-collide-sha0.json
+examples/hash-differential/objective-collide-sha1.json
+examples/hash-differential/objective-dv-sha0.json
+examples/hash-differential/objective-dv-sha1.json
+examples/secp256k1-modadd/objective.json
+examples/ecdsa-fail/objective.json

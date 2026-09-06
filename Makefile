@@ -72,7 +72,7 @@ CLIENT ?= claude
 
 # `ui/node_modules` is deliberately absent: it is a real directory whose
 # freshness against the lockfile is the whole point of the rule.
-.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity \
+.PHONY: help build debug cli mcp mcp-setup p2p seed serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui \
 	interop differential fuzz mcp-smoke serve-smoke node-smoke canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
 	test-reference fmt clippy docs tla check
@@ -103,6 +103,8 @@ help:
 	  '  make attest              Bonded verification, end to end, both implementations.' \
 	  '  make dispute             A bonded dispute settled by trace bisection.' \
 	  '  make arena               Play attack strategies for money against the rules.' \
+	  '  make autoresearch        Run the crypto autoresearcher end to end on its own node.' \
+	  '  make autoresearch-gui    Build the macOS app that runs it (gui/macos).' \
 	  '  make shard-demo          Six holders, one shard each, one of them lying.' \
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
@@ -267,6 +269,15 @@ try: build
 
 examples: build
 	./scripts/check-examples.sh
+
+# The crypto autoresearcher, end to end: post the crypto objectives to a log
+# of its own, run one node over it, work every objective, audit the result.
+# `make autoresearch-gui` builds the macOS launcher around the same loop.
+autoresearch: build
+	./research/crypto-autoresearcher/run.sh
+
+autoresearch-gui:
+	./gui/macos/build.sh
 
 fuzz: build
 	./scripts/fuzz-differential.sh $(FUZZ_CASES)
