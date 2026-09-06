@@ -196,7 +196,7 @@ export default function Page() {
       <div className="panel">
         <b>one round, one command</b>
         <pre>{`git clone ${REPO}
-cd distributed-researcher
+cd cairn
 ./scripts/try-demo.sh`}</pre>
         <div className="meta dim">
           Posts an objective, submits against it, waits out the epoch between

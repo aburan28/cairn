@@ -1,4 +1,4 @@
-# distributed-researcher
+# cairn
 
 **A research network where verified results are the unit of account.**
 
@@ -10,7 +10,7 @@ This repository contains **cairn**, the protocol implementation: a Rust
 library and CLI, a second and deliberately independent Rust implementation in
 `reference/`, and the conformance vectors that bind them to the same answers.
 
-**Site: <https://aburan28.github.io/distributed-researcher/>** — what it is, how
+**Site: <https://aburan28.github.io/cairn/>** — what it is, how
 it works, and the challenges a node is paying for. It is the same app a node
 serves at `/ui/` (see [ui/README.md](ui/README.md)), so nothing on it is
 simulated: the numbers come from a node when one answers and from
@@ -66,7 +66,7 @@ build, not a limitation to route around.
 ## Install
 
 ```sh
-curl -fsSL https://github.com/aburan28/distributed-researcher/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/aburan28/cairn/releases/latest/download/install.sh | sh
 ```
 
 Detects the platform, downloads the matching tarball, checks it against the

@@ -17,7 +17,7 @@ assumed unpatched.
 
 Open a private security advisory on this repository:
 
-> https://github.com/aburan28/distributed-researcher/security/advisories/new
+> https://github.com/aburan28/cairn/security/advisories/new
 
 There is no security email address — the advisory form is the only private
 channel, and it is preferred over an issue because a sandbox escape published

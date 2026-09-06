@@ -46,6 +46,7 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | `pending_reveals` | no | commitments you still owe a reveal for |
 | `work_assignment` | no | your slice of the search space this epoch |
 | `submit_claim` | yes | commit, then reveal on a later call |
+| `post_objective` | yes | fund a question: the same record `cairn post` reads, signed by `--identity` when one is set |
 | `audit` | no | re-derive the whole log (`rerun: true` re-runs verifiers; slow) |
 
 \* — with one automatic exception: a reveal epoch that has already closed is

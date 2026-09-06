@@ -4,7 +4,7 @@
 Vetto commitment, no ledger record depends on it, and the pilot in this
 directory funds nothing.*
 
-Target: `aburan28/distributed-researcher` (the `cairn` crate) becomes the
+Target: `aburan28/cairn` (the `cairn` crate) becomes the
 grading and publication layer under Vetto's benchmarks, so that every published
 number is re-derivable by a stranger holding nothing but a copy of the log.
 

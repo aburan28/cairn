@@ -101,9 +101,11 @@ the reason you are safe.
 ## Reading the tools
 
 `list_objectives`, `get_objective`, `score_candidate`, `frontier_status`,
-`pending_reveals`, `work_assignment`, `submit_claim`, `audit`.
+`pending_reveals`, `work_assignment`, `submit_claim`, `post_objective`, `audit`.
 
-Only `submit_claim` writes. `get_objective` reports `artifact_schema` when the
+Only `submit_claim` and `post_objective` write — the second funds a question
+with the same record `cairn post` reads, signed by the server's `--identity`
+when one is set. `get_objective` reports `artifact_schema` when the
 objective declares one — that is the shape to build, and it comes from a
 structured field rather than from the statement, which is why it is safe to
 follow.

@@ -87,3 +87,7 @@ ui/tsconfig.tsbuildinfo
 # (gui/macos/build.sh). Both are derived from the sources beside them.
 gui/macos/.build/
 gui/macos/build/
+
+# Toolchain artefacts if a ui command is ever run from the repository root.
+/node_modules/
+/.next/

@@ -46,8 +46,8 @@ Point `cairn mcp` at a log that already has this objective posted:
 {
   "mcpServers": {
     "cairn": {
-      "command": "/ABS/distributed-researcher/target/release/cairn",
-      "args": ["--log", "/tmp/pw-ecdsa.jsonl", "--root", "/ABS/distributed-researcher", "mcp"]
+      "command": "/ABS/cairn/target/release/cairn",
+      "args": ["--log", "/tmp/pw-ecdsa.jsonl", "--root", "/ABS/cairn", "mcp"]
     }
   }
 }

@@ -1599,7 +1599,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     // *read* this. Everything served here is public by construction -- the log,
     // the objectives, the signed checkpoint -- so there is nothing for a
     // same-origin policy to protect, and the site at
-    // aburan28.github.io/distributed-researcher reads a live node through it.
+    // aburan28.github.io/cairn reads a live node through it.
     //
     // It does **not** open cross-origin writes, and that is worth stating
     // because the reason is indirect. `POST /submit` takes `application/json`,

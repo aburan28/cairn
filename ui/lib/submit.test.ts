@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_DRAFT, type Draft, problems, reachableForWrites, toRecord } from "./submit";
+import {
+  EMPTY_DRAFT,
+  type Draft,
+  fromRecord,
+  problems,
+  reachableForWrites,
+  toRecord,
+} from "./submit";
 
 const CREATED = "2026-01-01T00:00:00+00:00";
 
@@ -10,11 +17,28 @@ function draft(overrides: Partial<Draft> = {}): Draft {
     statement: "Find an integer with a long trajectory.",
     funder: "alice",
     reward: "1000",
-    checker: "examples/collatz/checkers/long_trajectory.py",
-    checkerSha256: "df".repeat(32),
+    program: "examples/collatz/checkers/long_trajectory.py",
+    programSha256: "df".repeat(32),
     ...overrides,
   };
 }
+
+/** The shipped examples, verbatim in the fields that matter. */
+const CAPSET = {
+  goal: "GOAL-capset-lower-bounds",
+  statement: "Exhibit a cap set in F_3^4 of size at least 20.",
+  verifier: {
+    kind: "evaluator",
+    evaluator: "examples/capset/evaluators/cap_set.py",
+    evaluator_sha256: "05".repeat(32),
+    entrypoint: "score",
+    threshold: 20,
+    direction: "maximize",
+  },
+  reward: 250000,
+  funder: "treasury",
+  created_at: "2026-07-28T00:00:00+00:00",
+};
 
 describe("toRecord", () => {
   /**
@@ -40,23 +64,135 @@ describe("toRecord", () => {
     expect("deadline" in record).toBe(false);
     expect("ratchet" in record).toBe(false);
     expect("require_signed_submitter" in record).toBe(false);
+    expect("artifact_schema" in record).toBe(false);
   });
 
   it("includes optional fields once they are set", () => {
     const record = toRecord(
-      draft({ deadline: "2026-06-01T00:00:00+00:00", requireSignedSubmitter: true }),
+      draft({
+        deadline: "2026-06-01T00:00:00+00:00",
+        requireSignedSubmitter: true,
+        artifactSchema: '{"type":"object","required":["n"]}',
+      }),
       CREATED,
     );
     expect(record.deadline).toBe("2026-06-01T00:00:00+00:00");
     expect(record.require_signed_submitter).toBe(true);
+    expect(record.artifact_schema).toEqual({ type: "object", required: ["n"] });
   });
 
   it("sends the reward as a number, because money here is an integer", () => {
-    // A string reward decodes as a malformed record: `as_i128` refuses it, and
-    // the message a funder gets is about types rather than about their form.
     const record = toRecord(draft({ reward: "1000" }), CREATED);
     expect(record.reward).toBe(1000);
     expect(typeof record.reward).toBe("number");
+  });
+
+  /**
+   * The per-kind shape. The published schema requires only `kind`, and the
+   * verifier reports a malformed spec only when a verdict is first needed —
+   * after the objective is funded and in the log. So this is the one place
+   * the shape is decided before money moves, and each kind is pinned against
+   * the field names `src/verifiers/mod.rs` reads.
+   */
+  it("spells a certificate's verifier with checker fields", () => {
+    expect(toRecord(draft(), CREATED).verifier).toEqual({
+      kind: "certificate",
+      checker: "examples/collatz/checkers/long_trajectory.py",
+      checker_sha256: "df".repeat(32),
+      entrypoint: "check",
+    });
+  });
+
+  it("spells an evaluator's verifier with evaluator fields, a threshold and a direction", () => {
+    const record = toRecord(
+      draft({
+        verifierKind: "evaluator",
+        program: "examples/capset/evaluators/cap_set.py",
+        programSha256: "05".repeat(32),
+        entrypoint: "score",
+        threshold: "20",
+        direction: "maximize",
+      }),
+      CREATED,
+    );
+    expect(record.verifier).toEqual(CAPSET.verifier);
+  });
+
+  it("nests a statistical verifier's program under `statistic`", () => {
+    const record = toRecord(
+      draft({
+        verifierKind: "statistical",
+        program: "examples/permutation/stat.py",
+        programSha256: "ab".repeat(32),
+        entrypoint: "statistic",
+        threshold: "0.05",
+        direction: "minimize",
+      }),
+      CREATED,
+    );
+    expect(record.verifier).toEqual({
+      kind: "statistical",
+      statistic: { path: "examples/permutation/stat.py", sha256: "ab".repeat(32) },
+      entrypoint: "statistic",
+      threshold: 0.05,
+      direction: "minimize",
+    });
+  });
+
+  it("gives a lean verifier its statement and no pinned program", () => {
+    const record = toRecord(
+      draft({
+        verifierKind: "lean",
+        program: "",
+        programSha256: "",
+        leanStatement: "theorem t : 1 + 1 = 2",
+        leanPreamble: "import Mathlib",
+        timeoutSeconds: "30",
+      }),
+      CREATED,
+    );
+    expect(record.verifier).toEqual({
+      kind: "lean",
+      statement: "theorem t : 1 + 1 = 2",
+      preamble: "import Mathlib",
+      timeout_seconds: 30,
+    });
+  });
+
+  it("gives a replay verifier an argv, its reproducible fields and no pinned program", () => {
+    const record = toRecord(
+      draft({
+        verifierKind: "replay",
+        program: "",
+        programSha256: "",
+        replayCommand: "python3\nrun.py\n--seed 1\n",
+        replayFields: "relations_found, degree",
+        replayCwd: "examples/replay",
+      }),
+      CREATED,
+    );
+    expect(record.verifier).toEqual({
+      kind: "replay",
+      command: ["python3", "run.py", "--seed 1"],
+      reproducible_fields: ["relations_found", "degree"],
+      cwd: "examples/replay",
+    });
+    const { draft: back } = fromRecord(record);
+    expect(back.replayCommand).toBe("python3\nrun.py\n--seed 1");
+    expect(back.replayFields).toBe("relations_found, degree");
+    expect(problems(draft({ verifierKind: "replay", program: "", programSha256: "" })).replayCommand).toBeDefined();
+  });
+
+  it("merges verifier extras but lets the form's own fields win", () => {
+    const record = toRecord(
+      draft({
+        verifierExtras: '{"stepper":{"kind":"python"},"checker":"stale.py"}',
+      }),
+      CREATED,
+    );
+    const verifier = record.verifier as Record<string, unknown>;
+    expect(verifier.stepper).toEqual({ kind: "python" });
+    expect(verifier.checker).toBe("examples/collatz/checkers/long_trajectory.py");
   });
 
   /**
@@ -64,10 +200,11 @@ describe("toRecord", () => {
    * objective's. Deriving it from the one field the form collects is what
    * makes that unrepresentable rather than merely validated.
    */
-  it("gives the ratchet the objective's own reward", () => {
+  it("gives the ratchet the objective's own reward and direction", () => {
     const record = toRecord(
       draft({
         verifierKind: "evaluator",
+        threshold: "9",
         useRatchet: true,
         baseline: "9",
         target: "20",
@@ -93,6 +230,65 @@ describe("toRecord", () => {
   });
 });
 
+describe("fromRecord", () => {
+  /**
+   * The whole reason the loader exists: a scaffolded `objective.json` should
+   * post as the same record it would have posted from the terminal. A round
+   * trip that changed a verifier field would change the id, and the funder
+   * would learn that only when claims failed to resolve against it.
+   */
+  it("round-trips a shipped evaluator objective through the form", () => {
+    const { draft: loaded, dropped } = fromRecord(CAPSET);
+    expect(dropped).toEqual([]);
+    expect(loaded.verifierKind).toBe("evaluator");
+    expect(loaded.program).toBe(CAPSET.verifier.evaluator);
+    expect(loaded.programSha256).toBe(CAPSET.verifier.evaluator_sha256);
+    expect(loaded.threshold).toBe("20");
+    const posted = toRecord(loaded, CAPSET.created_at);
+    expect(posted).toEqual(CAPSET);
+  });
+
+  it("keeps verifier fields it has no control for", () => {
+    const { draft: loaded } = fromRecord({
+      ...CAPSET,
+      verifier: { kind: "certificate", checker: "c.py", checker_sha256: "00".repeat(32), entrypoint: "check", stepper: { kind: "python" }, timeout_seconds: 5 },
+    });
+    expect(JSON.parse(loaded.verifierExtras)).toEqual({
+      stepper: { kind: "python" },
+      timeout_seconds: 5,
+    });
+    const posted = toRecord(loaded, CREATED).verifier as Record<string, unknown>;
+    expect(posted.stepper).toEqual({ kind: "python" });
+    expect(posted.timeout_seconds).toBe(5);
+  });
+
+  it("lifts a ratchet and its direction", () => {
+    const { draft: loaded } = fromRecord({
+      ...CAPSET,
+      ratchet: { baseline: 9, target: 20, direction: "minimize", min_improvement: 3, reward: 250000 },
+    });
+    expect(loaded.useRatchet).toBe(true);
+    expect(loaded.baseline).toBe("9");
+    expect(loaded.target).toBe("20");
+    expect(loaded.minImprovement).toBe("3");
+    expect(loaded.direction).toBe("minimize");
+  });
+
+  it("names the top-level fields it cannot carry", () => {
+    const { dropped } = fromRecord({
+      ...CAPSET,
+      funding_signature: "ab".repeat(64),
+      confidentiality: "embargoed",
+    });
+    expect(dropped).toEqual(["confidentiality", "funding_signature"]);
+  });
+
+  it("refuses anything that is not an object", () => {
+    expect(() => fromRecord([])).toThrow();
+    expect(() => fromRecord("{}")).toThrow();
+  });
+});
+
 describe("problems", () => {
   it("passes a complete draft", () => {
     expect(problems(draft())).toEqual({});
@@ -111,11 +307,20 @@ describe("problems", () => {
    * anyone starts work. A blank or short value must not reach the node as a
    * plausible-looking field.
    */
-  it("requires a full 64-character lowercase checker hash", () => {
-    expect(problems(draft({ checkerSha256: "" })).checkerSha256).toBeDefined();
-    expect(problems(draft({ checkerSha256: "abc" })).checkerSha256).toBeDefined();
-    expect(problems(draft({ checkerSha256: "DF".repeat(32) })).checkerSha256).toBeDefined();
-    expect(problems(draft({ checkerSha256: "df".repeat(32) })).checkerSha256).toBeUndefined();
+  it("requires a full 64-character lowercase program hash", () => {
+    expect(problems(draft({ programSha256: "" })).programSha256).toBeDefined();
+    expect(problems(draft({ programSha256: "abc" })).programSha256).toBeDefined();
+    expect(problems(draft({ programSha256: "DF".repeat(32) })).programSha256).toBeDefined();
+    expect(problems(draft({ programSha256: "df".repeat(32) })).programSha256).toBeUndefined();
+  });
+
+  it("asks scored kinds for a threshold and lean for a statement, and nothing else of them", () => {
+    expect(problems(draft({ verifierKind: "evaluator" })).threshold).toBeDefined();
+    expect(problems(draft({ verifierKind: "evaluator", threshold: "1" })).threshold).toBeUndefined();
+    const lean = problems(draft({ verifierKind: "lean", program: "", programSha256: "" }));
+    expect(lean.leanStatement).toBeDefined();
+    expect(lean.program).toBeUndefined();
+    expect(lean.programSha256).toBeUndefined();
   });
 
   it("refuses a ratchet on a certificate, which has nothing to score", () => {
@@ -129,6 +334,7 @@ describe("problems", () => {
     const found = problems(
       draft({
         verifierKind: "evaluator",
+        threshold: "0",
         useRatchet: true,
         baseline: "0",
         target: "10",
@@ -142,6 +348,7 @@ describe("problems", () => {
     const found = problems(
       draft({
         verifierKind: "evaluator",
+        threshold: "5",
         useRatchet: true,
         baseline: "5",
         target: "5",
@@ -149,6 +356,12 @@ describe("problems", () => {
       }),
     );
     expect(found.target).toBeDefined();
+  });
+
+  it("refuses malformed JSON in the free-text fields", () => {
+    expect(problems(draft({ artifactSchema: "{nope" })).artifactSchema).toBeDefined();
+    expect(problems(draft({ verifierExtras: "[1]" })).verifierExtras).toBeDefined();
+    expect(problems(draft({ verifierExtras: '{"seed":1}' })).verifierExtras).toBeUndefined();
   });
 });
 
