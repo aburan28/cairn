@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.0](https://github.com/aburan28/cairn/compare/v1.2.0...v1.3.0) (2026-09-07)
+
+
+### Features
+
+* citation-flow harness as a CLI, and a CSV export that exports ([#142](https://github.com/aburan28/cairn/issues/142)) ([0e22188](https://github.com/aburan28/cairn/commit/0e22188d7907694ee2d8996f3e598340846ddd1e))
+* make the us-west seed real ([#139](https://github.com/aburan28/cairn/issues/139)) ([e182c7c](https://github.com/aburan28/cairn/commit/e182c7c116603270f378270a065db224d667d6ad))
+* publish seed node endpoints on GitHub Pages ([#137](https://github.com/aburan28/cairn/issues/137)) ([31eeb6c](https://github.com/aburan28/cairn/commit/31eeb6c36110c0b14059cbc311b2e959bb70f0e1))
+* **ui:** redesigned reader, post challenges from the page, wallet-signed funding ([#131](https://github.com/aburan28/cairn/issues/131)) ([5fc3aee](https://github.com/aburan28/cairn/commit/5fc3aee0f3b86b63d117e12dc961358d73506e13))
+
+
+### Fixes
+
+* decode and canon without a log, like check already did ([#140](https://github.com/aburan28/cairn/issues/140)) ([8a9ec96](https://github.com/aburan28/cairn/commit/8a9ec960e8b3f688572f896fea99ff52bbfb088a))
+* omit structuredContent when there are no citations to carry ([#141](https://github.com/aburan28/cairn/issues/141)) ([926e608](https://github.com/aburan28/cairn/commit/926e608c396231e9aebafefa845400330634a1ed))
+* **release:** build on tag creation, not only tag push ([#135](https://github.com/aburan28/cairn/issues/135)) ([9fe6f5e](https://github.com/aburan28/cairn/commit/9fe6f5edd0eb339ed0dfe12fb898355a48fda89e))
+* **ui:** render a fresh node's signed-but-empty checkpoint instead of crashing ([#138](https://github.com/aburan28/cairn/issues/138)) ([71e1ad3](https://github.com/aburan28/cairn/commit/71e1ad37b257cf004325b5550d62c3af4078cd14))
+
 ## [1.2.0](https://github.com/aburan28/cairn/compare/v1.1.0...v1.2.0) (2026-09-06)
 
 
