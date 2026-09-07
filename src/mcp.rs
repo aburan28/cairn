@@ -926,18 +926,32 @@ impl Server {
         // as a JSON-RPC error: the model needs to see the message and try
         // again, and a transport-level error is not shown to it.
         match result {
-            Ok(text) => success(
-                id,
-                json!({
+            Ok(text) => {
+                let citations = self
+                    .citation_capabilities
+                    .iter()
+                    .map(|(claim_id, capability)| {
+                        json!({ "claim_id": claim_id, "capability": capability })
+                    })
+                    .collect::<Vec<_>>();
+                let mut payload = json!({
                     "content": [text_block(&text)],
-                    "structuredContent": {
-                        "citations": self.citation_capabilities.iter().map(|(claim_id, capability)| {
-                            json!({ "claim_id": claim_id, "capability": capability })
-                        }).collect::<Vec<_>>()
-                    },
                     "isError": false
-                }),
-            ),
+                });
+                // Only when there is something to carry. A client that sees
+                // `structuredContent` may treat it as *the* result and ignore the
+                // text beside it -- the protocol pairs that field with an
+                // `outputSchema`, and these tools declare none. Sending
+                // `{"citations": []}` on every read therefore told such a client
+                // that `list_objectives` had returned nothing, and an agent
+                // reading it reported an empty log against a ledger holding a
+                // funded objective. Answering an empty listing and answering
+                // nothing must not look the same.
+                if !citations.is_empty() {
+                    payload["structuredContent"] = json!({ "citations": citations });
+                }
+                success(id, payload)
+            }
             Err(message) => success(
                 id,
                 json!({ "content": [text_block(&message)], "isError": true }),
@@ -2626,6 +2640,30 @@ mod tests {
         assert!(citations.iter().any(|citation| {
             citation["claim_id"] == json!(claim_id) && citation["capability"] == json!(capability)
         }));
+    }
+
+    #[test]
+    fn a_result_with_no_citations_carries_no_structured_content() {
+        // `structuredContent` is paired with an `outputSchema` by the protocol, and these
+        // tools declare none, so a client is entitled to treat the field as the whole
+        // result. Emitting `{"citations": []}` beside every listing said "nothing here"
+        // about a ledger holding a funded objective, and an agent driven over MCP duly
+        // reported an empty log. The text block is the answer; the structured field is
+        // only for capabilities that actually exist.
+        let mut s = server();
+        let response = s.call_tool(json!(1), &json!({ "name": "list_objectives", "arguments": {} }));
+        assert!(
+            response["result"].get("structuredContent").is_none(),
+            "empty citations must be absent, not an empty array: {}",
+            response["result"]
+        );
+        assert!(
+            !response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "the listing still has to say something"
+        );
     }
 
     #[test]
