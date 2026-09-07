@@ -95,22 +95,21 @@ def hybrid_flow(claims, delta=Fraction(1, 4), max_depth=6):
     for cid, c in claims.items():
         reward = Fraction(c["reward"])
         anc = ancestors_with_weight(claims, cid)
-        # Filter by depth
-        depth_limited = {}
-        for a in anc:
-            # Compute depth from cid to a
-            depth = 0
-            cur = cid
-            while cur != a and cur in claims:
-                cites = claims[cur]["cites"]
-                if not cites or cites[0] not in claims:
-                    break
-                cur = cites[0]
-                depth += 1
-                if cur == a:
-                    break
-            if depth <= max_depth:
-                depth_limited[a] = anc[a]
+        # Shortest hop distance from cid, walking every parent. cites[0] alone
+        # assigns fan-in siblings the spine's depth — or includes them even
+        # when the walk never reached them — so a --max-depth cap can drop or
+        # keep the wrong recipients.
+        hops = {cid: 0}
+        queue = [cid]
+        for here in queue:
+            d = hops[here]
+            if d >= max_depth:
+                continue
+            for p in claims[here]["cites"]:
+                if p in claims and p not in hops:
+                    hops[p] = d + 1
+                    queue.append(p)
+        depth_limited = {a: w for a, w in anc.items() if a in hops}
         total = sum(depth_limited.values())
         if not depth_limited or total == 0:
             out[c["who"]] += reward
