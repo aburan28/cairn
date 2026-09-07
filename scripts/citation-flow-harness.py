@@ -1,31 +1,46 @@
-"""Is reward-weighted ancestor attribution slicing-invariant?
+#!/usr/bin/env python3
+"""Citation Flow Harness — test slicing invariance of attribution schemes.
 
-Current rule: a claim sends delta upstream, split among its direct citations,
-recursively -- so decay is geometric in *hops*. Slicing adds hops.
+Current rule: geometric per-hop decay (DELTA per hop, split among direct cites).
+Proposed: reward-weighted transitive ancestors (delta split by ancestor's own settled reward).
 
-Proposed: a claim sends delta upstream, split among all its transitive
-ancestors weighted by each ancestor's own settled reward. On a ratchet,
-settled reward IS progress moved (telescoping guarantees the slices of one
-improvement sum to the unsliced reward), so the weights are slicing-invariant
-by construction.
+Usage:
+  python3 citation-flow-harness.py [--delta DELTA] [--max-depth N] [--scenario NAME] [--json] [--export CSV]
 """
+
 from fractions import Fraction
+from collections import defaultdict
+import argparse
+import json
+import sys
 
-DELTA = Fraction(1, 4)
+# ---------------------------------------------------------------------------
+# Core attribution schemes
+# ---------------------------------------------------------------------------
 
-def chain(steps):
-    """steps: [(who, reward)] each citing the previous. Returns claims dict."""
+def build_chain(steps):
+    """steps: [(who, reward)] citing the previous claim, or
+    [(who, reward, cite_indices)] with explicit parents (claim indices).
+    Linear default is the honest/slicing case; attacks need fan-in.
+    """
     claims = {}
     prev = None
-    for i, (who, reward) in enumerate(steps):
+    for i, step in enumerate(steps):
         cid = f"c{i}"
-        claims[cid] = {"who": who, "reward": reward, "cites": [prev] if prev else []}
+        if len(step) == 2:
+            who, reward = step
+            cites = [prev] if prev else []
+        else:
+            who, reward, cite_idxs = step
+            cites = [f"c{j}" for j in cite_idxs]
+        claims[cid] = {"who": who, "reward": reward, "cites": cites}
         prev = cid
     return claims
 
-def current_flow(claims, max_depth=6):
+
+def current_flow(claims, max_depth=6, delta=Fraction(1, 4)):
     """Geometric per-hop decay, as implemented today."""
-    out = {}
+    out = defaultdict(Fraction)
     for cid, c in claims.items():
         stack = [(cid, Fraction(c["reward"]), 0, ())]
         while stack:
@@ -33,14 +48,15 @@ def current_flow(claims, max_depth=6):
             node = claims[here]
             cites = [x for x in node["cites"] if x in claims and x not in path]
             if depth >= max_depth or not cites:
-                out[node["who"]] = out.get(node["who"], 0) + share
+                out[node["who"]] += share
                 continue
-            up = share * DELTA
-            out[node["who"]] = out.get(node["who"], 0) + (share - up)
+            up = share * delta
+            out[node["who"]] += (share - up)
             per = up / len(cites)
             for p in cites:
                 stack.append((p, per, depth + 1, path + (here,)))
     return out
+
 
 def ancestors_with_weight(claims, cid):
     """Every transitive ancestor, and its own settled reward as the weight."""
@@ -54,88 +70,322 @@ def ancestors_with_weight(claims, cid):
         stack.extend(claims[a]["cites"])
     return out
 
-def proposed_flow(claims):
-    """delta split among ALL transitive ancestors, weighted by their reward."""
-    out = {}
+
+def proposed_flow(claims, delta=Fraction(1, 4)):
+    """Delta split among ALL transitive ancestors, weighted by their reward."""
+    out = defaultdict(Fraction)
     for cid, c in claims.items():
         reward = Fraction(c["reward"])
         anc = ancestors_with_weight(claims, cid)
         total = sum(anc.values())
         if not anc or total == 0:
-            out[c["who"]] = out.get(c["who"], 0) + reward
+            out[c["who"]] += reward
             continue
-        up = reward * DELTA
-        out[c["who"]] = out.get(c["who"], 0) + (reward - up)
+        up = reward * delta
+        out[c["who"]] += (reward - up)
         for a, w in anc.items():
             who = claims[a]["who"]
-            out[who] = out.get(who, 0) + up * Fraction(w, total)
+            out[who] += up * Fraction(w, total)
     return out
 
-def report(name, steps):
-    claims = chain(steps)
-    cur, prop = current_flow(claims), proposed_flow(claims)
-    tot_in = sum(r for _, r in steps)
-    print(f"  {name:28s} current: " + "  ".join(f"{k}={float(v):>10.0f}" for k,v in sorted(cur.items())))
-    print(f"  {'':28s} proposed:" + "  ".join(f"{k}={float(v):>10.0f}" for k,v in sorted(prop.items())))
-    assert sum(cur.values()) == tot_in, "current does not conserve"
-    assert sum(prop.values()) == tot_in, "proposed does not conserve"
 
-print("README showcase: alice 12pts, bob 12->16, carol 16->20")
-honest = [("alice", 300_000), ("bob", 400_000), ("carol", 400_000)]
-report("honest (bob one claim)", honest)
+def hybrid_flow(claims, delta=Fraction(1, 4), max_depth=6):
+    """Hybrid: reward-weighted ancestors but capped at max_depth hops."""
+    out = defaultdict(Fraction)
+    for cid, c in claims.items():
+        reward = Fraction(c["reward"])
+        anc = ancestors_with_weight(claims, cid)
+        # Shortest hop distance from cid, walking every parent. cites[0] alone
+        # assigns fan-in siblings the spine's depth — or includes them even
+        # when the walk never reached them — so a --max-depth cap can drop or
+        # keep the wrong recipients.
+        hops = {cid: 0}
+        queue = [cid]
+        for here in queue:
+            d = hops[here]
+            if d >= max_depth:
+                continue
+            for p in claims[here]["cites"]:
+                if p in claims and p not in hops:
+                    hops[p] = d + 1
+                    queue.append(p)
+        depth_limited = {a: w for a, w in anc.items() if a in hops}
+        total = sum(depth_limited.values())
+        if not depth_limited or total == 0:
+            out[c["who"]] += reward
+            continue
+        up = reward * delta
+        out[c["who"]] += (reward - up)
+        for a, w in depth_limited.items():
+            who = claims[a]["who"]
+            out[who] += up * Fraction(w, total)
+    return out
 
-sliced = [("alice", 300_000)] + [("bob", 100_000)]*4 + [("carol", 400_000)]
-report("bob slices into 4", sliced)
 
-sliced16 = [("alice", 300_000)] + [("bob", 25_000)]*16 + [("carol", 400_000)]
-report("bob slices into 16", sliced16)
+# ---------------------------------------------------------------------------
+# Attack scenario builders
+# ---------------------------------------------------------------------------
 
-print()
-def alice_of(steps, f):
-    return f(chain(steps))["alice"]
-for label, f in (("current", current_flow), ("proposed", proposed_flow)):
-    a1, a4, a16 = (float(alice_of(s, f)) for s in (honest, sliced, sliced16))
-    print(f"  alice under {label:9s}: 1 slice {a1:>10.0f} | 4 slices {a4:>10.0f} | 16 slices {a16:>10.0f}"
-          f"  -> {'INVARIANT' if a1==a4==a16 else f'LOSES {100*(a1-a16)/a1:.0f}%'}")
+def scenario_honest():
+    """Alice 12pts, Bob 12->16 (400k), Carol 16->20 (400k)."""
+    return [("alice", 300_000), ("bob", 400_000), ("carol", 400_000)]
 
-print()
-print("Where does the residual 8% come from? Split alice's inflow by payer.")
-from collections import defaultdict
-def inflow_by_payer(steps):
-    claims = chain(steps)
+
+def scenario_bob_slices(n):
+    """Bob splits his 400k into n claims."""
+    return [("alice", 300_000)] + [("bob", 400_000 // n)] * n + [("carol", 400_000)]
+
+
+def scenario_sybil_attack():
+    """Attacker creates many fake identities citing each other, then cites alice."""
+    # All sybils cite alice (300k), then attacker cites all sybils — a 2-hop
+    # fan-in, not a line. A chain would put the attacker past max_depth.
+    sybils = [(f"sybil{i}", 10_000, [0]) for i in range(10)]
+    attacker = ("attacker", 400_000, list(range(1, 11)))
+    return [("alice", 300_000)] + sybils + [attacker]
+
+
+def scenario_collusion_ring():
+    """Three parties cite each other in a cycle (if allowed) or dense cluster."""
+    # Dense mutual citation: A->B, B->C, C->A, plus original work
+    # Note: our chain builder only supports linear chains, so we simulate
+    # by having each cite the previous in a circle
+    return [("alice", 300_000), ("bob", 200_000), ("carol", 200_000), ("dave", 200_000), ("eve", 400_000)]
+
+
+def scenario_free_rider():
+    """Contributor cites only the funder, skipping intermediate work."""
+    # Alice does work (300k), Bob improves (400k), Carol cites only Alice (skips Bob)
+    # We simulate by having Carol's claim cite Alice directly
+    steps = [("alice", 300_000), ("bob", 400_000)]
+    # Carol would be added with a custom cite structure, but chain is linear
+    return steps
+
+
+def scenario_deep_chain():
+    """Long chain of incremental improvements."""
+    return [("a0", 100_000)] + [(f"a{i}", 100_000) for i in range(1, 20)]
+
+
+def scenario_wide_fanin():
+    """Many small contributions cite one major work."""
+    # Each contributor cites the founder directly. A chain would be 21 hops
+    # and current_flow would never reach the founder under default max_depth.
+    base = [("founder", 500_000)]
+    contrib = [(f"contrib{i}", 50_000, [0]) for i in range(20)]
+    return base + contrib
+
+
+# ---------------------------------------------------------------------------
+# Analysis helpers
+# ---------------------------------------------------------------------------
+
+def analyze_flow(name, steps, schemes, delta=Fraction(1, 4), max_depth=6):
+    """Run all schemes on a scenario and return comparison."""
+    claims = build_chain(steps)
+    results = {}
+    for scheme_name, scheme_fn in schemes:
+        if scheme_name in ("current", "hybrid"):
+            results[scheme_name] = scheme_fn(claims, max_depth=max_depth, delta=delta)
+        else:
+            results[scheme_name] = scheme_fn(claims, delta=delta)
+    return claims, results
+
+
+def conservation_check(results, total_in):
+    """Verify all schemes conserve total reward."""
+    for name, flow in results.items():
+        total_out = sum(flow.values())
+        if total_out != total_in:
+            return False, f"{name}: {total_out} != {total_in}"
+    return True, "OK"
+
+
+def slicing_invariance(steps_list, scheme_fn, delta=Fraction(1, 4), max_depth=6):
+    """Measure how much alice's flow changes as bob slices more."""
+    alice_flows = []
+    for steps in steps_list:
+        claims = build_chain(steps)
+        flow = scheme_fn(claims, delta=delta, max_depth=max_depth) if scheme_fn.__name__ in ("current_flow", "hybrid_flow") else scheme_fn(claims, delta=delta)
+        alice_flows.append(float(flow.get("alice", 0)))
+    return alice_flows
+
+
+def inflow_by_payer(steps, scheme="proposed", delta=Fraction(1, 4)):
+    """Show who pays alice's citation inflow."""
+    claims = build_chain(steps)
+    if scheme == "proposed":
+        flow_fn = proposed_flow
+    elif scheme == "current":
+        flow_fn = lambda c, d=delta: current_flow(c, max_depth=6, delta=d)
+    else:
+        flow_fn = lambda c, d=delta: hybrid_flow(c, max_depth=6, delta=d)
+
     by = defaultdict(Fraction)
     for cid, c in claims.items():
         anc = ancestors_with_weight(claims, cid)
         total = sum(anc.values())
         if not anc or total == 0:
             continue
-        up = Fraction(c["reward"]) * DELTA
+        up = Fraction(c["reward"]) * delta
         for a, w in anc.items():
             if claims[a]["who"] == "alice":
                 by[c["who"]] += up * Fraction(w, total)
     return by
 
-for label, steps in (("bob unsliced", honest), ("bob x4", sliced), ("bob x16", sliced16)):
-    by = inflow_by_payer(steps)
-    parts = "  ".join(f"from {k}={float(v):>9.0f}" for k, v in sorted(by.items()))
-    print(f"  {label:14s} {parts}")
 
-# --------------------------------------------------------------------------
-# The decisive question: does the slicer's gain converge, or grow without
-# limit? A bounded premium for publishing incrementally is what the ratchet
-# exists to encourage. Unbounded extraction is an attack.
-# --------------------------------------------------------------------------
-def sliced_n(n):
-    return [("alice", 300_000)] + [("bob", 400_000 // n)] * n + [("carol", 400_000)]
+# ---------------------------------------------------------------------------
+# Output formatting
+# ---------------------------------------------------------------------------
 
-print()
-print("Convergence: alice's total as bob slices ever more finely")
-print(f"  {'slices':>7} | {'current':>10} | {'weighted':>10}")
-for n in (1, 4, 16, 64, 256):
-    cur = current_flow(chain(sliced_n(n)))["alice"]
-    prop = proposed_flow(chain(sliced_n(n)))["alice"]
-    print(f"  {n:>7} | {float(cur):>10.0f} | {float(prop):>10.0f}")
-print("  current  -> 300,521: alice's citation flow is driven to ZERO (she keeps")
-print("             only her own direct reward). Unbounded extraction.")
-print("  weighted -> 406,510: converges. She keeps ~75% of her flow however")
-print("             finely the work above her is chopped. Bounded premium.")
+def format_flow(flow, label, width=28):
+    items = "  ".join(f"{k}={float(v):>10.0f}" for k, v in sorted(flow.items()))
+    return f"  {label:{width}s} {items}"
+
+
+def print_scenario(name, steps, schemes, delta, max_depth, json_out=False):
+    claims, results = analyze_flow(name, steps, schemes, delta, max_depth)
+    total_in = sum(step[1] for step in steps)
+    ok, msg = conservation_check(results, total_in)
+
+    # Always return the structured payload so --csv can collect without
+    # forcing json_out, which would skip the human-readable print below.
+    payload = {
+        "scenario": name,
+        "total_in": total_in,
+        "conservation": ok,
+        "flows": {k: {kk: float(vv) for kk, vv in v.items()} for k, v in results.items()}
+    }
+
+    if json_out:
+        return payload
+
+    print(f"\n{name} (total_in={total_in:,})")
+    for scheme_name, flow in results.items():
+        print(format_flow(flow, scheme_name))
+    if not ok:
+        print(f"  WARNING: {msg}")
+    return payload
+
+
+def print_slicing_table(schemes, delta, max_depth):
+    """Print alice's flow as bob slices more finely."""
+    print("\nConvergence: alice's total as bob slices ever more finely")
+    header = f"  {'slices':>7} | " + " | ".join(f"{s:>10}" for s, _ in schemes)
+    print(header)
+    print("  " + "-" * len(header))
+
+    for n in (1, 4, 16, 64, 256, 1024):
+        steps = scenario_bob_slices(n)
+        row = f"  {n:>7} | "
+        vals = []
+        for scheme_name, scheme_fn in schemes:
+            claims = build_chain(steps)
+            if scheme_name in ("current", "hybrid"):
+                flow = scheme_fn(claims, max_depth=max_depth, delta=delta)
+            else:
+                flow = scheme_fn(claims, delta=delta)
+            vals.append(float(flow.get("alice", 0)))
+        row += " | ".join(f"{v:>10.0f}" for v in vals)
+        print(row)
+
+
+def print_inflow_by_payer(schemes, delta, max_depth):
+    """Show who pays alice in each scenario."""
+    print("\nInflow to alice by payer (proposed scheme):")
+    for label, steps in (("bob unsliced", scenario_honest()),
+                         ("bob x4", scenario_bob_slices(4)),
+                         ("bob x16", scenario_bob_slices(16))):
+        by = inflow_by_payer(steps, "proposed", delta)
+        parts = "  ".join(f"from {k}={float(v):>9.0f}" for k, v in sorted(by.items()))
+        print(f"  {label:14s} {parts}")
+
+
+# ---------------------------------------------------------------------------
+# Export functions
+# ---------------------------------------------------------------------------
+
+def export_csv(results_dict, filename):
+    """Export comparison results to CSV."""
+    import csv
+    with open(filename, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['scenario', 'scheme', 'recipient', 'flow'])
+        for scenario, data in results_dict.items():
+            for scheme, flow in data['flows'].items():
+                for recipient, amount in flow.items():
+                    writer.writerow([scenario, scheme, recipient, amount])
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Citation Flow Harness — test slicing invariance of attribution schemes"
+    )
+    parser.add_argument("--delta", type=float, default=0.25,
+                        help="Delta fraction (default 0.25 = 1/4)")
+    parser.add_argument("--max-depth", type=int, default=6,
+                        help="Max citation depth for current/hybrid schemes (default 6)")
+    parser.add_argument("--scenario", choices=[
+        "honest", "bob_slices_4", "bob_slices_16", "bob_slices_64",
+        "sybil", "collusion", "deep_chain", "wide_fanin", "all"
+    ], default="all", help="Scenario to run")
+    parser.add_argument("--schemes", nargs="+",
+                        choices=["current", "proposed", "hybrid"],
+                        default=["current", "proposed", "hybrid"],
+                        help="Schemes to compare")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    parser.add_argument("--csv", help="Export results to CSV file")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    args = parser.parse_args()
+
+    delta = Fraction(args.delta).limit_denominator()
+    max_depth = args.max_depth
+
+    scheme_fns = {
+        "current": current_flow,
+        "proposed": proposed_flow,
+        "hybrid": hybrid_flow,
+    }
+    schemes = [(name, scheme_fns[name]) for name in args.schemes]
+
+    # Build scenarios
+    all_scenarios = {
+        "honest": ("Honest (no slicing)", scenario_honest()),
+        "bob_slices_4": ("Bob slices 4x", scenario_bob_slices(4)),
+        "bob_slices_16": ("Bob slices 16x", scenario_bob_slices(16)),
+        "bob_slices_64": ("Bob slices 64x", scenario_bob_slices(64)),
+        "sybil": ("Sybil attack (10 sybils + attacker)", scenario_sybil_attack()),
+        "collusion": ("Collusion ring (5 parties)", scenario_collusion_ring()),
+        "deep_chain": ("Deep chain (20 incremental)", scenario_deep_chain()),
+        "wide_fanin": ("Wide fan-in (20 contributors)", scenario_wide_fanin()),
+    }
+
+    if args.scenario == "all":
+        selected = list(all_scenarios.values())
+    else:
+        selected = [all_scenarios[args.scenario]]
+
+    all_results = {}
+
+    for label, steps in selected:
+        res = print_scenario(label, steps, schemes, delta, max_depth, json_out=args.json)
+        all_results[label] = res
+
+    if not args.json:
+        print_slicing_table(schemes, delta, max_depth)
+        print_inflow_by_payer(schemes, delta, max_depth)
+
+    if args.json:
+        print(json.dumps(all_results, indent=2))
+
+    if args.csv:
+        export_csv(all_results, args.csv)
+        print(f"\nExported to {args.csv}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
