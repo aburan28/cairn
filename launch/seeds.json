@@ -6,11 +6,11 @@
   "seeds": [
     {
       "name": "us-west",
-      "addr": "44.229.170.164:5000",
-      "transport": null,
-      "http": null,
+      "addr": "44.251.117.84:9000",
+      "transport": "28706a3accf6dd86a22e56ba30b9d2e8727ec20a741cdb50a9baf32d848a1996",
+      "http": "https://aburan28.github.io/cairn/node",
       "operator": "the repository maintainer",
-      "note": "UNVERIFIED, and deliberately left that way rather than filled in with something plausible. No transport key has been published for this address, so there is no seeds/<transport>.key to check and `cairn seeds` refuses this entry and writes no bootstrap file for it. Until the operator runs `cairn seeds publish` on the seed host and opens a PR adding the key, dialling this address authenticates nobody -- which is exactly what the placeholder in .local/seed.json already did, said out loud."
+      "note": "Key published by `cairn seeds publish` on the seed host and added by pull request; the file beside this list is named for the sha256 of its bytes and `cairn seeds resolve` re-derives that id before writing a bootstrap file. p2p dials addr directly and the handshake decides who answered. The http half is a mirror, not a live endpoint: the node serves plain HTTP and terminates no TLS by design, so workflows/node-sync.yml pulls its read endpoints every five minutes and re-serves them under /node/ on this site. The site is therefore at most one interval behind, and the reader re-derives the log either way -- it is hash-linked and carries a signed checkpoint. While the node is down the site keeps the last copy; before the first sync it serves nothing under /node/ and the reader falls back to the bundled launch log, labeled as such."
     }
   ]
 }
