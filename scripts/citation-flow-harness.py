@@ -19,12 +19,21 @@ import sys
 # ---------------------------------------------------------------------------
 
 def build_chain(steps):
-    """steps: [(who, reward)] each citing the previous. Returns claims dict."""
+    """steps: [(who, reward)] citing the previous claim, or
+    [(who, reward, cite_indices)] with explicit parents (claim indices).
+    Linear default is the honest/slicing case; attacks need fan-in.
+    """
     claims = {}
     prev = None
-    for i, (who, reward) in enumerate(steps):
+    for i, step in enumerate(steps):
         cid = f"c{i}"
-        claims[cid] = {"who": who, "reward": reward, "cites": [prev] if prev else []}
+        if len(step) == 2:
+            who, reward = step
+            cites = [prev] if prev else []
+        else:
+            who, reward, cite_idxs = step
+            cites = [f"c{j}" for j in cite_idxs]
+        claims[cid] = {"who": who, "reward": reward, "cites": cites}
         prev = cid
     return claims
 
@@ -130,11 +139,11 @@ def scenario_bob_slices(n):
 
 def scenario_sybil_attack():
     """Attacker creates many fake identities citing each other, then cites alice."""
-    # Attacker creates 10 sybil identities each with small reward
-    sybils = [(f"sybil{i}", 10_000) for i in range(10)]
-    # All sybils cite alice (300k), then attacker cites all sybils
-    steps = [("alice", 300_000)] + sybils + [("attacker", 400_000)]
-    return steps
+    # All sybils cite alice (300k), then attacker cites all sybils — a 2-hop
+    # fan-in, not a line. A chain would put the attacker past max_depth.
+    sybils = [(f"sybil{i}", 10_000, [0]) for i in range(10)]
+    attacker = ("attacker", 400_000, list(range(1, 11)))
+    return [("alice", 300_000)] + sybils + [attacker]
 
 
 def scenario_collusion_ring():
@@ -161,8 +170,10 @@ def scenario_deep_chain():
 
 def scenario_wide_fanin():
     """Many small contributions cite one major work."""
+    # Each contributor cites the founder directly. A chain would be 21 hops
+    # and current_flow would never reach the founder under default max_depth.
     base = [("founder", 500_000)]
-    contrib = [(f"contrib{i}", 50_000) for i in range(20)]
+    contrib = [(f"contrib{i}", 50_000, [0]) for i in range(20)]
     return base + contrib
 
 
@@ -235,23 +246,27 @@ def format_flow(flow, label, width=28):
 
 def print_scenario(name, steps, schemes, delta, max_depth, json_out=False):
     claims, results = analyze_flow(name, steps, schemes, delta, max_depth)
-    total_in = sum(r for _, r in steps)
+    total_in = sum(step[1] for step in steps)
     ok, msg = conservation_check(results, total_in)
 
+    # Always return the structured payload so --csv can collect without
+    # forcing json_out, which would skip the human-readable print below.
+    payload = {
+        "scenario": name,
+        "total_in": total_in,
+        "conservation": ok,
+        "flows": {k: {kk: float(vv) for kk, vv in v.items()} for k, v in results.items()}
+    }
+
     if json_out:
-        return {
-            "scenario": name,
-            "total_in": total_in,
-            "conservation": ok,
-            "flows": {k: {kk: float(vv) for kk, vv in v.items()} for k, v in results.items()}
-        }
+        return payload
 
     print(f"\n{name} (total_in={total_in:,})")
     for scheme_name, flow in results.items():
         print(format_flow(flow, scheme_name))
     if not ok:
         print(f"  WARNING: {msg}")
-    return results
+    return payload
 
 
 def print_slicing_table(schemes, delta, max_depth):
@@ -358,7 +373,7 @@ def main():
     all_results = {}
 
     for label, steps in selected:
-        res = print_scenario(label, steps, schemes, delta, max_depth, json_out=True)
+        res = print_scenario(label, steps, schemes, delta, max_depth, json_out=args.json)
         all_results[label] = res
 
     if not args.json:
