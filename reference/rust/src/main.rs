@@ -681,6 +681,44 @@ fn cli(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    // Decode a single record and say whether it is admissible, without a
+    // log and without writing anything. Useful on its own for checking a
+    // record before posting it, and it is the surface
+    // `scripts/differential.sh` drives to prove the two implementations
+    // classify every record the same way.
+    if command == "decode" {
+        let kind = positional.ok_or("decode needs a record kind")?;
+        let path = flag("--record").ok_or("decode needs --record <file>")?;
+        let value =
+            Value::from_json(&read(Some(&path), "a record")?).map_err(|e| e.to_string())?;
+        match decode_record(&kind, &value) {
+            Ok(id) => say!("ok {id}"),
+            Err(reason) => {
+                say!("refused");
+                eprintln!("  {reason}");
+                return Err("record refused".into());
+            }
+        }
+        return Ok(());
+    }
+
+    // Canonicalize one JSON value: the format contract at its narrowest.
+    // `scripts/fuzz-differential.sh` drives this on random input, which is
+    // where an encoder disagreement shows up before it ever reaches a
+    // record.
+    if command == "canon" {
+        let path = flag("--input").ok_or("canon needs --input <file>")?;
+        match Value::from_json(&read(Some(&path), "a JSON value")?) {
+            Ok(value) => say!("ok {} {}", value.digest(), value.canonical_string()),
+            Err(error) => {
+                say!("refused");
+                eprintln!("  {error}");
+                return Err("input refused".into());
+            }
+        }
+        return Ok(());
+    }
+
     let mut node = Node::new(Ledger::open(&log)?, &root);
     let ts = timestamp();
 
@@ -793,40 +831,6 @@ fn cli(args: &[String]) -> Result<(), String> {
                     outcome.reward,
                     outcome.note
                 );
-            }
-        }
-        // Decode a single record and say whether it is admissible, without a
-        // log and without writing anything. Useful on its own for checking a
-        // record before posting it, and it is the surface
-        // `scripts/differential.sh` drives to prove the two implementations
-        // classify every record the same way.
-        "decode" => {
-            let kind = positional.ok_or("decode needs a record kind")?;
-            let path = flag("--record").ok_or("decode needs --record <file>")?;
-            let value =
-                Value::from_json(&read(Some(&path), "a record")?).map_err(|e| e.to_string())?;
-            match decode_record(&kind, &value) {
-                Ok(id) => say!("ok {id}"),
-                Err(reason) => {
-                    say!("refused");
-                    eprintln!("  {reason}");
-                    return Err("record refused".into());
-                }
-            }
-        }
-        // Canonicalize one JSON value: the format contract at its narrowest.
-        // `scripts/fuzz-differential.sh` drives this on random input, which is
-        // where an encoder disagreement shows up before it ever reaches a
-        // record.
-        "canon" => {
-            let path = flag("--input").ok_or("canon needs --input <file>")?;
-            match Value::from_json(&read(Some(&path), "a JSON value")?) {
-                Ok(value) => say!("ok {} {}", value.digest(), value.canonical_string()),
-                Err(error) => {
-                    say!("refused");
-                    eprintln!("  {error}");
-                    return Err("input refused".into());
-                }
             }
         }
         "log" => {
