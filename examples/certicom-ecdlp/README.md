@@ -38,6 +38,10 @@ retired the challenge and the pages are gone — the parameters here come from a
 expected to settle.** It is posted because a research network should carry a
 benchmark whose difficulty nobody local chose.
 
+How it *could* settle — paying for the search rather than the answer, one
+verified distinguished point at a time — is worked out in
+[`docs/design/rho-piecework.md`](../../docs/design/rho-piecework.md).
+
 The parameters came from a web archive of a dead host, which sounds like a
 provenance problem and is not one, because they are checkable:
 
