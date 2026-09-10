@@ -2651,7 +2651,10 @@ mod tests {
         // reported an empty log. The text block is the answer; the structured field is
         // only for capabilities that actually exist.
         let mut s = server();
-        let response = s.call_tool(json!(1), &json!({ "name": "list_objectives", "arguments": {} }));
+        let response = s.call_tool(
+            json!(1),
+            &json!({ "name": "list_objectives", "arguments": {} }),
+        );
         assert!(
             response["result"].get("structuredContent").is_none(),
             "empty citations must be absent, not an empty array: {}",

@@ -689,8 +689,7 @@ fn cli(args: &[String]) -> Result<(), String> {
     if command == "decode" {
         let kind = positional.ok_or("decode needs a record kind")?;
         let path = flag("--record").ok_or("decode needs --record <file>")?;
-        let value =
-            Value::from_json(&read(Some(&path), "a record")?).map_err(|e| e.to_string())?;
+        let value = Value::from_json(&read(Some(&path), "a record")?).map_err(|e| e.to_string())?;
         match decode_record(&kind, &value) {
             Ok(id) => say!("ok {id}"),
             Err(reason) => {
