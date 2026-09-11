@@ -750,11 +750,23 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /chain"),
                 Value::string("GET /chain.html"),
                 Value::string("GET /health"),
+                Value::string("GET /peers"),
+                // Named even when the table behind it is empty, because the
+                // whole point of this list is that a reader who cannot find a
+                // route learns why. A binary built without the `ui` feature
+                // answers /ui/ with a 404 that says so; leaving the route out
+                // of the index sends the same reader to check their URL.
+                Value::string(if cfg!(feature = "ui") {
+                    "GET /ui/"
+                } else {
+                    "GET /ui/ (disabled: built without the `ui` feature)"
+                }),
                 Value::string(if writable {
                     "POST /submit"
                 } else {
                     "POST /submit (disabled: this node is read-only)"
                 }),
+                Value::string("POST /objective/prepare"),
             ]),
         ),
         (
