@@ -228,8 +228,16 @@
 @layer components {
   /* -- surfaces ---------------------------------------------------------- */
 
+  /* `min-w-0` because a card is always somebody's grid or flex item here, and
+     a grid item's default `min-width: auto` means "never narrower than my
+     min-content". Whatever is widest inside then sets a floor under the card:
+     a `pre.code` holding an MCP config stanza measured 1032px, so its card
+     measured 1068px, in a 380px viewport, and the whole page scrolled
+     sideways. The `overflow-x: auto` on that `pre` could not help — a scroll
+     container only shrinks if something above it is allowed to. This is what
+     allows it to. */
   .card {
-    @apply rounded-[var(--radius-card)] border border-edge bg-surface;
+    @apply min-w-0 rounded-[var(--radius-card)] border border-edge bg-surface;
   }
 
   .card-pad {
@@ -323,20 +331,23 @@
   }
 
   /* Every hash, id, key and amount on the site. Tabular figures so two
-     numbers in a column line up digit for digit, and wrapping so a
-     64-character key never widens the page it is in.
+     numbers in a column line up digit for digit, and `anywhere` wrapping so a
+     64-character key, or a pinned verifier path, never widens the page it
+     is in.
 
-     `break-word` and NOT `anywhere`, which is what this was and what broke the
-     log table. The two wrap identically; they differ in whether the soft wrap
-     opportunities count toward the element's min-content width. Under
-     `anywhere` they do, so every mono cell reports a minimum width of one
-     character -- and an auto-layout table believes it. The log's id column was
-     duly squeezed to a few characters wide and `52048ad1…8684` came apart over
-     five lines, in a row that had plenty of room. `break-word` keeps a token's
-     min-content width whole, so a column is sized to hold it, and the break
-     still happens when the line genuinely cannot fit. */
+     `anywhere` and not `break-word`, and the difference is the whole point:
+     only `anywhere` lets the soft wrap opportunities count toward the
+     element's min-content width, so only `anywhere` actually stops a long
+     unbreakable token from setting a floor under its container. This briefly
+     read as `break-word` because the log table's id column was coming apart —
+     but the culprit there was the *elided* hash, which is already an
+     abbreviation and should never wrap at all, and `Hash` now renders it
+     `whitespace-nowrap` (see `components/ui.tsx`). Sizing that one column is
+     that span's job; not widening the page is this rule's. Swapping this back
+     to `break-word` puts `examples/capset_progressive/checkers/…` off the
+     right edge of a 360px screen again. */
   .mono {
-    @apply font-mono [font-variant-numeric:tabular-nums] [overflow-wrap:break-word];
+    @apply font-mono [font-variant-numeric:tabular-nums] [overflow-wrap:anywhere];
   }
 
   .kbd {

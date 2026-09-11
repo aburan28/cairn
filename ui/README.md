@@ -53,6 +53,34 @@ by attribute. The small component layer is in `components/`; it is hand-written
 because a headless library would add runtime JavaScript to every node binary
 for a button and a progress bar.
 
+### Narrow screens, and the three rules that keep them narrow
+
+Every page has to survive a 360px phone, and the failure mode is always the
+same: one thing inside refuses to shrink, and the whole page scrolls sideways
+because of it. Three rules divide that work, and they are easy to undo by
+accident because each looks redundant on its own.
+
+1. **`.card` carries `min-w-0`.** A card is always somebody's grid or flex
+   item, and the default `min-width: auto` means "never narrower than my
+   min-content" — so whatever is widest inside sets a floor under it. A
+   `pre.code` holding an MCP stanza is 1032px wide at min-content, and that is
+   how a 1068px card ended up in a 380px viewport.
+2. **`.mono` wraps `anywhere`, not `break-word`.** Only `anywhere` lets the
+   wrap opportunities count toward min-content, so only `anywhere` stops a long
+   unbreakable token — a 64-character key, `examples/…/checkers/long_name.py` —
+   from setting that floor in the first place.
+3. **An elided hash never wraps.** `Hash` renders its already-abbreviated value
+   `whitespace-nowrap`, which is what sizes the log table's id column. Rule 2
+   would otherwise let an auto-layout table squeeze it to one character.
+
+Rules 2 and 3 look like opposites and are not: one is about not widening the
+page, the other about one span that is already an abbreviation. A data table
+gets a `min-w-` and an `overflow-x-auto` wrapper, so it scrolls in its own box
+rather than squeezing its columns or widening the document.
+
+Checked with Chromium over CDP at 320–1280px across every route: no page can
+scroll sideways.
+
 ## Nothing on it is simulated
 
 Yukon's landing page labels its own leaderboard SIMULATED. For a project whose

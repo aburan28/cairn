@@ -180,7 +180,14 @@ export default function Page() {
 
             <Card className="overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-left text-[12.5px]">
+                {/* `min-w-` so the wrapper above scrolls instead of the table
+                    squeezing. Without it a 390px phone gave `says` about sixty
+                    pixels and every row stood five lines tall -- narrower than
+                    the content, which is the one thing a scroll container
+                    exists to avoid. The card around it carries `min-w-0`
+                    (globals.css), which is what lets this overflow the card
+                    rather than the page. */}
+                <table className="w-full min-w-[34rem] border-collapse text-left text-[12.5px]">
                   <thead>
                     <tr className="border-b border-edge bg-surface-2">
                       <th className="px-3 py-2 font-medium text-ink-2">seq</th>
