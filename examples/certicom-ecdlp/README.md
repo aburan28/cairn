@@ -38,6 +38,11 @@ retired the challenge and the pages are gone — the parameters here come from a
 expected to settle.** It is posted because a research network should carry a
 benchmark whose difficulty nobody local chose.
 
+How it *could* settle — paying for the search rather than the answer, one
+verified distinguished point at a time — is `objective-eccp131-rho.json`,
+below, and the design behind it is
+[`docs/design/rho-piecework.md`](../../docs/design/rho-piecework.md).
+
 The parameters came from a web archive of a dead host, which sounds like a
 provenance problem and is not one, because they are checkable:
 
@@ -128,6 +133,71 @@ found it first.
   revealed → `accept`, settled 120,000, and `audit` re-verified the chain. A
   wrong `k` against ECCp-131 → `reject: k*G does not equal the target point Q`,
   reward 0.
+
+## The search, paid by the point
+
+`objective-nums-50-rho.json` and `objective-eccp131-rho.json` pay for the
+*search* that the answer objectives above pay for finishing. Each is a
+`piecework` objective: a coordinator's divided problem, paid per verified unit.
+
+```sh
+python3 examples/certicom-ecdlp/tools/rho_dp.py job-id --job examples/certicom-ecdlp/jobs/nums-50-rho.json
+python3 examples/certicom-ecdlp/tools/rho_dp.py walk   --job examples/certicom-ecdlp/jobs/nums-50-rho.json --walker 0 --out dp.json
+python3 examples/certicom-ecdlp/tools/rho_dp.py verify --job examples/certicom-ecdlp/jobs/nums-50-rho.json dp.json
+python3 examples/certicom-ecdlp/tools/rho_selftest.py
+./scripts/piecework-demo.sh
+```
+
+The unit is one **distinguished point** of a shared Pollard rho walk: a
+record `(x, y, a, b)` with `a·P + b·Q = (x, y)` and the low `d` bits of `x`
+zero. It costs about `2^d` group operations to produce by the cheapest known
+method and two scalar multiplications to check, and it is exactly the shared
+state the search runs on — proof of work that is also the work. The checker
+(`checkers/*_rho_dp.py`) accepts exactly the four keys, requires the canonical
+`y ≤ (p−1)/2` and minimal lowercase hex, and pins the **job document** in
+`jobs/` by hash, so the walk everyone is asked to run is inside the
+objective's id.
+
+| objective | `d` | expected points | pays | pool |
+|---|---|---|---|---|
+| `objective-nums-50-rho.json` | 16 | ≈ 640 | 100 | 80,000 |
+| `objective-eccp131-rho.json` | 44 | ≈ 2 million | 1,000 | 2,600,000,000 |
+| `objective-nums-50-rho-batch.json` | 16 | ≈ 640, in batches of ≤ 64 | 100 per point | 80,000 |
+| `objective-eccp131-rho-batch.json` | 44 | ≈ 2 million, in batches of ≤ 64 | 1,000 per point | 2,600,000,000 |
+
+`jobs/*.json` is the `JobSpec` of `aburan28/crypto`'s
+`cryptanalysis rho-collab`, unchanged, so a Rust contributor runs
+`crypto cryptanalysis rho-collab work --job examples/certicom-ecdlp/jobs/nums-50-rho.json`
+and a Python one runs `tools/rho_dp.py walk`; the two produce identical trails
+for identical walker indices, checked in against the Rust output on the demo
+curves. Ask `work_assignment` for your unit range so contributors walk
+disjoint indices — but any valid point is paid whichever index it came from,
+because the pool pays for the point and not for staying in a lane.
+
+**Batches.** `objective-nums-50-rho-batch.json` and
+`objective-eccp131-rho-batch.json` are the same search paid a batch at a time:
+one claim is `{"dps": [...]}`, up to 64 points, each with the `walker` index
+and `steps` count that produced it, and the piecework block says
+`"items": "dps"` and `"key": ["x", "y", "a", "b"]` -- so a claim pays per novel
+point, and a paid point relabelled with another walker index is not a new
+one. `tools/rho_dp.py walk --job … --unit U --batch` walks a unit into one
+batch artifact; `checkers/*_rho_batch.py` refuses a batch with any invalid,
+non-canonical or repeated point, naming it. Post the batch objective *or* the
+single-point one for an instance, not both: to the novelty rule they are
+different jobs. The provenance is what makes the private-walk row of the
+threat model narrower than it was: `tools/rho_dp.py audit --job … --log …`
+samples paid batch claims, re-walks one element of each from its derived
+start, and writes the mismatches as a docket for `cairn attest slash`.
+
+The payoff: two artifacts for one point with **different** coefficients are a
+collision, and `tools/rho_dp.py collide` computes `k` from them — the answer
+to `objective-nums-50.json`. `tools/rho_selftest.py` proves that arithmetic
+on a 14-bit instance with a planted secret, and proves each checker against
+its pinned job: the job hashes to the pin, describes the checker's curve, and
+a point actually walked is accepted while a relabelled, negated, zero-padded
+or tampered copy is refused. Why the walk is worth paying for, what a private
+walk buys and does not, and the batch stage that closes that gap:
+[`docs/design/rho-piecework.md`](../../docs/design/rho-piecework.md).
 
 ## Working on one
 

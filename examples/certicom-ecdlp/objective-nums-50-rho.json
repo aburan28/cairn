@@ -1,0 +1,51 @@
+{
+  "artifact_schema": {
+    "description": "One distinguished point of the shared walk with its coefficients: a*P + b*Q = (x, y), low DP_BITS bits of x zero, 2y <= p. Exactly these four keys.",
+    "example": {
+      "a": "c7d474d02567",
+      "b": "31f68b36f378d",
+      "x": "166b721090000",
+      "y": "720d2d13bd24"
+    },
+    "properties": {
+      "a": {
+        "description": "coefficient of P, in [0, n)",
+        "type": "string"
+      },
+      "b": {
+        "description": "coefficient of Q, in [0, n)",
+        "type": "string"
+      },
+      "x": {
+        "description": "x-coordinate, lowercase hex, no prefix, no leading zero; low DP_BITS bits zero",
+        "type": "string"
+      },
+      "y": {
+        "description": "y-coordinate, canonical: 2y <= p",
+        "type": "string"
+      }
+    },
+    "required": [
+      "x",
+      "y",
+      "a",
+      "b"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-09-10T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-ecdlp-nums-50",
+  "piecework": {
+    "unit_price": 100,
+    "units": 281474976710656
+  },
+  "reward": 80000,
+  "statement": "Contribute distinguished points to the shared Pollard rho search for the 50-bit nothing-up-my-sleeve instance of GOAL-ecdlp-nums-50. This objective pays for the search; objective-nums-50.json pays for the answer. Run the walk in examples/certicom-ecdlp/jobs/nums-50-rho.json (job id bb124c668c79323b856c54372a720339895bcb4fd0599365bd7cf4706a4c855e; `tools/rho_dp.py walk --job ... --walker I` in pure Python, or `crypto cryptanalysis rho-collab work` in Rust). Each walker runs about 2^16 steps to a point whose low 16 bits of x are zero. Submit that point as exactly {\"x\", \"y\", \"a\", \"b\"} in lowercase hex with y canonical (2y <= p) and a*P + b*Q = (x, y). Each novel accepted point pays unit_price from the pool until the pool is empty; a point already paid mints nothing. Ask work_assignment for your unit range so contributors walk disjoint indices, but any valid point is paid whichever index it came from. Two artifacts for one point with different coefficients are a collision: `tools/rho_dp.py collide` computes k from them, and k settles objective-nums-50.json. About 640 points are expected before that happens.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/nums_50_rho_dp.py",
+    "checker_sha256": "d1e1a47742365ccdbf9a457b5d2bae086b912686928c5b953752a23661382055",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

@@ -103,6 +103,7 @@ use crate::knowledge::{ConfidencePolicy, Standing};
 use crate::ledger::Ledger;
 use crate::node::{Node, RuleViolation};
 use crate::partition::{assignment_for, epoch_of, epoch_seconds};
+use crate::piecework::Piecework;
 use crate::records::{commitment_hash, Claim, Commitment, Objective};
 use crate::schema::{validate_claim, validate_objective};
 use crate::time::{parse_rfc3339, timestamp};
@@ -545,7 +546,9 @@ fn write_private(path: &std::path::Path, text: &str) -> io::Result<()> {
 }
 
 enum NodeSource {
-    Owned(Node),
+    /// Boxed: a `Node` is a few hundred bytes of ledger, registry and
+    /// piecework index, and the other variant is a pointer.
+    Owned(Box<Node>),
     Shared(Arc<Mutex<crate::daemon::State>>),
 }
 
@@ -663,7 +666,7 @@ impl Server {
         identity: Option<Identity>,
         pending_cipher: Option<crate::store::atrest::Cipher>,
     ) -> Server {
-        Self::new_with_source(NodeSource::Owned(node), identity, pending_cipher)
+        Self::new_with_source(NodeSource::Owned(Box::new(node)), identity, pending_cipher)
     }
 
     fn new_shared(
@@ -926,18 +929,32 @@ impl Server {
         // as a JSON-RPC error: the model needs to see the message and try
         // again, and a transport-level error is not shown to it.
         match result {
-            Ok(text) => success(
-                id,
-                json!({
+            Ok(text) => {
+                let citations = self
+                    .citation_capabilities
+                    .iter()
+                    .map(|(claim_id, capability)| {
+                        json!({ "claim_id": claim_id, "capability": capability })
+                    })
+                    .collect::<Vec<_>>();
+                let mut payload = json!({
                     "content": [text_block(&text)],
-                    "structuredContent": {
-                        "citations": self.citation_capabilities.iter().map(|(claim_id, capability)| {
-                            json!({ "claim_id": claim_id, "capability": capability })
-                        }).collect::<Vec<_>>()
-                    },
                     "isError": false
-                }),
-            ),
+                });
+                // Only when there is something to carry. A client that sees
+                // `structuredContent` may treat it as *the* result and ignore the
+                // text beside it -- the protocol pairs that field with an
+                // `outputSchema`, and these tools declare none. Sending
+                // `{"citations": []}` on every read therefore told such a client
+                // that `list_objectives` had returned nothing, and an agent
+                // reading it reported an empty log against a ledger holding a
+                // funded objective. Answering an empty listing and answering
+                // nothing must not look the same.
+                if !citations.is_empty() {
+                    payload["structuredContent"] = json!({ "citations": citations });
+                }
+                success(id, payload)
+            }
             Err(message) => success(
                 id,
                 json!({ "content": [text_block(&message)], "isError": true }),
@@ -1424,6 +1441,52 @@ impl Server {
     }
 
     fn frontier_line(&mut self, id: &str, objective: &Objective) -> String {
+        // Piecework has no frontier to cite and no score to beat: the
+        // number an agent needs is how much of the pool is left, and, when
+        // the coordinator divided the problem, how many units it has.
+        if let Some(piecework) = objective
+            .piecework
+            .as_ref()
+            .and_then(|block| Piecework::from_value(block).ok())
+        {
+            let paid = self.node.read().paid_total(id);
+            let remaining = u128::from(objective.reward).saturating_sub(paid);
+            let mut line = format!(
+                "piecework: {} per novel accepted unit; pool: {remaining} of {} remaining \
+                 ({paid} paid so far)\n",
+                piecework.unit_price, objective.reward
+            );
+            if let Some(units) = piecework.units {
+                line.push_str(&format!(
+                    "the problem is divided into {units} units; ask work_assignment for yours\n"
+                ));
+            }
+            if let Some(items) = &piecework.items {
+                line.push_str(&format!(
+                    "a claim is a batch: the array under the artifact's {items:?} field, one \
+                     unit per element, paid per novel element\n"
+                ));
+            }
+            match &piecework.key {
+                Some(crate::piecework::UnitKey::Field(key)) => line.push_str(&format!(
+                    "a unit is named by its {key:?} field; a unit already paid mints nothing\n"
+                )),
+                Some(crate::piecework::UnitKey::Fields(fields)) => line.push_str(&format!(
+                    "a unit is named by its {} fields together; anything else it carries \
+                     does not make it new, and a unit already paid mints nothing\n",
+                    fields
+                        .iter()
+                        .map(|f| format!("{f:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                None => {}
+            }
+            if remaining == 0 {
+                line.push_str("this objective is exhausted: its pool is empty.\n");
+            }
+            return line;
+        }
         let frontier = self.node.read().frontier_of(id);
         match frontier {
             // "must cite", not "cite if you improve": the rule applies to every
@@ -1850,7 +1913,7 @@ impl Server {
     /// region" into an auditable claim rather than a promise.
     fn work_assignment(&mut self, args: &Json) -> Result<String, String> {
         let objective_id = string_arg(args, "objective_id")?;
-        self.objective(&objective_id)?;
+        let objective = self.objective(&objective_id)?;
         let node_id = string_arg(args, "node_id")?;
         let partitions = match args.get("partitions") {
             None | Some(Json::Null) => 8u64,
@@ -1889,10 +1952,29 @@ impl Server {
             .map_err(|e| format!("cannot assign work: {e}"))?;
         let (lo, hi) = assignment.share();
         let partition = assignment.partition;
+        // A coordinator who divided the problem into units said so in the
+        // objective, and the slice becomes a range of unit indices. Two
+        // floor divisions, so every node's range abuts its neighbours' --
+        // see `Piecework::unit_range`.
+        let units_line = objective
+            .piecework
+            .as_ref()
+            .and_then(|block| Piecework::from_value(block).ok())
+            .and_then(|piecework| {
+                let (first, end) = piecework.unit_range((lo, hi))?;
+                Some(format!(
+                    "your units: [{first}, {end}) of {} -- work unit indices in that range and \
+                     submit one artifact per unit; each novel accepted unit pays {}\n",
+                    piecework.units.unwrap_or(0),
+                    piecework.unit_price
+                ))
+            })
+            .unwrap_or_default();
         Ok(format!(
             "node {node_id} takes partition {partition} of {partitions} for epoch {epoch} \
              (epochs are {}s long)\n\
              search space slice: [{lo}, {hi})\n\
+             {units_line}\
              anchor: {anchor}\n\n\
              A candidate belongs to you when the first four bytes of its SHA-256 fall in that \
              range. The assignment is fixed for the whole epoch -- the anchor is the log head \
@@ -2629,6 +2711,33 @@ mod tests {
     }
 
     #[test]
+    fn a_result_with_no_citations_carries_no_structured_content() {
+        // `structuredContent` is paired with an `outputSchema` by the protocol, and these
+        // tools declare none, so a client is entitled to treat the field as the whole
+        // result. Emitting `{"citations": []}` beside every listing said "nothing here"
+        // about a ledger holding a funded objective, and an agent driven over MCP duly
+        // reported an empty log. The text block is the answer; the structured field is
+        // only for capabilities that actually exist.
+        let mut s = server();
+        let response = s.call_tool(
+            json!(1),
+            &json!({ "name": "list_objectives", "arguments": {} }),
+        );
+        assert!(
+            response["result"].get("structuredContent").is_none(),
+            "empty citations must be absent, not an empty array: {}",
+            response["result"]
+        );
+        assert!(
+            !response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "the listing still has to say something"
+        );
+    }
+
+    #[test]
     fn arbitrary_get_claim_does_not_launder_a_planted_citation() {
         let (mut server, planted) =
             server_with_claim_by(Value::object([("n", Value::Int(42))]), None);
@@ -3007,6 +3116,114 @@ mod tests {
         let second = ask(&mut s);
         assert_eq!(first, second, "the assignment moved inside one epoch");
         assert!(first.contains("anchor: "), "{first}");
+    }
+
+    /// A coordinator's divided problem: 1000 units at 100 each from a pool
+    /// of 100_000, named by the artifact's `unit` field.
+    fn server_with_piecework_objective() -> (Server, String) {
+        let mut s = server();
+        let objective = Objective::new(
+            "GOAL-rho",
+            "walk your units and submit each distinguished point",
+            Value::object([
+                ("kind", Value::string("certificate")),
+                ("checker", Value::string("c.py")),
+                ("checker_sha256", Value::string("ab".repeat(32))),
+                ("entrypoint", Value::string("check")),
+            ]),
+            100_000,
+            "treasury",
+            "2026-07-28T00:00:00+00:00",
+            None,
+            None,
+        )
+        .expect("valid objective")
+        .with_piecework(Value::object([
+            ("unit_price", Value::Int(100)),
+            ("units", Value::Int(1000)),
+            ("key", Value::string("unit")),
+        ]))
+        .expect("valid piecework block");
+        let id = s
+            .node
+            .write()
+            .post_objective(&objective, "2026-07-28T00:00:00+00:00")
+            .expect("posted");
+        (s, id)
+    }
+
+    /// `[first, end)` out of a work_assignment reply's "your units" line.
+    fn unit_range_of(reply: &str) -> (u64, u64) {
+        let line = reply
+            .lines()
+            .find(|line| line.starts_with("your units: ["))
+            .unwrap_or_else(|| panic!("no units line in {reply}"));
+        let inside = &line["your units: [".len()..line.find(')').expect("a closing paren")];
+        let (first, end) = inside.split_once(", ").expect("two bounds");
+        (first.parse().expect("first"), end.parse().expect("end"))
+    }
+
+    #[test]
+    fn work_assignment_turns_the_slice_into_a_unit_range_on_piecework() {
+        // One partition is the whole space, so the whole problem: every unit
+        // the coordinator posted, and the price each one pays.
+        let (mut s, objective_id) = server_with_piecework_objective();
+        let whole = call(
+            &mut s,
+            "work_assignment",
+            json!({ "objective_id": objective_id.clone(), "node_id": "a", "partitions": 1 }),
+        );
+        assert_eq!(unit_range_of(&whole), (0, 1000), "{whole}");
+        assert!(whole.contains("of 1000"), "{whole}");
+        assert!(
+            whole.contains("each novel accepted unit pays 100"),
+            "{whole}"
+        );
+
+        // Four partitions each take a quarter of the units, and the
+        // quarter is what the node's slice maps to -- not a recomputation
+        // that could disagree with a peer's.
+        let quarter = call(
+            &mut s,
+            "work_assignment",
+            json!({ "objective_id": objective_id, "node_id": "a", "partitions": 4, "epoch": 7 }),
+        );
+        let (first, end) = unit_range_of(&quarter);
+        assert_eq!(end - first, 250, "{quarter}");
+        assert_eq!(first % 250, 0, "{quarter}");
+    }
+
+    #[test]
+    fn work_assignment_says_nothing_about_units_off_piecework() {
+        let (mut s, objective_id, _) = server_with_injected_objective();
+        let out = call(
+            &mut s,
+            "work_assignment",
+            json!({ "objective_id": objective_id, "node_id": "a" }),
+        );
+        assert!(!out.contains("your units"), "{out}");
+        assert!(out.contains("search space slice"), "{out}");
+    }
+
+    #[test]
+    fn frontier_status_reports_the_pool_and_the_division_on_piecework() {
+        let (mut s, objective_id) = server_with_piecework_objective();
+        let out = call(
+            &mut s,
+            "frontier_status",
+            json!({ "objective_id": objective_id }),
+        );
+        assert!(
+            out.contains("piecework: 100 per novel accepted unit"),
+            "{out}"
+        );
+        assert!(
+            out.contains("pool: 100000 of 100000 remaining (0 paid so far)"),
+            "{out}"
+        );
+        assert!(out.contains("divided into 1000 units"), "{out}");
+        assert!(out.contains("\"unit\" field"), "{out}");
+        assert!(!out.contains("frontier: score"), "{out}");
     }
 
     #[test]

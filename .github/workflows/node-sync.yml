@@ -1,0 +1,114 @@
+name: node-sync
+
+# The seed's `http` endpoint, and why it is a job and not a proxy.
+#
+# `cairn serve` terminates no TLS by design (its module docs say to put a
+# reverse proxy in front), and a certificate for the seed's bare IP does not
+# exist: public CAs issue for names, and the seed has none. This job is the
+# reverse proxy. On a schedule it pulls the seed node's read endpoints and
+# re-serves them under /node/ at the site root, where a browser on the https
+# site is allowed to read them.
+#
+# The cost, stated rather than hidden: what the site serves is a copy, at
+# most one interval behind the node. That is survivable by construction --
+# the log is hash-linked and carries a signed checkpoint, so the reader
+# re-derives it either way, and every page says where its numbers came from.
+# A node that dies keeps serving its last copy until a deploy replaces it,
+# which is the property a cached DNS answer has.
+#
+# Only the read endpoints are mirrored. POSTs (funding, submissions) cannot
+# reach a static host and fail with a plain 404; the public site is a reader,
+# and a reader that cannot write is what it is for.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One mirror at a time, and never cancel one in flight: the deploy replaces
+# the whole site, so a half-finished mirror would take the site down with it.
+concurrency:
+  group: node-sync
+  cancel-in-progress: false
+
+env:
+  # The node the site reads. It is the seed entry's own address, named here
+  # rather than read from launch/seeds.json on purpose: a workflow that
+  # mirrored whatever a stranger can edit into seeds.json would let that file
+  # point a GitHub Actions runner at an arbitrary host on every push.
+  SEED_NODE: http://44.251.117.84:8080
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@v7
+
+      # Failing here keeps the last deploy in place, which is the wanted
+      # behaviour when the node is down: a stale-but-honest copy beats no
+      # answer, and a red run is the signal that the seed is dead.
+      - name: the node answers
+        run: |
+          set -euo pipefail
+          [ "$(curl -fsS --max-time 15 "$SEED_NODE/health")" = "ok" ]
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # Asks rather than hard-coding, for the reason pages.yml gives: a
+      # custom domain and a project page need different base paths.
+      - uses: actions/configure-pages@v5
+        id: pages
+        with:
+          enablement: true
+
+      # No Rust here, and that is not an oversight: the build only needs the
+      # committed snapshot.json and the seed list copy. pages.yml's Rust step
+      # *checks* the snapshot against the log; it is a CI assertion, not an
+      # input to the build.
+      - run: npm ci
+        working-directory: ui
+      - run: npx tsc --noEmit
+        working-directory: ui
+      - name: build the site
+        working-directory: ui
+        env:
+          NEXT_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+        run: npm run build
+
+      - name: mirror the read endpoints
+        run: |
+          set -euo pipefail
+          DEST=ui/out/node
+          rm -rf "$DEST"
+          mkdir -p "$DEST/objective"
+          # Extensionless on purpose: the UI fetches `${base}/objectives` and
+          # friends with no extension, and a static host serves a file
+          # called `objectives` for that path. The browser's fetch does not
+          # care about the content type it arrives as.
+          for ep in health objectives chain checkpoint peers log; do
+            curl -fsS --max-time 30 -o "$DEST/$ep" "$SEED_NODE/$ep"
+          done
+          # One file per objective, named exactly as the UI fetches it. The
+          # list of ids comes from the node's own answer, not from a second
+          # source that could drift.
+          ids="$(python3 -c 'import json; print("\n".join(o["id"] for o in json.load(open("ui/out/node/objectives"))["objectives"]))')"
+          for id in $ids; do
+            curl -fsS --max-time 30 -o "$DEST/objective/$id" "$SEED_NODE/objective/$id"
+          done
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ui/out
+
+      - uses: actions/deploy-pages@v4
+        id: deploy

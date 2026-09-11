@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "cairn certicom eccp131 rho",
+  "p": "48e1d43f293469e33194c43186b3abc0b",
+  "a": "41cb121ce2b31f608a76fc8f23d73cb66",
+  "b": "2f74f717e8dec90991e5ea9b2ff03da58",
+  "generator": {
+    "x": "3df84a96b5688ef574fa91a32e197198a",
+    "y": "14721161917a44fb7b4626f36f0942e71"
+  },
+  "target": {
+    "x": "3aa6f004fc62e2da1ed0bfb62c3ffb568",
+    "y": "9c21c284ba8a445bb2701bf55e3a67ed"
+  },
+  "order": "48e1d43f293469e317f7ed728f6b8e6f1",
+  "dp_bits": 44,
+  "num_branches": 32,
+  "negation_map": true,
+  "unit_size": 256,
+  "max_steps_per_walker": 0,
+  "seed": 0
+}

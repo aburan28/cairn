@@ -30,6 +30,7 @@ use cairn::canonical::Value;
 use cairn::frontier::Ratchet;
 use cairn::gossip::Candidate;
 use cairn::partition::{assign, assignment_for, beacon};
+use cairn::piecework::Piecework;
 use cairn::records::{commitment_hash, Claim, Commitment, Objective};
 
 // -- vector plumbing -------------------------------------------------------
@@ -122,6 +123,161 @@ fn every_section_this_file_covers_is_present_and_populated() {
     assert_eq!(list_of(section(&v, "attribution"), "cases").len(), 192);
     assert_eq!(list_of(&v, "partition").len(), 8);
     assert_eq!(list_of(&v, "gossip").len(), 12);
+    let piecework = section(&v, "piecework");
+    assert_eq!(list_of(piecework, "objectives").len(), 4);
+    assert_eq!(list_of(piecework, "novelty_keys").len(), 21);
+    assert_eq!(list_of(piecework, "unit_keys").len(), 9);
+    assert_eq!(list_of(piecework, "unit_ranges").len(), 23);
+    assert_eq!(list_of(piecework, "payouts").len(), 6);
+    assert_eq!(list_of(piecework, "batch_payouts").len(), 8);
+    assert_eq!(list_of(piecework, "schedules").len(), 3);
+}
+
+// -- piecework -------------------------------------------------------------
+//
+// Added alongside the frozen sections when the block was introduced, and
+// produced by this crate rather than the retired Python implementation. What
+// they pin is that `reference/rust` reads a piecework block the same way and
+// pays the same schedule; the reference runner checks the same cases.
+
+#[test]
+fn piecework_objective_ids_are_stable_and_carry_the_block() {
+    let v = vectors();
+    for (i, case) in list_of(section(&v, "piecework"), "objectives")
+        .iter()
+        .enumerate()
+    {
+        let record = field(case, "record");
+        let objective = Objective::from_value(record)
+            .unwrap_or_else(|e| panic!("piecework objective {i} does not decode: {e}"));
+        assert!(
+            objective.piecework.is_some(),
+            "objective {i} lost its block"
+        );
+        Piecework::from_value(objective.piecework.as_ref().unwrap())
+            .unwrap_or_else(|e| panic!("objective {i} carries an invalid piecework block: {e}"));
+        assert_eq!(objective.id(), text_of(case, "id"), "objective {i}");
+        assert_reencodes(
+            &objective.to_value(),
+            record,
+            &format!("piecework objective {i}"),
+        );
+    }
+}
+
+#[test]
+fn piecework_novelty_keys_match() {
+    let v = vectors();
+    for case in list_of(section(&v, "piecework"), "novelty_keys") {
+        let piecework = Piecework::from_value(field(case, "piecework")).expect("valid block");
+        let got = piecework
+            .novelty_key(field(case, "artifact"))
+            .map(Value::string)
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            &got,
+            field(case, "novelty_key"),
+            "{}",
+            case.canonical_string()
+        );
+    }
+}
+
+#[test]
+fn piecework_unit_keys_match() {
+    // Which units a claim carries: one, or one per distinct element of the
+    // batch under `items`, in artifact order.
+    let v = vectors();
+    for case in list_of(section(&v, "piecework"), "unit_keys") {
+        let piecework = Piecework::from_value(field(case, "piecework")).expect("valid block");
+        let got = Value::Array(
+            piecework
+                .unit_keys(field(case, "artifact"))
+                .into_iter()
+                .map(Value::string)
+                .collect(),
+        );
+        assert_eq!(
+            &got,
+            field(case, "unit_keys"),
+            "{}",
+            case.canonical_string()
+        );
+    }
+}
+
+#[test]
+fn piecework_batch_payouts_match() {
+    let v = vectors();
+    for case in list_of(section(&v, "piecework"), "batch_payouts") {
+        let piecework =
+            Piecework::new(u64_of(case, "unit_price"), None, None, None).expect("valid");
+        assert_eq!(
+            piecework.payout_for(u64_of(case, "novel"), u64_of(case, "remaining")),
+            u64_of(case, "payout"),
+            "{}",
+            case.canonical_string()
+        );
+    }
+}
+
+#[test]
+fn piecework_unit_ranges_match() {
+    let v = vectors();
+    for case in list_of(section(&v, "piecework"), "unit_ranges") {
+        let piecework = Piecework::new(1, Some(u64_of(case, "units")), None, None).expect("valid");
+        let got = piecework.unit_range((u64_of(case, "lo"), u64_of(case, "hi")));
+        assert_eq!(
+            got,
+            Some((u64_of(case, "first"), u64_of(case, "end"))),
+            "{}",
+            case.canonical_string()
+        );
+    }
+}
+
+#[test]
+fn piecework_payouts_match() {
+    let v = vectors();
+    for case in list_of(section(&v, "piecework"), "payouts") {
+        let piecework =
+            Piecework::new(u64_of(case, "unit_price"), None, None, None).expect("valid");
+        assert_eq!(
+            piecework.payout(u64_of(case, "remaining")),
+            u64_of(case, "payout"),
+            "{}",
+            case.canonical_string()
+        );
+    }
+}
+
+#[test]
+fn piecework_schedules_match() {
+    // The settlement rule as a pure function of claim order: paid units are
+    // consumed, unpaid ones are not, and the last unit gets the remainder.
+    let v = vectors();
+    for case in list_of(section(&v, "piecework"), "schedules") {
+        let piecework = Piecework::from_value(field(case, "piecework")).expect("valid block");
+        let mut remaining = u64_of(case, "reward");
+        let mut paid_units: BTreeSet<String> = BTreeSet::new();
+        for (i, claim) in list_of(case, "claims").iter().enumerate() {
+            let accepted = matches!(field(claim, "accepted"), Value::Bool(true));
+            let mut pay = 0u64;
+            if accepted {
+                let keys = piecework.unit_keys(field(claim, "artifact"));
+                let novel = keys.iter().filter(|k| !paid_units.contains(*k)).count() as u64;
+                if novel > 0 {
+                    pay = piecework.payout_for(novel, remaining);
+                    remaining -= pay;
+                    if pay > 0 {
+                        // A paid claim consumes every unit it carries.
+                        paid_units.extend(keys);
+                    }
+                }
+            }
+            assert_eq!(pay, u64_of(claim, "paid"), "schedule claim {i}");
+        }
+    }
 }
 
 // -- records ---------------------------------------------------------------

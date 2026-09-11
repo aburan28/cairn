@@ -246,7 +246,12 @@ final class ResearcherModel: ObservableObject {
 
     /// What the node's own log says about finding peers, tailed live.
     struct Discovery: Equatable {
+        /// The beacon socket as the node reported it, never inferred from a
+        /// report's absence: `unknown` until the node says, and for a binary
+        /// built before it said anything about a bind that worked.
+        enum Beacon: Equatable { case unknown, bound, off, failed }
         var multicast: String?          // nil until the node said anything
+        var beacon: Beacon = .unknown
         /// This node's own transport id, as the daemon prints it at startup.
         /// The half of "add me as a peer" that is not the address.
         var peerId: String?
@@ -375,7 +380,9 @@ final class ResearcherModel: ObservableObject {
             }
             let node = tool("node")
             out.append(SetupCheck(title: "Node (for Build)", ok: node != nil, detail: node ?? "needed once, by make ui-build"))
-            await MainActor.run {
+            // By value: `newProbe` and `out` are vars, and a var captured into
+            // code on another actor is an error in the Swift 6 language mode.
+            await MainActor.run { [newProbe, out] in
                 self.binaryProbe = newProbe
                 self.checks = out
                 self.checking = false
@@ -952,11 +959,26 @@ final class ResearcherModel: ObservableObject {
                 d = Discovery()
             }
             if l.contains("multicast:") {
-                d.multicast = l.contains("Address already in use")
-                    ? "beacon port already held by another node on this host; LAN discovery is off for this node"
-                    : (l.components(separatedBy: "multicast: ").last ?? l)
+                let said = l.components(separatedBy: "multicast: ").last ?? l
+                if l.contains("Address already in use") {
+                    d.multicast = "beacon port already held by another node on this host; LAN discovery is off for this node"
+                    d.beacon = .failed
+                } else {
+                    d.multicast = said
+                    if said.hasPrefix("beacon bound") {
+                        d.beacon = .bound
+                    } else if said.hasPrefix("off") {
+                        d.beacon = .off
+                    } else if said.contains("continuing without LAN discovery") {
+                        d.beacon = .failed
+                    }
+                }
             } else if l.contains("listening on") && l.contains("cairn::daemon") && d.multicast == nil {
-                d.multicast = "bound; announcing every 30s on 239.255.41.96:47396"
+                // A current node reports its beacon before it listens, bound or
+                // not. Listening without a report is a binary from before it
+                // reported a bind that worked, and the port and cadence that
+                // binary used are not in its log -- so they are not shown here.
+                d.multicast = "not reported by this cairn binary, which predates the report"
             }
             if let r = l.range(of: "peer id "), d.peerId == nil {
                 let rest = l[r.upperBound...].prefix(64)

@@ -26,6 +26,7 @@ use cairn_reference::frontier::Ratchet;
 use cairn_reference::ledger::{Ledger, Proof};
 use cairn_reference::node::Node;
 use cairn_reference::partition::{assign, beacon, settlement_rank};
+use cairn_reference::piecework::Piecework;
 use cairn_reference::records::{
     commitment_hash, Claim, ClaimRelation, Commitment, CommitteeShare, Objective, PeerRecord,
 };
@@ -422,6 +423,214 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
         }
     }
 
+    // -- piecework: pay per novel unit until the pool is gone ---------------
+    //
+    // Added alongside the frozen sections; produced by the primary and
+    // checked here, so what these pin is that the two crates read a
+    // piecework block the same way and pay the same schedule.
+    {
+        let piecework_section = vectors
+            .get("piecework")
+            .ok_or("vectors need a piecework section")?;
+        for case in array(piecework_section, "objectives")? {
+            let record = case
+                .get("record")
+                .ok_or("piecework objective case needs a record")?;
+            let objective =
+                Objective::from_value(record).map_err(|e| format!("piecework objective: {e}"))?;
+            if objective.piecework.is_none() {
+                f.0.push("piecework: objective case decoded without its piecework block".into());
+            }
+            f.check(
+                "piecework",
+                "objective id",
+                objective.id(),
+                str_of(case, "id")?.to_string(),
+            );
+            f.check(
+                "piecework",
+                "objective re-encode",
+                objective.to_value(),
+                record.clone(),
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "novelty_keys")? {
+            let block = case
+                .get("piecework")
+                .ok_or("novelty case needs a piecework block")?;
+            let piecework = Piecework::from_value(block)?;
+            let artifact = case
+                .get("artifact")
+                .ok_or("novelty case needs an artifact")?;
+            let got = piecework
+                .novelty_key(artifact)
+                .map(Value::string)
+                .unwrap_or(Value::Null);
+            let want = case.get("novelty_key").cloned().unwrap_or(Value::Null);
+            f.check(
+                "piecework",
+                &format!("novelty key of {}", artifact.canonical_string()),
+                got,
+                want,
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "unit_keys")? {
+            let block = case
+                .get("piecework")
+                .ok_or("unit_keys case needs a piecework block")?;
+            let piecework = Piecework::from_value(block)?;
+            let artifact = case
+                .get("artifact")
+                .ok_or("unit_keys case needs an artifact")?;
+            let got = Value::Array(
+                piecework
+                    .unit_keys(artifact)
+                    .into_iter()
+                    .map(Value::string)
+                    .collect(),
+            );
+            let want = case
+                .get("unit_keys")
+                .cloned()
+                .unwrap_or(Value::Array(Vec::new()));
+            f.check(
+                "piecework",
+                &format!("unit keys of {}", artifact.canonical_string()),
+                got,
+                want,
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "batch_payouts")? {
+            let unit_price = case
+                .get("unit_price")
+                .and_then(Value::as_u64)
+                .ok_or("batch payout case needs unit_price")?;
+            let novel = case
+                .get("novel")
+                .and_then(Value::as_u64)
+                .ok_or("batch payout case needs novel")?;
+            let remaining = case
+                .get("remaining")
+                .and_then(Value::as_u64)
+                .ok_or("batch payout case needs remaining")?;
+            let piecework = Piecework {
+                unit_price,
+                units: None,
+                key: None,
+                items: None,
+            };
+            f.check(
+                "piecework",
+                &format!("payout for {novel} novel units at {unit_price} with {remaining} left"),
+                Value::Int(i128::from(piecework.payout_for(novel, remaining))),
+                case.get("payout").cloned().unwrap_or(Value::Null),
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "unit_ranges")? {
+            let units = case
+                .get("units")
+                .and_then(Value::as_u64)
+                .ok_or("unit range needs units")?;
+            let lo = case
+                .get("lo")
+                .and_then(Value::as_u64)
+                .ok_or("unit range needs lo")?;
+            let hi = case
+                .get("hi")
+                .and_then(Value::as_u64)
+                .ok_or("unit range needs hi")?;
+            let piecework = Piecework {
+                unit_price: 1,
+                units: Some(units),
+                key: None,
+                items: None,
+            };
+            let want = (
+                case.get("first")
+                    .and_then(Value::as_u64)
+                    .ok_or("unit range needs first")?,
+                case.get("end")
+                    .and_then(Value::as_u64)
+                    .ok_or("unit range needs end")?,
+            );
+            f.check(
+                "piecework",
+                &format!("unit range of [{lo}, {hi}) over {units}"),
+                piecework.unit_range((lo, hi)),
+                Some(want),
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "payouts")? {
+            let unit_price = case
+                .get("unit_price")
+                .and_then(Value::as_u64)
+                .ok_or("payout case needs unit_price")?;
+            let remaining = case
+                .get("remaining")
+                .and_then(Value::as_u64)
+                .ok_or("payout case needs remaining")?;
+            let piecework = Piecework {
+                unit_price,
+                units: None,
+                key: None,
+                items: None,
+            };
+            f.check(
+                "piecework",
+                &format!("payout at {unit_price} with {remaining} left"),
+                piecework.payout(remaining),
+                case.get("payout")
+                    .and_then(Value::as_u64)
+                    .ok_or("payout case needs payout")?,
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "schedules")? {
+            let block = case
+                .get("piecework")
+                .ok_or("schedule needs a piecework block")?;
+            let piecework = Piecework::from_value(block)?;
+            let mut remaining = case
+                .get("reward")
+                .and_then(Value::as_u64)
+                .ok_or("schedule needs a reward")?;
+            let mut paid_units: std::collections::BTreeSet<String> = Default::default();
+            for (i, claim) in array(case, "claims")?.iter().enumerate() {
+                let artifact = claim
+                    .get("artifact")
+                    .ok_or("schedule claim needs an artifact")?;
+                let accepted = matches!(claim.get("accepted"), Some(Value::Bool(true)));
+                let mut pay = 0u64;
+                if accepted {
+                    let keys = piecework.unit_keys(artifact);
+                    let novel = keys.iter().filter(|k| !paid_units.contains(*k)).count() as u64;
+                    if novel > 0 {
+                        pay = piecework.payout_for(novel, remaining);
+                        remaining -= pay;
+                        if pay > 0 {
+                            paid_units.extend(keys);
+                        }
+                    }
+                }
+                f.check(
+                    "piecework",
+                    &format!("schedule claim {i}"),
+                    pay,
+                    claim
+                        .get("paid")
+                        .and_then(Value::as_u64)
+                        .ok_or("schedule claim needs paid")?,
+                );
+                checked += 1;
+            }
+        }
+    }
+
     // -- the payout curve ---------------------------------------------------
     for case in section(&vectors, "ratchet")? {
         let spec = case.get("ratchet").unwrap_or(case);
@@ -681,6 +890,43 @@ fn cli(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    // Decode a single record and say whether it is admissible, without a
+    // log and without writing anything. Useful on its own for checking a
+    // record before posting it, and it is the surface
+    // `scripts/differential.sh` drives to prove the two implementations
+    // classify every record the same way.
+    if command == "decode" {
+        let kind = positional.ok_or("decode needs a record kind")?;
+        let path = flag("--record").ok_or("decode needs --record <file>")?;
+        let value = Value::from_json(&read(Some(&path), "a record")?).map_err(|e| e.to_string())?;
+        match decode_record(&kind, &value) {
+            Ok(id) => say!("ok {id}"),
+            Err(reason) => {
+                say!("refused");
+                eprintln!("  {reason}");
+                return Err("record refused".into());
+            }
+        }
+        return Ok(());
+    }
+
+    // Canonicalize one JSON value: the format contract at its narrowest.
+    // `scripts/fuzz-differential.sh` drives this on random input, which is
+    // where an encoder disagreement shows up before it ever reaches a
+    // record.
+    if command == "canon" {
+        let path = flag("--input").ok_or("canon needs --input <file>")?;
+        match Value::from_json(&read(Some(&path), "a JSON value")?) {
+            Ok(value) => say!("ok {} {}", value.digest(), value.canonical_string()),
+            Err(error) => {
+                say!("refused");
+                eprintln!("  {error}");
+                return Err("input refused".into());
+            }
+        }
+        return Ok(());
+    }
+
     let mut node = Node::new(Ledger::open(&log)?, &root);
     let ts = timestamp();
 
@@ -793,40 +1039,6 @@ fn cli(args: &[String]) -> Result<(), String> {
                     outcome.reward,
                     outcome.note
                 );
-            }
-        }
-        // Decode a single record and say whether it is admissible, without a
-        // log and without writing anything. Useful on its own for checking a
-        // record before posting it, and it is the surface
-        // `scripts/differential.sh` drives to prove the two implementations
-        // classify every record the same way.
-        "decode" => {
-            let kind = positional.ok_or("decode needs a record kind")?;
-            let path = flag("--record").ok_or("decode needs --record <file>")?;
-            let value =
-                Value::from_json(&read(Some(&path), "a record")?).map_err(|e| e.to_string())?;
-            match decode_record(&kind, &value) {
-                Ok(id) => say!("ok {id}"),
-                Err(reason) => {
-                    say!("refused");
-                    eprintln!("  {reason}");
-                    return Err("record refused".into());
-                }
-            }
-        }
-        // Canonicalize one JSON value: the format contract at its narrowest.
-        // `scripts/fuzz-differential.sh` drives this on random input, which is
-        // where an encoder disagreement shows up before it ever reaches a
-        // record.
-        "canon" => {
-            let path = flag("--input").ok_or("canon needs --input <file>")?;
-            match Value::from_json(&read(Some(&path), "a JSON value")?) {
-                Ok(value) => say!("ok {} {}", value.digest(), value.canonical_string()),
-                Err(error) => {
-                    say!("refused");
-                    eprintln!("  {error}");
-                    return Err("input refused".into());
-                }
             }
         }
         "log" => {

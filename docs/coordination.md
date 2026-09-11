@@ -121,6 +121,49 @@ that a sequencer able to choose that value freely could grind it. That is
 acceptable while the sequencer is a trusted single operator and must become a
 VDF or threshold signature before it is not.
 
+### Worked example: a divided search, paid by the piece
+
+The distributed Pollard rho in `examples/certicom-ecdlp/` is the case the work
+split was built for, and the one that shows why it needs no dispatcher.
+
+A coordinator has a problem that decomposes into units whose results are
+cheap to check: for rho, walker `i` starts at a point derived from the job id
+and walks about `2^d` steps to a *distinguished point*, a record
+`(x, y, a, b)` with `a·P + b·Q = (x, y)` that anyone verifies with two scalar
+multiplications. The coordinator posts one objective with a `piecework` block:
+
+```json
+"piecework": { "unit_price": 100, "units": 281474976710656 }
+```
+
+and the objective goes into the log like any other, so every node learns of
+it by gossip. Each node asks `work_assignment` for its slice of the `2^32`
+space and gets the same slice mapped onto unit indices — `[first, end)` of the
+coordinator's `units`, two floor divisions so neighbouring slices abut — walks
+those, and submits one artifact per point. Nothing was reserved and nothing
+was agreed: the range is a pure function of the epoch beacon, the node id and
+the objective id, and anyone can recompute anyone else's.
+
+Payment is per *novel* accepted unit. The first paid claim that answers a
+unit takes `min(unit_price, pool remaining)`; a second answer to the same unit
+verifies fine and mints nothing; a rejected answer leaves the unit open. A
+claim may carry many units at once -- the block's `items` field names the
+array, and its `key` the fields that make an element the same unit however it
+is labelled -- and then pays per novel element, capped by the pool. So
+two nodes walking the same index are wasted compute and not an error, a node
+that squats a range it never walks costs the network nothing, and the
+objective closes when the pool is empty rather than when anyone says the
+problem is finished. A funder who wants the search to continue posts another
+objective with the same verifier and the same block, and it inherits the
+first one's paid units.
+
+The search's shared state — the table of distinguished points that any two
+trails can collide in — is the log itself. Whoever's new point matches one
+already there, with different coefficients, computes `k` and claims the
+answer objective. `scripts/piecework-demo.sh` runs the whole loop on the
+50-bit instance with the pure-Python walker, and
+[`docs/design/rho-piecework.md`](design/rho-piecework.md) is the design.
+
 ## Latency budget
 
 "Real-time" is usually the wrong frame. What the system actually needs:

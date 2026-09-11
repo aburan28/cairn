@@ -1,0 +1,49 @@
+{
+  "artifact_schema": {
+    "description": "A batch of 1 to 64 distinguished points of the shared walk, each with the walker index and step count that produced it: {\"dps\": [{x, y, a, b, walker, steps}, ...]}. Every point: a*P + b*Q = (x, y), low DP_BITS bits of x zero, 2y <= p; no point listed twice.",
+    "example": {
+      "dps": [
+        {
+          "a": "c7d474d02567",
+          "b": "31f68b36f378d",
+          "steps": 25209,
+          "walker": 0,
+          "x": "166b721090000",
+          "y": "720d2d13bd24"
+        }
+      ]
+    },
+    "properties": {
+      "dps": {
+        "description": "1 to 64 points; each element carries x, y, a, b (lowercase minimal hex), walker (integer) and steps (integer)",
+        "type": "array"
+      }
+    },
+    "required": [
+      "dps"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-09-11T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-certicom-eccp131",
+  "piecework": {
+    "items": "dps",
+    "key": [
+      "x",
+      "y",
+      "a",
+      "b"
+    ],
+    "unit_price": 1000,
+    "units": 281474976710656
+  },
+  "reward": 2600000000,
+  "statement": "Contribute distinguished points to the shared Pollard rho search for Certicom's ECCp-131, the open instance of GOAL-certicom-eccp131. This objective pays for the search; objective-certicom-eccp131.json pays for the answer, and is not expected to settle any other way. Run the walk in examples/certicom-ecdlp/jobs/eccp131-rho.json (job id 6f4881b59a78bfd929a7bf87bd2d4ce3210066862e62418b8333c39ec855cf7c; negation map on, so points are folded to 2y <= p during the walk). Each walker runs about 2^44 steps -- hours on a GPU -- to a point whose low 44 bits of x are zero. Submit points in batches of up to 64 as {\"dps\": [{\"x\", \"y\", \"a\", \"b\", \"walker\", \"steps\"}, ...]}, each in lowercase hex with y canonical and a*P + b*Q = (x, y). Each novel accepted point in a batch pays unit_price from the pool until the pool is empty; a point already paid mints nothing, whatever walker index or step count it is relabelled with. walker and steps say which walker of the job produced the point and how far it walked; `tools/rho_dp.py audit` re-walks a sample of them. Post this objective or the single-point one, not both: they are different jobs to the novelty rule. Ask work_assignment for your unit range; any valid point is paid whichever index it came from. About two million points are expected before two trails collide, and the collision's holder computes k with `tools/rho_dp.py collide`. Stage 0 rewards are notional: the pool is unit_price times the expected number of points, and nothing more is claimed for it.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/eccp131_rho_batch.py",
+    "checker_sha256": "24e217f87140ab291d405c18e7b9d4d5f423905fe22f2e4ead8bb7c64f044787",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

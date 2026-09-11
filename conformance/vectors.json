@@ -3691,6 +3691,1207 @@
       "epoch": 1000000
     }
   ],
+  "piecework": {
+    "_comment": "Added 2026-09-10 alongside the frozen sections, when the piecework block was introduced. Produced by the primary Rust implementation and checked by reference/rust, not by the retired Python implementation: two implementations agreeing is what these pin, and a disagreement means one of them reads a piecework block differently. Nothing here changes any earlier vector. Extended 2026-09-11 with batches (an `items` field and field-list keys): the new objective, novelty_keys, unit_keys, batch_payouts and schedule cases were produced the same way, and nothing earlier moved.",
+    "novelty_keys": [
+      {
+        "artifact": {
+          "a": "1a2b",
+          "b": "3c4d",
+          "x": "3849c8ac845e",
+          "y": "0e926b759e420"
+        },
+        "mode": "digest",
+        "novelty_key": "piece:sha256:056b60d8c783ae3a0b8418c4553b3777c7d1c078560a35fb12bea22278cbd525",
+        "piecework": {
+          "unit_price": 100,
+          "units": 72057594037927936
+        }
+      },
+      {
+        "artifact": {
+          "a": "1a2b",
+          "b": "3c4d",
+          "x": "3849c8ac845e",
+          "y": "0e926b759e420"
+        },
+        "mode": "digest",
+        "novelty_key": "piece:sha256:056b60d8c783ae3a0b8418c4553b3777c7d1c078560a35fb12bea22278cbd525",
+        "piecework": {
+          "unit_price": 100,
+          "units": 72057594037927936
+        }
+      },
+      {
+        "artifact": {
+          "a": "ffff",
+          "b": "0001",
+          "x": "3849c8ac845e",
+          "y": "0e926b759e420"
+        },
+        "mode": "digest",
+        "novelty_key": "piece:sha256:3ac62db1198b686a4f5277a36e9e71548deb74cf82d4927e042abc3f9dce6ba1",
+        "piecework": {
+          "unit_price": 100,
+          "units": 72057594037927936
+        }
+      },
+      {
+        "artifact": {
+          "proof": "alpha",
+          "unit": 7
+        },
+        "mode": "digest",
+        "novelty_key": "piece:sha256:fb7b11ab61c720d422e931bc76fc499c9be672a87448197484ee6dfca6cdd453",
+        "piecework": {
+          "unit_price": 100,
+          "units": 72057594037927936
+        }
+      },
+      {
+        "artifact": {
+          "proof": "beta",
+          "unit": 7
+        },
+        "mode": "digest",
+        "novelty_key": "piece:sha256:2d4f658b1d7629564dfd3356a5771d42601e55ffa602f694371173f06cee235b",
+        "piecework": {
+          "unit_price": 100,
+          "units": 72057594037927936
+        }
+      },
+      {
+        "artifact": {
+          "proof": "alpha",
+          "unit": 8
+        },
+        "mode": "digest",
+        "novelty_key": "piece:sha256:2b543715689c8422760f59fb6cc71167c60794a5d2b546e027a228e8c5498b44",
+        "piecework": {
+          "unit_price": 100,
+          "units": 72057594037927936
+        }
+      },
+      {
+        "artifact": {
+          "proof": "no unit field"
+        },
+        "mode": "digest",
+        "novelty_key": "piece:sha256:7c1dfb53f7f74fbb016cc77362bfed8327933fc25b205160e97aeda7690689fa",
+        "piecework": {
+          "unit_price": 100,
+          "units": 72057594037927936
+        }
+      },
+      {
+        "artifact": {
+          "a": "1a2b",
+          "b": "3c4d",
+          "x": "3849c8ac845e",
+          "y": "0e926b759e420"
+        },
+        "mode": "key",
+        "novelty_key": null,
+        "piecework": {
+          "key": "unit",
+          "unit_price": 250,
+          "units": 1000
+        }
+      },
+      {
+        "artifact": {
+          "a": "1a2b",
+          "b": "3c4d",
+          "x": "3849c8ac845e",
+          "y": "0e926b759e420"
+        },
+        "mode": "key",
+        "novelty_key": null,
+        "piecework": {
+          "key": "unit",
+          "unit_price": 250,
+          "units": 1000
+        }
+      },
+      {
+        "artifact": {
+          "a": "ffff",
+          "b": "0001",
+          "x": "3849c8ac845e",
+          "y": "0e926b759e420"
+        },
+        "mode": "key",
+        "novelty_key": null,
+        "piecework": {
+          "key": "unit",
+          "unit_price": 250,
+          "units": 1000
+        }
+      },
+      {
+        "artifact": {
+          "proof": "alpha",
+          "unit": 7
+        },
+        "mode": "key",
+        "novelty_key": "piece:unit:sha256:7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451",
+        "piecework": {
+          "key": "unit",
+          "unit_price": 250,
+          "units": 1000
+        }
+      },
+      {
+        "artifact": {
+          "proof": "beta",
+          "unit": 7
+        },
+        "mode": "key",
+        "novelty_key": "piece:unit:sha256:7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451",
+        "piecework": {
+          "key": "unit",
+          "unit_price": 250,
+          "units": 1000
+        }
+      },
+      {
+        "artifact": {
+          "proof": "alpha",
+          "unit": 8
+        },
+        "mode": "key",
+        "novelty_key": "piece:unit:sha256:2c624232cdd221771294dfbb310aca000a0df6ac8b66b696d90ef06fdefb64a3",
+        "piecework": {
+          "key": "unit",
+          "unit_price": 250,
+          "units": 1000
+        }
+      },
+      {
+        "artifact": {
+          "proof": "no unit field"
+        },
+        "mode": "key",
+        "novelty_key": null,
+        "piecework": {
+          "key": "unit",
+          "unit_price": 250,
+          "units": 1000
+        }
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0a",
+          "b": "0b",
+          "walker": 7,
+          "steps": 100
+        },
+        "novelty_key": "piece:x,y:sha256:5beb48f44a3be85559e28d0f54d65ced5bba79144b5b02f0b9aff819f94a87ca"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0c",
+          "b": "0d",
+          "walker": 8
+        },
+        "novelty_key": "piece:x,y:sha256:5beb48f44a3be85559e28d0f54d65ced5bba79144b5b02f0b9aff819f94a87ca",
+        "_note": "same point, other coefficients and provenance: the same unit under [x, y]"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "walker": 7
+        },
+        "novelty_key": null,
+        "_note": "a field of the list is missing: names no unit"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0a",
+          "b": "0b",
+          "walker": 7,
+          "steps": 100
+        },
+        "novelty_key": "piece:x,y,a,b:sha256:52a7e81f877495903583389ece78197749b4f819f9fb0700894b0f0e569caffc"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0c",
+          "b": "0d",
+          "walker": 8
+        },
+        "novelty_key": "piece:x,y,a,b:sha256:3260784660062ce8d6da59cf00a393fb4375350452a9d1ac48a5dfcef3dc2103",
+        "_note": "other coefficients for the same point are a different unit under [x, y, a, b]: the collision that solves the instance is paid"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0a",
+          "b": "0b",
+          "walker": 7,
+          "steps": 100
+        },
+        "novelty_key": "piece:x,y,a,b:sha256:52a7e81f877495903583389ece78197749b4f819f9fb0700894b0f0e569caffc",
+        "_note": "novelty_key is per unit; `items` only says where a claim's units are"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "unit"
+          ]
+        },
+        "artifact": {
+          "unit": 7,
+          "proof": "x"
+        },
+        "novelty_key": "piece:unit:sha256:1fd93e00481f06a62d011bb776c7c0d150c0f8b06e6abe6d8fa37ce6f57a98e7",
+        "_note": "a one-element list keys on the sub-object, not the bare value: not the same key as the string form"
+      }
+    ],
+    "objectives": [
+      {
+        "id": "sha256:b09c1125976c5b4504fbb80850f2ccf60a0db11ac895088939fc240098659e43",
+        "record": {
+          "created_at": "2026-09-10T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-piecework",
+          "piecework": {
+            "unit_price": 100,
+            "units": 72057594037927936
+          },
+          "reward": 100000,
+          "statement": "Contribute distinguished points; each novel point pays 100.",
+          "type": "objective",
+          "verifier": {
+            "checker": "examples/certicom-ecdlp/checkers/nums_50_rho_dp.py",
+            "checker_sha256": "abababababababababababababababababababababababababababababababab",
+            "entrypoint": "check",
+            "kind": "certificate"
+          }
+        }
+      },
+      {
+        "id": "sha256:83fd0b2b2694b79eba41b1570de00082b12bf8678bb22727614634f94267894c",
+        "record": {
+          "created_at": "2026-09-10T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-piecework",
+          "piecework": {
+            "key": "unit",
+            "unit_price": 250,
+            "units": 1000
+          },
+          "reward": 250000,
+          "statement": "Sieve unit n of 1000 and report its relations; each unit pays 250.",
+          "type": "objective",
+          "verifier": {
+            "checker": "examples/certicom-ecdlp/checkers/nums_50_rho_dp.py",
+            "checker_sha256": "abababababababababababababababababababababababababababababababab",
+            "entrypoint": "check",
+            "kind": "certificate"
+          }
+        }
+      },
+      {
+        "id": "sha256:1ca52c9e4a7d9c02ac645828e741da7fbd55a61350a04edd595bd2d3d2e506f9",
+        "record": {
+          "created_at": "2026-09-10T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-piecework",
+          "piecework": {
+            "unit_price": 1
+          },
+          "reward": 7,
+          "statement": "Minimal piecework block: one field, seven units of one.",
+          "type": "objective",
+          "verifier": {
+            "checker": "examples/certicom-ecdlp/checkers/nums_50_rho_dp.py",
+            "checker_sha256": "abababababababababababababababababababababababababababababababab",
+            "entrypoint": "check",
+            "kind": "certificate"
+          }
+        }
+      },
+      {
+        "id": "sha256:a428ed4c7261f85106ae914f9f5a8c41391e449f6b4dee269bbde610ab55833d",
+        "record": {
+          "created_at": "2026-09-10T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-piecework",
+          "piecework": {
+            "unit_price": 100,
+            "units": 72057594037927936,
+            "items": "dps",
+            "key": [
+              "x",
+              "y",
+              "a",
+              "b"
+            ]
+          },
+          "reward": 100000,
+          "statement": "Batch of distinguished points: pay per novel point, keyed on the point and its coefficients, whatever walker index and step count each element carries.",
+          "type": "objective",
+          "verifier": {
+            "checker": "examples/certicom-ecdlp/checkers/nums_50_rho_dp.py",
+            "checker_sha256": "abababababababababababababababababababababababababababababababab",
+            "entrypoint": "check",
+            "kind": "certificate"
+          }
+        }
+      }
+    ],
+    "payouts": [
+      {
+        "payout": 100,
+        "remaining": 1000,
+        "unit_price": 100
+      },
+      {
+        "payout": 100,
+        "remaining": 100,
+        "unit_price": 100
+      },
+      {
+        "payout": 37,
+        "remaining": 37,
+        "unit_price": 100
+      },
+      {
+        "payout": 0,
+        "remaining": 0,
+        "unit_price": 100
+      },
+      {
+        "payout": 1,
+        "remaining": 1,
+        "unit_price": 1
+      },
+      {
+        "payout": 5,
+        "remaining": 5,
+        "unit_price": 18446744073709551615
+      }
+    ],
+    "schedules": [
+      {
+        "claims": [
+          {
+            "accepted": true,
+            "artifact": {
+              "a": "0a",
+              "b": "0b",
+              "x": "01",
+              "y": "02"
+            },
+            "paid": 100
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "a": "0a",
+              "b": "0b",
+              "x": "01",
+              "y": "02"
+            },
+            "paid": 0
+          },
+          {
+            "accepted": false,
+            "artifact": {
+              "a": "0c",
+              "b": "0d",
+              "x": "03",
+              "y": "04"
+            },
+            "paid": 0
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "a": "0c",
+              "b": "0d",
+              "x": "03",
+              "y": "04"
+            },
+            "paid": 100
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "a": "0e",
+              "b": "0f",
+              "x": "05",
+              "y": "06"
+            },
+            "paid": 50
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "a": "10",
+              "b": "11",
+              "x": "07",
+              "y": "08"
+            },
+            "paid": 0
+          }
+        ],
+        "piecework": {
+          "unit_price": 100,
+          "units": 72057594037927936
+        },
+        "reward": 250
+      },
+      {
+        "claims": [
+          {
+            "accepted": true,
+            "artifact": {
+              "proof": "alpha",
+              "unit": 1
+            },
+            "paid": 250
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "proof": "beta",
+              "unit": 1
+            },
+            "paid": 0
+          },
+          {
+            "accepted": false,
+            "artifact": {
+              "proof": "alpha",
+              "unit": 2
+            },
+            "paid": 0
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "proof": "beta",
+              "unit": 2
+            },
+            "paid": 250
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "proof": "no unit"
+            },
+            "paid": 0
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "proof": "alpha",
+              "unit": 3
+            },
+            "paid": 250
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "proof": "alpha",
+              "unit": 4
+            },
+            "paid": 250
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "proof": "alpha",
+              "unit": 5
+            },
+            "paid": 0
+          }
+        ],
+        "piecework": {
+          "key": "unit",
+          "unit_price": 250,
+          "units": 1000
+        },
+        "reward": 1000
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "reward": 450,
+        "_note": "a paid batch consumes every unit it carries, a batch with no novel unit is paid nothing and consumes nothing, and the last batch is paid what is left",
+        "claims": [
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0a",
+                  "y": "14",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 0,
+                  "steps": 0
+                },
+                {
+                  "x": "0b",
+                  "y": "15",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 1,
+                  "steps": 3
+                },
+                {
+                  "x": "0c",
+                  "y": "16",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 2,
+                  "steps": 6
+                }
+              ]
+            },
+            "paid": 300
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0b",
+                  "y": "15",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 50,
+                  "steps": 999
+                },
+                {
+                  "x": "0d",
+                  "y": "17",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 3,
+                  "steps": 9
+                }
+              ]
+            },
+            "paid": 100
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0a",
+                  "y": "14",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 51,
+                  "steps": 999
+                },
+                {
+                  "x": "0d",
+                  "y": "17",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 52,
+                  "steps": 999
+                }
+              ]
+            },
+            "paid": 0
+          },
+          {
+            "accepted": false,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0e",
+                  "y": "18",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 4,
+                  "steps": 12
+                }
+              ]
+            },
+            "paid": 0
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0e",
+                  "y": "18",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 4,
+                  "steps": 12
+                },
+                {
+                  "x": "0f",
+                  "y": "19",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 5,
+                  "steps": 15
+                }
+              ]
+            },
+            "paid": 50
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "10",
+                  "y": "1a",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 6,
+                  "steps": 18
+                }
+              ]
+            },
+            "paid": 0
+          }
+        ]
+      }
+    ],
+    "unit_ranges": [
+      {
+        "end": 125,
+        "first": 0,
+        "hi": 536870912,
+        "lo": 0,
+        "units": 1000
+      },
+      {
+        "end": 250,
+        "first": 125,
+        "hi": 1073741824,
+        "lo": 536870912,
+        "units": 1000
+      },
+      {
+        "end": 375,
+        "first": 250,
+        "hi": 1610612736,
+        "lo": 1073741824,
+        "units": 1000
+      },
+      {
+        "end": 500,
+        "first": 375,
+        "hi": 2147483648,
+        "lo": 1610612736,
+        "units": 1000
+      },
+      {
+        "end": 625,
+        "first": 500,
+        "hi": 2684354560,
+        "lo": 2147483648,
+        "units": 1000
+      },
+      {
+        "end": 750,
+        "first": 625,
+        "hi": 3221225472,
+        "lo": 2684354560,
+        "units": 1000
+      },
+      {
+        "end": 875,
+        "first": 750,
+        "hi": 3758096384,
+        "lo": 3221225472,
+        "units": 1000
+      },
+      {
+        "end": 1000,
+        "first": 875,
+        "hi": 4294967296,
+        "lo": 3758096384,
+        "units": 1000
+      },
+      {
+        "end": 0,
+        "first": 0,
+        "hi": 536870912,
+        "lo": 0,
+        "units": 3
+      },
+      {
+        "end": 0,
+        "first": 0,
+        "hi": 1073741824,
+        "lo": 536870912,
+        "units": 3
+      },
+      {
+        "end": 1,
+        "first": 0,
+        "hi": 1610612736,
+        "lo": 1073741824,
+        "units": 3
+      },
+      {
+        "end": 1,
+        "first": 1,
+        "hi": 2147483648,
+        "lo": 1610612736,
+        "units": 3
+      },
+      {
+        "end": 1,
+        "first": 1,
+        "hi": 2684354560,
+        "lo": 2147483648,
+        "units": 3
+      },
+      {
+        "end": 2,
+        "first": 1,
+        "hi": 3221225472,
+        "lo": 2684354560,
+        "units": 3
+      },
+      {
+        "end": 2,
+        "first": 2,
+        "hi": 3758096384,
+        "lo": 3221225472,
+        "units": 3
+      },
+      {
+        "end": 3,
+        "first": 2,
+        "hi": 4294967296,
+        "lo": 3758096384,
+        "units": 3
+      },
+      {
+        "end": 18014398509481984,
+        "first": 0,
+        "hi": 1073741824,
+        "lo": 0,
+        "units": 72057594037927936
+      },
+      {
+        "end": 36028797018963968,
+        "first": 18014398509481984,
+        "hi": 2147483648,
+        "lo": 1073741824,
+        "units": 72057594037927936
+      },
+      {
+        "end": 54043195528445952,
+        "first": 36028797018963968,
+        "hi": 3221225472,
+        "lo": 2147483648,
+        "units": 72057594037927936
+      },
+      {
+        "end": 72057594037927936,
+        "first": 54043195528445952,
+        "hi": 4294967296,
+        "lo": 3221225472,
+        "units": 72057594037927936
+      },
+      {
+        "end": 5,
+        "first": 0,
+        "hi": 4294967296,
+        "lo": 0,
+        "units": 5
+      },
+      {
+        "end": 0,
+        "first": 0,
+        "hi": 5,
+        "lo": 10,
+        "units": 1000
+      },
+      {
+        "end": 0,
+        "first": 0,
+        "hi": 4294967297,
+        "lo": 0,
+        "units": 1000
+      }
+    ],
+    "unit_keys": [
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "dps": [
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 7,
+              "steps": 100
+            },
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 9,
+              "steps": 5
+            },
+            {
+              "x": "03",
+              "y": "04",
+              "a": "0a",
+              "b": "0b",
+              "walker": 1,
+              "steps": 1
+            },
+            {
+              "x": "05"
+            }
+          ]
+        },
+        "unit_keys": [
+          "piece:x,y,a,b:sha256:52a7e81f877495903583389ece78197749b4f819f9fb0700894b0f0e569caffc",
+          "piece:x,y,a,b:sha256:1cdd72f2e3d4fbad9d3d31da2822c52492eefd11d88c92ae3b1ec77bc2fd9a5f"
+        ],
+        "_note": "a relabelled element is not a second unit; an element missing a keyed field carries none"
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps"
+        },
+        "artifact": {
+          "dps": [
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 7,
+              "steps": 100
+            },
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 9,
+              "steps": 5
+            },
+            {
+              "x": "03",
+              "y": "04",
+              "a": "0a",
+              "b": "0b",
+              "walker": 1,
+              "steps": 1
+            },
+            {
+              "x": "05"
+            }
+          ]
+        },
+        "unit_keys": [
+          "piece:sha256:e0a57b1e24260ac069e886dadd406b173649d514b198623332e7733a45e1c50b",
+          "piece:sha256:af387f7e33f4302d841e118a435e55bf82b2f61e47dc4115c8a49108a5a6d7d8",
+          "piece:sha256:5d082ad6ccfd0e21a9a5c8a6330bb1ed8d3e4b01cc50d3c409c1d4c4acd3d3dc",
+          "piece:sha256:49d8ac83ed321db9c32b733842301197e29eaddfbe00bdbfef5b407098867262"
+        ],
+        "_note": "with no key each element's own digest is its unit, provenance included"
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "dps": "not an array"
+        },
+        "unit_keys": []
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "points": [
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 7,
+              "steps": 100
+            }
+          ]
+        },
+        "unit_keys": [],
+        "_note": "the batch must be under the named field"
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "dps": []
+        },
+        "unit_keys": []
+      },
+      {
+        "piecework": {
+          "unit_price": 100
+        },
+        "artifact": {
+          "dps": [
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 7,
+              "steps": 100
+            },
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 9,
+              "steps": 5
+            },
+            {
+              "x": "03",
+              "y": "04",
+              "a": "0a",
+              "b": "0b",
+              "walker": 1,
+              "steps": 1
+            },
+            {
+              "x": "05"
+            }
+          ]
+        },
+        "unit_keys": [
+          "piece:sha256:677ab3ea93d35ed622a43d078a581a9500e9b4a4b97639a5e3af4642f6657f3d"
+        ],
+        "_note": "without items the whole artifact is the one unit"
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "key": "unit"
+        },
+        "artifact": {
+          "unit": 3,
+          "n": 1
+        },
+        "unit_keys": [
+          "piece:unit:sha256:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+        ]
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "key": "unit"
+        },
+        "artifact": {
+          "n": 1
+        },
+        "unit_keys": []
+      },
+      {
+        "piecework": {
+          "unit_price": 1,
+          "items": "dps",
+          "key": "unit"
+        },
+        "artifact": {
+          "dps": [
+            {
+              "unit": 1
+            },
+            {
+              "unit": 2
+            },
+            {
+              "unit": 1
+            },
+            {
+              "other": 3
+            }
+          ]
+        },
+        "unit_keys": [
+          "piece:unit:sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          "piece:unit:sha256:d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"
+        ]
+      }
+    ],
+    "batch_payouts": [
+      {
+        "unit_price": 100,
+        "novel": 1,
+        "remaining": 1000,
+        "payout": 100
+      },
+      {
+        "unit_price": 100,
+        "novel": 3,
+        "remaining": 1000,
+        "payout": 300
+      },
+      {
+        "unit_price": 100,
+        "novel": 3,
+        "remaining": 250,
+        "payout": 250
+      },
+      {
+        "unit_price": 100,
+        "novel": 0,
+        "remaining": 250,
+        "payout": 0
+      },
+      {
+        "unit_price": 100,
+        "novel": 5,
+        "remaining": 0,
+        "payout": 0
+      },
+      {
+        "unit_price": 9223372036854775808,
+        "novel": 4,
+        "remaining": 18446744073709551615,
+        "payout": 18446744073709551615,
+        "_note": "the product overflows u64 and is capped by the pool, not wrapped"
+      },
+      {
+        "unit_price": 18446744073709551615,
+        "novel": 18446744073709551615,
+        "remaining": 7,
+        "payout": 7
+      },
+      {
+        "unit_price": 1,
+        "novel": 18446744073709551615,
+        "remaining": 18446744073709551615,
+        "payout": 18446744073709551615
+      }
+    ]
+  },
   "ratchet": [
     {
       "points": [

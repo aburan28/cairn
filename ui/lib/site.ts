@@ -21,6 +21,7 @@
  */
 
 import { readCheckpoint } from "./checkpoint";
+import { loadSeeds, readableEndpoints } from "./seeds";
 import snapshot from "./snapshot.json";
 import { ShapeMismatch, expectFields } from "./shape";
 
@@ -90,9 +91,11 @@ export type ChainFacts = {
 
 /** `launch/checkpoint.json`'s signed body, plus the key that signed it. */
 export type CheckpointFacts = {
-  head: string;
+  /** `null` on a fresh node: signed over an empty log, so there is no head
+   *  or root yet. See `Checkpoint` in `./checkpoint`. */
+  head: string | null;
   height: number;
-  root: string;
+  root: string | null;
   issued_at: string;
   public_key: string;
 };
@@ -114,8 +117,84 @@ export type Snapshot = {
 
 export const SNAPSHOT = snapshot as unknown as Snapshot;
 
-/** The node this site reads. Same-origin unless told otherwise. */
+/** The build-time override, if one was set. Empty otherwise, and empty is a
+ *  real answer — see `resolveNode` below, which is what decides what a page
+ *  actually reads. Still exported because every page uses it as the initial
+ *  value of its URL box, before resolution has finished. */
 export const NODE_URL = process.env.NEXT_PUBLIC_CAIRN_NODE ?? "";
+
+/**
+ * Which node to read, decided once per page load.
+ *
+ * # The order, and why each step is where it is
+ *
+ * 1. **`NEXT_PUBLIC_CAIRN_NODE`**, if the build set one. An explicit answer
+ *    ends the question and costs no requests — this is the operator who built
+ *    the site pointed at their own node, and second-guessing them by probing
+ *    would be both slower and wrong.
+ * 2. **Same origin.** The daemon embeds this export and serves it at `/ui/`,
+ *    so the node that served you the HTML is the node to ask, and no seed list
+ *    is consulted at all in the case this app was written for.
+ * 3. **The published seed list.** Only reached when nobody local answered,
+ *    which on `aburan28.github.io` is always. This is the case that used to
+ *    fall straight through to the bundled log: the site said "from launch
+ *    snapshot" while real nodes were running and reachable.
+ * 4. **Nothing**, and `""` is deliberately what that returns. Every loader
+ *    below then makes a relative request that fails, and falls back to the
+ *    snapshot exactly as it did before this function existed — labelled, as
+ *    it always was.
+ *
+ * # Why a probe rather than trying each endpoint per request
+ *
+ * A page makes three or four independent requests and each already has its own
+ * fallback. Resolving per request would mean each one re-walking the seed list
+ * on its own, so a page could end up rendering `/objectives` from one node and
+ * `/chain` from another with one provenance line covering both. One `/health`
+ * per candidate, once, keeps a page reading one node.
+ *
+ * Memoised for the life of the page, so the six pages' worth of loaders that
+ * call it share one answer and one round of probing. Not cached beyond that:
+ * a reload should re-ask, because the point of the list is that seeds move.
+ */
+let resolving: Promise<string> | null = null;
+
+export function resolveNode(): Promise<string> {
+  resolving ??= discoverNode();
+  return resolving;
+}
+
+/** For tests, and for a page that wants a fresh look after an explicit retry. */
+export function forgetResolvedNode(): void {
+  resolving = null;
+}
+
+/**
+ * Does a node answer here? `GET /health` and nothing heavier.
+ *
+ * `/health` is `text/plain` `ok`, so a 200 carrying an HTML error page — which
+ * is what GitHub Pages serves for a path it does not have — is not mistaken for
+ * a node. That is not hypothetical for this site: `loadCheckpoint` already
+ * carries a comment about Pages' HTML 404 being read as a node's own answer.
+ */
+async function answers(base: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${base}/health`, { cache: "no-store" });
+    if (!response.ok) return false;
+    return (await response.text()).trim() === "ok";
+  } catch {
+    return false;
+  }
+}
+
+async function discoverNode(): Promise<string> {
+  if (NODE_URL) return NODE_URL;
+  if (await answers("")) return "";
+  const protocol = typeof window === "undefined" ? "https:" : window.location.protocol;
+  for (const seed of readableEndpoints(await loadSeeds(), protocol)) {
+    if (await answers(seed)) return seed;
+  }
+  return "";
+}
 
 /**
  * The repository, which is the only external thing this site links to.
@@ -184,14 +263,15 @@ export function provenance(sourced: { live: boolean; origin: string }): string {
  * Never throws: a landing page that renders an error where its content should
  * be is worse than one that renders real, older, clearly-labelled content.
  */
-export async function loadObjectives(base: string = NODE_URL): Promise<Feed> {
+export async function loadObjectives(base?: string): Promise<Feed> {
+  const at = base ?? (await resolveNode());
   try {
-    const response = await fetch(`${base}/objectives`, { cache: "no-store" });
+    const response = await fetch(`${at}/objectives`, { cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
     const body = expectFields<{ objectives: Objective[] }>(
       await response.json(),
       ["objectives"],
-      `${base || "this node"}/objectives`,
+      `${at || "this node"}/objectives`,
     );
     const objectives = body.objectives;
     // A node with an empty log is a real answer, but showing a visitor nothing
@@ -199,7 +279,7 @@ export async function loadObjectives(base: string = NODE_URL): Promise<Feed> {
     if (objectives.length === 0) {
       return { objectives: SNAPSHOT.objectives, live: false, origin: SNAPSHOT.source };
     }
-    return { objectives, live: true, origin: base || "this node" };
+    return { objectives, live: true, origin: at || "this node" };
   } catch (cause) {
     return {
       objectives: SNAPSHOT.objectives,
@@ -217,15 +297,16 @@ export async function loadObjectives(base: string = NODE_URL): Promise<Feed> {
  * mismatch is the one failure that is *not* "no node answered", so it comes
  * back as a `note` beside the fallback rather than disappearing into it.
  */
-export async function loadChain(base: string = NODE_URL): Promise<Sourced<ChainFacts>> {
+export async function loadChain(base?: string): Promise<Sourced<ChainFacts>> {
+  const at = base ?? (await resolveNode());
   const fallback = { value: SNAPSHOT.chain, live: false, origin: SNAPSHOT.source };
   try {
-    const response = await fetch(`${base}/chain`, { cache: "no-store" });
+    const response = await fetch(`${at}/chain`, { cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
     const body = expectFields<ChainFacts>(
       await response.json(),
       ["head", "links", "height", "ledger_head"],
-      `${base || "this node"}/chain`,
+      `${at || "this node"}/chain`,
     );
     return {
       value: {
@@ -235,7 +316,7 @@ export async function loadChain(base: string = NODE_URL): Promise<Sourced<ChainF
         ledger_head: body.ledger_head,
       },
       live: true,
-      origin: base || "this node",
+      origin: at || "this node",
     };
   } catch (cause) {
     return cause instanceof ShapeMismatch ? { ...fallback, note: cause.message } : fallback;
@@ -258,11 +339,10 @@ export async function loadChain(base: string = NODE_URL): Promise<Sourced<ChainF
  * the body, and a 404 that is not the node's falls back as silently as
  * `/objectives` and `/chain` do.
  */
-export async function loadCheckpoint(
-  base: string = NODE_URL,
-): Promise<Sourced<CheckpointFacts>> {
+export async function loadCheckpoint(base?: string): Promise<Sourced<CheckpointFacts>> {
+  const at = base ?? (await resolveNode());
   const fallback = { value: SNAPSHOT.checkpoint, live: false, origin: SNAPSHOT.source };
-  const answer = await readCheckpoint(base);
+  const answer = await readCheckpoint(at);
   switch (answer.kind) {
     case "signed": {
       const { checkpoint, public_key } = answer.value;
@@ -275,11 +355,11 @@ export async function loadCheckpoint(
           public_key,
         },
         live: true,
-        origin: base || "this node",
+        origin: at || "this node",
       };
     }
     case "unsigned":
-      return { ...fallback, note: `${base || "this node"} publishes no checkpoint` };
+      return { ...fallback, note: `${at || "this node"} publishes no checkpoint` };
     case "unreadable":
       return { ...fallback, note: answer.message };
     case "no-node":
@@ -298,9 +378,10 @@ export async function loadCheckpoint(
  */
 export async function loadObjective(
   id: string,
-  base: string = NODE_URL,
+  base?: string,
 ): Promise<{ objective: Objective | null; live: boolean; origin: string }> {
-  const feed = await loadObjectives(base);
+  const at = base ?? (await resolveNode());
+  const feed = await loadObjectives(at);
   const found = feed.objectives.find((o) => o.id === id) ?? null;
   if (found && feed.live && !found.record) {
     try {
@@ -308,7 +389,7 @@ export async function loadObjective(
       // in a path segment, and the server matches on the raw remainder after
       // `/objective/` without decoding. Encoding it produced a 404 and a
       // challenge page that silently fell back to single-bounty wording.
-      const response = await fetch(`${base}/objective/${id}`, { cache: "no-store" });
+      const response = await fetch(`${at}/objective/${id}`, { cache: "no-store" });
       if (response.ok) {
         const body = (await response.json()) as { record?: Objective["record"] };
         if (body.record) found.record = body.record;
