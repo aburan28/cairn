@@ -433,20 +433,30 @@ def _audit(ctx, args):
             continue
         sampled += 1
         dps = payload["artifact"]["dps"]
-        index = int.from_bytes(pick[8:16], "big") % len(dps)
-        element = dps[index]
-        checked += 1
-        why = ctx.audit_element(element)
-        submitter = payload.get("submitter", "?")
-        if why is None:
-            print(f"ok    {claim_id[:23]}… {submitter}: dps[{index}] walker {element['walker']} re-walked, {element['steps']} steps")
+        # One element per claim is what a real auditor does: a re-walk costs the
+        # work itself, and the point of sampling is that the submitter cannot
+        # know which element will be drawn. `--elements all` is for a caller
+        # that wants the whole claim settled either way -- a test, or an auditor
+        # who already has a reason to suspect this one -- and it is opt-in
+        # because at batch sizes that matter it is the whole search again.
+        if args.elements == "all":
+            indices = list(range(len(dps)))
         else:
-            print(f"FAIL  {claim_id[:23]}… {submitter}: dps[{index}] walker {element['walker']}: {why}")
-            mismatches.append({
-                "artifact": _digest(payload["artifact"]),
-                "expect": "reject",
-                "detail": f"claim {claim_id}: dps[{index}] (walker {element['walker']}): {why}",
-            })
+            indices = [int.from_bytes(pick[8:16], "big") % len(dps)]
+        submitter = payload.get("submitter", "?")
+        for index in indices:
+            element = dps[index]
+            checked += 1
+            why = ctx.audit_element(element)
+            if why is None:
+                print(f"ok    {claim_id[:23]}… {submitter}: dps[{index}] walker {element['walker']} re-walked, {element['steps']} steps")
+            else:
+                print(f"FAIL  {claim_id[:23]}… {submitter}: dps[{index}] walker {element['walker']}: {why}")
+                mismatches.append({
+                    "artifact": _digest(payload["artifact"]),
+                    "expect": "reject",
+                    "detail": f"claim {claim_id}: dps[{index}] (walker {element['walker']}): {why}",
+                })
     print(f"{len(claims)} batch claim(s), {len([c for c in claims if c in paid])} paid, "
           f"{sampled} sampled at 1/{rate}, {checked} re-walked, {len(mismatches)} mismatch(es)")
     if args.docket:
@@ -502,6 +512,8 @@ def main(argv=None):
     p_audit.add_argument("--objective", help="only claims on this objective id")
     p_audit.add_argument("--rate", type=int, default=1, help="sample one claim in N (default: every claim)")
     p_audit.add_argument("--seed", default="", help="mixed into the sampling, so an auditor's picks are its own")
+    p_audit.add_argument("--elements", choices=("one", "all"), default="one",
+                         help="re-walk one element of each sampled claim (default), or every element")
     p_audit.add_argument("--docket", help="write the mismatches as a docket for `cairn attest slash --docket`")
 
     args = parser.parse_args(argv)
