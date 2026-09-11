@@ -1,6 +1,13 @@
 # Distributed Pollard rho as a piecework objective
 
-**Status: proposal. Nothing here is built.** Written against
+**Status: Stage A built** (`src/piecework.rs`, the `piecework` branch of
+`settle_one` in both implementations, the `piecework` conformance section,
+`examples/certicom-ecdlp/{jobs,checkers/*_rho_dp.py,tools/rho_dp.py}`,
+`scripts/piecework-demo.sh`). Stages B and C below are still proposals. One
+departure from §3 as first written: the walk is pinned by the *job document*
+whose hash the checker carries, not derived from the objective id — the id
+covers the checker, so the job is inside the id either way, and the `crypto`
+implementation runs the same job file unchanged. Written against
 [`node.rs::settle_one`](../../src/node.rs), [`partition.rs`](../../src/partition.rs),
 [`frontier.rs`](../../src/frontier.rs) and
 [`examples/certicom-ecdlp/`](../../examples/certicom-ecdlp/), and against the
@@ -252,7 +259,7 @@ checker is its first instance.
 
 ## 10. Concrete change list
 
-Here:
+Here (Stage A, done unless marked):
 
 1. `records.rs`: optional `piecework` block on `Objective`, omitted when
    absent, inside the id when present; `spec/objective.schema.json` entry;
@@ -269,7 +276,9 @@ Here:
    piecework top-up dedup (handled); `docs/coordination.md`: the rho case as
    the worked example of "work split is a pure function".
 6. `src/arena.rs`: a scenario where a submitter relabels public DPs, expected
-   verdict CLOSED.
+   verdict CLOSED. *Not yet: the relabelling is refused by the checker's
+   exact-keys rule and covered by `tools/rho_selftest.py`; an arena scenario
+   is still worth adding.*
 
 In [`crypto`](https://github.com/aburan28/crypto):
 

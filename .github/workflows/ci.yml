@@ -37,6 +37,10 @@ jobs:
       - run: cargo build --release --locked
       - run: ./scripts/demo.sh
       - run: ./scripts/ratchet-demo.sh
+      # Piecework: a coordinator's divided problem, paid per verified unit. The
+      # contributor is the pure-Python walker, so this also proves a peer with
+      # no Rust toolchain can take part, and the reference re-derives the log.
+      - run: ./scripts/piecework-demo.sh
       # `try` and `scaffold`: the one command that waits on a real epoch
       # boundary, and the generated challenge that has to be postable. Neither
       # can be checked from a fixture timestamp.
@@ -325,6 +329,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
       - run: ./scripts/check-examples.sh
+      # The rho piecework checkers pin a *job document* besides their own
+      # source, and `check-examples.sh` only follows pins inside the verifier
+      # block. This checks the job pins, that checker and job describe one
+      # curve, and that a point actually walked is accepted while a relabelled
+      # or negated copy is not.
+      - run: python3 examples/certicom-ecdlp/tools/rho_selftest.py
       # The First-Blood instances are derived, not authored: `Q` is hashed to
       # the curve from a public seed so that nobody -- the funder included --
       # knows its discrete log. A checker edited by hand would silently break

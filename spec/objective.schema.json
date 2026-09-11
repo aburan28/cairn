@@ -78,6 +78,14 @@
       "description": "Progressive-bounty parameters. When present the objective pays along an improvement curve instead of once to a single winner. Part of the id, like the verifier.",
       "$comment": "Field shape is validated by frontier::Ratchet, which reports a malformed block rather than settling on it."
     },
+    "piecework": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Per-unit payout parameters. When present the objective pays `unit_price` to every accepted claim whose unit is novel, from the pool, until the pool is exhausted, and never settles as a whole. `units` optionally declares how many units the problem divides into, which `work_assignment` maps a node's slice onto; `key` optionally names the artifact field that identifies a unit, so two different artifacts for one unit pay once -- absent, the artifact itself is the unit. Part of the id, like the ratchet, so the price cannot be lowered after work has started. Mutually exclusive with ratchet.",
+      "$comment": "Field shape is validated by piecework::Piecework, which reports a malformed block rather than settling on it."
+    },
     "confidentiality": {
       "type": [
         "string",

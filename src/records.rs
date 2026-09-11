@@ -140,6 +140,9 @@ pub enum RecordError {
     /// asked for "never revealed" and got "revealed later" would be misled
     /// about the one thing they cared about.
     SealedNotImplemented,
+    /// An objective carrying both a `ratchet` and a `piecework` block. One
+    /// pool, one rule for spending it -- see [`Objective::validate`].
+    PieceworkWithRatchet,
     /// A commitment carries an `envelope` that is not a decodable sealed
     /// envelope, or a share record carries a malformed share.
     ///
@@ -195,6 +198,10 @@ impl fmt::Display for RecordError {
                 f,
                 "unknown confidentiality class {value:?} (expected \
                  \"public\", \"embargoed\", or \"sealed\")"
+            ),
+            RecordError::PieceworkWithRatchet => f.write_str(
+                "objective carries both a ratchet and a piecework block; one pool has one \
+                 rule for spending it",
             ),
             RecordError::SealedNotImplemented => f.write_str(
                 "confidentiality \"sealed\" requires zero-knowledge verification, \
@@ -365,6 +372,14 @@ pub struct Objective {
     /// once to a single winner, which is what makes immediate publication the
     /// profitable move rather than a gift to your competitors.
     pub ratchet: Option<Value>,
+    /// Optional per-unit payout parameters (see [`crate::piecework`]). When
+    /// present the objective pays every accepted novel unit from the pool
+    /// until it is exhausted, instead of settling once. Inside the id when
+    /// present and omitted when absent, exactly like `ratchet`, so adding it
+    /// reissued no existing id. Mutually exclusive with `ratchet`: one pays
+    /// for distance moved, the other for units done, and an objective cannot
+    /// be both.
+    pub piecework: Option<Value>,
     /// When settled artifacts become public. Defaults to
     /// [`Confidentiality::Public`].
     ///
@@ -450,6 +465,7 @@ impl Objective {
             created_at: created_at.into(),
             deadline,
             ratchet,
+            piecework: None,
             confidentiality: Confidentiality::Public,
             embargo_epochs: None,
             artifact_schema: None,
@@ -457,6 +473,15 @@ impl Objective {
         };
         objective.validate()?;
         Ok(objective)
+    }
+
+    /// Attach a piecework block, re-validating. A builder step rather than a
+    /// ninth constructor argument: every existing caller keeps the default,
+    /// and the ones that want per-unit payment say so by name.
+    pub fn with_piecework(mut self, block: Value) -> Result<Objective, RecordError> {
+        self.piecework = Some(block);
+        self.validate()?;
+        Ok(self)
     }
 
     /// Attach an artifact-shape hint, re-validating.
@@ -550,6 +575,23 @@ impl Objective {
                 });
             }
         }
+        if let Some(piecework) = &self.piecework {
+            if piecework.as_object().is_none() {
+                return Err(RecordError::InvalidField {
+                    record: "objective",
+                    field: "piecework",
+                    expected: "an object",
+                });
+            }
+            // One pool, one rule for spending it. A ratchet pays for the
+            // distance a frontier moves and piecework pays per unit; an
+            // objective carrying both would have two answers to "what does
+            // this claim earn", and the two implementations could pick
+            // different ones.
+            if self.ratchet.is_some() {
+                return Err(RecordError::PieceworkWithRatchet);
+            }
+        }
         // An embargo length on an objective that is not embargoed is a funder
         // who thinks they asked for delay and did not. Refused rather than
         // ignored, for the same reason `sealed` is refused rather than
@@ -634,6 +676,11 @@ impl Objective {
         }
         if let Some(ratchet) = &self.ratchet {
             body.insert("ratchet".to_string(), ratchet.clone());
+        }
+        // Omitted when absent, inside the id when present: the same shape as
+        // `ratchet`, for the same two reasons.
+        if let Some(piecework) = &self.piecework {
+            body.insert("piecework".to_string(), piecework.clone());
         }
         // Omitted when `Public`, for the same reason `deadline` and `ratchet`
         // are omitted when unset: emitting the default would change the digest
@@ -734,6 +781,11 @@ impl Objective {
             None | Some(Value::Null) => None,
             Some(other) => Some(other.clone()),
         };
+        // Absent and null both mean "pays once", exactly as for `ratchet`.
+        let piecework = match value.get("piecework") {
+            None | Some(Value::Null) => None,
+            Some(other) => Some(other.clone()),
+        };
 
         let confidentiality = match value.get("confidentiality") {
             None | Some(Value::Null) => Confidentiality::Public,
@@ -777,6 +829,7 @@ impl Objective {
             created_at: required_string(value, RECORD, "created_at")?,
             deadline: optional_string(value, RECORD, "deadline")?,
             ratchet,
+            piecework,
             confidentiality,
             embargo_epochs,
             require_signed_submitter: match value.get("require_signed_submitter") {
@@ -3291,6 +3344,7 @@ mod tests {
             created_at: TS.to_string(),
             deadline: None,
             ratchet: None,
+            piecework: None,
             confidentiality: Confidentiality::Public,
             embargo_epochs: None,
             artifact_schema: None,

@@ -908,10 +908,11 @@ fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Res
 /// which claim. It is `null` for a ratchet, whose payouts are many and are
 /// carried per move by `frontier.paid_cumulative` -- the first settlement of a
 /// ratchet is only its first paid step, and naming it here would read as the
-/// whole.
+/// whole. It is `null` for piecework for the same reason: its payouts are per
+/// unit, and `piecework.paid_units` and `paid_total` carry them.
 fn lifecycle_fields(node: &Node, id: &str, objective: &Objective) -> Vec<(&'static str, Value)> {
     let closed = node.objective_is_closed(objective);
-    let settlement = if objective.ratchet.is_some() {
+    let settlement = if objective.ratchet.is_some() || objective.piecework.is_some() {
         Value::Null
     } else {
         node.settlement_of(id)
@@ -926,7 +927,37 @@ fn lifecycle_fields(node: &Node, id: &str, objective: &Objective) -> Vec<(&'stat
     if let Some(frontier) = node.frontier_of(id) {
         fields.push(("frontier", frontier_value(&frontier, objective.reward)));
     }
+    if let Some(piecework) = piecework_value(node, id, objective) {
+        fields.push(("piecework", piecework));
+    }
     fields
+}
+
+/// A piecework objective's standing: what a unit pays, how much of the pool
+/// is left, and how many units the log has paid for. `None` off piecework.
+fn piecework_value(node: &Node, id: &str, objective: &Objective) -> Option<Value> {
+    let piecework = crate::piecework::Piecework::from_value(objective.piecework.as_ref()?).ok()?;
+    let paid = node.paid_total(id);
+    let remaining = u128::from(objective.reward).saturating_sub(paid);
+    let paid_units = node
+        .ledger()
+        .entries_of_kind("settlement")
+        .into_iter()
+        .filter(|entry| entry.payload.get("objective_id").and_then(Value::as_str) == Some(id))
+        .count();
+    let mut fields = vec![
+        ("unit_price", Value::Int(i128::from(piecework.unit_price))),
+        ("paid_units", Value::Int(paid_units as i128)),
+        ("paid_total", Value::Int(paid as i128)),
+        ("pool_remaining", Value::Int(remaining as i128)),
+    ];
+    if let Some(units) = piecework.units {
+        fields.push(("units", Value::Int(i128::from(units))));
+    }
+    if let Some(key) = &piecework.key {
+        fields.push(("key", Value::string(key.clone())));
+    }
+    Some(Value::object(fields))
 }
 
 /// The three fields of a settlement record a reader acts on, copied out of
@@ -951,12 +982,21 @@ fn frontier(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<(
     let Some(objective) = objectives.get(id) else {
         return json_error(stream, 404, "no such objective in this log");
     };
-    let body = match node.frontier_of(id) {
-        Some(frontier) => Value::object([
+    let body = match (node.frontier_of(id), piecework_value(&node, id, objective)) {
+        (Some(frontier), _) => Value::object([
             ("objective_id", Value::string(id)),
             ("frontier", frontier_value(&frontier, objective.reward)),
         ]),
-        None => Value::object([
+        (None, Some(piecework)) => Value::object([
+            ("objective_id", Value::string(id)),
+            ("frontier", Value::Null),
+            ("piecework", piecework),
+            (
+                "note",
+                Value::string("piecework objective: no frontier to cite; pay is per novel unit"),
+            ),
+        ]),
+        (None, None) => Value::object([
             ("objective_id", Value::string(id)),
             ("frontier", Value::Null),
             (
@@ -2225,6 +2265,87 @@ mod tests {
         assert_eq!(field(&fields, "settlement"), &Value::Null);
         let frontier = field(&fields, "frontier");
         assert_eq!(field(frontier, "pool_remaining"), &Value::Int(600_000));
+    }
+
+    /// A piecework objective is open until its pool is empty, whatever
+    /// settlements it has written, and it publishes the pool rather than a
+    /// "settlement" that would name only its first paid unit as the whole.
+    #[test]
+    fn a_piecework_objective_publishes_its_pool_and_closes_when_it_is_empty() {
+        let dir = TempDir::new("piecework");
+        let ts = "2026-07-28T00:00:00+00:00";
+        let objective = Objective::new(
+            "G",
+            "answer the units",
+            Value::object([
+                ("kind", Value::string("certificate")),
+                ("checker", Value::string("c.py")),
+                ("checker_sha256", Value::string("ab".repeat(32))),
+                ("entrypoint", Value::string("check")),
+            ]),
+            250,
+            "treasury",
+            ts,
+            None,
+            None,
+        )
+        .expect("valid objective")
+        .with_piecework(Value::object([
+            ("unit_price", Value::Int(100)),
+            ("units", Value::Int(64)),
+            ("key", Value::string("unit")),
+        ]))
+        .expect("valid piecework block");
+        let id = objective.id();
+
+        let mut ledger = Ledger::open(dir.path.join("log.jsonl")).expect("open");
+        ledger
+            .append("objective", objective.to_value(), ts)
+            .expect("objective");
+        let pay = |ledger: &mut Ledger, claim: &str, reward: i128| {
+            ledger
+                .append(
+                    "settlement",
+                    Value::object([
+                        ("objective_id", Value::string(id.clone())),
+                        ("claim_id", Value::string(claim)),
+                        ("submitter", Value::string("alice")),
+                        ("reward", Value::Int(reward)),
+                    ]),
+                    ts,
+                )
+                .expect("settlement");
+        };
+        pay(&mut ledger, "sha256:c1", 100);
+
+        let node = Node::new(ledger, &dir.path);
+        let fields = Value::object(lifecycle_fields(&node, &id, &objective));
+        assert_eq!(field(&fields, "settled"), &Value::Bool(false));
+        assert_eq!(field(&fields, "open"), &Value::Bool(true));
+        assert_eq!(field(&fields, "settlement"), &Value::Null);
+        assert!(
+            fields.get("frontier").is_none(),
+            "piecework has no frontier"
+        );
+        let piecework = field(&fields, "piecework");
+        assert_eq!(field(piecework, "unit_price"), &Value::Int(100));
+        assert_eq!(field(piecework, "paid_units"), &Value::Int(1));
+        assert_eq!(field(piecework, "paid_total"), &Value::Int(100));
+        assert_eq!(field(piecework, "pool_remaining"), &Value::Int(150));
+        assert_eq!(field(piecework, "units"), &Value::Int(64));
+        assert_eq!(field(piecework, "key"), &Value::string("unit"));
+
+        // Two more units drain the pool: the last one takes what is left.
+        let mut ledger = Ledger::open(dir.path.join("log.jsonl")).expect("reopen");
+        pay(&mut ledger, "sha256:c2", 100);
+        pay(&mut ledger, "sha256:c3", 50);
+        let node = Node::new(ledger, &dir.path);
+        let fields = Value::object(lifecycle_fields(&node, &id, &objective));
+        assert_eq!(field(&fields, "settled"), &Value::Bool(true));
+        assert_eq!(field(&fields, "open"), &Value::Bool(false));
+        let piecework = field(&fields, "piecework");
+        assert_eq!(field(piecework, "paid_units"), &Value::Int(3));
+        assert_eq!(field(piecework, "pool_remaining"), &Value::Int(0));
     }
 
     #[test]
