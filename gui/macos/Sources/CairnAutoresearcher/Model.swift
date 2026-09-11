@@ -375,7 +375,9 @@ final class ResearcherModel: ObservableObject {
             }
             let node = tool("node")
             out.append(SetupCheck(title: "Node (for Build)", ok: node != nil, detail: node ?? "needed once, by make ui-build"))
-            await MainActor.run {
+            // By value: `newProbe` and `out` are vars, and a var captured into
+            // code on another actor is an error in the Swift 6 language mode.
+            await MainActor.run { [newProbe, out] in
                 self.binaryProbe = newProbe
                 self.checks = out
                 self.checking = false

@@ -317,6 +317,33 @@ jobs:
       - run: npm run build
         working-directory: ui
 
+  gui-macos:
+    # The macOS launcher in gui/macos, compiled. No other job builds Swift and
+    # neither does `make check`, so a change that broke the launcher surfaced
+    # only when somebody next built the app -- and until build.sh passed the
+    # compiler's exit status through, not even then: it packaged the binary an
+    # earlier build had left in .build and printed "built".
+    #
+    # On every push and pull request, as `ui` runs, rather than behind a
+    # gui/macos/** path filter. Nothing outside gui/macos goes into this build,
+    # but the compiler does: it is whichever Xcode the `macos-latest` image
+    # carries, and that changes without a commit here. Behind a filter, a break
+    # the toolchain caused would first go red on the next launcher PR, however
+    # much later, and read as that diff's fault.
+    #
+    # Warnings are not made fatal, for the same reason: a deprecation arriving
+    # with a new SDK would fail pull requests that touched no Swift. What this
+    # job catches is a compile that fails.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The compiler is the image's and is not pinned here, so the log names
+      # it: a failure that began with an image update should look like one.
+      - run: swift --version
+      # Release, as build.sh builds it. `-O` and whole-module mode run compiler
+      # passes that a debug build never reaches.
+      - run: swift build -c release --package-path gui/macos
+
   examples:
     # Every example objective must pass schema validation and match its pinned
     # verifier hashes -- not only the ones the demo scripts happen to post.
