@@ -323,10 +323,20 @@
   }
 
   /* Every hash, id, key and amount on the site. Tabular figures so two
-     numbers in a column line up digit for digit, and `anywhere` wrapping so a
-     64-character key never widens the page it is in. */
+     numbers in a column line up digit for digit, and wrapping so a
+     64-character key never widens the page it is in.
+
+     `break-word` and NOT `anywhere`, which is what this was and what broke the
+     log table. The two wrap identically; they differ in whether the soft wrap
+     opportunities count toward the element's min-content width. Under
+     `anywhere` they do, so every mono cell reports a minimum width of one
+     character -- and an auto-layout table believes it. The log's id column was
+     duly squeezed to a few characters wide and `52048ad1…8684` came apart over
+     five lines, in a row that had plenty of room. `break-word` keeps a token's
+     min-content width whole, so a column is sized to hold it, and the break
+     still happens when the line genuinely cannot fit. */
   .mono {
-    @apply font-mono [font-variant-numeric:tabular-nums] [overflow-wrap:anywhere];
+    @apply font-mono [font-variant-numeric:tabular-nums] [overflow-wrap:break-word];
   }
 
   .kbd {
