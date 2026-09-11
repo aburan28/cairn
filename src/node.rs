@@ -64,6 +64,7 @@ use crate::knowledge::{
 };
 use crate::ledger::{Entry, Ledger, LedgerError, Proof};
 use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
+use crate::piecework::{Piecework, PieceworkError};
 use crate::records::{
     Attestation, Availability, AvailabilityPool, BisectionMove, Challenge, Claim, Commitment,
     CommitteeShare, Issuance, Objective, PeerRecord, Undertaking,
@@ -416,6 +417,14 @@ pub enum RuleViolation {
     /// The objective's ratchet block is malformed, or its arithmetic could not
     /// be completed exactly.
     MalformedRatchet(RatchetError),
+    /// The piecework block cannot be decoded. Refused at post time for the
+    /// same reason a malformed ratchet is: an objective nobody can be paid
+    /// under is a stranded pool.
+    MalformedPiecework(PieceworkError),
+    /// A unit price the pool cannot pay even once. Not wrong arithmetically
+    /// -- `payout` would cap it -- but a coordinator who posts it has made a
+    /// mistake they would rather hear about now than after somebody's work.
+    PieceworkPriceExceedsPool { unit_price: u64, pool: u64 },
     /// The objective's latest frontier entry cannot be read.
     ///
     /// Refused rather than treated as an empty frontier: an unreadable frontier
@@ -907,6 +916,14 @@ impl fmt::Display for RuleViolation {
             RuleViolation::MalformedRatchet(source) => {
                 write!(f, "objective carries an unusable ratchet: {source}")
             }
+            RuleViolation::MalformedPiecework(source) => {
+                write!(f, "objective carries an unusable piecework block: {source}")
+            }
+            RuleViolation::PieceworkPriceExceedsPool { unit_price, pool } => write!(
+                f,
+                "piecework unit_price ({unit_price}) exceeds the pool ({pool}); not one unit \
+                 could be paid in full"
+            ),
             RuleViolation::MalformedFrontier(source) => write!(
                 f,
                 "the objective's latest frontier entry cannot be read: {source}"
@@ -1185,6 +1202,7 @@ impl std::error::Error for RuleViolation {
             RuleViolation::MalformedRatchet(source) | RuleViolation::MalformedFrontier(source) => {
                 Some(source)
             }
+            RuleViolation::MalformedPiecework(source) => Some(source),
             RuleViolation::Ledger(source) => Some(source),
             _ => None,
         }
@@ -1447,6 +1465,16 @@ impl Node {
                 return Err(RuleViolation::RatchetRewardMismatch {
                     ratchet: ratchet.reward,
                     objective: objective.reward,
+                });
+            }
+        }
+        if let Some(block) = &objective.piecework {
+            let piecework =
+                Piecework::from_value(block).map_err(RuleViolation::MalformedPiecework)?;
+            if piecework.unit_price > objective.reward {
+                return Err(RuleViolation::PieceworkPriceExceedsPool {
+                    unit_price: piecework.unit_price,
+                    pool: objective.reward,
                 });
             }
         }
@@ -3401,6 +3429,11 @@ impl Node {
     /// disagree about which logs are valid.
     pub fn objective_is_closed(&self, objective: &Objective) -> bool {
         let id = objective.id();
+        // Piecework closes when the pool is empty, and not before: the first
+        // paid unit is exactly when there is the most left to earn.
+        if objective.piecework.is_some() {
+            return self.paid_total(&id) >= u128::from(objective.reward);
+        }
         let Some(block) = &objective.ratchet else {
             return self.settlement_of(&id).is_some();
         };
@@ -3972,7 +4005,12 @@ impl Node {
                 submitter: commitment.submitter.clone(),
             });
         }
-        if objective.ratchet.is_none() && self.settlement_of(&commitment.objective_id).is_some() {
+        // A ratchet and a piecework objective both stay open after a
+        // settlement; only a pass/fail one closes when it pays.
+        if objective.ratchet.is_none()
+            && objective.piecework.is_none()
+            && self.settlement_of(&commitment.objective_id).is_some()
+        {
             return Err(RuleViolation::AlreadySettled {
                 objective_id: commitment.objective_id.clone(),
             });
@@ -4503,8 +4541,20 @@ impl Node {
             let mut consumed: BTreeSet<String> = BTreeSet::new();
             for (claim_id, claim) in batch {
                 order.push(Value::string(claim_id.clone()));
-                outcomes.push(self.settle_one(&claim_id, &claim, epoch, &consumed, ts)?);
-                consumed.insert(claim.artifact_id());
+                let outcome = self.settle_one(&claim_id, &claim, epoch, &consumed, ts)?;
+                // A piecework unit is spoken for by a *paid* claim, not a
+                // seen one -- see `crate::piecework` -- so an unpaid unit
+                // earlier in the batch (pool dry, or no unit named) does not
+                // shadow a later one. Every other objective keeps the rule
+                // that the first reveal of an artifact consumes it.
+                let (key, spoken_for) = match self.novelty_key_for(&claim) {
+                    Some(key) => (key, outcome.settled),
+                    None => (claim.artifact_id(), true),
+                };
+                if spoken_for {
+                    consumed.insert(key);
+                }
+                outcomes.push(outcome);
             }
             let record = Value::object([
                 ("epoch", Value::Int(i128::from(epoch))),
@@ -5907,6 +5957,22 @@ impl Node {
             return self.settle_improvement(claim, verdict, &ratchet, held.as_ref(), ts);
         }
 
+        if let Some(block) = &objective.piecework {
+            let piecework = match Piecework::from_value(block) {
+                Ok(piecework) => piecework,
+                Err(error) => {
+                    return Ok(Outcome::unsettled(
+                        claim_id.to_string(),
+                        verdict,
+                        format!("objective carries an unusable piecework block: {error}"),
+                    ))
+                }
+            };
+            return self.settle_unit(
+                claim_id, claim, verdict, &objective, &piecework, consumed, ts,
+            );
+        }
+
         // Novelty is necessary but never sufficient. Resubmitting an artifact
         // already in the log verifies fine and mints zero. Checked before the
         // already-settled case so the note names the real reason: the copy
@@ -5947,6 +6013,77 @@ impl Node {
             reward: objective.reward,
             pending_epoch: None,
             note: String::from("settled"),
+        })
+    }
+
+    /// Pay one unit of a piecework objective, or say why not.
+    ///
+    /// Three non-settling outcomes, none of them rejections: the artifact
+    /// names no unit under the objective's key (it verified, but it is not an
+    /// answer to a unit of this problem); the unit was already paid to
+    /// somebody, here or on another objective pinning the same job; or the
+    /// pool is empty. The last is the one a top-up objective exists for.
+    #[allow(clippy::too_many_arguments)]
+    fn settle_unit(
+        &mut self,
+        claim_id: &str,
+        claim: &Claim,
+        verdict: Verdict,
+        objective: &Objective,
+        piecework: &Piecework,
+        consumed: &BTreeSet<String>,
+        ts: &str,
+    ) -> Result<Outcome, RuleViolation> {
+        let Some(key) = piecework.novelty_key(&claim.artifact) else {
+            return Ok(Outcome::unsettled(
+                claim_id.to_string(),
+                verdict,
+                format!(
+                    "artifact has no {:?} field, so it names no unit of this objective",
+                    piecework.key.as_deref().unwrap_or("")
+                ),
+            ));
+        };
+        if consumed.contains(&key) || self.paid_unit_keys(objective, piecework).contains(&key) {
+            return Ok(Outcome::unsettled(
+                claim_id.to_string(),
+                verdict,
+                "duplicate unit mints nothing",
+            ));
+        }
+        let paid = self.paid_total(&claim.objective_id);
+        // The pool is a `u64`, so anything left after subtracting a total
+        // the audit bounds by the pool fits; the fallback only guards a
+        // hostile log that overpaid, where the honest remainder is zero.
+        let remaining =
+            u64::try_from(u128::from(objective.reward).saturating_sub(paid)).unwrap_or(0);
+        let reward = piecework.payout(remaining);
+        if reward == 0 {
+            return Ok(Outcome::unsettled(
+                claim_id.to_string(),
+                verdict,
+                "pool exhausted; this unit verified and earns nothing here",
+            ));
+        }
+        let settlement = Value::object([
+            ("objective_id", Value::string(claim.objective_id.clone())),
+            ("claim_id", Value::string(claim_id.to_string())),
+            ("submitter", Value::string(claim.submitter.clone())),
+            ("reward", Value::Int(i128::from(reward))),
+        ]);
+        self.append(SETTLEMENT, settlement, ts)?;
+        let note = if reward == remaining {
+            "unit paid; pool exhausted"
+        } else {
+            "unit paid"
+        };
+        Ok(Outcome {
+            claim_id: claim_id.to_string(),
+            verdict,
+            settled: true,
+            reward,
+            pending_epoch: None,
+            note: String::from(note),
         })
     }
 
@@ -6650,6 +6787,55 @@ impl Node {
             }
         }
 
+        // Re-derive every piecework payment from the order the log paid
+        // them in: each is `min(unit_price, what was left)`, with "what was
+        // left" advanced by the *expected* amount rather than the recorded
+        // one, so a single overpayment is reported once rather than
+        // excused by the settlements after it. Duplicate units are named
+        // too: the pool bound cannot see two payments for one unit when
+        // their sum is within budget.
+        let mut piecework_rewards: BTreeMap<String, u64> = BTreeMap::new();
+        {
+            let mut remaining: BTreeMap<&str, u64> = BTreeMap::new();
+            let mut paid_units: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for entry in self.ledger.entries_of_kind(SETTLEMENT) {
+                let Some(objective_id) = payload_str(&entry.payload, "objective_id") else {
+                    continue;
+                };
+                let Some(objective) = objectives.get(objective_id) else {
+                    continue;
+                };
+                let Some(block) = &objective.piecework else {
+                    continue;
+                };
+                let Ok(piecework) = Piecework::from_value(block) else {
+                    problems.push(format!(
+                        "objective {objective_id}: piecework block cannot be decoded"
+                    ));
+                    continue;
+                };
+                let left = remaining.entry(objective_id).or_insert(objective.reward);
+                let expected = piecework.payout(*left);
+                *left -= expected;
+                let Some(claim) =
+                    payload_str(&entry.payload, "claim_id").and_then(|id| claims_by_id.get(id))
+                else {
+                    continue;
+                };
+                piecework_rewards.insert(claim.id(), expected);
+                if let Some(key) = piecework.novelty_key(&claim.artifact) {
+                    // Scope: the same job, whichever objective paid it.
+                    let job = format!("{}|{}", objective.verifier.digest(), block.digest());
+                    if !paid_units.entry(job).or_default().insert(key) {
+                        problems.push(format!(
+                            "objective {objective_id}: unit of claim {} was paid more than once",
+                            claim.id()
+                        ));
+                    }
+                }
+            }
+        }
+
         for entry in self.ledger.entries_of_kind(SETTLEMENT) {
             let objective_id =
                 payload_str(&entry.payload, "objective_id").unwrap_or("(no objective_id)");
@@ -6686,6 +6872,8 @@ impl Node {
             if let Some(objective) = objectives.get(&claim.objective_id) {
                 let expected = if objective.ratchet.is_some() {
                     progressive_rewards.get(claim.id().as_str()).copied()
+                } else if objective.piecework.is_some() {
+                    piecework_rewards.get(claim.id().as_str()).copied()
                 } else {
                     Some(objective.reward)
                 };
@@ -6713,7 +6901,10 @@ impl Node {
                 }
             };
             let objective = objectives.get(&objective_id);
-            let progressive = objective.is_some_and(|o| o.ratchet.is_some());
+            // A ratchet pays per improvement and piecework per unit; both
+            // settle many times by design.
+            let progressive =
+                objective.is_some_and(|o| o.ratchet.is_some() || o.piecework.is_some());
             if seen_objectives.contains(&objective_id) && !progressive {
                 problems.push(format!("objective {objective_id}: settled more than once"));
             }
@@ -7765,6 +7956,82 @@ impl Node {
             }
         }
         out
+    }
+
+    /// Everything the log has paid against an objective, summed in `u128`.
+    ///
+    /// The audit bounds this by the pool, but this reader is used on the
+    /// rules path on logs the audit has not passed yet, so it saturates
+    /// rather than trusting that.
+    pub fn paid_total(&self, objective_id: &str) -> u128 {
+        let mut total: u128 = 0;
+        for entry in self.ledger.entries_of_kind(SETTLEMENT) {
+            if payload_str(&entry.payload, "objective_id") != Some(objective_id) {
+                continue;
+            }
+            let reward = entry
+                .payload
+                .get("reward")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            total = total.saturating_add(u128::from(reward));
+        }
+        total
+    }
+
+    /// The objectives that share one piecework job with `objective`: the
+    /// same verifier and the same piecework block, so the same checker on
+    /// the same units. A top-up posted when the first pool ran dry is one,
+    /// and it must not pay again for a unit the first already paid.
+    fn piecework_scope(&self, objective: &Objective) -> BTreeSet<String> {
+        self.objectives()
+            .iter()
+            .filter(|(_, other)| {
+                other.piecework.is_some()
+                    && other.piecework == objective.piecework
+                    && other.verifier == objective.verifier
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Novelty keys of every unit a settlement has paid for, across the
+    /// objective's whole job. The consumed set for piecework -- see
+    /// `crate::piecework` for why paid rather than seen.
+    fn paid_unit_keys(&self, objective: &Objective, piecework: &Piecework) -> BTreeSet<String> {
+        let scope = self.piecework_scope(objective);
+        let mut claims: BTreeMap<String, Claim> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            if let Ok(claim) = Claim::from_value(&entry.payload) {
+                if scope.contains(&claim.objective_id) {
+                    claims.insert(claim.id(), claim);
+                }
+            }
+        }
+        let mut out = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(SETTLEMENT) {
+            let Some(claim_id) = payload_str(&entry.payload, "claim_id") else {
+                continue;
+            };
+            if let Some(key) = claims
+                .get(claim_id)
+                .and_then(|claim| piecework.novelty_key(&claim.artifact))
+            {
+                out.insert(key);
+            }
+        }
+        out
+    }
+
+    /// The unit a claim answers under its objective's piecework block, or
+    /// `None` when the objective is not piecework (or the artifact names no
+    /// unit). What the batch's consumed set is keyed on for such a claim.
+    fn novelty_key_for(&self, claim: &Claim) -> Option<String> {
+        let objectives = self.objectives();
+        let block = objectives.get(&claim.objective_id)?.piecework.as_ref()?;
+        Piecework::from_value(block)
+            .ok()?
+            .novelty_key(&claim.artifact)
     }
 
     /// Ids of claims whose recorded verdict was `accept`.

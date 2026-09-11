@@ -12,6 +12,7 @@ use crate::drand;
 use crate::frontier::Ratchet;
 use crate::ledger::{Ledger, Proof};
 use crate::partition::{assign, beacon, epoch_of, epoch_seconds, settlement_rank, COMMITTEE_SIZE};
+use crate::piecework::Piecework;
 use crate::records::{
     signed_submitter, Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Objective,
     PeerRecord, Undertaking, MAX_UNDERTAKING_HEIGHT,
@@ -1761,6 +1762,71 @@ impl Node {
         out
     }
 
+    /// Everything paid against an objective, saturating in u128.
+    pub fn paid_total(&self, objective_id: &str) -> u128 {
+        let mut total: u128 = 0;
+        for entry in self.ledger.entries_of_kind(SETTLEMENT) {
+            if entry.payload.get("objective_id").and_then(Value::as_str) != Some(objective_id) {
+                continue;
+            }
+            let reward = entry
+                .payload
+                .get("reward")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            total = total.saturating_add(u128::from(reward));
+        }
+        total
+    }
+
+    /// Objectives sharing one piecework job: same verifier, same block.
+    fn piecework_scope(&self, objective: &Objective) -> BTreeSet<String> {
+        self.objectives()
+            .iter()
+            .filter(|(_, other)| {
+                other.piecework.is_some()
+                    && other.piecework == objective.piecework
+                    && other.verifier == objective.verifier
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Novelty keys of every unit a settlement in the job has paid for.
+    fn paid_unit_keys(&self, objective: &Objective, piecework: &Piecework) -> BTreeSet<String> {
+        let scope = self.piecework_scope(objective);
+        let mut claims: BTreeMap<String, Claim> = BTreeMap::new();
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            if let Ok(claim) = Claim::from_value(&entry.payload) {
+                if scope.contains(&claim.objective_id) {
+                    claims.insert(claim.id(), claim);
+                }
+            }
+        }
+        let mut out = BTreeSet::new();
+        for entry in self.ledger.entries_of_kind(SETTLEMENT) {
+            let Some(claim_id) = entry.payload.get("claim_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(key) = claims
+                .get(claim_id)
+                .and_then(|claim| piecework.novelty_key(&claim.artifact))
+            {
+                out.insert(key);
+            }
+        }
+        out
+    }
+
+    /// The unit a claim answers, or `None` off a piecework objective.
+    fn novelty_key_for(&self, claim: &Claim) -> Option<String> {
+        let objectives = self.objectives();
+        let block = objectives.get(&claim.objective_id)?.piecework.as_ref()?;
+        Piecework::from_value(block)
+            .ok()?
+            .novelty_key(&claim.artifact)
+    }
+
     fn artifact_ids_before(&self, objective_id: &str, epoch: u64) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         for entry in self.ledger.entries_of_kind(CLAIM) {
@@ -1831,6 +1897,15 @@ impl Node {
                 return Err("ratchet reward and objective reward disagree".into());
             }
         }
+        if let Some(block) = &objective.piecework {
+            let piecework = Piecework::from_value(block)?;
+            if piecework.unit_price > objective.reward {
+                return Err(format!(
+                    "piecework unit_price ({}) exceeds the pool ({})",
+                    piecework.unit_price, objective.reward
+                ));
+            }
+        }
         objective
             .verify_funding_signature()
             .map_err(|error| error.to_string())?;
@@ -1890,7 +1965,10 @@ impl Node {
         }
         // A progressive objective stays open after a settlement; a pass/fail
         // one does not.
-        if objective.ratchet.is_none() && self.settlement_of(&commitment.objective_id).is_some() {
+        if objective.ratchet.is_none()
+            && objective.piecework.is_none()
+            && self.settlement_of(&commitment.objective_id).is_some()
+        {
             return Err("objective already settled".into());
         }
         let entry = self.ledger.append(COMMITMENT, commitment.to_value(), ts)?;
@@ -2088,8 +2166,20 @@ impl Node {
             let mut order = Vec::with_capacity(batch.len());
             for claim in batch {
                 order.push(Value::string(claim.id()));
-                outcomes.push(self.settle_one(&claim, epoch, &consumed, ts)?);
-                consumed.insert(claim.artifact_id());
+                let outcome = self.settle_one(&claim, epoch, &consumed, ts)?;
+                // A piecework unit is spoken for by a *paid* claim; every
+                // other artifact by its first reveal.
+                match self.novelty_key_for(&claim) {
+                    Some(key) => {
+                        if outcome.settled {
+                            consumed.insert(key);
+                        }
+                    }
+                    None => {
+                        consumed.insert(claim.artifact_id());
+                    }
+                }
+                outcomes.push(outcome);
             }
             self.ledger.append(
                 BATCH,
@@ -2146,6 +2236,48 @@ impl Node {
             };
             let held = self.frontier_of(&claim.objective_id);
             return self.settle_improvement(claim, verdict, &ratchet, held, ts);
+        }
+
+        if let Some(block) = &objective.piecework {
+            let Ok(piecework) = Piecework::from_value(block) else {
+                return Ok(unsettled(
+                    claim_id,
+                    verdict,
+                    "objective carries an unusable piecework block",
+                ));
+            };
+            let Some(key) = piecework.novelty_key(&claim.artifact) else {
+                return Ok(unsettled(claim_id, verdict, "artifact names no unit"));
+            };
+            if consumed.contains(&key) || self.paid_unit_keys(&objective, &piecework).contains(&key)
+            {
+                return Ok(unsettled(claim_id, verdict, "duplicate unit mints nothing"));
+            }
+            let paid = self.paid_total(&claim.objective_id);
+            let remaining =
+                u64::try_from(u128::from(objective.reward).saturating_sub(paid)).unwrap_or(0);
+            let reward = piecework.payout(remaining);
+            if reward == 0 {
+                return Ok(unsettled(claim_id, verdict, "pool exhausted"));
+            }
+            self.ledger.append(
+                SETTLEMENT,
+                Value::object([
+                    ("objective_id", Value::string(claim.objective_id.clone())),
+                    ("claim_id", Value::string(claim_id.clone())),
+                    ("submitter", Value::string(claim.submitter.clone())),
+                    ("reward", Value::Int(i128::from(reward))),
+                ]),
+                ts,
+            )?;
+            return Ok(Outcome {
+                claim_id,
+                verdict,
+                settled: true,
+                reward,
+                note: "unit paid".into(),
+                pending_epoch: None,
+            });
         }
 
         let artifact_id = claim.artifact_id();
@@ -2993,6 +3125,57 @@ impl Node {
                 progressive_rewards.insert(frontier.claim_id, reward);
             }
         }
+        // Piecework: each payment is min(unit_price, what was left), with
+        // "what was left" advanced by the expected amount, and no unit is
+        // paid twice across the objectives that share its job.
+        let mut piecework_rewards: BTreeMap<String, u64> = BTreeMap::new();
+        {
+            let mut remaining: BTreeMap<String, u64> = BTreeMap::new();
+            let mut paid_units: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for entry in self.ledger.entries_of_kind(SETTLEMENT) {
+                let Some(objective_id) = entry.payload.get("objective_id").and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let Some(objective) = objectives.get(objective_id) else {
+                    continue;
+                };
+                let Some(block) = &objective.piecework else {
+                    continue;
+                };
+                let Ok(piecework) = Piecework::from_value(block) else {
+                    problems.push(format!(
+                        "objective {}: piecework block cannot be decoded",
+                        short(objective_id)
+                    ));
+                    continue;
+                };
+                let left = remaining
+                    .entry(objective_id.to_string())
+                    .or_insert(objective.reward);
+                let expected = piecework.payout(*left);
+                *left -= expected;
+                let Some(claim) = entry
+                    .payload
+                    .get("claim_id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| accepted.get(id))
+                else {
+                    continue;
+                };
+                piecework_rewards.insert(claim.id(), expected);
+                if let Some(key) = piecework.novelty_key(&claim.artifact) {
+                    let job = format!("{}|{}", objective.verifier.digest(), block.digest());
+                    if !paid_units.entry(job).or_default().insert(key) {
+                        problems.push(format!(
+                            "objective {}: unit of claim {} was paid more than once",
+                            short(objective_id),
+                            short(&claim.id())
+                        ));
+                    }
+                }
+            }
+        }
         for entry in self.ledger.entries_of_kind(SETTLEMENT) {
             let Some(claim_id) = entry.payload.get("claim_id").and_then(Value::as_str) else {
                 problems.push(format!("entry {}: settlement has no claim_id", entry.seq));
@@ -3033,6 +3216,8 @@ impl Node {
             if let Some(objective) = objectives.get(&claim.objective_id) {
                 let expected = if objective.ratchet.is_some() {
                     progressive_rewards.get(claim_id).copied()
+                } else if objective.piecework.is_some() {
+                    piecework_rewards.get(claim_id).copied()
                 } else {
                     Some(objective.reward)
                 };
@@ -3192,7 +3377,8 @@ impl Node {
             // A ratcheted objective pays each improvement, so more than one
             // settlement is the design rather than a fault. Every other kind
             // closes when it pays.
-            let progressive = objective.is_some_and(|o| o.ratchet.is_some());
+            let progressive =
+                objective.is_some_and(|o| o.ratchet.is_some() || o.piecework.is_some());
             if !settled_once.insert(objective_id.to_string()) && !progressive {
                 problems.push(format!(
                     "objective {}: settled more than once",
@@ -3731,6 +3917,7 @@ mod tests {
                 created_at: TS.into(),
                 deadline: None,
                 ratchet: None,
+                piecework: None,
                 confidentiality: crate::records::DEFAULT_CONFIDENTIALITY.into(),
                 embargo_epochs: None,
                 artifact_schema: None,
@@ -4001,6 +4188,7 @@ mod tests {
             created_at: declared_at.into(),
             deadline: None,
             ratchet: None,
+            piecework: None,
             confidentiality: "public".into(),
             embargo_epochs: None,
             artifact_schema: None,

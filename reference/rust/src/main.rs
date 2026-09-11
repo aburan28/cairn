@@ -26,6 +26,7 @@ use cairn_reference::frontier::Ratchet;
 use cairn_reference::ledger::{Ledger, Proof};
 use cairn_reference::node::Node;
 use cairn_reference::partition::{assign, beacon, settlement_rank};
+use cairn_reference::piecework::Piecework;
 use cairn_reference::records::{
     commitment_hash, Claim, ClaimRelation, Commitment, CommitteeShare, Objective, PeerRecord,
 };
@@ -419,6 +420,158 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
                 str_of(rank, "rank")?.to_string(),
             );
             checked += 1;
+        }
+    }
+
+    // -- piecework: pay per novel unit until the pool is gone ---------------
+    //
+    // Added alongside the frozen sections; produced by the primary and
+    // checked here, so what these pin is that the two crates read a
+    // piecework block the same way and pay the same schedule.
+    {
+        let piecework_section = vectors
+            .get("piecework")
+            .ok_or("vectors need a piecework section")?;
+        for case in array(piecework_section, "objectives")? {
+            let record = case
+                .get("record")
+                .ok_or("piecework objective case needs a record")?;
+            let objective =
+                Objective::from_value(record).map_err(|e| format!("piecework objective: {e}"))?;
+            if objective.piecework.is_none() {
+                f.0.push("piecework: objective case decoded without its piecework block".into());
+            }
+            f.check(
+                "piecework",
+                "objective id",
+                objective.id(),
+                str_of(case, "id")?.to_string(),
+            );
+            f.check(
+                "piecework",
+                "objective re-encode",
+                objective.to_value(),
+                record.clone(),
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "novelty_keys")? {
+            let block = case
+                .get("piecework")
+                .ok_or("novelty case needs a piecework block")?;
+            let piecework = Piecework::from_value(block)?;
+            let artifact = case
+                .get("artifact")
+                .ok_or("novelty case needs an artifact")?;
+            let got = piecework
+                .novelty_key(artifact)
+                .map(Value::string)
+                .unwrap_or(Value::Null);
+            let want = case.get("novelty_key").cloned().unwrap_or(Value::Null);
+            f.check(
+                "piecework",
+                &format!("novelty key of {}", artifact.canonical_string()),
+                got,
+                want,
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "unit_ranges")? {
+            let units = case
+                .get("units")
+                .and_then(Value::as_u64)
+                .ok_or("unit range needs units")?;
+            let lo = case
+                .get("lo")
+                .and_then(Value::as_u64)
+                .ok_or("unit range needs lo")?;
+            let hi = case
+                .get("hi")
+                .and_then(Value::as_u64)
+                .ok_or("unit range needs hi")?;
+            let piecework = Piecework {
+                unit_price: 1,
+                units: Some(units),
+                key: None,
+            };
+            let want = (
+                case.get("first")
+                    .and_then(Value::as_u64)
+                    .ok_or("unit range needs first")?,
+                case.get("end")
+                    .and_then(Value::as_u64)
+                    .ok_or("unit range needs end")?,
+            );
+            f.check(
+                "piecework",
+                &format!("unit range of [{lo}, {hi}) over {units}"),
+                piecework.unit_range((lo, hi)),
+                Some(want),
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "payouts")? {
+            let unit_price = case
+                .get("unit_price")
+                .and_then(Value::as_u64)
+                .ok_or("payout case needs unit_price")?;
+            let remaining = case
+                .get("remaining")
+                .and_then(Value::as_u64)
+                .ok_or("payout case needs remaining")?;
+            let piecework = Piecework {
+                unit_price,
+                units: None,
+                key: None,
+            };
+            f.check(
+                "piecework",
+                &format!("payout at {unit_price} with {remaining} left"),
+                piecework.payout(remaining),
+                case.get("payout")
+                    .and_then(Value::as_u64)
+                    .ok_or("payout case needs payout")?,
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "schedules")? {
+            let block = case
+                .get("piecework")
+                .ok_or("schedule needs a piecework block")?;
+            let piecework = Piecework::from_value(block)?;
+            let mut remaining = case
+                .get("reward")
+                .and_then(Value::as_u64)
+                .ok_or("schedule needs a reward")?;
+            let mut paid_units: std::collections::BTreeSet<String> = Default::default();
+            for (i, claim) in array(case, "claims")?.iter().enumerate() {
+                let artifact = claim
+                    .get("artifact")
+                    .ok_or("schedule claim needs an artifact")?;
+                let accepted = matches!(claim.get("accepted"), Some(Value::Bool(true)));
+                let mut pay = 0u64;
+                if accepted {
+                    if let Some(key) = piecework.novelty_key(artifact) {
+                        if !paid_units.contains(&key) {
+                            pay = piecework.payout(remaining);
+                            remaining -= pay;
+                            if pay > 0 {
+                                paid_units.insert(key);
+                            }
+                        }
+                    }
+                }
+                f.check(
+                    "piecework",
+                    &format!("schedule claim {i}"),
+                    pay,
+                    claim
+                        .get("paid")
+                        .and_then(Value::as_u64)
+                        .ok_or("schedule claim needs paid")?,
+                );
+                checked += 1;
+            }
         }
     }
 

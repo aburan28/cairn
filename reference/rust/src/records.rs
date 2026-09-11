@@ -128,6 +128,9 @@ pub struct Objective {
     pub created_at: String,
     pub deadline: Option<String>,
     pub ratchet: Option<Value>,
+    /// Per-unit payout parameters; inside the id when present, omitted when
+    /// absent, like `ratchet`. Mutually exclusive with it.
+    pub piecework: Option<Value>,
     pub confidentiality: String,
     /// Epochs an embargoed artifact stays shut after its commitment's epoch.
     ///
@@ -157,6 +160,9 @@ impl Objective {
         }
         if let Some(ratchet) = &self.ratchet {
             body.push(("ratchet", ratchet.clone()));
+        }
+        if let Some(piecework) = &self.piecework {
+            body.push(("piecework", piecework.clone()));
         }
         if self.confidentiality != DEFAULT_CONFIDENTIALITY {
             body.push((
@@ -264,6 +270,10 @@ impl Objective {
                 None | Some(Value::Null) => None,
                 Some(other) => Some(other.clone()),
             },
+            piecework: match value.get("piecework") {
+                None | Some(Value::Null) => None,
+                Some(other) => Some(other.clone()),
+            },
             confidentiality,
             // Read independently rather than trusted: an embargo the two
             // implementations disagreed about is a committee opening an
@@ -304,6 +314,17 @@ impl Objective {
         if let Some(ratchet) = &self.ratchet {
             if ratchet.as_object().is_none() {
                 return Err(RecordError("ratchet must be an object".into()));
+            }
+        }
+        if let Some(piecework) = &self.piecework {
+            if piecework.as_object().is_none() {
+                return Err(RecordError("piecework must be an object".into()));
+            }
+            // One pool, one rule for spending it.
+            if self.ratchet.is_some() {
+                return Err(RecordError(
+                    "objective carries both a ratchet and a piecework block".into(),
+                ));
             }
         }
         if let Some(schema) = &self.artifact_schema {
@@ -952,6 +973,7 @@ mod tests {
             created_at: "2026-07-28T00:00:00+00:00".into(),
             deadline: None,
             ratchet: None,
+            piecework: None,
             confidentiality: DEFAULT_CONFIDENTIALITY.into(),
             embargo_epochs: None,
             artifact_schema: None,

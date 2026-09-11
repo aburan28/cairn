@@ -42,6 +42,7 @@ mod mcp;
 pub mod node;
 pub mod p2p;
 pub mod partition;
+pub mod piecework;
 pub mod records;
 pub mod scaffold;
 pub mod schema;

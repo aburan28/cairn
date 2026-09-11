@@ -20,6 +20,7 @@ pub mod frontier;
 pub mod ledger;
 pub mod node;
 pub mod partition;
+pub mod piecework;
 pub mod records;
 pub mod sig;
 pub mod time;

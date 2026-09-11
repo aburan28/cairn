@@ -103,6 +103,7 @@ use crate::knowledge::{ConfidencePolicy, Standing};
 use crate::ledger::Ledger;
 use crate::node::{Node, RuleViolation};
 use crate::partition::{assignment_for, epoch_of, epoch_seconds};
+use crate::piecework::Piecework;
 use crate::records::{commitment_hash, Claim, Commitment, Objective};
 use crate::schema::{validate_claim, validate_objective};
 use crate::time::{parse_rfc3339, timestamp};
@@ -1438,6 +1439,37 @@ impl Server {
     }
 
     fn frontier_line(&mut self, id: &str, objective: &Objective) -> String {
+        // Piecework has no frontier to cite and no score to beat: the
+        // number an agent needs is how much of the pool is left, and, when
+        // the coordinator divided the problem, how many units it has.
+        if let Some(piecework) = objective
+            .piecework
+            .as_ref()
+            .and_then(|block| Piecework::from_value(block).ok())
+        {
+            let paid = self.node.read().paid_total(id);
+            let remaining = u128::from(objective.reward).saturating_sub(paid);
+            let mut line = format!(
+                "piecework: {} per novel accepted unit; pool: {remaining} of {} remaining \
+                 ({paid} paid so far)\n",
+                piecework.unit_price, objective.reward
+            );
+            if let Some(units) = piecework.units {
+                line.push_str(&format!(
+                    "the problem is divided into {units} units; ask work_assignment for yours\n"
+                ));
+            }
+            if let Some(key) = &piecework.key {
+                line.push_str(&format!(
+                    "a unit is named by the artifact's {key:?} field; a unit already paid \
+                     mints nothing\n"
+                ));
+            }
+            if remaining == 0 {
+                line.push_str("this objective is exhausted: its pool is empty.\n");
+            }
+            return line;
+        }
         let frontier = self.node.read().frontier_of(id);
         match frontier {
             // "must cite", not "cite if you improve": the rule applies to every
@@ -1864,7 +1896,7 @@ impl Server {
     /// region" into an auditable claim rather than a promise.
     fn work_assignment(&mut self, args: &Json) -> Result<String, String> {
         let objective_id = string_arg(args, "objective_id")?;
-        self.objective(&objective_id)?;
+        let objective = self.objective(&objective_id)?;
         let node_id = string_arg(args, "node_id")?;
         let partitions = match args.get("partitions") {
             None | Some(Json::Null) => 8u64,
@@ -1903,10 +1935,29 @@ impl Server {
             .map_err(|e| format!("cannot assign work: {e}"))?;
         let (lo, hi) = assignment.share();
         let partition = assignment.partition;
+        // A coordinator who divided the problem into units said so in the
+        // objective, and the slice becomes a range of unit indices. Two
+        // floor divisions, so every node's range abuts its neighbours' --
+        // see `Piecework::unit_range`.
+        let units_line = objective
+            .piecework
+            .as_ref()
+            .and_then(|block| Piecework::from_value(block).ok())
+            .and_then(|piecework| {
+                let (first, end) = piecework.unit_range((lo, hi))?;
+                Some(format!(
+                    "your units: [{first}, {end}) of {} -- work unit indices in that range and \
+                     submit one artifact per unit; each novel accepted unit pays {}\n",
+                    piecework.units.unwrap_or(0),
+                    piecework.unit_price
+                ))
+            })
+            .unwrap_or_default();
         Ok(format!(
             "node {node_id} takes partition {partition} of {partitions} for epoch {epoch} \
              (epochs are {}s long)\n\
              search space slice: [{lo}, {hi})\n\
+             {units_line}\
              anchor: {anchor}\n\n\
              A candidate belongs to you when the first four bytes of its SHA-256 fall in that \
              range. The assignment is fixed for the whole epoch -- the anchor is the log head \
@@ -3048,6 +3099,114 @@ mod tests {
         let second = ask(&mut s);
         assert_eq!(first, second, "the assignment moved inside one epoch");
         assert!(first.contains("anchor: "), "{first}");
+    }
+
+    /// A coordinator's divided problem: 1000 units at 100 each from a pool
+    /// of 100_000, named by the artifact's `unit` field.
+    fn server_with_piecework_objective() -> (Server, String) {
+        let mut s = server();
+        let objective = Objective::new(
+            "GOAL-rho",
+            "walk your units and submit each distinguished point",
+            Value::object([
+                ("kind", Value::string("certificate")),
+                ("checker", Value::string("c.py")),
+                ("checker_sha256", Value::string("ab".repeat(32))),
+                ("entrypoint", Value::string("check")),
+            ]),
+            100_000,
+            "treasury",
+            "2026-07-28T00:00:00+00:00",
+            None,
+            None,
+        )
+        .expect("valid objective")
+        .with_piecework(Value::object([
+            ("unit_price", Value::Int(100)),
+            ("units", Value::Int(1000)),
+            ("key", Value::string("unit")),
+        ]))
+        .expect("valid piecework block");
+        let id = s
+            .node
+            .write()
+            .post_objective(&objective, "2026-07-28T00:00:00+00:00")
+            .expect("posted");
+        (s, id)
+    }
+
+    /// `[first, end)` out of a work_assignment reply's "your units" line.
+    fn unit_range_of(reply: &str) -> (u64, u64) {
+        let line = reply
+            .lines()
+            .find(|line| line.starts_with("your units: ["))
+            .unwrap_or_else(|| panic!("no units line in {reply}"));
+        let inside = &line["your units: [".len()..line.find(')').expect("a closing paren")];
+        let (first, end) = inside.split_once(", ").expect("two bounds");
+        (first.parse().expect("first"), end.parse().expect("end"))
+    }
+
+    #[test]
+    fn work_assignment_turns_the_slice_into_a_unit_range_on_piecework() {
+        // One partition is the whole space, so the whole problem: every unit
+        // the coordinator posted, and the price each one pays.
+        let (mut s, objective_id) = server_with_piecework_objective();
+        let whole = call(
+            &mut s,
+            "work_assignment",
+            json!({ "objective_id": objective_id.clone(), "node_id": "a", "partitions": 1 }),
+        );
+        assert_eq!(unit_range_of(&whole), (0, 1000), "{whole}");
+        assert!(whole.contains("of 1000"), "{whole}");
+        assert!(
+            whole.contains("each novel accepted unit pays 100"),
+            "{whole}"
+        );
+
+        // Four partitions each take a quarter of the units, and the
+        // quarter is what the node's slice maps to -- not a recomputation
+        // that could disagree with a peer's.
+        let quarter = call(
+            &mut s,
+            "work_assignment",
+            json!({ "objective_id": objective_id, "node_id": "a", "partitions": 4, "epoch": 7 }),
+        );
+        let (first, end) = unit_range_of(&quarter);
+        assert_eq!(end - first, 250, "{quarter}");
+        assert_eq!(first % 250, 0, "{quarter}");
+    }
+
+    #[test]
+    fn work_assignment_says_nothing_about_units_off_piecework() {
+        let (mut s, objective_id, _) = server_with_injected_objective();
+        let out = call(
+            &mut s,
+            "work_assignment",
+            json!({ "objective_id": objective_id, "node_id": "a" }),
+        );
+        assert!(!out.contains("your units"), "{out}");
+        assert!(out.contains("search space slice"), "{out}");
+    }
+
+    #[test]
+    fn frontier_status_reports_the_pool_and_the_division_on_piecework() {
+        let (mut s, objective_id) = server_with_piecework_objective();
+        let out = call(
+            &mut s,
+            "frontier_status",
+            json!({ "objective_id": objective_id }),
+        );
+        assert!(
+            out.contains("piecework: 100 per novel accepted unit"),
+            "{out}"
+        );
+        assert!(
+            out.contains("pool: 100000 of 100000 remaining (0 paid so far)"),
+            "{out}"
+        );
+        assert!(out.contains("divided into 1000 units"), "{out}");
+        assert!(out.contains("\"unit\" field"), "{out}");
+        assert!(!out.contains("frontier: score"), "{out}");
     }
 
     #[test]

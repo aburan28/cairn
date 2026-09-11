@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "cairn nums-50 rho",
+  "p": "3ffffffffff8f",
+  "a": "bf1acd21f918",
+  "b": "31306c48bf2d9",
+  "generator": {
+    "x": "3849c8ac845e",
+    "y": "e926b759e420"
+  },
+  "target": {
+    "x": "133a7995f4d28",
+    "y": "177425a290458"
+  },
+  "order": "4000002c8af47",
+  "dp_bits": 16,
+  "num_branches": 32,
+  "negation_map": false,
+  "unit_size": 16,
+  "max_steps_per_walker": 0,
+  "seed": 0
+}

@@ -579,6 +579,47 @@ a bug — it's the island model preserving search diversity. **Gossip is
 untrusted**: a peer asserting `score = 10^12` would evict every real candidate, so
 `ingest()` re-scores locally and drops what doesn't reproduce.
 
+### Dividing a problem: piecework
+
+The ratchet pays for moving a score. Some problems have no score to move —
+only a great many small results, each checkable on its own, and an answer
+that falls out once enough of them exist. A distributed Pollard rho is the
+canonical one: a distinguished point `(x, y, a, b)` with `a·P + b·Q = (x, y)`
+costs `2^d` group operations to produce and two scalar multiplications to
+check, and the search is the table of them.
+
+A coordinator posts one objective with a `piecework` block, and every node
+learns of it from the log:
+
+```json
+{
+  "statement": "Contribute distinguished points to the shared rho search ...",
+  "verifier": { "kind": "certificate", "checker": "examples/certicom-ecdlp/checkers/nums_50_rho_dp.py", ... },
+  "piecework": { "unit_price": 100, "units": 281474976710656 },
+  "reward": 80000
+}
+```
+
+Peers ask `work_assignment` for their share and get it as a range of the
+coordinator's units — the same coordinator-free slice as any other objective,
+mapped onto unit indices. Each **novel** accepted unit pays `unit_price` from
+the pool; a unit already paid mints nothing; a rejected answer consumes
+nothing; and the objective is closed when the pool is empty, not before. A
+top-up is another objective with the same checker and the same block, and it
+inherits the first one's paid units.
+
+```
+alice: point from walker 0      reward 100
+bob:   point from walker 1      reward 100
+eve:   copies alice's point     reward 0        (duplicate unit mints nothing)
+carol: point from walker 2      reward 100      (pool: 79700 of 80000 remaining)
+```
+
+`scripts/piecework-demo.sh` runs this on the 50-bit instance with a
+pure-Python walker (`examples/certicom-ecdlp/tools/rho_dp.py`), then has both
+implementations audit the log. The design is
+[`docs/design/rho-piecework.md`](docs/design/rho-piecework.md).
+
 ## Agents paying agents
 
 Every payment above points the same way: a funder escrows, an artifact verifies,
