@@ -9,8 +9,10 @@ seriously.
 
 ## Supported versions
 
-The `main` branch only. The project is pre-1.0 (Stage 0); there are no
-releases receiving backported fixes, and anything not on `main` should be
+The `main` branch only. Releases are cut by release-please from conventional
+commits, so the version number is past 1.0 — but the project is at **Stage 0**
+(one operator, no consensus) and that number carries no stability promise. No
+release line receives backported fixes, and anything not on `main` should be
 assumed unpatched.
 
 ## Reporting a vulnerability
@@ -33,9 +35,11 @@ In scope — the properties this project actually claims:
 - **Sandbox escapes.** Objective-authored checker/evaluator code reaching the
   network, the filesystem outside its scratch directory, or the host
   environment, with `CAIRN_REQUIRE_SANDBOX` set.
-- **Consensus splits.** Any input on which the Rust and Python
-  implementations disagree about a record's id, a Merkle root, a verdict, or
-  a settlement.
+- **Consensus splits.** Any input on which the two implementations — `src/` and
+  the independent one in `reference/rust/` — disagree about a record's id, a
+  Merkle root, a verdict, or a settlement. (The frozen conformance vectors came
+  from a Python implementation that no longer exists; a disagreement with a
+  vector is the same class of report.)
 - **Canonical-encoding collisions.** Two semantically different objects with
   the same canonical bytes, or one object with two valid encodings.
 - **Citation-flow theft.** Redirecting attribution or reward to someone who

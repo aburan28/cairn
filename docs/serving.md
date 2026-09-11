@@ -36,10 +36,22 @@ record instead.
 | `GET /chain` | the epoch chain: `links` and `head` are the chain's, `height` and `ledger_head` are the ledger's — the units a checkpoint signs, and not interchangeable with the first two |
 | `GET /chain.html` | the same, as a page with no build step |
 | `GET /health` | liveness, for whatever is watching the process |
+| `GET /` (and `/index`) | what this node is and every route it answers, including the ones it has disabled |
+| `GET /peers` | the `peer` records in this log — **known** peers, not open connections |
+| `GET /ui/` | the embedded reader, when the binary was built with the `ui` feature |
 | `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type` |
 | `POST /objective/prepare` | canonicalize a draft objective and return the exact bytes its funder must sign — see below |
 
 Everything except `/log` is a convenience. `/log` is the product.
+
+`GET /` is the one to hit first against an unfamiliar node: it names the version
+and every route, and marks `POST /submit` and `GET /ui/` as disabled when this
+node was started read-only or built without the reader — so a 404 or a refusal
+is explained before you hit it.
+
+`GET /peers` answers from the log, so a peer listed there may be long gone: the
+log is append-only and nothing retracts a record. Live session state lives in the
+p2p service, which serves no HTTP at all.
 
 Both objective views carry the same three lifecycle fields. `settled` means *no
 longer payable* -- for a certificate, that a settlement exists; for a ratchet,
