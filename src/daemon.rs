@@ -583,7 +583,17 @@ pub fn run(config: Config) -> Result<(), String> {
     };
     let beacon = beacon_port.and_then(|port| {
         match multicast::Responder::bind(service.identity(), config.listen.port(), port) {
-            Ok(responder) => Some(responder),
+            Ok(responder) => {
+                // Said, as failing and `off` already are. A reader that hears
+                // nothing has to guess, and the macOS app's Node pane did: it
+                // printed a 30-second cadence (announcing happens every tick)
+                // and the default port even when `CAIRN_BEACON_PORT` moved it.
+                log::info!(
+                    "multicast: beacon bound on {}:{port}; announcing every {TICK_SECONDS}s",
+                    multicast::GROUP
+                );
+                Some(responder)
+            }
             Err(error) => {
                 log::warn!("multicast: {error} -- continuing without LAN discovery");
                 None

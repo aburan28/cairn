@@ -126,8 +126,19 @@ struct NodeView: View {
             VStack(alignment: .leading, spacing: 6) {
                 let d = model.discovery
                 HStack(spacing: 8) {
-                    Image(systemName: d.multicast == nil ? "circle.dashed" : (d.multicast!.contains("already held") ? "exclamationmark.triangle.fill" : "antenna.radiowaves.left.and.right"))
-                        .foregroundStyle(d.multicast == nil ? Color.secondary : (d.multicast!.contains("already held") ? .orange : .green))
+                    // Green only for a bind the node reported. A failed bind,
+                    // `off`, and a binary too old to say all used to get the
+                    // green antenna, because anything but "already held" did.
+                    let look: (symbol: String, tint: Color) = {
+                        switch d.beacon {
+                        case .bound: return ("antenna.radiowaves.left.and.right", .green)
+                        case .off: return ("antenna.radiowaves.left.and.right.slash", .secondary)
+                        case .failed: return ("exclamationmark.triangle.fill", .orange)
+                        case .unknown: return ("circle.dashed", .secondary)
+                        }
+                    }()
+                    Image(systemName: look.symbol)
+                        .foregroundStyle(look.tint)
                     Text(d.multicast ?? (model.nodeReachable ? "waiting for the node's log" : "no node running"))
                         .textSelection(.enabled)
                 }
