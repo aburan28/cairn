@@ -114,9 +114,34 @@ grep -q "reward 100" "$WORK/mallory.out" || fail "mallory's one novel point was 
 grep -q "2 duplicate(s) in the batch earned nothing" "$WORK/mallory.out" || fail "the relabelled points were paid"
 OID=$OID_SINGLE
 
-rule "an auditor re-walks a sample of the paid batches from their walker indices"
-$WALK audit --job $JOB --log "$LOG" --objective "$BOID" --docket "$WORK/docket.json" | tee "$WORK/audit-tool.out"
-grep -q "0 mismatch(es)" "$WORK/audit-tool.out" || fail "the re-walk audit found a mismatch in honest batches"
+rule "an auditor re-walks the paid batches from their walker indices"
+# `--elements all`, and the exit status captured rather than left to `set -e`.
+#
+# This step asserted "0 mismatch(es)" while re-walking one element per claim.
+# But mallory's batch is in the log by now and is *supposed* to contain two
+# points that do not re-walk, so that assertion could only hold when the auditor
+# happened not to draw one -- one run in three, her batch being two forged
+# points and one real one. The demo therefore passed only when the fraud went
+# undetected, and went red the rest of the time (the `rust` job on 80768ea,
+# among others). The sampling is not the bug: drawing one element the submitter
+# cannot predict is the mechanism, and it stays the default. What was wrong was
+# asserting a clean audit of a log built to be dirty.
+#
+# So: re-walk every element, and assert what the mechanism actually promises --
+# dave's honest batch survives intact, both of mallory's relabelled points are
+# caught, and the docket carries exactly those two for `cairn attest slash`.
+audit_status=0
+$WALK audit --job $JOB --log "$LOG" --objective "$BOID" --elements all \
+    --docket "$WORK/docket.json" | tee "$WORK/audit-tool.out" || audit_status=$?
+[ "$audit_status" -eq 1 ] \
+    || fail "the re-walk audit exited $audit_status; want 1, the code that says it found a mismatch"
+if grep -q "^FAIL .* dave:" "$WORK/audit-tool.out"; then
+    fail "an honest batch was reported as a mismatch"
+fi
+grep -q "2 mismatch(es)" "$WORK/audit-tool.out" \
+    || fail "the re-walk audit did not catch both of the relabelled points"
+python3 -c 'import json,sys; sys.exit(0 if len(json.load(open(sys.argv[1]))["entries"]) == 2 else 1)' \
+    "$WORK/docket.json" || fail "the docket does not carry the two mismatches attest slash needs"
 
 rule "audit: every point re-verified, no unit paid twice (alone or in a batch), pool never overspent"
 pw audit | tee "$WORK/audit.out"
