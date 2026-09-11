@@ -136,6 +136,15 @@ score, paying in proportion to the distance moved. Publishing is how you get
 paid, so publishing immediately is optimal — which dissolves the hoarding trap
 that winner-take-all bounties create. `src/frontier.rs`.
 
+**Piecework.** The other payment shape, for work with no frontier to move: a
+search producing many independent, individually checkable outputs, done when
+enough of them exist. An objective carrying a `piecework` block pays
+`unit_price` for every accepted claim whose **unit is novel**, out of a pool,
+until the pool is empty — so it never "settles" as a whole. Which unit a claim
+answers is the artifact itself, or the field the block names; a claim may carry
+a batch of units at once. `src/piecework.rs`, and
+[design/rho-piecework.md](design/rho-piecework.md) for the worked instance.
+
 **Standing / confidence.** What the log *says* about a claim, as opposed to what
 it paid: derived from corroborations, refutations and disputes under a policy
 the *reader* chooses. Never stored, never paid. `cairn knowledge`, and

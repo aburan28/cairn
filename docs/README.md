@@ -55,6 +55,9 @@ The four pages a user needs and nothing else in this repository provides.
   cap, and sync.
 - [tiers.md](tiers.md) — why a unit earned on a millisecond certificate check
   is not a unit earned on a Lean proof, and cannot be spent as one.
+- [design/rho-piecework.md](design/rho-piecework.md) — **piecework**: paying per
+  verified unit of a divided problem, for searches that have no frontier to
+  move. Built, and the worked instance is a distributed Pollard rho.
 - [knowledge.md](knowledge.md) — typed relations, derived standing, and
   reader-chosen confidence: revising knowledge without rewriting history.
 - [../examples/README.md](../examples/README.md) — worked objectives with real
@@ -134,6 +137,8 @@ lines; that is the authority, and this table is the index to it.
 | [embargo-release.md](design/embargo-release.md) — holding an artifact the log already owes you | design only |
 | [heir-fhe-compilation.md](design/heir-fhe-compilation.md) — buy the search, refuse the compute | integration review; half of it is refused on purpose |
 | [workspace-benchmarks.md](design/workspace-benchmarks.md) — repository-shaped benchmarks | design review, with the code changes it would need |
+| [rho-piecework.md](design/rho-piecework.md) — distributed Pollard rho as piecework | **Stages A and B built** (`src/piecework.rs`); Stage C is not |
+| [index-calculus-p224.md](design/index-calculus-p224.md) — index calculus as piecework | proposal; nothing here is built |
 
 ## Contributing
 

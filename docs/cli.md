@@ -38,7 +38,7 @@ starts:
 
 ```console
 $ cairn --version
-cairn 1.2.0
+cairn 1.3.0
   ui       not embedded -- `cairn run` refuses; build with `make ui-build`
 ```
 
@@ -305,6 +305,22 @@ handshake authenticates the *key*, not the socket that answered — so this cann
 make a remote peer trustworthy. The daemon keeps warning while the placeholder
 key is still in the file, and the warning clears itself when the real key is
 pasted in.
+
+### `seeds resolve --list FILE [--keys DIR] --out DIR`
+
+Check a downloaded seed list against its key files and write a `--bootstrap`
+file for every entry that verifies. Entries that do not verify are **refused**,
+not skipped.
+
+### `seeds publish --identity FILE --out DIR`
+
+Write this node's own `<transport>.key`, to be added to a published list by
+pull request.
+
+The list itself is fetched by `./scripts/seeds-fetch.sh`, not by this binary:
+`tests/cipher_policy.rs` fails the build if a TLS crate enters the tree, and an
+HTTP client is how one arrives. Same split as the drand beacon — the binary
+checks what it is handed, and downloading is somebody else's job.
 
 ### `beacon --orders EPOCH (--drand-signature HEX | --value HEX [--source NAME] [--block N]) [--delay N]`
 

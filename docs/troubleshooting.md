@@ -27,6 +27,25 @@ used to mean the ledger *path* to the CLI and the stderr *level* to the daemons.
 that rather than guessing; see [configuration.md](configuration.md). Use
 `CAIRN_LOG_PATH` for the path and `CAIRN_LOG_LEVEL` for the level.
 
+## `audit` reports "an order the beacon does not produce"
+
+> ```
+> 5 problem(s):
+>   ! batch for epoch 2976926: settled 1 claim(s) in an order the beacon does not produce
+>   ! note: every batch in this log was written with an epoch length of 600, and this
+>     audit used 1. …
+> ```
+
+Check `$CAIRN_EPOCH_SECONDS` before believing this. Epoch length is a **reader**
+setting: epochs are derived from record timestamps and never stored, so
+auditing a normal log in a shell still holding `CAIRN_EPOCH_SECONDS=1` from a
+demo reports it as thoroughly broken. The audit detects the mismatch and says
+so on the last line, including which length to re-run with.
+
+If the variable is unset and this still fires, it is a real finding — a batch
+settled in an order the beacon does not produce is the sequencer choosing who
+got paid first, which is the thing the beacon exists to prevent.
+
 ## `cairn run` will not start
 
 > `run requires the embedded UI; build with `make ui-build` or `cargo build
@@ -38,7 +57,7 @@ that refuses. `cairn --version` says which build you have:
 
 ```console
 $ cairn --version
-cairn 1.2.0
+cairn 1.3.0
   ui       not embedded -- `cairn run` refuses; build with `make ui-build`
 ```
 

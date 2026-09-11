@@ -116,6 +116,12 @@ Three things in that output are the design showing through, not noise:
   is for local trials against a log used for nothing else. Never set it on a
   node that talks to other nodes: two nodes with different epoch lengths
   disagree about which epoch a record is in, which is a fork.
+
+  It is also **still exported in this shell**, and epoch length is a *reader*
+  setting: go back and re-run step 1 now and the published log audits as five
+  problems, because its batches were ordered under 600-second epochs and you
+  just asked for one-second ones. The audit says exactly that when it happens.
+  Unset the variable, or open a new shell, before auditing anybody else's log.
 - **The decomposition note.** The reward is below what it costs the network to
   verify it at full redundancy. `post` says so before you fund it, rather than
   after.
