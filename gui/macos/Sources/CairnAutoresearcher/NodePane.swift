@@ -221,7 +221,7 @@ struct NodeView: View {
             TableColumn("#") { e in Text("\(e.seq)").monospacedDigit() }.width(40)
             TableColumn("kind") { e in Text(e.kind).font(.body.monospaced()) }.width(90)
             TableColumn("hash") { e in Text(String(e.hash.prefix(22))).font(.caption.monospaced()).foregroundStyle(.secondary) }.width(170)
-            TableColumn("created") { e in Text(e.createdAt).font(.caption.monospaced()) }.width(170)
+            TableColumn("appended") { e in Text(e.ts).font(.caption.monospaced()) }.width(170)
             TableColumn("summary") { e in Text(e.summary).font(.callout) }
         }
         .overlay {

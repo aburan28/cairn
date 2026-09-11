@@ -156,8 +156,72 @@ struct LedgerEntry: Identifiable, Equatable {
     var seq: Int
     var kind: String
     var hash: String
-    var createdAt: String
+    /// The entry's own `ts`, stamped when it was appended. Not the payload's
+    /// `created_at`, which only some kinds carry -- no verdict, settlement,
+    /// batch or frontier has one, so those rows showed no time -- and which,
+    /// where it exists, is another clock: an objective's is whatever its
+    /// author wrote, days older than the entry in `launch/cairn.jsonl`. A
+    /// column that took one where present and the other elsewhere could not
+    /// be read down.
+    var ts: String
     var summary: String
+
+    /// The entries in a `/log` body, one per line that is a JSON object.
+    static func parse(ndjson text: String) -> [LedgerEntry] {
+        var entries: [LedgerEntry] = []
+        for (i, line) in text.split(separator: "\n").enumerated() {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            let kind = obj["kind"] as? String ?? "?"
+            // `seq` counts from zero, so on a well-formed log it is the line's
+            // index. This fallback was `i + 1`, which gave a line missing its
+            // seq the id of the line after it, and SwiftUI gives undefined
+            // results for a row id that repeats.
+            entries.append(LedgerEntry(seq: obj["seq"] as? Int ?? i, kind: kind,
+                                       hash: obj["hash"] as? String ?? "", ts: obj["ts"] as? String ?? "",
+                                       summary: summary(kind: kind, payload: obj["payload"] as? [String: Any] ?? [:])))
+        }
+        return entries
+    }
+
+    /// One line saying what an entry records, from the fields the log's other
+    /// two readers use: `summarize` in `src/main.rs` and in `ui/lib/log.ts`.
+    /// A key looked up in the wrong place in a `[String: Any]` is not an
+    /// error, only a blank, which is how a verdict's status (nested under
+    /// `verdict`) and a settlement's epoch (it has none; its batch does) went
+    /// unnoticed here. A field that is not found shows as `?`, so the next
+    /// such misread is visible.
+    static func summary(kind: String, payload: [String: Any]) -> String {
+        func text(_ key: String) -> String { payload[key] as? String ?? "?" }
+        func number(_ key: String) -> String { (payload[key] as? Int).map { "\($0)" } ?? "?" }
+        switch kind {
+        case "objective":
+            return "\(text("goal"))  reward \(number("reward"))"
+        case "commitment":
+            return "by \(text("submitter").prefix(12))  for \(text("objective_id").prefix(20))"
+        case "claim":
+            return "by \(text("submitter").prefix(12))  for \(text("objective_id").prefix(20))  cites \((payload["cites"] as? [Any])?.count ?? 0)"
+        case "verdict":
+            let verdict = payload["verdict"] as? [String: Any] ?? [:]
+            var line = "\(verdict["status"] as? String ?? "?")  claim \(text("claim_id").prefix(20))"
+            // The verifier's detail goes last: it is free text of any length,
+            // and a long one should run off the end of the cell rather than
+            // push the claim id out of it.
+            if let detail = verdict["detail"] as? String, !detail.isEmpty { line += "  " + detail }
+            return line
+        case "settlement":
+            return "paid \(number("reward")) to \(text("submitter").prefix(12))  claim \(text("claim_id").prefix(20))"
+        case "batch":
+            let claims = (payload["claims"] as? [Any])?.count ?? 0
+            return "epoch \(number("epoch"))  \(claims) claim\(claims == 1 ? "" : "s")"
+        case "frontier":
+            // `paid_cumulative` is the objective's running total, hence "so
+            // far": read as this move's payout it contradicts the settlement
+            // written after it, which pays only the step.
+            return "held by \(text("holder").prefix(12))  score \(number("score"))  paid \(number("paid_cumulative")) so far"
+        default:
+            return payload.keys.sorted().prefix(4).joined(separator: ", ")
+        }
+    }
 }
 
 struct PeerRow: Identifiable, Equatable {
@@ -1090,26 +1154,8 @@ final class ResearcherModel: ObservableObject {
         request.timeoutInterval = 5
         URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             guard let data, let text = String(data: data, encoding: .utf8) else { return }
-            var kinds: [String: Int] = [:]
-            var entries: [LedgerEntry] = []
-            for (i, line) in text.split(separator: "\n").enumerated() {
-                guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
-                let kind = obj["kind"] as? String ?? "?"
-                kinds[kind, default: 0] += 1
-                let payload = obj["payload"] as? [String: Any] ?? [:]
-                let summary: String
-                switch kind {
-                case "objective": summary = (payload["goal"] as? String ?? "") + "  reward \(payload["reward"] ?? "")"
-                case "commitment": summary = "by \((payload["submitter"] as? String ?? "").prefix(12))  for \((payload["objective_id"] as? String ?? "").prefix(20))"
-                case "claim": summary = "by \((payload["submitter"] as? String ?? "").prefix(12))  for \((payload["objective_id"] as? String ?? "").prefix(20))  cites \((payload["cites"] as? [Any])?.count ?? 0)"
-                case "verdict": summary = "\(payload["status"] ?? "")  claim \((payload["claim_id"] as? String ?? "").prefix(20))"
-                case "settlement": summary = "epoch \(payload["epoch"] ?? "")  paid \(payload["reward"] ?? payload["amount"] ?? "")"
-                default: summary = payload.keys.sorted().prefix(4).joined(separator: ", ")
-                }
-                entries.append(LedgerEntry(seq: obj["seq"] as? Int ?? i + 1, kind: kind,
-                                           hash: obj["hash"] as? String ?? "", createdAt: payload["created_at"] as? String ?? "",
-                                           summary: summary))
-            }
+            let entries = LedgerEntry.parse(ndjson: text)
+            let kinds = entries.reduce(into: [String: Int]()) { $0[$1.kind, default: 0] += 1 }
             Task { @MainActor in
                 if kinds != self?.logKinds { self?.logKinds = kinds }
                 if entries != self?.ledger { self?.ledger = entries }
