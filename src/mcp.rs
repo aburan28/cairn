@@ -546,7 +546,9 @@ fn write_private(path: &std::path::Path, text: &str) -> io::Result<()> {
 }
 
 enum NodeSource {
-    Owned(Node),
+    /// Boxed: a `Node` is a few hundred bytes of ledger, registry and
+    /// piecework index, and the other variant is a pointer.
+    Owned(Box<Node>),
     Shared(Arc<Mutex<crate::daemon::State>>),
 }
 
@@ -664,7 +666,7 @@ impl Server {
         identity: Option<Identity>,
         pending_cipher: Option<crate::store::atrest::Cipher>,
     ) -> Server {
-        Self::new_with_source(NodeSource::Owned(node), identity, pending_cipher)
+        Self::new_with_source(NodeSource::Owned(Box::new(node)), identity, pending_cipher)
     }
 
     fn new_shared(
@@ -1459,11 +1461,26 @@ impl Server {
                     "the problem is divided into {units} units; ask work_assignment for yours\n"
                 ));
             }
-            if let Some(key) = &piecework.key {
+            if let Some(items) = &piecework.items {
                 line.push_str(&format!(
-                    "a unit is named by the artifact's {key:?} field; a unit already paid \
-                     mints nothing\n"
+                    "a claim is a batch: the array under the artifact's {items:?} field, one \
+                     unit per element, paid per novel element\n"
                 ));
+            }
+            match &piecework.key {
+                Some(crate::piecework::UnitKey::Field(key)) => line.push_str(&format!(
+                    "a unit is named by its {key:?} field; a unit already paid mints nothing\n"
+                )),
+                Some(crate::piecework::UnitKey::Fields(fields)) => line.push_str(&format!(
+                    "a unit is named by its {} fields together; anything else it carries \
+                     does not make it new, and a unit already paid mints nothing\n",
+                    fields
+                        .iter()
+                        .map(|f| format!("{f:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                None => {}
             }
             if remaining == 0 {
                 line.push_str("this objective is exhausted: its pool is empty.\n");

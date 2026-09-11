@@ -634,3 +634,201 @@ fn a_piecework_objective_survives_the_log_round_trip() {
     assert_eq!(back.id(), objective.id());
     assert_eq!(back.piecework, objective.piecework);
 }
+
+// ---------------------------------------------------------------------------
+// Batches: many units in one claim
+// ---------------------------------------------------------------------------
+
+/// A checker for a batch of units: an artifact `{"dps": [ {n, w?}, ... ]}`
+/// where every element's `n` is a small non-negative integer. `w` is
+/// provenance the checker does not care about and the novelty rule, keyed
+/// on `["n"]`, must ignore.
+const BATCH_CHECKER: &str = r#"
+def check(artifact):
+    dps = artifact.get("dps")
+    if not isinstance(dps, list) or not dps:
+        return False, "dps must be a non-empty list"
+    for e in dps:
+        n = e.get("n") if isinstance(e, dict) else None
+        if not isinstance(n, int) or not 0 <= n < 1000:
+            return False, "every element needs an n in [0, 1000)"
+    return True, "verified %d units" % len(dps)
+"#;
+
+fn batch_block(unit_price: i128) -> Value {
+    Value::object([
+        ("unit_price", Value::Int(unit_price)),
+        ("items", Value::string("dps")),
+        ("key", Value::Array(vec![Value::string("n")])),
+    ])
+}
+
+/// `{"dps": [{"n": n, "w": w}, ...]}` from `(n, w)` pairs.
+fn batch(elements: &[(i128, i128)]) -> Value {
+    Value::object([(
+        "dps",
+        Value::Array(
+            elements
+                .iter()
+                .map(|(n, w)| Value::object([("n", Value::Int(*n)), ("w", Value::Int(*w))]))
+                .collect(),
+        ),
+    )])
+}
+
+fn batch_env(label: &str, reward: u64) -> (TempDir, Node, Objective) {
+    let dir = TempDir::new(label);
+    let sha = write_pinned(&dir, "c.py", BATCH_CHECKER);
+    let mut node = node_at(&dir);
+    let objective = piecework_objective(
+        &sha,
+        "answer the units, in batches",
+        reward,
+        batch_block(100),
+    );
+    node.post_objective(&objective, TS).expect("post");
+    (dir, node, objective)
+}
+
+#[test]
+fn a_batch_pays_once_per_novel_element() {
+    let (_dir, mut node, objective) = batch_env("batch", 100_000);
+
+    let first = submit(
+        &mut node,
+        &objective,
+        "alice",
+        batch(&[(1, 0), (2, 0), (3, 0)]),
+    );
+    assert_paid(&first, 300);
+    assert!(
+        first.note.contains("3 novel unit(s) paid"),
+        "{}",
+        first.note
+    );
+
+    // Two of bob's units are alice's, relabelled; one is new.
+    let second = submit(
+        &mut node,
+        &objective,
+        "bob",
+        batch(&[(2, 9), (4, 9), (3, 9)]),
+    );
+    assert_paid(&second, 100);
+    assert!(second.note.contains("2 duplicate(s)"), "{}", second.note);
+
+    // A batch that is all duplicates verifies and earns nothing.
+    assert_unpaid(
+        &submit(&mut node, &objective, "eve", batch(&[(1, 5), (4, 5)])),
+        "every unit in the batch was already paid",
+    );
+    // Listing a unit twice in one batch is one unit.
+    assert_paid(
+        &submit(
+            &mut node,
+            &objective,
+            "carol",
+            batch(&[(7, 0), (7, 1), (7, 2)]),
+        ),
+        100,
+    );
+    assert_eq!(node.paid_total(&objective.id()), 500);
+    assert!(!node.objective_is_closed(&objective));
+    assert_clean(&node.audit(true));
+}
+
+#[test]
+fn a_batch_at_the_end_of_the_pool_takes_the_remainder_and_consumes_all_its_units() {
+    let (_dir, mut node, objective) = batch_env("batch-remainder", 250);
+
+    let last = submit(
+        &mut node,
+        &objective,
+        "alice",
+        batch(&[(1, 0), (2, 0), (3, 0)]),
+    );
+    assert_paid(&last, 250);
+    assert!(last.note.contains("pool exhausted"), "{}", last.note);
+    assert!(node.objective_is_closed(&objective));
+
+    // Every unit of a paid batch is spoken for, including the one the pool
+    // could not cover in full: a top-up does not pay it again.
+    let dir_sha = {
+        let sha = sha256_hex(BATCH_CHECKER.as_bytes());
+        sha
+    };
+    let top_up = piecework_objective(&dir_sha, "round two", 1000, batch_block(100));
+    node.post_objective(&top_up, TS).expect("post");
+    assert_unpaid(
+        &submit(&mut node, &top_up, "bob", batch(&[(3, 1)])),
+        "every unit in the batch was already paid",
+    );
+    assert_paid(
+        &submit(&mut node, &top_up, "bob", batch(&[(3, 1), (4, 1)])),
+        100,
+    );
+    assert_clean(&node.audit(true));
+}
+
+#[test]
+fn two_batches_sharing_a_unit_in_one_epoch_pay_for_it_once() {
+    let (_dir, mut node, objective) = batch_env("batch-same-epoch", 100_000);
+    let step = next_step(&node);
+    let a = batch(&[(1, 0), (2, 0)]);
+    let b = batch(&[(2, 1), (3, 1)]);
+    commit_at(&mut node, &objective, "alice", &a, &stamp(step));
+    commit_at(&mut node, &objective, "bob", &b, &stamp(step));
+    let reveal = stamp(step + epoch());
+    reveal_at(&mut node, &objective, "alice", a, &reveal).expect("reveal");
+    reveal_at(&mut node, &objective, "bob", b, &reveal).expect("reveal");
+    let settled = node
+        .settle_at(&stamp(step + (2 + finality()) * epoch()))
+        .expect("settle");
+    let paid: u64 = settled.iter().map(|o| o.reward).sum();
+    assert_eq!(
+        paid, 300,
+        "three distinct units across the two batches: {settled:?}"
+    );
+    assert_clean(&node.audit(true));
+}
+
+#[test]
+fn the_audit_catches_a_batch_paid_for_no_novel_unit() {
+    let (_dir, mut node, objective) = batch_env("batch-audit", 100_000);
+    let paid = submit(&mut node, &objective, "alice", batch(&[(1, 0), (2, 0)]));
+    assert_paid(&paid, 200);
+    let copy = submit(&mut node, &objective, "eve", batch(&[(1, 3), (2, 3)]));
+    assert_unpaid(&copy, "every unit in the batch was already paid");
+
+    node.ledger_mut()
+        .append(
+            "settlement",
+            Value::object([
+                ("objective_id", Value::string(objective.id())),
+                ("claim_id", Value::string(copy.claim_id)),
+                ("submitter", Value::string("eve")),
+                ("reward", Value::Int(200)),
+            ]),
+            TS,
+        )
+        .expect("a hostile log is still a log");
+
+    assert_reports(&node.audit(false), "batch with no novel unit");
+}
+
+#[test]
+fn a_batch_objective_publishes_its_block_and_names_no_unit_for_a_bare_artifact() {
+    let (_dir, mut node, objective) = batch_env("batch-shape", 100_000);
+    // The checker refuses an artifact that is not a batch, so nothing is
+    // paid; the rule underneath would have found no unit in it either.
+    let bare = submit(&mut node, &objective, "alice", n(1));
+    assert_eq!(bare.verdict.status, Status::Reject);
+    let piecework = cairn::piecework::Piecework::from_value(objective.piecework.as_ref().unwrap())
+        .expect("valid block");
+    assert!(piecework.unit_keys(&n(1)).is_empty());
+    assert_eq!(
+        piecework.unit_keys(&batch(&[(1, 0), (1, 1), (2, 0)])).len(),
+        2
+    );
+    assert_clean(&node.audit(true));
+}

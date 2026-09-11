@@ -162,6 +162,8 @@ objective's id.
 |---|---|---|---|---|
 | `objective-nums-50-rho.json` | 16 | ≈ 640 | 100 | 80,000 |
 | `objective-eccp131-rho.json` | 44 | ≈ 2 million | 1,000 | 2,600,000,000 |
+| `objective-nums-50-rho-batch.json` | 16 | ≈ 640, in batches of ≤ 64 | 100 per point | 80,000 |
+| `objective-eccp131-rho-batch.json` | 44 | ≈ 2 million, in batches of ≤ 64 | 1,000 per point | 2,600,000,000 |
 
 `jobs/*.json` is the `JobSpec` of `aburan28/crypto`'s
 `cryptanalysis rho-collab`, unchanged, so a Rust contributor runs
@@ -171,6 +173,21 @@ for identical walker indices, checked in against the Rust output on the demo
 curves. Ask `work_assignment` for your unit range so contributors walk
 disjoint indices — but any valid point is paid whichever index it came from,
 because the pool pays for the point and not for staying in a lane.
+
+**Batches.** `objective-nums-50-rho-batch.json` and
+`objective-eccp131-rho-batch.json` are the same search paid a batch at a time:
+one claim is `{"dps": [...]}`, up to 64 points, each with the `walker` index
+and `steps` count that produced it, and the piecework block says
+`"items": "dps"` and `"key": ["x", "y", "a", "b"]` -- so a claim pays per novel
+point, and a paid point relabelled with another walker index is not a new
+one. `tools/rho_dp.py walk --job … --unit U --batch` walks a unit into one
+batch artifact; `checkers/*_rho_batch.py` refuses a batch with any invalid,
+non-canonical or repeated point, naming it. Post the batch objective *or* the
+single-point one for an instance, not both: to the novelty rule they are
+different jobs. The provenance is what makes the private-walk row of the
+threat model narrower than it was: `tools/rho_dp.py audit --job … --log …`
+samples paid batch claims, re-walks one element of each from its derived
+start, and writes the mismatches as a docket for `cairn attest slash`.
 
 The payoff: two artifacts for one point with **different** coefficients are a
 collision, and `tools/rho_dp.py collide` computes `k` from them — the answer
