@@ -144,14 +144,23 @@ export function Hash({
     return (
       <span className="inline-flex max-w-full items-center gap-1">
         {label && <span className="text-[11px] text-ink-3">{label}</span>}
-        <span className="mono text-[12px] text-ink-3">—</span>
+        <span className="mono whitespace-nowrap text-[12px] text-ink-3">—</span>
       </span>
     );
   }
   const bare = value.replace(/^sha256:/, "");
   const shown = bare.length > chars * 2 ? `${bare.slice(0, chars)}…${bare.slice(-4)}` : bare;
+  // `whitespace-nowrap`, because what this renders is already elided: at most
+  // `chars + 1 + 4` characters, and the ellipsis is the abbreviation. Breaking
+  // it again produces `62aa6232…` over one line and `2e9f` over the next, which
+  // is what the log table did in every column narrow enough to provoke it -- a
+  // second, worse abbreviation of something already abbreviated. An auto-layout
+  // table now sizes the column to hold the whole token, and puts the squeeze on
+  // the prose column beside it, which is the one that can afford it. Narrower
+  // than every column's minimum and the table outgrows its `overflow-x-auto`
+  // wrapper and scrolls, which is what that wrapper is for.
   const body = (
-    <span className="mono text-[12px]" title={value}>
+    <span className="mono whitespace-nowrap text-[12px]" title={value}>
       {shown}
     </span>
   );
