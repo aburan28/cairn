@@ -11,7 +11,18 @@ OUT="$HERE/build"
 APP="$OUT/Cairn Autoresearcher.app"
 
 cd "$HERE"
-swift build -c release 2>&1 | grep -v '^\[' || true
+# Progress lines are dropped; warnings and errors are kept. grep exits 1 when
+# every line it read was a progress line, so its `|| true` stays inside the
+# braces, where it cannot also excuse the compiler: `pipefail` hands swift
+# build's own status to `rc`. The `|| true` once covered the whole pipeline,
+# and a failed compile went on to package whatever binary an earlier build had
+# left in .build, then printed "built".
+rc=0
+swift build -c release 2>&1 | { grep -v '^\[' || true; } || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "swift build failed (exit $rc); nothing was packaged" >&2
+  exit "$rc"
+fi
 BIN="$(swift build -c release --show-bin-path)/CairnAutoresearcher"
 [ -x "$BIN" ] || { echo "build failed: $BIN missing" >&2; exit 1; }
 
