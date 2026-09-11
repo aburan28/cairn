@@ -1,0 +1,49 @@
+{
+  "artifact_schema": {
+    "description": "A batch of 1 to 64 distinguished points of the shared walk, each with the walker index and step count that produced it: {\"dps\": [{x, y, a, b, walker, steps}, ...]}. Every point: a*P + b*Q = (x, y), low DP_BITS bits of x zero, 2y <= p; no point listed twice.",
+    "example": {
+      "dps": [
+        {
+          "a": "c7d474d02567",
+          "b": "31f68b36f378d",
+          "steps": 25209,
+          "walker": 0,
+          "x": "166b721090000",
+          "y": "720d2d13bd24"
+        }
+      ]
+    },
+    "properties": {
+      "dps": {
+        "description": "1 to 64 points; each element carries x, y, a, b (lowercase minimal hex), walker (integer) and steps (integer)",
+        "type": "array"
+      }
+    },
+    "required": [
+      "dps"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-09-11T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-ecdlp-nums-50",
+  "piecework": {
+    "items": "dps",
+    "key": [
+      "x",
+      "y",
+      "a",
+      "b"
+    ],
+    "unit_price": 100,
+    "units": 281474976710656
+  },
+  "reward": 80000,
+  "statement": "Contribute distinguished points to the shared Pollard rho search for the 50-bit nothing-up-my-sleeve instance of GOAL-ecdlp-nums-50. This objective pays for the search; objective-nums-50.json pays for the answer. Run the walk in examples/certicom-ecdlp/jobs/nums-50-rho.json (job id bb124c668c79323b856c54372a720339895bcb4fd0599365bd7cf4706a4c855e; `tools/rho_dp.py walk --job ... --walker I` in pure Python, or `crypto cryptanalysis rho-collab work` in Rust). Each walker runs about 2^16 steps to a point whose low 16 bits of x are zero. Submit points in batches of up to 64 as {\"dps\": [{\"x\", \"y\", \"a\", \"b\", \"walker\", \"steps\"}, ...]}, each in lowercase hex with y canonical (2y <= p) and a*P + b*Q = (x, y). Each novel accepted point in a batch pays unit_price from the pool until the pool is empty; a point already paid mints nothing, whatever walker index or step count it is relabelled with, and a batch that lists a point twice is refused. walker and steps say which walker of the job produced the point and how far it walked; `tools/rho_dp.py audit` re-walks a sample of them, so a point from a private walk is a point somebody can catch. Post this objective or the single-point one, not both: they are different jobs to the novelty rule. Ask work_assignment for your unit range so contributors walk disjoint indices, but any valid point is paid whichever index it came from. Two artifacts for one point with different coefficients are a collision: `tools/rho_dp.py collide` computes k from them, and k settles objective-nums-50.json. About 640 points are expected before that happens.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/nums_50_rho_batch.py",
+    "checker_sha256": "9c69e6f201d15d30f34fa7a2d53409c92a456dcec0e529c4081ec7e1b380c01c",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

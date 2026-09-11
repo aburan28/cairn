@@ -955,7 +955,10 @@ fn piecework_value(node: &Node, id: &str, objective: &Objective) -> Option<Value
         fields.push(("units", Value::Int(i128::from(units))));
     }
     if let Some(key) = &piecework.key {
-        fields.push(("key", Value::string(key.clone())));
+        fields.push(("key", key.to_value()));
+    }
+    if let Some(items) = &piecework.items {
+        fields.push(("items", Value::string(items.clone())));
     }
     Some(Value::object(fields))
 }

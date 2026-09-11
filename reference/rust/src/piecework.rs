@@ -1,20 +1,43 @@
 //! Piecework: pay per verified unit, from a pool, until it is gone.
 //!
 //! Mirrors the primary's `src/piecework.rs` and is pinned against it by the
-//! `piecework` section of the conformance vectors. Three things two
+//! `piecework` section of the conformance vectors. Four things two
 //! implementations must agree on byte for byte: what a unit's novelty key
-//! is, what one more unit pays, and how a `2^32`-space slice maps onto unit
-//! indices. Everything else about piecework is settlement logic in `node.rs`.
+//! is, which units a claim carries (one, or a batch under `items`), what
+//! `n` more novel units pay, and how a `2^32`-space slice maps onto unit
+//! indices. Everything else about piecework is settlement logic in
+//! `node.rs`.
+
+use std::collections::BTreeMap;
 
 use crate::canonical::Value;
 
 const SPACE: u128 = 1 << 32;
 
+/// One field, or the sub-object of several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnitKey {
+    Field(String),
+    Fields(Vec<String>),
+}
+
+impl UnitKey {
+    pub fn to_value(&self) -> Value {
+        match self {
+            UnitKey::Field(field) => Value::string(field.clone()),
+            UnitKey::Fields(fields) => {
+                Value::Array(fields.iter().map(|f| Value::string(f.clone())).collect())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Piecework {
     pub unit_price: u64,
     pub units: Option<u64>,
-    pub key: Option<String>,
+    pub key: Option<UnitKey>,
+    pub items: Option<String>,
 }
 
 impl Piecework {
@@ -40,30 +63,98 @@ impl Piecework {
         };
         let key = match value.get("key") {
             None | Some(Value::Null) => None,
-            Some(Value::String(key)) if !key.is_empty() => Some(key.clone()),
+            Some(Value::String(key)) if !key.is_empty() => Some(UnitKey::Field(key.clone())),
             Some(Value::String(_)) => return Err("piecework key must name a field".into()),
-            Some(_) => return Err("piecework key must be a string".into()),
+            Some(Value::Array(fields)) => {
+                let mut names = Vec::with_capacity(fields.len());
+                for field in fields {
+                    match field {
+                        Value::String(name) if name.is_empty() => {
+                            return Err("piecework key must name a field".into())
+                        }
+                        Value::String(name) if name.contains(',') => {
+                            return Err("a piecework key field may not contain a comma".into())
+                        }
+                        Value::String(name) => names.push(name.clone()),
+                        _ => return Err("piecework key fields must be strings".into()),
+                    }
+                }
+                if names.is_empty() {
+                    return Err("piecework key must name a field".into());
+                }
+                Some(UnitKey::Fields(names))
+            }
+            Some(_) => return Err("piecework key must be a string or an array of them".into()),
+        };
+        let items = match value.get("items") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(items)) if !items.is_empty() => Some(items.clone()),
+            Some(Value::String(_)) => return Err("piecework items must name a field".into()),
+            Some(_) => return Err("piecework items must be a string".into()),
         };
         Ok(Piecework {
             unit_price,
             units,
             key,
+            items,
         })
     }
 
-    /// `piece:<artifact digest>` with no key; `piece:<key>:<field digest>`
-    /// with one. `None` when the artifact has no such field.
-    pub fn novelty_key(&self, artifact: &Value) -> Option<String> {
+    /// `piece:<digest>` with no key; `piece:<field>:<digest of the field>`
+    /// with one; `piece:<f1,f2,…>:<digest of the sub-object>` with a list.
+    /// `None` when the unit lacks a named field.
+    pub fn novelty_key(&self, unit: &Value) -> Option<String> {
         match &self.key {
-            None => Some(format!("piece:{}", artifact.digest())),
-            Some(key) => artifact
+            None => Some(format!("piece:{}", unit.digest())),
+            Some(UnitKey::Field(key)) => unit
                 .get(key)
-                .map(|unit| format!("piece:{}:{}", key, unit.digest())),
+                .map(|value| format!("piece:{}:{}", key, value.digest())),
+            Some(UnitKey::Fields(fields)) => {
+                let mut sub = BTreeMap::new();
+                for field in fields {
+                    sub.insert(field.clone(), unit.get(field)?.clone());
+                }
+                Some(format!(
+                    "piece:{}:{}",
+                    fields.join(","),
+                    Value::Object(sub).digest()
+                ))
+            }
         }
+    }
+
+    /// The claim's units, in order, each once: the artifact's key, or one
+    /// per element of the array under `items`.
+    pub fn unit_keys(&self, artifact: &Value) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |key: Option<String>| {
+            if let Some(key) = key {
+                if !out.contains(&key) {
+                    out.push(key);
+                }
+            }
+        };
+        match &self.items {
+            None => push(self.novelty_key(artifact)),
+            Some(items) => {
+                if let Some(Value::Array(elements)) = artifact.get(items) {
+                    for element in elements {
+                        push(self.novelty_key(element));
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn payout(&self, remaining: u64) -> u64 {
         self.unit_price.min(remaining)
+    }
+
+    /// `min(unit_price * novel, remaining)`, the product taken in u128.
+    pub fn payout_for(&self, novel: u64, remaining: u64) -> u64 {
+        let owed = u128::from(self.unit_price) * u128::from(novel);
+        u64::try_from(owed.min(u128::from(remaining))).unwrap_or(remaining)
     }
 
     /// Two floor divisions in u128; see the primary for why that tiles.

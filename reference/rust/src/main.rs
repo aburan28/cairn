@@ -476,6 +476,60 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
             );
             checked += 1;
         }
+        for case in array(piecework_section, "unit_keys")? {
+            let block = case
+                .get("piecework")
+                .ok_or("unit_keys case needs a piecework block")?;
+            let piecework = Piecework::from_value(block)?;
+            let artifact = case
+                .get("artifact")
+                .ok_or("unit_keys case needs an artifact")?;
+            let got = Value::Array(
+                piecework
+                    .unit_keys(artifact)
+                    .into_iter()
+                    .map(Value::string)
+                    .collect(),
+            );
+            let want = case
+                .get("unit_keys")
+                .cloned()
+                .unwrap_or(Value::Array(Vec::new()));
+            f.check(
+                "piecework",
+                &format!("unit keys of {}", artifact.canonical_string()),
+                got,
+                want,
+            );
+            checked += 1;
+        }
+        for case in array(piecework_section, "batch_payouts")? {
+            let unit_price = case
+                .get("unit_price")
+                .and_then(Value::as_u64)
+                .ok_or("batch payout case needs unit_price")?;
+            let novel = case
+                .get("novel")
+                .and_then(Value::as_u64)
+                .ok_or("batch payout case needs novel")?;
+            let remaining = case
+                .get("remaining")
+                .and_then(Value::as_u64)
+                .ok_or("batch payout case needs remaining")?;
+            let piecework = Piecework {
+                unit_price,
+                units: None,
+                key: None,
+                items: None,
+            };
+            f.check(
+                "piecework",
+                &format!("payout for {novel} novel units at {unit_price} with {remaining} left"),
+                Value::Int(i128::from(piecework.payout_for(novel, remaining))),
+                case.get("payout").cloned().unwrap_or(Value::Null),
+            );
+            checked += 1;
+        }
         for case in array(piecework_section, "unit_ranges")? {
             let units = case
                 .get("units")
@@ -493,6 +547,7 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
                 unit_price: 1,
                 units: Some(units),
                 key: None,
+                items: None,
             };
             let want = (
                 case.get("first")
@@ -523,6 +578,7 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
                 unit_price,
                 units: None,
                 key: None,
+                items: None,
             };
             f.check(
                 "piecework",
@@ -551,13 +607,13 @@ fn conformance(path: Option<&str>) -> Result<(), String> {
                 let accepted = matches!(claim.get("accepted"), Some(Value::Bool(true)));
                 let mut pay = 0u64;
                 if accepted {
-                    if let Some(key) = piecework.novelty_key(artifact) {
-                        if !paid_units.contains(&key) {
-                            pay = piecework.payout(remaining);
-                            remaining -= pay;
-                            if pay > 0 {
-                                paid_units.insert(key);
-                            }
+                    let keys = piecework.unit_keys(artifact);
+                    let novel = keys.iter().filter(|k| !paid_units.contains(*k)).count() as u64;
+                    if novel > 0 {
+                        pay = piecework.payout_for(novel, remaining);
+                        remaining -= pay;
+                        if pay > 0 {
+                            paid_units.extend(keys);
                         }
                     }
                 }

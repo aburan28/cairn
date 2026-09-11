@@ -7,7 +7,8 @@ Three things have to agree for a piecework rho objective to be honest, and
 none of them is checked by `scripts/check-examples.sh`, which only follows
 the pins inside the verifier block:
 
-1. **The checker pins the job it names.** Each `*_rho_dp.py` carries the
+1. **The checker pins the job it names.** Each `*_rho_dp.py` and
+   `*_rho_batch.py` carries the
    SHA-256 of its job document, so the walk is inside the objective's id.
    A job edited after the fact would leave the checker verifying points of a
    walk nobody runs.
@@ -20,6 +21,14 @@ the pins inside the verifier block:
    coefficient changed, an extra key, a non-canonical y, and a point that is
    on the curve but not distinguished. ECCp-131 is exercised for rejection
    only: a point of its walk costs 2^44 steps, which is the point.
+
+The batch checkers are exercised the same way: a walked batch is accepted,
+and a relabelled repeat, a tampered element, a missing provenance field, an
+empty or oversized batch and an impossible step count are each refused.
+The audit is exercised against the walked elements: each re-walks to itself,
+a wrong walker index or step count is caught, and a point of a *private*
+walk -- valid, canonical, verifiable, and not where any walker of the job
+leads -- is caught too.
 
 The collision arithmetic is proven on a 14-bit instance with a planted
 secret: twenty-odd walkers collide, and `collide` recovers the secret.
@@ -117,6 +126,65 @@ def main():
     require(not checker.check(padded)[0], "a leading zero (second spelling of one point) is refused")
     uppercase = dict(art, x=art["x"].upper())
     require(not checker.check(uppercase)[0], "uppercase hex is refused")
+
+    print("nums_50_rho_batch: a walked batch, and what a batch may not do")
+    batch_checker = __import__("nums_50_rho_batch")
+    require(batch_checker.JOB_SHA256 == checker.JOB_SHA256 and batch_checker.JOB_ID == checker.JOB_ID,
+            "the batch checker pins the same job as the single-point checker")
+    require((batch_checker.CURVE_P, batch_checker.ORDER_N, batch_checker.DP_BITS)
+            == (checker.CURVE_P, checker.ORDER_N, checker.DP_BITS), "and the same curve and DP_BITS")
+    elements = []
+    for i in range(3):
+        rec = ctx.run_walker(i)
+        if rec is not None:
+            steps, x, y, a, b = rec
+            elements.append(ctx.batch_element(i, steps, x, y, a, b))
+    require(len(elements) == 3, "walkers 0..2 each reach a distinguished point")
+    walked = {"dps": elements}
+    ok, why = batch_checker.check(walked)
+    require(ok, f"the batch checker accepts the walked batch: {why}")
+    require(ctx.verify_batch(walked)[0], "rho_dp.verify_batch agrees with the checker")
+    relabelled = json.loads(json.dumps(walked))
+    relabelled["dps"].append(dict(elements[0], walker=77, steps=5))
+    ok, why = batch_checker.check(relabelled)
+    require(not ok and "repeats" in why, f"a point listed twice under another label is refused: {why}")
+    tampered = json.loads(json.dumps(walked))
+    tampered["dps"][1]["b"] = format((int(elements[1]["b"], 16) + 1) % ctx.n, "x")
+    ok, why = batch_checker.check(tampered)
+    require(not ok and why.startswith("dps[1]"), f"one bad element refuses the batch, by index: {why}")
+    stripped = {"dps": [{k: elements[0][k] for k in ("x", "y", "a", "b")}]}
+    require(not batch_checker.check(stripped)[0], "an element without provenance is refused")
+    require(not batch_checker.check({"dps": []})[0], "an empty batch is refused")
+    require(not batch_checker.check({"dps": [elements[0]] * 1 + [dict(elements[0], walker=1)] })[0],
+            "the same point twice, even relabelled, is refused")
+    too_many = {"dps": [dict(elements[0], walker=i) for i in range(batch_checker.MAX_BATCH + 1)]}
+    require(not batch_checker.check(too_many)[0], f"more than MAX_BATCH ({batch_checker.MAX_BATCH}) is refused")
+    require(not batch_checker.check({"dps": [dict(elements[0], steps=batch_checker.MAX_STEPS + 1)]})[0],
+            "steps past the walk's cap are refused")
+
+    print("audit: re-walking provenance")
+    require(ctx.audit_element(elements[0]) is None, "a walked element re-walks to itself")
+    lie = dict(elements[0], walker=elements[1]["walker"])
+    why = ctx.audit_element(lie)
+    require(why is not None and "different point" in why, f"a point labelled with another walker is caught: {why}")
+    lie = dict(elements[0], steps=elements[0]["steps"] + 1)
+    why = ctx.audit_element(lie)
+    require(why is not None and "steps" in why, f"a wrong step count is caught: {why}")
+    # A private-walk point: valid, canonical, verifiable -- and not where any
+    # walker of the shared job leads.
+    rng = random.Random("private walk")
+    private = None
+    for _ in range(20000):
+        a, b = rng.randrange(1, ctx.n), rng.randrange(1, ctx.n)
+        x, y = ctx.combine(a, b)
+        if ctx.is_dp((x, y)):
+            private = ctx.batch_element(elements[2]["walker"], 1, x, y, a, b)
+            break
+    if private is None:
+        print("  skip  no distinguished point found by sampling (probability 2^-16 per try)")
+    else:
+        require(batch_checker.check({"dps": [private]})[0], "a private-walk point passes the checker")
+        require(ctx.audit_element(private) is not None, "and the audit catches it")
 
     print("collision on a 14-bit planted instance")
     tiny = rho_dp.Context(TINY_JOB)

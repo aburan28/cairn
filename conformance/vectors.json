@@ -3692,7 +3692,7 @@
     }
   ],
   "piecework": {
-    "_comment": "Added 2026-09-10 alongside the frozen sections, when the piecework block was introduced. Produced by the primary Rust implementation and checked by reference/rust, not by the retired Python implementation: two implementations agreeing is what these pin, and a disagreement means one of them reads a piecework block differently. Nothing here changes any earlier vector.",
+    "_comment": "Added 2026-09-10 alongside the frozen sections, when the piecework block was introduced. Produced by the primary Rust implementation and checked by reference/rust, not by the retired Python implementation: two implementations agreeing is what these pin, and a disagreement means one of them reads a piecework block differently. Nothing here changes any earlier vector. Extended 2026-09-11 with batches (an `items` field and field-list keys): the new objective, novelty_keys, unit_keys, batch_payouts and schedule cases were produced the same way, and nothing earlier moved.",
     "novelty_keys": [
       {
         "artifact": {
@@ -3878,6 +3878,140 @@
           "unit_price": 250,
           "units": 1000
         }
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0a",
+          "b": "0b",
+          "walker": 7,
+          "steps": 100
+        },
+        "novelty_key": "piece:x,y:sha256:5beb48f44a3be85559e28d0f54d65ced5bba79144b5b02f0b9aff819f94a87ca"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0c",
+          "b": "0d",
+          "walker": 8
+        },
+        "novelty_key": "piece:x,y:sha256:5beb48f44a3be85559e28d0f54d65ced5bba79144b5b02f0b9aff819f94a87ca",
+        "_note": "same point, other coefficients and provenance: the same unit under [x, y]"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "walker": 7
+        },
+        "novelty_key": null,
+        "_note": "a field of the list is missing: names no unit"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0a",
+          "b": "0b",
+          "walker": 7,
+          "steps": 100
+        },
+        "novelty_key": "piece:x,y,a,b:sha256:52a7e81f877495903583389ece78197749b4f819f9fb0700894b0f0e569caffc"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0c",
+          "b": "0d",
+          "walker": 8
+        },
+        "novelty_key": "piece:x,y,a,b:sha256:3260784660062ce8d6da59cf00a393fb4375350452a9d1ac48a5dfcef3dc2103",
+        "_note": "other coefficients for the same point are a different unit under [x, y, a, b]: the collision that solves the instance is paid"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "x": "01",
+          "y": "02",
+          "a": "0a",
+          "b": "0b",
+          "walker": 7,
+          "steps": 100
+        },
+        "novelty_key": "piece:x,y,a,b:sha256:52a7e81f877495903583389ece78197749b4f819f9fb0700894b0f0e569caffc",
+        "_note": "novelty_key is per unit; `items` only says where a claim's units are"
+      },
+      {
+        "mode": "fields",
+        "piecework": {
+          "unit_price": 1,
+          "key": [
+            "unit"
+          ]
+        },
+        "artifact": {
+          "unit": 7,
+          "proof": "x"
+        },
+        "novelty_key": "piece:unit:sha256:1fd93e00481f06a62d011bb776c7c0d150c0f8b06e6abe6d8fa37ce6f57a98e7",
+        "_note": "a one-element list keys on the sub-object, not the bare value: not the same key as the string form"
       }
     ],
     "objectives": [
@@ -3935,6 +4069,34 @@
           },
           "reward": 7,
           "statement": "Minimal piecework block: one field, seven units of one.",
+          "type": "objective",
+          "verifier": {
+            "checker": "examples/certicom-ecdlp/checkers/nums_50_rho_dp.py",
+            "checker_sha256": "abababababababababababababababababababababababababababababababab",
+            "entrypoint": "check",
+            "kind": "certificate"
+          }
+        }
+      },
+      {
+        "id": "sha256:a428ed4c7261f85106ae914f9f5a8c41391e449f6b4dee269bbde610ab55833d",
+        "record": {
+          "created_at": "2026-09-10T00:00:00+00:00",
+          "funder": "treasury",
+          "goal": "GOAL-piecework",
+          "piecework": {
+            "unit_price": 100,
+            "units": 72057594037927936,
+            "items": "dps",
+            "key": [
+              "x",
+              "y",
+              "a",
+              "b"
+            ]
+          },
+          "reward": 100000,
+          "statement": "Batch of distinguished points: pay per novel point, keyed on the point and its coefficients, whatever walker index and step count each element carries.",
           "type": "objective",
           "verifier": {
             "checker": "examples/certicom-ecdlp/checkers/nums_50_rho_dp.py",
@@ -4119,6 +4281,158 @@
           "units": 1000
         },
         "reward": 1000
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "reward": 450,
+        "_note": "a paid batch consumes every unit it carries, a batch with no novel unit is paid nothing and consumes nothing, and the last batch is paid what is left",
+        "claims": [
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0a",
+                  "y": "14",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 0,
+                  "steps": 0
+                },
+                {
+                  "x": "0b",
+                  "y": "15",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 1,
+                  "steps": 3
+                },
+                {
+                  "x": "0c",
+                  "y": "16",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 2,
+                  "steps": 6
+                }
+              ]
+            },
+            "paid": 300
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0b",
+                  "y": "15",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 50,
+                  "steps": 999
+                },
+                {
+                  "x": "0d",
+                  "y": "17",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 3,
+                  "steps": 9
+                }
+              ]
+            },
+            "paid": 100
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0a",
+                  "y": "14",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 51,
+                  "steps": 999
+                },
+                {
+                  "x": "0d",
+                  "y": "17",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 52,
+                  "steps": 999
+                }
+              ]
+            },
+            "paid": 0
+          },
+          {
+            "accepted": false,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0e",
+                  "y": "18",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 4,
+                  "steps": 12
+                }
+              ]
+            },
+            "paid": 0
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "0e",
+                  "y": "18",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 4,
+                  "steps": 12
+                },
+                {
+                  "x": "0f",
+                  "y": "19",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 5,
+                  "steps": 15
+                }
+              ]
+            },
+            "paid": 50
+          },
+          {
+            "accepted": true,
+            "artifact": {
+              "dps": [
+                {
+                  "x": "10",
+                  "y": "1a",
+                  "a": "0a",
+                  "b": "0b",
+                  "walker": 6,
+                  "steps": 18
+                }
+              ]
+            },
+            "paid": 0
+          }
+        ]
       }
     ],
     "unit_ranges": [
@@ -4282,6 +4596,299 @@
         "hi": 4294967297,
         "lo": 0,
         "units": 1000
+      }
+    ],
+    "unit_keys": [
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "dps": [
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 7,
+              "steps": 100
+            },
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 9,
+              "steps": 5
+            },
+            {
+              "x": "03",
+              "y": "04",
+              "a": "0a",
+              "b": "0b",
+              "walker": 1,
+              "steps": 1
+            },
+            {
+              "x": "05"
+            }
+          ]
+        },
+        "unit_keys": [
+          "piece:x,y,a,b:sha256:52a7e81f877495903583389ece78197749b4f819f9fb0700894b0f0e569caffc",
+          "piece:x,y,a,b:sha256:1cdd72f2e3d4fbad9d3d31da2822c52492eefd11d88c92ae3b1ec77bc2fd9a5f"
+        ],
+        "_note": "a relabelled element is not a second unit; an element missing a keyed field carries none"
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps"
+        },
+        "artifact": {
+          "dps": [
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 7,
+              "steps": 100
+            },
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 9,
+              "steps": 5
+            },
+            {
+              "x": "03",
+              "y": "04",
+              "a": "0a",
+              "b": "0b",
+              "walker": 1,
+              "steps": 1
+            },
+            {
+              "x": "05"
+            }
+          ]
+        },
+        "unit_keys": [
+          "piece:sha256:e0a57b1e24260ac069e886dadd406b173649d514b198623332e7733a45e1c50b",
+          "piece:sha256:af387f7e33f4302d841e118a435e55bf82b2f61e47dc4115c8a49108a5a6d7d8",
+          "piece:sha256:5d082ad6ccfd0e21a9a5c8a6330bb1ed8d3e4b01cc50d3c409c1d4c4acd3d3dc",
+          "piece:sha256:49d8ac83ed321db9c32b733842301197e29eaddfbe00bdbfef5b407098867262"
+        ],
+        "_note": "with no key each element's own digest is its unit, provenance included"
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "dps": "not an array"
+        },
+        "unit_keys": []
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "points": [
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 7,
+              "steps": 100
+            }
+          ]
+        },
+        "unit_keys": [],
+        "_note": "the batch must be under the named field"
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "items": "dps",
+          "key": [
+            "x",
+            "y",
+            "a",
+            "b"
+          ]
+        },
+        "artifact": {
+          "dps": []
+        },
+        "unit_keys": []
+      },
+      {
+        "piecework": {
+          "unit_price": 100
+        },
+        "artifact": {
+          "dps": [
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 7,
+              "steps": 100
+            },
+            {
+              "x": "01",
+              "y": "02",
+              "a": "0a",
+              "b": "0b",
+              "walker": 9,
+              "steps": 5
+            },
+            {
+              "x": "03",
+              "y": "04",
+              "a": "0a",
+              "b": "0b",
+              "walker": 1,
+              "steps": 1
+            },
+            {
+              "x": "05"
+            }
+          ]
+        },
+        "unit_keys": [
+          "piece:sha256:677ab3ea93d35ed622a43d078a581a9500e9b4a4b97639a5e3af4642f6657f3d"
+        ],
+        "_note": "without items the whole artifact is the one unit"
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "key": "unit"
+        },
+        "artifact": {
+          "unit": 3,
+          "n": 1
+        },
+        "unit_keys": [
+          "piece:unit:sha256:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+        ]
+      },
+      {
+        "piecework": {
+          "unit_price": 100,
+          "key": "unit"
+        },
+        "artifact": {
+          "n": 1
+        },
+        "unit_keys": []
+      },
+      {
+        "piecework": {
+          "unit_price": 1,
+          "items": "dps",
+          "key": "unit"
+        },
+        "artifact": {
+          "dps": [
+            {
+              "unit": 1
+            },
+            {
+              "unit": 2
+            },
+            {
+              "unit": 1
+            },
+            {
+              "other": 3
+            }
+          ]
+        },
+        "unit_keys": [
+          "piece:unit:sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          "piece:unit:sha256:d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"
+        ]
+      }
+    ],
+    "batch_payouts": [
+      {
+        "unit_price": 100,
+        "novel": 1,
+        "remaining": 1000,
+        "payout": 100
+      },
+      {
+        "unit_price": 100,
+        "novel": 3,
+        "remaining": 1000,
+        "payout": 300
+      },
+      {
+        "unit_price": 100,
+        "novel": 3,
+        "remaining": 250,
+        "payout": 250
+      },
+      {
+        "unit_price": 100,
+        "novel": 0,
+        "remaining": 250,
+        "payout": 0
+      },
+      {
+        "unit_price": 100,
+        "novel": 5,
+        "remaining": 0,
+        "payout": 0
+      },
+      {
+        "unit_price": 9223372036854775808,
+        "novel": 4,
+        "remaining": 18446744073709551615,
+        "payout": 18446744073709551615,
+        "_note": "the product overflows u64 and is capped by the pool, not wrapped"
+      },
+      {
+        "unit_price": 18446744073709551615,
+        "novel": 18446744073709551615,
+        "remaining": 7,
+        "payout": 7
+      },
+      {
+        "unit_price": 1,
+        "novel": 18446744073709551615,
+        "remaining": 18446744073709551615,
+        "payout": 18446744073709551615
       }
     ]
   },

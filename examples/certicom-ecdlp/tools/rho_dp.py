@@ -6,6 +6,8 @@
     python3 examples/certicom-ecdlp/tools/rho_dp.py walk    --job JOB --unit U    [--out-dir DIR]
     python3 examples/certicom-ecdlp/tools/rho_dp.py verify  --job JOB ARTIFACT...
     python3 examples/certicom-ecdlp/tools/rho_dp.py collide --job JOB ARTIFACT ARTIFACT
+    python3 examples/certicom-ecdlp/tools/rho_dp.py walk    --job JOB --unit U --batch [--out FILE]
+    python3 examples/certicom-ecdlp/tools/rho_dp.py audit   --job JOB --log LOG [--rate N] [--docket FILE]
 
 This is the contributor's side of a piecework rho objective, in pure Python
 so that a peer with no Rust toolchain can still take part. It reproduces,
@@ -41,6 +43,17 @@ a public point by relabelling it; see docs/design/rho-piecework.md.
 `collide` is the payoff: given two artifacts for the same point with
 different coefficients, it computes `k` with `k*G = Q`, which is the answer
 to the *other* objective on the same instance.
+
+`--batch` is Stage B: one artifact `{"dps": [...]}` for a whole unit, every
+element carrying `walker` and `steps` besides the point, for the batch
+objectives (`objective-*-rho-batch.json`). `audit` is the other half of that:
+it reads a cairn log (a file, or a node's `GET /log` URL), samples paid
+batch claims at rate 1/N, re-walks one sampled element per claim from its
+derived start, and reports every point that is not where the shared walk
+leads. A mismatch is a point from a private walk (or a forged label), and
+`--docket` writes it in the shape `cairn attest slash --docket` and
+`cairn canary check --docket` read, so a bonded attestation that stood
+behind such a claim is slashable.
 """
 import argparse
 import hashlib
@@ -240,6 +253,57 @@ class Context:
             y, a, b = (-y) % self.p, (-a) % self.n, (-b) % self.n
         return {"x": _hex(x), "y": _hex(y), "a": _hex(a), "b": _hex(b)}
 
+    def batch_element(self, walker, steps, x, y, a, b):
+        """A batch element: the canonical point plus its provenance."""
+        element = self.artifact(x, y, a, b)
+        element["walker"] = walker
+        element["steps"] = steps
+        return element
+
+    def verify_batch(self, artifact, max_batch=64):
+        """What the batch checker checks, as a (bool, reason) pair."""
+        if not isinstance(artifact, dict) or set(artifact) != {"dps"}:
+            return False, "artifact must be exactly {dps}"
+        dps = artifact["dps"]
+        if not isinstance(dps, list) or not 1 <= len(dps) <= max_batch:
+            return False, f"dps must carry between 1 and {max_batch} points"
+        seen = set()
+        for index, element in enumerate(dps):
+            if not isinstance(element, dict) or set(element) != {"x", "y", "a", "b", "walker", "steps"}:
+                return False, f"dps[{index}] must carry exactly x, y, a, b, walker, steps"
+            ok, why = self.verify({k: element[k] for k in ("x", "y", "a", "b")})
+            if not ok:
+                return False, f"dps[{index}]: {why}"
+            walker, steps = element["walker"], element["steps"]
+            if not isinstance(walker, int) or isinstance(walker, bool) or not 0 <= walker < 2**64:
+                return False, f"dps[{index}]: walker must be an integer in [0, 2^64)"
+            if not isinstance(steps, int) or isinstance(steps, bool) or not 0 <= steps <= self.step_cap:
+                return False, f"dps[{index}]: steps must be an integer in [0, {self.step_cap}]"
+            point = (element["x"], element["y"], element["a"], element["b"])
+            if point in seen:
+                return False, f"dps[{index}] repeats an earlier point of the batch"
+            seen.add(point)
+        return True, f"verified: {len(dps)} distinguished points (2^{self.dp_bits} steps each)"
+
+    def audit_element(self, element):
+        """Re-walk one batch element from its derived start.
+
+        Returns `None` when walker `element["walker"]` reaches exactly this
+        point in exactly `element["steps"]` steps, else a reason. Costs the
+        2^dp_bits steps of the work itself, which is why this is sampled.
+        """
+        rec = self.run_walker(int(element["walker"]))
+        if rec is None:
+            return "the walker is a dead trail: it reaches no distinguished point"
+        steps, x, y, a, b = rec
+        want = self.artifact(x, y, a, b)
+        got = {k: element[k] for k in ("x", "y", "a", "b")}
+        if want != got:
+            return "the walker leads to a different point: not a point of the shared walk from that start"
+        if steps != int(element["steps"]):
+            return f"the walker reaches the point in {steps} steps, not {element['steps']}"
+        return None
+
     def verify(self, artifact):
         """What the pinned checker checks, as a (bool, reason) pair."""
         if not isinstance(artifact, dict) or set(artifact) != {"x", "y", "a", "b"}:
@@ -289,6 +353,110 @@ class Context:
         return k
 
 
+def _points_of(artifact):
+    """The `{x, y, a, b}` points an artifact carries: itself, or its batch."""
+    if isinstance(artifact, dict) and isinstance(artifact.get("dps"), list):
+        return [{k: e[k] for k in ("x", "y", "a", "b")} for e in artifact["dps"] if isinstance(e, dict)]
+    return [artifact]
+
+
+def _collide_any(ctx, first, second):
+    """`k` from any pair of points, one from each side, that share `(x, y)`
+    with different coefficients."""
+    by_point = {}
+    for p in first:
+        by_point.setdefault((p.get("x"), p.get("y")), []).append(p)
+    for q in second:
+        for p in by_point.get((q.get("x"), q.get("y")), []):
+            if p.get("a") != q.get("a"):
+                k = ctx.solve_collision(p, q)
+                if k is not None:
+                    return k
+    return None
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _digest(value):
+    return "sha256:" + hashlib.sha256(_canonical(value).encode()).hexdigest()
+
+
+def _read_log(source):
+    if source.startswith("http://") or source.startswith("https://"):
+        import urllib.request
+
+        with urllib.request.urlopen(source, timeout=60) as response:
+            return response.read().decode()
+    with open(source) as handle:
+        return handle.read()
+
+
+def _audit(ctx, args):
+    """Sample paid batch claims and re-walk one element of each.
+
+    Sampling is deterministic in the claim id (and `--seed`), so two auditors
+    with the same seed check the same claims and a submitter cannot know
+    which of their points a stranger will re-walk. Only *paid* claims are
+    worth the walk: an unpaid one cost the pool nothing.
+    """
+    lines = _read_log(args.log).splitlines()
+    claims, paid = {}, set()
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        payload = entry.get("payload") or {}
+        if entry.get("kind") == "claim":
+            if args.objective and payload.get("objective_id") != args.objective:
+                continue
+            artifact = payload.get("artifact")
+            if isinstance(artifact, dict) and isinstance(artifact.get("dps"), list) and artifact["dps"]:
+                record = dict(payload)
+                record["type"] = "claim"
+                claims[_digest(record)] = payload
+        elif entry.get("kind") == "settlement":
+            paid.add(payload.get("claim_id"))
+    rate = max(1, args.rate)
+    sampled = checked = 0
+    mismatches = []
+    for claim_id, payload in claims.items():
+        if claim_id not in paid:
+            continue
+        pick = hashlib.sha256((args.seed + "|" + claim_id).encode()).digest()
+        if int.from_bytes(pick[:8], "big") % rate != 0:
+            continue
+        sampled += 1
+        dps = payload["artifact"]["dps"]
+        index = int.from_bytes(pick[8:16], "big") % len(dps)
+        element = dps[index]
+        checked += 1
+        why = ctx.audit_element(element)
+        submitter = payload.get("submitter", "?")
+        if why is None:
+            print(f"ok    {claim_id[:23]}… {submitter}: dps[{index}] walker {element['walker']} re-walked, {element['steps']} steps")
+        else:
+            print(f"FAIL  {claim_id[:23]}… {submitter}: dps[{index}] walker {element['walker']}: {why}")
+            mismatches.append({
+                "artifact": _digest(payload["artifact"]),
+                "expect": "reject",
+                "detail": f"claim {claim_id}: dps[{index}] (walker {element['walker']}): {why}",
+            })
+    print(f"{len(claims)} batch claim(s), {len([c for c in claims if c in paid])} paid, "
+          f"{sampled} sampled at 1/{rate}, {checked} re-walked, {len(mismatches)} mismatch(es)")
+    if args.docket:
+        with open(args.docket, "w") as handle:
+            json.dump({"entries": mismatches}, handle, indent=2)
+            handle.write("\n")
+        print(f"docket written to {args.docket} ({len(mismatches)} entries)")
+    return 1 if mismatches else 0
+
+
 # -- CLI -----------------------------------------------------------------------
 
 
@@ -313,18 +481,28 @@ def main(argv=None):
     group = p_walk.add_mutually_exclusive_group(required=True)
     group.add_argument("--walker", type=int, help="a single walker index")
     group.add_argument("--unit", type=int, help="every walker in unit U: [U*unit_size, (U+1)*unit_size)")
-    p_walk.add_argument("--out", help="write the single artifact here (with --walker)")
+    p_walk.add_argument("--out", help="write the single artifact here (with --walker, or with --batch)")
     p_walk.add_argument("--out-dir", help="write one artifact file per point here (with --unit)")
+    p_walk.add_argument("--batch", action="store_true",
+                        help="emit one batch artifact {dps: [...]} with walker and steps per point")
     p_walk.add_argument("--quiet", action="store_true")
 
     p_verify = sub.add_parser("verify", help="check artifacts the way the pinned checker does")
     p_verify.add_argument("--job", required=True)
     p_verify.add_argument("artifacts", nargs="+")
 
-    p_coll = sub.add_parser("collide", help="compute k from two artifacts for one point")
+    p_coll = sub.add_parser("collide", help="compute k from two artifacts (or batches) sharing a point")
     p_coll.add_argument("--job", required=True)
     p_coll.add_argument("first")
     p_coll.add_argument("second")
+
+    p_audit = sub.add_parser("audit", help="re-walk a sample of the batch claims in a cairn log")
+    p_audit.add_argument("--job", required=True)
+    p_audit.add_argument("--log", required=True, help="a cairn log file, or a node's http://…/log URL")
+    p_audit.add_argument("--objective", help="only claims on this objective id")
+    p_audit.add_argument("--rate", type=int, default=1, help="sample one claim in N (default: every claim)")
+    p_audit.add_argument("--seed", default="", help="mixed into the sampling, so an auditor's picks are its own")
+    p_audit.add_argument("--docket", help="write the mismatches as a docket for `cairn attest slash --docket`")
 
     args = parser.parse_args(argv)
     job = load_job(args.job)
@@ -344,6 +522,7 @@ def main(argv=None):
         if args.out_dir:
             os.makedirs(args.out_dir, exist_ok=True)
         found = 0
+        elements = []
         for i in indices:
             rec = ctx.run_walker(i)
             if rec is None:
@@ -351,21 +530,38 @@ def main(argv=None):
                     print(f"walker {i}: dead trail after {ctx.step_cap} steps", file=sys.stderr)
                 continue
             steps, x, y, a, b = rec
-            artifact = ctx.artifact(x, y, a, b)
             found += 1
             if not args.quiet:
                 print(f"walker {i}: distinguished point after {steps} steps", file=sys.stderr)
+            if args.batch:
+                elements.append(ctx.batch_element(i, steps, x, y, a, b))
+                continue
+            artifact = ctx.artifact(x, y, a, b)
             if args.out_dir:
                 _write(artifact, os.path.join(args.out_dir, f"dp-{i}.json"))
             else:
                 _write(artifact, args.out if args.walker is not None else None)
+        if args.batch and found:
+            # The batch checker refuses a point listed twice, and the walk
+            # can reach one point from two starts; keep the first.
+            distinct, seen = [], set()
+            for e in elements:
+                key = (e["x"], e["y"], e["a"], e["b"])
+                if key not in seen:
+                    seen.add(key)
+                    distinct.append(e)
+            _write({"dps": distinct}, args.out)
         return 0 if found else 1
 
     if args.cmd == "verify":
         bad = 0
         for path in args.artifacts:
             with open(path) as handle:
-                ok, why = ctx.verify(json.load(handle))
+                artifact = json.load(handle)
+            if isinstance(artifact, dict) and "dps" in artifact:
+                ok, why = ctx.verify_batch(artifact)
+            else:
+                ok, why = ctx.verify(artifact)
             print(f"{'ok  ' if ok else 'FAIL'}  {path}: {why}")
             bad += not ok
         return 1 if bad else 0
@@ -375,12 +571,15 @@ def main(argv=None):
             first = json.load(handle)
         with open(args.second) as handle:
             second = json.load(handle)
-        k = ctx.solve_collision(first, second)
+        k = _collide_any(ctx, _points_of(first), _points_of(second))
         if k is None:
-            print("same trail: identical coefficients, nothing to solve", file=sys.stderr)
+            print("no colliding pair with different coefficients", file=sys.stderr)
             return 1
         print(json.dumps({"k": f"{k:064x}"}))
         return 0
+
+    if args.cmd == "audit":
+        return _audit(ctx, args)
 
     return 2
 

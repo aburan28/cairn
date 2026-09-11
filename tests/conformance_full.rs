@@ -124,11 +124,13 @@ fn every_section_this_file_covers_is_present_and_populated() {
     assert_eq!(list_of(&v, "partition").len(), 8);
     assert_eq!(list_of(&v, "gossip").len(), 12);
     let piecework = section(&v, "piecework");
-    assert_eq!(list_of(piecework, "objectives").len(), 3);
-    assert_eq!(list_of(piecework, "novelty_keys").len(), 14);
+    assert_eq!(list_of(piecework, "objectives").len(), 4);
+    assert_eq!(list_of(piecework, "novelty_keys").len(), 21);
+    assert_eq!(list_of(piecework, "unit_keys").len(), 9);
     assert_eq!(list_of(piecework, "unit_ranges").len(), 23);
     assert_eq!(list_of(piecework, "payouts").len(), 6);
-    assert_eq!(list_of(piecework, "schedules").len(), 2);
+    assert_eq!(list_of(piecework, "batch_payouts").len(), 8);
+    assert_eq!(list_of(piecework, "schedules").len(), 3);
 }
 
 // -- piecework -------------------------------------------------------------
@@ -182,10 +184,48 @@ fn piecework_novelty_keys_match() {
 }
 
 #[test]
+fn piecework_unit_keys_match() {
+    // Which units a claim carries: one, or one per distinct element of the
+    // batch under `items`, in artifact order.
+    let v = vectors();
+    for case in list_of(section(&v, "piecework"), "unit_keys") {
+        let piecework = Piecework::from_value(field(case, "piecework")).expect("valid block");
+        let got = Value::Array(
+            piecework
+                .unit_keys(field(case, "artifact"))
+                .into_iter()
+                .map(Value::string)
+                .collect(),
+        );
+        assert_eq!(
+            &got,
+            field(case, "unit_keys"),
+            "{}",
+            case.canonical_string()
+        );
+    }
+}
+
+#[test]
+fn piecework_batch_payouts_match() {
+    let v = vectors();
+    for case in list_of(section(&v, "piecework"), "batch_payouts") {
+        let piecework =
+            Piecework::new(u64_of(case, "unit_price"), None, None, None).expect("valid");
+        assert_eq!(
+            piecework.payout_for(u64_of(case, "novel"), u64_of(case, "remaining")),
+            u64_of(case, "payout"),
+            "{}",
+            case.canonical_string()
+        );
+    }
+}
+
+#[test]
 fn piecework_unit_ranges_match() {
     let v = vectors();
     for case in list_of(section(&v, "piecework"), "unit_ranges") {
-        let piecework = Piecework::new(1, Some(u64_of(case, "units")), None).expect("valid");
+        let piecework = Piecework::new(1, Some(u64_of(case, "units")), None, None).expect("valid");
         let got = piecework.unit_range((u64_of(case, "lo"), u64_of(case, "hi")));
         assert_eq!(
             got,
@@ -200,7 +240,8 @@ fn piecework_unit_ranges_match() {
 fn piecework_payouts_match() {
     let v = vectors();
     for case in list_of(section(&v, "piecework"), "payouts") {
-        let piecework = Piecework::new(u64_of(case, "unit_price"), None, None).expect("valid");
+        let piecework =
+            Piecework::new(u64_of(case, "unit_price"), None, None, None).expect("valid");
         assert_eq!(
             piecework.payout(u64_of(case, "remaining")),
             u64_of(case, "payout"),
@@ -223,13 +264,14 @@ fn piecework_schedules_match() {
             let accepted = matches!(field(claim, "accepted"), Value::Bool(true));
             let mut pay = 0u64;
             if accepted {
-                if let Some(key) = piecework.novelty_key(field(claim, "artifact")) {
-                    if !paid_units.contains(&key) {
-                        pay = piecework.payout(remaining);
-                        remaining -= pay;
-                        if pay > 0 {
-                            paid_units.insert(key);
-                        }
+                let keys = piecework.unit_keys(field(claim, "artifact"));
+                let novel = keys.iter().filter(|k| !paid_units.contains(*k)).count() as u64;
+                if novel > 0 {
+                    pay = piecework.payout_for(novel, remaining);
+                    remaining -= pay;
+                    if pay > 0 {
+                        // A paid claim consumes every unit it carries.
+                        paid_units.extend(keys);
                     }
                 }
             }

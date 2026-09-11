@@ -1,9 +1,19 @@
 # Distributed Pollard rho as a piecework objective
 
-**Status: Stage A built** (`src/piecework.rs`, the `piecework` branch of
-`settle_one` in both implementations, the `piecework` conformance section,
-`examples/certicom-ecdlp/{jobs,checkers/*_rho_dp.py,tools/rho_dp.py}`,
-`scripts/piecework-demo.sh`). Stages B and C below are still proposals. One
+**Status: Stages A and B built.** Stage A: `src/piecework.rs`, the
+`piecework` branch of `settle_one` in both implementations, the `piecework`
+conformance section, `examples/certicom-ecdlp/{jobs,checkers/*_rho_dp.py,tools/rho_dp.py}`,
+`scripts/piecework-demo.sh`; the contributor is `rho-collab work --cairn`
+in `crypto` ([aburan28/crypto#130](https://github.com/aburan28/crypto/pull/130)).
+Stage B: batch artifacts under an `items` field, field-list keys so novelty
+is the point and not its label, a paid-unit index in the node, the batch
+checkers `checkers/*_rho_batch.py` and objectives `objective-*-rho-batch.json`,
+`tools/rho_dp.py walk --batch` and `tools/rho_dp.py audit`, whose docket of
+re-walk mismatches is what `cairn attest slash --docket` takes. What Stage
+B does **not** include is a bond on the *submitter*: a re-walk mismatch
+slashes whoever stood behind the claim with a bonded attestation, and the
+submitter's own stake is Stage 1's submission bond, not yet built. Stage C
+below is still a proposal. One
 departure from §3 as first written: the walk is pinned by the *job document*
 whose hash the checker carries, not derived from the objective id — the id
 covers the checker, so the job is inside the id either way, and the `crypto`
@@ -200,12 +210,17 @@ way to make one, and it has a hole that Stage B closes.
 - **Self-dealing.** Already handled for the ladder by nothing-up-my-sleeve
   instances; ECCp-131's `Q` is Certicom's.
 
-Stage B closes the private-walk hole the way cairn closes verification
-laziness: sampling and canaries. The batch artifact carries walker indices
-and trail lengths; a sampled audit re-walks one trail from its derived start
-(cost `2^d`, the same as the work, at a sampling rate ε) and a mismatch is a
-bonded slash under `require_signed_submitter`. [`bonded-verification.md`](../bonded-verification.md)
-is the mechanism; the DP re-walk is just its check.
+Stage B narrows the private-walk hole the way cairn closes verification
+laziness: sampling and dockets. The batch artifact carries walker indices
+and trail lengths; `tools/rho_dp.py audit` re-walks one element of a
+sampled paid claim from its derived start (cost `2^d`, the same as the
+work, at a sampling rate `1/N`) and writes every mismatch as a docket
+entry keyed by the artifact's digest. That docket is the input of
+[`bonded-verification.md`](../bonded-verification.md)'s `attest slash`: an
+attestor who stood behind the claim with a bond loses it to the auditor.
+What it cannot yet reach is the submitter, who posts no bond in Stage 0;
+until Stage 1's submission bonds exist, a private-walk point is caught,
+named and unattestable, and still paid once.
 
 `cairn incentives` should get the numbers before anything is funded: the
 decomposition floor in [`incentive/design.rs`](../../src/incentive/design.rs) says a sub-artifact the
@@ -242,13 +257,23 @@ split; a derived DP index as a read-only view; `rho-collab work --cairn` in
 settled `k` on the answer objective, then `cairn audit` and the reference
 implementation re-deriving every payment.
 
-**Stage B — scale.** Batch artifacts `{ "dps": [ … ] }` with walker indices
-and steps; the DP index becomes consensus state used for dedup on the
-*point* (a relabelled DP in a new batch mints nothing) and the checker scores
-the batch's valid, canonical, in-batch-distinct points; sampled re-walk
-audits with bonds. This is the change that needs the reference
-implementation to grow a DP index too, so it is a separate PR with its own
-vectors.
+**Stage B — scale.** *Built.* Batch artifacts `{ "dps": [ … ] }` with walker
+indices and steps: the piecework block names the batch field (`"items":
+"dps"`) and the fields that *are* the point (`"key": ["x", "y", "a", "b"]`),
+so every element is one unit, a relabelled point in a new batch mints
+nothing, and the claim pays `unit_price` per novel element capped by the
+pool. The checker refuses a batch with any invalid, non-canonical or
+repeated point, naming the element, and stays a yes/no certificate; which
+elements are novel is the rules' question, answered from the paid-unit
+index both implementations derive from the log (the primary keeps it
+incrementally, the reference recomputes it). A paid batch consumes every
+unit it carries, including the ones a nearly-empty pool could not cover in
+full -- the last contributor is short by at most one batch, as Stage A's
+last contributor was short by at most one unit. `tools/rho_dp.py audit`
+samples paid batch claims by claim id, re-walks one element per sampled
+claim from its derived start, and writes the mismatches as a docket; the
+bond it reaches is an attestor's (§7). Pinned by the `unit_keys`,
+`batch_payouts` and batch schedule cases of the vectors.
 
 **Stage C — beyond rho.** The same objective shape covers any search whose
 partial outputs are certificates: Pollard kangaroo over an interval
@@ -276,8 +301,9 @@ Here (Stage A, done unless marked):
    piecework top-up dedup (handled); `docs/coordination.md`: the rho case as
    the worked example of "work split is a pure function".
 6. `src/arena.rs`: a scenario where a submitter relabels public DPs, expected
-   verdict CLOSED. *Not yet: the relabelling is refused by the checker's
-   exact-keys rule and covered by `tools/rho_selftest.py`; an arena scenario
+   verdict CLOSED. *Not yet: the relabelling is refused by the single-point
+   checker's exact-keys rule, and in a batch by the field-list key (pinned
+   in `tests/piecework.rs` and the `unit_keys` vectors); an arena scenario
    is still worth adding.*
 
 In [`crypto`](https://github.com/aburan28/crypto):

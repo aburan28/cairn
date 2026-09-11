@@ -146,7 +146,10 @@ the objective id, and anyone can recompute anyone else's.
 
 Payment is per *novel* accepted unit. The first paid claim that answers a
 unit takes `min(unit_price, pool remaining)`; a second answer to the same unit
-verifies fine and mints nothing; a rejected answer leaves the unit open. So
+verifies fine and mints nothing; a rejected answer leaves the unit open. A
+claim may carry many units at once -- the block's `items` field names the
+array, and its `key` the fields that make an element the same unit however it
+is labelled -- and then pays per novel element, capped by the pool. So
 two nodes walking the same index are wasted compute and not an error, a node
 that squats a range it never walks costs the network nothing, and the
 objective closes when the pool is empty rather than when anyone says the

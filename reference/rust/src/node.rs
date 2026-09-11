@@ -1808,23 +1808,22 @@ impl Node {
             let Some(claim_id) = entry.payload.get("claim_id").and_then(Value::as_str) else {
                 continue;
             };
-            if let Some(key) = claims
-                .get(claim_id)
-                .and_then(|claim| piecework.novelty_key(&claim.artifact))
-            {
-                out.insert(key);
+            if let Some(claim) = claims.get(claim_id) {
+                out.extend(piecework.unit_keys(&claim.artifact));
             }
         }
         out
     }
 
-    /// The unit a claim answers, or `None` off a piecework objective.
-    fn novelty_key_for(&self, claim: &Claim) -> Option<String> {
+    /// The units a claim answers, or `None` off a piecework objective.
+    fn unit_keys_for(&self, claim: &Claim) -> Option<Vec<String>> {
         let objectives = self.objectives();
         let block = objectives.get(&claim.objective_id)?.piecework.as_ref()?;
-        Piecework::from_value(block)
-            .ok()?
-            .novelty_key(&claim.artifact)
+        Some(
+            Piecework::from_value(block)
+                .ok()?
+                .unit_keys(&claim.artifact),
+        )
     }
 
     fn artifact_ids_before(&self, objective_id: &str, epoch: u64) -> BTreeSet<String> {
@@ -2169,10 +2168,10 @@ impl Node {
                 let outcome = self.settle_one(&claim, epoch, &consumed, ts)?;
                 // A piecework unit is spoken for by a *paid* claim; every
                 // other artifact by its first reveal.
-                match self.novelty_key_for(&claim) {
-                    Some(key) => {
+                match self.unit_keys_for(&claim) {
+                    Some(keys) => {
                         if outcome.settled {
-                            consumed.insert(key);
+                            consumed.extend(keys);
                         }
                     }
                     None => {
@@ -2246,17 +2245,22 @@ impl Node {
                     "objective carries an unusable piecework block",
                 ));
             };
-            let Some(key) = piecework.novelty_key(&claim.artifact) else {
+            let keys = piecework.unit_keys(&claim.artifact);
+            if keys.is_empty() {
                 return Ok(unsettled(claim_id, verdict, "artifact names no unit"));
-            };
-            if consumed.contains(&key) || self.paid_unit_keys(&objective, &piecework).contains(&key)
-            {
+            }
+            let paid_keys = self.paid_unit_keys(&objective, &piecework);
+            let novel = keys
+                .iter()
+                .filter(|key| !consumed.contains(*key) && !paid_keys.contains(*key))
+                .count();
+            if novel == 0 {
                 return Ok(unsettled(claim_id, verdict, "duplicate unit mints nothing"));
             }
             let paid = self.paid_total(&claim.objective_id);
             let remaining =
                 u64::try_from(u128::from(objective.reward).saturating_sub(paid)).unwrap_or(0);
-            let reward = piecework.payout(remaining);
+            let reward = piecework.payout_for(novel as u64, remaining);
             if reward == 0 {
                 return Ok(unsettled(claim_id, verdict, "pool exhausted"));
             }
@@ -3153,27 +3157,30 @@ impl Node {
                 let left = remaining
                     .entry(objective_id.to_string())
                     .or_insert(objective.reward);
-                let expected = piecework.payout(*left);
-                *left -= expected;
                 let Some(claim) = entry
                     .payload
                     .get("claim_id")
                     .and_then(Value::as_str)
                     .and_then(|id| accepted.get(id))
                 else {
+                    *left -= piecework.payout(*left);
                     continue;
                 };
-                piecework_rewards.insert(claim.id(), expected);
-                if let Some(key) = piecework.novelty_key(&claim.artifact) {
-                    let job = format!("{}|{}", objective.verifier.digest(), block.digest());
-                    if !paid_units.entry(job).or_default().insert(key) {
-                        problems.push(format!(
-                            "objective {}: unit of claim {} was paid more than once",
-                            short(objective_id),
-                            short(&claim.id())
-                        ));
-                    }
+                let job = format!("{}|{}", objective.verifier.digest(), block.digest());
+                let paid = paid_units.entry(job).or_default();
+                let keys = piecework.unit_keys(&claim.artifact);
+                let novel = keys.iter().filter(|key| !paid.contains(*key)).count();
+                if novel == 0 {
+                    problems.push(format!(
+                        "objective {}: unit of claim {} was paid more than once",
+                        short(objective_id),
+                        short(&claim.id())
+                    ));
                 }
+                let expected = piecework.payout_for(novel as u64, *left);
+                *left -= expected;
+                piecework_rewards.insert(claim.id(), expected);
+                paid.extend(keys);
             }
         }
         for entry in self.ledger.entries_of_kind(SETTLEMENT) {

@@ -615,9 +615,16 @@ eve:   copies alice's point     reward 0        (duplicate unit mints nothing)
 carol: point from walker 2      reward 100      (pool: 79700 of 80000 remaining)
 ```
 
+At scale a claim is a **batch**: the block names the artifact field holding
+an array of units (`"items": "dps"`) and the fields that identify one
+(`"key": ["x", "y", "a", "b"]`), so a claim pays per novel element and an
+element's provenance -- the walker index and step count an auditor re-walks
+-- does not make a paid point new.
+
 `scripts/piecework-demo.sh` runs this on the 50-bit instance with a
-pure-Python walker (`examples/certicom-ecdlp/tools/rho_dp.py`), then has both
-implementations audit the log. The design is
+pure-Python walker (`examples/certicom-ecdlp/tools/rho_dp.py`), single points
+and then a batch, then has both implementations audit the log and the walker
+re-walk a sample of the batch. The design is
 [`docs/design/rho-piecework.md`](docs/design/rho-piecework.md).
 
 ## Agents paying agents

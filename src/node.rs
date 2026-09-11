@@ -50,7 +50,7 @@
 //! the boundary is tested here on purpose — a reward above `u64::MAX` is in
 //! `conformance/adversarial.jsonl` for exactly that reason.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -64,7 +64,7 @@ use crate::knowledge::{
 };
 use crate::ledger::{Entry, Ledger, LedgerError, Proof};
 use crate::partition::{self, epoch_of, epoch_seconds, settlement_rank, PartitionError};
-use crate::piecework::{Piecework, PieceworkError};
+use crate::piecework::{Piecework, PieceworkError, UnitKey};
 use crate::records::{
     Attestation, Availability, AvailabilityPool, BisectionMove, Challenge, Claim, Commitment,
     CommitteeShare, Issuance, Objective, PeerRecord, Undertaking,
@@ -1371,6 +1371,24 @@ impl Outcome {
 pub struct Node {
     ledger: Ledger,
     registry: VerifierRegistry,
+    /// Paid piecework units per job, built incrementally from the log. A
+    /// cache and nothing more: it is derived from entries already in the
+    /// ledger and rebuilt from them on open, and [`Node::audit`] re-derives
+    /// the same sets from scratch without it. See [`Node::paid_unit_keys`].
+    piecework_index: HashMap<String, PaidUnitIndex>,
+}
+
+/// Which units of one piecework job the log has paid for, and how far
+/// through the log that knowledge reaches.
+#[derive(Debug, Default)]
+struct PaidUnitIndex {
+    /// Ledger entries `[0, scanned)` are reflected below.
+    scanned: usize,
+    /// Unit keys of every claim on the job seen so far, by claim id, so a
+    /// later settlement entry can find them without re-decoding the claim.
+    claims: HashMap<String, Vec<String>>,
+    /// Unit keys some settlement has paid for.
+    paid: BTreeSet<String>,
 }
 
 impl Node {
@@ -1385,13 +1403,18 @@ impl Node {
         Node {
             ledger,
             registry: VerifierRegistry::new(root),
+            piecework_index: HashMap::new(),
         }
     }
 
     /// A node over a pre-configured registry -- a node with a pinned Lean
     /// toolchain, or a test that needs a binary guaranteed to be absent.
     pub fn with_registry(ledger: Ledger, registry: VerifierRegistry) -> Node {
-        Node { ledger, registry }
+        Node {
+            ledger,
+            registry,
+            piecework_index: HashMap::new(),
+        }
     }
 
     /// The log. Public because every consumer -- attribution, the CLI, an
@@ -4547,12 +4570,17 @@ impl Node {
                 // earlier in the batch (pool dry, or no unit named) does not
                 // shadow a later one. Every other objective keeps the rule
                 // that the first reveal of an artifact consumes it.
-                let (key, spoken_for) = match self.novelty_key_for(&claim) {
-                    Some(key) => (key, outcome.settled),
-                    None => (claim.artifact_id(), true),
-                };
-                if spoken_for {
-                    consumed.insert(key);
+                match self.unit_keys_for(&claim) {
+                    Some(keys) => {
+                        // Every unit of a paid claim, novel or not: the
+                        // ones that were not novel are in the set already.
+                        if outcome.settled {
+                            consumed.extend(keys);
+                        }
+                    }
+                    None => {
+                        consumed.insert(claim.artifact_id());
+                    }
                 }
                 outcomes.push(outcome);
             }
@@ -6034,30 +6062,43 @@ impl Node {
         consumed: &BTreeSet<String>,
         ts: &str,
     ) -> Result<Outcome, RuleViolation> {
-        let Some(key) = piecework.novelty_key(&claim.artifact) else {
-            return Ok(Outcome::unsettled(
-                claim_id.to_string(),
-                verdict,
-                format!(
-                    "artifact has no {:?} field, so it names no unit of this objective",
-                    piecework.key.as_deref().unwrap_or("")
+        let keys = piecework.unit_keys(&claim.artifact);
+        if keys.is_empty() {
+            let why = match (&piecework.items, &piecework.key) {
+                (Some(items), _) => format!(
+                    "artifact carries no units under {items:?}, so it names no unit of this objective"
                 ),
-            ));
-        };
-        if consumed.contains(&key) || self.paid_unit_keys(objective, piecework).contains(&key) {
-            return Ok(Outcome::unsettled(
-                claim_id.to_string(),
-                verdict,
-                "duplicate unit mints nothing",
-            ));
+                (None, Some(UnitKey::Field(field))) => format!(
+                    "artifact has no {field:?} field, so it names no unit of this objective"
+                ),
+                (None, Some(UnitKey::Fields(fields))) => format!(
+                    "artifact lacks one of {:?}, so it names no unit of this objective",
+                    fields.join(",")
+                ),
+                (None, None) => "artifact names no unit of this objective".to_string(),
+            };
+            return Ok(Outcome::unsettled(claim_id.to_string(), verdict, why));
         }
-        let paid = self.paid_total(&claim.objective_id);
+        let paid = self.paid_unit_keys(objective, piecework);
+        let novel: Vec<&String> = keys
+            .iter()
+            .filter(|key| !consumed.contains(*key) && !paid.contains(*key))
+            .collect();
+        if novel.is_empty() {
+            let why = if piecework.items.is_some() {
+                "every unit in the batch was already paid; duplicate units mint nothing"
+            } else {
+                "duplicate unit mints nothing"
+            };
+            return Ok(Outcome::unsettled(claim_id.to_string(), verdict, why));
+        }
+        let paid_total = self.paid_total(&claim.objective_id);
         // The pool is a `u64`, so anything left after subtracting a total
         // the audit bounds by the pool fits; the fallback only guards a
         // hostile log that overpaid, where the honest remainder is zero.
         let remaining =
-            u64::try_from(u128::from(objective.reward).saturating_sub(paid)).unwrap_or(0);
-        let reward = piecework.payout(remaining);
+            u64::try_from(u128::from(objective.reward).saturating_sub(paid_total)).unwrap_or(0);
+        let reward = piecework.payout_for(novel.len() as u64, remaining);
         if reward == 0 {
             return Ok(Outcome::unsettled(
                 claim_id.to_string(),
@@ -6072,18 +6113,27 @@ impl Node {
             ("reward", Value::Int(i128::from(reward))),
         ]);
         self.append(SETTLEMENT, settlement, ts)?;
-        let note = if reward == remaining {
-            "unit paid; pool exhausted"
+        let mut note = if piecework.items.is_some() {
+            format!("{} novel unit(s) paid", novel.len())
         } else {
-            "unit paid"
+            String::from("unit paid")
         };
+        if novel.len() < keys.len() {
+            note.push_str(&format!(
+                "; {} duplicate(s) in the batch earned nothing",
+                keys.len() - novel.len()
+            ));
+        }
+        if reward == remaining {
+            note.push_str("; pool exhausted");
+        }
         Ok(Outcome {
             claim_id: claim_id.to_string(),
             verdict,
             settled: true,
             reward,
             pending_epoch: None,
-            note: String::from(note),
+            note,
         })
     }
 
@@ -6815,24 +6865,38 @@ impl Node {
                     continue;
                 };
                 let left = remaining.entry(objective_id).or_insert(objective.reward);
-                let expected = piecework.payout(*left);
-                *left -= expected;
                 let Some(claim) =
                     payload_str(&entry.payload, "claim_id").and_then(|id| claims_by_id.get(id))
                 else {
+                    // A settlement naming no decodable claim is reported
+                    // below; here it still spends one unit of the pool, so
+                    // the bound after it stays honest.
+                    *left -= piecework.payout(*left);
                     continue;
                 };
-                piecework_rewards.insert(claim.id(), expected);
-                if let Some(key) = piecework.novelty_key(&claim.artifact) {
-                    // Scope: the same job, whichever objective paid it.
-                    let job = format!("{}|{}", objective.verifier.digest(), block.digest());
-                    if !paid_units.entry(job).or_default().insert(key) {
-                        problems.push(format!(
+                // Scope: the same job, whichever objective paid it.
+                let job = format!("{}|{}", objective.verifier.digest(), block.digest());
+                let paid = paid_units.entry(job).or_default();
+                let keys = piecework.unit_keys(&claim.artifact);
+                let novel = keys.iter().filter(|key| !paid.contains(*key)).count();
+                if novel == 0 {
+                    problems.push(if piecework.items.is_some() {
+                        format!(
+                            "objective {objective_id}: claim {} was paid for a batch with no \
+                             novel unit",
+                            claim.id()
+                        )
+                    } else {
+                        format!(
                             "objective {objective_id}: unit of claim {} was paid more than once",
                             claim.id()
-                        ));
-                    }
+                        )
+                    });
                 }
+                let expected = piecework.payout_for(novel as u64, *left);
+                *left -= expected;
+                piecework_rewards.insert(claim.id(), expected);
+                paid.extend(keys);
             }
         }
 
@@ -7998,40 +8062,61 @@ impl Node {
     /// Novelty keys of every unit a settlement has paid for, across the
     /// objective's whole job. The consumed set for piecework -- see
     /// `crate::piecework` for why paid rather than seen.
-    fn paid_unit_keys(&self, objective: &Objective, piecework: &Piecework) -> BTreeSet<String> {
+    ///
+    /// Served from [`Node::piecework_index`], advanced over whatever the
+    /// log has appended since it was last asked. A batch objective at scale
+    /// settles thousands of claims carrying tens of units each, and
+    /// re-reading every claim on every settlement would make the cost of
+    /// paying the `n`th claim proportional to `n`. The index is keyed by
+    /// the job -- the verifier and the block -- rather than by the
+    /// objective, so a top-up posted later joins the same set without a
+    /// rebuild.
+    fn paid_unit_keys(&mut self, objective: &Objective, piecework: &Piecework) -> BTreeSet<String> {
         let scope = self.piecework_scope(objective);
-        let mut claims: BTreeMap<String, Claim> = BTreeMap::new();
-        for entry in self.ledger.entries_of_kind(CLAIM) {
-            if let Ok(claim) = Claim::from_value(&entry.payload) {
-                if scope.contains(&claim.objective_id) {
-                    claims.insert(claim.id(), claim);
+        let job = match &objective.piecework {
+            Some(block) => format!("{}|{}", objective.verifier.digest(), block.digest()),
+            None => return BTreeSet::new(),
+        };
+        let index = self.piecework_index.entry(job).or_default();
+        let entries = self.ledger.entries();
+        // A log that shrank is a log that was replaced under this node;
+        // start over rather than trust offsets into it.
+        if index.scanned > entries.len() {
+            *index = PaidUnitIndex::default();
+        }
+        for entry in &entries[index.scanned..] {
+            if entry.kind == CLAIM {
+                if let Ok(claim) = Claim::from_value(&entry.payload) {
+                    if scope.contains(&claim.objective_id) {
+                        index
+                            .claims
+                            .insert(claim.id(), piecework.unit_keys(&claim.artifact));
+                    }
+                }
+            } else if entry.kind == SETTLEMENT {
+                let keys: Option<&Vec<String>> = payload_str(&entry.payload, "claim_id")
+                    .and_then(|claim_id| index.claims.get(claim_id));
+                if let Some(keys) = keys {
+                    index.paid.extend(keys.iter().cloned());
                 }
             }
         }
-        let mut out = BTreeSet::new();
-        for entry in self.ledger.entries_of_kind(SETTLEMENT) {
-            let Some(claim_id) = payload_str(&entry.payload, "claim_id") else {
-                continue;
-            };
-            if let Some(key) = claims
-                .get(claim_id)
-                .and_then(|claim| piecework.novelty_key(&claim.artifact))
-            {
-                out.insert(key);
-            }
-        }
-        out
+        index.scanned = entries.len();
+        index.paid.clone()
     }
 
-    /// The unit a claim answers under its objective's piecework block, or
-    /// `None` when the objective is not piecework (or the artifact names no
-    /// unit). What the batch's consumed set is keyed on for such a claim.
-    fn novelty_key_for(&self, claim: &Claim) -> Option<String> {
+    /// The units a claim answers under its objective's piecework block, or
+    /// `None` when the objective is not piecework. What the batch's
+    /// consumed set is keyed on for such a claim; empty when the artifact
+    /// names no unit.
+    fn unit_keys_for(&self, claim: &Claim) -> Option<Vec<String>> {
         let objectives = self.objectives();
         let block = objectives.get(&claim.objective_id)?.piecework.as_ref()?;
-        Piecework::from_value(block)
-            .ok()?
-            .novelty_key(&claim.artifact)
+        Some(
+            Piecework::from_value(block)
+                .ok()?
+                .unit_keys(&claim.artifact),
+        )
     }
 
     /// Ids of claims whose recorded verdict was `accept`.
