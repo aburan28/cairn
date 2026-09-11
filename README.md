@@ -105,6 +105,10 @@ build --release --features ui` does the same if `ui/out` already exists.
 
 ## Quick start
 
+[docs/quickstart.md](docs/quickstart.md) is this section at more length and with
+the output shown: audit the published log, win a bounty end to end, then start a
+node. What follows is the short version.
+
 An installed release has the complete local node behind one command:
 
 ```sh
@@ -1041,6 +1045,22 @@ examples/            worked objectives with real artifacts
 
 ## Docs
 
+**[docs/README.md](docs/README.md) is the map** — every page below, grouped by
+what you are trying to do, with the design notes marked built or not built. The
+five a user reaches for first:
+
+- [quickstart.md](docs/quickstart.md) — five minutes: audit the published log,
+  win a bounty end to end, start a node
+- [cli.md](docs/cli.md) — every subcommand, flag and exit code
+- [configuration.md](docs/configuration.md) — every environment variable and
+  file location, and the two that fork a network if you change them
+- [glossary.md](docs/glossary.md) — the vocabulary, pointing at the code that
+  defines each term
+- [troubleshooting.md](docs/troubleshooting.md) — the failure modes that are
+  designed-in and look like bugs
+
+The design, in the order the ideas depend on each other:
+
 - [diagrams.md](docs/diagrams.md) — architecture and detailed design, drawn from the code
 - [architecture.md](docs/architecture.md) — the full design and which work shapes fit
 - [verification.md](docs/verification.md) — the verification ladder; authoring verifiers
@@ -1049,9 +1069,11 @@ examples/            worked objectives with real artifacts
 - [agent-market.md](docs/agent-market.md) — agent-to-agent rewards: what a peer-to-peer mechanism would be, and what it breaks
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
 - [knowledge.md](docs/knowledge.md) — typed relations, derived standing, and reader-chosen confidence: revising knowledge without rewriting history
+- [tiers.md](docs/tiers.md) — why a unit earned on a millisecond check cannot be spent on Lean work
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation
 - [bonded-verification.md](docs/bonded-verification.md) — who ran the checker, and what it costs them to lie: canaries name it for free, a bond is what a slash takes
+- [fraud-proofs.md](docs/fraud-proofs.md) — settling a disputed computation by executing one step instead of all of them
 - [arena.md](docs/arena.md) — attack strategies played for money against the real rules engine, and what each one earned
 - [review-pcw.md](docs/review-pcw.md) — a review of Proof of Adaptive Challenge Solving as a consensus mechanism, and what to salvage from it
 - [proving-it.md](docs/proving-it.md) — what a game-theoretic proof here would be, what it would not be, and where this one is weakest
@@ -1061,13 +1083,17 @@ examples/            worked objectives with real artifacts
 - [threat-model.md](docs/threat-model.md) — attacks, and which are actually handled
 - [launch-review.md](docs/launch-review.md) — the pre-launch pass: what was fixed, and the gaps that remain, in priority order
 - [p2p.md](docs/p2p.md) — removing the operator: what needs agreement, and the McEliece handshake
+- [discovery.md](docs/discovery.md) — peer discovery without a name anybody owns
 - [agents.md](docs/agents.md) — running Claude Code / Codex / OpenCode against the network over MCP
 - [.claude/skills/cairn/](.claude/skills/cairn/) — the Claude Code skill: ask Claude to start the network and it builds, wires MCP, and posts objectives
 - [AGENTS.md](AGENTS.md) — instructions agents read: contributing here, and contributing *to* the network
 - [CONTRIBUTING.md](CONTRIBUTING.md) — the two different things "contributing" means here, and the gate for each
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — how people are expected to treat each other here
+- [SECURITY.md](SECURITY.md) — the private reporting channel, and what is in scope
 - [roadmap.md](docs/roadmap.md) — what Stage 1–3 add, in the order worth doing
 - [formal-model.md](docs/formal-model.md) — which rules TLC actually checks, and which are only tested
 - [design-stage0-completion.md](docs/design-stage0-completion.md) — what "Stage 0 is done" was defined to mean
+- [docs/design/](docs/design/) — worked design reviews, each marked built or not built
 - [conformance/README.md](conformance/README.md) — the cross-implementation contract
 
 ## What this is not

@@ -863,6 +863,14 @@ enum Command {
     },
     Log,
     Help,
+    /// Print the version, and the one build-time choice that changes what the
+    /// binary can do.
+    ///
+    /// Worth a command rather than leaving it to the release tarball's name,
+    /// because the two questions a report starts with are "which version" and
+    /// "why does `run` refuse to start" -- and the answer to the second is a
+    /// feature flag that is otherwise invisible from outside the binary.
+    Version,
 }
 
 /// Configuration for `cairn run`.
@@ -1297,6 +1305,12 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
                 options,
                 command: Command::Help,
             });
+        } else if token == "-V" || token == "--version" {
+            cursor.take();
+            return Ok(Invocation {
+                options,
+                command: Command::Version,
+            });
         } else {
             break;
         }
@@ -1433,6 +1447,10 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             Command::Log
         }
         "help" => Command::Help,
+        "version" => {
+            expect_end(&mut cursor, "version")?;
+            Command::Version
+        }
         other => return Err(CliError::Usage(format!("unknown command {other:?}"))),
     };
 
@@ -3364,6 +3382,27 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      who has stood behind what, and whose bond is still live",
     );
+    say(
+        out,
+        "  availability [undertake|answer|fund|settle|status] ...",
+    );
+    say(
+        out,
+        "      promise to hold the log under bond, answer this epoch's sample,",
+    );
+    say(
+        out,
+        "      fund the pool that pays holders, and settle what it owes",
+    );
+    say(out, "  dispute [trace|open|play|settle|status] ...");
+    say(
+        out,
+        "      dispute a committed trace, play the bisection, and settle it by",
+    );
+    say(
+        out,
+        "      executing the one step in dispute rather than all of them",
+    );
     say(out, "  checkpoint --root-key FILE [--out FILE]");
     say(
         out,
@@ -3634,6 +3673,11 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  log");
     say(out, "      print the log");
+    say(out, "  version");
+    say(
+        out,
+        "      the version, and whether this build embedded the reader",
+    );
     say(out, "  canon --input <file>");
     say(
         out,
@@ -3734,6 +3778,27 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  2  refused, or bad input");
     say(out, "  3  reveal produced a verdict that settles nothing");
+}
+
+/// `cairn --version`: the crate version, and the feature that changes the
+/// command set.
+///
+/// The `ui` feature is reported because it is the only build-time choice an
+/// operator can hit from outside the binary: without it `run` refuses to start,
+/// and from a support thread "which version" and "did your build embed the
+/// reader" are the same question asked twice. `cairn::VERSION` is the same
+/// constant the MCP server announces in its handshake and the HTTP index puts
+/// in its body, so all three cannot drift apart.
+fn print_version(out: &mut dyn Write) {
+    say(out, format!("cairn {}", cairn::VERSION));
+    say(
+        out,
+        if cfg!(feature = "ui") {
+            "  ui       embedded -- `cairn run` will start"
+        } else {
+            "  ui       not embedded -- `cairn run` refuses; build with `make ui-build`"
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -8647,6 +8712,10 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             print_help(out);
             Ok(0)
         }
+        Command::Version => {
+            print_version(out);
+            Ok(0)
+        }
         Command::Post {
             objective,
             identity,
@@ -10763,6 +10832,93 @@ mod tests {
         for spelling in [vec!["help"], vec!["--help"], vec!["-h"]] {
             let parsed = parse(argv(&spelling)).expect("parses");
             assert_eq!(parsed.command, Command::Help, "for {spelling:?}");
+        }
+    }
+
+    #[test]
+    fn version_is_reachable_three_ways_and_reports_the_crate_version() {
+        for spelling in [vec!["version"], vec!["--version"], vec!["-V"]] {
+            let parsed = parse(argv(&spelling)).expect("parses");
+            assert_eq!(parsed.command, Command::Version, "for {spelling:?}");
+        }
+        let mut out = Vec::new();
+        print_version(&mut out);
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(
+            text.contains(cairn::VERSION),
+            "the version line must carry the crate version; got: {text}"
+        );
+        // The feature is the half a support thread actually needs, so it is
+        // stated either way rather than only when it is missing.
+        assert!(
+            text.contains("ui"),
+            "the ui feature must be reported: {text}"
+        );
+    }
+
+    /// Every command the parser accepts is named on the help screen.
+    ///
+    /// A command the help omits is a command nobody finds: `availability` and
+    /// `dispute` were both fully implemented, both documented in the record
+    /// types, and both invisible to `cairn help` -- ten subcommands that only a
+    /// reader of `parse` knew about. The list is written out here rather than
+    /// derived, because deriving it from the same `match` that `parse` uses
+    /// would make the test agree with the bug.
+    #[test]
+    fn every_command_the_parser_accepts_is_named_in_help() {
+        let mut out = Vec::new();
+        print_help(&mut out);
+        let help = String::from_utf8(out).expect("utf-8");
+        for name in [
+            "post",
+            "propose",
+            "issue",
+            "balances",
+            "commit",
+            "reveal",
+            "settle",
+            "beacon",
+            "drand-round",
+            "drand-verify",
+            "checkpoint",
+            "drain",
+            "audit",
+            "verify",
+            "prove",
+            "check",
+            "availability",
+            "canary",
+            "dispute",
+            "attest",
+            "attribute",
+            "knowledge",
+            "blob",
+            "shard",
+            "incentives",
+            "scaffold",
+            "try",
+            "run",
+            "mcp",
+            "p2p",
+            "serve",
+            "gen-bootstrap",
+            "arena",
+            "canon",
+            "decode",
+            "peer",
+            "identity",
+            "keygen",
+            "store",
+            "sync",
+            "log",
+            "help",
+            "version",
+        ] {
+            // Two leading spaces is the help's own indent for a command line;
+            // continuations are indented six, so this cannot match one.
+            let named =
+                help.contains(&format!("  {name} ")) || help.contains(&format!("  {name}\n"));
+            assert!(named, "`{name}` parses but `cairn help` never names it");
         }
     }
 
