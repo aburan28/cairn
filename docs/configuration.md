@@ -70,6 +70,14 @@ nothing in the log reports the disagreement. That is exactly what makes it
 silent, and why both defaults are constants in the source with an override
 documented as demo-only.
 
+**And they are `audit`'s settings too, not just a writer's.** Epochs are derived
+from record timestamps, so auditing an ordinary log in a shell that still holds
+`CAIRN_EPOCH_SECONDS=1` from a demo reports it as thoroughly broken — every
+batch "settled in an order the beacon does not produce". The audit detects the
+mismatch and says which length to re-run with, but check the variable before
+believing any such finding. See
+[troubleshooting.md](troubleshooting.md#audit-reports-an-order-the-beacon-does-not-produce).
+
 **`CAIRN_SANDBOX_MEMORY_MB` is not in that class, but it is not cosmetic
 either.** It bounds a verifier's address space, and a verifier killed for
 exceeding the cap does not return the verdict it would otherwise have returned —

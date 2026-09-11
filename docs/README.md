@@ -27,7 +27,7 @@ below is either reference (what a command, a setting, or a word does) or design
 
 ## Reference
 
-The four pages a user needs and nothing else in this repository provides.
+The five pages a user needs and nothing else in this repository provides.
 
 - [quickstart.md](quickstart.md) — audit a real settled log, run one bounty
   round end to end, start a node. Every command in it was run to write it.
