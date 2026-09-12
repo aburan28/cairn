@@ -9605,6 +9605,16 @@ mod tests {
             "a ratchet that strands nothing still warned: {fine}"
         );
 
+        // Winner-take-all is the same silence: the only settling claim covers
+        // the span and collects the pool. Inverting `is_exhausted` without the
+        // admission gate would name score 1 and almost the whole reward, which
+        // is the figure a funder must not be shown for a bounty that pays out.
+        let winner = post_to_string(&options, &ratcheted(100), &dir);
+        assert!(
+            !winner.contains("closes for good"),
+            "a winner-take-all bounty was described as stranding the pool: {winner}"
+        );
+
         // And the unwinnable case keeps its own, sterner wording rather than
         // being folded into this one: "never pays" and "pays and then shuts" are
         // different problems with different fixes.

@@ -615,15 +615,30 @@ impl Ratchet {
     /// at 1,499,999,999 against a published world best of 1,483,649,332, so the
     /// first submission of already-known work ends it.
     ///
+    /// The score is also one a claim can land on. Inverting `is_exhausted`
+    /// alone names `span - min_improvement + 1` units of progress, but getting
+    /// a frontier there still has to clear `min_improvement` from an empty
+    /// start. Those diverge once the gate is more than half the span: the
+    /// inverted score is unreachable, and [`Ratchet::max_stranded`] would
+    /// report almost the whole pool at risk for a winner-take-all bounty that
+    /// actually pays out.
+    ///
     /// Clamped to the baseline. A ratchet whose gate exceeds its whole span
     /// closes before it opens, which is [`Ratchet::is_fundable`]'s case, and
     /// there is no score worse than the baseline to name.
     pub fn closes_at(&self) -> i64 {
-        // The frontier shuts once fewer than `min_improvement` units of span
-        // remain, so the least-improved closing progress is
-        // `span - min_improvement + 1`. Below zero means it never opens.
-        let remaining = i128::from(self.span()) - i128::from(self.min_improvement) + 1;
-        let progress = remaining.max(0);
+        // Least progress that both exhausts the remainder *and* admits a
+        // claim from an empty frontier. `is_exhausted` inverted is
+        // `span - min_improvement + 1`; `improves` from empty needs at least
+        // the gate. Below one on the invert means it never opens.
+        let span = i128::from(self.span());
+        let gate = i128::from(self.min_improvement);
+        let exhausted_at = span - gate + 1;
+        let progress = if exhausted_at < 1 {
+            0
+        } else {
+            exhausted_at.max(gate)
+        };
         // Back from progress to a score, in the direction this ratchet runs.
         // i128 throughout: baseline and target may straddle zero at the extremes,
         // where the sum leaves i64 before the clamp brings it back.
@@ -1510,6 +1525,16 @@ mod tests {
         assert!(down.is_exhausted(9));
         assert!(!down.is_exhausted(10));
         assert_eq!(down.max_stranded().expect("live curve"), 90_000);
+
+        // Gate more than half the span: inverting `is_exhausted` names 41,
+        // but no claim can land there. The worst reachable close is the gate
+        // itself, and that is what a funder can actually lose.
+        let half = Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 60).expect("valid");
+        assert_eq!(half.closes_at(), 60);
+        assert!(half.improves(None, 60));
+        assert!(!half.improves(None, 41));
+        assert!(half.is_exhausted(60));
+        assert_eq!(half.max_stranded().expect("live curve"), 400_000);
     }
 
     /// The two ends, where the formula has to stop rather than run off the curve.
@@ -1539,17 +1564,18 @@ mod tests {
         assert_eq!(wide.closes_at(), i64::MAX);
         assert_eq!(wide.max_stranded().expect("live curve"), 0);
 
-        // A gate equal to the whole span is fundable -- one claim straight to the
-        // target collects everything -- and one step is enough to shut it:
-        // `span - progress < min_improvement` holds for *any* progress above
-        // zero. So the closing score is one unit off the baseline and all but a
-        // rounding unit of the pool is at risk. Worth its own case, because
-        // `is_fundable` says yes and the bounty is still a trap.
+        // A gate equal to the whole span is fundable -- one claim straight to
+        // the target collects everything. `is_exhausted` would call any
+        // progress above zero a close, but that score is unreachable: the
+        // only settling claim covers the span and pays the pool. Naming the
+        // unreachable score would report almost the whole reward stranded on
+        // a winner-take-all bounty that actually pays out.
         let knife = Ratchet::new(i64::MAX, i64::MIN, u64::MAX, Direction::Minimize, u64::MAX)
             .expect("valid");
         assert!(knife.is_fundable());
-        assert_eq!(knife.closes_at(), i64::MAX - 1);
-        assert_eq!(knife.max_stranded().expect("live curve"), u64::MAX - 1);
+        assert_eq!(knife.closes_at(), i64::MIN);
+        assert!(knife.improves(None, i64::MIN));
+        assert_eq!(knife.max_stranded().expect("live curve"), 0);
     }
 
     /// The shipped live ecdsa.fail objective, and why these functions exist.
