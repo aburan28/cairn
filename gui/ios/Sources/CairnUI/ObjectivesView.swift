@@ -89,6 +89,7 @@ public struct ChallengeView: View {
                             LabeledContent("claim") { HashText(settlement.claim_id) }
                         }
                     }
+                    FrontierHistory(objective: objective)
                     if overspent(objective) {
                         Text("This node published paid + remaining greater than the reward. That is a bug on one side of the seam, not a display choice.")
                             .font(.footnote)
@@ -105,6 +106,104 @@ public struct ChallengeView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .task { await model.fillRecord(for: id) }
+        .task {
+            await model.fillRecord(for: id)
+            if model.health == .live {
+                await model.loadLogIfNeeded()
+            }
+        }
+    }
+}
+
+/// Successive frontier states, newest first — the same pile the site shows
+/// at `/frontier?id=`. Built from log records the node already wrote; a
+/// missing log is a missing history, not an empty one.
+private struct FrontierHistory: View {
+    let objective: Objective
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Frontier history").font(.headline)
+            Text("Each move is a frontier record. The payout is this record's paid_cumulative minus the previous one — two numbers the node published, compared, not recomputed.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            if let sourced = model.log {
+                let moves = buildMoves(sourced.value.records, objectiveId: objective.id)
+                if !sourced.value.problems.isEmpty {
+                    Text("\(sourced.value.problems.count) line\(sourced.value.problems.count == 1 ? "" : "s") of the log could not be read. A move recorded on one of those would be missing.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                if moves.isEmpty {
+                    if objective.frontier != nil {
+                        Text("This log has no frontier records for this objective.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else if objective.settlement != nil {
+                        Text("A certificate settles once and moves no frontier, so there are no moves to list.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("The frontier starts at the objective's baseline.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ForEach(Array(moves.reversed().enumerated()), id: \.element.id) { index, move in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("\(move.score)")
+                                    .font(.title3.weight(.semibold))
+                                    .monospacedDigit()
+                                if index == 0 {
+                                    StatusBadge("current", kind: .accent)
+                                }
+                                Spacer()
+                                Text("+\(units(move.paidThisMove))")
+                                    .font(.system(.subheadline, design: .monospaced))
+                            }
+                            HStack {
+                                Text("held by")
+                                    .foregroundStyle(.secondary)
+                                HashText(move.holder)
+                            }
+                            .font(.caption)
+                            HStack {
+                                Text("claim")
+                                    .foregroundStyle(.secondary)
+                                HashText(move.claimId)
+                            }
+                            .font(.caption)
+                            if !move.consistent {
+                                Text("disagrees with settlement (\(units(move.settlementReward)))")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                            Text(move.ts)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    if let frontier = objective.frontier {
+                        let parts = moves.map { units($0.paidThisMove) }.joined(separator: " + ")
+                        Text("\(parts) = \(units(frontier.paid_cumulative)) paid so far of \(units(objective.reward)) funded.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                ProvenanceLine(sourced.provenance)
+            } else if model.health == .live {
+                Button("Read the log for this history") {
+                    Task { await model.loadLog() }
+                }
+            } else {
+                Text("Point the app at a live node to walk the successive states. The snapshot has the current frontier, not the pile that built it.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }

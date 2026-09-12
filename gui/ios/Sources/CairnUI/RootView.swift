@@ -32,6 +32,7 @@ public struct RootView: View {
                     NavigationLink("Chain") { ChainView() }
                     NavigationLink("Log") { LogView() }
                     NavigationLink("Peers") { PeersView() }
+                    NavigationLink("How it works") { HowItWorksView() }
                     NavigationLink("Settings") { SettingsView() }
                 }
                 .navigationTitle("cairn")
@@ -49,6 +50,7 @@ public struct MoreView: View {
     public var body: some View {
         List {
             NavigationLink("Peers") { PeersView() }
+            NavigationLink("How it works") { HowItWorksView() }
             NavigationLink("Settings") { SettingsView() }
             Section {
                 Text("A reader, not a node. Nothing here re-derives a settlement or a chain — it reads what a node published and says where each number came from. The check that means something is `cairn audit` on a copy of the log.")

@@ -269,6 +269,67 @@ public struct LogRecord: Hashable, Identifiable, Sendable {
     /// every record kind the protocol will ever add.
     public var payload: [String: JSONValue]
     public var id: Int { seq }
+
+    public init(
+        seq: Int,
+        kind: String,
+        hash: String,
+        prev: String?,
+        ts: String,
+        payload: [String: JSONValue]
+    ) {
+        self.seq = seq
+        self.kind = kind
+        self.hash = hash
+        self.prev = prev
+        self.ts = ts
+        self.payload = payload
+    }
+}
+
+/// One step in an objective's frontier, as the log recorded it.
+///
+/// `paidThisMove` is this record's `paid_cumulative` minus the previous
+/// frontier record's — arithmetic on two numbers the node published, not a
+/// new one. `settlementReward` is the `settlement` naming the same
+/// `claim_id`, joined by value, not by re-hashing anything.
+public struct FrontierMove: Hashable, Identifiable, Sendable {
+    public var seq: Int
+    public var ts: String
+    public var score: Int
+    public var holder: String
+    public var claimId: String
+    public var paidThisMove: Int
+    public var paidCumulative: Int
+    public var settlementReward: Int?
+    /// Whether this move's own payout matches what `settlement` records for
+    /// the same claim. A mismatch means this node published two records that
+    /// disagree about one payment. `true` when no settlement has landed yet
+    /// — the log may not have reached it.
+    public var consistent: Bool
+    public var id: Int { seq }
+
+    public init(
+        seq: Int,
+        ts: String,
+        score: Int,
+        holder: String,
+        claimId: String,
+        paidThisMove: Int,
+        paidCumulative: Int,
+        settlementReward: Int?,
+        consistent: Bool
+    ) {
+        self.seq = seq
+        self.ts = ts
+        self.score = score
+        self.holder = holder
+        self.claimId = claimId
+        self.paidThisMove = paidThisMove
+        self.paidCumulative = paidCumulative
+        self.settlementReward = settlementReward
+        self.consistent = consistent
+    }
 }
 
 public enum JSONValue: Hashable, Sendable {

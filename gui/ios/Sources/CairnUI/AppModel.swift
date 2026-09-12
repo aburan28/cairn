@@ -23,13 +23,20 @@ public final class AppModel: ObservableObject {
     @Published public var checkpoint: Sourced<CheckpointFacts>
     @Published public var peers: Sourced<[Peer]>?
     @Published public var log: Sourced<ParsedLog>?
+    @Published public var recentNodes: [String]
     @Published public var loading = false
     @Published public var lastError: String?
 
     public let snapshot: Snapshot
     private var client: NodeClient { NodeClient(base: nodeURL) }
+    /// Bumped at the start of every `refresh`. In-flight fetches captured the
+    /// previous value and must not write back after a retarget or a fallback —
+    /// that is how a late `/log` once restored a live table on a snapshot page.
+    private var generation: UInt64 = 0
 
     private static let urlKey = "cairn.nodeURL"
+    private static let recentKey = "cairn.recentNodes"
+    private static let recentLimit = 8
 
     public enum Health: Equatable {
         case checking, live, down
@@ -44,6 +51,7 @@ public final class AppModel: ObservableObject {
         )
         self.snapshot = bundled
         self.nodeURL = nodeURL ?? UserDefaults.standard.string(forKey: Self.urlKey) ?? ""
+        self.recentNodes = UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []
         self.objectives = Sourced(value: bundled.objectives, live: false, origin: bundled.source)
         self.checkpoint = Sourced(value: bundled.checkpoint, live: false, origin: bundled.source)
     }
@@ -63,22 +71,30 @@ public final class AppModel: ObservableObject {
         loading = true
         lastError = nil
         health = .checking
+        generation += 1
+        let token = generation
         defer { loading = false }
 
         let base = await client.resolve()
+        // Assigned before /health is confirmed so Settings can name the host
+        // we tried. LogView must not treat this as a green light — it keys
+        // its fetch on `health == .live`, and `loadLog` re-checks the token.
         resolvedBase = base
         if base.isEmpty {
+            guard token == generation else { return }
             health = .down
             applySnapshot()
             return
         }
         let live = await client.answers(base)
+        guard token == generation else { return }
         health = live ? .live : .down
         if !live {
             applySnapshot(note: "Nothing answered at \(base).")
             lastError = "Nothing answered at \(base)."
             return
         }
+        rememberNode(base)
         dropStale(keeping: base)
         await loadAll(from: base)
     }
@@ -93,19 +109,53 @@ public final class AppModel: ObservableObject {
 
     public func loadLog(from base: String? = nil) async {
         let at = base ?? resolvedBase
+        let token = generation
         guard !at.isEmpty else {
-            log = nil
+            if token == generation { log = nil }
             return
         }
         do {
             let parsed = try await client.fetchLog(at: at)
+            // A refresh can fall back to the snapshot, or retarget, while
+            // this call is in flight. Writing back then would put a live
+            // log on a page that just said nothing answered.
+            guard token == generation, resolvedBase == at, health == .live else { return }
             log = Sourced(value: parsed, live: true, origin: at)
         } catch {
-            // A failed fetch must not keep the previous node's log labelled
-            // live. Nil drops the table; the error is the reason.
+            // Only wipe the table if we still own this origin. A cancelled
+            // older failure must not erase a newer log, and a fallback must
+            // not be "fixed" by a late 404.
+            guard token == generation, resolvedBase == at, health == .live else { return }
             log = nil
             lastError = error.localizedDescription
         }
+    }
+
+    /// Fetch the log only when this origin does not already have one.
+    /// Challenge history and the Log tab share the same bytes; paying twice
+    /// for the ledger is how a phone that opened one objective used to stall.
+    public func loadLogIfNeeded() async {
+        if let log, log.live, log.origin == resolvedBase, health == .live { return }
+        guard health == .live, !resolvedBase.isEmpty else { return }
+        await loadLog()
+    }
+
+    public func rememberNode(_ url: String) {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var next = recentNodes.filter { $0 != trimmed }
+        next.insert(trimmed, at: 0)
+        if next.count > Self.recentLimit {
+            next = Array(next.prefix(Self.recentLimit))
+        }
+        recentNodes = next
+        UserDefaults.standard.set(next, forKey: Self.recentKey)
+    }
+
+    public func useNode(_ url: String) {
+        nodeURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        rememberNode(nodeURL)
+        Task { await refresh() }
     }
 
     public func objective(id: String) -> Objective? {

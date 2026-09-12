@@ -27,21 +27,28 @@ says so. The merkle root and the `cairn audit` command sit at the bottom,
 same as the landing page.
 
 **Objectives.** Searchable, settled hideable, reward-first. A challenge shows
-the statement as untrusted text, the frontier, and the one arithmetic check
-a reader can do for itself: whether paid + remaining exceeds the reward.
+the statement as untrusted text, the current frontier, and the successive
+states that built it (`buildMoves` — the same join as `/frontier` on the
+site). The one arithmetic check a reader can do for itself: whether paid +
+remaining exceeds the reward.
 
 **Chain.** Head, height, ledger head. Walks the links and reports the first
 whose `prev` is not the one before it. A break is shown in red and the head
 is called untrustworthy. Nothing here re-derives the fold.
 
 **Log.** NDJSON, parsed per line. A bad line is named and the rest still
-render.
+render. Expand a row for the record as stored. The fetch waits until a node
+has actually answered — assigning a resolved URL is not the same as live.
 
 **Peers.** Announcements in the log, not live sessions. The copy says so.
 
-**Settings.** The node URL. Cleartext HTTP is allowed because an operator's
-node is often on a LAN or an SSH tunnel, and refusing it would make the app
-unable to read the one thing it exists to read.
+**How it works.** The protocol in one screen. The long form stays on the
+site; this is not a second copy of the payout curve.
+
+**Settings.** The node URL, and the last few that answered. Cleartext HTTP
+is allowed because an operator's node is often on a LAN or an SSH tunnel,
+and refusing it would make the app unable to read the one thing it exists
+to read.
 
 ## Nothing on it is simulated
 

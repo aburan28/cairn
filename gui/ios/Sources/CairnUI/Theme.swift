@@ -3,6 +3,18 @@ import CairnKit
 #if canImport(UIKit)
 import UIKit
 #endif
+#if canImport(AppKit)
+import AppKit
+#endif
+
+func copyToPasteboard(_ value: String) {
+    #if canImport(UIKit)
+    UIPasteboard.general.string = value
+    #elseif canImport(AppKit)
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(value, forType: .string)
+    #endif
+}
 
 /// Semantic colours taken from `ui/app/globals.css`, so the phone and the
 /// site are one palette. Values flip with the system appearance the same
@@ -38,6 +50,11 @@ public struct HashText: View {
             .font(.system(.caption, design: .monospaced))
             .lineLimit(1)
             .help(value)
+            .textSelection(.enabled)
+            .contextMenu {
+                Button("Copy") { copyToPasteboard(value) }
+            }
+            .accessibilityHint("Long press to copy the full value")
     }
 }
 
