@@ -140,6 +140,15 @@ public struct ChainFacts: Codable, Hashable, Sendable {
     public var links: Int
     public var height: Int
     public var ledger_head: String
+
+    // Explicit: a public Codable struct only synthesises `init(from:)`,
+    // which is useless to CairnUI constructing a labelled fallback.
+    public init(head: String, links: Int, height: Int, ledger_head: String) {
+        self.head = head
+        self.links = links
+        self.height = height
+        self.ledger_head = ledger_head
+    }
 }
 
 public struct Checkpoint: Codable, Hashable, Sendable {
@@ -161,6 +170,20 @@ public struct CheckpointFacts: Codable, Hashable, Sendable {
     public var root: String?
     public var issued_at: String
     public var public_key: String
+
+    public init(
+        head: String?,
+        height: Int,
+        root: String?,
+        issued_at: String,
+        public_key: String
+    ) {
+        self.head = head
+        self.height = height
+        self.root = root
+        self.issued_at = issued_at
+        self.public_key = public_key
+    }
 }
 
 public struct Peer: Codable, Hashable, Identifiable, Sendable {
@@ -202,6 +225,18 @@ public struct Snapshot: Codable, Sendable {
     public var chain: ChainFacts
     public var checkpoint: CheckpointFacts
     public var objectives: [Objective]
+
+    public init(
+        source: String,
+        chain: ChainFacts,
+        checkpoint: CheckpointFacts,
+        objectives: [Objective]
+    ) {
+        self.source = source
+        self.chain = chain
+        self.checkpoint = checkpoint
+        self.objectives = objectives
+    }
 }
 
 /// One value and where it came from. The landing page reads three endpoints
