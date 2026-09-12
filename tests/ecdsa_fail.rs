@@ -1352,6 +1352,15 @@ fn the_slicers_own_premium_is_bounded_and_converges() {
         takes.push((slices, run.paid("alice")));
     }
 
+    // Exact, because these are the numbers `docs/threat-model.md` quotes for the
+    // size of the residue. A change to attribution that moves them is a change
+    // to who gets paid, and it should have to come here and edit them.
+    assert_eq!(
+        takes,
+        vec![(1, 151_851u64), (2, 148_676), (4, 147_253), (8, 146_587)],
+        "the premium's measured shape has moved"
+    );
+
     let unchopped = takes[0].1;
     // Monotone: more cuts never pay alice more. (The old rule was monotone too;
     // this is the premise, not the defence.)

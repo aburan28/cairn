@@ -10,7 +10,7 @@ for solved.
 | **front-running the reveal** — copy an artifact out of the mempool and submit it first | commit–reveal binding `H(artifact ‖ submitter ‖ nonce)`; the submitter is inside the hash so a commitment cannot be replayed under another name. The frozen encoding uses `|` separators, so both implementations refuse a submitter containing `|` and prevent shifting bytes between submitter and nonce | handled |
 | **mid-bounty rule change** — edit the evaluator after work has been done | the verifier is part of the objective's content-addressed id, so an edit forks the objective instead of rescoring it. Unrepresentable rather than guarded | handled |
 | **log tampering** — rewrite a settled result | hash-linked entries; `audit` recomputes every hash and re-runs every settled verifier | handled |
-| **log rollback/fork** — publish a shorter or alternate internally valid chain | daemon checkpoints sign height, head, and Merkle root with a separately pinned ML-DSA-65 root key, and `proofwork verify --from <checkpoint> --root-key <pinned>` checks the signature and recomputes head and root over the **prefix** of length `height`. A rewritten entry below the checkpoint, a truncated log, and a forked chain all fail. `--root-key` is what makes it a check: verifying against the key inside the same file authenticates nothing, so the reader must have the key out of band | handled |
+| **log rollback/fork** — publish a shorter or alternate internally valid chain | daemon checkpoints sign height, head, and Merkle root with a separately pinned ML-DSA-65 root key, and `cairn verify --from <checkpoint> --root-key <pinned>` checks the signature and recomputes head and root over the **prefix** of length `height`. A rewritten entry below the checkpoint, a truncated log, and a forked chain all fail. `--root-key` is what makes it a check: verifying against the key inside the same file authenticates nothing, so the reader must have the key out of band | handled |
 | **checkpoint equivocation** — sign two different chains at the same height for two different readers | **not handled.** Each checkpoint is internally valid, so no reader detects it alone; only comparing checkpoints across readers does. Detection needs the checkpoints published somewhere append-only, which is the base-layer anchor Stage 3 argues for | **not handled** |
 | **forged settlement** — pay an unaccepted claim, redirect another claim's reward, or change its amount | both audits reconstruct the accepted claim and its objective, submitter, exact reward and balance delta; a settlement is valid only when the whole payload matches | handled |
 | **verifier-offline attack** — take checkers down so honest submissions "fail" | `UNAVAILABLE` never settles and never refutes; the objective stays open | handled |
@@ -31,6 +31,7 @@ for solved.
 | **availability answer replay** — reuse one entry forever, or across auditors | The sampled index is drawn from `beacon(epoch, anchor)`, so it moves each epoch; the anchor is bounded by the answer's own **position** in the log, so later appends cannot move it under a written answer; and it uses the `EPOCH_SECONDS` constant, never the `CAIRN_EPOCH_SECONDS` override, so the same log audits identically whatever the auditor's environment. The last two were real defects, measured at six failures in ten before the fix, and both read as flakiness rather than as bugs | handled |
 | **citation-flow dilution** — split one improvement into many to starve the contributor you built on | **handled.** Attribution weights δ by each ancestor's *settled reward* rather than decaying per hop, and on a ratchet that reward is the progress the claim moved — so the weights are slicing-invariant by construction. A downstream citer pays the upstream contributor exactly the same however the middle was chopped, and the slicer's own premium converges rather than growing: alice moves under 1% between 16 and 256 slices, against being drained to her direct reward alone under the old rule. Identity-blind, so there is no sybil version — four slices by one submitter and four claims by four give the same distribution, which matters because minting a name is one command. Conserves exactly in integers, with largest-remainder allocation resolved by sorted id so every node reproduces it. Both implementations agree unit for unit on a real settled log. `tests/citation_flow.rs` now pins the *absence* of the attack; `docs/design/citation-flow-dilution.md` records the measurements and the `max_depth` bug found on the way | handled |
 | **frontier rollback** — replay an old lower score as the current best | `audit` rejects a frontier that moves backwards, and a pool paid beyond its size | handled |
+| **ratchet pool stranding** — a frontier lands within `min_improvement` of the target, and no artifact at any score ever settles against that objective again | **partial.** Progress clamps to `baseline - target`, so past that point the largest gain a claim can record is under the gate and the rest of the pool is unreachable by anybody, the funder included, with the log staying consistent throughout. Reachable from a single claim and long before the target. Diagnosed rather than prevented: `Ratchet::is_exhausted` answers it directly, `is_fundable` catches the crude case at post time, `Stall::ClampedByTarget` distinguishes *better but clamped* from *worse* so a contributor holding a genuine advance is not told to discard it, and `frontier_status` reports exhaustion instead of advertising a pool nothing can collect. What is not fixed is the incentive shape: nothing computes the safe interval for `min_improvement`, which must be small enough not to strand the pool and large enough to deter the two slicing rows above — pressures that point opposite ways. `examples/ecdsa-fail/objective-live.json` ships with the shape, paying 4,955,310 of 5,000,000 for reproducing published work and stranding the rest; `tests/ecdsa_fail.rs` pins it with those numbers | partial |
 | **piecework double payment** — get one unit of a divided problem paid twice, by resubmitting it, by resubmitting it under a top-up objective, or by two answers to it landing in one batch | a unit is spoken for by the first *paid* claim that answers it, in beacon order, across every objective with the same verifier and the same `piecework` block — so a top-up inherits the original's history and a second answer in the same batch mints nothing. `audit` re-derives every payment and reports a unit paid more than once or a unit paid other than `min(unit_price, remaining)`. Both implementations agree on the `piecework` conformance section and on the demo log | handled |
 | **piecework unit griefing** — close the units of a divided problem with wrong answers so honest work on them earns nothing | only a *paid* claim consumes a unit. A rejected answer leaves the unit open, and so does an accepted one that arrived after the pool ran dry, so no unpaid claim can deny anyone a payment | handled |
 | **relabelled distinguished point** — re-mint a public point of a rho search by resubmitting it with a different walker index or step count, alone or inside a batch | the single-point checkers accept exactly the four keys `x, y, a, b`, require the canonical `y` and lowercase minimal hex, and novelty keys on the artifact digest, so one point has one spelling and a copy is the same unit. A batch objective carries provenance per element, so there its piecework block keys novelty on `["x", "y", "a", "b"]` and the walker index and step count are not part of what is new; a batch that lists one point twice is refused by the checker, and one that re-lists a paid point is paid for its novel elements only. Two honest peers who reach one point hold *different* coefficients, and that pair is the collision that solves the instance, so both are paid on purpose | handled |
@@ -60,7 +61,7 @@ for solved.
 | **wrong-content manifest** — offer a manifest describing something else | checked against the digest the objective already committed to, before a byte is transferred. This is the step BitTorrent cannot take: a `.torrent` must be obtained out of band and believed, whereas here the ledger fixed the digest first | handled |
 | **submission-queue flooding** — POST endless distinct records to fill an operator's disk | **partial.** The spool is content-addressed so a retry is free, and `--max-queue` (4096 by default) refuses past that many undrained records with a 429 that says the work was not lost. That bounds disk, which is the version of the attack that stops a node writing its own log. It does not bound *effort*: an attacker who drains and refills, or who spreads across identities, still costs the operator drains. Separating those needs a submission that costs something to make -- Stage 1's bonds | partial |
 | **forged submission over HTTP** — POST a claim under somebody else's `submitter` | **partial.** A submitter that is 64 lowercase hex characters *is* an ed25519 public key, and a record naming one is refused unless it carries a signature that verifies under it — enforced in both implementations, before anything is written, at `commit` and `reveal` alike. The name is the key, so the binding needs no registry and no migration: an identity used once cannot be worn by anyone else, and the signature covers the record, so it cannot be replayed onto a different one. An objective may additionally set `require_signed_submitter`, which refuses nickname submitters outright — so a funder who wants every claim attributable can make that a rule of the bounty rather than a request in its statement. What remains: a nickname submitter on an objective that does *not* set the flag is unauthenticated exactly as before, which is what keeps Stage-0 logs working, and nothing stops someone registering a key nobody has heard of — this makes an identity unforgeable, not attributable to a person | partial |
-| **queue flooding** — fill an operator's spool directory with junk | partial. Bodies are capped (`MAX_BODY_BYTES`), concurrent connections are capped, and the spool is content-addressed so a retry or a replay of the same bytes is one file rather than many. What is *not* bounded is a stream of distinct well-formed records, each of which costs a file and a drain-time rule check. An operator exposing `proofwork-serve` to the open internet needs a rate limiter in front of it, the same as any other small service | partial |
+| **queue flooding** — fill an operator's spool directory with junk | partial. Bodies are capped (`MAX_BODY_BYTES`), concurrent connections are capped, and the spool is content-addressed so a retry or a replay of the same bytes is one file rather than many. What is *not* bounded is a stream of distinct well-formed records, each of which costs a file and a drain-time rule check. An operator exposing `cairn serve` to the open internet needs a rate limiter in front of it, the same as any other small service | partial |
 | **a lying published log** — an operator serves a log that is not what they settled | the log is served byte for byte and the reader re-derives it: `verify --from` checks an ML-DSA-65 signature over `(height, head, merkle_root)` and recomputes both over the prefix, and `audit` re-runs every pinned verifier. A server that altered a record fails all of it. The residual, and it is not solvable at this layer: the *root key* must be obtained from somewhere the reader already trusts, because a key served beside what it authenticates authenticates nothing | handled, given the key |
 | **oversized-claim DoS** — announce a 64 GiB blob, or a 4 GiB frame | a frame's length prefix is checked before anything is allocated; a manifest above the node's own `max_blob` is refused; pieces are held individually as they arrive rather than preallocated from a declared length. A node that preallocates from a stranger's claim has been told how much memory to use | handled |
 | **hostile address source** — a seized domain, a poisoned resolver, or a malicious relay substitutes a different machine | a peer record is signed by the key that *is* the peer, so editing an address invalidates it. Any source of hints is therefore equally safe and none is privileged: DNS, gossip and a pasted string land in the same table under the same check. A replayed old record cannot displace a newer one (`seq`), so a hostile carrier's only power is to withhold or be out of date | handled |
@@ -106,48 +107,92 @@ for solved.
 | **result withholding** — find something extraordinary and walk away | escrow makes it cost the bounty. Nothing makes it impossible | unsolvable |
 | **post-hoc statistics** — choose the success criterion after seeing data | the `statistical` verifier puts the pinned statistic, its sha256, the threshold, the direction and the seed inside the objective, so all of them are part of its content-addressed id. Picking a criterion after seeing the data means posting a *different* objective with a different id, in public, after the fact | handled |
 | **seed shopping** — rerun a Monte Carlo statistic until one draw clears the threshold | the seed is pinned in the objective and passed to `statistic(artifact, seed)`; the same artifact therefore always produces the same number on every honest node. A submitter can still search *artifacts* against a fixed seed, which is the objective doing its job | handled |
-| **malformed objective input to a schema** — post a record that decodes but means something else | **partial.** The CLI's `post` and `reveal`, and `proofwork-mcp`'s `submit_claim`, validate the body against `spec/objective.schema.json` / `spec/claim.schema.json` before decoding, and refuse rather than append. Both implementations interpret the schema documents rather than reimplementing them, so a schema change cannot silently apply to one and not the other. Not yet gated: records arriving over `p2p::sync` go through the Rust decoders' structural checks but not the published schema | partial |
+| **malformed objective input to a schema** — post a record that decodes but means something else | **partial.** The CLI's `post` and `reveal`, and `cairn mcp`'s `submit_claim`, validate the body against `spec/objective.schema.json` / `spec/claim.schema.json` before decoding, and refuse rather than append. Both implementations interpret the schema documents rather than reimplementing them, so a schema change cannot silently apply to one and not the other. Not yet gated: records arriving over `p2p::sync` go through the Rust decoders' structural checks but not the published schema | partial |
 
-## Slicing, and why telescoping is not enough
+## Slicing: which half telescoping covers, and which half replaced it
 
 The ratchet was built on a specific promise: **chopping an improvement into
 small steps pays exactly what one big step pays**, so publishing partial results
 early costs nothing and the hoarding incentive disappears. `frontier.rs` proves
 that for the direct reward, and the proof is correct.
 
-It is only half the mechanism. A settled claim also *sends* value upstream, and
-that flow decays per citation **hop**. Chopping adds hops. So:
+It was only half the mechanism. A settled claim also *sends* value upstream, and
+under the original per-hop rule that flow decayed δ per citation **hop**.
+Chopping adds hops, so chopping was free in direct reward and strictly
+profitable in flow — 256 slices drove the upstream contributor's citation flow
+to *zero*, which made slicing the dominant strategy rather than an exotic
+attack and inverted the payout result the README uses to argue that publishing
+beats hoarding.
 
-| | alice | bob | carol |
-|---|---|---|---|
-| as published in the README | 425,000 | 375,000 | 300,000 |
-| bob slices 12→16 into four 1-point steps | 333,592 | **466,408** | 300,000 |
+**`payouts_over` now weights δ by each ancestor's settled reward** instead of
+decaying per hop. On a ratchet an ancestor's settled reward *is* the progress it
+moved, and telescoping guarantees the slices of one improvement sum to the
+unsliced reward, so the weights are slicing-invariant by construction.
+[design/citation-flow-dilution.md](design/citation-flow-dilution.md) records the
+measurements and the `max_depth` bug found on the way.
 
-bob does identical work for an identical direct reward and takes 91,408 from
-alice. He is not exploiting a bug in the arithmetic — every claim is a genuine
-improvement and every payment is conserved. He is responding to the incentive
-the mechanism actually creates, which is not the one it was designed to create.
-A participant who declines to slice is leaving money on the table, so this is
-the dominant strategy rather than an exotic attack.
+That closes one half **exactly** and leaves the other **bounded**, and the two
+are worth stating separately because only one of them is a guarantee:
 
-**The fix, and what it costs.** Attribution asks the citation DAG "how many hops
-back?", when for a ratcheted objective the frontier ledger already records the
-better answer: `(claim_id, holder, score, paid_cumulative)` gives the *distance*
-each submitter moved, and distance is invariant to chopping by construction.
-Weighting flow by distance rather than hop count makes slicing neutral, which is
-what telescoping was already committed to.
+- **The downstream half is closed exactly.** However finely bob chops his work,
+  a later contributor building on him pays alice precisely the same. This is the
+  half the weighting was designed for.
+- **The slicer's own steps still pay each other.** Each of bob's later slices
+  counts his earlier slices as ancestors, so alice's weight is diluted by bob's
+  own reward in the denominator. Measured on a settled log, alice takes 151,851
+  unchopped and 146,587 against eight slices — 96.5% — and the marginal cost of
+  each further doubling shrinks (3,175 then 1,423 then 666), so it **converges**
+  rather than growing, where the per-hop rule extracted all of it.
 
-The cost is that distance-weighting must aggregate per **submitter** to stop a
-slicer's own steps paying each other — and that requires an identity layer.
-Under sybils, one participant can present as several and the aggregation fails.
-So this is a case where the roadmap ordering is load-bearing rather than
-cosmetic: **identity is a prerequisite for fair attribution, not a later
-convenience.** Slicing-invariance and sybil-resistance cannot both be had
-without it.
+The residual is not a leak a better rule would remove: it is the mechanism
+pricing a longer dependency chain, and a small bounded premium for publishing in
+many steps rather than one is not a bug in a system built to make publishing
+immediately profitable. It is also **identity-blind** — eight slices under eight
+names distribute exactly as eight under one, which matters because `cairn
+identity` makes minting a name one command — so unlike the distance-weighted
+alternative it does not need an identity layer to hold.
+
+Both halves are pinned. `tests/citation_flow.rs` asserts them through
+`payouts_over` on fixtures; `tests/ecdsa_fail.rs` asserts them on a ratchet log
+the rules engine actually settled, which matters because the conformance vectors
+pin the per-hop `flow` and not the weighted rule that moves the money.
+
+## A ratchet can strand its own pool, and the shipped example does
+
+`Ratchet::progress` clamps to `baseline - target`, so once the frontier lands
+within `min_improvement` of the target the largest gain any further claim can
+record is smaller than the gate — and **no artifact at any score settles against
+that objective again**. The remainder of the pool is unreachable by anybody,
+including the funder, and the log stays perfectly consistent while it happens.
+
+It is reachable from a single claim and long before the target.
+`examples/ecdsa-fail/objective-live.json` has the shape today: `min_improvement`
+is 100,000,000 and the published world best leaves 83,649,332 of span, so the
+first accepted submission takes 4,955,310 of the 5,000,000 pool for reproducing
+already-published work, 44,690 units are stranded, and a later claim beating the
+world record by 2.3% is admitted, verified, and paid nothing.
+
+Partly handled, and the honest split is between the *diagnosis* and the *shape*:
+
+- **Diagnosed.** `Ratchet::is_exhausted` answers "can this frontier move again"
+  directly, `Ratchet::is_fundable` catches the crude case at post time,
+  `Stall::ClampedByTarget` words the refusal as *better than the frontier, and no
+  larger improvement gains more* rather than as a regression — the conflation
+  that would tell a contributor holding a world record to discard it — and
+  `frontier_status` reports exhaustion instead of advertising a pool nothing can
+  collect. `tests/ecdsa_fail.rs` pins all of it against the live objective's own
+  numbers.
+- **Not fixed.** The incentive shape. A funder must pick `min_improvement` small
+  enough not to strand the pool and large enough to deter epsilon-farming and
+  the verifier-compute exhaustion row above, and those pressures point opposite
+  ways. Nothing computes the safe interval, nothing refuses a bounty that pays
+  most of itself for reproducing known work, and the live example still ships
+  mis-set — deliberately, since repricing a posted bounty changes its content
+  address and is the funder's call.
 
 ## Agents as contributors
 
-`proofwork-mcp` lets an agent pull objectives and submit against them. That is
+`cairn mcp` lets an agent pull objectives and submit against them. That is
 mostly *good* for this threat model: an agent that hallucinates an answer gets a
 `REJECT`, earns zero, and costs the network nothing. The design never needed the
 contributor to be reliable — only the checker to be pinned — and a language
@@ -220,7 +265,7 @@ that honours it is not wired up. Until it is, this row is **partial**, and an
 There is no identity layer, no stake, no dispute mechanism, and no consensus.
 A single operator can refuse to include a submission or can post objectives in
 bad faith. What the operator *cannot* do is lie about a settled result: the log
-is hash-linked and `proofwork audit` re-derives every verdict from the artifacts
+is hash-linked and `cairn audit` re-derives every verdict from the artifacts
 themselves. That is the specific, narrow guarantee this stage makes, and
 overstating it would be the first dishonest thing in the project.
 
