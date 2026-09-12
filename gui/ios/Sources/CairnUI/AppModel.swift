@@ -99,10 +99,16 @@ public final class AppModel: ObservableObject {
         }
         do {
             let parsed = try await client.fetchLog(at: at)
+            // After the await, like applyRecord. resolvedBase is assigned
+            // before /health, so matching origin alone would restore a live
+            // log after applySnapshot; a cancelled fetch becomes unreachable
+            // and must not nil a log a newer request already wrote.
+            guard resolvedBase == at, health != .down else { return }
             log = Sourced(value: parsed, live: true, origin: at)
         } catch {
             // A failed fetch must not keep the previous node's log labelled
             // live. Nil drops the table; the error is the reason.
+            guard resolvedBase == at, health != .down else { return }
             log = nil
             lastError = error.localizedDescription
         }
