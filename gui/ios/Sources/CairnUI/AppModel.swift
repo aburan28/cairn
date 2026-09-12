@@ -79,6 +79,7 @@ public final class AppModel: ObservableObject {
             lastError = "Nothing answered at \(base)."
             return
         }
+        dropStale(keeping: base)
         await loadAll(from: base)
     }
 
@@ -92,11 +93,17 @@ public final class AppModel: ObservableObject {
 
     public func loadLog(from base: String? = nil) async {
         let at = base ?? resolvedBase
-        guard !at.isEmpty else { return }
+        guard !at.isEmpty else {
+            log = nil
+            return
+        }
         do {
             let parsed = try await client.fetchLog(at: at)
             log = Sourced(value: parsed, live: true, origin: at)
         } catch {
+            // A failed fetch must not keep the previous node's log labelled
+            // live. Nil drops the table; the error is the reason.
+            log = nil
             lastError = error.localizedDescription
         }
     }
@@ -108,36 +115,46 @@ public final class AppModel: ObservableObject {
     public func fillRecord(for id: String) async {
         let at = resolvedBase
         guard !at.isEmpty else { return }
-        guard let index = objectives.value.firstIndex(where: { $0.id == id }) else { return }
-        guard objectives.value[index].record == nil else { return }
-        if let record = try? await client.fetchObjective(at: at, id: id) {
-            var next = objectives.value
-            next[index].record = record
-            objectives = Sourced(value: next, live: objectives.live, origin: objectives.origin)
-        }
+        guard objectives.value.contains(where: { $0.id == id && $0.record == nil }) else { return }
+        guard let record = try? await client.fetchObjective(at: at, id: id) else { return }
+        // Look up by id *after* the await. A refresh can replace the list
+        // while this call is in flight; writing back at a captured index
+        // would attach another objective's ratchet or trap out of bounds.
+        applyRecord(id: id, record: record, expectedOrigin: at)
     }
 
     private func loadObjectives(from base: String) async {
         do {
-            var list = try await client.fetchObjectives(at: base)
+            let list = try await client.fetchObjectives(at: base)
             if list.isEmpty {
                 objectives = Sourced(value: snapshot.objectives, live: false, origin: snapshot.source)
                 return
             }
-            // Detail is an enhancement: fetch records after the list is on
-            // screen. A failure leaves the summary standing.
-            for i in list.indices {
-                if list[i].record == nil, let record = try? await client.fetchObjective(at: base, id: list[i].id) {
-                    list[i].record = record
+            // Publish the summary first. Detail is an enhancement and used
+            // to run before this assignment, so Overview stayed on the
+            // snapshot and `refresh` held `loading` until every
+            // `/objective/{id}` returned.
+            objectives = Sourced(value: list, live: true, origin: base)
+            for objective in list where objective.record == nil {
+                if let record = try? await client.fetchObjective(at: base, id: objective.id) {
+                    applyRecord(id: objective.id, record: record, expectedOrigin: base)
                 }
             }
-            objectives = Sourced(value: list, live: true, origin: base)
         } catch {
             objectives = Sourced(
                 value: snapshot.objectives, live: false, origin: snapshot.source,
                 note: error.localizedDescription
             )
         }
+    }
+
+    private func applyRecord(id: String, record: ObjectiveRecord, expectedOrigin: String) {
+        guard objectives.origin == expectedOrigin,
+              let index = objectives.value.firstIndex(where: { $0.id == id })
+        else { return }
+        var next = objectives.value
+        next[index].record = record
+        objectives = Sourced(value: next, live: objectives.live, origin: objectives.origin, note: objectives.note)
     }
 
     private func loadChain(from base: String) async {
@@ -208,5 +225,15 @@ public final class AppModel: ObservableObject {
             origin: snapshot.source
         )
         checkpoint = Sourced(value: snapshot.checkpoint, live: false, origin: snapshot.source)
+        // The snapshot has no log or peer list. Leaving the previous node's
+        // here would show them with a live provenance line after a fallback.
+        log = nil
+        peers = nil
+    }
+
+    /// Drop auxiliary pages that still name a different origin.
+    private func dropStale(keeping origin: String) {
+        if log?.origin != origin { log = nil }
+        if peers?.origin != origin { peers = nil }
     }
 }

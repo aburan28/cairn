@@ -63,8 +63,10 @@ public struct LogView: View {
             await model.refresh()
             await model.loadLog()
         }
-        .task {
-            if model.log == nil, !model.resolvedBase.isEmpty {
+        .task(id: model.resolvedBase) {
+            // Keyed on the resolved node so a retarget drops the previous
+            // log instead of leaving it up because `log` was already set.
+            if !model.resolvedBase.isEmpty {
                 await model.loadLog()
             }
         }

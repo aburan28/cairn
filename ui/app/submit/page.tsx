@@ -360,7 +360,7 @@ export default function Page() {
                         connecting one could only look like it worked.
                       </>
                     )}
-                    {onPhone && !evmOnly && (
+                    {onPhone && (
                       <>
                         {" "}
                         Safari (and Chrome) on a phone do not inject wallets.
