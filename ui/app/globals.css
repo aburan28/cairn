@@ -164,6 +164,33 @@
     scroll-behavior: smooth;
   }
 
+  /* Home-screen / notched-phone gutters. `viewport-fit: cover` is set in
+     layout.tsx so these are non-zero; without it they stay 0px and the
+     sticky header sits under the status bar. The header claims the top
+     inset so it can draw under the status bar while its content clears
+     it; the footer claims the bottom so the last line is not under the
+     home indicator. Left/right use max() so a 1rem page gutter still
+     wins on a device with no inset. */
+  .shell-header {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .shell-gutter {
+    padding-left: max(1rem, env(safe-area-inset-left, 0px));
+    padding-right: max(1rem, env(safe-area-inset-right, 0px));
+  }
+
+  @media (min-width: 640px) {
+    .shell-gutter {
+      padding-left: max(1.5rem, env(safe-area-inset-left, 0px));
+      padding-right: max(1.5rem, env(safe-area-inset-right, 0px));
+    }
+  }
+
+  .shell-footer {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     html {
       scroll-behavior: auto;

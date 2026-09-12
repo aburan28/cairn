@@ -104,3 +104,11 @@ settled = sum(1 for o in objectives if o.get("frontier"))
 print(f"snapshot: {len(objectives)} objective(s), {settled} with a frontier, "
       f"{chain['links']} chain link(s), root {checkpoint['root'][:14]}…")
 PY
+
+# The iOS reader ships the same fallback and must not grow a second copy that
+# someone regenerates independently. Byte-identical, so a field the site just
+# started reading is a field the phone just started reading.
+IOS_SNAPSHOT=gui/ios/Sources/CairnKit/Resources/snapshot.json
+if [ -d "$(dirname "$IOS_SNAPSHOT")" ]; then
+  cp "$OUT" "$IOS_SNAPSHOT"
+fi

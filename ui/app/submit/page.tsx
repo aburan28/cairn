@@ -24,6 +24,7 @@ import {
   connect,
   hasEvmOnly,
   isKeyShaped,
+  isMobileBrowser,
   signPayload,
 } from "@/lib/wallet";
 import { NODE_URL } from "@/lib/objectives";
@@ -75,6 +76,7 @@ export default function Page() {
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [wallets, setWallets] = useState<{ kind: string; label: string }[]>([]);
   const [evmOnly, setEvmOnly] = useState(false);
+  const [onPhone, setOnPhone] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
 
   const [loadNote, setLoadNote] = useState<{ tone: "accent" | "warn" | "bad"; text: string } | null>(
@@ -101,6 +103,9 @@ export default function Page() {
   useEffect(() => {
     setWallets(available());
     setEvmOnly(hasEvmOnly());
+    // After mount: a UA read during prerender would disagree with the phone
+    // that hydrates, and the extra sentence would be a hydration warning.
+    setOnPhone(isMobileBrowser());
     // Reconnect silently if this origin is already trusted, so a returning
     // funder is not made to approve the same page again.
     void (async () => {
@@ -354,9 +359,25 @@ export default function Page() {
                         Ed25519 key. There is no conversion between the two, so
                         connecting one could only look like it worked.
                       </>
+                    )}
+                    {onPhone && !evmOnly && (
+                      <>
+                        {" "}
+                        Safari (and Chrome) on a phone do not inject wallets.
+                        Open this page in <b>Phantom&rsquo;s in-app browser</b>{" "}
+                        — Browse, then this URL — which is the one place on iOS
+                        that `signMessage` exists. The native reader in{" "}
+                        <a
+                          className="text-accent hover:underline"
+                          href={repoLink("gui/ios/")}
+                        >
+                          gui/ios
+                        </a>{" "}
+                        reads a node; it does not sign.{" "}
+                      </>
                     )}{" "}
-                    Phantom, Solflare and Backpack all work. Or fund under a plain
-                    name below.
+                    Phantom, Solflare and Backpack all work on a desktop. Or fund
+                    under a plain name below.
                   </p>
                 )}
               </div>

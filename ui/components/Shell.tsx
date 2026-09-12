@@ -58,8 +58,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
         Skip to content
       </a>
 
-      <header className="sticky top-0 z-30 border-b border-edge bg-canvas/85 backdrop-blur-md">
-        <div className="mx-auto flex h-14 max-w-[78rem] items-center gap-3 px-4 sm:px-6">
+      <header className="shell-header sticky top-0 z-30 border-b border-edge bg-canvas/85 backdrop-blur-md">
+        <div className="shell-gutter mx-auto flex h-14 max-w-[78rem] items-center gap-3">
           <Link
             href="/"
             className="flex shrink-0 items-center gap-2 text-[14px] font-semibold tracking-tight"
@@ -112,7 +112,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             six items behind a tap for no gain at this count. */}
         <nav
           aria-label="Primary, compact"
-          className="flex gap-1 overflow-x-auto border-t border-edge px-4 py-1.5 lg:hidden"
+          className="shell-gutter flex gap-1 overflow-x-auto border-t border-edge py-1.5 lg:hidden"
         >
           {ROUTES.map((route) => {
             const active = pathname === route.href || pathname === `${route.href}/`;
@@ -132,7 +132,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </nav>
       </header>
 
-      <main id="content" className="mx-auto max-w-[78rem] px-4 py-8 sm:px-6 sm:py-10">
+      <main id="content" className="shell-gutter mx-auto max-w-[78rem] py-8 sm:py-10">
         {children}
       </main>
 
@@ -355,14 +355,17 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
 
 function Footer() {
   return (
-    <footer className="mt-16 border-t border-edge bg-surface">
-      <div className="mx-auto max-w-[78rem] px-4 py-8 sm:px-6">
+    <footer className="shell-footer mt-16 border-t border-edge bg-surface">
+      <div className="shell-gutter mx-auto max-w-[78rem] py-8">
         <div className="flex flex-wrap gap-x-5 gap-y-2 text-[13px]">
           <a className="text-accent hover:underline" href={REPO}>
             source
           </a>
           <a className="text-accent hover:underline" href={`${REPO}/releases/latest`}>
             releases
+          </a>
+          <a className="text-accent hover:underline" href={repoLink("gui/ios/")}>
+            iOS
           </a>
           <Link className="text-accent hover:underline" href="/docs">
             docs

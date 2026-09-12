@@ -1,0 +1,280 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A11C00000000000000000001 /* CairnApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A12C00000000000000000001 /* CairnApp.swift */; };
+		A11C00000000000000000002 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A12C00000000000000000002 /* Assets.xcassets */; };
+		A11C00000000000000000003 /* CairnKit in Frameworks */ = {isa = PBXBuildFile; productRef = A13C00000000000000000001 /* CairnKit */; };
+		A11C00000000000000000004 /* CairnUI in Frameworks */ = {isa = PBXBuildFile; productRef = A13C00000000000000000002 /* CairnUI */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A12C00000000000000000001 /* CairnApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CairnApp.swift; sourceTree = "<group>"; };
+		A12C00000000000000000002 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A12C00000000000000000003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A12C00000000000000000004 /* Cairn.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Cairn.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A14C00000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11C00000000000000000003 /* CairnKit in Frameworks */,
+				A11C00000000000000000004 /* CairnUI in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A15C00000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A15C00000000000000000002 /* App */,
+				A15C00000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A15C00000000000000000002 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				A12C00000000000000000001 /* CairnApp.swift */,
+				A12C00000000000000000002 /* Assets.xcassets */,
+				A12C00000000000000000003 /* Info.plist */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		A15C00000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A12C00000000000000000004 /* Cairn.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A16C00000000000000000001 /* Cairn */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A18C00000000000000000002 /* Build configuration list for PBXNativeTarget "Cairn" */;
+			buildPhases = (
+				A17C00000000000000000001 /* Sources */,
+				A14C00000000000000000001 /* Frameworks */,
+				A17C00000000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Cairn;
+			packageProductDependencies = (
+				A13C00000000000000000001 /* CairnKit */,
+				A13C00000000000000000002 /* CairnUI */,
+			);
+			productName = Cairn;
+			productReference = A12C00000000000000000004 /* Cairn.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10C00000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+			};
+			buildConfigurationList = A18C00000000000000000001 /* Build configuration list for PBXProject "Cairn" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A15C00000000000000000001;
+			packageReferences = (
+				A19C00000000000000000001 /* XCLocalSwiftPackageReference "." */,
+			);
+			productRefGroup = A15C00000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A16C00000000000000000001 /* Cairn */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A17C00000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11C00000000000000000002 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A17C00000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11C00000000000000000001 /* CairnApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A1A000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		A1A000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_OPTIMIZATION_LEVEL = s;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A1A000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = cairn;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.cairn.reader;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A1A000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = cairn;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.cairn.reader;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A18C00000000000000000001 /* Build configuration list for PBXProject "Cairn" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1A000000000000000000001 /* Debug */,
+				A1A000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A18C00000000000000000002 /* Build configuration list for PBXNativeTarget "Cairn" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1A000000000000000000003 /* Debug */,
+				A1A000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A19C00000000000000000001 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A13C00000000000000000001 /* CairnKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A19C00000000000000000001 /* XCLocalSwiftPackageReference "." */;
+			productName = CairnKit;
+		};
+		A13C00000000000000000002 /* CairnUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A19C00000000000000000001 /* XCLocalSwiftPackageReference "." */;
+			productName = CairnUI;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A10C00000000000000000001 /* Project object */;
+}
