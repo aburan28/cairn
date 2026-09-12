@@ -399,3 +399,12 @@ jobs:
       # OpenSSL carries either, and thirty-four malformed artifacts that must
       # score rather than raise.
       - run: python3 examples/hash-differential/tools/selftest.py
+      # The ecdsa-fail demo, run the way its README tells a reader to run it.
+      # `check-examples.sh` follows both of its objectives' pins and posts them,
+      # which is what stopped the pins rotting and nothing else: it never
+      # commits, reveals, or settles. This walks the minimize ratchet end to end
+      # against the real CLI, and it also guards the mode bit -- all three of
+      # this example's scripts shipped 100644, so every quick-start line in its
+      # README died on "Permission denied" for anyone who cloned the repository,
+      # which no test noticed because no test ran them.
+      - run: ./examples/ecdsa-fail/demo.sh
