@@ -6,7 +6,13 @@ import type { MetadataRoute } from "next";
  * (a node that just settled has a different frontier, and a cached answer
  * would show a pool that is no longer there). The icons are the same mark
  * the tab already uses, so a home-screen tile cannot drift from the favicon.
+ *
+ * `force-static` because this app is `output: "export"` — a dynamic
+ * `/manifest.webmanifest` route has no server to run on, and the build
+ * refuses it. The file never depended on a request anyway.
  */
+export const dynamic = "force-static";
+
 export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "cairn",
