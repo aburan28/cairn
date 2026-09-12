@@ -4188,6 +4188,31 @@ fn post_objective_file(
                     ratchet.span()
                 ),
             );
+        } else if let Ok(stranded) = ratchet.max_stranded() {
+            // The same failure a size down, and the one that actually happens.
+            // `is_fundable` only catches a gate wider than the entire span; a
+            // gate merely wider than the *last stretch* of it shuts the objective
+            // early instead of never, which looks like success until somebody
+            // holding a genuine advance is refused. The funder can still repost,
+            // and after the first claim nobody can undo it -- so the numbers go
+            // out here, where they are still actionable.
+            if stranded > 0 {
+                // One line, and it is the comparison the funder has to make: a
+                // closing score the field can already reach means the first
+                // honest submission ends the bounty. The node cannot know the
+                // state of the art, so it names the score rather than judging it.
+                say(
+                    out,
+                    format!(
+                        "  note: closes for good at score {}, leaving up to {stranded} of {} \
+ unpaid. If that score is already achievable, the first accepted claim ends this \
+ objective; a smaller min_improvement than {} moves it toward the target.",
+                        ratchet.closes_at(),
+                        ratchet.reward,
+                        ratchet.min_improvement
+                    ),
+                );
+            }
         }
     }
 
@@ -9507,6 +9532,91 @@ mod tests {
                 .to_string()
         };
         assert_ne!(id_of(&clean), id_of(&warned));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn post_names_the_score_a_progressive_objective_closes_at() {
+        // The funder-facing half of ratchet pool stranding. `is_fundable` only
+        // catches a gate wider than the whole span -- a bounty that can never
+        // pay. The case that actually happens is a gate wider than the *last
+        // stretch*, which shuts the objective early instead of never, and looks
+        // like success until somebody holding a genuine advance is refused. Once
+        // the first claim lands nobody can undo it, so the numbers have to reach
+        // the funder here, while a repost is still possible.
+        use cairn::canonical::digest_bytes;
+        let (dir, options, objective) = bundle_with_objective();
+
+        // A ratchet needs a verifier that produces a *score*, so the fixture's
+        // certificate checker will not do: `post` refuses the pairing outright,
+        // which is its own defence and not the one under test here.
+        let source = b"def score(artifact):\n    return artifact.get('n', 0)\n";
+        std::fs::write(dir.join("e.py"), source).expect("write evaluator");
+        let pin = digest_bytes(source)
+            .strip_prefix("sha256:")
+            .expect("prefixed")
+            .to_string();
+
+        let ratcheted = |min_improvement: i128| {
+            let mut with = objective.clone();
+            if let Value::Object(map) = &mut with {
+                map.insert(
+                    "verifier".to_string(),
+                    Value::object([
+                        ("kind", Value::string("evaluator")),
+                        ("evaluator", Value::string("e.py")),
+                        ("evaluator_sha256", Value::string(pin.clone())),
+                        ("entrypoint", Value::string("score")),
+                        ("threshold", Value::Int(1)),
+                        ("direction", Value::string("maximize")),
+                    ]),
+                );
+                // One pool, not two: `post` refuses a ratchet whose reward
+                // disagrees with the objective's, so both move together.
+                map.insert("reward".to_string(), Value::Int(1_000_000));
+                map.insert(
+                    "ratchet".to_string(),
+                    Value::object([
+                        ("baseline", Value::Int(0)),
+                        ("target", Value::Int(100)),
+                        ("reward", Value::Int(1_000_000)),
+                        ("direction", Value::string("maximize")),
+                        ("min_improvement", Value::Int(min_improvement)),
+                    ]),
+                );
+            }
+            with
+        };
+
+        // A gate of 10 on a span of 100 shuts the objective at 91 and leaves 9%
+        // of the pool unreachable. Both numbers are named.
+        let coarse = post_to_string(&options, &ratcheted(10), &dir);
+        assert!(coarse.contains("closes for good at score 91"), "{coarse}");
+        assert!(coarse.contains("90000 of 1000000"), "{coarse}");
+        assert!(coarse.contains("min_improvement"), "{coarse}");
+
+        // A gate of 1 strands nothing -- the only closing score is the target --
+        // so it says nothing. A note on every progressive objective would be
+        // noise, and noise is how the ones that matter get skipped.
+        let fine = post_to_string(&options, &ratcheted(1), &dir);
+        assert!(
+            !fine.contains("closes for good"),
+            "a ratchet that strands nothing still warned: {fine}"
+        );
+
+        // And the unwinnable case keeps its own, sterner wording rather than
+        // being folded into this one: "never pays" and "pays and then shuts" are
+        // different problems with different fixes.
+        let doomed = post_to_string(&options, &ratcheted(101), &dir);
+        assert!(
+            doomed.contains("exceeds the whole baseline-to-target span"),
+            "{doomed}"
+        );
+        assert!(
+            !doomed.contains("closes for good"),
+            "the unwinnable case should not also claim it closes early: {doomed}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

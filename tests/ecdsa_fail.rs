@@ -1015,10 +1015,36 @@ fn the_live_objective_strands_its_own_pool() {
         ratchet.reward
     );
 
-    // The objective is now shut. `is_exhausted` says so directly.
+    // The objective is now shut, and both halves of that are answerable from the
+    // frontier the engine actually wrote rather than from the arithmetic alone.
+    let held = run
+        .node
+        .frontier_of(&run.objective.id())
+        .expect("a frontier");
     assert!(
-        ratchet.is_exhausted(WORLD_BEST),
+        ratchet.is_exhausted(held.score),
         "the ratchet should know it can never move again"
+    );
+    assert_eq!(
+        ratchet.stranded_at(held.score).expect("a live curve"),
+        stranded,
+        "the stranded figure has to agree with what the log paid"
+    );
+    // And the worst case a funder could have been told at post time bounds what
+    // actually happened here, which is the property that makes `max_stranded`
+    // worth printing before anybody commits money to a curve.
+    assert!(
+        ratchet.max_stranded().expect("a live curve") >= stranded,
+        "the post-time bound {} did not cover the outcome {stranded}",
+        ratchet.max_stranded().unwrap()
+    );
+    // The score at which this bounty shuts is worse than work that already
+    // existed when it was written, which is the whole defect in one comparison.
+    assert!(
+        ratchet.closes_at() > WORLD_BEST,
+        "a bounty whose closing score {} is beaten by the published record is \
+         dead on arrival",
+        ratchet.closes_at()
     );
 
     // And it is shut against real advances, not just against spam. Each of these

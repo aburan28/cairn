@@ -31,7 +31,7 @@ for solved.
 | **availability answer replay** — reuse one entry forever, or across auditors | The sampled index is drawn from `beacon(epoch, anchor)`, so it moves each epoch; the anchor is bounded by the answer's own **position** in the log, so later appends cannot move it under a written answer; and it uses the `EPOCH_SECONDS` constant, never the `CAIRN_EPOCH_SECONDS` override, so the same log audits identically whatever the auditor's environment. The last two were real defects, measured at six failures in ten before the fix, and both read as flakiness rather than as bugs | handled |
 | **citation-flow dilution** — split one improvement into many to starve the contributor you built on | **handled.** Attribution weights δ by each ancestor's *settled reward* rather than decaying per hop, and on a ratchet that reward is the progress the claim moved — so the weights are slicing-invariant by construction. A downstream citer pays the upstream contributor exactly the same however the middle was chopped, and the slicer's own premium converges rather than growing: alice moves under 1% between 16 and 256 slices, against being drained to her direct reward alone under the old rule. Identity-blind, so there is no sybil version — four slices by one submitter and four claims by four give the same distribution, which matters because minting a name is one command. Conserves exactly in integers, with largest-remainder allocation resolved by sorted id so every node reproduces it. Both implementations agree unit for unit on a real settled log. `tests/citation_flow.rs` now pins the *absence* of the attack; `docs/design/citation-flow-dilution.md` records the measurements and the `max_depth` bug found on the way | handled |
 | **frontier rollback** — replay an old lower score as the current best | `audit` rejects a frontier that moves backwards, and a pool paid beyond its size | handled |
-| **ratchet pool stranding** — a frontier lands within `min_improvement` of the target, and no artifact at any score ever settles against that objective again | **partial.** Progress clamps to `baseline - target`, so past that point the largest gain a claim can record is under the gate and the rest of the pool is unreachable by anybody, the funder included, with the log staying consistent throughout. Reachable from a single claim and long before the target. Diagnosed rather than prevented: `Ratchet::is_exhausted` answers it directly, `is_fundable` catches the crude case at post time, `Stall::ClampedByTarget` distinguishes *better but clamped* from *worse* so a contributor holding a genuine advance is not told to discard it, and `frontier_status` reports exhaustion instead of advertising a pool nothing can collect. What is not fixed is the incentive shape: nothing computes the safe interval for `min_improvement`, which must be small enough not to strand the pool and large enough to deter the two slicing rows above — pressures that point opposite ways. `examples/ecdsa-fail/objective-live.json` ships with the shape, paying 4,955,310 of 5,000,000 for reproducing published work and stranding the rest; `tests/ecdsa_fail.rs` pins it with those numbers | partial |
+| **ratchet pool stranding** — a frontier lands within `min_improvement` of the target, and no artifact at any score ever settles against that objective again | **partial.** Progress clamps to `baseline - target`, so past that point the largest gain a claim can record is under the gate and the rest of the pool is unreachable by anybody, the funder included, with the log staying consistent throughout. Reachable from a single claim and long before the target. **Priced at post time:** `Ratchet::closes_at` gives the worst score that shuts the objective and `max_stranded` what is left in it, both printed by `cairn post`, which reduces the question to one comparison a funder can make — *is that score already achievable?* Diagnosed afterwards by `is_exhausted`, `stranded_at`, `Stall::ClampedByTarget` (which distinguishes *better but clamped* from *worse*, so a contributor holding a genuine advance is not told to discard it) and `frontier_status`. Not *prevented*, and deliberately not: refusing the shape at admission changes which records a node accepts and orphans logs that already carry one. The knob is still the funder's to set against opposing pressures — small enough not to strand, large enough to deter the two slicing rows above — and nothing notices a bounty that pays most of itself for reproducing known work, because the node cannot know the state of the art. `examples/ecdsa-fail/objective-live.json` ships with the shape, closing at 1,499,999,999 against a published world best of 1,483,649,332 and stranding 44,690 of 5,000,000; `tests/ecdsa_fail.rs` pins it with those numbers | partial |
 | **piecework double payment** — get one unit of a divided problem paid twice, by resubmitting it, by resubmitting it under a top-up objective, or by two answers to it landing in one batch | a unit is spoken for by the first *paid* claim that answers it, in beacon order, across every objective with the same verifier and the same `piecework` block — so a top-up inherits the original's history and a second answer in the same batch mints nothing. `audit` re-derives every payment and reports a unit paid more than once or a unit paid other than `min(unit_price, remaining)`. Both implementations agree on the `piecework` conformance section and on the demo log | handled |
 | **piecework unit griefing** — close the units of a divided problem with wrong answers so honest work on them earns nothing | only a *paid* claim consumes a unit. A rejected answer leaves the unit open, and so does an accepted one that arrived after the pool ran dry, so no unpaid claim can deny anyone a payment | handled |
 | **relabelled distinguished point** — re-mint a public point of a rho search by resubmitting it with a different walker index or step count, alone or inside a batch | the single-point checkers accept exactly the four keys `x, y, a, b`, require the canonical `y` and lowercase minimal hex, and novelty keys on the artifact digest, so one point has one spelling and a copy is the same unit. A batch objective carries provenance per element, so there its piecework block keys novelty on `["x", "y", "a", "b"]` and the walker index and step count are not part of what is new; a batch that lists one point twice is refused by the checker, and one that re-lists a paid point is paid for its novel elements only. Two honest peers who reach one point hold *different* coefficients, and that pair is the collision that solves the instance, so both are paid on purpose | handled |
@@ -172,23 +172,36 @@ first accepted submission takes 4,955,310 of the 5,000,000 pool for reproducing
 already-published work, 44,690 units are stranded, and a later claim beating the
 world record by 2.3% is admitted, verified, and paid nothing.
 
-Partly handled, and the honest split is between the *diagnosis* and the *shape*:
+Partly handled, and the honest split is between what a funder is *told* and what
+the mechanism *prevents*:
 
-- **Diagnosed.** `Ratchet::is_exhausted` answers "can this frontier move again"
-  directly, `Ratchet::is_fundable` catches the crude case at post time,
+- **Priced before the money is committed.** `Ratchet::closes_at` returns the
+  worst score that shuts the objective for good, and `Ratchet::max_stranded` what
+  is still in the pool when it does. `cairn post` prints both, which turns the
+  question into one comparison a funder can actually make: *is that score already
+  achievable?* If it is, the first honest submission ends the bounty. On the live
+  ecdsa-fail objective it prints a closing score of 1,499,999,999 against a
+  published world best of 1,483,649,332 — so the answer is yes, and it is visible
+  before anybody funds it rather than after somebody is refused.
+- **Diagnosed once it happens.** `Ratchet::is_exhausted` answers "can this
+  frontier move again" directly, `stranded_at` says how much is left in it,
   `Stall::ClampedByTarget` words the refusal as *better than the frontier, and no
   larger improvement gains more* rather than as a regression — the conflation
   that would tell a contributor holding a world record to discard it — and
-  `frontier_status` reports exhaustion instead of advertising a pool nothing can
-  collect. `tests/ecdsa_fail.rs` pins all of it against the live objective's own
-  numbers.
-- **Not fixed.** The incentive shape. A funder must pick `min_improvement` small
-  enough not to strand the pool and large enough to deter epsilon-farming and
-  the verifier-compute exhaustion row above, and those pressures point opposite
-  ways. Nothing computes the safe interval, nothing refuses a bounty that pays
-  most of itself for reproducing known work, and the live example still ships
-  mis-set — deliberately, since repricing a posted bounty changes its content
-  address and is the funder's call.
+  `frontier_status` reports the unpaid amount instead of advertising a pool
+  nothing can collect. `tests/ecdsa_fail.rs` pins all of it against the live
+  objective's own numbers.
+- **Not prevented.** Nothing refuses the shape, and refusing it would be wrong:
+  admission rules decide which records a node accepts, so tightening them orphans
+  any log that already carries one. The tension is also still the funder's to
+  resolve — `min_improvement` must be small enough not to strand the pool and
+  large enough to deter epsilon-farming and the verifier-compute exhaustion row
+  above, and those pressures point opposite ways. Nor does anything notice a
+  bounty that pays most of itself for reproducing known work: the node cannot know
+  the state of the art, which is why `closes_at` names the score and leaves the
+  comparison to whoever is spending. The live example still ships mis-set,
+  deliberately — repricing a posted bounty changes its content address and is the
+  funder's call.
 
 ## Agents as contributors
 

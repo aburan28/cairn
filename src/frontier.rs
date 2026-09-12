@@ -600,6 +600,84 @@ impl Ratchet {
         u128::from(self.min_improvement) <= u128::from(self.span())
     }
 
+    /// The **worst** score at which this objective can shut for good.
+    ///
+    /// [`Ratchet::is_exhausted`] answers the question for a frontier that
+    /// already exists. This answers it for a funder who has not posted yet, and
+    /// it is the number they actually need: any claim landing the frontier at
+    /// this score or better closes the objective permanently, whatever is left
+    /// in the pool. So comparing it against what the field can already do is the
+    /// check that catches a bounty which is dead on arrival — if the closing
+    /// score is *worse* than the published state of the art, the first honest
+    /// submission shuts the bounty.
+    ///
+    /// `examples/ecdsa-fail/objective-live.json` is exactly that case: it closes
+    /// at 1,499,999,999 against a published world best of 1,483,649,332, so the
+    /// first submission of already-known work ends it.
+    ///
+    /// Clamped to the baseline. A ratchet whose gate exceeds its whole span
+    /// closes before it opens, which is [`Ratchet::is_fundable`]'s case, and
+    /// there is no score worse than the baseline to name.
+    pub fn closes_at(&self) -> i64 {
+        // The frontier shuts once fewer than `min_improvement` units of span
+        // remain, so the least-improved closing progress is
+        // `span - min_improvement + 1`. Below zero means it never opens.
+        let remaining = i128::from(self.span()) - i128::from(self.min_improvement) + 1;
+        let progress = remaining.max(0);
+        // Back from progress to a score, in the direction this ratchet runs.
+        // i128 throughout: baseline and target may straddle zero at the extremes,
+        // where the sum leaves i64 before the clamp brings it back.
+        let score = match self.direction {
+            Direction::Maximize => i128::from(self.baseline) + progress,
+            Direction::Minimize => i128::from(self.baseline) - progress,
+        };
+        // Never worse than the baseline and never better than the target: the
+        // curve is only defined between them, and a caller comparing this
+        // against a real score should not be handed one off the end of it.
+        let (low, high) = match self.direction {
+            Direction::Maximize => (i128::from(self.baseline), i128::from(self.target)),
+            Direction::Minimize => (i128::from(self.target), i128::from(self.baseline)),
+        };
+        let clamped = score.clamp(low, high);
+        // In range by construction, so the fallback is unreachable; it exists to
+        // keep the function total rather than to handle a case.
+        i64::try_from(clamped).unwrap_or(self.baseline)
+    }
+
+    /// The most of the pool that can be left unreachable, over every score a
+    /// claim could land on.
+    ///
+    /// The companion to [`Ratchet::closes_at`]: that says *where* the objective
+    /// can shut, this says what is still in it when it does. Not a
+    /// possibility to be weighed against a probability — a submitter chooses
+    /// their own score, so the worst case is reachable by anyone at will, and
+    /// once reached nobody can undo it. `min_improvement` of 1 strands nothing,
+    /// because the only closing progress is the span itself.
+    ///
+    /// This is the price side of the tension `docs/threat-model.md` records:
+    /// `min_improvement` has to be large enough to deter epsilon-farming and the
+    /// verification cost of slicing, and every unit of it buys a little more of
+    /// the pool that can be stranded. Nothing here picks a side; it makes the
+    /// cost visible so a funder can.
+    pub fn max_stranded(&self) -> Result<u64, RatchetError> {
+        let paid = self.cumulative(self.closes_at())?;
+        // `cumulative` is bounded by `reward`, so this cannot go negative.
+        Ok(self.reward.saturating_sub(paid))
+    }
+
+    /// What a frontier sitting at `score` leaves unreachable: the pool minus
+    /// what the curve has paid to get there, once nothing can move it again.
+    ///
+    /// Zero while the objective is still open, so a caller can report this
+    /// without first asking [`Ratchet::is_exhausted`] — an amount that is only
+    /// meaningful in one state is a footgun when it is readable in both.
+    pub fn stranded_at(&self, score: i64) -> Result<u64, RatchetError> {
+        if !self.is_exhausted(score) {
+            return Ok(0);
+        }
+        Ok(self.reward.saturating_sub(self.cumulative(score)?))
+    }
+
     // -- money -------------------------------------------------------------
 
     /// Total the objective has paid out once the frontier reaches `score`.
@@ -1407,5 +1485,108 @@ mod tests {
         assert!(Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 100)
             .expect("valid")
             .is_fundable());
+    }
+
+    /// Where a bounty can shut, and what is in it when it does.
+    #[test]
+    fn the_closing_score_is_the_worst_one_that_shuts_the_objective() {
+        let ratchet = Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 10).expect("valid");
+        // 9 of span left is under the gate, 10 is exactly it.
+        assert_eq!(ratchet.closes_at(), 91);
+        assert!(ratchet.is_exhausted(91));
+        assert!(!ratchet.is_exhausted(90));
+        // And the number that goes with it: 9% of the curve unwalked.
+        assert_eq!(ratchet.max_stranded().expect("live curve"), 90_000);
+        assert_eq!(ratchet.stranded_at(91).expect("live curve"), 90_000);
+        // Open objectives strand nothing yet, so the figure is safe to read in
+        // either state rather than only after asking `is_exhausted`.
+        assert_eq!(ratchet.stranded_at(90).expect("live curve"), 0);
+        assert_eq!(ratchet.stranded_at(0).expect("live curve"), 0);
+
+        // Minimize runs the other way and the closing score is the *largest*
+        // one that still shuts it.
+        let down = Ratchet::new(100, 0, 1_000_000, Direction::Minimize, 10).expect("valid");
+        assert_eq!(down.closes_at(), 9);
+        assert!(down.is_exhausted(9));
+        assert!(!down.is_exhausted(10));
+        assert_eq!(down.max_stranded().expect("live curve"), 90_000);
+    }
+
+    /// The two ends, where the formula has to stop rather than run off the curve.
+    #[test]
+    fn a_gate_of_one_strands_nothing_and_a_gate_over_the_span_strands_everything() {
+        // Nothing: the only closing progress is the span itself, which is the
+        // target, which pays the pool out in full.
+        let fine = Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 1).expect("valid");
+        assert_eq!(fine.closes_at(), 100);
+        assert_eq!(fine.max_stranded().expect("live curve"), 0);
+
+        // Everything: a gate over the span closes the objective before it opens,
+        // so the closing score clamps to the baseline and the whole reward is
+        // unreachable. Agrees with `is_fundable`, which is the cheap form of the
+        // same question.
+        let doomed = Ratchet::new(0, 100, 1_000_000, Direction::Maximize, 101).expect("valid");
+        assert!(!doomed.is_fundable());
+        assert_eq!(doomed.closes_at(), 0);
+        assert_eq!(doomed.max_stranded().expect("live curve"), 1_000_000);
+
+        // The widest curve i64 can hold, which is where the score computation
+        // leaves i64 and has to be done in i128: baseline and target straddling
+        // zero make the span `u64::MAX`.
+        let wide =
+            Ratchet::new(i64::MIN, i64::MAX, u64::MAX, Direction::Maximize, 1).expect("valid");
+        assert_eq!(wide.span(), u64::MAX);
+        assert_eq!(wide.closes_at(), i64::MAX);
+        assert_eq!(wide.max_stranded().expect("live curve"), 0);
+
+        // A gate equal to the whole span is fundable -- one claim straight to the
+        // target collects everything -- and one step is enough to shut it:
+        // `span - progress < min_improvement` holds for *any* progress above
+        // zero. So the closing score is one unit off the baseline and all but a
+        // rounding unit of the pool is at risk. Worth its own case, because
+        // `is_fundable` says yes and the bounty is still a trap.
+        let knife = Ratchet::new(i64::MAX, i64::MIN, u64::MAX, Direction::Minimize, u64::MAX)
+            .expect("valid");
+        assert!(knife.is_fundable());
+        assert_eq!(knife.closes_at(), i64::MAX - 1);
+        assert_eq!(knife.max_stranded().expect("live curve"), u64::MAX - 1);
+    }
+
+    /// The shipped live ecdsa.fail objective, and why these functions exist.
+    ///
+    /// Its gate is larger than the distance between the published world best and
+    /// its own target, so the first submission of *already-known* work shuts the
+    /// bounty. `closes_at` is what says so before anybody funds it: a closing
+    /// score worse than the state of the art is a bounty that cannot be won.
+    #[test]
+    fn the_live_ecdsa_fail_objective_closes_above_the_published_world_best() {
+        let ratchet = Ratchet::new(
+            10_758_874_395,
+            1_400_000_000,
+            5_000_000,
+            Direction::Minimize,
+            100_000_000,
+        )
+        .expect("valid");
+        const WORLD_BEST: i64 = 1_483_649_332;
+
+        // It closes at any score under target + gate, so the worst closing score
+        // is 1,499,999,999 -- and the published record already beats that.
+        assert_eq!(ratchet.closes_at(), 1_499_999_999);
+        assert!(
+            ratchet.closes_at() > WORLD_BEST,
+            "the closing score should be worse than work that already exists"
+        );
+        assert!(ratchet.is_exhausted(WORLD_BEST));
+
+        // What the funder loses to it. `max_stranded` is the worst case over
+        // every score; the world best is not the worst score, so it strands
+        // slightly less -- and the bound has to hold over the actual outcome.
+        assert_eq!(ratchet.max_stranded().expect("live curve"), 53_426);
+        assert_eq!(ratchet.stranded_at(WORLD_BEST).expect("live curve"), 44_690);
+        assert!(
+            ratchet.stranded_at(WORLD_BEST).unwrap() <= ratchet.max_stranded().unwrap(),
+            "the worst case must bound what actually happened"
+        );
     }
 }
