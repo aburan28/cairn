@@ -106,7 +106,13 @@ public struct ChallengeView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .task {
+        .refreshable {
+            await model.refresh()
+            if model.health == .live {
+                await model.loadLogIfNeeded()
+            }
+        }
+        .task(id: "\(id)|\(model.resolvedBase)|\(String(describing: model.health))") {
             await model.fillRecord(for: id)
             if model.health == .live {
                 await model.loadLogIfNeeded()
