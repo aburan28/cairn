@@ -150,7 +150,14 @@ public final class AppModel: ObservableObject {
     public func rememberNode(_ url: String) {
         let trimmed = Self.normalizeNode(url)
         guard !trimmed.isEmpty else { return }
-        var next = recentNodes.map(Self.normalizeNode).filter { $0 != trimmed && !$0.isEmpty }
+        // Normalize first so slash variants are one host. The filter only
+        // drops the one being saved; without uniquifying, a migrated pair
+        // such as `http://host/` and `http://host` becomes two identical
+        // strings, and Settings keys rows on that string.
+        var seen = Set<String>()
+        var next = recentNodes.map(Self.normalizeNode).filter {
+            $0 != trimmed && !$0.isEmpty && seen.insert($0).inserted
+        }
         next.insert(trimmed, at: 0)
         if next.count > Self.recentLimit {
             next = Array(next.prefix(Self.recentLimit))
