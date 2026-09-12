@@ -130,16 +130,11 @@ public final class AppModel: ObservableObject {
                 objectives = Sourced(value: snapshot.objectives, live: false, origin: snapshot.source)
                 return
             }
-            // Publish the summary first. Detail is an enhancement and used
-            // to run before this assignment, so Overview stayed on the
-            // snapshot and `refresh` held `loading` until every
-            // `/objective/{id}` returned.
+            // Detail is an enhancement fetched on the challenge page
+            // (`fillRecord`). Publishing the list first is what puts Overview
+            // on live data; waiting for every `/objective/{id}` here kept
+            // every tab on the snapshot until the last one returned.
             objectives = Sourced(value: list, live: true, origin: base)
-            for objective in list where objective.record == nil {
-                if let record = try? await client.fetchObjective(at: base, id: objective.id) {
-                    applyRecord(id: objective.id, record: record, expectedOrigin: base)
-                }
-            }
         } catch {
             objectives = Sourced(
                 value: snapshot.objectives, live: false, origin: snapshot.source,
