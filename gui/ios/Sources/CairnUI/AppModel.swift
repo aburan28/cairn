@@ -38,6 +38,14 @@ public final class AppModel: ObservableObject {
     private static let recentKey = "cairn.recentNodes"
     private static let recentLimit = 8
 
+    /// Same slash-trim `NodeClient` applies before resolve. Without it the
+    /// typed URL and the host that answered occupy two slots for one node.
+    private static func canonicalNode(_ url: String) -> String {
+        var out = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        while out.hasSuffix("/") { out.removeLast() }
+        return out
+    }
+
     public enum Health: Equatable {
         case checking, live, down
     }
@@ -73,15 +81,19 @@ public final class AppModel: ObservableObject {
         health = .checking
         generation += 1
         let token = generation
-        defer { loading = false }
+        // A superseded pass must not clear the spinner the newer one still owns.
+        defer { if token == generation { loading = false } }
 
         let base = await client.resolve()
+        // After the generation check, not before: a slower earlier resolve
+        // used to write this and then bail, pairing the new host's health
+        // and /objectives with the old URL that LogView then fetches.
+        guard token == generation else { return }
         // Assigned before /health is confirmed so Settings can name the host
         // we tried. LogView must not treat this as a green light — it keys
         // its fetch on `health == .live`, and `loadLog` re-checks the token.
         resolvedBase = base
         if base.isEmpty {
-            guard token == generation else { return }
             health = .down
             applySnapshot()
             return
@@ -141,9 +153,9 @@ public final class AppModel: ObservableObject {
     }
 
     public func rememberNode(_ url: String) {
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = Self.canonicalNode(url)
         guard !trimmed.isEmpty else { return }
-        var next = recentNodes.filter { $0 != trimmed }
+        var next = recentNodes.filter { Self.canonicalNode($0) != trimmed }
         next.insert(trimmed, at: 0)
         if next.count > Self.recentLimit {
             next = Array(next.prefix(Self.recentLimit))
@@ -154,7 +166,9 @@ public final class AppModel: ObservableObject {
 
     public func useNode(_ url: String) {
         nodeURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        rememberNode(nodeURL)
+        // Persist only after /health answers — `refresh` calls rememberNode
+        // on the resolved base. Recording the typed string here put a down
+        // or slashed URL in the list the Settings copy calls "that answered".
         Task { await refresh() }
     }
 

@@ -109,7 +109,11 @@ public struct ChallengeView: View {
         .refreshable {
             await model.refresh()
             if model.health == .live {
-                await model.loadLogIfNeeded()
+                // Force a refetch. `loadLogIfNeeded` is for `.task` so
+                // opening a challenge does not pay for the ledger twice;
+                // reusing it here left history on the last successful load
+                // while the headline frontier came from a newer /objectives.
+                await model.loadLog()
             }
         }
         .task(id: "\(id)|\(model.resolvedBase)|\(String(describing: model.health))") {
