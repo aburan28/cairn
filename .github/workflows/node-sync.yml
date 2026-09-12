@@ -106,7 +106,7 @@ jobs:
             curl -fsS --max-time 30 -o "$DEST/objective/$id" "$SEED_NODE/objective/$id"
           done
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: ui/out
 
