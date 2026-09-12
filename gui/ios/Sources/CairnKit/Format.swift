@@ -149,3 +149,40 @@ public func summarize(_ record: LogRecord) -> String {
         return flat.count > 96 ? String(flat.prefix(96)) + "…" : flat
     }
 }
+
+/// A pretty-printed record, for the expanded row.
+///
+/// Two-space JSON rather than anything fancier: this is meant to look like
+/// the line the node actually wrote, not like a view's opinion of it. Same
+/// job as `pretty` in `ui/lib/log.ts`.
+public func pretty(_ record: LogRecord) -> String {
+    let object: [String: Any] = [
+        "seq": record.seq,
+        "kind": record.kind,
+        "hash": record.hash,
+        "prev": record.prev as Any? ?? NSNull(),
+        "ts": record.ts,
+        "payload": record.payload.mapValues(\.jsonObject),
+    ]
+    guard JSONSerialization.isValidJSONObject(object),
+          let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+          let text = String(data: data, encoding: .utf8)
+    else {
+        return String(describing: record)
+    }
+    return text
+}
+
+extension JSONValue {
+    fileprivate var jsonObject: Any {
+        switch self {
+        case let .string(value): return value
+        case let .int(value): return value
+        case let .double(value): return value
+        case let .bool(value): return value
+        case let .object(value): return value.mapValues(\.jsonObject)
+        case let .array(value): return value.map(\.jsonObject)
+        case .null: return NSNull()
+        }
+    }
+}

@@ -18,8 +18,7 @@ public struct SettingsView: View {
                     .autocorrectionDisabled()
                     #endif
                 Button("Use this node") {
-                    model.nodeURL = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                    Task { await model.refresh() }
+                    model.useNode(draft)
                 }
                 Button("Clear — use the snapshot") {
                     draft = ""
@@ -30,6 +29,21 @@ public struct SettingsView: View {
                 Text("node")
             } footer: {
                 Text("A cairn node publishes GET /objectives, /chain, /log, /checkpoint and /peers. Writes stay on the node's own origin; this app is a reader. Cleartext HTTP is allowed because an operator's node is often on a LAN or an SSH tunnel, and refusing it would make the app unable to read the one thing it exists to read.")
+            }
+
+            if !model.recentNodes.isEmpty {
+                Section("recent") {
+                    ForEach(model.recentNodes, id: \.self) { url in
+                        Button {
+                            draft = url
+                            model.useNode(url)
+                        } label: {
+                            Text(url)
+                                .font(.system(.body, design: .monospaced))
+                                .lineLimit(1)
+                        }
+                    }
+                }
             }
 
             Section("status") {

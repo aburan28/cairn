@@ -28,21 +28,30 @@ public struct LogView: View {
                 }
                 Section("records") {
                     ForEach(filtered(sourced.value.records)) { record in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(record.kind)
-                                    .font(.caption.weight(.semibold))
-                                Text("#\(record.seq)")
-                                    .font(.caption)
+                        DisclosureGroup {
+                            Text(pretty(record))
+                                .font(.system(.caption2, design: .monospaced))
+                                .textSelection(.enabled)
+                                .contextMenu {
+                                    Button("Copy record") { copyToPasteboard(pretty(record)) }
+                                }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(record.kind)
+                                        .font(.caption.weight(.semibold))
+                                    Text("#\(record.seq)")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                    Spacer()
+                                    HashText(record.hash, chars: 6)
+                                }
+                                Text(summarize(record))
+                                    .font(.subheadline)
+                                Text(record.ts)
+                                    .font(.caption2)
                                     .foregroundStyle(.tertiary)
-                                Spacer()
-                                HashText(record.hash, chars: 6)
                             }
-                            Text(summarize(record))
-                                .font(.subheadline)
-                            Text(record.ts)
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
                         }
                     }
                 }
@@ -54,22 +63,29 @@ public struct LogView: View {
                     Button("Load the log") {
                         Task { await model.loadLog() }
                     }
-                    .disabled(model.resolvedBase.isEmpty)
+                    .disabled(model.health != .live || model.resolvedBase.isEmpty)
                 }
             }
         }
         .navigationTitle("Log")
         .refreshable {
             await model.refresh()
-            await model.loadLog()
-        }
-        .task(id: model.resolvedBase) {
-            // Keyed on the resolved node so a retarget drops the previous
-            // log instead of leaving it up because `log` was already set.
-            if !model.resolvedBase.isEmpty {
+            if model.health == .live {
                 await model.loadLog()
             }
         }
+        .task(id: logTaskKey) {
+            // Keyed on origin *and* health. `refresh` assigns `resolvedBase`
+            // before /health is confirmed; fetching on that assignment alone
+            // is how a late success used to restore a live log after the
+            // snapshot fallback had cleared it.
+            guard model.health == .live, !model.resolvedBase.isEmpty else { return }
+            await model.loadLog()
+        }
+    }
+
+    private var logTaskKey: String {
+        "\(model.resolvedBase)|\(String(describing: model.health))"
     }
 
     private func filtered(_ records: [LogRecord]) -> [LogRecord] {
