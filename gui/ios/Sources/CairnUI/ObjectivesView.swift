@@ -108,8 +108,12 @@ public struct ChallengeView: View {
         #endif
         .refreshable {
             await model.refresh()
+            // Force a fetch. `loadLogIfNeeded` returns as soon as this
+            // origin already has a log, so the headline frontier moved and
+            // the pile did not — the sum line then compared leftover
+            // paidThisMove values to a newer paid_cumulative.
             if model.health == .live {
-                await model.loadLogIfNeeded()
+                await model.loadLog()
             }
         }
         .task(id: "\(id)|\(model.resolvedBase)|\(String(describing: model.health))") {
