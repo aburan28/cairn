@@ -90,7 +90,7 @@ CLIENT ?= claude
 
 # `ui/node_modules` is deliberately absent: it is a real directory whose
 # freshness against the lockfile is the whole point of the rule.
-.PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui \
+.PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui ios-check \
 	interop differential fuzz mcp-smoke serve-smoke node-smoke canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
 	test-reference fmt clippy docs tla check
@@ -125,6 +125,7 @@ help:
 	  '  make arena               Play attack strategies for money against the rules.' \
 	  '  make autoresearch        Run the crypto autoresearcher end to end on its own node.' \
 	  '  make autoresearch-gui    Build the macOS app that runs it (gui/macos).' \
+	  '  make ios-check           Test the iOS reader package (needs Swift).' \
 	  '  make shard-demo          Six holders, one shard each, one of them lying.' \
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
@@ -319,6 +320,14 @@ autoresearch: build
 
 autoresearch-gui:
 	./gui/macos/build.sh
+
+# The iOS reader is an Xcode app; what CI can run without a simulator is the
+# Swift package — decoder, chain check, bundled snapshot. `swift test` here
+# is the known-answer test that a field rename in GET /objectives fails the
+# phone the same way it fails the site.
+ios-check:
+	cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
+	swift test --package-path gui/ios
 
 fuzz: build
 	./scripts/fuzz-differential.sh $(FUZZ_CASES)

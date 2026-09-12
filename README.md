@@ -14,7 +14,10 @@ library and CLI, a second and deliberately independent Rust implementation in
 it works, and the challenges a node is paying for. It is the same app a node
 serves at `/ui/` (see [ui/README.md](ui/README.md)), so nothing on it is
 simulated: the numbers come from a node when one answers and from
-`launch/cairn.jsonl` when none does, and the page says which.
+`launch/cairn.jsonl` when none does, and the page says which. On a phone,
+Add to Home Screen, or the native reader in [gui/ios](gui/ios/). Neither
+runs a node. The macOS app in [gui/macos](gui/macos/) is the other job: it
+runs the researcher.
 
 Stage 0 — one operator, no token, no consensus. What it does provide is the
 property that actually matters: *anyone can independently re-derive every result

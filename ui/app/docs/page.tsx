@@ -127,6 +127,30 @@ const GROUPS: Group[] = [
     ],
   },
   {
+    title: "reading it",
+    note: "The same reader, three mounts: a site, a node, a phone.",
+    entries: [
+      {
+        path: "ui/",
+        name: "ui/",
+        blurb:
+          "the public site and the node's own reader, one app — nothing on it is simulated",
+      },
+      {
+        path: "gui/ios/",
+        name: "gui/ios/",
+        blurb:
+          "native iPhone reader of the same HTTP surface; a reader, not a node",
+      },
+      {
+        path: "gui/macos/",
+        name: "gui/macos/",
+        blurb:
+          "macOS control surface for the crypto autoresearcher — the thing that writes",
+      },
+    ],
+  },
+  {
     title: "the limits",
     note:
       "Marked handled / partial / not handled / unsolvable, and kept honest on purpose.",

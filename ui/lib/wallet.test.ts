@@ -4,6 +4,7 @@ import {
   base58Encode,
   fromHex,
   isKeyShaped,
+  isMobileUserAgent,
   toHex,
 } from "./wallet";
 
@@ -88,6 +89,30 @@ describe("hex", () => {
   it("round-trips a full-width key", () => {
     const bytes = new Uint8Array(32).map((_, i) => (i * 7) % 256);
     expect(fromHex(toHex(bytes))).toEqual(bytes);
+  });
+});
+
+describe("isMobileUserAgent", () => {
+  it("recognises a phone, which cannot inject an extension", () => {
+    expect(
+      isMobileUserAgent(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+      ),
+    ).toBe(true);
+    expect(
+      isMobileUserAgent(
+        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat desktop Safari or a missing UA as a phone", () => {
+    expect(
+      isMobileUserAgent(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+      ),
+    ).toBe(false);
+    expect(isMobileUserAgent("")).toBe(false);
   });
 });
 

@@ -316,6 +316,10 @@ jobs:
         working-directory: ui
       - run: npm run build
         working-directory: ui
+      # The iOS reader ships the same fallback the site does. A copy that
+      # drifted would teach the phone a different launch log than the page
+      # that says they are the same file.
+      - run: cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
 
   gui-macos:
     # The macOS launcher in gui/macos, compiled. No other job builds Swift and
@@ -343,6 +347,21 @@ jobs:
       # Release, as build.sh builds it. `-O` and whole-module mode run compiler
       # passes that a debug build never reaches.
       - run: swift build -c release --package-path gui/macos
+
+  gui-ios:
+    # The iPhone reader. The decoder and the chain check are a Swift package
+    # so they compile on this runner without a simulator; the .app is
+    # Cairn.xcodeproj and needs a Mac with Xcode to sign onto a phone.
+    # Same "every PR, not a path filter" argument as gui-macos: the compiler
+    # is the image's, and a toolchain break should go red here, not on the
+    # next Swift PR.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: swift --version
+      - run: cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
+      - run: swift test --package-path gui/ios
+      - run: swift build -c release --package-path gui/ios
 
   examples:
     # Every example objective must pass schema validation and match its pinned

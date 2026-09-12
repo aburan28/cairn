@@ -1,6 +1,23 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Shell } from "@/components/Shell";
 import "./globals.css";
+
+/**
+ * `viewport-fit=cover` is what makes `env(safe-area-inset-*)` non-zero on a
+ * notched phone. Without it the sticky header sits under the status bar when
+ * someone adds this site to their home screen — which is now a supported way
+ * in, see `app/manifest.ts`. The theme-color tags match the canvas token so
+ * Safari's chrome does not flash a default white around a dark page.
+ */
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#fbfbfa" },
+    { media: "(prefers-color-scheme: dark)", color: "#0b0c0e" },
+  ],
+};
 
 export const metadata: Metadata = {
   // A template rather than one fixed string. Every page here answers a
@@ -15,6 +32,16 @@ export const metadata: Metadata = {
     + "answer forward is paid in proportion to how far they moved it, and every "
     + "payment is re-derivable from the log by anyone who has it.",
   applicationName: "cairn",
+  // Home-screen install. A service worker would intercept fetches and is a
+  // new cache the project would then have to trust; the manifest and the
+  // apple-touch-icon are same-origin files and enough for "Add to Home
+  // Screen" to open this reader as its own app. The native iOS reader in
+  // gui/ios is the same pages without a browser chrome.
+  appleWebApp: {
+    capable: true,
+    title: "cairn",
+    statusBarStyle: "default",
+  },
   // No `metadataBase` and no og:image, deliberately. An absolute URL would bake
   // the public site's origin into the copy of this app that ships inside every
   // node binary, and an image would be another file the daemon carries for a

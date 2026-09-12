@@ -83,6 +83,24 @@ function candidates(): Candidate[] {
   ];
 }
 
+/**
+ * Is this a phone browser that cannot inject an extension?
+ *
+ * Safari on iPhone does not run wallet extensions. Phantom, Solflare and
+ * Backpack inject only inside their own in-app browsers. Distinguishing the
+ * two is what lets `/submit` say *why* the list is empty on a phone, rather
+ * than "install an extension" to somebody who cannot. Pure over a UA string
+ * so the test does not need a `navigator`.
+ */
+export function isMobileUserAgent(ua: string): boolean {
+  return /iPhone|iPad|iPod|Android/i.test(ua);
+}
+
+export function isMobileBrowser(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return isMobileUserAgent(navigator.userAgent);
+}
+
 /** Every Ed25519 wallet currently present in this page. */
 export function available(): { kind: string; label: string }[] {
   const seen = new Set<Provider>();

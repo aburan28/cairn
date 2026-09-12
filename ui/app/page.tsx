@@ -116,6 +116,14 @@ export default function Page() {
           files come from the same server. The check that means something is the one
           at the bottom of this page.
         </p>
+        <p className="hint">
+          On a phone, Add to Home Screen — this reader is a standalone web app,
+          same pages, no service worker — or the native reader in{" "}
+          <a className="text-accent hover:underline" href={repoLink("gui/ios/")}>
+            gui/ios
+          </a>
+          . Neither runs a node; both read one.
+        </p>
       </Card>
 
       <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">

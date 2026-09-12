@@ -81,6 +81,14 @@ rather than squeezing its columns or widening the document.
 Checked with Chromium over CDP at 320–1280px across every route: no page can
 scroll sideways.
 
+The same three rules, plus `viewport-fit: cover` and `env(safe-area-inset-*)`
+on the chrome, are what let "Add to Home Screen" on a phone open this reader
+as a standalone app without the sticky header sitting under the status bar.
+There is no service worker: a worker would intercept fetches and invent a
+cache, and a node that just settled has a different frontier. The native
+iPhone reader in [`gui/ios/`](../gui/ios/) is the same pages without a
+browser chrome.
+
 ## Nothing on it is simulated
 
 Yukon's landing page labels its own leaderboard SIMULATED. For a project whose
