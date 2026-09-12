@@ -51,7 +51,7 @@ public final class AppModel: ObservableObject {
         )
         self.snapshot = bundled
         self.nodeURL = nodeURL ?? UserDefaults.standard.string(forKey: Self.urlKey) ?? ""
-        self.recentNodes = UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []
+        self.recentNodes = Self.uniqueNodes(UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? [])
         self.objectives = Sourced(value: bundled.objectives, live: false, origin: bundled.source)
         self.checkpoint = Sourced(value: bundled.checkpoint, live: false, origin: bundled.source)
     }
@@ -150,18 +150,10 @@ public final class AppModel: ObservableObject {
     public func rememberNode(_ url: String) {
         let trimmed = Self.normalizeNode(url)
         guard !trimmed.isEmpty else { return }
-        // Normalize first so slash variants are one host. The filter only
-        // drops the one being saved; without uniquifying, a migrated pair
-        // such as `http://host/` and `http://host` becomes two identical
-        // strings, and Settings keys rows on that string.
-        var seen = Set<String>()
-        var next = recentNodes.map(Self.normalizeNode).filter {
-            $0 != trimmed && !$0.isEmpty && seen.insert($0).inserted
-        }
-        next.insert(trimmed, at: 0)
-        if next.count > Self.recentLimit {
-            next = Array(next.prefix(Self.recentLimit))
-        }
+        // Dedup the whole list, not only the host being saved. Mapping
+        // slash variants and then filtering `!= trimmed` left two
+        // `http://other` rows that ForEach identified as one.
+        let next = Array(Self.uniqueNodes([trimmed] + recentNodes).prefix(Self.recentLimit))
         recentNodes = next
         UserDefaults.standard.set(next, forKey: Self.recentKey)
     }
@@ -182,6 +174,17 @@ public final class AppModel: ObservableObject {
         var trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         while trimmed.hasSuffix("/") { trimmed.removeLast() }
         return trimmed
+    }
+
+    private static func uniqueNodes(_ urls: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for url in urls {
+            let normalized = normalizeNode(url)
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else { continue }
+            out.append(normalized)
+        }
+        return out
     }
 
     public func objective(id: String) -> Objective? {
