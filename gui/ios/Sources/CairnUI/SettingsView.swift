@@ -18,7 +18,7 @@ public struct SettingsView: View {
                     .autocorrectionDisabled()
                     #endif
                 Button("Use this node") {
-                    model.useNode(draft)
+                    Task { await model.useNode(draft) }
                 }
                 Button("Clear — use the snapshot") {
                     draft = ""
@@ -36,7 +36,7 @@ public struct SettingsView: View {
                     ForEach(model.recentNodes, id: \.self) { url in
                         Button {
                             draft = url
-                            model.useNode(url)
+                            Task { await model.useNode(url) }
                         } label: {
                             Text(url)
                                 .font(.system(.body, design: .monospaced))

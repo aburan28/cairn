@@ -51,7 +51,7 @@ public final class AppModel: ObservableObject {
         )
         self.snapshot = bundled
         self.nodeURL = nodeURL ?? UserDefaults.standard.string(forKey: Self.urlKey) ?? ""
-        self.recentNodes = UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []
+        self.recentNodes = Self.uniqueNodes(UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? [])
         self.objectives = Sourced(value: bundled.objectives, live: false, origin: bundled.source)
         self.checkpoint = Sourced(value: bundled.checkpoint, live: false, origin: bundled.source)
     }
@@ -73,15 +73,18 @@ public final class AppModel: ObservableObject {
         health = .checking
         generation += 1
         let token = generation
-        defer { loading = false }
+        // A superseded pass must not clear the spinner the newer one is
+        // still holding up — two Settings taps used to do exactly that.
+        defer { if token == generation { loading = false } }
 
         let base = await client.resolve()
-        // Assigned before /health is confirmed so Settings can name the host
-        // we tried. LogView must not treat this as a green light — it keys
-        // its fetch on `health == .live`, and `loadLog` re-checks the token.
+        // After the await, not before: a slower earlier resolve once
+        // overwrote the origin a newer pass had already loaded, and the
+        // log keyed on `resolvedBase` while health was still live, so
+        // the table and the objectives named two hosts.
+        guard token == generation else { return }
         resolvedBase = base
         if base.isEmpty {
-            guard token == generation else { return }
             health = .down
             applySnapshot()
             return
@@ -96,14 +99,18 @@ public final class AppModel: ObservableObject {
         }
         rememberNode(base)
         dropStale(keeping: base)
-        await loadAll(from: base)
+        await loadAll(from: base, token: token)
     }
 
     public func loadAll(from base: String) async {
-        async let objectivesLoad: Void = loadObjectives(from: base)
-        async let chainLoad: Void = loadChain(from: base)
-        async let checkpointLoad: Void = loadCheckpoint(from: base)
-        async let peersLoad: Void = loadPeers(from: base)
+        await loadAll(from: base, token: generation)
+    }
+
+    private func loadAll(from base: String, token: UInt64) async {
+        async let objectivesLoad: Void = loadObjectives(from: base, token: token)
+        async let chainLoad: Void = loadChain(from: base, token: token)
+        async let checkpointLoad: Void = loadCheckpoint(from: base, token: token)
+        async let peersLoad: Void = loadPeers(from: base, token: token)
         _ = await (objectivesLoad, chainLoad, checkpointLoad, peersLoad)
     }
 
@@ -141,21 +148,43 @@ public final class AppModel: ObservableObject {
     }
 
     public func rememberNode(_ url: String) {
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = Self.normalizeNode(url)
         guard !trimmed.isEmpty else { return }
-        var next = recentNodes.filter { $0 != trimmed }
-        next.insert(trimmed, at: 0)
-        if next.count > Self.recentLimit {
-            next = Array(next.prefix(Self.recentLimit))
-        }
+        // Dedup the whole list, not only the host being saved. Mapping
+        // slash variants and then filtering `!= trimmed` left two
+        // `http://other` rows that ForEach identified as one.
+        let next = Array(Self.uniqueNodes([trimmed] + recentNodes).prefix(Self.recentLimit))
         recentNodes = next
         UserDefaults.standard.set(next, forKey: Self.recentKey)
     }
 
-    public func useNode(_ url: String) {
-        nodeURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        rememberNode(nodeURL)
-        Task { await refresh() }
+    /// Point at a host and refresh. Recents are written only when that host
+    /// answers — remembering the typed string here is how a mistype used to
+    /// land in the list, and an unstructured `Task` per tap is how two
+    /// recents interleaved their resolves.
+    public func useNode(_ url: String) async {
+        nodeURL = Self.normalizeNode(url)
+        await refresh()
+    }
+
+    /// Trailing slashes are not part of the identity. `NodeClient` already
+    /// strips them to talk to the host; the recents list has to do the same
+    /// or the typed URL and the later resolved base both appear.
+    private static func normalizeNode(_ url: String) -> String {
+        var trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        while trimmed.hasSuffix("/") { trimmed.removeLast() }
+        return trimmed
+    }
+
+    private static func uniqueNodes(_ urls: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for url in urls {
+            let normalized = normalizeNode(url)
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else { continue }
+            out.append(normalized)
+        }
+        return out
     }
 
     public func objective(id: String) -> Objective? {
@@ -173,9 +202,10 @@ public final class AppModel: ObservableObject {
         applyRecord(id: id, record: record, expectedOrigin: at)
     }
 
-    private func loadObjectives(from base: String) async {
+    private func loadObjectives(from base: String, token: UInt64) async {
         do {
             let list = try await client.fetchObjectives(at: base)
+            guard token == generation else { return }
             if list.isEmpty {
                 objectives = Sourced(value: snapshot.objectives, live: false, origin: snapshot.source)
                 return
@@ -186,11 +216,13 @@ public final class AppModel: ObservableObject {
             // `/objective/{id}` returned.
             objectives = Sourced(value: list, live: true, origin: base)
             for objective in list where objective.record == nil {
+                guard token == generation else { return }
                 if let record = try? await client.fetchObjective(at: base, id: objective.id) {
                     applyRecord(id: objective.id, record: record, expectedOrigin: base)
                 }
             }
         } catch {
+            guard token == generation else { return }
             objectives = Sourced(
                 value: snapshot.objectives, live: false, origin: snapshot.source,
                 note: error.localizedDescription
@@ -207,11 +239,13 @@ public final class AppModel: ObservableObject {
         objectives = Sourced(value: next, live: objectives.live, origin: objectives.origin, note: objectives.note)
     }
 
-    private func loadChain(from base: String) async {
+    private func loadChain(from base: String, token: UInt64) async {
         do {
             let value = try await client.fetchChain(at: base)
+            guard token == generation else { return }
             chain = Sourced(value: value, live: true, origin: base)
         } catch {
+            guard token == generation else { return }
             chain = Sourced(
                 value: Chain(
                     head: snapshot.chain.head,
@@ -226,9 +260,10 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    private func loadCheckpoint(from base: String) async {
+    private func loadCheckpoint(from base: String, token: UInt64) async {
         do {
             let response = try await client.fetchCheckpoint(at: base)
+            guard token == generation else { return }
             checkpoint = Sourced(
                 value: CheckpointFacts(
                     head: response.checkpoint.head,
@@ -241,11 +276,13 @@ public final class AppModel: ObservableObject {
                 origin: base
             )
         } catch let NodeError.httpStatus(code, _) where code == 404 {
+            guard token == generation else { return }
             checkpoint = Sourced(
                 value: snapshot.checkpoint, live: false, origin: snapshot.source,
                 note: "\(base) publishes no checkpoint"
             )
         } catch {
+            guard token == generation else { return }
             checkpoint = Sourced(
                 value: snapshot.checkpoint, live: false, origin: snapshot.source,
                 note: error.localizedDescription
@@ -253,11 +290,13 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    private func loadPeers(from base: String) async {
+    private func loadPeers(from base: String, token: UInt64) async {
         do {
             let response = try await client.fetchPeers(at: base)
+            guard token == generation else { return }
             peers = Sourced(value: response.peers, live: true, origin: base, note: response.note)
         } catch {
+            guard token == generation else { return }
             peers = Sourced(value: [], live: false, origin: base, note: error.localizedDescription)
         }
     }
