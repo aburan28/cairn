@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.4.0](https://github.com/aburan28/cairn/compare/v1.3.0...v1.4.0) (2026-09-12)
+
+
+### Features
+
+* **ios:** frontier history, and stop a late log fetch undoing fallback ([#157](https://github.com/aburan28/cairn/issues/157)) ([e5ce3e9](https://github.com/aburan28/cairn/commit/e5ce3e9cb17ac3ea93041c611f3e533640272219))
+* native iOS reader and a phone-installable site ([#155](https://github.com/aburan28/cairn/issues/155)) ([014c3e0](https://github.com/aburan28/cairn/commit/014c3e051f7ad9c99de991f7be6f0ecbfd9bfc3e))
+
+
+### Fixes
+
+* **ios:** keep refresh writes on the generation that started them ([#158](https://github.com/aburan28/cairn/issues/158)) ([36bedf6](https://github.com/aburan28/cairn/commit/36bedf6db1603e25d74fc46a2df19579ae020933))
+* the piecework demo passed only when the fraud went undetected ([#152](https://github.com/aburan28/cairn/issues/152)) ([9365bcc](https://github.com/aburan28/cairn/commit/9365bcc469c0e8b6dca811bf6db5365febf101b9))
+* **ui:** stop an already-elided hash from being abbreviated a second time ([#150](https://github.com/aburan28/cairn/issues/150)) ([ef633cf](https://github.com/aburan28/cairn/commit/ef633cff36edf903bcf51be968c464a4c53f22c4))
+* **ui:** stop three things from refusing to shrink on a phone ([#154](https://github.com/aburan28/cairn/issues/154)) ([58cbefb](https://github.com/aburan28/cairn/commit/58cbefbb95e7175cfe56a5ad322a77b27091c9c5))
+
+
+### Documentation
+
+* a release-ready reference set, and the three defects writing it exposed ([#149](https://github.com/aburan28/cairn/issues/149)) ([7347722](https://github.com/aburan28/cairn/commit/7347722abaaac6bda0e7caa033928561b72fa077))
+
 ## [1.3.0](https://github.com/aburan28/cairn/compare/v1.2.0...v1.3.0) (2026-09-07)
 
 
