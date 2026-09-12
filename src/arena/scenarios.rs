@@ -26,6 +26,7 @@ pub fn all(seed: u64) -> Vec<Trial> {
         unbisectable_objectives(seed),
         cheap_tier_standing(seed),
         availability_free_riding(seed),
+        epsilon_farming(seed),
     ]
 }
 
@@ -619,6 +620,179 @@ fn availability_run(seed: u64, sampled: bool) -> Run {
         arena.tick();
     }
     arena.finish(&format!("availability free-riding / {label}"), false)
+}
+
+// ---------------------------------------------------------------------------
+// 6. Epsilon-farming a progressive bounty
+// ---------------------------------------------------------------------------
+
+/// One improvement, published as many small steps, to be paid more than once
+/// for it.
+///
+/// The first scenario on this board to use a **ratchet**. Every other objective
+/// here is `certificate` kind: one bool, one payout, nothing to slice. A
+/// progressive bounty is where "what a settlement mints" stops being the
+/// objective's `reward` and becomes a function of where the frontier was, which
+/// is the arithmetic an ecdsa.fail-shaped challenge runs on -- and until this
+/// existed, a change to `Ratchet::payout` was a change to the money with no
+/// attack measured against it.
+///
+/// **The attack.** A submitter who can reach a score of 80 publishes it as eight
+/// steps of 10 instead of one step of 80. It costs nothing to do: they already
+/// hold the result, so the slices are free, and each one is a genuine
+/// improvement that the pinned evaluator accepts.
+///
+/// **The defence.** Payouts telescope. `Ratchet::payout` pays
+/// `cumulative(new) - cumulative(old)`, and the frontier carries
+/// `paid_cumulative` so that subtraction is against what the objective has
+/// *actually* paid rather than against what this claim happens to cite. The
+/// total along any path is therefore `cumulative(final)`, whatever the path.
+///
+/// **The counterfactual.** The undefended arm is the same log scored without the
+/// subtraction: pay each accepted improvement `cumulative(its score)` outright,
+/// which is what a ratchet without `paid_cumulative` does. It is not a
+/// hypothetical mistake -- it is the shape the code would have if the running
+/// total were dropped, and `Node::audit`'s pool check is the thing that would
+/// catch it. Capped at the objective's reward, because even a naive
+/// implementation would stop at the pool, and leaving it uncapped would inflate
+/// the attack's apparent take with money no rule would ever have released.
+///
+/// The result to want is **NEUTRAL**: the slicer earns exactly what the honest
+/// submitter earns. Equality is the claim, not a smaller number -- an attack
+/// that is exactly neutral has had its incentive removed rather than priced.
+pub fn epsilon_farming(seed: u64) -> Trial {
+    let (defended, undefended) = farming_runs(seed);
+    Trial {
+        attack: "epsilon-farming a progressive bounty".to_string(),
+        defence: "payouts telescope on a cumulative curve".to_string(),
+        attacker: "slicer".to_string(),
+        // The same work, published in one step. Equality here is the whole
+        // claim, so this is a benchmark rather than a victim.
+        benchmark: Some("honest".to_string()),
+        victim: None,
+        undefended,
+        defended,
+    }
+}
+
+/// The curve both submitters walk: reward, target, and how finely it is cut.
+const FARM_REWARD: u64 = 100_000;
+const FARM_TARGET: i64 = 100;
+const FARM_REACH: i64 = 80;
+const FARM_SLICES: i64 = 8;
+
+fn farming_runs(seed: u64) -> (Run, Run) {
+    let history = farming_history(seed);
+
+    let mut defended = history.run.clone();
+    defended.label = format!("epsilon-farming / telescoping ({FARM_SLICES} slices)");
+
+    // Same epochs, same claims, same verdicts -- paid without the cumulative
+    // subtraction.
+    let mut undefended = history.run.clone();
+    undefended.label =
+        format!("epsilon-farming / paid per improvement ({FARM_SLICES} slices, modelled)");
+    restate(&mut undefended, "slicer", history.slicer_unsubtracted);
+    restate(&mut undefended, "honest", history.honest_unsubtracted);
+
+    (defended, undefended)
+}
+
+struct Farm {
+    run: Run,
+    /// What the slicer would have taken if every accepted improvement paid
+    /// `cumulative(score)` outright.
+    slicer_unsubtracted: u128,
+    /// The same rule applied to the honest submitter, who has one claim and is
+    /// therefore indifferent to it.
+    honest_unsubtracted: u128,
+}
+
+fn farming_history(seed: u64) -> Farm {
+    let mut arena = Arena::new(
+        "epsilon-farming",
+        seed,
+        &["slicer", "honest"],
+        10_000,
+        1_000_000,
+    );
+
+    // One objective each, with identical parameters. Sharing a single ratchet
+    // would make the two submitters compete for the same pool, and the run
+    // would measure who got there first rather than what slicing is worth --
+    // `docs/arena.md` records shared objectives as a past cause of a scenario
+    // measuring nothing.
+    let slicer_objective =
+        arena.fund_ratchet("treasury", FARM_REWARD, "farm-sliced", FARM_TARGET, 1);
+    let honest_objective =
+        arena.fund_ratchet("treasury", FARM_REWARD, "farm-whole", FARM_TARGET, 1);
+    arena.tick();
+
+    let cumulative =
+        |score: i64| -> u128 { u128::from(FARM_REWARD) * score as u128 / FARM_TARGET as u128 };
+
+    let step = FARM_REACH / FARM_SLICES;
+    let mut slicer_unsubtracted = 0u128;
+    if let Some(objective) = slicer_objective.as_deref() {
+        for cut in 1..=FARM_SLICES {
+            let score = step * cut;
+            if arena
+                .submit_scored("slicer", objective, score, &format!("s{cut}"))
+                .is_some()
+            {
+                // Only claims that were actually admitted count towards the
+                // counterfactual: a refused slice is not money a naive rule
+                // would have paid either.
+                slicer_unsubtracted += cumulative(score);
+            }
+            // A reveal lands an epoch after its commitment and a batch settles
+            // once its epoch has closed, so each slice needs the frontier to
+            // have advanced before the next one cites it.
+            arena.tick();
+            arena.tick();
+            arena.tick();
+        }
+    }
+
+    let mut honest_unsubtracted = 0u128;
+    if let Some(objective) = honest_objective.as_deref() {
+        if arena
+            .submit_scored("honest", objective, FARM_REACH, "h1")
+            .is_some()
+        {
+            honest_unsubtracted += cumulative(FARM_REACH);
+        }
+        arena.tick();
+        arena.tick();
+        arena.tick();
+    }
+
+    // Neither submitter is charged `solve`: they reach the same score, so the
+    // cost of getting there is identical and subtracting it from both would
+    // move both nets by the same amount and change nothing. What the scenario
+    // is asking is whether *publishing it differently* pays differently.
+    let run = arena.finish("epsilon-farming", false);
+    Farm {
+        run,
+        slicer_unsubtracted: slicer_unsubtracted.min(u128::from(FARM_REWARD)),
+        honest_unsubtracted: honest_unsubtracted.min(u128::from(FARM_REWARD)),
+    }
+}
+
+/// Rewrite one player's close under a modelled rule, leaving what they opened
+/// and spent alone.
+///
+/// [`collapse`] does this for an operator spread over many keys; this is the
+/// one-name case, and keeping them separate avoids pretending a single
+/// submitter is a set of them.
+fn restate(run: &mut Run, player: &str, earned: u128) {
+    if let Some(payoff) = run
+        .payoffs
+        .iter_mut()
+        .find(|payoff| payoff.player == player)
+    {
+        payoff.closed = payoff.opened.saturating_add(earned);
+    }
 }
 
 // ---------------------------------------------------------------------------

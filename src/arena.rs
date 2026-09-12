@@ -422,6 +422,31 @@ def check(artifact):
     return artifact.get("n", 0) % 2 == 0
 "#;
 
+/// A scoring function, so an objective can carry a **ratchet** and pay for
+/// distance moved rather than for a single verdict.
+///
+/// The board's other objectives are `certificate` kind: one bool, one payout,
+/// nothing to slice. A progressive bounty is where "what a settlement mints"
+/// stops being a constant, and until this existed no arena scenario could
+/// represent one — so a change to `Ratchet::payout` was a change to the money
+/// with no attack measured against it.
+///
+/// Reads the score off the artifact rather than computing anything. The arena is
+/// about money, and an evaluator that made scoring *hard* would put the
+/// interesting variable somewhere this board cannot vary. Refuses a non-integer
+/// and anything negative, so a claim cannot buy progress with a malformed
+/// artifact -- `0` is below the threshold, so it rejects rather than settling
+/// for nothing.
+const EVALUATOR: &str = r#"
+def score(artifact):
+    value = artifact.get("score")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    if value < 0:
+        return 0
+    return value
+"#;
+
 /// A step function, so an objective can be *disputed* and a challenge bond has
 /// something to bind to. An objective with no stepper cannot be challenged at
 /// all, which is a fine property and makes a griefing scenario measure nothing.
@@ -544,6 +569,7 @@ pub struct Arena {
     opened: BTreeMap<String, u128>,
     checker_sha: String,
     stepper_sha: String,
+    evaluator_sha: String,
 }
 
 impl Arena {
@@ -564,12 +590,16 @@ impl Arena {
         let scratch = Scratch::new(label, seed);
         std::fs::write(scratch.path.join("c.py"), CHECKER).expect("writable");
         std::fs::write(scratch.path.join("s.py"), STEPPER).expect("writable");
+        std::fs::write(scratch.path.join("e.py"), EVALUATOR).expect("writable");
         let mut hasher = Sha256::new();
         hasher.update(CHECKER.as_bytes());
         let checker_sha = crate::hex::encode(&hasher.finalize());
         let mut hasher = Sha256::new();
         hasher.update(STEPPER.as_bytes());
         let stepper_sha = crate::hex::encode(&hasher.finalize());
+        let mut hasher = Sha256::new();
+        hasher.update(EVALUATOR.as_bytes());
+        let evaluator_sha = crate::hex::encode(&hasher.finalize());
 
         let ledger = Ledger::open(scratch.path.join("log.jsonl")).expect("an empty log");
         let mut node = Node::with_registry(ledger, VerifierRegistry::new(&scratch.path));
@@ -638,6 +668,7 @@ impl Arena {
             opened,
             checker_sha,
             stepper_sha,
+            evaluator_sha,
         }
     }
 
@@ -773,6 +804,123 @@ impl Arena {
             }
             Err(why) => {
                 self.note_refusal(player, "fund", &why);
+                None
+            }
+        }
+    }
+
+    /// Fund a **progressive** objective: an evaluator scores the artifact and a
+    /// ratchet pays for distance moved along a cumulative curve.
+    ///
+    /// Baseline zero and `maximize`, so a score *is* the progress and the
+    /// arithmetic a scenario has to reason about stays in one line:
+    /// `cumulative(s) = reward * s / target`.
+    ///
+    /// Returns the objective's id, or `None` if the rules refused.
+    pub fn fund_ratchet(
+        &mut self,
+        player: &str,
+        reward: u64,
+        tag: &str,
+        target: i64,
+        min_improvement: u64,
+    ) -> Option<String> {
+        let funder = self.who(player);
+        let verifier = Value::object([
+            ("kind", Value::string("evaluator")),
+            ("evaluator", Value::string("e.py")),
+            (
+                "evaluator_sha256",
+                Value::string(self.evaluator_sha.clone()),
+            ),
+            ("entrypoint", Value::string("score")),
+            // Above zero, so the evaluator's "malformed" sentinel rejects
+            // instead of settling for no progress.
+            ("threshold", Value::Int(1)),
+            ("direction", Value::string("maximize")),
+        ]);
+        let ratchet = Value::object([
+            ("baseline", Value::Int(0)),
+            ("target", Value::Int(i128::from(target))),
+            ("reward", Value::Int(i128::from(reward))),
+            ("direction", Value::string("maximize")),
+            ("min_improvement", Value::Int(i128::from(min_improvement))),
+        ]);
+        let objective = Objective::new(
+            "G",
+            format!("arena progressive objective {tag}"),
+            verifier,
+            reward,
+            funder,
+            self.now(),
+            None,
+            Some(ratchet),
+        )
+        .expect("a valid objective")
+        .funded_by(self.identity(player));
+        let ts = self.now();
+        match self.node.post_objective(&objective, &ts) {
+            Ok(_) => {
+                self.note_acted(player);
+                Some(objective.id())
+            }
+            Err(why) => {
+                self.note_refusal(player, "fund", &why);
+                None
+            }
+        }
+    }
+
+    /// Commit and reveal an artifact scoring `score` against a progressive
+    /// objective, citing the frontier the rules insist on.
+    ///
+    /// The citation is not optional and is not the caller's business: once a
+    /// ratcheted objective has a frontier, *every* claim against it must name
+    /// the holder or admission refuses it. A scenario that built the citation
+    /// list itself would be free to get that wrong, and a slicing attack whose
+    /// slices were quietly refused would report a defence that does not exist.
+    pub fn submit_scored(
+        &mut self,
+        player: &str,
+        objective: &str,
+        score: i64,
+        nonce: &str,
+    ) -> Option<String> {
+        let who = self.who(player);
+        let artifact = Value::object([
+            ("score", Value::Int(i128::from(score))),
+            // Distinguishes two players who reach the same score, so neither
+            // submission is a byte-identical copy of the other.
+            ("tag", Value::string(format!("{who}-{nonce}"))),
+        ]);
+        let at = self.now();
+        let commitment = Commitment::new(
+            objective,
+            &who,
+            crate::records::commitment_hash(objective, &who, &artifact, nonce),
+            &at,
+        )
+        .signed_with(self.identity(player));
+        if let Err(why) = self.node.commit(&commitment, &at) {
+            self.note_refusal(player, "commit", &why);
+            return None;
+        }
+        let reveal_at = self.later(1);
+        let cites: Vec<String> = self
+            .node
+            .frontier_of(objective)
+            .map(|held| vec![held.claim_id])
+            .unwrap_or_default();
+        let claim = Claim::new(objective, &who, artifact, nonce, &reveal_at, cites)
+            .expect("a valid claim")
+            .signed_with(self.identity(player));
+        match self.node.reveal(&claim, &reveal_at) {
+            Ok(_) => {
+                self.note_acted(player);
+                Some(claim.id())
+            }
+            Err(why) => {
+                self.note_refusal(player, "reveal", &why);
                 None
             }
         }
