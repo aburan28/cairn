@@ -1,0 +1,52 @@
+{
+  "artifact_schema": {
+    "description": "A batch of 1 to 64 distinguished orbits of the shared walk, each with the seed that started the trail and the eight branch counters that reconstruct its relation: {\"dps\": [{x, seed, j}, ...]}. Every orbit: HW(x) <= 34 over 131 normal-basis coordinates, x the least of its 131 rotations, and [mu*alpha_0]P + [mu]Q on the orbit x names; no orbit listed twice.",
+    "example": {
+      "dps": [
+        {
+          "j": [
+            4194304,
+            4194304,
+            4194304,
+            4194304,
+            4194304,
+            4194304,
+            4194304,
+            4194304
+          ],
+          "seed": "10000",
+          "x": "3f00000000000000000000000000001"
+        }
+      ]
+    },
+    "properties": {
+      "dps": {
+        "description": "1 to 64 orbits; each element carries x (lowercase minimal hex, 131 normal-basis coordinates), seed (lowercase minimal hex, 64 bits) and j (eight non-negative integers summing to the trail's step count).",
+        "type": "array"
+      }
+    },
+    "required": [
+      "dps"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-09-14T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-certicom-ecc2k130",
+  "piecework": {
+    "items": "dps",
+    "key": [
+      "x"
+    ],
+    "unit_price": 1000,
+    "units": 281474976710656
+  },
+  "reward": 2097152000,
+  "statement": "Contribute distinguished orbits to the shared Pollard rho search for Certicom's ECC2K-130, the open Koblitz instance of GOAL-certicom-ecc2k130. This objective pays for the search; objective-ecc2k130.json pays for the answer and is not expected to settle any other way. Run the walk in examples/certicom-ecdlp/jobs/ecc2k130.json (job id 1b41754d63526f77280f57d805cebe3191b5ed2cbdef02d2ce1a9e02cb40115d). The unit is an ORBIT, not a point: sigma(x, y) = (x^2, y^2) and negation (x, y) = (x, x + y) generate a group of order 262 that the iteration function respects, so one orbit has 262 spellings and is paid once, keyed on the least rotation of x's normal-basis coordinates. One step is R -> R + sigma^j(R) with j = 3 + ((HW(x) / 2) mod 8); a point is distinguished at HW(x) <= 34, about 2^25 steps, and each trail is about 2.9 ms of one 2026-class GPU. Submit up to 64 orbits per claim as {\"dps\": [{\"x\", \"seed\", \"j\"}, ...]}: x the canonical orbit, seed the 64-bit walk seed, and j the eight counters saying how many steps took each branch. Those counters are the WITNESS and are what makes the point payable -- the trail is [mu]R_0 for mu = prod (1 + s^j)^(j_count), so anyone checks the claim with one double scalar multiplication instead of re-running 2^25 steps. Without them a canonical low-weight bit string is free to invent and this objective would pay for nothing. Each novel accepted orbit pays unit_price from the pool until the pool is empty; an orbit already paid mints nothing, whatever seed or counters it is relabelled with -- and a second answer to one orbit is a COLLISION, whose holder computes k with `tools/orbit_dp.py collide` and claims objective-ecc2k130.json. Ask work_assignment for your unit range; any valid orbit is paid whichever seed slot it came from. THIS POOL IS ONE TRANCHE. The whole search is about 2^60.81 iterations and about 2^35.54 orbits; 2097152 orbits is about 2^46.27 iterations, roughly one part in 24000 of it. A funder who wants the search continued posts another objective with the same checker, which inherits this one's paid orbits. Stage 0 rewards are notional: the pool is unit_price times the tranche, and nothing more is claimed for it.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/ecc2k130_orbit_batch.py",
+    "checker_sha256": "502f5b58881ed1a83b0f882153f78b724bc4319744853d080e8b2134aec661a3",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

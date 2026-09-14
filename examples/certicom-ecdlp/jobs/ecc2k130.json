@@ -1,0 +1,32 @@
+{
+  "a": "0",
+  "b": "1",
+  "cofactor": 4,
+  "dp_max_weight": 34,
+  "family": "koblitz-frobenius-rho",
+  "frobenius_eigenvalue": "93d6a7fd020366557433410c5eef6bf4",
+  "generator": {
+    "x": "51c99bfa6f18de467c80c23b98c7994aa",
+    "y": "42ea2d112ecec71fcf7e000d7efc978bd"
+  },
+  "j_base": 3,
+  "j_count": 8,
+  "m": 131,
+  "max_batch": 64,
+  "max_steps_per_walker": 1073741824,
+  "name": "certicom ecc2k-130",
+  "nb_generator": "85425218439633925eb07b25668eee8f",
+  "order": "200000000000000004d4fdd5703a3f269",
+  "poly": "800000000000000000000000000002007",
+  "seed": 0,
+  "start_terms": 128,
+  "target": {
+    "x": "6c997f3e7f2c66a4a5d2fda13756a37b1",
+    "y": "4a38d11829d32d347bd0c0f584d546e9a"
+  },
+  "trail_bits": 16,
+  "unit_size": 256,
+  "units": 281474976710656,
+  "version": 2,
+  "witness": "j-counts"
+}

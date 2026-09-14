@@ -6,8 +6,13 @@ python3 examples/certicom-ecdlp/tools/selftest.py
 python3 examples/certicom-ecdlp/tools/nums.py verify examples/certicom-ecdlp/instances/nums-60.json
 ```
 
-Three objectives: two solvable rungs, and one open Certicom instance posted as a
-benchmark rather than as work anyone expects to finish.
+Two solvable rungs and one open Certicom instance posted as a benchmark rather
+than as work anyone expects to finish — and then, for each of the two open
+instances, a *piecework* objective that pays for the search instead of for
+finishing it. ECCp-131's is a distributed Pollard rho paid per distinguished
+point; ECC2K-130's is paid per **orbit**, because on a Koblitz curve that is
+what a collision is between, and a point there cannot carry its own
+certificate at all.
 
 ## Why Certicom's own instances could not simply be posted
 
@@ -119,6 +124,80 @@ was published, and the live 50-bit objective uses a **fresh v2 seed** whose
 logarithm nobody has computed. That retirement is the point: an objective whose
 answer its poster holds is self-dealing whether the poster chose it or merely
 found it first.
+
+## ECC2K-130: when the point cannot carry its own certificate
+
+`objective-ecc2k130-orbit-batch.json` pays for the search on Certicom's other
+open instance, and it is a different protocol rather than the same one with
+different constants. The design is
+[`docs/design/orbit-piecework.md`](../../docs/design/orbit-piecework.md); the
+job document schema is [`spec/search-job.schema.json`](../../spec/search-job.schema.json)
+version 2.
+
+```sh
+python3 examples/certicom-ecdlp/tools/orbit_dp.py describe --job examples/certicom-ecdlp/jobs/ecc2k130.json
+python3 examples/certicom-ecdlp/tools/orbit_dp.py validate
+python3 examples/certicom-ecdlp/tools/orbit_dp.py selftest
+./scripts/orbit-demo.sh
+```
+
+ECC2K-130 is a Koblitz curve, `y² + xy = x³ + 1` over `GF(2^131)`, and three
+things about it break the shape above:
+
+- **The unit is an orbit, not a point.** `σ(x, y) = (x², y²)` and negation
+  generate a group of order `2m = 262` that the iteration function respects,
+  so two trails have merged when they reach the same *orbit*. A unit keyed on
+  a representative would be paid 262 times for one orbit, by 262 relabellings
+  anybody computes from one published record. The piecework block therefore
+  says `"key": ["x"]` where `x` is the least cyclic rotation of the abscissa's
+  normal-basis coordinates — one name per orbit, and `m` prime is what makes
+  it unique.
+- **The weight is read in a normal basis.** The branch `j = 3 + ((HW(x)/2) mod 8)`
+  and the distinguishing test `HW(x) ≤ 34` are both orbit-invariant only there,
+  where `σ` is a rotation of the coordinates. The job pins the normal element;
+  the artifact spells `x` in that basis, so the checker decides "is this
+  distinguished" and "is this the canonical name" with two bit operations.
+- **A point cannot carry `(a, b)`.** The step would cost a 129-bit modular
+  multiplication, and the client that runs `1.4 × 10^10` steps a second keeps
+  the whole walk state in bitsliced field elements. So its corpus record is
+  `(seed, canonical x)` — which nobody can check for less than the work, and
+  which anybody can **invent for nothing**: a low-weight bit string rotated to
+  its least rotation is a syntactically perfect orbit name.
+
+The fix is the **witness**, and it comes out of the walk's own algebra. One
+step is `R ↦ R + σ^j(R) = [1 + s^j]R`, and the endomorphism ring is
+commutative, so a trail of any length is `[μ]R_0` with
+`μ = ∏_j (1 + s^j)^{n_j}` — and the `n_j` are just how many steps took each
+branch, in any order. **Eight counters.** A claim carrying them is verified by
+one double scalar multiplication: about 227 group operations against the
+`4 × 10^7` the trail cost, an asymmetry of `2^17.4`.
+
+```json
+{"dps": [{"x": "<canonical orbit>", "seed": "<64-bit walk seed>", "j": [n3, …, n10]}]}
+```
+
+| objective | pays | pool | note |
+|---|---|---|---|
+| `objective-ecc2k130-orbit-batch.json` | 1,000 per novel orbit, ≤ 64 per claim | 2,097,152,000 | one **tranche**: ≈ 2^46.3 of the ≈ 2^60.8 expected iterations |
+| `objective-ecc2k130.json` | 2,000,000 for `k` | — | the answer; not expected to settle |
+| `objective-ecc2k-23-orbit-batch.json` | 100 per novel orbit, ≤ 16 per claim | 8,000 | the same protocol at 21 bits, so it finishes |
+| `objective-ecc2k-23.json` | 5,000 for `k` | — | minted with a known `k`, so a demo checks rather than believes |
+
+What the witness does **not** prove is that the counters came from this walk's
+own `j` rule. A contributor who applies `σ^3` at every step ships witnesses
+that verify and trails that merge with nobody — the same cost to them, no
+progress for the search. That costs a re-walk to detect, so
+`tools/orbit_dp.py audit` samples paid claims and writes a docket for
+`cairn attest slash`, and `scripts/orbit-demo.sh` runs exactly that case: the
+private-rule trail is paid, and then caught.
+
+Two honest limits. The full ECC2K-130 corpus is about `2^35.5` orbits — call
+it 6.8 TB of claim artifacts — and every node that verifies the log holds all
+of it, which is why the posted pool is a tranche and why the whole table does
+not live in this network yet ([shards.md](../../docs/shards.md) is the right
+shape and is not wired into the transport). And the GPU client in
+`aburan28/crypto` would have to carry those eight counters to earn here, which
+costs walk state in a kernel tuned to the byte.
 
 ## What was checked before this shipped
 

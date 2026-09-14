@@ -13,10 +13,15 @@
 //! two implementations disagree about which objectives exist. Interpreting the
 //! document makes drift impossible by construction.
 //!
-//! Only the JSON Schema keywords actually used by `spec/*.json` are
-//! implemented, and an unrecognised keyword is an *error*, not a no-op. Failing
-//! closed matters: silently ignoring a keyword someone adds to the schema would
-//! turn a tightened contract into an unenforced comment.
+//! Only the JSON Schema keywords actually used by the two documents this
+//! module interprets — `spec/objective.schema.json` and
+//! `spec/claim.schema.json` — are implemented, and an unrecognised keyword is
+//! an *error*, not a no-op. Failing closed matters: silently ignoring a keyword
+//! someone adds to the schema would turn a tightened contract into an
+//! unenforced comment. `spec/` holds other documents that are contracts for
+//! things the node never validates (`search-job.schema.json` describes a job a
+//! *checker* pins, not a record), and those are free to use keywords this
+//! validator does not have; they are enforced where they are used.
 
 use std::collections::BTreeMap;
 use std::fmt;

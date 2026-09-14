@@ -1,0 +1,29 @@
+{
+  "artifact_schema": {
+    "description": "The discrete logarithm, as 6 lowercase hex characters.",
+    "example": {
+      "k": "0a1b2c"
+    },
+    "properties": {
+      "k": {
+        "description": "k with [k]P = Q, in [1, n), zero-padded to exactly 6 lowercase hex characters.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "k"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-09-14T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-ecc2k-23",
+  "reward": 5000,
+  "statement": "Find k with [k]P = Q on the 21-bit Koblitz instance in examples/certicom-ecdlp/jobs/ecc2k-23.json (job id c22d2033b98a00dbf6635349d70278294c654a6f717c54389c217cde448099f6). The answer half of the toy orbit-rho pair: objective-ecc2k-23-orbit-batch.json pays for the search, this one pays for the answer. Submit {\"k\"} as 6 lowercase hex characters, k in [1, n). The instance was minted with a known k so a demo can check the recovered logarithm rather than believe it; that is what makes it a test and not a challenge.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/ecc2k23_dlog.py",
+    "checker_sha256": "fa8ef17b2efabaef3aff266cac314d308a07234bf91b406efb4f402167cd6e43",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}
