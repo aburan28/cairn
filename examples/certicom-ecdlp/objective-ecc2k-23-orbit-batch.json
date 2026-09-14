@@ -1,0 +1,52 @@
+{
+  "artifact_schema": {
+    "description": "A batch of 1 to 16 distinguished orbits: {\"dps\": [{x, seed, j}, ...]}.",
+    "example": {
+      "dps": [
+        {
+          "j": [
+            1,
+            0,
+            2,
+            0,
+            0,
+            1,
+            0,
+            0
+          ],
+          "seed": "0",
+          "x": "1f"
+        }
+      ]
+    },
+    "properties": {
+      "dps": {
+        "description": "1 to 16 orbits; each element carries x, seed and j.",
+        "type": "array"
+      }
+    },
+    "required": [
+      "dps"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-09-14T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-ecc2k-23",
+  "piecework": {
+    "items": "dps",
+    "key": [
+      "x"
+    ],
+    "unit_price": 100,
+    "units": 4096
+  },
+  "reward": 8000,
+  "statement": "Contribute distinguished orbits to the shared rho search for the 21-bit Koblitz instance in examples/certicom-ecdlp/jobs/ecc2k-23.json (job id c22d2033b98a00dbf6635349d70278294c654a6f717c54389c217cde448099f6). This is ECC2K-130's protocol at a scale that finishes in a second: the same curve shape y^2 + xy = x^3 + 1 over GF(2^m), the same iteration R -> R + sigma^j(R), the same <-1> x <sigma> orbits, the same eight-counter witness, and the same rule that an orbit is a unit and is paid once. It exists so the mechanism is exercised end to end rather than described. Submit up to 16 orbits per claim as {\"dps\": [{\"x\", \"seed\", \"j\"}, ...]}. Whoever reaches an orbit already in the log holds a collision and claims objective-ecc2k-23.json with k.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/ecc2k23_orbit_batch.py",
+    "checker_sha256": "0ba12ff65fbdf7170cbd1f70732fac3ee6cfb222e0f4bdc8712ed0c162079626",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

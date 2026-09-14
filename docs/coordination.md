@@ -164,6 +164,26 @@ answer objective. `scripts/piecework-demo.sh` runs the whole loop on the
 50-bit instance with the pure-Python walker, and
 [`docs/design/rho-piecework.md`](design/rho-piecework.md) is the design.
 
+### When the unit is not a point
+
+ECC2K-130 is the same idea and a different unit, which is worth stating here
+because it is the place the "unit" abstraction is load-bearing rather than
+decorative. On a binary Koblitz curve the Frobenius map and negation generate
+a group of order `2m` that the walk respects, so two trails have merged when
+they reach the same **orbit**; a novelty rule keyed on a representative would
+pay `2m` times for one unit, to relabellings anyone computes from a published
+record. And the walk cannot carry coefficients at all — the step would cost a
+modular multiplication per iteration on a client that does `10^10` of them a
+second — so the natural record is checkable only by redoing the work, and
+invented records are free.
+
+Both are fixed inside the objective rather than inside the rules: the unit is
+the orbit's canonical name, and the artifact carries an eight-counter
+*witness* that collapses the trail to one scalar, so a point costs `2^25`
+group operations to make and about `2^7.8` to check.
+[`docs/design/orbit-piecework.md`](design/orbit-piecework.md), and
+`scripts/orbit-demo.sh` runs it at 21 bits.
+
 ## Latency budget
 
 "Real-time" is usually the wrong frame. What the system actually needs:

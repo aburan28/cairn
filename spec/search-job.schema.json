@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aburan28/cairn/spec/search-job.schema.json",
+  "title": "Search job",
+  "description": "A divided search, pinned by hash. A job document says what walk every contributor runs and what shape a unit of its output takes; its SHA-256 over canonical `tag=value` lines is the job id, and a piecework objective's checker carries that id, so the job is inside the objective's own id. Nothing here is a cairn record: the log never carries a job document, the checker does, and this file exists so two implementations of the same walk agree about what they are running. See docs/design/rho-piecework.md (version 1) and docs/design/orbit-piecework.md (version 2).",
+  "oneOf": [
+    { "$ref": "#/$defs/v1" },
+    { "$ref": "#/$defs/v2" }
+  ],
+  "$defs": {
+    "hex": {
+      "type": "string",
+      "pattern": "^(0|[1-9a-f][0-9a-f]*)$",
+      "description": "Lowercase hex, no prefix, no leading zero. One value, one spelling: the job id is a hash of these strings, so `0a` and `a` would be two different jobs with the same parameters."
+    },
+    "point": {
+      "type": "object",
+      "required": ["x", "y"],
+      "additionalProperties": false,
+      "properties": { "x": { "$ref": "#/$defs/hex" }, "y": { "$ref": "#/$defs/hex" } }
+    },
+    "v1": {
+      "title": "Version 1: r-adding walk on a prime-field curve",
+      "description": "The shape `examples/certicom-ecdlp/jobs/{nums-50,eccp131}-rho.json` are written in and `tools/rho_dp.py` runs. A point on `y^2 = x^3 + ax + b` over `F_p` carries its own coefficients `(a, b)` with `aP + bQ = (x, y)`, so a distinguished point is its own certificate and the artifact needs nothing else. Frozen: these job ids are inside shipped checkers, and a field added here would move them.",
+      "type": "object",
+      "required": ["version", "name", "p", "a", "b", "generator", "target", "order", "dp_bits", "num_branches", "negation_map", "unit_size", "max_steps_per_walker", "seed"],
+      "additionalProperties": false,
+      "properties": {
+        "version": { "const": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "p": { "$ref": "#/$defs/hex", "description": "Field characteristic." },
+        "a": { "$ref": "#/$defs/hex" },
+        "b": { "$ref": "#/$defs/hex" },
+        "generator": { "$ref": "#/$defs/point", "description": "P." },
+        "target": { "$ref": "#/$defs/point", "description": "Q, whose logarithm base P is the answer." },
+        "order": { "$ref": "#/$defs/hex", "description": "n, the prime order of P." },
+        "dp_bits": { "type": "integer", "minimum": 1, "description": "A point is distinguished when the low `dp_bits` bits of x are zero, so a trail is about 2^dp_bits steps." },
+        "num_branches": { "type": "integer", "minimum": 2, "description": "Size of the r-adding branch table, derived from the job id." },
+        "negation_map": { "type": "boolean", "description": "Fold each point to the representative with 2y <= p, halving the search at the cost of fruitless cycles the walk must escape." },
+        "unit_size": { "type": "integer", "minimum": 1, "description": "Walker indices per unit of the work assignment." },
+        "max_steps_per_walker": { "type": "integer", "minimum": 0, "description": "Step cap before a trail is abandoned; 0 means the implementation's default of 20 * 2^dp_bits." },
+        "seed": { "type": "integer", "minimum": 0, "description": "Domain separator mixed into every derived scalar." }
+      }
+    },
+    "v2": {
+      "title": "Version 2: Frobenius-adding walk on a binary Koblitz curve, paid per orbit",
+      "description": "ECC2K-130's shape. Three things make it a different document rather than a field added to version 1, and each of them changes what a unit IS.\n\nFirst, the equivalence group. On `y^2 + xy = x^3 + ax^2 + b` over `GF(2^m)`, `sigma(x, y) = (x^2, y^2)` and negation `(x, y) = (x, x + y)` generate a group of order `2m` that the iteration function respects, so the walk is on ORBITS and two trails have collided when they reach the same orbit -- not the same point. A unit is therefore an orbit, and a piecework block that keyed novelty on a representative would pay `2m` times for one unit.\n\nSecond, the weight basis. The distinguishing test and the iteration's branch are both the Hamming weight of x in a NORMAL basis, where sigma is a cyclic rotation of the coordinates; in the polynomial basis neither is orbit-invariant and the walk is not well defined on orbits at all. So the job pins a normal element, the artifact spells x in those coordinates, and the orbit's name is the least rotation of that bit string.\n\nThird, the witness. The step is `R -> R + sigma^j(R) = [1 + s^j]R` and the endomorphism ring is commutative, so a trail of any length is `[mu]R_0` for `mu = prod_j (1 + s^j)^(n_j)` -- and the `n_j` are just how many steps took each branch, in any order. A walker that carries `j_count` counters ships a point anyone verifies with one double scalar multiplication. A walker that carries only the endpoint, which is what a bitsliced client naturally produces, ships something nobody can check for less than the work itself and that anybody can invent for nothing.",
+      "type": "object",
+      "required": ["version", "name", "family", "m", "poly", "a", "b", "generator", "target", "order", "cofactor", "frobenius_eigenvalue", "nb_generator", "j_base", "j_count", "start_terms", "trail_bits", "dp_max_weight", "witness", "max_batch", "unit_size", "units", "max_steps_per_walker", "seed"],
+      "additionalProperties": false,
+      "properties": {
+        "version": { "const": 2 },
+        "name": { "type": "string", "minLength": 1 },
+        "family": {
+          "type": "string",
+          "enum": ["koblitz-frobenius-rho"],
+          "description": "The whole walk shape in one field: the iteration `R -> R + sigma^j(R)`, `j = j_base + ((HW(x) / 2) mod j_count)`; the distinguishing test `HW(x) <= dp_max_weight`; the equivalence group `<-1> x <sigma>`; the orbit name `least rotation of the normal-basis coordinates of x`; and the start point `R_0 = Q + sum_i c_i sigma^i(P)` over the bits of splitmix64(seed). One knob naming all of it rather than five that can contradict each other -- a document that said `equivalence: none` beside a Frobenius-invariant distinguishing test would be describing no walk anyone can run."
+        },
+        "m": { "type": "integer", "minimum": 3, "description": "Extension degree of `GF(2^m) = F_2[z]/(poly)`." },
+        "poly": { "$ref": "#/$defs/hex", "description": "Reduction polynomial as a bitmask, degree exactly m, irreducible." },
+        "a": { "$ref": "#/$defs/hex", "description": "Koblitz `a`, so 0 or 1." },
+        "b": { "$ref": "#/$defs/hex" },
+        "generator": { "$ref": "#/$defs/point", "description": "P, in polynomial-basis coordinates." },
+        "target": { "$ref": "#/$defs/point", "description": "Q, in polynomial-basis coordinates." },
+        "order": { "$ref": "#/$defs/hex", "description": "n, the prime order of P; `#E = cofactor * n`." },
+        "cofactor": { "type": "integer", "minimum": 1 },
+        "frobenius_eigenvalue": {
+          "$ref": "#/$defs/hex",
+          "description": "s with `sigma(R) = [s]R` on `<P>`, a root of `s^2 - mu*s + 2 = 0 mod n`. Pinned rather than derived because both roots satisfy the equation and only one acts as Frobenius: a job that let each implementation pick would have half of them computing every witness wrong, silently, since the wrong root still produces a well-formed scalar."
+        },
+        "nb_generator": {
+          "$ref": "#/$defs/hex",
+          "description": "gamma, a normal element, in polynomial-basis coordinates: the basis `gamma, gamma^2, ..., gamma^(2^(m-1))` is the one weights and orbit names are read in. Pinned by value, not by a rule like 'the type-II generator' or 'the sparsest one', because two implementations that search for it can find different elements and then disagree about which orbit a point is on."
+        },
+        "j_base": { "type": "integer", "minimum": 1, "description": "Lowest Frobenius power the iteration adds. ECC2K-130 uses 3." },
+        "j_count": { "type": "integer", "minimum": 2, "description": "How many branches, and therefore how many counters a witness carries. ECC2K-130 uses 8." },
+        "start_terms": { "type": "integer", "minimum": 1, "description": "Bits of the seed expansion that build the start point, so `R_0 = Q + sum_{i < start_terms} c_i sigma^(i mod m)(P)`." },
+        "trail_bits": { "type": "integer", "minimum": 0, "maximum": 32, "description": "Low bits of the 64-bit seed that count restarts within one unit: `seed = (unit << trail_bits) | trail`. A walker that finishes a trail increments its seed and keeps the unit." },
+        "dp_max_weight": { "type": "integer", "minimum": 1, "description": "A point is distinguished when its normal-basis Hamming weight is at most this. Sets both the trail length and the size of the corpus: expected steps per orbit is 1/Pr[HW <= this], and the whole search produces (expected iterations) * Pr orbits. Both matter, in opposite directions -- see docs/design/orbit-piecework.md." },
+        "witness": {
+          "type": "string",
+          "enum": ["j-counts"],
+          "description": "How a submitted orbit proves it is a real endpoint. `j-counts`: the artifact carries `j_count` per-branch step counters, and the checker rebuilds `mu = prod_j (1 + s^j)^(n_j)` and requires `[mu*alpha_0]P + [mu]Q` to land on the claimed orbit. An enum with one member on purpose: the obvious alternative -- endpoint and seed only, which is what an unmodified bitsliced client writes -- is not a payable mode at all, because a canonical low-weight bit string costs nothing to invent, and is left out rather than offered with a warning."
+        },
+        "max_batch": { "type": "integer", "minimum": 1, "description": "Most orbits one claim may carry. The checker pins it too: it bounds what one submission costs every verifying node." },
+        "unit_size": { "type": "integer", "minimum": 1, "description": "Seed slots per unit of the work assignment." },
+        "units": { "type": "integer", "minimum": 1, "description": "How many units the seed space divides into, which `work_assignment` maps a node's per-epoch slice onto. At most `2^(64 - trail_bits)`. Advisory, like every assignment in this network: nothing reserves a unit, and a point is paid whichever unit produced it." },
+        "max_steps_per_walker": { "type": "integer", "minimum": 0, "description": "Step cap before a trail is abandoned unpaid; 0 means the implementation's default. A capped trail is not a distinguished point and earns nothing -- a client reports it so it can restart the lane, and that report is not a unit." },
+        "seed": { "type": "integer", "minimum": 0, "description": "Domain separator XORed into every walk seed before expansion." }
+      }
+    }
+  }
+}

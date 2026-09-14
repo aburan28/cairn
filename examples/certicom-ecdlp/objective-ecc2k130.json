@@ -1,0 +1,29 @@
+{
+  "artifact_schema": {
+    "description": "The discrete logarithm, as 33 lowercase hex characters.",
+    "example": {
+      "k": "0000000000000000000001a2b3c4d5e6f"
+    },
+    "properties": {
+      "k": {
+        "description": "k with [k]P = Q, in [1, n), zero-padded to exactly 33 lowercase hex characters.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "k"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-09-14T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-certicom-ecc2k130",
+  "reward": 2000000,
+  "statement": "Solve Certicom's ECC2K-130, open since 1997: find k with [k]P = Q on the Koblitz curve y^2 + xy = x^3 + 1 over GF(2^131) pinned in the checker. The parameters are the challenge's own and are authenticated by arithmetic rather than by their source -- the reduction polynomial irreducible, #E = 4n by the Frobenius recursion, n prime, P and Q on the curve and of order n -- so a corrupted digit could not have survived. THIS IS A FRONTIER OBJECTIVE AND IS NOT EXPECTED TO SETTLE. Pollard rho with the <-1> x <sigma> speed-up needs about 2^60.81 group operations, about 40000 GPU-hours at the 14.1e9 iterations/s one 2026 GPU measures. It is posted because the network should carry an externally-defined benchmark whose difficulty nobody here chose. Certicom's own prize is NOT claimable: BlackBerry retired the challenge and the pages are gone; this objective pays cairn's reward and nothing of Certicom's. The search itself is paid by objective-ecc2k130-orbit-batch.json, orbit by orbit, and that is the objective a contributor works. Submit {\"k\"} as 33 lowercase hex characters, k in [1, n). See examples/certicom-ecdlp/README.md and docs/design/orbit-piecework.md.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/ecc2k130_dlog.py",
+    "checker_sha256": "d932da7925bb493f4ac6bd9b299e41b82f10076b9d1ff0e3074ee1ef7beb1497",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

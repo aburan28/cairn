@@ -58,6 +58,10 @@ The five pages a user needs and nothing else in this repository provides.
 - [design/rho-piecework.md](design/rho-piecework.md) — **piecework**: paying per
   verified unit of a divided problem, for searches that have no frontier to
   move. Built, and the worked instance is a distributed Pollard rho.
+- [design/orbit-piecework.md](design/orbit-piecework.md) — the same, where the
+  unit is an **orbit** and a point cannot carry its own certificate: ECC2K-130,
+  and the eight-counter witness that makes one of its distinguished points
+  something a network can pay for.
 - [knowledge.md](knowledge.md) — typed relations, derived standing, and
   reader-chosen confidence: revising knowledge without rewriting history.
 - [../examples/README.md](../examples/README.md) — worked objectives with real
@@ -138,6 +142,7 @@ lines; that is the authority, and this table is the index to it.
 | [heir-fhe-compilation.md](design/heir-fhe-compilation.md) — buy the search, refuse the compute | integration review; half of it is refused on purpose |
 | [workspace-benchmarks.md](design/workspace-benchmarks.md) — repository-shaped benchmarks | design review, with the code changes it would need |
 | [rho-piecework.md](design/rho-piecework.md) — distributed Pollard rho as piecework | **Stages A and B built** (`src/piecework.rs`); Stage C is not |
+| [orbit-piecework.md](design/orbit-piecework.md) — ECC2K-130: paying per orbit, and the witness that makes one checkable | **built**, with no consensus change; the corpus still does not fit a log |
 | [index-calculus-p224.md](design/index-calculus-p224.md) — index calculus as piecework | proposal; nothing here is built |
 
 ## Contributing
