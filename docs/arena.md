@@ -74,8 +74,34 @@ At seed 1, with default costs:
 | griefing bonded disputes | **PROTECTED** — the griefer forfeits 6,000 and the submitter it stalled ends 9,000 up instead of 3,000 |
 | griefing a plain objective | **REFUSED** — an objective with no stepper cannot be disputed at all |
 | rubber-stamping | **CLOSED** — 8,000 undefended against −92,000 defended |
+| epsilon-farming a progressive bounty | **NEUTRAL** — eight slices earn 80,000, exactly what one claim earns; paid per improvement they would take 100,000 |
 
 No attack in this set is profitable against its defence.
+
+### The one that had nothing pointed at it
+
+Every objective on this board was `certificate` kind until epsilon-farming
+arrived, so "what a settlement mints" was the objective's `reward` and never a
+function of where the frontier was. A ratchet is the case where it *is* a
+function — `Ratchet::payout` pays `cumulative(new) - cumulative(old)`, and the
+frontier's `paid_cumulative` is what that subtraction is against — and AGENTS.md
+sends exactly that kind of change here. Nothing arrived.
+
+So the arena could not represent the shape an ecdsa.fail-style challenge runs
+on, and a change to the ratchet's arithmetic would have shown up in no scenario
+at all. `Arena::fund_ratchet` and `Arena::submit_scored` are the two moves that
+were missing; the objective they post carries a pinned `evaluator` and a ratchet,
+and the submission cites the frontier because admission insists on it.
+
+The undefended arm is the same log paid **without the subtraction**: each
+accepted improvement collects `cumulative(its score)` outright, which is the
+shape the code has if the running total is dropped. Capped at the pool, because
+even a naive implementation would stop there and an uncapped counterfactual would
+credit the attack with money no rule would have released.
+
+Removing telescoping makes it report **OPEN** at 360,000 on a 100,000 pool, which
+is how the scenario was checked to be pinning something rather than agreeing with
+itself.
 
 ### The one that used to be open
 

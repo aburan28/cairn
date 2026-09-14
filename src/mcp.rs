@@ -1525,10 +1525,20 @@ impl Server {
                     // every future claim gains too little to settle. Better to
                     // say so than to let somebody spend a run finding out.
                     if ratchet.is_exhausted(f.score) {
-                        line.push_str(
-                            "this objective is exhausted: the remaining pool is smaller than \
- one settling move, so no claim can be paid here again.\n",
-                        );
+                        // Naming the amount rather than only the fact, because
+                        // the pool line above already showed a number and a
+                        // contributor comparing the two needs to see that this
+                        // one is the same money. And it is the remaining *span*
+                        // that is under the gate, not the remaining pool -- the
+                        // earlier wording conflated the two, which reads as
+                        // "there is almost nothing left" when the truth can be
+                        // "there is plenty left and it is unreachable".
+                        let stranded = ratchet.stranded_at(f.score).unwrap_or(0);
+                        line.push_str(&format!(
+                            "this objective is exhausted: {stranded} of the pool is unpaid, but \
+ the whole remaining span is under one settling move, so no claim at any score \
+ can be paid here again.\n"
+                        ));
                     }
                 }
                 line

@@ -228,6 +228,86 @@ fn standing_behind_the_truth_costs_only_the_check() {
     );
 }
 
+/// Chopping one improvement into eight pays exactly what publishing it once
+/// pays, so there is nothing to farm.
+///
+/// The first scenario on this board to run on a **ratchet**, and the reason it
+/// had to exist: every other objective here is `certificate` kind, so "what a
+/// settlement mints" was the objective's `reward` and never a function of where
+/// the frontier was. A change to `Ratchet::payout` or to the `paid_cumulative`
+/// it subtracts against had no attack measured against it, which is exactly the
+/// case AGENTS.md sends to the arena.
+///
+/// Neutral rather than merely unprofitable. A slicer that earned *less* than an
+/// honest submitter would mean the mechanism punishes incremental publication,
+/// which is backwards for a design whose whole purpose is making it safe to
+/// publish early.
+#[test]
+fn slicing_an_improvement_pays_exactly_what_publishing_it_once_pays() {
+    if !have_python() {
+        eprintln!("skipping: no python3");
+        return;
+    }
+    let trial = scenarios::epsilon_farming(SEED);
+    match trial.verdict() {
+        Verdict::Neutral {
+            attacker,
+            honest,
+            without,
+        } => {
+            assert_eq!(
+                attacker, honest,
+                "eight slices earned {attacker} against one claim's {honest}: \
+                 telescoping is supposed to make these identical"
+            );
+            // The counterfactual has to be worth something, or the run measures
+            // an absence of opportunity rather than a defence. Paid per
+            // improvement, the same eight claims take strictly more.
+            assert!(
+                without > honest,
+                "paying per improvement gave the slicer {without} against \
+                 {honest}; nothing was at stake"
+            );
+            assert!(attacker > 0, "neither submitter was paid at all");
+        }
+        other => panic!("epsilon-farming: {other}"),
+    }
+}
+
+/// The slices were admitted, not quietly refused.
+///
+/// The failure this guards is specific and would leave the test above passing:
+/// on a ratcheted objective every claim must cite the frontier holder, so a
+/// scenario that got the citation wrong would have its slices refused at
+/// admission, and "the slicer earned no more than the honest submitter" would be
+/// true because the slicer never submitted anything. The arena's `INERT` verdict
+/// catches an attack that lost money; nothing catches an attack that never
+/// happened.
+#[test]
+fn the_slicer_actually_sliced() {
+    if !have_python() {
+        eprintln!("skipping: no python3");
+        return;
+    }
+    let trial = scenarios::epsilon_farming(SEED);
+    let slicer = trial
+        .defended
+        .payoff(&trial.attacker)
+        .expect("the slicer's payoff");
+    assert!(
+        slicer.refused.is_empty(),
+        "a slice was turned away, so the run measured a refusal rather than a \
+         defence: {:?}",
+        slicer.refused
+    );
+    // Eight reveals, and each one had to name the frontier it beat.
+    assert!(
+        slicer.acted >= 8,
+        "the slicer acted {} times, so it did not publish eight slices",
+        slicer.acted
+    );
+}
+
 /// Every scenario is a deterministic function of its seed, or a run is an
 /// anecdote rather than a measurement.
 #[test]
