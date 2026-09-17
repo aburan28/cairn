@@ -90,7 +90,7 @@ CLIENT ?= claude
 
 # `ui/node_modules` is deliberately absent: it is a real directory whose
 # freshness against the lockfile is the whole point of the rule.
-.PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui ios-check \
+.PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui ios-check ios-app \
 	interop differential fuzz mcp-smoke serve-smoke node-smoke canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
 	test-reference fmt clippy docs tla check
@@ -126,6 +126,7 @@ help:
 	  '  make autoresearch        Run the crypto autoresearcher end to end on its own node.' \
 	  '  make autoresearch-gui    Build the macOS app that runs it (gui/macos).' \
 	  '  make ios-check           Test the iOS reader package (needs Swift).' \
+	  '  make ios-app             Compile Cairn.app for the simulator (needs Xcode).' \
 	  '  make shard-demo          Six holders, one shard each, one of them lying.' \
 	  '  make tla                 Model-check every TLA+ module in spec/tla.' \
 	  '  make check               Run the full required verification suite.' \
@@ -328,6 +329,21 @@ autoresearch-gui:
 ios-check:
 	cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
 	swift test --package-path gui/ios
+
+# The .app itself. Needs Xcode; GitHub's macos-latest job is the cloud copy
+# (Actions → ios-app, or the gui-ios job on a PR). Unsigned simulator —
+# a device IPA needs an Apple team this repository does not carry.
+ios-app:
+	xcodebuild \
+		-project gui/ios/Cairn.xcodeproj \
+		-scheme Cairn \
+		-destination 'generic/platform=iOS Simulator' \
+		-configuration Release \
+		-derivedDataPath gui/ios/.derived \
+		CODE_SIGNING_ALLOWED=NO \
+		CODE_SIGNING_REQUIRED=NO \
+		CODE_SIGN_IDENTITY= \
+		build
 
 fuzz: build
 	./scripts/fuzz-differential.sh $(FUZZ_CASES)

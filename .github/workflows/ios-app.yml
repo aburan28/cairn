@@ -1,0 +1,54 @@
+name: ios-app
+
+# The iPhone .app, compiled on a Mac GitHub hosts. This Linux cloud-agent
+# image has no Xcode; macos-latest does. `workflow_dispatch` is how somebody
+# builds the reader without waiting for the rust job, and `workflow_call` is
+# how `ci.yml`'s gui-ios job runs the same steps so a toolchain break still
+# goes red on every PR.
+#
+# Simulator, unsigned. DEVELOPMENT_TEAM is empty and Automatic signing
+# needs a logged-in Xcode; a machine that is not that cannot produce a
+# device IPA. The artifact is the compile — drag it onto a Simulator —
+# not a store package.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: xcodebuild -version
+      - run: cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
+      - run: swift test --package-path gui/ios
+      - run: swift build -c release --package-path gui/ios
+      - name: compile Cairn.app for the simulator
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project gui/ios/Cairn.xcodeproj \
+            -scheme Cairn \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Release \
+            -derivedDataPath gui/ios/.derived \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            build
+      - name: package the .app
+        run: |
+          set -euo pipefail
+          app=gui/ios/.derived/Build/Products/Release-iphonesimulator/Cairn.app
+          test -d "$app"
+          ditto -c -k --keepParent "$app" cairn-reader-ios-simulator.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cairn-reader-ios-simulator
+          path: cairn-reader-ios-simulator.zip
+          if-no-files-found: error
+          retention-days: 14
