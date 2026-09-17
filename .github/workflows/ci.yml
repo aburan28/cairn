@@ -355,19 +355,12 @@ jobs:
       - run: swift build -c release --package-path gui/macos
 
   gui-ios:
-    # The iPhone reader. The decoder and the chain check are a Swift package
-    # so they compile on this runner without a simulator; the .app is
-    # Cairn.xcodeproj and needs a Mac with Xcode to sign onto a phone.
-    # Same "every PR, not a path filter" argument as gui-macos: the compiler
-    # is the image's, and a toolchain break should go red here, not on the
-    # next Swift PR.
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: swift --version
-      - run: cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
-      - run: swift test --package-path gui/ios
-      - run: swift build -c release --package-path gui/ios
+    # The iPhone reader, including Cairn.xcodeproj. Lives in ios-app.yml so
+    # a dispatch can compile the .app without waiting for rust. Same "every
+    # PR, not a path filter" argument as gui-macos: the compiler is the
+    # image's, and a toolchain break should go red here, not on the next
+    # Swift PR.
+    uses: ./.github/workflows/ios-app.yml
 
   examples:
     # Every example objective must pass schema validation and match its pinned

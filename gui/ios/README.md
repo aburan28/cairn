@@ -12,11 +12,19 @@ the rules. This app only reads.
 ```sh
 open gui/ios/Cairn.xcodeproj     # Xcode, then Run on a simulator or a phone
 swift test --package-path gui/ios
+make ios-app                     # unsigned simulator .app, needs Xcode
 ```
 
 The Xcode project is the `.app`. The Swift package is the decoder, the chain
 check, and the same SwiftUI scenes compiled as a macOS window so CI can fail
 a view without a simulator. `make ios-check` runs the package tests.
+
+A Linux cloud agent cannot compile this — there is no Xcode on that image.
+GitHub's `macos-latest` runner can. Actions → **ios-app** (Run workflow) builds
+`Cairn.app` for the simulator and uploads `cairn-reader-ios-simulator.zip`.
+The same job is `gui-ios` on every PR. Drag the `.app` onto a Simulator.
+A device or App Store IPA needs an Apple team and certificates; those are
+not in this repository, and Automatic signing has no `DEVELOPMENT_TEAM`.
 
 ## What it shows
 
