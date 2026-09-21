@@ -362,6 +362,12 @@ Both `GB` (10⁹) and `GiB` (2³⁰) are accepted and mean different things. A c
 silently picked one would be off by 7% at the gigabyte — a real amount of
 somebody's disk.
 
+`cairn --max-size 20GB run` holds a running node to the same cap: it reclaims
+to fit before anything starts, and checks again every minute. When the pinned
+content alone outgrows the cap, the node stops with the refusal below rather
+than keep writing. Until this was wired in, `run` accepted the flag and never
+measured the store against it again.
+
 ### The log is never evicted
 
 This is the whole design. A size cap on a store holding the only copy of a

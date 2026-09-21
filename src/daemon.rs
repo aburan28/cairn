@@ -75,6 +75,11 @@ const BEACONS_PER_TICK: usize = 64;
 /// Seconds between sync rounds.
 const TICK_SECONDS: u64 = 5;
 
+/// Ticks between checks of the store against its cap: a minute. Walking the
+/// data directory is not free, and a log does not grow by a meaningful
+/// fraction of any sensible cap in sixty seconds.
+const STORE_CHECK_TICKS: u64 = 12;
+
 /// Everything [`run`] needs. All three entry points build one from their flags.
 ///
 /// Paths are taken as owned values rather than borrowed: the daemon outlives
@@ -130,6 +135,14 @@ pub struct Config {
     /// Ed25519 identity used to sign MCP submissions. This is deliberately
     /// separate from [`Config::identity`], which is the transport KEM key.
     pub mcp_identity: Option<PathBuf>,
+    /// A store with a size cap to hold this node under while it runs.
+    ///
+    /// Checked once a minute: reclaimable content is
+    /// evicted to make room, and when the pinned content alone outgrows the
+    /// cap the node stops, which is what the cap means -- see
+    /// [`crate::store`]: "a cap smaller than your log stops your node; it does
+    /// not prune your log". `None`, or a store with no limit, checks nothing.
+    pub store: Option<crate::store::Store>,
 }
 
 impl Config {
@@ -159,6 +172,7 @@ impl Config {
             proxy: None,
             mcp: false,
             mcp_identity: None,
+            store: None,
         }
     }
 
@@ -474,10 +488,15 @@ fn bind_http(config: &Config) -> Result<Option<(TcpListener, serve::Serving)>, S
 
 /// Run the node until the process is killed.
 ///
-/// Returns `Err` only for a startup failure the operator has to fix: an
+/// Returns `Err` for a startup failure the operator has to fix: an
 /// unreadable identity file, a log another process holds, an address that
 /// cannot be bound. Once the loops are running, failures are logged and stepped
 /// over — a node that stops on the first unreachable peer is not a node.
+///
+/// With one exception, which is a decision rather than a failure: a store that
+/// outgrows the size cap its operator set ([`Config::store`]). A full disk is
+/// an accident and the node rides it out; a cap is an instruction, and a node
+/// that kept writing past it would make the cap decoration.
 pub fn run(config: Config) -> Result<(), String> {
     // The ledger first, and the ordering is deliberate.
     //
@@ -788,7 +807,14 @@ pub fn run(config: Config) -> Result<(), String> {
         }
     });
 
+    let mut ticks: u64 = 0;
     loop {
+        if let Some(store) = config.store.as_ref() {
+            if ticks.is_multiple_of(STORE_CHECK_TICKS) {
+                hold_under_cap(store)?;
+            }
+        }
+        ticks = ticks.wrapping_add(1);
         if mcp_finished.as_ref().is_some_and(|finished| {
             !matches!(
                 finished.try_recv(),
@@ -946,10 +972,79 @@ pub fn run(config: Config) -> Result<(), String> {
     }
 }
 
+/// Evict reclaimable content until the store fits its cap, or refuse.
+///
+/// `Err` only for the refusal -- the pinned bytes alone are over the cap --
+/// and its message is the store's own, which names both numbers and says to
+/// raise the cap or move the store. Anything else that goes wrong measuring a
+/// directory is logged and retried next time, like every other runtime
+/// failure here.
+fn hold_under_cap(store: &crate::store::Store) -> Result<(), String> {
+    use crate::store::{format_size, quota, StoreError};
+    match quota::reclaim(store, 0) {
+        Ok(eviction) if !eviction.is_empty() => {
+            log::info!(
+                "store: evicted {} reclaimable file(s), {} freed, to stay under the {} cap",
+                eviction.removed.len(),
+                format_size(eviction.freed),
+                store.limit().map(format_size).unwrap_or_default()
+            );
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(error @ StoreError::QuotaExceeded { .. }) => {
+            log::error!("store: {error}; stopping the node");
+            Err(format!("store: {error}"))
+        }
+        Err(error) => {
+            log::warn!("store: could not check the size cap: {error}");
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::records::{commitment_hash, Claim, Commitment};
+
+    /// `cairn run --max-size` was accepted and then ignored for the life of
+    /// the node. This is the check that now runs every minute.
+    #[test]
+    fn a_store_over_its_cap_stops_the_node_and_never_loses_the_log() {
+        let dir = std::env::temp_dir().join(format!(
+            "cairn-daemon-cap-{}-{}",
+            std::process::id(),
+            timestamp().replace(':', "")
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = crate::store::Store::new(&dir);
+        store.prepare().expect("prepare");
+        fs::write(store.log_path(), vec![b'x'; 1000]).expect("log");
+        let cached = store.cache_dir().join("blob");
+        fs::write(&cached, vec![b'y'; 1000]).expect("cache");
+
+        // No cap, no work.
+        assert_eq!(hold_under_cap(&store), Ok(()));
+        assert!(cached.exists());
+
+        // Room for the log but not the cache: the cache goes, the node stays.
+        assert_eq!(
+            hold_under_cap(&store.clone().with_limit(Some(1500))),
+            Ok(())
+        );
+        assert!(!cached.exists(), "reclaimable content is evicted to fit");
+
+        // No room for the log: the node stops, and says what to do about it.
+        let refusal = hold_under_cap(&store.clone().with_limit(Some(500))).expect_err("over cap");
+        assert!(refusal.contains("Raise the limit"), "{refusal}");
+        assert_eq!(
+            fs::metadata(store.log_path()).map(|m| m.len()).ok(),
+            Some(1000),
+            "the log is never pruned to fit"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     // The same three instants `tests/p2p_convergence.rs` uses, for the same
     // reason: commit, reveal one epoch later, settle after the reveal epoch

@@ -19,7 +19,8 @@ and they are not conveniences.
 | `CAIRN_KEY` | `~/.cairn/key` | the at-rest key file |
 | `CAIRN_PASSPHRASE` | — | passphrase for a wrapped at-rest key |
 | `CAIRN_REQUIRE_SANDBOX` | unset | `1` refuses to run objective code at all without a working jail |
-| `CAIRN_SANDBOX_MEMORY_MB` | `4096` (MiB) | address-space cap for pinned pure functions; `0` disables it |
+| `CAIRN_SANDBOX_MEMORY_MB` | `4096` (MiB) | memory cap for pinned pure functions: `RLIMIT_AS` on Linux, the process tree's measured footprint on macOS; `0` disables it |
+| `CAIRN_SANDBOX_CPUS` | unset (no cap) | cores one verifier's process tree may keep busy, on average; enforced by pausing it |
 | `CAIRN_EPOCH_SECONDS` | `600` | **consensus-critical.** Epoch length, in seconds |
 | `CAIRN_FINALITY_EPOCHS` | `1` | **consensus-critical.** Closed epochs that must pass before an epoch may settle |
 | `CAIRN_REQUIRE_BEACON` | unset | `1` refuses a log whose epochs settled without a recorded beacon |
@@ -84,7 +85,21 @@ exceeding the cap does not return the verdict it would otherwise have returned �
 so a node with a smaller cap can differ from its peers on a heavy artifact. The
 jail mechanism a node actually used is recorded in the verdict's evidence for
 this reason: when auditors compare disagreeing verdicts, how the loser ran it is
-the first question.
+the first question. macOS has no `RLIMIT_AS`, so there the node measures the
+verifier's whole process tree while it runs — its physical footprint, what
+Activity Monitor calls Memory — and stops it past the cap.
+
+**`CAIRN_SANDBOX_CPUS` is in the same class.** It holds a verifier's whole
+process tree to that many cores' worth of CPU, averaged, by pausing it
+(`SIGSTOP`) when it is over and continuing it once it has caught up: the only
+whole-tree CPU cap macOS gives an unprivileged process, since it has no cgroups
+and ignores thread affinity on Apple silicon. A paused verifier's deadline keeps
+running, so a multi-process checker throttled hard enough can time out, which
+is `unavailable`, and the timeout message says this node's cap paused it. A
+single-process checker loses nothing at one core or more: its `RLIMIT_CPU`
+already equals its deadline in seconds. On Linux a service manager's
+`CPUQuota=` or a cgroup does the same job more precisely, and for the whole
+node rather than one verifier at a time.
 
 ### The two refusal switches
 
@@ -113,7 +128,7 @@ bubblewrap`), **seatbelt** on macOS. There is no Windows build, because there is
 no third jail.
 
 What the jail does: no network, declared reads only, confined writes, a
-deadline, and the address-space cap above. What it does not do: survive a kernel
+deadline, and the memory and CPU caps above. What it does not do: survive a kernel
 or policy bug. `verifiers::SANDBOXING` in the source documents exactly what is
 and is not covered, and [threat-model.md](threat-model.md) marks the rest.
 
@@ -136,6 +151,12 @@ and is not covered, and [threat-model.md](threat-model.md) marks the rest.
 
 `--max-size` caps it (`20GB`, `20GiB`). `cairn store status` reports what is
 used, what is pinned and what is reclaimable; `cairn store gc` reclaims.
+
+`cairn run` holds itself to the cap. At startup it evicts reclaimable content
+to fit, or refuses to start when the pinned content — the log, the keys, the
+queue — is over it on its own. Every minute after that it does the same, and
+stops the node rather than grow past the cap. It never prunes the log to fit;
+see [storage.md](storage.md#the-size-cap).
 
 ### The at-rest key
 

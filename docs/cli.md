@@ -23,7 +23,7 @@ Global options come **before** the command name:
 | `--data-dir PATH` | `$CAIRN_DATA` | where node data lives |
 | `--key-file PATH` | `$CAIRN_KEY`, else `~/.cairn/key` | the at-rest key |
 | `--passphrase-file PATH` | `$CAIRN_PASSPHRASE` | passphrase for a wrapped key |
-| `--max-size SIZE` | no cap | cap on the data directory, e.g. `20GB`, `20GiB` |
+| `--max-size SIZE` | no cap | cap on the data directory, e.g. `20GB`, `20GiB`; `run` stops rather than grow past it |
 
 `mcp`, `p2p` and `serve` also accept `--log`, `--root` and `--key-file` *after*
 their own name. That is not a second spelling for its own sake: those three were

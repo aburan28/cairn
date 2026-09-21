@@ -69,6 +69,7 @@
 //! child spawned here runs under a wall-clock bound and is killed on expiry.
 //! Expiry yields `Unavailable`, so a slow checker can never become a rejection.
 
+pub mod limits;
 pub mod sandbox;
 
 use std::collections::BTreeMap;
@@ -376,7 +377,11 @@ OS jail: bubblewrap on Linux, a seatbelt profile on macOS. Enforced by the \
 kernel: no network of any kind (including unix sockets to a local daemon), no \
 reads outside declared bundle, toolchain, and system paths, no writes outside a \
 scratch directory that is deleted when the check finishes, a wall-clock \
-deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. Every child process gets a \
+deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. While the child runs the node \
+also measures its process tree and holds it to a CPU cap (CAIRN_SANDBOX_CPUS, \
+by pausing it) and, on macOS, which has no RLIMIT_AS, to the memory cap; a \
+process that leaves both the tree and its process group escapes that \
+measurement, as it escapes the deadline's kill. Every child process gets a \
 scrubbed environment, so objective code cannot return the operator's credentials \
 in verdict evidence. Raw child output is retained only by digest. \
 Directories a spec can name (replay's cwd, \
@@ -1236,19 +1241,21 @@ impl VerifierRegistry {
         };
         let mut command = jailed.command;
 
-        let completed = match run_bounded(&mut command, workdir.path(), None, timeout) {
-            Ok(completed) => completed,
-            // A timeout is not a refutation. The proof may be fine and slow.
-            Err(RunFailure::TimedOut) => {
-                return Verdict::unavailable(format!(
-                    "lean exceeded {}s; timeout is not a refutation",
-                    timeout.as_secs()
-                ))
-            }
-            Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
-                return Verdict::unavailable(format!("cannot run lean: {error}"))
-            }
-        };
+        let completed =
+            match run_bounded(&mut command, workdir.path(), None, timeout, plan.limits()) {
+                Ok(completed) => completed,
+                // A timeout is not a refutation. The proof may be fine and slow.
+                Err(RunFailure::TimedOut(throttled)) => {
+                    return Verdict::unavailable(format!(
+                        "lean exceeded {}s{}; timeout is not a refutation",
+                        timeout.as_secs(),
+                        RunFailure::throttle_note(throttled)
+                    ))
+                }
+                Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
+                    return Verdict::unavailable(format!("cannot run lean: {error}"))
+                }
+            };
 
         let output = format!("{}{}", completed.stdout, completed.stderr)
             .trim()
@@ -1417,18 +1424,20 @@ impl VerifierRegistry {
         };
         let mut command = jailed.command;
 
-        let completed = match run_bounded(&mut command, workdir.path(), None, timeout) {
-            Ok(completed) => completed,
-            Err(RunFailure::TimedOut) => {
-                return Verdict::unavailable(format!(
-                    "replay exceeded {}s; a timeout is not a refutation",
-                    timeout.as_secs()
-                ))
-            }
-            Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
-                return Verdict::unavailable(format!("cannot run replay command: {error}"))
-            }
-        };
+        let completed =
+            match run_bounded(&mut command, workdir.path(), None, timeout, plan.limits()) {
+                Ok(completed) => completed,
+                Err(RunFailure::TimedOut(throttled)) => {
+                    return Verdict::unavailable(format!(
+                        "replay exceeded {}s{}; a timeout is not a refutation",
+                        timeout.as_secs(),
+                        RunFailure::throttle_note(throttled)
+                    ))
+                }
+                Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
+                    return Verdict::unavailable(format!("cannot run replay command: {error}"))
+                }
+            };
 
         if completed.code != Some(0) {
             let code = match completed.code {
@@ -1791,12 +1800,14 @@ impl VerifierRegistry {
             workdir.path(),
             Some(stdin.as_slice()),
             timeout,
+            plan.limits(),
         ) {
             Ok(completed) => completed,
-            Err(RunFailure::TimedOut) => {
+            Err(RunFailure::TimedOut(throttled)) => {
                 return Err(Verdict::unavailable(format!(
-                    "pinned {role} exceeded {}s; a timeout is not a refutation",
-                    timeout.as_secs()
+                    "pinned {role} exceeded {}s{}; a timeout is not a refutation",
+                    timeout.as_secs(),
+                    RunFailure::throttle_note(throttled)
                 )))
             }
             Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
@@ -2311,8 +2322,26 @@ enum RunFailure {
     Spawn(io::Error),
     /// The plumbing around the child failed.
     Io(io::Error),
-    /// The child outlived its deadline and was killed.
-    TimedOut,
+    /// The child outlived its deadline and was killed. Carries the CPU cap
+    /// and how long it held the child, if it ever did.
+    TimedOut(Option<(u32, Duration)>),
+}
+
+impl RunFailure {
+    /// What to add to a timeout's message when this node's own CPU cap spent
+    /// part of the deadline. Empty otherwise, so an uncapped node's messages
+    /// read exactly as they always have.
+    fn throttle_note(throttled: Option<(u32, Duration)>) -> String {
+        match throttled {
+            Some((cpus, paused)) => format!(
+                " (this node's CPU cap of {cpus} core{}, {}, paused it for {}s of that)",
+                if cpus == 1 { "" } else { "s" },
+                limits::CPUS_ENV,
+                paused.as_secs()
+            ),
+            None => String::new(),
+        }
+    }
 }
 
 /// Run a child under a wall-clock bound.
@@ -2331,11 +2360,15 @@ enum RunFailure {
 /// Elapsed time is measured with [`Instant::elapsed`] rather than by adding a
 /// `Duration` to an `Instant`, because that addition panics on overflow and
 /// library code here does not panic.
+///
+/// `limits` is what the same loop holds the child's process tree to while it
+/// waits: a CPU cap and, on macOS, a memory cap. See [`limits`].
 fn run_bounded(
     command: &mut Command,
     workdir: &Path,
     stdin: Option<&[u8]>,
     timeout: Duration,
+    limits: limits::Limits,
 ) -> Result<Completed, RunFailure> {
     let out_path = workdir.join("stdout");
     let err_path = workdir.join("stderr");
@@ -2388,36 +2421,55 @@ fn run_bounded(
 
     let mut child = command.spawn().map_err(RunFailure::Spawn)?;
     let started = Instant::now();
+    // Released (anything it stopped, continued) before every kill below, so a
+    // descendant outside the group that the kill misses is not also left
+    // frozen; and on drop, for every other way out of this function.
+    let mut watch = limits::Watch::new(limits, child.id());
     let mut over_cap = false;
+    let mut breach = None;
     let code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code(),
             Ok(None) => {
                 if started.elapsed() >= timeout {
+                    let throttled = watch.throttled();
+                    watch.release();
                     reap(&mut child);
-                    return Err(RunFailure::TimedOut);
+                    return Err(RunFailure::TimedOut(throttled));
                 }
                 // A checker that prints for its whole CPU budget fills the
                 // operator's disk. Checked while it runs rather than after,
                 // because "after" is too late for the bytes already written.
                 if captured_bytes(&out_file, &err_file) > MAX_CAPTURED_BYTES {
                     over_cap = true;
+                    watch.release();
+                    reap(&mut child);
+                    break None;
+                }
+                if let Err(over) = watch.poll() {
+                    breach = Some(over);
+                    watch.release();
                     reap(&mut child);
                     break None;
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(error) => {
+                watch.release();
                 reap(&mut child);
                 return Err(RunFailure::Io(error));
             }
         }
     };
+    watch.release();
     if over_cap {
         return Err(RunFailure::Io(io::Error::other(format!(
             "verifier wrote more than {MAX_CAPTURED_BYTES} bytes of output and was stopped; \
              that is a fact about this node's limits, not about the artifact"
         ))));
+    }
+    if let Some(breach) = breach {
+        return Err(RunFailure::Io(io::Error::other(breach.to_string())));
     }
 
     Ok(Completed {
@@ -3283,8 +3335,9 @@ mod tests {
             workdir.path(),
             None,
             Duration::from_millis(200),
+            limits::Limits::default(),
         );
-        assert!(matches!(outcome, Err(RunFailure::TimedOut)));
+        assert!(matches!(outcome, Err(RunFailure::TimedOut(None))));
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "the deadline must actually bound the wait"
@@ -3295,7 +3348,13 @@ mod tests {
     fn a_missing_binary_is_a_spawn_failure_not_a_hang() {
         let workdir = tmpdir("proofwork-spawn");
         let mut command = Command::new("proofwork-nonexistent-binary-xyz");
-        let outcome = run_bounded(&mut command, workdir.path(), None, Duration::from_secs(5));
+        let outcome = run_bounded(
+            &mut command,
+            workdir.path(),
+            None,
+            Duration::from_secs(5),
+            limits::Limits::default(),
+        );
         assert!(matches!(outcome, Err(RunFailure::Spawn(_))));
     }
 
@@ -3316,13 +3375,205 @@ mod tests {
             .arg("sh")
             .arg(workdir.path())
             .arg(&outside);
-        let completed = run_bounded(&mut command, workdir.path(), None, Duration::from_secs(5))
-            .expect("child completes");
+        let completed = run_bounded(
+            &mut command,
+            workdir.path(),
+            None,
+            Duration::from_secs(5),
+            limits::Limits::default(),
+        )
+        .expect("child completes");
 
         assert_eq!(completed.code, Some(0));
         assert_eq!(completed.stdout, "child-output");
         assert!(!completed.stdout.contains("host secret"));
         let _ = fs::remove_file(outside);
+    }
+
+    /// `0m1.234s` (bash) or `0m1.23s` (dash), as `times` prints, in ms.
+    #[cfg(unix)]
+    fn millis(field: &str) -> Option<u64> {
+        let (minutes, seconds) = field.strip_suffix('s')?.split_once('m')?;
+        let (whole, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
+        let fraction = format!("{:0<3}", &fraction[..fraction.len().min(3)]);
+        Some(
+            minutes.parse::<u64>().ok()? * 60_000
+                + whole.parse::<u64>().ok()? * 1000
+                + fraction.parse::<u64>().ok()?,
+        )
+    }
+
+    /// Run `script` under `limits` and return its wall time and the CPU time
+    /// its children spent, both in ms. The CPU time is the shell's own
+    /// `times`, which counts every descendant it waited for -- the work
+    /// itself, measured by the kernel rather than by the watch under test.
+    #[cfg(unix)]
+    fn busy(script: &str, limits: limits::Limits) -> (u64, u64) {
+        let workdir = tmpdir("proofwork-spin");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!(
+            "spin() {{ i=0; while [ $i -lt $1 ]; do i=$((i+1)); done; }}\n{script}\nwait\ntimes"
+        ));
+        let started = Instant::now();
+        let completed = run_bounded(
+            &mut command,
+            workdir.path(),
+            None,
+            Duration::from_secs(120),
+            limits,
+        )
+        .expect("the loops finish");
+        let wall = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        assert_eq!(completed.code, Some(0), "{}", completed.stderr);
+        let children = completed
+            .stdout
+            .lines()
+            .nth(1)
+            .expect("times prints two lines");
+        let cpu = children
+            .split_whitespace()
+            .map(|field| millis(field).expect("a time"))
+            .sum();
+        (wall, cpu)
+    }
+
+    /// Steps of `spin` that take about `target_ms` of CPU on this machine.
+    /// Calibrated on CPU time, not wall time: contention stretches the wall
+    /// time of a fixed amount of work and leaves its CPU time alone.
+    #[cfg(unix)]
+    fn steps_for(target_ms: u64) -> u64 {
+        let mut count = 20_000u64;
+        // Bounded: a machine too slow to reach the target by then is still
+        // measured, just with less margin.
+        loop {
+            // In the background, so it is a child `times` counts: a plain
+            // call to a shell function runs in the shell itself.
+            let (_, cpu) = busy(&format!("spin {count} &"), limits::Limits::default());
+            if cpu >= target_ms || count >= 20_000_000 {
+                return count;
+            }
+            count *= 2;
+        }
+    }
+
+    /// What one core may spend in `wall_ms`: the core itself, the burst the
+    /// bucket starts with, one sample's overrun by each of `busy` busy
+    /// processes, and a sample's worth of slack for the edges.
+    #[cfg(unix)]
+    fn one_core(wall_ms: u64, busy: u64) -> u64 {
+        wall_ms + 200 + busy * 100 + 100
+    }
+
+    /// The cap is only real if a tree that wants more cores does not get
+    /// them. Four busy loops held to one core may spend one core's worth of
+    /// CPU over the run and no more.
+    ///
+    /// The bound is on CPU spent per unit of wall time, which load on the
+    /// machine can only lower -- a starved tree spends less -- so a busy CI
+    /// host cannot fail it. What fails it is a cap that does not hold: four
+    /// uncapped loops on four idle cores spend about four times their wall
+    /// time. An earlier version compared wall times against a one-loop
+    /// baseline, and failed under a loaded test run because contention
+    /// stretched the baseline too.
+    #[cfg(unix)]
+    #[test]
+    fn a_cpu_cap_holds_a_busy_tree_to_its_cores() {
+        let count = steps_for(400);
+        let (wall, cpu) = busy(
+            &format!("spin {count} & spin {count} & spin {count} & spin {count} &"),
+            limits::Limits {
+                cpus: 1,
+                memory_mb: 0,
+            },
+        );
+        assert!(
+            cpu <= one_core(wall, 4),
+            "four loops held to one core spent {cpu} ms of CPU in {wall} ms"
+        );
+    }
+
+    /// A process that starts and ends between two samples is never seen
+    /// alive. Four chains of short commands are nothing but such processes;
+    /// the watch still has to count them, through the reaped-children time of
+    /// the shells that ran them.
+    #[cfg(unix)]
+    #[test]
+    fn a_cpu_cap_counts_processes_too_short_to_sample() {
+        let short = steps_for(400) / 16;
+        let chain = format!("(for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do sh -c 'i=0; while [ $i -lt {short} ]; do i=$((i+1)); done'; done) &");
+        let (wall, cpu) = busy(
+            &[chain.as_str(); 4].join(" "),
+            limits::Limits {
+                cpus: 1,
+                memory_mb: 0,
+            },
+        );
+        assert!(
+            cpu <= one_core(wall, 4),
+            "four chains of short commands held to one core spent {cpu} ms of CPU in {wall} ms"
+        );
+    }
+
+    #[test]
+    fn a_throttled_timeout_says_whose_cap_it_was() {
+        let note = RunFailure::throttle_note(Some((2, Duration::from_secs(41))));
+        assert!(note.contains("2 cores"), "{note}");
+        assert!(note.contains(limits::CPUS_ENV), "{note}");
+        assert!(note.contains("41s"), "{note}");
+        assert_eq!(RunFailure::throttle_note(None), "");
+    }
+
+    /// macOS has no `RLIMIT_AS`, so before the watch this cap was a number in
+    /// the docs and nothing on the machine.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_tree_over_its_memory_cap_is_stopped_on_macos() {
+        let workdir = tmpdir("proofwork-memory");
+        // Perl rather than Python: /usr/bin/python3 on a Mac without the
+        // developer tools is a stub that opens an install dialog.
+        let mut command = Command::new("/usr/bin/perl");
+        command.args(["-e", "my $x = 'x' x (512 << 20); sleep 20;"]);
+        let started = Instant::now();
+        let outcome = run_bounded(
+            &mut command,
+            workdir.path(),
+            None,
+            Duration::from_secs(30),
+            limits::Limits {
+                cpus: 0,
+                memory_mb: 128,
+            },
+        );
+        match outcome {
+            Err(RunFailure::Io(error)) => {
+                let text = error.to_string();
+                assert!(text.contains("CAIRN_SANDBOX_MEMORY_MB"), "{text}");
+                assert!(text.contains("not about the artifact"), "{text}");
+            }
+            other => panic!("expected the memory cap to stop it, got {other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(15));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_inside_its_limits_is_left_alone() {
+        let workdir = tmpdir("proofwork-inside-limits");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("printf fine");
+        let completed = run_bounded(
+            &mut command,
+            workdir.path(),
+            None,
+            Duration::from_secs(5),
+            limits::Limits {
+                cpus: 1,
+                memory_mb: 1024,
+            },
+        )
+        .expect("child completes");
+        assert_eq!(completed.code, Some(0));
+        assert_eq!(completed.stdout, "fine");
     }
 
     // -- replay ------------------------------------------------------------

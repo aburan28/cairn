@@ -34,6 +34,11 @@ struct CairnApp: App {
                 }
             }
         }
+
+        // ⌘, and the app menu's Settings… item come with the scene.
+        Settings {
+            SettingsView(node: delegate.node)
+        }
     }
 }
 
@@ -79,7 +84,9 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup {
                 if case .running(let url) = node.state {
-                    Text(url.host.map { "\($0):\(url.port ?? 80)" } ?? "")
+                    // Verbatim: as a localized key the port is a number to
+                    // format, and 8080 reads "8,080".
+                    Text(verbatim: url.host.map { "\($0):\(url.port ?? 80)" } ?? "")
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .help("This node's reader. The same page opens in any browser on this Mac.")
@@ -88,6 +95,8 @@ struct ContentView: View {
                     Button { NSWorkspace.shared.open(url) } label: { Label("Open in Browser", systemImage: "safari") }
                         .help("Open this page in your browser")
                 }
+                OpenSettingsButton(iconOnly: true)
+                    .help("How much of this Mac the node may use, and where it keeps its data")
             }
         }
     }
@@ -148,6 +157,9 @@ private struct Failed: View {
                 Button("Show Data Folder") {
                     NSWorkspace.shared.activateFileViewerSelecting([node.dataDir])
                 }
+                // The storage cap and the data folder are both reasons a node
+                // stops or never starts, and both are fixed there.
+                OpenSettingsButton()
             }
         }
         .padding(28)

@@ -96,8 +96,15 @@ pub struct Confinement<'a> {
     /// `RLIMIT_CPU`, seconds. Complements the wall-clock kill: a child that
     /// spins in a tight loop hits this first and dies on `SIGXCPU`.
     pub cpu_seconds: u64,
-    /// `RLIMIT_AS`, MiB. `0` leaves the address space unbounded.
+    /// `RLIMIT_AS`, MiB, on Linux; on macOS, which has no `RLIMIT_AS`, the
+    /// same number caps the process tree's physical footprint, measured by
+    /// [`super::limits::Watch`]. `0` leaves memory unbounded.
     pub memory_mb: u64,
+    /// Cores the process tree may keep busy on average, from
+    /// [`super::limits::CPUS_ENV`]. `0` is no cap. Every spawn path gets it:
+    /// unlike the memory cap it cannot fail a checker that stays inside its
+    /// own `RLIMIT_CPU`, so nothing needs to opt out.
+    pub cpus: u32,
 }
 
 impl<'a> Confinement<'a> {
@@ -110,6 +117,15 @@ impl<'a> Confinement<'a> {
             scrub_env: false,
             cpu_seconds,
             memory_mb: 0,
+            cpus: super::limits::configured_cpus(),
+        }
+    }
+
+    /// What `run_bounded` holds the running child to.
+    pub fn limits(&self) -> super::limits::Limits {
+        super::limits::Limits {
+            cpus: self.cpus,
+            memory_mb: self.memory_mb,
         }
     }
 
@@ -251,7 +267,9 @@ fn probe() -> Mechanism {
     Mechanism::None("no jail mechanism is implemented for this platform")
 }
 
-fn configured_memory_mb() -> u64 {
+/// [`MEMORY_ENV`], or its default. Public so `run` can say at startup which
+/// cap its verifiers get.
+pub fn configured_memory_mb() -> u64 {
     match std::env::var(MEMORY_ENV) {
         Ok(text) => text.trim().parse::<u64>().unwrap_or(DEFAULT_MEMORY_MB),
         Err(_) => DEFAULT_MEMORY_MB,

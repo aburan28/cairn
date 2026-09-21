@@ -180,6 +180,11 @@ Enforced by the kernel:
 - **No writes outside a scratch directory** that is deleted when the check
   finishes.
 - A wall-clock deadline, and best-effort `RLIMIT_CPU` / `RLIMIT_AS`.
+- Two caps the node measures while the child runs, over its whole process tree:
+  CPU cores (`CAIRN_SANDBOX_CPUS`, enforced by pausing the tree) and, on macOS,
+  which has no `RLIMIT_AS`, the memory cap as a physical footprint. Both can
+  only end in `UNAVAILABLE`. A process that leaves both the tree and its
+  process group escapes them, as it escapes the deadline's kill.
 - A **scrubbed environment for every objective subprocess**. Only the minimum
   runtime variables and a scratch `HOME`/`TMPDIR` survive, so replay and Lean
   cannot inherit the operator's credentials even when sandboxing is optional.

@@ -3842,6 +3842,22 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
         .unwrap_or_else(|| PathBuf::from(".local"));
     let store = Store::new(&data).with_limit(options.max_size);
     store.prepare().map_err(CliError::Store)?;
+    // `--max-size` used to be accepted here and then ignored: the store was
+    // prepared with its cap and never measured against it again, so a node
+    // grew past the size its operator set without a word. Now the cap is
+    // met before anything starts -- evicting what can be fetched again, or
+    // refusing when the log alone is over it -- and the daemon holds the node
+    // to it from then on.
+    if store.limit().is_some() {
+        let eviction = cairn::store::quota::reclaim(&store, 0).map_err(CliError::Store)?;
+        if !eviction.is_empty() {
+            eprintln!(
+                "store: evicted {} reclaimable file(s), {} freed, to fit --max-size",
+                eviction.removed.len(),
+                cairn::store::format_size(eviction.freed)
+            );
+        }
+    }
 
     let default_path = |name: &str| data.join(name);
     let log = if options.log == DEFAULT_LOG && !options.log_chosen {
@@ -3897,6 +3913,7 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
         .unwrap_or(cairn::serve::DEFAULT_MAX_QUEUED);
     config.mcp = !request.no_mcp;
     config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
+    config.store = store.limit().is_some().then(|| store.clone());
     if !request.no_queue {
         config.queue = Some(
             request
@@ -3922,6 +3939,33 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
     eprintln!("  http: {serve}");
     eprintln!("  p2p:  {listen}");
     eprintln!("  log:  {}", log.display());
+    eprintln!(
+        "  data: {}{}",
+        data.display(),
+        store
+            .limit()
+            .map(|limit| format!(" (capped at {})", cairn::store::format_size(limit)))
+            .unwrap_or_default()
+    );
+    // What the verifiers this node runs are held to, since that is the work
+    // it does for the network and the part an operator lending a machine
+    // wants to see took effect.
+    let cpus = cairn::verifiers::limits::configured_cpus();
+    let memory = cairn::verifiers::sandbox::configured_memory_mb();
+    // Memory is the pinned checkers' cap alone: replay and Lean have never
+    // had one, since Lean reserves far more address space than it touches.
+    eprintln!(
+        "  work: a verifier may keep {} busy; a pinned checker may use {}",
+        match cpus {
+            0 => String::from("every core"),
+            1 => String::from("1 core"),
+            n => format!("{n} cores"),
+        },
+        match memory {
+            0 => String::from("any amount of memory"),
+            mb => format!("{mb} MiB"),
+        }
+    );
     eprintln!("  stop with Ctrl-C");
 
     daemon::run(config).map_err(CliError::Daemon)?;
