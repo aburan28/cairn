@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The installer's script: which pages it shows, and where it may install.
+  build-dmg.sh fills in each placeholder (a name between two at-signs) and
+  hands the result to productbuild, which ships this file, comments and all,
+  inside the installer. verify-dmg.sh fails on any placeholder left unfilled,
+  which is why this comment does not spell one out.
+
+  hostArchitectures is the attribute that matters. Leave it out and Installer
+  assumes a package is Intel-only, so on Apple Silicon it offers to install
+  Rosetta before installing a binary that has a native arm64 slice in it. The
+  value is what lipo found in the binary, not a constant, so a single-arch
+  local build does not claim an architecture it does not contain.
+
+  The boot volume only, and for every user. There is no per-user install
+  because the postinstall links into /usr/local/bin, which a per-user install
+  has no right to write and no equivalent of.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>cairn @VERSION@</title>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="LICENSE.txt" mime-type="text/plain"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="false" hostArchitectures="@HOST_ARCHS@"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+    <choice id="default" title="cairn">
+        <pkg-ref id="@IDENTIFIER@"/>
+    </choice>
+    <pkg-ref id="@IDENTIFIER@" version="@PKG_VERSION@" onConclusion="none">cairn-cli.pkg</pkg-ref>
+</installer-gui-script>

@@ -82,6 +82,21 @@ replace what used to ship as separate executables — to `~/.local/bin`.
 Linux amd64/arm64 and macOS Intel/Apple Silicon; no Windows, because the
 verifier sandbox is seatbelt and bubblewrap.
 
+Or a native package, from the
+[releases page](https://github.com/aburan28/cairn/releases/latest):
+
+| you have | download | then |
+|---|---|---|
+| macOS, either chip | `cairn-<version>-macos-universal.dmg` | open it, run *Install Cairn.pkg* |
+| Debian, Ubuntu | `cairn_<version>-1_amd64.deb` (or `_arm64`) | `sudo apt install ./cairn_*.deb` |
+| Fedora, RHEL 9 family | `cairn-<version>-1.x86_64.rpm` (or `.aarch64`) | `sudo dnf install ./cairn-*.rpm` |
+
+Same binary, on `PATH` for every user, and nothing else: no service, no
+account, no configuration. The macOS installer is unsigned, so macOS asks you
+to approve it the first time. [docs/install.md](docs/install.md) has that, what
+each package recommends and why, upgrading, removing, and what to do when two
+routes have both been used.
+
 **What that checksum does and does not prove.** It comes from the same server as
 the tarball, so it detects a corrupted download and nothing else — there is no
 signing key here yet, and saying otherwise would be worse than saying this. The

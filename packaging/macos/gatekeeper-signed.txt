@@ -1,0 +1,11 @@
+SIGNED AND NOTARIZED
+----------------------------------------------------------------------
+
+This installer is signed with an Apple Developer ID and notarized by
+Apple, so it opens like any other. To see that for yourself:
+
+    pkgutil --check-signature "/Volumes/Cairn @VERSION@/Install Cairn.pkg"
+    spctl --assess --type install -v "/Volumes/Cairn @VERSION@/Install Cairn.pkg"
+
+That tells you who signed it. It does not tell you the program computes
+what the project says it does; the audit below is the check for that.

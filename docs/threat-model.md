@@ -275,6 +275,18 @@ artifact at settlement time. The class is declared and binding; the mechanism
 that honours it is not wired up. Until it is, this row is **partial**, and an
 `embargoed` objective offers a promise the code does not yet keep.
 
+## Getting the binary
+
+The rows above assume the `cairn` on your machine is the one this repository
+builds. These are about whether it is.
+
+| attack | mechanism | status |
+|---|---|---|
+| **substituted release** — whoever serves the download serves a different binary | every asset has a `.sha256` beside it, from the same server, so it detects corruption and **not** substitution: whoever could swap one could swap both. Nothing is signed by a key of this project's — not the tarballs, not the `.deb` or `.rpm`, and not the macOS installer, which is why macOS refuses to open it unprompted. What exists instead is the check the project is for: `cairn --log launch/cairn.jsonl --root . audit` against a clone shows the binary computes what the published log says. That bounds what a substituted binary can get wrong about *settled results*; it does nothing about one that also reads your identity key. Given the same binary, the `.deb` and `.rpm` are byte-for-byte reproducible (`SOURCE_DATE_EPOCH` is the commit time), so the packaging step adds nothing that cannot be re-derived; whether the *binary* rebuilds identically from a tag has not been established, the macOS image does not (codesign and hdiutil both stamp it), and nobody is currently running the comparison | not handled |
+| **the installer as root** — all three package routes run as root, so a package that does more than copy a file does it with every privilege | the `.deb` and `.rpm` carry **no maintainer scripts at all**: no `postinst`, no `%post`, no triggers, so installing one copies three files and runs nothing — and the builders refuse to emit a package that has one, so that stays true rather than merely being true today. The macOS package has one, `packaging/macos/postinstall`, which makes a single symlink and is short enough to read; `verify-dmg.sh` runs it against a scratch directory on every build. None of them installs a service, so nothing of this project's runs as root *after* the install either | handled |
+| **a package that clobbers a shared directory** — macOS's installer forces the owner and mode a package records onto directories that already exist, so a payload naming `usr/local/bin` resets it to `root:wheel` and breaks Homebrew on Intel Macs | the payload names only its own prefix, `/usr/local/cairn`, and the link into `/usr/local/bin` is made by `ln`, which alters nothing about the directory it writes into. `verify-dmg.sh` fails the build if the payload names any other path, and with `--install` compares `/usr/local/bin` before and after a real install | handled |
+| **a package that lies about its contents** — a wrong-architecture or dynamically linked binary under a label that says otherwise, or a version the binary inside does not report | the builders read the architecture from the ELF header rather than the path, refuse anything with a `PT_INTERP`, and the install test compares the digest of the installed `/usr/bin/cairn` to the binary the build job tested, then requires `cairn --version` to report the tag | handled |
+
 ## What Stage 0 explicitly does not defend
 
 There is no identity layer, no stake, no dispute mechanism, and no consensus.

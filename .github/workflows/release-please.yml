@@ -1,11 +1,16 @@
 name: release-please
 
 # Owns the *version* and the *changelog*. It owns no binaries: merging the PR
-# it opens creates a `v*` tag, and that tag triggers `release.yml`, which
-# builds and publishes the artifacts. Two workflows because deciding "what
-# version is this" and "what bytes ship" are different jobs — a tool that does
-# both tends to do one of them badly, and this repository already has strong
-# opinions about what goes into a release tarball.
+# it opens creates a `v*` tag, and the last step below starts `release.yml` on
+# that tag, which builds and publishes the artifacts. Two workflows because
+# deciding "what version is this" and "what bytes ship" are different jobs — a
+# tool that does both tends to do one of them badly, and this repository
+# already has strong opinions about what goes into a release tarball.
+#
+# "Starts", and not "the tag triggers", because the tag triggers nothing. See
+# the step itself for why; the short version is that v1.0.0 to v1.2.0 each got
+# their assets from somebody dispatching the build by hand, and v1.3.0, which
+# nobody dispatched, was published with none.
 #
 # How it works, for anyone who has not used it: on every push to main it keeps
 # a single open "chore(main): release X.Y.Z" PR up to date, accumulating the
@@ -43,12 +48,51 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # For the dispatch in the last step, and for nothing else.
+  actions: write
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v5
+        id: release
         with:
           config-file: .github/release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # The step that makes a release have files in it.
+      #
+      # release-please creates the tag with this workflow's GITHUB_TOKEN, and
+      # GitHub starts no workflow for anything that token does. Not `push`,
+      # not `create`, not `release`: the rule is about who acted, not about
+      # which event, and it exists so a workflow cannot trigger itself forever.
+      # So `on: push: tags` in release.yml never fires for a tag cut here, and
+      # never has -- the run history holds no tag push at all.
+      #
+      # This was misdiagnosed once already. #135 read the symptom as "tags made
+      # through the API emit no push event" and added `on: create`, which is
+      # suppressed by the same rule for the same reason. It then fired for
+      # every *branch* anyone pushed, twenty-three times, skipped every one,
+      # and never once saw a tag. v1.3.0 was the first release cut after it
+      # landed, and shipped with no assets -- which also took down the
+      # documented installer, because /releases/latest/download/install.sh
+      # resolves against the newest release and that release had no install.sh.
+      #
+      # `workflow_dispatch` is one of the two events exempt from the rule, the
+      # other being `repository_dispatch`. Dispatching at the tag makes
+      # `github.ref` the tag, so release.yml behaves exactly as it would for a
+      # tag push, and it is the same thing a maintainer was doing by hand. The
+      # tag's own copy of release.yml is what runs, which is the right one: it
+      # is the workflow that was reviewed alongside the code it builds.
+      #
+      # The alternative is handing release-please a personal access token, so
+      # that its tag push counts as a person's. That works, and puts a
+      # long-lived credential with write access in the repository's secrets to
+      # save the six lines below.
+      - name: start the release build on the new tag
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"

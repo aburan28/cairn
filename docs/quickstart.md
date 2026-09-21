@@ -15,7 +15,9 @@ curl -fsSL https://github.com/aburan28/cairn/releases/latest/download/install.sh
 
 One binary, `cairn`, into `~/.local/bin`. See the README's *Install* section for
 what the published `.sha256` does and does not prove, and for `--version`,
-`--bin-dir` and `--libc`.
+`--bin-dir` and `--libc`. A release also carries a macOS disk image, a `.deb`
+and an `.rpm`, which put the same binary on `PATH` for every user;
+[install.md](install.md) covers those.
 
 From a source checkout instead:
 

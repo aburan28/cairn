@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px -apple-system, "Helvetica Neue", sans-serif; line-height: 1.45; }
+  code, pre { font: 12px Menlo, monospace; }
+  pre  { background: rgba(127,127,127,0.12); padding: 8px 10px; border-radius: 5px; margin: 6px 0 12px; }
+  h1   { font-size: 17px; font-weight: 600; margin: 0 0 10px; }
+</style>
+</head>
+<body>
+<h1>cairn @VERSION@ is installed</h1>
+
+<p>Open a <b>new</b> terminal window and check it:</p>
+<pre>cairn --version</pre>
+
+<p>If that prints an older version, an earlier copy is ahead of this one on
+your <code>PATH</code> &mdash; most often <code>~/.local/bin/cairn</code>, left
+by the install script. <code>type -a cairn</code> lists every copy in the order
+your shell finds them.</p>
+
+<p><b>Start a node</b> and open the reader it serves:</p>
+<pre>cairn run</pre>
+<p><a href="http://127.0.0.1:8080/ui/">http://127.0.0.1:8080/ui/</a></p>
+
+<p><b>Check it before you trust it.</b> This re-derives a real settled log,
+which is the point of the whole project:</p>
+<pre>git clone https://github.com/aburan28/cairn
+cd cairn
+cairn --log launch/cairn.jsonl --root . audit</pre>
+
+<p><b>To remove it</b></p>
+<pre>sudo rm -rf /usr/local/cairn /usr/local/bin/cairn
+sudo pkgutil --forget @IDENTIFIER@</pre>
+</body>
+</html>
