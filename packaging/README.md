@@ -109,10 +109,15 @@ published v1.4.0 binary and passing `verify-dmg.sh --tagged`, including
 missing-`--app` guards fired on purpose; the app run against the installed
 v1.4.0 — node up on free ports beside another node holding 8080 and 9000,
 reader answering, node gone half a second after a normal quit and three
-seconds after the app was `kill -9`ed. **Not run:** an install through
-Installer, so the `/Applications` ownership check, the upgrade over an
-existing install and the quarantine note in `verify-dmg.sh --install` wait for
-the first dry run, as the command's did.
+seconds after the app was `kill -9`ed. Then a release dry run
+([35604958668](https://github.com/aburan28/cairn/actions/runs/35604958668))
+built the app universal on the runner's Swift 6.3.3 and ran
+`verify-dmg.sh --install`: installed through Installer from a quarantined
+copy, `/Applications` and `/usr/local/bin` unchanged, installed again over
+itself with the signature still valid, no quarantine mark on the installed
+app, and removed cleanly with the documented commands. **Not run:** opening
+the installed app on the runner, which has no one logged in to show a window
+to.
 
 **Never run, and will not be until there is a certificate:** Developer ID
 signing and notarization, below.
