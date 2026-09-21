@@ -1252,6 +1252,7 @@ impl VerifierRegistry {
                         RunFailure::throttle_note(throttled)
                     ))
                 }
+                Err(RunFailure::Breach(breach)) => return Verdict::unavailable(breach.to_string()),
                 Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
                     return Verdict::unavailable(format!("cannot run lean: {error}"))
                 }
@@ -1434,6 +1435,7 @@ impl VerifierRegistry {
                         RunFailure::throttle_note(throttled)
                     ))
                 }
+                Err(RunFailure::Breach(breach)) => return Verdict::unavailable(breach.to_string()),
                 Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
                     return Verdict::unavailable(format!("cannot run replay command: {error}"))
                 }
@@ -1809,6 +1811,9 @@ impl VerifierRegistry {
                     timeout.as_secs(),
                     RunFailure::throttle_note(throttled)
                 )))
+            }
+            Err(RunFailure::Breach(breach)) => {
+                return Err(Verdict::unavailable(breach.to_string()))
             }
             Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
                 return Err(Verdict::unavailable(format!(
@@ -2325,6 +2330,10 @@ enum RunFailure {
     /// The child outlived its deadline and was killed. Carries the CPU cap
     /// and how long it held the child, if it ever did.
     TimedOut(Option<(u32, Duration)>),
+    /// The child ran and was stopped for passing one of this node's resource
+    /// caps. Not `Io`: the child did start, and a message that says it could
+    /// not run would send whoever reads it after the jail.
+    Breach(limits::Breach),
 }
 
 impl RunFailure {
@@ -2469,7 +2478,7 @@ fn run_bounded(
         ))));
     }
     if let Some(breach) = breach {
-        return Err(RunFailure::Io(io::Error::other(breach.to_string())));
+        return Err(RunFailure::Breach(breach));
     }
 
     Ok(Completed {
@@ -3545,8 +3554,9 @@ mod tests {
             },
         );
         match outcome {
-            Err(RunFailure::Io(error)) => {
-                let text = error.to_string();
+            Err(RunFailure::Breach(breach)) => {
+                assert!(matches!(breach, limits::Breach::Memory { cap_mb: 128, .. }));
+                let text = breach.to_string();
                 assert!(text.contains("CAIRN_SANDBOX_MEMORY_MB"), "{text}");
                 assert!(text.contains("not about the artifact"), "{text}");
             }
