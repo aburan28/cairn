@@ -137,7 +137,7 @@ if command -v shellcheck >/dev/null 2>&1; then
     # sets and another reads is checked rather than assumed.
     if ( cd "$HERE/.." && shellcheck -x \
             packaging/*.sh packaging/linux/*.sh packaging/macos/*.sh \
-            && shellcheck -s sh packaging/macos/postinstall ); then
+            && shellcheck -s sh packaging/macos/postinstall packaging/macos/preinstall-app ); then
         ok "every script lints"
     else
         bad "shellcheck has complaints, above"

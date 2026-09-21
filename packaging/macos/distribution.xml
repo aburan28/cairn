@@ -6,6 +6,10 @@
   inside the installer. verify-dmg.sh fails on any placeholder left unfilled,
   which is why this comment does not spell one out.
 
+  Two component packages under one choice: the command, and Cairn.app that
+  runs it. One choice because the app is useless without the command and
+  nobody should have to know that to get a working install.
+
   hostArchitectures is the attribute that matters. Leave it out and Installer
   assumes a package is Intel-only, so on Apple Silicon it offers to install
   Rosetta before installing a binary that has a native arm64 slice in it. The
@@ -17,7 +21,7 @@
   has no right to write and no equivalent of.
 -->
 <installer-gui-script minSpecVersion="2">
-    <title>cairn @VERSION@</title>
+    <title>Cairn @VERSION@</title>
     <welcome file="welcome.html" mime-type="text/html"/>
     <license file="LICENSE.txt" mime-type="text/plain"/>
     <conclusion file="conclusion.html" mime-type="text/html"/>
@@ -26,8 +30,10 @@
     <choices-outline>
         <line choice="default"/>
     </choices-outline>
-    <choice id="default" title="cairn">
+    <choice id="default" title="Cairn">
         <pkg-ref id="@IDENTIFIER@"/>
+        <pkg-ref id="@APP_IDENTIFIER@"/>
     </choice>
     <pkg-ref id="@IDENTIFIER@" version="@PKG_VERSION@" onConclusion="none">cairn-cli.pkg</pkg-ref>
+    <pkg-ref id="@APP_IDENTIFIER@" version="@PKG_VERSION@" onConclusion="none">cairn-app.pkg</pkg-ref>
 </installer-gui-script>

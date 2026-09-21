@@ -90,7 +90,7 @@ CLIENT ?= claude
 
 # `ui/node_modules` is deliberately absent: it is a real directory whose
 # freshness against the lockfile is the whole point of the rule.
-.PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui ios-check ios-app \
+.PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui mac-app ios-check ios-app \
 	interop differential fuzz mcp-smoke serve-smoke node-smoke canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
 	test-reference fmt clippy docs tla check \
@@ -129,6 +129,7 @@ help:
 	  '  make arena               Play attack strategies for money against the rules.' \
 	  '  make autoresearch        Run the crypto autoresearcher end to end on its own node.' \
 	  '  make autoresearch-gui    Build the macOS app that runs it (gui/macos).' \
+	  '  make mac-app             Build Cairn.app, the window onto a node the .dmg installs.' \
 	  '  make ios-check           Test the iOS reader package (needs Swift).' \
 	  '  make ios-app             Compile Cairn.app for the simulator (needs Xcode).' \
 	  '  make shard-demo          Six holders, one shard each, one of them lying.' \
@@ -326,6 +327,12 @@ autoresearch: build
 autoresearch-gui:
 	./gui/macos/build.sh
 
+# Cairn.app: a window onto a local node, which the .dmg installs beside the
+# command. It runs /usr/local/cairn/bin/cairn (or $$CAIRN_BINARY), so from a
+# checkout: CAIRN_BINARY=$$PWD/bin/cairn open gui/macos-app/build/Cairn.app
+mac-app:
+	./gui/macos-app/build.sh
+
 # The iOS reader is an Xcode app; what CI can run without a simulator is the
 # Swift package — decoder, chain check, bundled snapshot. `swift test` here
 # is the known-answer test that a field rename in GET /objectives fails the
@@ -419,9 +426,10 @@ MUSL_BIN := target/$(MUSL_TARGET)/release/cairn
 # refuses to start is not a smaller product, it is a broken one, and
 # verify-dmg.sh fails it. One architecture, because a laptop builds only its
 # own; the universal image is release.yml's, where both runners exist.
-dmg: ui-build
+dmg: ui-build mac-app
 	./packaging/macos/build-dmg.sh --version "v$(CAIRN_VERSION)" \
-	  --binary "$(RELEASE_DIR)/cairn" --out "$(DIST_DIR)"
+	  --binary "$(RELEASE_DIR)/cairn" --app gui/macos-app/build/Cairn.app \
+	  --out "$(DIST_DIR)"
 	./packaging/macos/verify-dmg.sh --tagged --version "v$(CAIRN_VERSION)" \
 	  --dmg "$(DIST_DIR)/cairn-v$(CAIRN_VERSION)-macos-$(HOST_ARCH).dmg"
 

@@ -10,9 +10,12 @@
 </style>
 </head>
 <body>
-<h1>cairn @VERSION@ is installed</h1>
+<h1>Cairn @VERSION@ is installed</h1>
 
-<p>Open a <b>new</b> terminal window and check it:</p>
+<p><b>Open Cairn</b> from Applications, Launchpad or Spotlight. It starts a
+node and shows its reader; quitting it stops the node.</p>
+
+<p><b>From a terminal</b>, open a <b>new</b> window and check the command:</p>
 <pre>cairn --version</pre>
 
 <p>If that prints an older version, an earlier copy is ahead of this one on
@@ -31,7 +34,11 @@ cd cairn
 cairn --log launch/cairn.jsonl --root . audit</pre>
 
 <p><b>To remove it</b></p>
-<pre>sudo rm -rf /usr/local/cairn /usr/local/bin/cairn
-sudo pkgutil --forget @IDENTIFIER@</pre>
+<pre>sudo rm -rf /usr/local/cairn /usr/local/bin/cairn /Applications/Cairn.app
+sudo pkgutil --forget @IDENTIFIER@
+sudo pkgutil --forget @APP_IDENTIFIER@</pre>
+<p>That leaves the app's node data, in
+<code>~/Library/Application Support/Cairn</code>; it holds the node's
+identity, so delete it only if you mean to.</p>
 </body>
 </html>

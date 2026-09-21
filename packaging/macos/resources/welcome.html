@@ -12,18 +12,22 @@
 <h1>cairn @VERSION@</h1>
 
 <p>A research network where verified results are the unit of account. This
-installs one command-line program, <code>cairn</code>, for
-@ARCH_SENTENCE@.</p>
+installs the <code>cairn</code> command and <b>Cairn</b>, an app that runs a
+node and shows it in a window, for @ARCH_SENTENCE@.</p>
 
 <p><b>What it puts on this Mac</b></p>
 <ul>
   <li><code>/usr/local/cairn/bin/cairn</code> &mdash; the program</li>
   <li><code>/usr/local/bin/cairn</code> &mdash; a link to it, so that
       <code>cairn</code> works in any terminal</li>
+  <li><code>/Applications/Cairn.app</code> &mdash; the app, which runs that
+      program</li>
 </ul>
 
 <p>Nothing else. It starts no background service, adds no login item, and
-creates no account. A node keeps its data in whichever folder you start it
-from.</p>
+creates no account. The app's node runs only while its window is open and
+keeps its data in <code>~/Library/Application Support/Cairn</code>; a node
+started with <code>cairn run</code> keeps its data in whichever folder you
+start it from.</p>
 </body>
 </html>
