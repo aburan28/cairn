@@ -171,6 +171,10 @@ Work through, in order:
    working: install bubblewrap (Linux) or run on macOS, which has seatbelt.
 4. `CAIRN_SANDBOX_MEMORY_MB` — a heavy verifier killed at the 4096 MiB cap
    reports `unavailable` on a node whose peers, with a larger cap, accept.
+5. `CAIRN_SANDBOX_CPUS` — a multi-process verifier held to fewer cores can run
+   out its deadline while paused. The timeout message says so: "this node's
+   CPU cap of N cores … paused it for Ns of that". Cairn.app sets both of these
+   from its Settings window.
 
 ## The verdict is `invalid_spec`
 

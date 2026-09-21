@@ -20,12 +20,14 @@ final class Node: ObservableObject {
     /// the app without bound. The whole of it is also in `logFile`.
     @Published private(set) var lines: [String] = []
 
-    /// Where the node keeps its log, keys and queue. One fixed folder rather
-    /// than "wherever you started it", because an app has no working
-    /// directory a person chose.
-    let dataDir: URL = FileManager.default
-        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Cairn", isDirectory: true)
+    /// What this node was last started with: its data folder and the limits
+    /// on its work. Read from Settings at each start and kept until the next,
+    /// so the window can tell a person that a change they made has not
+    /// reached the running node yet.
+    @Published private(set) var settings = NodeSettings.current()
+
+    /// Where the node keeps its log, keys and queue.
+    var dataDir: URL { settings.dataFolder }
     var logFile: URL { dataDir.appendingPathComponent("node.log") }
 
     private(set) var binary: URL?
@@ -96,6 +98,7 @@ final class Node: ObservableObject {
         stopping = false
         lines = []
         state = .starting
+        settings = NodeSettings.current()
 
         guard let binary = Self.locateBinary() else {
             state = .failed("""
@@ -120,6 +123,18 @@ final class Node: ObservableObject {
             return
         }
 
+        // Only the default folder is created here. A chosen one that is not
+        // there is most likely on a disk that is not connected, and creating
+        // it would start a new, empty node on whatever disk the path now
+        // lands on -- quietly, and with a new identity.
+        if !settings.isDefaultFolder, !FileManager.default.fileExists(atPath: dataDir.path) {
+            state = .failed("""
+                The data folder \(dataDir.path) is not there. If it is on a disk that \
+                is not connected, connect it and try again, or choose another folder \
+                in Settings.
+                """)
+            return
+        }
         do {
             try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         } catch {
@@ -140,9 +155,7 @@ final class Node: ObservableObject {
         let p = Process()
         p.executableURL = binary
         p.currentDirectoryURL = dataDir
-        p.arguments = [
-            "--data-dir", dataDir.path,
-            "--root", dataDir.path,
+        p.arguments = settings.arguments + [
             "run",
             "--listen", "127.0.0.1:\(p2p)",
             "--serve", "127.0.0.1:\(http)",
@@ -152,6 +165,8 @@ final class Node: ObservableObject {
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = ["/opt/homebrew/bin", "/usr/local/bin", env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"]
             .joined(separator: ":")
+        // The limits on its work, which the node enforces itself.
+        env.merge(settings.environment) { _, chosen in chosen }
         p.environment = env
 
         let input = Pipe()
