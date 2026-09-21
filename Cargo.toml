@@ -148,7 +148,7 @@ hqc-kem = "0.1.0-rc.0"
 # Pure Rust, and that is load-bearing rather than aesthetic: `blst` is the
 # faster option and compiles C, which would put a `cc` in the graph and end the
 # static musl build that `release.yml` ships.
-bls12_381 = { version = "0.8", default-features = false, features = ["groups", "pairings", "alloc", "experimental"] }
+bls12_381 = { version = "0.9", default-features = false, features = ["groups", "pairings", "alloc", "experimental"] }
 
 # At-rest encryption of the local store. Argon2id is used only to wrap the key
 # file with a passphrase -- the data itself is sealed with the ChaCha20-Poly1305
