@@ -93,7 +93,8 @@ CLIENT ?= claude
 .PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui ios-check ios-app \
 	interop differential fuzz mcp-smoke serve-smoke node-smoke canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
-	test-reference fmt clippy docs tla check
+	test-reference fmt clippy docs tla check \
+	dmg deb rpm musl-build packaging-check
 
 help:
 	@printf '%s\n' \
@@ -112,6 +113,9 @@ help:
 	  '  cairn run                Installed release: MCP + P2P + HTTP + embedded UI.' \
 	  '                           From a checkout, make ui-build then bin/cairn run.' \
 	  '  make install             Install the released binary from GitHub.' \
+	  '  make dmg                 Build the macOS disk image from this checkout (on a Mac).' \
+	  '  make deb / make rpm      Build a Linux package from this checkout (on Linux).' \
+	  '  make packaging-check     Lint and self-test packaging/, as CI does.' \
 	  '  make ui                  Run the Next.js reader in dev mode (port UI_PORT).' \
 	  '  make ui-check            Typecheck, test and build the UI, as CI does.' \
 	  '  make ui-build            Export the site and build it INTO the binary.' \
@@ -390,6 +394,74 @@ node: build $(SEED_BOOTSTRAP) | $(LOCAL_DIR)
 # ~/.local/bin unless CAIRN_BIN says otherwise.
 install:
 	./scripts/install.sh
+
+# ---- distribution packages ---------------------------------------------------
+#
+# What release.yml builds on a tag, buildable from a checkout: a .dmg on a Mac,
+# a .deb and an .rpm on Linux. packaging/README.md has the decisions; these
+# targets are the same scripts the workflow runs, so that "it built on my
+# machine" and "it built in the release" are one code path and not two.
+#
+# The version is Cargo.toml's, which is the number `cairn --version` will
+# print -- so the verifiers can be told `--tagged` and hold the package and the
+# binary inside it to the same number, as they do on a real release.
+CAIRN_VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+DIST_DIR ?= dist
+# `uname -m` says arm64 on a Mac and aarch64 on Linux for the same silicon.
+# Each format wants its own spelling, so both are derived here, once.
+HOST_ARCH := $(shell uname -m)
+MUSL_TARGET ?= $(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch64,x86_64)-unknown-linux-musl
+DEB_ARCH := $(if $(filter arm64 aarch64,$(HOST_ARCH)),arm64,amd64)
+RPM_ARCH := $(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch64,x86_64)
+MUSL_BIN := target/$(MUSL_TARGET)/release/cairn
+
+# Depends on `ui-build` and not `build`: an installer whose `cairn run`
+# refuses to start is not a smaller product, it is a broken one, and
+# verify-dmg.sh fails it. One architecture, because a laptop builds only its
+# own; the universal image is release.yml's, where both runners exist.
+dmg: ui-build
+	./packaging/macos/build-dmg.sh --version "v$(CAIRN_VERSION)" \
+	  --binary "$(RELEASE_DIR)/cairn" --out "$(DIST_DIR)"
+	./packaging/macos/verify-dmg.sh --tagged --version "v$(CAIRN_VERSION)" \
+	  --dmg "$(DIST_DIR)/cairn-v$(CAIRN_VERSION)-macos-$(HOST_ARCH).dmg"
+
+# The static build the Linux packages wrap. Its own target rather than
+# `ui-build`, which builds for the host -- glibc -- and which the package
+# builders refuse: a package declaring no dependencies has to have none.
+# Needs the target (`rustup target add $(MUSL_TARGET)`) and a musl linker
+# (`apt install musl-tools`), exactly as release.yml sets up.
+#
+# The reader is exported here without `site-snapshot`, as release.yml does it:
+# the snapshot is committed, and a package should hold what the tag holds.
+musl-build:
+	cd "$(ROOT)/ui" && npm ci && npm run build
+	$(CARGO) build --release --locked --features ui --bins --target $(MUSL_TARGET)
+
+# The package is verified only when docker is present -- the test *is* an
+# install into a clean image -- and says so when it is not, rather than
+# printing "built" over a package nothing has tried to install.
+deb: musl-build
+	./packaging/linux/build-deb.sh --binary "$(MUSL_BIN)" \
+	  --version "v$(CAIRN_VERSION)" --arch $(DEB_ARCH) --out "$(DIST_DIR)"
+	@if command -v docker >/dev/null 2>&1; then \
+	  ./packaging/linux/verify.sh --tagged --version "v$(CAIRN_VERSION)" --image debian:12 \
+	    --binary "$(MUSL_BIN)" --package "$(DIST_DIR)/cairn_$(CAIRN_VERSION)-1_$(DEB_ARCH).deb"; \
+	else echo "make: docker not found -- the .deb was built and NOT install-tested" >&2; fi
+
+rpm: musl-build
+	./packaging/linux/build-rpm.sh --binary "$(MUSL_BIN)" \
+	  --version "v$(CAIRN_VERSION)" --arch $(DEB_ARCH) --out "$(DIST_DIR)"
+	@if command -v docker >/dev/null 2>&1; then \
+	  ./packaging/linux/verify.sh --tagged --version "v$(CAIRN_VERSION)" --image fedora:latest \
+	    --binary "$(MUSL_BIN)" --package "$(DIST_DIR)/cairn-$(CAIRN_VERSION)-1.$(RPM_ARCH).rpm"; \
+	else echo "make: docker not found -- the .rpm was built and NOT install-tested" >&2; fi
+
+# Seconds, and needs nothing but a shell: the version mapping, the ELF guards,
+# the release-notes text, and shellcheck over every script. What CI's
+# `packaging` job runs. Building real packages is the three targets above, or a
+# `workflow_dispatch` dry run of release.yml.
+packaging-check:
+	./packaging/selftest.sh
 
 # `npm ci` from the committed lockfile, not `npm install`: it installs exactly
 # what the lockfile says and fails if the two disagree, which is the same

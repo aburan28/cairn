@@ -88,6 +88,11 @@ ui/tsconfig.tsbuildinfo
 # `make build` stages release binaries here; cargo's own output stays in target/.
 /bin/
 
+# `make dmg`, `make deb` and `make rpm` write packages here. Anchored, because
+# a `dist/` further down the tree would be somebody else's and may well be
+# source.
+/dist/
+
 # The macOS launcher's SwiftPM output and the assembled .app bundle
 # (gui/macos/build.sh). Both are derived from the sources beside them.
 gui/macos/.build/

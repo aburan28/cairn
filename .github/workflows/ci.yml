@@ -433,3 +433,29 @@ jobs:
       # README died on "Permission denied" for anyone who cloned the repository,
       # which no test noticed because no test ran them.
       - run: ./examples/ecdsa-fail/demo.sh
+
+  packaging:
+    # The shell under packaging/, which otherwise runs only when a release is
+    # being cut. Building the .deb, the .rpm and the .dmg for real needs a
+    # release binary, docker and a Mac, and is what a `workflow_dispatch` dry
+    # run of release.yml is for -- minutes, and manual. This is the part that
+    # needs none of those and takes a second: the mapping from a tag to each
+    # format's idea of a version, the guards that refuse a binary of the wrong
+    # architecture, the release-notes text, and shellcheck over all of it.
+    #
+    # It has already paid for itself. The first run of the self-test found the
+    # version parser accepting `v1.4.0-` as 1.4.0, and the runner's shellcheck
+    # is older than the one on a developer's Mac and objects to things that one
+    # lets through -- so "it linted here" was not evidence that it lints here.
+    #
+    # On every pull request rather than behind a `packaging/**` filter, for the
+    # reason `gui-macos` gives: shellcheck is the image's, it changes without a
+    # commit here, and the break should go red now rather than on the next
+    # unrelated packaging change.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The self-test skips the lint, with a note, where shellcheck is absent --
+      # which is right on a laptop and would be a silent hole here.
+      - run: shellcheck --version
+      - run: ./packaging/selftest.sh

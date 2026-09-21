@@ -1,0 +1,43 @@
+#!/bin/sh
+# Runs as root, once the payload is on disk at /usr/local/cairn.
+#
+# Its whole job is one symlink, and it is a script rather than part of the
+# payload for a reason that has bitten other people's installers.
+#
+# Installer applies the owner and mode recorded in a package to every directory
+# the payload names -- *including ones that already exist*. A payload carrying
+# `usr/local/bin/cairn` therefore also carries `usr/local/bin`, as root:wheel
+# 0755, and installing it resets that directory on the way past. On an Intel
+# Mac with Homebrew, /usr/local/bin belongs to the user, because that is where
+# brew links everything; after such a package it belongs to root, and the next
+# `brew install` fails on a permissions error with no visible connection to the
+# thing that caused it.
+#
+# So the payload lives in a directory nothing else has an opinion about, and
+# the one path that is shared is touched here, by `ln`, which changes nothing
+# about the directory it writes into. verify-dmg.sh --install records the
+# owner and mode of /usr/local/bin before and after, because "we were careful"
+# is not a test.
+set -eu
+
+# $3 is the volume being installed to: "/" for the boot volume, which is the
+# only one distribution.xml allows. Honoured anyway; it costs one line, and a
+# script that assumes "/" is wrong the day that restriction is lifted.
+TARGET="${3:-/}"
+[ "$TARGET" = "/" ] && TARGET=""
+
+BIN_DIR="$TARGET/usr/local/bin"
+
+# A no-op when the directory exists, which is nearly always, and that is the
+# point: `mkdir -p` never alters a directory it did not create. It is absent
+# only on an Apple Silicon Mac nothing has ever been installed on.
+mkdir -p "$BIN_DIR"
+
+# The link target is where the binary is once this volume is booted, not where
+# it sits while being installed to from another system.
+# -f because an upgrade finds the previous link already there; -n so that a
+# `cairn` which is somehow a link to a directory is replaced rather than
+# written into.
+ln -sfn /usr/local/cairn/bin/cairn "$BIN_DIR/cairn"
+
+exit 0

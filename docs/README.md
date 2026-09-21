@@ -13,6 +13,7 @@ below is either reference (what a command, a setting, or a word does) or design
 
 | you want to | read |
 |---|---|
+| get `cairn` onto a machine | [install.md](install.md) |
 | see it work, without building anything of your own | [quickstart.md](quickstart.md) |
 | point an agent at open objectives and get paid | [agents.md](agents.md) |
 | write an objective other people can solve | [verification.md](verification.md) |
@@ -27,8 +28,11 @@ below is either reference (what a command, a setting, or a word does) or design
 
 ## Reference
 
-The five pages a user needs and nothing else in this repository provides.
+The six pages a user needs and nothing else in this repository provides.
 
+- [install.md](install.md) — the disk image, the `.deb`, the `.rpm` and the
+  install script: what each puts where, what the packages recommend and why,
+  the macOS approval dialog, and what none of their checksums prove.
 - [quickstart.md](quickstart.md) — audit a real settled log, run one bounty
   round end to end, start a node. Every command in it was run to write it.
 - [cli.md](cli.md) — every `cairn` subcommand, its flags, what it reads, what

@@ -9,25 +9,45 @@ name: release
 # different jobs with different failure modes, and a tool that does both tends
 # to do one of them badly.
 #
-# `workflow_dispatch` exists because this workflow had never run once: releases
+# `workflow_dispatch` does two jobs, and which one depends on the ref it is
+# given.
+#
+# On a **branch** it is a dry run. This workflow had never run once: releases
 # only fire on tags, so a break in it stays invisible until the moment somebody
-# is trying to cut a release and least wants to debug YAML. Dispatching builds
-# and packages without publishing, so the path can be exercised on demand.
+# is trying to cut a release and least wants to debug YAML. Dispatching builds,
+# packages and installs everything without publishing, so the path can be
+# exercised on demand -- and it is the only thing that exercises the .deb, the
+# .rpm and the .dmg, so dispatch it on any branch that touches `packaging/`.
+#
+# On a **tag** it is how every release is actually built. `release-please.yml`
+# cuts the tag with its GITHUB_TOKEN, GitHub starts no workflow for anything
+# that token does, and so `on: push: tags` below has never fired for a release
+# -- that file's last step has the whole story. It dispatches this workflow at
+# the tag instead, which makes `github.ref` the tag and everything below behave
+# as it would for a push. `push: tags` stays for a tag pushed by a person.
 on:
   push:
     tags: ["v*"]
-  # Tags cut by release-please arrive via the API, which emits no `push`
-  # event -- so without this the tag-to-assets automation never fires and a
-  # published release sits empty until somebody dispatches the build by hand
-  # (which is what v1.2.0 needed). `create` also fires for new branches, so
-  # every job below skips those; the one overlap this leaves is a tag pushed
-  # by hand over git, which fires both events and builds twice from the same
-  # bytes -- harmless, and nobody pushes tags by hand here.
-  create:
   workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  # `github.ref_name` is the *branch* on a dry run, and a branch name may
+  # contain a slash -- which lands in a tarball filename and makes
+  # `tar -czf cairn-feat/thing-....tar.gz` write into a directory that
+  # does not exist. The dry run this trigger exists for therefore failed at
+  # the packaging step on any branch named the way this repository names
+  # them, which is the one thing it was added to prove would not happen.
+  #
+  # A dry run also is not a version, so it gets a name no one can mistake
+  # for one. Tags are unaffected and keep their own name.
+  #
+  # Here rather than on one job because four jobs now spell file names with
+  # it, and they have to spell them identically: a package job finds the
+  # tarball it wraps by this name.
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('0.0.0-dispatch.{0}', github.run_id) }}
 
 jobs:
   # The embedded reader, built once.
@@ -43,8 +63,6 @@ jobs:
   # reproduce, which is the same reason the Rust build passes `--locked`.
   ui:
     name: reader
-    # `create` fires for branches too; a branch is never a version.
-    if: github.event_name != 'create' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -71,7 +89,6 @@ jobs:
 
   build:
     name: ${{ matrix.target }}
-    if: github.event_name != 'create' || github.ref_type == 'tag'
     needs: ui
     strategy:
       # One target's toolchain failing should not hide whether the others
@@ -109,17 +126,6 @@ jobs:
           # and a node that verifies objective-authored code *without* one is
           # the configuration `CAIRN_REQUIRE_SANDBOX` exists to refuse.
     runs-on: ${{ matrix.os }}
-    env:
-      # `github.ref_name` is the *branch* on a `workflow_dispatch`, and a branch
-      # name may contain a slash -- which lands in a tarball filename and makes
-      # `tar -czf cairn-feat/thing-....tar.gz` write into a directory that
-      # does not exist. The dry run this trigger exists for therefore failed at
-      # the packaging step on any branch named the way this repository names
-      # them, which is the one thing it was added to prove would not happen.
-      #
-      # A dispatch also is not a version, so it gets a name no one can mistake
-      # for one. Tags are unaffected and keep their own name.
-      VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('0.0.0-dispatch.{0}', github.run_id) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -282,67 +288,22 @@ jobs:
             cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
             cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz.sha256
 
-      # Publishing is tag-only. A manual dispatch builds, packages and proves
-      # the tarball runs, then stops — so the path can be exercised without
+      # Publishing is tag-only. A dry run builds, packages and proves the
+      # tarball runs, then stops — so the path can be exercised without
       # minting a release nobody asked for.
+      #
+      # No `body:` here, and there used to be one. This step runs six times,
+      # and each run *replaced* the release's text with the install
+      # instructions -- which is how v1.2.0's page came to say how to install
+      # it and nothing about what had changed: the changelog release-please
+      # wrote was overwritten by the first target to finish. The `notes` job
+      # at the end owns the release text now, once, and appends.
       - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
             cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz.sha256
-          body: |
-            ```sh
-            curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh
-            ```
-
-            Detects the platform, downloads the right tarball, checks it against
-            the published `.sha256`, and installs to `~/.local/bin`. Pin a
-            version or a directory with `--version` / `--bin-dir`; on Linux it
-            takes the static musl build unless you pass `--libc gnu`.
-
-            One binary for `${{ github.ref_name }}`: `cairn`. The CLI, the MCP
-            server (`cairn mcp`), the p2p daemon (`cairn p2p`), the HTTP
-            publisher (`cairn serve`), the bootstrap generator
-            (`cairn gen-bootstrap`) and the combined node (`cairn run`) are
-            all subcommands of it.
-
-            | platform | target |
-            |---|---|
-            | Linux amd64 | `x86_64-unknown-linux-gnu`, `…-musl` (static) |
-            | Linux arm64 | `aarch64-unknown-linux-gnu`, `…-musl` (static) |
-            | macOS Apple Silicon | `aarch64-apple-darwin` |
-            | macOS Intel | `x86_64-apple-darwin` |
-
-            Prefer **musl** on Linux if your distribution is older than the
-            build runner: it links statically, so there is no glibc version to
-            match.
-
-            By hand, if you would rather not pipe a script to a shell:
-
-            ```sh
-            tar -xzf cairn-${{ github.ref_name }}-<target>.tar.gz
-            sha256sum -c cairn-${{ github.ref_name }}-<target>.tar.gz.sha256
-            ./cairn --help
-            ```
-
-            **A checksum beside a tarball proves neither came from us** — the
-            same server serves both. It detects corruption, not substitution.
-            The check that means something runs offline, against bytes in the
-            repository:
-
-            ```sh
-            ./cairn --log launch/cairn.jsonl --root . audit
-            ```
-
-            **Check it before you trust it.** A copy of the settled log ships in
-            `launch/`, and re-deriving it is the point of the whole project:
-
-            ```sh
-            ./cairn --log launch/cairn.jsonl --root . audit
-            ./cairn --log launch/cairn.jsonl --root . verify \
-                --from launch/checkpoint.json --root-key launch/root-key.pub --audit
-            ```
 
   # The installer, uploaded under a name with no version in it.
   #
@@ -358,7 +319,6 @@ jobs:
   # one upload.
   installer:
     name: install.sh
-    if: github.event_name != 'create' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -382,3 +342,322 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: scripts/install.sh
+
+  # The .deb and the .rpm: the musl binary `build` already tested, wrapped.
+  #
+  # Downstream of `build` rather than steps inside it, for two reasons. A
+  # package is made *from* a tarball, so the tarball has to have passed first
+  # -- including the check that the binary in it serves the reader -- and
+  # `needs` is how that is said. And it keeps the six-way matrix about
+  # compiling: only two of its six targets have a package at all.
+  #
+  # Musl and not glibc, for the reason install.sh defaults to it. A package
+  # declares what it depends on, and the glibc build depends on a libc at least
+  # as new as the runner's, which is newer than most of the machines these
+  # formats exist to serve. The static build depends on nothing, so one file
+  # per architecture covers every release of every distribution, and
+  # `require_static` in packaging/linux/common.sh refuses to wrap anything else.
+  linux-packages:
+    name: ${{ matrix.arch }} .deb and .rpm
+    needs: build
+    # `needs: build` alone would skip this whenever *any* of the six targets
+    # failed, the four this job never touches included -- and "ship five of
+    # six" is the rule `build` sets for itself. So it runs regardless, and
+    # whether its own input exists is settled by the download below, which
+    # fails, loudly and for the right reason, when it does not.
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners again, and here it is load-bearing rather than
+          # tidy: the install test below *executes* the packaged binary
+          # inside a container, and an amd64 runner cannot run an arm64 one.
+          - os: ubuntu-latest
+            arch: amd64
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: tarball
+
+      # The checksum is checked even though this file never left GitHub. It
+      # costs nothing, and it is the only thing that would notice an artifact
+      # that was truncated in storage -- which would otherwise surface as a
+      # package whose binary segfaults.
+      - name: unpack the binary that was tested
+        run: |
+          set -euo pipefail
+          NAME="cairn-${VERSION}-${{ matrix.target }}"
+          ( cd tarball && sha256sum -c "$NAME.tar.gz.sha256" )
+          mkdir -p unpacked
+          tar -C unpacked -xzf "tarball/$NAME.tar.gz"
+
+      # dpkg-deb is on the image because the image is Ubuntu. rpmbuild is not.
+      - name: rpmbuild
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: build the packages
+        run: |
+          set -euo pipefail
+          packaging/linux/build-deb.sh --binary unpacked/cairn \
+            --version "$VERSION" --arch ${{ matrix.arch }} --out dist
+          packaging/linux/build-rpm.sh --binary unpacked/cairn \
+            --version "$VERSION" --arch ${{ matrix.arch }} --out dist
+
+      # A package that builds is not a package that installs, and the
+      # difference is found by whoever runs `apt install` first. So each one
+      # is installed here, by its distribution's own package manager, in an
+      # image with nothing else in it -- then run, used to audit the published
+      # log, and removed. packaging/linux/verify.sh says what it holds a
+      # package to.
+      #
+      # Two images per format: a long-term release and a current one.
+      # fedora is deliberately unpinned -- if a new Fedora stops installing
+      # this, the dry run should be where that is learned. It has already
+      # earned its place: it merged /usr/sbin into /usr/bin, and the first
+      # version of this test failed a correct package over it.
+      #
+      # almalinux:9 and not :8, because the test audits the launch log and
+      # that log's verifiers need Python 3.9. RHEL 8's python3 is 3.6: the
+      # package installs there and the binary runs, and the audit then reports
+      # four claims it cannot re-verify. That is the distribution's Python and
+      # not a packaging fault, so it is documented rather than tested.
+      #
+      # None of these is old enough to object to zstd, which is what the
+      # builders' explicit xz and gzip are for -- so the builders check that
+      # in the artifact instead, and do not rely on an image to notice.
+      - name: each installs on a clean system, runs, and leaves
+        run: |
+          set -euo pipefail
+          TAGGED=""
+          if [ "${{ github.ref_type }}" = "tag" ]; then TAGGED="--tagged"; fi
+          for image in debian:12 ubuntu:24.04; do
+            packaging/linux/verify.sh --package dist/*.deb --image "$image" \
+              --version "$VERSION" --binary unpacked/cairn $TAGGED
+          done
+          for image in almalinux:9 fedora:latest; do
+            packaging/linux/verify.sh --package dist/*.rpm --image "$image" \
+              --version "$VERSION" --binary unpacked/cairn $TAGGED
+          done
+
+      - name: checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          for f in *.deb *.rpm; do
+            sha256sum "$f" > "$f.sha256"
+            cat "$f.sha256"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-packages-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+      - uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/*.deb
+            dist/*.deb.sha256
+            dist/*.rpm
+            dist/*.rpm.sha256
+
+  # The macOS disk image: both darwin binaries `build` already tested, joined
+  # into one universal binary, in an installer package, in a .dmg.
+  #
+  # One image for every Mac, because "which chip do I have" is a question a
+  # download page should not ask. That is also why this cannot be a step in
+  # `build`: it needs two of that job's outputs at once, from two different
+  # runners. packaging/macos/build-dmg.sh says why the image holds an
+  # installer rather than an app to drag.
+  macos-dmg:
+    name: universal .dmg
+    needs: build
+    # As for `linux-packages`: a broken Linux target is no reason to withhold
+    # the macOS image, and a missing darwin tarball fails the download.
+    if: ${{ !cancelled() }}
+    runs-on: macos-latest
+    env:
+      # `secrets` cannot be read in a step's `if:`, so whether there is a
+      # certificate is decided here, once, as a plain string.
+      HAVE_DEVELOPER_ID: ${{ secrets.MACOS_CERTIFICATES_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: aarch64-apple-darwin
+          path: tarball/arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: x86_64-apple-darwin
+          path: tarball/x86_64
+
+      - name: unpack the binaries that were tested
+        run: |
+          set -euo pipefail
+          for pair in arm64:aarch64-apple-darwin x86_64:x86_64-apple-darwin; do
+            dir="${pair%%:*}"; target="${pair#*:}"
+            NAME="cairn-${VERSION}-${target}"
+            ( cd "tarball/$dir" && shasum -a 256 -c "$NAME.tar.gz.sha256" )
+            mkdir -p "unpacked/$dir"
+            tar -C "unpacked/$dir" -xzf "tarball/$dir/$NAME.tar.gz"
+          done
+
+      # **This step has never run**, and neither has the signing half of
+      # build-dmg.sh: there is no Apple Developer ID in this repository's
+      # secrets, so `HAVE_DEVELOPER_ID` has only ever been false and every
+      # image so far is unsigned. It is GitHub's documented sequence for
+      # putting a certificate on a macOS runner, written down so that the day
+      # a certificate exists is a day of adding secrets. Dry-run it with
+      # `workflow_dispatch` before a tag depends on it. packaging/README.md
+      # lists the seven secrets.
+      #
+      # A keychain of its own, with a password made up on the spot: the
+      # runner's login keychain is locked, and nothing here should outlive
+      # the job.
+      - name: import the Developer ID certificates
+        if: env.HAVE_DEVELOPER_ID == 'true'
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATES_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATES_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/certificates.p12"
+          security import "$RUNNER_TEMP/certificates.p12" -P "$P12_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/certificates.p12"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN"
+          printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          echo "CAIRN_NOTARY_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
+
+      # With no secrets set, all of these are empty strings, which
+      # build-dmg.sh reads as "unsigned" -- the same as not setting them.
+      - name: build the disk image
+        env:
+          CAIRN_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          CAIRN_INSTALLER_IDENTITY: ${{ secrets.MACOS_INSTALLER_IDENTITY }}
+          CAIRN_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          CAIRN_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          packaging/macos/build-dmg.sh --version "$VERSION" --out dist \
+            --binary unpacked/arm64/cairn --binary unpacked/x86_64/cairn
+
+      # `--install`, because a runner is disposable and a developer's laptop
+      # is not. It is the only test of two things nothing else can check: that
+      # installing leaves the ownership of /usr/local/bin alone, which is the
+      # whole reason the payload lives in /usr/local/cairn; and that
+      # `sudo installer` accepts this package from a terminal when Gatekeeper
+      # would refuse a double-click, which the README inside the image tells
+      # every user of an unsigned release to rely on.
+      - name: it mounts, installs, runs, and leaves
+        run: |
+          set -euo pipefail
+          TAGGED=""
+          if [ "${{ github.ref_type }}" = "tag" ]; then TAGGED="--tagged"; fi
+          packaging/macos/verify-dmg.sh --install $TAGGED --version "$VERSION" \
+            --dmg "dist/cairn-${VERSION}-macos-universal.dmg"
+
+      - name: checksum
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 "cairn-${VERSION}-macos-universal.dmg" \
+            > "cairn-${VERSION}-macos-universal.dmg.sha256"
+          cat "cairn-${VERSION}-macos-universal.dmg.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-dmg
+          path: dist/
+          if-no-files-found: error
+
+      - uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/cairn-${{ env.VERSION }}-macos-universal.dmg
+            dist/cairn-${{ env.VERSION }}-macos-universal.dmg.sha256
+
+  # The release page's text, written once, last, by one job.
+  #
+  # Last, because it describes the assets that are actually there, and it
+  # cannot know that until every job that uploads has finished. `!cancelled()`
+  # rather than the default, which would skip this whenever any job it needs
+  # failed -- and `fail-fast: false` exists precisely so that a release can go
+  # out with five packages when the sixth broke. That release still needs a
+  # page, and the page needs to say which one is missing. It does.
+  #
+  # packaging/release-notes.sh has the two rules this follows, and the two
+  # times the page went wrong that they come from.
+  notes:
+    name: release notes
+    needs: [build, installer, linux-packages, macos-dmg]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    env:
+      HAVE_DEVELOPER_ID: ${{ secrets.MACOS_CERTIFICATES_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: write the install section under the changelog
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SIGNED=""
+          if [ "$HAVE_DEVELOPER_ID" = "true" ]; then SIGNED="--macos-signed"; fi
+          packaging/release-notes.sh --tag "$GITHUB_REF_NAME" $SIGNED
+
+      # A dry run has no release to edit, and a script that only ever runs at
+      # release time is a script whose first failure is a release. So a dry
+      # run renders the same text from the packages it just built and puts it
+      # in the run's summary: the script is exercised, and whoever dispatched
+      # the run sees the page the next tag would get.
+      #
+      # `continue-on-error`, because a package job that failed uploaded
+      # nothing, and that is a case the text handles -- it should be seen
+      # handling it rather than stop the preview.
+      - uses: actions/download-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        continue-on-error: true
+        with:
+          pattern: linux-packages-*
+          path: preview
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        continue-on-error: true
+        with:
+          name: macos-dmg
+          path: preview
+      - name: preview the release page
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          mkdir -p preview
+          { ls preview; echo install.sh; } > assets.txt
+          SIGNED=""
+          if [ "$HAVE_DEVELOPER_ID" = "true" ]; then SIGNED="--macos-signed"; fi
+          packaging/release-notes.sh --tag "$VERSION" --print $SIGNED \
+            --assets-file assets.txt --body-file /dev/null >> "$GITHUB_STEP_SUMMARY"
