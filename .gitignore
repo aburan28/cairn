@@ -101,3 +101,7 @@ gui/macos/build/
 # Toolchain artefacts if a ui command is ever run from the repository root.
 /node_modules/
 /.next/
+
+# Cairn.app (gui/macos-app/build.sh), derived from the sources beside it.
+gui/macos-app/.build/
+gui/macos-app/build/

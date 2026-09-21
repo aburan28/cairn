@@ -93,7 +93,7 @@ install_notes() {
     echo
     echo "| you have | download | then |"
     echo "|---|---|---|"
-    row "**macOS** — Apple Silicon or Intel" "$DMG" "open it and run *Install Cairn.pkg*"
+    row "**macOS** — Apple Silicon or Intel" "$DMG" "open it and run *Install Cairn.pkg*, then open **Cairn** from Applications"
     row "**Debian 11+, Ubuntu 22.04+** — amd64" "$DEB_AMD64" "\`sudo apt install ./$DEB_AMD64\`"
     row "**Debian 11+, Ubuntu 22.04+** — arm64" "$DEB_ARM64" "\`sudo apt install ./$DEB_ARM64\`"
     row "**Fedora, RHEL / Alma / Rocky 9+** — x86_64" "$RPM_X86" "\`sudo dnf install ./$RPM_X86\`"

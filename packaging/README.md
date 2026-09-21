@@ -15,7 +15,8 @@ linux/verify.sh         install a package in a clean container and hold it to it
 linux/verify-inside.sh  ...the half of that which runs inside the container
 macos/build-dmg.sh      binaries -> universal binary -> installer .pkg -> .dmg
 macos/verify-dmg.sh     mount it, take the installer apart, run what is inside
-macos/postinstall       the one script any package here runs as root
+macos/postinstall       links the command into /usr/local/bin, as root
+macos/preinstall-app    removes a previous Cairn.app before the new one is written, as root
 macos/distribution.xml, resources/, dmg-README.txt, gatekeeper-*.txt   the installer's text
 ```
 
@@ -38,6 +39,11 @@ and `codesign` re-signs the result, so those are not the tested bytes.
 `macos/verify-dmg.sh` runs the binary out of the finished image instead — both
 slices, the Intel one under Rosetta where there is one.
 
+Cairn.app is the other exception: it is Swift, the `build` job has no Mac that
+makes both slices, so the `macos-dmg` job compiles it with
+`gui/macos-app/build.sh --universal` just before packaging. `build-dmg.sh`
+refuses an app whose architectures differ from the binary's.
+
 ## Decisions, and where each is argued
 
 Each is a comment at the point it bites. In short:
@@ -49,7 +55,8 @@ Each is a comment at the point it bites. In short:
 | `.deb` is **xz**, `.rpm` payload is **gzip**, both explicit | Ubuntu's `dpkg-deb` defaults to zstd, which Debian 11 cannot open; rpm's default depends on whose rpm it is. Both builders assert the result | `linux/build-deb.sh`, `linux/cairn.spec` |
 | **no maintainer scripts** in the `.deb` or `.rpm`, enforced | installing one runs nothing as root. `docs/threat-model.md` relies on it, so the builders fail if one appears | both builders |
 | **no systemd unit, no user, no config** | where a node's log, identity key and `--root` live is the operator's decision, and this project has never specified a system deployment. Also `cairn run` exits when stdin closes | `docs/install.md` |
-| the `.dmg` holds an **installer .pkg**, not an app to drag | cairn is a command and needs to be on `PATH`; `gui/macos` drives a source checkout and would open onto failed setup checks | `macos/build-dmg.sh` |
+| the `.dmg` holds an **installer .pkg**, not an app to drag | cairn is a command and needs to be on `PATH`; one installer puts the command there and Cairn.app (`gui/macos-app`) in `/Applications`, and the app runs the command rather than carrying a second copy. `gui/macos` drives a source checkout and is not shipped | `macos/build-dmg.sh` |
+| Cairn.app's payload is **rooted at the bundle**, installed as `/Applications/Cairn.app`, and not relocatable | rooted at `/Applications`, the package would record that directory as `root:wheel 0755` and reset it on install; relocatable, Installer upgrades whichever copy of the bundle id it finds, build directories included | `macos/build-dmg.sh` |
 | the payload goes to **`/usr/local/cairn`**, linked from `/usr/local/bin` by a script | `pkgbuild` writes `overwrite-permissions="true"` and records `usr/local/bin` as `root:wheel`, which breaks Homebrew on Intel Macs | `macos/postinstall` |
 | **dpkg-deb, rpmbuild, pkgbuild, hdiutil** and nothing third-party | a static file and two documents do not need a build system, and a tool fetched at release time is one more party whose bytes end up in a release | `linux/build-deb.sh` |
 | no Alpine, Arch, Homebrew, apt or dnf **repository** | each needs a signing key or a second repository to publish into; the musl tarball and `install.sh` already cover those systems | — |
@@ -94,6 +101,23 @@ with it the two claims only a real install can test — that `/usr/local/bin`
 keeps its owner, and that `sudo installer` accepts the unsigned package from a
 terminal; and the dispatch step in `release-please.yml`, which can only fire
 when a release is actually cut.
+
+**Cairn.app, when it was added:** the universal app built with the Command
+Line Tools alone (Swift 6.1.2, macOS 26); a universal image built around the
+published v1.4.0 binary and passing `verify-dmg.sh --tagged`, including
+`preinstall-app` against a scratch volume, both ways; the architecture and
+missing-`--app` guards fired on purpose; the app run against the installed
+v1.4.0 — node up on free ports beside another node holding 8080 and 9000,
+reader answering, node gone half a second after a normal quit and three
+seconds after the app was `kill -9`ed. Then a release dry run
+([35604958668](https://github.com/aburan28/cairn/actions/runs/35604958668))
+built the app universal on the runner's Swift 6.3.3 and ran
+`verify-dmg.sh --install`: installed through Installer from a quarantined
+copy, `/Applications` and `/usr/local/bin` unchanged, installed again over
+itself with the signature still valid, no quarantine mark on the installed
+app, and removed cleanly with the documented commands. **Not run:** opening
+the installed app on the runner, which has no one logged in to show a window
+to.
 
 **Never run, and will not be until there is a certificate:** Developer ID
 signing and notarization, below.

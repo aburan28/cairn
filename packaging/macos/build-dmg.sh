@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Build the macOS disk image: cairn binaries in, one .dmg holding an installer
-# package out.
+# Build the macOS disk image: cairn binaries and Cairn.app in, one .dmg holding
+# an installer package out.
 #
 #   packaging/macos/build-dmg.sh --version v1.4.0 \
 #       --binary target/aarch64-apple-darwin/release/cairn \
-#       --binary target/x86_64-apple-darwin/release/cairn [--out dist]
+#       --binary target/x86_64-apple-darwin/release/cairn \
+#       --app gui/macos-app/build/Cairn.app [--out dist]
 #
 # Give it both architectures and the result is universal: one download for
 # every Mac, and nobody has to know which chip they have. Give it one --binary
@@ -12,21 +13,29 @@
 # the image is named for that architecture and the installer claims no other.
 #
 # Like the Linux builders, nothing is compiled here. The inputs are the
-# binaries release.yml already unpacked and tested. Unlike them, the bytes that
+# binaries release.yml already unpacked and tested, and the app
+# gui/macos-app/build.sh built; the app must hold the same architectures as
+# the binary it will run. Unlike them, the bytes that
 # ship are not quite the bytes that were tested -- lipo wraps the two in a fat
 # header and codesign re-signs the result -- so verify-dmg.sh runs the binary
 # out of the finished image rather than trusting that.
 #
 # Why a .pkg inside the .dmg, and not an app to drag
 # --------------------------------------------------
-# A drag-to-Applications image is for an app, and cairn is a command: what it
-# needs is to be on PATH, and a bundle in /Applications puts nothing on PATH.
-# The macOS launcher in gui/macos is not the answer either -- it drives a
-# source checkout (it looks for research/crypto-autoresearcher and bin/cairn
-# under one), so shipped alone it would open onto a column of failed setup
-# checks. An installer package is what macOS has for "put this file where
-# shells look", and it gives a receipt, so `pkgutil --pkg-info org.cairn.cli`
-# can say what is installed.
+# cairn is two things on a Mac: a command, which needs to be on PATH, and
+# Cairn.app (gui/macos-app), a window onto a node, which runs that command. A
+# bundle dragged to /Applications puts nothing on PATH, and an app that ran a
+# copy of the binary inside itself would be a second binary to keep in step
+# with the first. So one installer puts both where they belong, as two
+# component packages with two receipts -- `pkgutil --pkg-info org.cairn.cli`
+# and `org.cairn.app` -- and, as far as anyone has checked, one Gatekeeper
+# decision rather than two: Installer does not copy the package's quarantine
+# mark onto what it writes, where a dragged app would ask again on its first
+# launch. verify-dmg.sh --install checks that the installed app has no mark.
+#
+# The app is not the launcher in gui/macos. That one drives a source checkout
+# (it looks for research/crypto-autoresearcher and bin/cairn under one), so
+# shipped alone it would open onto a column of failed setup checks.
 #
 # Signing
 # -------
@@ -61,22 +70,29 @@ REPO="$(cd "$HERE/../.." && pwd)"
 
 die() { echo "packaging: $*" >&2; exit 1; }
 
-# The same prefix as the two apps in gui/, so the three receipts and bundle ids
-# this project puts on a Mac sort together.
+# The same prefix as the apps in gui/, so the receipts and bundle ids this
+# project puts on a Mac sort together. APP_IDENTIFIER is also Cairn.app's
+# CFBundleIdentifier, which the check below holds it to.
 IDENTIFIER="org.cairn.cli"
+APP_IDENTIFIER="org.cairn.app"
 
-BINARIES=() VERSION="" OUT="dist"
+BINARIES=() VERSION="" OUT="dist" APP=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --binary)  [ $# -ge 2 ] || die "--binary needs a value";  BINARIES+=("$2"); shift 2 ;;
         --version) [ $# -ge 2 ] || die "--version needs a value"; VERSION="$2";     shift 2 ;;
         --out)     [ $# -ge 2 ] || die "--out needs a value";     OUT="$2";         shift 2 ;;
-        --help|-h) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --app)     [ $# -ge 2 ] || die "--app needs a value";     APP="${2%/}";     shift 2 ;;
+        --help|-h) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
 [ "${#BINARIES[@]}" -ge 1 ] || die "--binary is required (once per architecture)"
 [ -n "$VERSION" ] || die "--version is required"
+# Required rather than optional: an image built without it would be the
+# command-line-only installer again, under a README that promises an app.
+[ -n "$APP" ] || die "--app is required: build it with gui/macos-app/build.sh (--universal for a universal image)"
+[ -x "$APP/Contents/MacOS/Cairn" ] || die "$APP is not a built Cairn.app (no Contents/MacOS/Cairn)"
 [ "$(uname -s)" = "Darwin" ] \
     || die "this needs macOS: lipo, pkgbuild, productbuild and hdiutil exist nowhere else"
 for bin in "${BINARIES[@]}"; do
@@ -104,7 +120,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/cairn-packaging.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 ROOT="$WORK/root"          # the payload, laid out relative to /usr/local/cairn
 STAGE="$WORK/dmg"          # what a user sees when the image mounts
-mkdir -p "$ROOT/bin" "$WORK/pkgs" "$WORK/scripts" "$WORK/resources" "$STAGE"
+mkdir -p "$ROOT/bin" "$WORK/pkgs" "$WORK/scripts" "$WORK/app-scripts" "$WORK/resources" "$STAGE"
 
 # -- one binary ---------------------------------------------------------------
 #
@@ -149,7 +165,33 @@ fi
 codesign --verify --strict "$ROOT/bin/cairn" \
     || die "the binary does not verify after signing"
 
-# -- the component package ----------------------------------------------------
+# -- the app --------------------------------------------------------------------
+#
+# A copy, so the version stamp and the signature land on this image's bundle
+# and not on the build directory's. Its architectures must be the binary's: an
+# arm64-only app beside a universal binary installs on an Intel Mac and does
+# not open.
+APP_ROOT="$WORK/Cairn.app"
+ditto "$APP" "$APP_ROOT"
+APP_ARCHS="$(lipo -archs "$APP_ROOT/Contents/MacOS/Cairn" | tr ' ' '\n' | LC_ALL=C sort | paste -sd, -)"
+[ "$APP_ARCHS" = "$HOST_ARCHS" ] \
+    || die "Cairn.app holds $APP_ARCHS and the binary $HOST_ARCHS; build the app with the same architectures (gui/macos-app/build.sh --universal)"
+[ "$(plutil -extract CFBundleIdentifier raw -o - "$APP_ROOT/Contents/Info.plist")" = "$APP_IDENTIFIER" ] \
+    || die "Cairn.app's bundle identifier is not $APP_IDENTIFIER"
+plutil -replace CFBundleShortVersionString -string "$UPSTREAM_VERSION" "$APP_ROOT/Contents/Info.plist"
+plutil -replace CFBundleVersion -string "$MACOS_PKG_VERSION" "$APP_ROOT/Contents/Info.plist"
+# Signed after the stamp, since the signature seals Info.plist. The hardened
+# runtime needs no entitlements here: the app starts a process and loads
+# pages from loopback, and neither is something the runtime restricts.
+if [ "$SIGNED" -eq 1 ]; then
+    codesign --force --options runtime --timestamp --sign "$APP_ID" "$APP_ROOT"
+else
+    codesign --force --sign - "$APP_ROOT"
+fi
+codesign --verify --strict --deep "$APP_ROOT" \
+    || die "Cairn.app does not verify after signing"
+
+# -- the component packages -------------------------------------------------------
 #
 # Installed to /usr/local/cairn, a directory nothing else has an opinion about,
 # and *not* to /usr/local/bin. pkgbuild writes `overwrite-permissions="true"`
@@ -169,11 +211,38 @@ pkgbuild --quiet \
     --ownership recommended \
     "$WORK/pkgs/cairn-cli.pkg"
 
+# The app's payload is the bundle itself, installed *as* /Applications/Cairn.app,
+# for the reason the command's is installed as /usr/local/cairn. Rooted at
+# /Applications instead, the payload's `.` would be /Applications, recorded
+# as root:wheel 0755 under `overwrite-permissions="true"`, and every install
+# would take the admin group's write access off the directory -- the
+# /usr/local/bin breakage `postinstall` describes, one folder over.
+#
+# Rooted at the bundle, pkgbuild also sees no bundle to make relocatable. A
+# relocatable one is upgraded wherever Installer finds that identifier -- a
+# copy in ~/Downloads, a build directory in a checkout -- and nothing lands
+# in /Applications. verify-dmg.sh checks the receipt says relocatable="false".
+#
+# `preinstall` removes the previous version first: installing over it would
+# leave behind any file this version no longer has, and a stray file inside a
+# bundle breaks its signature.
+cp "$HERE/preinstall-app" "$WORK/app-scripts/preinstall"
+chmod 0755 "$WORK/app-scripts/preinstall"
+pkgbuild --quiet \
+    --root "$APP_ROOT" \
+    --install-location /Applications/Cairn.app \
+    --identifier "$APP_IDENTIFIER" \
+    --version "$MACOS_PKG_VERSION" \
+    --scripts "$WORK/app-scripts" \
+    --ownership recommended \
+    "$WORK/pkgs/cairn-app.pkg"
+
 # -- the installer a person double-clicks --------------------------------------
 fill() {
     sed -e "s|@VERSION@|$UPSTREAM_VERSION|g" \
         -e "s|@PKG_VERSION@|$MACOS_PKG_VERSION|g" \
         -e "s|@IDENTIFIER@|$IDENTIFIER|g" \
+        -e "s|@APP_IDENTIFIER@|$APP_IDENTIFIER|g" \
         -e "s|@HOST_ARCHS@|$HOST_ARCHS|g" \
         -e "s|@ARCH_LABEL@|$ARCH_LABEL|g" \
         -e "s|@ARCH_SENTENCE@|$ARCH_SENTENCE|g" "$1"
@@ -248,6 +317,7 @@ fi
 echo "built $DMG"
 echo "    architectures  $ARCHS"
 echo "    installs       /usr/local/cairn/bin/cairn, linked from /usr/local/bin/cairn"
+echo "                   /Applications/Cairn.app"
 if [ "$SIGNED" -eq 1 ]; then
     echo "    signing        Developer ID, notarized and stapled"
 else

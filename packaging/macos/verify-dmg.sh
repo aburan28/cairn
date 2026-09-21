@@ -29,6 +29,7 @@ say()  { echo "==> $*"; }
 fail() { echo "verify: $*" >&2; exit 1; }
 
 IDENTIFIER="org.cairn.cli"
+APP_IDENTIFIER="org.cairn.app"
 DMG="" VERSION="" TAGGED=0 INSTALL=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -118,6 +119,69 @@ POST="$COMPONENT/Scripts/postinstall"
 [ -x "$POST" ] || fail "no executable postinstall; nothing would put cairn on PATH"
 sh -n "$POST"  || fail "postinstall does not parse"
 
+# -- Cairn.app ------------------------------------------------------------------
+say "checking Cairn.app"
+APP_COMPONENT="$X/cairn-app.pkg"
+APP="$APP_COMPONENT/Payload"
+[ -f "$APP_COMPONENT/PackageInfo" ] || fail "no component package named cairn-app.pkg inside"
+grep -q 'install-location="/Applications/Cairn.app"' "$APP_COMPONENT/PackageInfo" \
+    || fail "the app does not install as /Applications/Cairn.app"
+grep -q "identifier=\"$APP_IDENTIFIER\"" "$APP_COMPONENT/PackageInfo" \
+    || fail "the app's receipt identifier is not $APP_IDENTIFIER"
+# Relocatable, Installer upgrades whichever copy of the bundle id it finds
+# first -- a build directory, ~/Downloads -- and /Applications gets nothing.
+grep -q 'relocatable="false"' "$APP_COMPONENT/PackageInfo" \
+    || fail "the app's package is relocatable; see build-dmg.sh"
+# The same guard as the command's: the payload may name nothing but the bundle,
+# or Installer stamps its recorded owner and mode on /Applications.
+# `._` entries carry extended attributes -- com.apple.provenance, which macOS
+# puts on anything a build writes and lets nobody remove -- and are applied to
+# the path beside them rather than installed, as for the command above.
+# awk rather than a chain of `grep -v`: the last grep of a clean payload
+# matches nothing, exits 1, and under pipefail ends this script without a word.
+outside="$(lsbom -s "$APP_COMPONENT/Bom" \
+    | awk '$0 != "." && $0 !~ /\/\._/ && $0 !~ /^\.\/Contents(\/|$)/' | head -n 3 | tr '\n' ' ')"
+[ -z "$outside" ] || fail "the app's payload names paths outside the bundle: $outside"
+[ -z "$(find "$APP" -name '._*' | head -n 1)" ] \
+    || fail "AppleDouble files would be installed into Cairn.app"
+PRE="$APP_COMPONENT/Scripts/preinstall"
+[ -x "$PRE" ] || fail "the app has no executable preinstall; an upgrade would leave stale files in the bundle"
+sh -n "$PRE"  || fail "the app's preinstall does not parse"
+
+codesign --verify --strict --deep "$APP" || fail "Cairn.app's signature does not verify"
+app_archs="$(lipo -archs "$APP/Contents/MacOS/Cairn" | tr ' ' '\n' | LC_ALL=C sort | paste -sd, -)"
+bin_archs="$(lipo -archs "$BIN" | tr ' ' '\n' | LC_ALL=C sort | paste -sd, -)"
+[ "$app_archs" = "$bin_archs" ] \
+    || fail "Cairn.app holds $app_archs and the binary it runs holds $bin_archs"
+plist="$APP/Contents/Info.plist"
+[ "$(plutil -extract CFBundleIdentifier raw -o - "$plist")" = "$APP_IDENTIFIER" ] \
+    || fail "Cairn.app's bundle identifier is not $APP_IDENTIFIER"
+[ "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = "$UPSTREAM_VERSION" ] \
+    || fail "Cairn.app says version $(plutil -extract CFBundleShortVersionString raw -o - "$plist"), not $UPSTREAM_VERSION"
+[ "$(plutil -extract CFBundleVersion raw -o - "$plist")" = "$MACOS_PKG_VERSION" ] \
+    || fail "Cairn.app's build version is not $MACOS_PKG_VERSION"
+# The app runs the command at this path and nowhere else the installer puts
+# anything, so the two must agree; the string is in the binary as a literal.
+grep -aq '/usr/local/cairn/bin/cairn' "$APP/Contents/MacOS/Cairn" \
+    || fail "Cairn.app does not look for the command where this installer puts it"
+
+# preinstall, against a scratch volume: an old Cairn.app goes, anything else
+# called Cairn.app stays and fails the install.
+FAKE_APPS="$WORK/app-volume"
+mkdir -p "$FAKE_APPS/Applications/Cairn.app/Contents"
+cp "$plist" "$FAKE_APPS/Applications/Cairn.app/Contents/Info.plist"
+touch "$FAKE_APPS/Applications/Cairn.app/Contents/stale-file"
+sh "$PRE" "$PKG" /Applications/Cairn.app "$FAKE_APPS" / || fail "the app's preinstall failed over a previous Cairn.app"
+[ ! -e "$FAKE_APPS/Applications/Cairn.app" ] || fail "the app's preinstall left a previous Cairn.app in place"
+mkdir -p "$FAKE_APPS/Applications/Cairn.app/Contents"
+plutil -create xml1 "$FAKE_APPS/Applications/Cairn.app/Contents/Info.plist"
+plutil -insert CFBundleIdentifier -string com.example.other "$FAKE_APPS/Applications/Cairn.app/Contents/Info.plist"
+if sh "$PRE" "$PKG" /Applications/Cairn.app "$FAKE_APPS" / 2>/dev/null; then
+    fail "the app's preinstall accepted a Cairn.app that is not ours"
+fi
+[ -f "$FAKE_APPS/Applications/Cairn.app/Contents/Info.plist" ] \
+    || fail "the app's preinstall deleted a Cairn.app that is not ours"
+
 # -- postinstall, run for real against a directory that stands in for a volume --
 #
 # It takes the target volume as $3, so it can be pointed at a scratch tree and
@@ -190,6 +254,7 @@ say "auditing the published launch log with the binary from the image"
 if [ "$INSTALL" -eq 1 ]; then
     before="absent"
     [ -d /usr/local/bin ] && before="$(stat -f '%Su:%Sg %Lp' /usr/local/bin)"
+    apps_before="$(stat -f '%Su:%Sg %Lp' /Applications)"
 
     # As a browser would leave it. A file fetched with curl carries no
     # quarantine mark, so without this the test would pass on a machine where
@@ -209,6 +274,31 @@ if [ "$INSTALL" -eq 1 ]; then
     pkgutil --pkg-info "$IDENTIFIER" | grep -q "^version: $MACOS_PKG_VERSION\$" \
         || fail "the receipt does not say version $MACOS_PKG_VERSION"
 
+    [ -d /Applications/Cairn.app ] || fail "/Applications/Cairn.app is not there after installing"
+    codesign --verify --strict --deep /Applications/Cairn.app \
+        || fail "the installed Cairn.app's signature does not verify"
+    pkgutil --pkg-info "$APP_IDENTIFIER" | grep -q "^version: $MACOS_PKG_VERSION\$" \
+        || fail "the app's receipt does not say version $MACOS_PKG_VERSION"
+    # The claim build-dmg.sh makes about one Gatekeeper prompt rather than two.
+    # Reported, not failed: it is Installer's behaviour, not something this
+    # package controls, and the README does not depend on it.
+    if xattr -p com.apple.quarantine /Applications/Cairn.app >/dev/null 2>&1; then
+        say "NOTE: the installed Cairn.app carries a quarantine mark; its first launch will ask too"
+    else
+        say "the installed Cairn.app carries no quarantine mark"
+    fi
+
+    [ "$(stat -f '%Su:%Sg %Lp' /Applications)" = "$apps_before" ] \
+        || fail "installing changed /Applications from '$apps_before' to '$(stat -f '%Su:%Sg %Lp' /Applications)'"
+
+    # Twice, as an upgrade would: the second run goes through preinstall's
+    # removal of the first.
+    say "installing again, over itself"
+    sudo installer -pkg "$WORK/Install Cairn.pkg" -target / >/dev/null \
+        || fail "installing over an existing install failed"
+    codesign --verify --strict --deep /Applications/Cairn.app \
+        || fail "Cairn.app's signature does not verify after an upgrade"
+
     if [ "$before" != "absent" ]; then
         after="$(stat -f '%Su:%Sg %Lp' /usr/local/bin)"
         [ "$before" = "$after" ] \
@@ -217,14 +307,15 @@ if [ "$INSTALL" -eq 1 ]; then
     fi
 
     say "removing, with the commands the README gives"
-    sudo rm -rf /usr/local/cairn /usr/local/bin/cairn
+    sudo rm -rf /usr/local/cairn /usr/local/bin/cairn /Applications/Cairn.app
     sudo pkgutil --forget "$IDENTIFIER" >/dev/null
-    if [ -e /usr/local/cairn ] || [ -L /usr/local/bin/cairn ]; then
+    sudo pkgutil --forget "$APP_IDENTIFIER" >/dev/null
+    if [ -e /usr/local/cairn ] || [ -L /usr/local/bin/cairn ] || [ -e /Applications/Cairn.app ]; then
         fail "the documented removal left something behind"
     fi
-    if pkgutil --pkg-info "$IDENTIFIER" >/dev/null 2>&1; then
-        fail "the receipt survived \`pkgutil --forget\`"
+    if pkgutil --pkg-info "$IDENTIFIER" >/dev/null 2>&1 || pkgutil --pkg-info "$APP_IDENTIFIER" >/dev/null 2>&1; then
+        fail "a receipt survived \`pkgutil --forget\`"
     fi
 fi
 
-say "ok: $(basename "$DMG") mounts, its installer is well formed, and the binary inside runs and audits the published log"
+say "ok: $(basename "$DMG") mounts, its installer is well formed, Cairn.app is signed and matches the binary, and the binary runs and audits the published log"

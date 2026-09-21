@@ -549,6 +549,15 @@ jobs:
           printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
           echo "CAIRN_NOTARY_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
 
+      # Built here rather than in `build`, which has no Mac that makes both
+      # slices: one `swift build` per architecture, joined with lipo, on
+      # whichever Swift the runner image carries. build-dmg.sh refuses it if
+      # its architectures are not the binary's.
+      - name: build Cairn.app
+        run: |
+          swift --version
+          gui/macos-app/build.sh --universal
+
       # With no secrets set, all of these are empty strings, which
       # build-dmg.sh reads as "unsigned" -- the same as not setting them.
       - name: build the disk image
@@ -560,7 +569,8 @@ jobs:
         run: |
           set -euo pipefail
           packaging/macos/build-dmg.sh --version "$VERSION" --out dist \
-            --binary unpacked/arm64/cairn --binary unpacked/x86_64/cairn
+            --binary unpacked/arm64/cairn --binary unpacked/x86_64/cairn \
+            --app gui/macos-app/build/Cairn.app
 
       # `--install`, because a runner is disposable and a developer's laptop
       # is not. It is the only test of two things nothing else can check: that

@@ -328,7 +328,7 @@ jobs:
       - run: cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
 
   gui-macos:
-    # The macOS launcher in gui/macos, compiled. No other job builds Swift and
+    # The macOS launcher in gui/macos, and Cairn.app in gui/macos-app, compiled. No other job builds Swift and
     # neither does `make check`, so a change that broke the launcher surfaced
     # only when somebody next built the app -- and until build.sh passed the
     # compiler's exit status through, not even then: it packaged the binary an
@@ -353,6 +353,10 @@ jobs:
       # Release, as build.sh builds it. `-O` and whole-module mode run compiler
       # passes that a debug build never reaches.
       - run: swift build -c release --package-path gui/macos
+      # Cairn.app, which the release's .dmg installs. Both slices, as
+      # release.yml builds it, so an x86_64-only break shows up here and not
+      # on a tag.
+      - run: gui/macos-app/build.sh --universal
 
   gui-ios:
     # The iPhone reader, including Cairn.xcodeproj. Lives in ios-app.yml so

@@ -7,7 +7,7 @@ be to run them.
 
 | you have | use | it lands in | needs root |
 |---|---|---|---|
-| macOS, Apple Silicon or Intel | the [`.dmg`](#macos-the-disk-image) | `/usr/local/bin/cairn` | yes |
+| macOS, Apple Silicon or Intel | the [`.dmg`](#macos-the-disk-image) | `/usr/local/bin/cairn`, and `/Applications/Cairn.app` | yes |
 | Debian 11+, Ubuntu 22.04+ | the [`.deb`](#debian-and-ubuntu-the-deb) | `/usr/bin/cairn` | yes |
 | Fedora, RHEL / Alma / Rocky 9+ | the [`.rpm`](#fedora-and-the-rhel-family-the-rpm) | `/usr/bin/cairn` | yes |
 | any Linux or macOS, or no root | the [install script](#anything-else-the-install-script) | `~/.local/bin/cairn` | no |
@@ -47,6 +47,17 @@ It installs the program to `/usr/local/cairn/bin/cairn` and links it from
 `/usr/local/bin/cairn`, which is on every Mac's default `PATH`. Open a *new*
 terminal window and run `cairn --version`.
 
+It also installs **Cairn.app** to `/Applications`: a window onto a node. Open
+it and it runs `cairn run` on that same program, waits for the node to come up
+and shows its reader; quit it and the node stops. It is the one exception to
+[what no route does](#what-no-route-does) below, in one respect: an app has no
+directory you started it from, so its node keeps its log, keys and queue in
+`~/Library/Application Support/Cairn`. It uses the command line's ports,
+8080 and 9000, when they are free and any free ones when they are not, so it
+can run beside a `cairn run` of your own. **Node → Open in Browser** opens the
+same page in your browser; **Node → Show Data Folder** and **Show Node Log**
+are where to look when it will not start.
+
 **macOS will refuse to open it the first time.** The installer is not signed
 with an Apple Developer ID, because this project does not have one, so macOS
 cannot say who made it and says that instead of opening it.
@@ -68,9 +79,13 @@ dialog bothers you more than piping a script to a shell does, use that.
 To remove it:
 
 ```sh
-sudo rm -rf /usr/local/cairn /usr/local/bin/cairn
+sudo rm -rf /usr/local/cairn /usr/local/bin/cairn /Applications/Cairn.app
 sudo pkgutil --forget org.cairn.cli
+sudo pkgutil --forget org.cairn.app
 ```
+
+That leaves the app's node in `~/Library/Application Support/Cairn`, identity
+included; delete it too only if you mean to.
 
 <details>
 <summary>Why it installs to <code>/usr/local/cairn</code> and not straight into <code>/usr/local/bin</code></summary>

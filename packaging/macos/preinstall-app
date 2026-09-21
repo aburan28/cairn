@@ -1,0 +1,24 @@
+#!/bin/sh
+# Runs as root, before Cairn.app's payload is written to /Applications/Cairn.app.
+#
+# Installer writes a payload *over* what is there, file by file. A new version
+# that no longer has some file would leave the old one inside the bundle, and a
+# file the signature does not list is a broken signature: the app is refused as
+# damaged. So the previous copy goes first -- but only if it is ours. A
+# different program that happens to be called Cairn.app is not this package's
+# to delete, and the install fails rather than write into it.
+set -eu
+
+TARGET="${3:-/}"
+[ "$TARGET" = "/" ] && TARGET=""
+APP="$TARGET/Applications/Cairn.app"
+
+[ -e "$APP" ] || [ -L "$APP" ] || exit 0
+
+id="$(/usr/bin/defaults read "$APP/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
+if [ "$id" != "org.cairn.app" ] || [ -L "$APP" ]; then
+    echo "preinstall: $APP exists and is not a previous Cairn.app (bundle id '$id'); leaving it alone" >&2
+    exit 1
+fi
+rm -rf "$APP"
+exit 0
