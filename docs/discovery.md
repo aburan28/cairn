@@ -332,7 +332,8 @@ to whoever you happen to be talking to.
   bootstrap file is alone — the single point of failure this document exists to
   avoid, reached by under-provisioning rather than by design. More seeds under
   independent operators are the cheap fix; a rendezvous that needs no
-  cairn-operated host at all is the real one.
+  cairn-operated host at all is the real one, and is planned in
+  [plan.md](plan.md) (items 1 and 2).
 - **Seeds concentrate observation.** Everyone who bootstraps from the compiled
   list dials the same few hosts, so their operators learn the IP of every new
   node at the moment it joins; `make seeds` moves the same exposure to whoever

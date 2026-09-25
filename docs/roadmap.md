@@ -3,6 +3,11 @@
 Ordered by value delivered per unit of consensus complexity — roughly the
 reverse of how these projects are usually built.
 
+[plan.md](plan.md) is the forward-looking companion to this record: an
+evaluation of where the whole tool stands against the goal of a volunteer
+network, where anyone can contribute compute, models or ideas, and the work
+that implies.
+
 ## Stage 0 — verifiable log, no token *(this repository)*
 
 One operator. Objectives with runnable pinned verifiers, commit–reveal,

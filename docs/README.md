@@ -115,6 +115,9 @@ The six pages a user needs and nothing else in this repository provides.
   **handled / partial / not handled / unsolvable**. Keeping it honest is a
   stated project rule; read it before trusting anything above.
 - [roadmap.md](roadmap.md) — what Stage 1–3 add, in the order worth doing.
+- [plan.md](plan.md) — a holistic evaluation against the volunteer-network
+  goal (anyone contributes compute, models or ideas), and the fifteen items
+  between here and there.
 - [design-stage0-completion.md](design-stage0-completion.md) — what "Stage 0 is
   done" was defined to mean.
 - [launch-review.md](launch-review.md) — the pre-launch pass: what was fixed,
