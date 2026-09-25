@@ -25,6 +25,7 @@ and they are not conveniences.
 | `CAIRN_FINALITY_EPOCHS` | `1` | **consensus-critical.** Closed epochs that must pass before an epoch may settle |
 | `CAIRN_REQUIRE_BEACON` | unset | `1` refuses a log whose epochs settled without a recorded beacon |
 | `CAIRN_BEACON_PORT` | `47396` | moves the LAN discovery beacon port; `off` or `0` disables beacons |
+| `CAIRN_SEEDS` | built-in list | a seed list in the `launch/seeds.json` shape for `run`, `p2p` and `serve --p2p-listen` to dial; `off` or `0` dials no seeds. Unset or empty uses the list compiled into the binary |
 | `CAIRN_LEDGER_FSYNC` | unset | `1` calls `fsync` after every append |
 
 `RUST_LOG` is **not** read. This is not `env_logger`, and pretending otherwise
@@ -183,6 +184,7 @@ hashes and the same Merkle root. See [storage.md](storage.md).
 | HTTP API and `/ui/` | `127.0.0.1:8080` | `--serve` (`run`, `p2p`), `--listen` (`serve`) |
 | P2P | `127.0.0.1:9000` | `--listen` (`run`, `p2p`), `--p2p-listen` (`serve`) |
 | LAN discovery beacon | multicast | `CAIRN_BEACON_PORT`, or `off` |
+| Seeds dialled at start | `launch/seeds.json`, compiled in | `CAIRN_SEEDS=<file>`, or `off` |
 | MCP | none — stdio | — |
 
 The defaults bind loopback, so a first `cairn run` exposes nothing. Binding

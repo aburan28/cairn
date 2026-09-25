@@ -581,6 +581,13 @@ Tor client, or a Tor bridge speaking obfs4/Snowflake on that port) and every
 dial leaves through it — see the transport-security section above and
 `docs/censorship.md` §5.
 
+A node needs no bootstrap file to reach the published seeds: the daemon dials
+the copy of `launch/seeds.json` compiled into the binary, asking each seed for
+its key and keeping it only if it hashes to the listed id (`src/p2p/seeds.rs`;
+`CAIRN_SEEDS=<file>` swaps the list, `CAIRN_SEEDS=off` drops it). A bootstrap
+file is for everything else — a peer not on the list, and every seed for a node
+whose dials go through `--proxy`, since a key request is a direct dial.
+
 `cairn seeds resolve` is where a real one comes from. `make seeds` runs
 `scripts/seeds-fetch.sh`, which downloads the list this project publishes at
 <https://aburan28.github.io/cairn/seeds.json> together with

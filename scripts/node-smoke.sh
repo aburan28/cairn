@@ -47,6 +47,9 @@ trap cleanup EXIT
 # live node on the same segment, synced with it, and failed here because its
 # claim had been settled elsewhere.
 export CAIRN_BEACON_PORT=off
+# No built-in seeds either, for the same reason one step further away: a node
+# here that reached the public seed would sync the real network's log.
+export CAIRN_SEEDS=off
 export CAIRN_EPOCH_SECONDS=6
 
 # Wait for a listener rather than sleeping a fixed amount.

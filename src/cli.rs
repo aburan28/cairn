@@ -662,42 +662,21 @@ fn seeds_resolve(args: Vec<String>) -> i32 {
 }
 
 fn resolve_one(entry: &Value, keys: &Path, out: &Path) -> Resolved {
-    let name = entry
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("<unnamed>")
-        .to_string();
-    // A name becomes a filename, so it may not steer the write anywhere. The
-    // list is fetched from a URL and edited by pull request; `../../.ssh` in a
-    // `name` would otherwise be a file write chosen by whoever served it.
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Resolved::Refused {
-            name,
-            why: "name must be non-empty and only letters, digits, - and _".into(),
-        };
-    }
-    let Some(addr) = entry.get("addr").and_then(Value::as_str) else {
-        return Resolved::Refused {
-            name,
-            why: "no addr: an HTTP-only entry is for the site to read, not to dial".into(),
-        };
+    // The name, address and id rules are the daemon's, from one function: a
+    // seed this refuses and the built-in list dials, or the reverse, is a seed
+    // that works by one route and not the other.
+    let seed = match crate::p2p::seeds::entry(entry) {
+        Ok(seed) => seed,
+        Err(skipped) => {
+            return Resolved::Refused {
+                name: skipped.name,
+                why: skipped.why,
+            }
+        }
     };
-    let Some(transport) = entry.get("transport").and_then(Value::as_str) else {
-        return Resolved::Refused {
-            name,
-            why: "no transport key published, so nothing here can authenticate it".into(),
-        };
-    };
-    if transport.len() != 64 || !transport.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Resolved::Refused {
-            name,
-            why: format!("transport {transport:?} is not a 64-character peer id"),
-        };
-    }
+    let name = seed.name;
+    let addr = seed.addr.as_str();
+    let transport = crate::p2p::discovery::peer_id_string(&seed.transport);
 
     let path = keys.join(format!("{transport}.key"));
     let size = match std::fs::metadata(&path) {

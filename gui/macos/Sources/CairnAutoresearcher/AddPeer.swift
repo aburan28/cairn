@@ -105,7 +105,7 @@ struct AddPeerSheet: View {
 
     private var bootstrapTab: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("A bootstrap file is local configuration this node reads at start: an address and the peer's real transport key, which is too large to keep in a log. Peers on this LAN are found without one; a seed elsewhere needs one.")
+            Text("A bootstrap file is local configuration this node reads at start: an address and the peer's real transport key, which is too large to keep in a log. Peers on this LAN and the seeds built into cairn are found without one; any other peer needs one.")
                 .font(.callout).foregroundStyle(.secondary)
             HStack {
                 Button("Choose a file…") { chooseBootstrap() }
@@ -117,7 +117,7 @@ struct AddPeerSheet: View {
                 .font(.caption).foregroundStyle(.tertiary)
             Divider()
             if model.bootstrapPaths.isEmpty {
-                Text("No bootstrap files. This node finds peers on the local segment only.")
+                Text("No bootstrap files. This node finds the seeds built into cairn and peers on the local segment.")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(model.bootstrapPaths, id: \.self) { path in
