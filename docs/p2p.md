@@ -47,9 +47,13 @@ conclusion.
 
 ## Key exchange: Classic McEliece, mandatory, plus whatever else you publish
 
-Built: [`src/crypto/kem.rs`](../src/crypto/kem.rs), used by
-[`src/p2p/handshake.rs`](../src/p2p/handshake.rs) and by the sealed-envelope
-committee.
+Built: [`src/crypto/kem.rs`](../src/crypto/kem.rs), used by the
+sealed-envelope committee. The transport handshake
+([`src/p2p/handshake.rs`](../src/p2p/handshake.rs)) is Classic McEliece alone
+and takes only `kem::key_id` from this module, so that a bundle and a bare
+transport key derive the same peer id. The optional legs below therefore
+harden sealed submissions and never reach a session key; making the handshake
+hybrid is item 5 of [plan.md](plan.md).
 
 **There is one key-exchange primitive in this crate and it is a KEM.** Classic
 McEliece is mandatory in every key bundle; ML-KEM-768 and HQC-128 are optional
