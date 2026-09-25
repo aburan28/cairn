@@ -45,12 +45,16 @@ The risk is everything between that core and a newcomer:
    autoresearcher script.
 4. **Records are signed with ed25519 alone.** That is the largest quantum gap
    in the tree, larger than the KEM question, because those signatures move
-   money. And a node's identity is welded to its Classic McEliece key, which
-   is why McEliece cannot currently be demoted.
+   money. A node's identity is welded to its Classic McEliece key, which is
+   why McEliece cannot currently be demoted. And every p2p session key rests
+   on McEliece alone: the additive KEM bundle protects sealed submissions, and
+   the handshake never uses it.
 5. **Every piece of a currency exists except a rail**: issuance, escrow,
    tiers, bonds, slashing and conservation audits. The published log declares
    no supply, though, so none of that accounting is switched on there. There
-   is also no way for many sponsors to fund one idea.
+   is also no way for many sponsors to fund one idea. And the citation income
+   the agent guidance promises is computed by `cairn attribute` but never
+   reaches a balance.
 6. **Nobody has decided who orders a multi-operator network.** Every log has
    one writer. Two operators paying out on the same objective need an answer
    to "who was first" that the design explicitly does not have yet.
@@ -63,11 +67,11 @@ The risk is everything between that core and a newcomer:
 | incentive defences | **strong for what is modelled** | `src/arena/`, bonded attestations, canaries, `src/challenge.rs` | identities are free (Sybil) |
 | transport and sync | **solid, closed to inbound** | `src/p2p/`: PQ handshake, set reconciliation, Kademlia, multicast, NAT-PMP, SOCKS5 | no hole punching, no forward secrecy, no pre-auth rate limit; the app binds loopback |
 | discovery | **was broken in practice** | one seed, down; the app never read the list (fixed by #168) | more seeds; a rendezvous nobody operates |
-| distributed computation | **early, well-founded** | `src/piecework.rs`, `docs/design/orbit-piecework.md`, `src/partition.rs` | job layer, GPU sandbox, terabyte-scale result store |
+| distributed computation | **early, well-founded** | `src/piecework.rs`, `docs/design/orbit-piecework.md`, `src/partition.rs`; `src/compute.rs` is written and has never been compiled | job layer, GPU sandbox, terabyte-scale result store |
 | resource telemetry | **absent** | none | all of item 12 |
 | onboarding and agents | **CLI and MCP only** | `src/mcp.rs` (ten tools), `gui/macos-app/` shows the node's web reader, `research/crypto-autoresearcher/` | provider login, in-app agent, budgets |
-| cryptography | **PQ transport, classical record signatures** | `src/crypto/kem.rs`, `src/crypto/identity.rs`, `src/crypto/envelope.rs`, `tests/cipher_policy.rs` | items 4–7 |
-| money | **pieces present, no rail** | `records::Issuance`, escrow in `Node::post_objective`, `src/tier.rs` | rail, sponsorship; the launch log declares no supply |
+| cryptography | **PQ transport on one KEM, classical record signatures** | `src/p2p/handshake.rs` (McEliece only), `src/crypto/kem.rs` (the bundle, sealed path only), `src/crypto/identity.rs`, `src/crypto/envelope.rs`, `tests/cipher_policy.rs` | items 4–7 |
+| money | **pieces present, no rail** | `records::Issuance`, escrow in `Node::post_objective`, `src/tier.rs` | rail, sponsorship; citation flow not in balances; objective deadlines unenforced; the launch log declares no supply |
 | ordering across operators | **single writer per log** | [p2p.md](p2p.md#still-open) | item 8 |
 
 **Stranded work worth reviving.** Branch
@@ -77,13 +81,23 @@ accepted, deprecated, withdrawn) and a `min_families` knob. It also carries
 `docs/agility.md`, which analyses what can and cannot be migrated, and claim
 co-authorship `shares`. Item 4 starts from it rather than from nothing.
 
-**Stale statements, corrected alongside this plan.** The `Undertaking::bond`
-doc comment in `src/records.rs` and the roadmap's "three bounds remain"
-paragraph both said `post_objective` takes no deposit, and named a test that
-no longer exists. It has escrowed the reward from the funder's balance, per
-tier, since #100 (`Node::afford`, `Node::afford_in`). On a log with no
-`issuance`, which includes the published one, escrow is still not enforced,
-and both now say exactly that.
+**Stale or overstated statements, corrected alongside this plan.**
+
+- The `Undertaking::bond` doc comment in `src/records.rs` and the roadmap's
+  "three bounds remain" paragraph both said `post_objective` takes no deposit,
+  and named a test that no longer exists. It has escrowed the reward from the
+  funder's balance, per tier, since #100 (`Node::afford`, `Node::afford_in`).
+  On a log with no `issuance`, which includes the published one, escrow is
+  still not enforced, and both now say exactly that.
+- [p2p.md](p2p.md) said the KEM bundle is used by `src/p2p/handshake.rs`. The
+  handshake takes only `kem::key_id` from it, to derive the same peer id; the
+  session key is McEliece alone.
+- `docs/README.md` and
+  [design/inference-capabilities.md](design/inference-capabilities.md) called
+  `src/compute.rs` built. It has never been declared as a module, so nothing
+  compiles or tests it. Its request envelopes use X25519, which the crate
+  removed and `tests/cipher_policy.rs` forbids, so it cannot simply be wired
+  in.
 
 ## Answers to the questions asked
 
@@ -140,9 +154,11 @@ between orbits under Frobenius and negation, not between points. The pieces:
   group operations, where producing it costs about 4 × 10^7. Without the
   witness an orbit is free to invent; with it, faking one costs a real trail.
 - **The residual fraud.** A walker that ignores the walk's branch rule
-  produces orbits that verify and never collide. That is caught by sampled
-  re-walks feeding `cairn attest slash`, the existing bonded-verification
-  machinery.
+  produces orbits that verify and never collide. Sampled re-walks
+  (`tools/orbit_dp.py audit`) catch it and feed `cairn attest slash`, so an
+  attestor who vouched for the claim loses their bond. The submitter posts no
+  bond in Stage 0 and keeps one payment; submission bonds are what would make
+  it cost them (`docs/threat-model.md`, the private-walk row).
 - **The payoff.** A second arrival at an orbit is the collision. Its finder
   commits the discrete log to the separate answer objective in the same epoch.
 - **Try it:** `./scripts/orbit-demo.sh` runs the whole loop on a 21-bit
@@ -232,10 +248,12 @@ break, a flaw in the `classic-mceliece-rust` crate, and a finding about how
 cairn uses McEliece call for different responses. The plan does not depend on
 which it was, because it stops depending on any one KEM either way.
 
-**The instinct is right, and the tree is half-way there.** KEM legs already
-combine additively (a bundle is as strong as its strongest leg, never
-negotiated down). Signatures and the symmetric layer each rest on one
-primitive, and identity rests on McEliece specifically. Items 4–7 fix that in
+**The instinct is right, and the tree is part of the way there.** For sealed
+submissions, KEM legs already combine additively: a bundle is as strong as its
+strongest leg, never negotiated down. The transport does not use the bundle,
+so every p2p session key rests on McEliece alone. Signatures and the symmetric
+layer each rest on one primitive, and identity rests on McEliece
+specifically. Items 4–7 fix that in
 order of consequence: registry, KEM and identity, record signatures, cipher
 cascade. A caution on each of the requested primitives:
 
@@ -345,7 +363,9 @@ when it is done, and which of the repository's invariants it touches.
 
 #### 5. Hybrid KEM with forward secrecy; identity no longer welded to one KEM
 
-- **Why.** `PeerId = sha256(McEliece public key)`, so McEliece cannot be
+- **Why.** The handshake is McEliece alone: the bundle's optional ML-KEM and
+  HQC legs never reach a session key, so every recorded session rests on one
+  assumption. `PeerId = sha256(McEliece public key)`, so McEliece cannot be
   demoted without changing every peer id. Static keys give no forward secrecy
   (a stated weakness in [p2p.md](p2p.md)). And the 261 KiB cleartext hello is
   the most fingerprintable thing on the wire.
@@ -382,7 +402,10 @@ when it is done, and which of the repository's invariants it touches.
     reference it by hash, so it is not repeated per record.
   - A policy epoch after which admission requires both signatures.
   - The audit rule in **both** implementations, and new vectors **beside**
-    the frozen ones.
+    the frozen ones. The reference verifies only ed25519 today (its crypto
+    dependencies are `sha2`, `ed25519-dalek` and `bls12_381_plus`). It needs
+    its own ML-DSA verifier, from a different library than the main crate's
+    `ml-dsa`, the way drand is checked on two BLS libraries.
   - Rare, high-value signatures (checkpoints, the seed list, releases) use
     ML-DSA-87 plus SLH-DSA, the hash-based scheme and the most conservative
     assumption available.
@@ -481,6 +504,10 @@ when it is done, and which of the repository's invariants it touches.
     advertise capacity, signed and challenge-checked (item 12).
   - Assignment weights by capacity, with weighted rendezvous hashing over the
     same public inputs, so anyone can still recompute a peer's share.
+  - `src/compute.rs` already has capability-aware worker routing, written and
+    never compiled. Start from it once its request envelopes move from X25519
+    onto the KEM bundle, and keep its own rule that capabilities are routing
+    hints, not proof of work.
   - GPU work runs outside the bubblewrap jail, because passing `/dev/nvidia*`
     into it would void the jail. The options are a VM with device passthrough,
     or gVisor's GPU proxy. The threat model says plainly that GPU isolation is
@@ -561,6 +588,12 @@ when it is done, and which of the repository's invariants it touches.
   - Activation is **derived**, like a verdict, never stored: when pledges
     reach the target before the deadline, the objective is funded from them
     pro rata. Otherwise every pledge returns. This is an assurance contract.
+  - Refunds need a rule, not just a record. Today an objective's escrow never
+    returns, and its `deadline` field is enforced by nothing: it is part of
+    the id, and no rule reads it. So "the deadline passed, the money goes
+    back" is new consensus in both implementations. The simpler alternative is
+    append-only `objective_funding` records that top up one objective from
+    many funders. It needs no activation rule, and it offers no refund either.
   - Optionally, a proposer share of settlements, so an idea earns for its
     author the way a citation does.
   - "Approval" needs no committee, because the pinned verifier already
@@ -573,7 +606,7 @@ when it is done, and which of the repository's invariants it touches.
 - **Touches.** **Consensus.** Both implementations, and the arena for pledge
   griefing and self-sponsorship.
 
-#### 15. Settlement rails, batteries not included; and pricing identity
+#### 15. Settlement rails with no currency built in, citation flow that pays, and pricing identity
 
 - **Rails.**
   - A genesis-declared rail key or keys.
@@ -587,14 +620,25 @@ when it is done, and which of the repository's invariants it touches.
     boundary the log names, never one it hides.
   - Declare a supply on the published log, so the accounting it already has
     is switched on.
+  - The site already accepts Solana wallets as Ed25519 identities
+    (`ui/lib/wallet.ts`). That is a signer, not a rail, but a Solana-based
+    adapter would credit the very key a user already signs with.
+- **Citation flow: make it pay, or stop calling it income.** A settlement
+  credits the whole reward to the claim's submitter (`gross_paid_within`), and
+  `cairn attribute` computes the citation split as a report that no balance
+  reads. Crediting it is a consensus change in both implementations. The rule
+  in `tests/knowledge.rs` that a relation never pays must survive it, since
+  only `cites` may.
 - **Identity cost (Sybil).** Price it per use rather than once:
   - stake through a rail, for committee seats;
   - capacity-proof identities, for eclipse resistance;
   - vouching with slashing, or external proof of personhood, for sponsorship
     matching.
 - **Done when.** A deposit and a withdrawal through a test rail audit clean in
-  both implementations, a forged deposit does not, and the arena shows a
-  sixteen-key sponsor earns what a one-key sponsor earns.
+  both implementations, and a forged deposit does not. The arena shows a
+  sixteen-key sponsor earning what a one-key sponsor earns. And
+  `cairn balances` agrees with `cairn attribute` to the unit, or the guidance
+  no longer promises citation income.
 - **Touches.** **Consensus.** Both implementations, the arena, and
   `docs/threat-model.md` (a new row per rail).
 
@@ -624,5 +668,8 @@ when it is done, and which of the repository's invariants it touches.
 - **Dependency policy.** Keep the no-TLS rule and build UDP traversal on the
   existing handshake, or make a written exception for QUIC.
 - **Provider terms.** Contributors run their own agents only (recommended).
+- **Citation flow.** Make it credit balances (recommended: `AGENTS.md`
+  already tells contributors that holding work back delays their citation
+  income), or drop that promise from the guidance until it does.
 - **First rail, if any.** The protocol does not need one. A deployment that
   pays real money does.
