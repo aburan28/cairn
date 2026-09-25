@@ -123,6 +123,23 @@ one arrives. So `scripts/seeds-fetch.sh` does the transport with `curl` and
 that the half that has to be right is the half written in Rust with tests
 against it.
 
+**And the binary carries the list itself.** `cairn run`, `cairn p2p` and
+`cairn serve --p2p-listen` dial the copy of this file compiled into them
+([`src/p2p/seeds.rs`](../src/p2p/seeds.rs)), in addition to any
+`--bootstrap` file. No key file and no HTTP client are involved: an entry's
+address and transport id are enough, because the seed answers a key request
+(`transport::request_key`) and the node keeps the key only if it hashes to the
+id — the check `resolve` makes against a downloaded file, made against the
+seed. Before this, the list reached a node only through `make seeds`, which
+Cairn.app never ran, so every node the app started was LAN-only and said
+nothing about it. Property (2) still holds without a code change:
+`CAIRN_SEEDS=<file>` replaces the compiled copy with a list in the same shape,
+and `CAIRN_SEEDS=off` removes it, which is what the test scripts set for the
+same reason they set `CAIRN_BEACON_PORT=off`. Keys are fetched on a thread of
+their own, so a dead seed costs ten seconds of that thread a minute and nothing
+of the node's tick, and every failure is logged at `warn` with the seed's name
+— a node whose seed is down now says so.
+
 **The site reads the same file, for a different half of it.** `ui/lib/seeds.ts`
 fetches the list from the browser and uses the `http` field — an HTTPS
 `cairn serve` endpoint — to find a live node, where before it fell straight
@@ -305,17 +322,24 @@ to whoever you happen to be talking to.
 
 ## Where this is wrong
 
-- **The anchor is still there.** It is now a list you fetch from somewhere,
-  rather than a name in the source, and the list is self-verifying — but a node
-  with an empty address book, no `--peer` and no reachable seed source still
-  cannot start. Moving the anchor is not removing it, and this document opened
-  by saying nobody removes it.
-- **Publishing on GitHub Pages concentrates observation.** Everyone who
-  bootstraps fetches one URL, so whoever serves it learns the IP of every new
-  node at the moment it joins — which is not a correctness problem and is a
-  real privacy one, and is the same trade this document criticises DoH for
-  making above. Mirrors and `CAIRN_SEEDS_URL` spread it; nothing forces them to
-  be used.
+- **The anchor is still there.** It is now a self-verifying list compiled into
+  the binary and published beside it, rather than a name in the source — but a
+  node with an empty address book, no `--bootstrap`, no LAN peer and no seed
+  that answers still finds nobody. Moving the anchor is not removing it, and
+  this document opened by saying nobody removes it.
+- **One seed is one machine.** The compiled list has one entry, run by the
+  maintainer, so while that host is down every newcomer without a LAN peer or a
+  bootstrap file is alone — the single point of failure this document exists to
+  avoid, reached by under-provisioning rather than by design. More seeds under
+  independent operators are the cheap fix; a rendezvous that needs no
+  cairn-operated host at all is the real one.
+- **Seeds concentrate observation.** Everyone who bootstraps from the compiled
+  list dials the same few hosts, so their operators learn the IP of every new
+  node at the moment it joins; `make seeds` moves the same exposure to whoever
+  serves the published URL. Not a correctness problem and a real privacy one,
+  and the same trade this document criticises DoH for making above.
+  `CAIRN_SEEDS`, mirrors and `CAIRN_SEEDS_URL` spread it; nothing forces them
+  to be used.
 - **Omission in the seed list is unchecked.** The naming rule stops a hostile
   list substituting a key; nothing stops it *leaving honest seeds out* and
   offering only its own. For a node that already knows one honest peer that is
@@ -325,11 +349,12 @@ to whoever you happen to be talking to.
   list, or comparing independently-served copies of it, is the fix and is not
   built. [threat-model.md](threat-model.md) carries this under *eclipse via
   peer sampling*.
-- **The published list has no key in it yet.** The one entry names an address
-  and no transport, so it resolves to nothing and says so. That is honest
-  rather than finished: until a seed operator runs `cairn seeds publish` and
-  opens a pull request, `make p2p` still falls back to the placeholder key that
-  authenticates nobody.
+- **A seed must answer key requests.** The compiled list carries ids, not
+  keys, so a seed running a build from before key requests (2026-09-06) is
+  reachable only through a `--bootstrap` file carrying its key, which
+  `make seeds` still writes. So is every seed for a node whose dials go through
+  `--proxy`, because a key request is a direct dial; that node says so at
+  start.
 - **No NAT traversal.** A node behind a home router can fetch and cannot seed,
   which quietly makes the network more centralised than the protocol suggests.
 - **`seq` is wall-clock seconds.** It only has to increase, and a clock that goes

@@ -210,6 +210,14 @@ also time out at 15 seconds.
 
 ## Peers never connect
 
+- **Read the `seeds:` lines first.** With no `--bootstrap`, a node dials the
+  seed list compiled into it (`CAIRN_SEEDS` overrides it). At start it says
+  how many seeds it has; after that it says `seeds: <name> answered at …` once
+  a seed hands over its key, or `seeds: <name> at <addr> did not hand over its
+  key (…)` once a minute while one does not. The second, repeated, means that
+  machine is down or firewalled — nothing on your side will fix it, and
+  another seed, a `--bootstrap` file or a LAN peer will. A node started with
+  `CAIRN_SEEDS=off` says so and dials none.
 - `--bootstrap` is a *hint*. The handshake authenticates the **key**, not the
   socket that answered, so a bootstrap file with a placeholder key cannot
   connect to a real peer. `gen-bootstrap` writes exactly such a placeholder and

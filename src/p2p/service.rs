@@ -66,6 +66,25 @@ impl From<SessionError> for ServiceError {
     }
 }
 
+/// What [`Service::seed_from_list`] made of one seed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SeedOutcome {
+    /// Its key is already held; the seed is dialable and nothing was sent.
+    Dialable,
+    /// Its key arrived now, from this address, and hashed to the listed id.
+    Learned(SocketAddr),
+    /// Asked, and no key that hashes to the listed id came back.
+    Failed { addr: SocketAddr, error: String },
+    /// Asked within [`KEY_FETCH_BACKOFF`]; asked again after it.
+    Waiting,
+    /// The address is neither an address nor a name that resolves now.
+    Unresolvable,
+    /// The entry names this node.
+    Ourselves,
+    /// Dials leave through a proxy, and a key request is a direct dial.
+    Proxied,
+}
+
 /// Owns the local identity, the non-consensus address book, and the DHT view.
 pub struct Service {
     identity: Arc<PeerIdentity>,
@@ -566,15 +585,8 @@ impl Service {
             {
                 continue;
             }
-            {
-                let mut fetches = self.key_fetches.lock().unwrap_or_else(|e| e.into_inner());
-                if fetches
-                    .get(peer)
-                    .is_some_and(|last| now.duration_since(*last) < KEY_FETCH_BACKOFF)
-                {
-                    continue;
-                }
-                fetches.insert(*peer, now);
+            if !self.may_ask_for_key(peer, now) {
+                continue;
             }
             // A beacon's address is the datagram's source, which for a node
             // bound to every interface is the host's LAN address -- and a
@@ -582,23 +594,12 @@ impl Service {
             // So a refused request is retried on loopback at the same port.
             // Reaching some other local node that way is harmless: its key
             // does not hash to the id asked for and is dropped.
-            let mut attempt = transport::request_key(*addr, *peer).map(|public| (public, *addr));
-            if attempt.is_err() && !addr.ip().is_loopback() {
-                let local = SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port());
-                if let Ok(public) = transport::request_key(local, *peer) {
-                    attempt = Ok((public, local));
-                }
-            }
-            match attempt {
-                Ok((public, reached)) => {
+            match self.request_key_into_book(peer, *addr, true) {
+                Ok(reached) => {
                     log::info!(
                         "learned the transport key of {} from {reached}; it is dialable now",
                         peer_id_hex(peer)
                     );
-                    self.with_book(|book| book.insert(Endpoint::new(reached, public)));
-                    self.with_directory(|directory| {
-                        directory.resolved_key(NodeId::from_bytes(*peer));
-                    });
                     learned += 1;
                 }
                 Err(error) => {
@@ -607,6 +608,105 @@ impl Service {
             }
         }
         learned
+    }
+
+    /// Whether `peer` may be asked for its key now, noting the attempt if so.
+    ///
+    /// One backoff for every hint source, so a peer named by a beacon *and* a
+    /// seed list is not asked twice as often as one named by either.
+    fn may_ask_for_key(&self, peer: &PeerId, now: Instant) -> bool {
+        let mut fetches = self.key_fetches.lock().unwrap_or_else(|e| e.into_inner());
+        if fetches
+            .get(peer)
+            .is_some_and(|last| now.duration_since(*last) < KEY_FETCH_BACKOFF)
+        {
+            return false;
+        }
+        fetches.insert(*peer, now);
+        true
+    }
+
+    /// Ask `addr` for the key that hashes to `peer`, and file it as an
+    /// endpoint if it does. Returns the address that answered.
+    ///
+    /// `request_key` checks the hash, so nothing reaches the book here that
+    /// could authenticate as anybody but `peer`.
+    fn request_key_into_book(
+        &self,
+        peer: &PeerId,
+        addr: SocketAddr,
+        retry_on_loopback: bool,
+    ) -> Result<SocketAddr, TransportError> {
+        let mut attempt = transport::request_key(addr, *peer).map(|public| (public, addr));
+        if retry_on_loopback && attempt.is_err() && !addr.ip().is_loopback() {
+            let local = SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port());
+            if let Ok(public) = transport::request_key(local, *peer) {
+                attempt = Ok((public, local));
+            }
+        }
+        let (public, reached) = attempt?;
+        self.with_book(|book| book.insert(Endpoint::new(reached, public)));
+        self.with_directory(|directory| {
+            directory.resolved_key(NodeId::from_bytes(*peer));
+        });
+        Ok(reached)
+    }
+
+    /// Fold a seed list into the routing table, and ask each seed whose key
+    /// this node lacks for it directly. One outcome per seed, in list order.
+    ///
+    /// The fourth hint source, and deliberately the same two steps as beacons
+    /// and peer records: note the contact, then take the key from the contact
+    /// and keep it only if it hashes to the id. See [`super::seeds`] for why a
+    /// list compiled into the binary adds no trust.
+    ///
+    /// Two things differ from [`Service::fetch_missing_keys`], and both are
+    /// about a seed's address being one somebody *published*. Nothing is
+    /// retried on loopback: a refusal at a published address means the seed is
+    /// down, and knocking on 127.0.0.1 at its port would reach whatever local
+    /// node uses that port -- the app's own, when the seed's port is the
+    /// default. And every outcome is returned rather than logged at debug,
+    /// because "the seed did not answer" is the one thing a node started from
+    /// the app most needs to say.
+    ///
+    /// Blocking: a seed that does not answer costs [`transport::DIAL_TIMEOUT`].
+    /// The daemon calls this from a thread of its own, never under the node's
+    /// lock, so a dead seed stalls nothing but the next seed.
+    pub fn seed_from_list(&self, seeds: &[super::seeds::Seed]) -> Vec<SeedOutcome> {
+        let now = Instant::now();
+        seeds.iter().map(|seed| self.seed_one(seed, now)).collect()
+    }
+
+    fn seed_one(&self, seed: &super::seeds::Seed, now: Instant) -> SeedOutcome {
+        if seed.transport == self.identity.id() {
+            return SeedOutcome::Ourselves;
+        }
+        if !matches!(self.proxy, Proxy::Direct) {
+            return SeedOutcome::Proxied;
+        }
+        if self.with_book(|book| !book.for_peer(&seed.transport).is_empty()) {
+            return SeedOutcome::Dialable;
+        }
+        // Before resolving, so a name that does not resolve is retried on the
+        // same schedule as a seed that does not answer, rather than on every
+        // tick: resolution blocks too.
+        if !self.may_ask_for_key(&seed.transport, now) {
+            return SeedOutcome::Waiting;
+        }
+        let Some(addr) = super::discovery::dialable(&seed.addr) else {
+            return SeedOutcome::Unresolvable;
+        };
+        // Zero, not a sequence: a list entry makes no freshness claim, so a
+        // signed peer record for the same identity always outranks it.
+        self.note_contact(seed.transport, addr);
+        self.with_directory(|directory| directory.wants_key(NodeId::from_bytes(seed.transport)));
+        match self.request_key_into_book(&seed.transport, addr, false) {
+            Ok(reached) => SeedOutcome::Learned(reached),
+            Err(error) => SeedOutcome::Failed {
+                addr,
+                error: error.to_string(),
+            },
+        }
     }
 
     /// The transport key this node holds for `peer`, if any.
