@@ -140,6 +140,7 @@ pub mod envelope;
 pub mod gf;
 pub mod identity;
 pub mod kem;
+pub mod policy;
 pub mod shamir;
 
 pub use envelope::{
@@ -149,5 +150,8 @@ pub use identity::{
     verify_bytes, verify_value, Identity, IdentityError, MasterSeed, Signature, SignedRecord,
     VerifyingKeyBytes,
 };
-pub use kem::{Bundle, Encapsulated, KemError, Leg, PublicKey, SecretBundle, SecretKey, Suite};
+pub use kem::{
+    Bundle, Encapsulated, Family, KemError, Leg, PublicKey, SecretBundle, SecretKey, Suite,
+};
+pub use policy::{Policy, PolicyError, Status as SuiteStatus};
 pub use shamir::{combine, split, ShamirError, Share};

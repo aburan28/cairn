@@ -107,7 +107,8 @@ use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use super::kem::{Bundle, Encapsulated, KemError, Leg, SecretBundle, Suite, SUITES};
+use super::kem::{Bundle, Encapsulated, KemError, Leg, SecretBundle, Suite};
+use super::policy::Policy;
 use super::shamir::{self, Share};
 use crate::canonical::Value;
 
@@ -219,6 +220,14 @@ pub enum EnvelopeError {
     CommitteeTooLarge { size: usize },
     /// `threshold` must be at least 1 and at most the committee size.
     InvalidThreshold { threshold: u8, committee: usize },
+    /// `threshold` or more members rest on a single hardness family, so one
+    /// break of that family reconstructs the content key.
+    ///
+    /// A property of the *committee*, not of any member: an unhedged member is
+    /// fine, and `threshold` of them are not. See the check in
+    /// [`SealedEnvelope::seal_retaining_key`] for why the bound is exactly the
+    /// threshold.
+    CommitteeNotHedged { unhedged: usize, threshold: u8 },
     /// Two members share a routing index, so a share cannot be addressed.
     DuplicateMemberIndex { index: u8 },
     /// Two members share a key bundle. Not a decoding problem: it means one
@@ -290,6 +299,13 @@ impl fmt::Display for EnvelopeError {
             } => write!(
                 f,
                 "threshold {threshold} must be in 1..={committee} for this committee"
+            ),
+            EnvelopeError::CommitteeNotHedged {
+                unhedged,
+                threshold,
+            } => write!(
+                f,
+                "{unhedged} committee member(s) carry only one hardness family and the                  threshold is {threshold}: one break of that family would open enough                  shares to reconstruct the content key. Members should publish a key                  bundle spanning at least two families"
             ),
             EnvelopeError::DuplicateMemberIndex { index } => {
                 write!(f, "duplicate committee member index {index}")
@@ -414,7 +430,10 @@ impl CommitteeKey {
     /// member to publish fewer — only a size reason, and a committee key is
     /// published once per epoch.
     pub fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> CommitteeKey {
-        CommitteeKey::generate_over(&SUITES, rng)
+        // Follow the live policy so deprecating a suite stops new keys carrying
+        // it without editing this function.
+        let suites = Policy::current().suites_to_publish();
+        CommitteeKey::generate_over(&suites, rng)
     }
 
     /// Adopt an already-assembled secret bundle, for a member whose keys are
@@ -688,6 +707,44 @@ impl SealedEnvelope {
                     return Err(EnvelopeError::DuplicateMemberKey { index: other.index });
                 }
             }
+        }
+
+        // **The committee is as strong as its `threshold` weakest members.**
+        //
+        // Each member's share is sealed to their whole bundle, and the combiner
+        // hashes every leg, so opening one share requires breaking *all* of
+        // that member's legs. A member carrying only one hardness family is
+        // therefore opened by a single break of that family — and an attacker
+        // who breaks it collects exactly the unhedged members' shares. They
+        // reconstruct the content key precisely when they have `threshold` of
+        // them.
+        //
+        // So the rule is `unhedged < threshold`, and it is tight rather than
+        // cautious: at `threshold - 1` unhedged members a family break yields
+        // one share too few and reveals nothing, and at `threshold` it yields
+        // the artifact. Nothing here refuses an unhedged *member* — that would
+        // exclude peers for a property their own share's secrecy already
+        // prices, and would be a liveness cost paid for no security.
+        //
+        // Live cryptanalysis is why this is enforced rather than documented.
+        // The 2026 results against binary Goppa codes are not a practical break
+        // of `mceliece348864`, and a committee whose members are all
+        // McEliece-only is one result away from being opened wholesale. See
+        // `Family` in `super::kem`.
+        //
+        // "Hedged" is the *policy's* definition, not a constant here: raising
+        // `Policy::min_families` is how the network responds to cryptanalysis,
+        // and it must not require editing this function to take effect.
+        let policy = Policy::current();
+        let unhedged = committee
+            .iter()
+            .filter(|member| policy.admits(&member.keys).is_err())
+            .count();
+        if unhedged >= usize::from(threshold) {
+            return Err(EnvelopeError::CommitteeNotHedged {
+                unhedged,
+                threshold,
+            });
         }
 
         let content_key = Secret32::random(rng);
@@ -1229,6 +1286,97 @@ d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6\
             keys.push(key);
         }
         (keys, members)
+    }
+
+    /// A committee where the first `unhedged` members carry only McEliece.
+    ///
+    /// `generate_over(&[Suite::McEliece], ..)` is the shape a peer running an
+    /// older build publishes, so this is the real population the rule is about
+    /// rather than a synthetic one.
+    fn mixed_committee(n: u8, unhedged: u8) -> (Vec<CommitteeKey>, Vec<CommitteeMember>) {
+        let mut keys = Vec::new();
+        let mut members = Vec::new();
+        for index in 1..=n {
+            let key = if index <= unhedged {
+                CommitteeKey::generate_over(&[Suite::McEliece], &mut OsRng)
+            } else {
+                CommitteeKey::generate(&mut OsRng)
+            };
+            members.push(key.member(index));
+            keys.push(key);
+        }
+        (keys, members)
+    }
+
+    #[test]
+    fn a_bundle_is_hedged_only_when_it_spans_two_hardness_families() {
+        let all = CommitteeKey::generate(&mut OsRng).public();
+        assert!(all.is_hedged());
+        assert_eq!(all.families().len(), 3);
+
+        let goppa_only = CommitteeKey::generate_over(&[Suite::McEliece], &mut OsRng).public();
+        assert!(!goppa_only.is_hedged());
+        assert_eq!(
+            goppa_only.families(),
+            std::collections::BTreeSet::from([crate::crypto::kem::Family::GoppaCode])
+        );
+
+        // The distinction the enum exists for: HQC is code-based and is *not*
+        // in McEliece's family, because the Goppa cryptanalysis recovers a
+        // hidden structured code and HQC has none to recover.
+        let two_codes =
+            CommitteeKey::generate_over(&[Suite::McEliece, Suite::Hqc128], &mut OsRng).public();
+        assert!(
+            two_codes.is_hedged(),
+            "two code-based suites from different families must count as hedged"
+        );
+    }
+
+    #[test]
+    fn a_committee_whose_unhedged_members_reach_the_threshold_is_refused() {
+        // Three members resting on one family, threshold 2. Break Goppa and you
+        // hold three shares where two suffice.
+        let (_keys, members) = mixed_committee(3, 3);
+        let error = SealedEnvelope::seal(b"artifact", AAD, &members, 2, &mut OsRng)
+            .expect_err("a committee one break from total disclosure must be refused");
+        assert_eq!(
+            error,
+            EnvelopeError::CommitteeNotHedged {
+                unhedged: 3,
+                threshold: 2,
+            }
+        );
+        assert!(error.to_string().contains("one hardness family"), "{error}");
+    }
+
+    #[test]
+    fn the_bound_is_exactly_the_threshold_and_not_one_less() {
+        // Two unhedged of three, threshold 3: a Goppa break yields two shares,
+        // one short, and reveals nothing. This must be *allowed* -- refusing it
+        // would cost liveness for no security, which is the whole reason the
+        // rule counts members rather than rejecting them individually.
+        let (keys, members) = mixed_committee(3, 2);
+        let envelope = SealedEnvelope::seal(b"artifact", AAD, &members, 3, &mut OsRng)
+            .expect("threshold - 1 unhedged members is not yet a break");
+
+        // And it really does still open, so the rule did not merely wave it
+        // through into something unusable.
+        let shares: Vec<Share> = keys
+            .iter()
+            .enumerate()
+            .map(|(at, key)| {
+                key.open_share(&envelope, (at + 1) as u8)
+                    .expect("member opens its own share")
+            })
+            .collect();
+        assert_eq!(
+            envelope.open_with_shares(&shares).expect("opens"),
+            b"artifact"
+        );
+
+        // One more unhedged member at the same threshold flips it.
+        let (_keys, worse) = mixed_committee(3, 3);
+        assert!(SealedEnvelope::seal(b"artifact", AAD, &worse, 3, &mut OsRng).is_err());
     }
 
     fn clone_share(share: &Share) -> Share {

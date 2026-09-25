@@ -19,6 +19,7 @@ and they are not conveniences.
 | `CAIRN_KEY` | `~/.cairn/key` | the at-rest key file |
 | `CAIRN_PASSPHRASE` | — | passphrase for a wrapped at-rest key |
 | `CAIRN_REQUIRE_SANDBOX` | unset | `1` refuses to run objective code at all without a working jail |
+| `CAIRN_SANDBOX_MECHANISM` | `auto` | `auto` / `bwrap` / `gvisor` / `none`: which jail to use on Linux. `gvisor` needs a working `runsc` |
 | `CAIRN_SANDBOX_MEMORY_MB` | `4096` (MiB) | memory cap for pinned pure functions: `RLIMIT_AS` on Linux, the process tree's measured footprint on macOS; `0` disables it |
 | `CAIRN_SANDBOX_CPUS` | unset (no cap) | cores one verifier's process tree may keep busy, on average; enforced by pausing it |
 | `CAIRN_EPOCH_SECONDS` | `600` | **consensus-critical.** Epoch length, in seconds |
@@ -124,14 +125,16 @@ anybody.
 ## The sandbox
 
 Verifier code is pinned by content hash and written by whoever posted the
-objective. It runs in an OS jail: **bubblewrap** on Linux (`apt install
-bubblewrap`), **seatbelt** on macOS. There is no Windows build, because there is
-no third jail.
+objective. It runs in an OS jail: **bubblewrap** on Linux by default (`apt
+install bubblewrap`), **gVisor** when `CAIRN_SANDBOX_MECHANISM=gvisor` and
+`runsc` is installed and working, **seatbelt** on macOS. There is no Windows
+build, because there is no third jail for that host.
 
 What the jail does: no network, declared reads only, confined writes, a
-deadline, and the memory and CPU caps above. What it does not do: survive a kernel
-or policy bug. `verifiers::SANDBOXING` in the source documents exactly what is
-and is not covered, and [threat-model.md](threat-model.md) marks the rest.
+deadline, and the memory and CPU caps above. What bubblewrap and seatbelt do
+not do: survive a host-kernel or policy bug — that is what gVisor is for when
+selected. `verifiers::SANDBOXING` in the source documents exactly what is and
+is not covered, and [threat-model.md](threat-model.md) marks the rest.
 
 ## Files and directories
 

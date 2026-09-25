@@ -118,6 +118,8 @@ The six pages a user needs and nothing else in this repository provides.
 - [plan.md](plan.md) — a holistic evaluation against the volunteer-network
   goal (anyone contributes compute, models or ideas), and the fifteen items
   between here and there.
+- [agility.md](agility.md) — the versioned algorithm registry, what can be
+  swapped without moving ids, and what cannot.
 - [design-stage0-completion.md](design-stage0-completion.md) — what "Stage 0 is
   done" was defined to mean.
 - [launch-review.md](launch-review.md) — the pre-launch pass: what was fixed,
@@ -140,6 +142,7 @@ lines; that is the authority, and this table is the index to it.
 | [chain-beacon.md](design/chain-beacon.md) — a beacon the sequencer cannot grind | **built** — the `beacon` record, `cairn beacon` |
 | [drand-beacon.md](design/drand-beacon.md) — a beacon a log-only auditor can check | **built**, in both implementations |
 | [settlement-convergence.md](design/settlement-convergence.md) — the epoch chain | **built**, in both implementations |
+| [multi-operator-ordering.md](design/multi-operator-ordering.md) — causal clocks without a pay-to-spam lottery | **design**; clocks detect conflict, beacon orders payouts |
 | [citation-flow-dilution.md](design/citation-flow-dilution.md) — the slicing attack on attribution | **implemented, not the default**; the threat model still carries the row |
 | [confidential-corpus.md](design/confidential-corpus.md) — material the network cannot read | storage and release **built** (`src/corpus.rs`); the rest deliberately undone |
 | [inference-capabilities.md](design/inference-capabilities.md) — capability-aware scheduling | **written, not compiled**: `src/compute.rs` is not a module of the crate, and its envelopes use X25519, which `tests/cipher_policy.rs` forbids |
