@@ -1489,6 +1489,42 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_book_answers_want_peers_with_silence() {
+        // No records to share means no reply at all, not an empty `Peers`
+        // frame: answering every asker with an empty list spends a socket on
+        // acknowledging ignorance, and a stranger could farm replies.
+        let book = new_book();
+        assert!(
+            on_peer_exchange(PeerId(1), &Message::WantPeers, &book).is_empty(),
+            "an empty book answered"
+        );
+
+        // And a book that knows someone answers with exactly what it holds,
+        // still signed: the asker verifies on receipt, as the forged-record
+        // test above pins down.
+        use crate::crypto::identity::Identity;
+        use crate::p2p::swarm::discovery::PeerRecord;
+
+        let signed = PeerRecord::sign(
+            &Identity::from_secret_bytes([8u8; 32]),
+            &["127.0.0.1:9998".parse().expect("addr")],
+            1,
+        )
+        .expect("signs");
+        book.lock().expect("lock").offer(&signed).expect("verifies");
+        let replies = on_peer_exchange(PeerId(1), &Message::WantPeers, &book);
+        assert_eq!(replies.len(), 1, "one question, one answer");
+        match &replies[0] {
+            Action::Send(peer, Message::Peers(records)) => {
+                assert_eq!(*peer, PeerId(1));
+                assert_eq!(records.len(), 1);
+                PeerRecord::open(&records[0]).expect("the reply relays a verifiable record");
+            }
+            other => panic!("expected a Peers reply, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn fetching_with_no_peers_is_refused_rather_than_waited_out() {
         let dir = scratch("nopeers");
         let leecher = store(&dir, "leech");

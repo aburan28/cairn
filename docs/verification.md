@@ -199,6 +199,19 @@ so an operator can tell a broken jail from a broken checker. Raw child
 stdout/stderr is not copied into consensus evidence: only SHA-256 digests and
 the derived fields needed to reproduce the verdict are retained.
 
+**`python3` must resolve to a real interpreter, not a version-manager shim.**
+The jail allow-lists the interpreter binary and its runtime root — the
+installation prefix two levels above `bin/`, which covers Homebrew, rustup and
+similar layouts. A pyenv/asdf/mise shim re-execs through the manager binary
+and a version directory under `$HOME`, and home-directory roots are
+deliberately never allow-listed, so the re-exec is denied and the shim exits
+126. The verdict is `Unavailable` for every pinned check, which is the honest
+answer — but on a host where `which python3` hits a shim first, *everything*
+is unavailable, which reads as a broken node rather than a broken check. Put a
+directly-installed `python3` (e.g. `/opt/homebrew/bin`) first on `PATH` before
+running the test suite, the demo scripts, or a node. `the_shipped_artifacts_verify`
+failing with "pinned checker exited 126" is this, not a checker bug.
+
 Two gaps remain real and neither is hypothetical:
 
 1. **It is not a VM boundary.** A kernel or policy bug is still an escape.
