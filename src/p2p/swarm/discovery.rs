@@ -610,6 +610,61 @@ mod tests {
         assert!(book.get(&signed.submitter_id()).is_some());
     }
 
+    #[test]
+    fn an_update_for_a_known_peer_needs_no_eviction() {
+        // The full-book branch evicts only when the peer is new. A newer
+        // record for a peer already held must update in place: evicting a
+        // stranger to make room for someone already inside shrinks the
+        // network the book knows for no reason, and a peer that republishes
+        // often would flush quiet ones all by itself.
+        let mut book = AddressBook::new();
+        for seed in 0..MAX_RECORDS {
+            let id = Identity::from_secret_bytes(seed_bytes(seed));
+            let signed = PeerRecord::sign(&id, &[addr(1000)], (seed as u64) + 10).expect("signs");
+            book.offer(&signed).expect("verifies");
+        }
+        assert_eq!(book.len(), MAX_RECORDS);
+        let quietest = Identity::from_secret_bytes(seed_bytes(0)).public().to_hex();
+
+        // The newest peer republishes, not the stalest: evicting here would
+        // cost the quiet peer that never republishes, which is exactly the
+        // one the full-book policy keeps.
+        let mover = Identity::from_secret_bytes(seed_bytes(MAX_RECORDS - 1));
+        let moved = PeerRecord::sign(&mover, &[addr(2000)], 1_000_000).expect("signs");
+        assert!(
+            book.offer(&moved).expect("verifies"),
+            "a newer record is taken"
+        );
+        assert_eq!(book.len(), MAX_RECORDS, "an update is not an insertion");
+        let entry = book
+            .get(&moved.submitter_id())
+            .expect("the known peer is still known");
+        assert_eq!(entry.record.addrs, vec![addr(2000)], "the peer moved");
+        assert!(
+            book.get(&quietest).is_some(),
+            "the update evicted a stranger to make room that was never needed"
+        );
+    }
+
+    #[test]
+    fn forgetting_a_peer_is_exact_and_leaves_the_rest() {
+        // `remove` is what a failure detector would call. It must drop exactly
+        // the named peer and report whether there was anything to drop, so a
+        // caller can tell "forgotten" from "never known".
+        let mut book = AddressBook::new();
+        book.offer(&record(1, 1111, 1)).expect("verifies");
+        book.offer(&record(2, 2222, 1)).expect("verifies");
+        let one = record(1, 0, 0).submitter_id();
+        let two = record(2, 0, 0).submitter_id();
+
+        assert!(book.remove(&one), "a known peer is forgotten");
+        assert!(book.get(&one).is_none());
+        assert!(book.get(&two).is_some(), "the rest stay");
+        assert_eq!(book.len(), 1);
+        assert!(!book.remove(&one), "forgetting twice is not forgetting");
+        assert!(!book.remove(&"ff".repeat(32)), "a stranger was never known");
+    }
+
     fn seed_bytes(n: usize) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&(n as u64 + 1).to_be_bytes());
