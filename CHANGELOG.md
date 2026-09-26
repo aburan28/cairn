@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0](https://github.com/aburan28/cairn/compare/v1.4.0...v1.5.0) (2026-09-26)
+
+
+### Features
+
+* **macos:** limit what Cairn.app's node may use, and choose its data folder ([#164](https://github.com/aburan28/cairn/issues/164)) ([1715e4e](https://github.com/aburan28/cairn/commit/1715e4e57082dab3cf2216db1918c3db4b8c91ec))
+* **macos:** ship Cairn.app in the .dmg ([#162](https://github.com/aburan28/cairn/issues/162)) ([db1f17e](https://github.com/aburan28/cairn/commit/db1f17e45418b3a6439a054bddc05e4801abcb27))
+
 ## [1.4.0](https://github.com/aburan28/cairn/compare/v1.3.0...v1.4.0) (2026-09-21)
 
 
