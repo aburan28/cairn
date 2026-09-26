@@ -183,6 +183,20 @@ argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "ze
 log = { version = "0.4", default-features = false, features = ["std"] }
 serpent = { version = "0.6.0", default-features = false }
 chacha20 = { version = "0.10.2", default-features = false, features = ["cipher"] }
+# SQIsign level 1, as an optional third signature on a claim. Not a sole
+# signature: `submitter` stays an ed25519 key, and a record that carries this
+# field still has to verify that signature. Omitted when absent, so existing
+# ids do not move.
+#
+# Research-grade. The crate's own README says it is not audited. Signing runs
+# LLL with an `f64` Gram-Schmidt approximation, which is why this is not the
+# identity and not Falcon's sampling construction either — verification is the
+# isogeny check, and a signature this build cannot reproduce byte-for-byte
+# from a seed is still a signature it can accept or refuse. There is no second
+# pure-Rust implementation; `reference/rust` links `sqisign-verify`, the
+# verification half of this same project, so the two nodes apply the same
+# check rather than one of them ignoring the field.
+sqisign-rs = { version = "0.5.0", default-features = false }
 
 [dev-dependencies]
 rand = "0.10"

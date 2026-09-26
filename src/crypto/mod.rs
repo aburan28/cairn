@@ -144,6 +144,7 @@ pub mod kem;
 pub mod policy;
 pub mod pq;
 pub mod shamir;
+pub mod sqisign;
 pub mod threefish;
 
 pub use envelope::{

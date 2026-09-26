@@ -481,6 +481,10 @@ pub struct Claim {
     pub pq_key: Option<String>,
     /// ML-DSA-65 signature, hex. Omitted when absent. Not part of the signing payload.
     pub pq_signature: Option<String>,
+    /// SQIsign level-1 public key, hex. Omitted when absent. Inside the signing payload.
+    pub sqisign_key: Option<String>,
+    /// SQIsign level-1 signature, hex. Omitted when absent. Not part of the signing payload.
+    pub sqisign_signature: Option<String>,
 }
 
 /// The nine relation kinds, spelled as they appear on the wire.
@@ -578,6 +582,9 @@ impl Claim {
         if let (Value::Object(map), Some(pq_key)) = (&mut value, &self.pq_key) {
             map.insert("pq_key".into(), Value::string(pq_key.clone()));
         }
+        if let (Value::Object(map), Some(sqisign_key)) = (&mut value, &self.sqisign_key) {
+            map.insert("sqisign_key".into(), Value::string(sqisign_key.clone()));
+        }
         value
     }
 
@@ -588,6 +595,13 @@ impl Claim {
         }
         if let (Value::Object(map), Some(pq_signature)) = (&mut value, &self.pq_signature) {
             map.insert("pq_signature".into(), Value::string(pq_signature.clone()));
+        }
+        if let (Value::Object(map), Some(sqisign_signature)) = (&mut value, &self.sqisign_signature)
+        {
+            map.insert(
+                "sqisign_signature".into(),
+                Value::string(sqisign_signature.clone()),
+            );
         }
         value
     }
@@ -623,10 +637,21 @@ impl Claim {
             &self.signing_payload(),
             self.signature.as_deref(),
         )?;
+        let message = self.signing_payload().canonical_bytes();
         crate::pq::verify_claim(
             self.pq_key.as_deref(),
             self.pq_signature.as_deref(),
-            &self.signing_payload().canonical_bytes(),
+            &message,
+        )?;
+        if self.sqisign_key.is_some() && signed_submitter(&self.submitter).is_none() {
+            return Err(RecordError(
+                "sqisign is not a sole signature; the submitter must be an ed25519 key".into(),
+            ));
+        }
+        crate::sqisign::verify_claim(
+            self.sqisign_key.as_deref(),
+            self.sqisign_signature.as_deref(),
+            &message,
         )
     }
 
@@ -701,6 +726,8 @@ impl Claim {
             signature: optional_text(value, "signature")?,
             pq_key: optional_text(value, "pq_key")?,
             pq_signature: optional_text(value, "pq_signature")?,
+            sqisign_key: optional_text(value, "sqisign_key")?,
+            sqisign_signature: optional_text(value, "sqisign_signature")?,
         };
         claim.validate()?;
         Ok(claim)
@@ -1142,6 +1169,8 @@ mod tests {
             signature: None,
             pq_key: None,
             pq_signature: None,
+            sqisign_key: None,
+            sqisign_signature: None,
         };
         let mut signed = claim.clone();
         signed.signature = Some("ab".repeat(64));

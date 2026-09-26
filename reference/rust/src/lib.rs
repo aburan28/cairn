@@ -25,5 +25,6 @@ pub mod pq;
 pub mod records;
 pub mod sig;
 pub mod sponsorship;
+pub mod sqisign;
 pub mod time;
 pub mod verifiers;

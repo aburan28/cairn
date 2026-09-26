@@ -154,6 +154,9 @@ fn the_cipher_and_the_kems_that_should_be_there_are() {
         // Signatures. Not key exchange -- see `crypto::kem`.
         "ed25519-dalek",
         "ml-dsa",
+        // Experimental third signature. Not an AEAD and not TLS.
+        "sqisign-rs",
+        "sqisign-verify",
     ] {
         assert!(
             packages.contains(required),

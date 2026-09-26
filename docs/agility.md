@@ -12,7 +12,7 @@ would be the useful thing to get wrong.
 | layer | self-describing? | swappable? | what a swap costs today |
 |---|---|---|---|
 | **KEM suites** | yes — `Suite` is tagged on the wire | **yes**, additively | nothing. A new leg moves no id |
-| **record signatures** | ed25519 is implied by the 64-hex submitter; ML-DSA-65 (`pq_key`, `pq_signature`) is omitted when absent | the extra signature, not the identity | replacing ed25519 moves every signed id |
+| **record signatures** | ed25519 is implied by the 64-hex submitter; ML-DSA-65 and SQIsign are extra fields, omitted when absent | the extra signatures, not the identity | replacing ed25519 moves every signed id |
 | **content addressing** | in form — ids are `sha256:<hex>` | no | every id in the network moves at once |
 
 The KEM row is the one a registry governs. Record signatures can carry a
@@ -104,7 +104,12 @@ What is done is a second signature. A claim may carry `pq_key` and
 before the field existed keeps its id, and the ed25519 signature covers
 `pq_key` when it is present. Admission does not yet require the second
 signature: a policy epoch that refused ed25519-only claims would fork every
-log that predates it. SQIsign is not a signature scheme in this tree.
+log that predates it. SQIsign level 1 may sit beside both, in `sqisign_key`
+and `sqisign_signature`, also omitted when absent, and only on a submitter
+that is already an ed25519 key. It is not a sole signature. The
+implementation is research-grade (`sqisign-rs`); there is no second
+library, so the reference links that project's verifier rather than
+ignoring the field.
 
 Checkpoints were already ML-DSA-65 on their own. A claim can now carry both,
 and the identity the submitter string names is still ed25519.
