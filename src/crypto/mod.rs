@@ -136,11 +136,16 @@
 //!   decentralized inclusion does (§7).
 
 pub mod bignum;
+pub mod cascade;
 pub mod envelope;
 pub mod gf;
 pub mod identity;
 pub mod kem;
+pub mod policy;
+pub mod pq;
 pub mod shamir;
+pub mod sqisign;
+pub mod threefish;
 
 pub use envelope::{
     CommitteeKey, CommitteeMember, EnvelopeError, SealedEnvelope, SealedShare, Secret32,
@@ -149,5 +154,8 @@ pub use identity::{
     verify_bytes, verify_value, Identity, IdentityError, MasterSeed, Signature, SignedRecord,
     VerifyingKeyBytes,
 };
-pub use kem::{Bundle, Encapsulated, KemError, Leg, PublicKey, SecretBundle, SecretKey, Suite};
+pub use kem::{
+    Bundle, Encapsulated, Family, KemError, Leg, PublicKey, SecretBundle, SecretKey, Suite,
+};
+pub use policy::{Policy, PolicyError, Status as SuiteStatus};
 pub use shamir::{combine, split, ShamirError, Share};

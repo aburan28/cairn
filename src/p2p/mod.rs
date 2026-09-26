@@ -26,15 +26,18 @@
 //! is a sibling talking to a sibling, and nothing above `p2p` needs to know
 //! either exists.
 
+pub mod cache;
 pub mod code;
 pub mod dht;
 pub mod discovery;
 pub mod handshake;
+pub mod mainline;
 pub mod multicast;
 pub mod peers;
 pub mod pop;
 pub mod portmap;
 pub mod proxy;
+pub mod punch;
 pub mod seeds;
 pub mod service;
 pub mod session;

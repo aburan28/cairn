@@ -45,6 +45,12 @@ ed25519-dalek = "3"
 # hand-written expander, checked against RFC 9380's vectors independently of the
 # primary's -- the same bargain as the rest of this crate.
 bls12_381_plus = "0.9"
+fips204 = "0.4.6"
+# Verification half of the SQIsign crate the primary signs with. Not an
+# independent implementation — none is published — and said here so the
+# dependency is not mistaken for the BLS split above. A claim that carries
+# `sqisign_key` has to verify here or the two audits disagree about admission.
+sqisign-verify = { version = "0.5.0", default-features = false }
 
 [profile.release]
 overflow-checks = true

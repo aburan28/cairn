@@ -143,9 +143,10 @@ fn no_tls_stack_is_in_the_dependency_tree() {
 fn the_cipher_and_the_kems_that_should_be_there_are() {
     let packages = locked_packages();
     for required in [
-        // The one symmetric cipher.
+        // The one AEAD, and the cascade's other two legs (Threefish is in-tree).
         "chacha20poly1305",
         "chacha20",
+        "serpent",
         // The mandatory KEM, and the two optional suites.
         "classic-mceliece-rust",
         "ml-kem",
@@ -153,6 +154,9 @@ fn the_cipher_and_the_kems_that_should_be_there_are() {
         // Signatures. Not key exchange -- see `crypto::kem`.
         "ed25519-dalek",
         "ml-dsa",
+        // Experimental third signature. Not an AEAD and not TLS.
+        "sqisign-rs",
+        "sqisign-verify",
     ] {
         assert!(
             packages.contains(required),

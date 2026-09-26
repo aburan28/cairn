@@ -34,10 +34,11 @@ The risk is everything between that core and a newcomer:
    [#168](https://github.com/aburan28/cairn/pull/168) fixes the second half.
    The first half needs the host restarted, and then more than one host.
 2. **It pays for artifacts, not for running somebody's computation, and says
-   so.** "Becoming a general compute marketplace" is a roadmap non-goal. The
-   ECC2K-130 piecework design is the bridge: it pays per *verified unit of a
-   declared search* rather than per hour, which is the shape a job layer
-   should keep.
+   so.** This is a distributed Library of Alexandria: verified knowledge is the
+   unit of account. "Becoming a general compute marketplace" is a roadmap
+   non-goal. The ECC2K-130 piecework design is the bridge: it pays per
+   *verified unit of a declared search* rather than per hour, which is the
+   shape a job layer should keep.
 3. **There is no path from "launch the app" to "contribute".** No provider
    login and no agent in the app. There is also no view of anybody's
    resources. Contribution today means configuring Claude Code, Codex or
@@ -335,9 +336,11 @@ when it is done, and which of the repository's invariants it touches.
   - TCP simultaneous-open hole punching, coordinated through a peer both
     sides can reach.
   - Volunteer relays for symmetric NATs (the TURN role).
-  - Decide whether to add a UDP transport. QUIC (`quinn`, iroh) brings rustls,
-    which the no-TLS policy forbids. The honest options are an exception,
-    written down, or a reliable-UDP framing over the existing handshake.
+  - **Owner decision (2026-09-25):** TLS and QUIC are allowed as a written
+    exception for NAT traversal and hole-punching. The PQ KEM handshake remains
+    peer authentication; TLS/QUIC is reachability, not a substitute. Prefer
+    QUIC (`quinn` / iroh) for UDP + hole-punch, with the existing handshake
+    still binding the peer id.
 - **Done when.** Two home-NAT nodes with no public host sync directly, or
   through a volunteer relay when they cannot.
 - **Touches.** No consensus. Threat-model rows for relay abuse and the DoS
@@ -409,7 +412,9 @@ when it is done, and which of the repository's invariants it touches.
   - Rare, high-value signatures (checkpoints, the seed list, releases) use
     ML-DSA-87 plus SLH-DSA, the hash-based scheme and the most conservative
     assumption available.
-  - SQIsign as an optional third leg behind a feature flag.
+  - **Owner decision (2026-09-25):** SQIsign **yes** as an experimental third
+    leg behind a feature flag, once the hybrid ML-DSA field and registry are
+    live. Not a sole signature.
   - Not FN-DSA (Falcon): its signing samples with floating point, and the
     repository forbids floats near identity.
 - **Cost, stated.** About 3.3 KB per signed record with ML-DSA-65.
@@ -451,6 +456,11 @@ when it is done, and which of the repository's invariants it touches.
 - **Why.** This gates money between operators. Records converge by union, but
   settlement order and "who moved the frontier first" are per-log, and
   [p2p.md](p2p.md#still-open) leaves both open.
+- **Owner decision (2026-09-25).** Causal detection with Lamport / vector
+  clocks (or the cite DAG), game-theoretically solid settlement that clocks
+  **never** feed, per-objective sequencer for admission, surface frontier
+  conflicts. Design note:
+  [design/multi-operator-ordering.md](design/multi-operator-ordering.md).
 - **Options.**
   - (a) One sequencer per objective, named in the objective by a field that
     is omitted when default. This is closest to today, and discretion is
@@ -461,20 +471,21 @@ when it is done, and which of the repository's invariants it touches.
     needs membership governance.
   - (c) Anchor settlement roots to an external chain. This is roadmap Stage 3,
     and it pays fees through a rail.
-- **Recommendation.** (a) now. Design (c) as an optional anchor, starting with
-  OpenTimestamps: free, Bitcoin-anchored, and useful for proving a checkpoint
-  existed at a time. Take (b) only if cross-objective atomicity turns out to
-  matter. In every case, surface frontier conflicts instead of silently
-  diverging.
+- **Recommendation.** **(a) now**, with vector-clock / cite conflict
+  surfacing. Design (c) as an optional OpenTimestamps anchor. Take (b) only if
+  cross-objective atomicity turns out to matter. Settlement order stays
+  `H(beacon ‖ commitment_hash)` — never Lamport time, never arrival time.
 - **Touches.** **Consensus.** Both implementations. The arena needs a
   sequencer-censorship scenario.
 
 #### 9. Work orders: submit a computation, volunteers pick it up
 
-- **Why.** This is the vision, and it contradicts a written non-goal. The
-  resolution is to keep the principle, *pay for verified output, never for
-  hours*, and add the layer that distributes work under it. The repository's
-  thesis survives; the non-goal's wording changes.
+- **Why.** This is the vision for *distributing research search*, not for
+  renting GPUs. The owner lock: Cairn is a censorship-resistant knowledge
+  network (Library of Alexandria), not a cloud provider. The resolution is to
+  keep the principle, *pay for verified output, never for hours*, and add the
+  layer that distributes work under it. The repository's thesis survives; the
+  non-goal's wording names the marketplace so nobody builds one by accident.
 - **The shape.** A work order is an objective carrying:
   - pinned code (a WASM module or a container image digest);
   - input blobs;
@@ -648,28 +659,48 @@ when it is done, and which of the repository's invariants it touches.
    seed operators. Make `node-sync` alert.
 2. **Merge [#168](https://github.com/aburan28/cairn/pull/168)**, so the app
    finds whatever seeds answer.
-3. **In parallel:**
-   - item 4 (rebase the registry, write down the McEliece finding);
-   - a spike on item 2 (announce and look up on the Mainline DHT from the
-     daemon, behind a flag);
-   - step 1 of item 11 (measure throughput with counters).
-4. **Then the design notes** for items 6 and 8 in `docs/design/`, before any
-   code. Both move consensus, and both are cheaper to argue about on paper.
+3. **In parallel (started on `cursor/plan-execution-phase0-50b2`):**
+   - item 4 — algorithm registry (`crypto::policy`), `Family`, committee hedge
+     check, [agility.md](agility.md);
+   - item 8 design — [design/multi-operator-ordering.md](design/multi-operator-ordering.md);
+   - gVisor jail path (`CAIRN_SANDBOX_MECHANISM=gvisor`);
+   - Mainline UDP client behind `CAIRN_MAINLINE` (item 2): hints only, no CI
+     dependency on the public DHT. Two fresh nodes finding each other with
+     every seed down is still open.
+   - still open: ECC2K-130 throughput measure (item 11 step 1). The orbit
+     index lives under the shard store and keeps both witnesses; it is not
+     on the swarm and it does not pay.
+4. Hybrid ML-DSA-65 on a claim, omitted when absent (item 6). Admission does
+   not yet require it. SQIsign level 1 is a third signature on the same
+   claim, also omitted when absent, and it does not replace ed25519.
+   The QUIC hole-punch is a long-header datagram, not `quinn`: linking a TLS
+   stack would compile AES, which the cipher policy still refuses. The owner
+   exception for TLS stands for a stack that can be ChaCha20-only.
 
-## Decisions only the owner can make
+## Owner decisions (locked 2026-09-25)
 
-- **The compute non-goal.** Keep "pay for verified output, never for hours" and
-  add work orders (recommended), or keep the non-goal as written.
-- **Ordering.** Per-objective sequencers (recommended), a federation, or an
-  anchor chain.
-- **Cryptographic policy.** Whether to allow X25519 as a combiner leg. Whether
-  SQIsign is an experimental third leg now, or waits for standardisation.
-  Whether ML-KEM-1024 or ML-KEM-768 is mandatory.
-- **Dependency policy.** Keep the no-TLS rule and build UDP traversal on the
-  existing handshake, or make a written exception for QUIC.
-- **Provider terms.** Contributors run their own agents only (recommended).
-- **Citation flow.** Make it credit balances (recommended: `AGENTS.md`
-  already tells contributors that holding work back delays their citation
-  income), or drop that promise from the guidance until it does.
-- **First rail, if any.** The protocol does not need one. A deployment that
-  pays real money does.
+- **Ordering.** Causal clocks for conflict detection; settlement order stays
+  beacon ⊕ commitment hash; per-objective sequencer for admission; surface
+  concurrent frontiers. See
+  [design/multi-operator-ordering.md](design/multi-operator-ordering.md).
+  **Not** Lamport-ordered payouts — that is a free lottery.
+- **Cryptographic policy.** SQIsign: **yes**, as an experimental / third-leg
+  path once the registry and hybrid signature design land. Lattices
+  (ML-KEM / ML-DSA) remain the hedge. No single suite alone. Cipher cascades
+  (Serpent, Threefish) stay on the agility ladder; ChaCha20-Poly1305 remains
+  the AEAD until a cascade is specified with known-answer tests.
+- **Transport / TLS.** **Written exception:** TLS and QUIC are allowed for
+  NAT traversal and hole-punching. The PQ KEM handshake remains the
+  peer-authentication story; TLS/QUIC is the reachability layer, not a
+  substitute for it.
+- **Provider terms.** Contributors run **their own** agents with **their own**
+  API keys. The network does not proxy or subsidize third-party LLM logins.
+- **Isolation.** gVisor (`runsc`) is the stronger Linux jail; opt in with
+  `CAIRN_SANDBOX_MECHANISM=gvisor`. Bubblewrap remains the default when both
+  work.
+- **Knowledge, not cloud.** Not a compute rental market. Distributed Library
+  of Alexandria: pay for verified artifacts and knowledge, never for hours.
+- **Citation flow / first rail.** Still open; not decided this turn.
+- **X25519 as a combiner leg / ML-KEM-1024 vs 768 mandatory.** Still open;
+  registry version 1 keeps McEliece structurally required and
+  `min_families: 2`.

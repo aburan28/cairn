@@ -835,7 +835,11 @@ somebody wanted.
 
 ## Non-goals
 
-- Becoming a general compute marketplace. This buys artifacts, not hours.
+- Becoming a general compute marketplace or a cloud rental. This network is a
+  distributed, censorship-resistant knowledge store — a Library of Alexandria
+  that pays for **verified artifacts**, never for GPU-hours or claimed effort.
+  Work orders (plan item 9) distribute search under that rule; they do not
+  rent machines.
 - Verifying judgement. It cannot be done and the design says so.
 - Distributed pretraining. Interconnect-bound and not self-verifying — a
   different system with a different threat model.

@@ -4220,6 +4220,10 @@ mod tests {
             cites: Vec::new(),
             relations: Vec::new(),
             signature: None,
+            pq_key: None,
+            pq_signature: None,
+            sqisign_key: None,
+            sqisign_signature: None,
         };
         ledger
             .append(OBJECTIVE, objective.to_value(), declared_at)
