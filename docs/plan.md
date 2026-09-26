@@ -664,10 +664,17 @@ when it is done, and which of the repository's invariants it touches.
      check, [agility.md](agility.md);
    - item 8 design — [design/multi-operator-ordering.md](design/multi-operator-ordering.md);
    - gVisor jail path (`CAIRN_SANDBOX_MECHANISM=gvisor`);
-   - still open: Mainline DHT spike (item 2), ECC2K-130 throughput measure
-     (item 11 step 1).
-4. **Next design notes** for item 6 (hybrid signatures / SQIsign) before the
-   signature migration code; TLS/QUIC exception is owner-locked (see below).
+   - Mainline UDP client behind `CAIRN_MAINLINE` (item 2): hints only, no CI
+     dependency on the public DHT. Two fresh nodes finding each other with
+     every seed down is still open.
+   - still open: ECC2K-130 throughput measure (item 11 step 1). The orbit
+     index lives under the shard store and keeps both witnesses; it is not
+     on the swarm and it does not pay.
+4. Hybrid ML-DSA-65 on a claim, omitted when absent (item 6). Admission does
+   not yet require it. SQIsign is still not a signature scheme in this tree.
+   The QUIC hole-punch is a long-header datagram, not `quinn`: linking a TLS
+   stack would compile AES, which the cipher policy still refuses. The owner
+   exception for TLS stands for a stack that can be ChaCha20-only.
 
 ## Owner decisions (locked 2026-09-25)
 

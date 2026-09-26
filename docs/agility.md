@@ -12,11 +12,13 @@ would be the useful thing to get wrong.
 | layer | self-describing? | swappable? | what a swap costs today |
 |---|---|---|---|
 | **KEM suites** | yes — `Suite` is tagged on the wire | **yes**, additively | nothing. A new leg moves no id |
-| **record signatures** | **no** — the algorithm is implied by `submitter` being 64 hex, which *is* an ed25519 key | no | every submitter string changes, so every signed record's id moves |
+| **record signatures** | ed25519 is implied by the 64-hex submitter; ML-DSA-65 (`pq_key`, `pq_signature`) is omitted when absent | the extra signature, not the identity | replacing ed25519 moves every signed id |
 | **content addressing** | in form — ids are `sha256:<hex>` | no | every id in the network moves at once |
 
-Only the top row is solved. The rest of this document is what the other two
-would take, and why the answer for the bottom one is not "swap it".
+The KEM row is the one a registry governs. Record signatures can carry a
+second algorithm without moving an id; they cannot replace the first. The
+rest of this document is what the other two would take, and why the answer
+for the bottom one is not "swap it".
 
 ## What is built: the algorithm registry
 
@@ -93,13 +95,19 @@ admits what another refuses.
 ### Signature agility
 
 `submitter` being 64 lowercase hex *is* the ed25519 public key — there is no
-suite tag, and the algorithm is inferred from the string's shape. Adding
-ML-DSA-signed records means a tagged key format, which changes every submitter
-string, which moves every signed record's id. That is the migration the
-`Required` status is a placeholder for.
+suite tag, and the algorithm is inferred from the string's shape. Replacing
+that key with a tagged format moves every signed record's id. That migration
+is not done.
 
-Checkpoints are already ML-DSA-65, so the network is not uniformly stuck on
-ed25519 — the *record* layer is.
+What is done is a second signature. A claim may carry `pq_key` and
+`pq_signature` (ML-DSA-65). Both are omitted when absent, so a record written
+before the field existed keeps its id, and the ed25519 signature covers
+`pq_key` when it is present. Admission does not yet require the second
+signature: a policy epoch that refused ed25519-only claims would fork every
+log that predates it. SQIsign is not a signature scheme in this tree.
+
+Checkpoints were already ML-DSA-65 on their own. A claim can now carry both,
+and the identity the submitter string names is still ed25519.
 
 ### Hash agility, and why replacement is the wrong frame
 

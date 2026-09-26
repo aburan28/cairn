@@ -136,12 +136,15 @@
 //!   decentralized inclusion does (§7).
 
 pub mod bignum;
+pub mod cascade;
 pub mod envelope;
 pub mod gf;
 pub mod identity;
 pub mod kem;
 pub mod policy;
+pub mod pq;
 pub mod shamir;
+pub mod threefish;
 
 pub use envelope::{
     CommitteeKey, CommitteeMember, EnvelopeError, SealedEnvelope, SealedShare, Secret32,

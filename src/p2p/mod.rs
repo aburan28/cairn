@@ -37,6 +37,7 @@ pub mod peers;
 pub mod pop;
 pub mod portmap;
 pub mod proxy;
+pub mod punch;
 pub mod seeds;
 pub mod service;
 pub mod session;

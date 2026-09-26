@@ -477,6 +477,10 @@ pub struct Claim {
     /// surviving as an opaque blob this crate would happily re-emit.
     pub relations: Vec<ClaimRelation>,
     pub signature: Option<String>,
+    /// ML-DSA-65 verifying key, hex. Omitted when absent so older ids stay.
+    pub pq_key: Option<String>,
+    /// ML-DSA-65 signature, hex. Omitted when absent. Not part of the signing payload.
+    pub pq_signature: Option<String>,
 }
 
 /// The nine relation kinds, spelled as they appear on the wire.
@@ -571,6 +575,9 @@ impl Claim {
                 );
             }
         }
+        if let (Value::Object(map), Some(pq_key)) = (&mut value, &self.pq_key) {
+            map.insert("pq_key".into(), Value::string(pq_key.clone()));
+        }
         value
     }
 
@@ -578,6 +585,9 @@ impl Claim {
         let mut value = self.signing_payload();
         if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
             map.insert("signature".into(), Value::string(signature.clone()));
+        }
+        if let (Value::Object(map), Some(pq_signature)) = (&mut value, &self.pq_signature) {
+            map.insert("pq_signature".into(), Value::string(pq_signature.clone()));
         }
         value
     }
@@ -612,6 +622,11 @@ impl Claim {
             &self.submitter,
             &self.signing_payload(),
             self.signature.as_deref(),
+        )?;
+        crate::pq::verify_claim(
+            self.pq_key.as_deref(),
+            self.pq_signature.as_deref(),
+            &self.signing_payload().canonical_bytes(),
         )
     }
 
@@ -684,6 +699,8 @@ impl Claim {
             cites,
             relations,
             signature: optional_text(value, "signature")?,
+            pq_key: optional_text(value, "pq_key")?,
+            pq_signature: optional_text(value, "pq_signature")?,
         };
         claim.validate()?;
         Ok(claim)
@@ -1123,6 +1140,8 @@ mod tests {
             cites: vec![],
             relations: vec![],
             signature: None,
+            pq_key: None,
+            pq_signature: None,
         };
         let mut signed = claim.clone();
         signed.signature = Some("ab".repeat(64));

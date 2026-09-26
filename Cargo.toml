@@ -68,11 +68,18 @@ hmac = "0.13"
 # by construction, so there is no configuration in which this crate is running
 # a table-lookup cipher on secret data without anybody noticing.
 #
-# One cipher and not two is the rest of it. Every AEAD in this crate has the
+# One AEAD and not two is the rest of it. Every AEAD in this crate has the
 # same 32-byte key, the same 12-byte nonce and the same failure mode, so
 # "nonce reuse is fatal" is one rule to enforce rather than one per site.
 # `tests/cipher_policy.rs` fails the build if an AES or TLS crate enters the
 # dependency tree, so the claim is checked and not merely written down.
+#
+# Serpent and Threefish are not a second AEAD. They are XOR keystream legs of
+# `crypto::cascade`, beside ChaCha20, so a break of one cipher does not open
+# a blob sealed that way. Transport frames and sealed stores stay on
+# ChaCha20-Poly1305. The hole-punch path does not link a QUIC stack: every
+# one in reach compiles AES inside its TLS library, and the ban above was
+# not lifted.
 #
 # `the_aead_matches_the_rfc_8439_vector` in `src/crypto/envelope.rs` is what
 # makes a bump here safe to take. Every other cipher test seals and opens in one
@@ -174,6 +181,8 @@ argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "ze
 # structured backends this does not have, and `serde` is not wanted anywhere
 # near a diagnostic path.
 log = { version = "0.4", default-features = false, features = ["std"] }
+serpent = { version = "0.6.0", default-features = false }
+chacha20 = { version = "0.10.2", default-features = false, features = ["cipher"] }
 
 [dev-dependencies]
 rand = "0.10"

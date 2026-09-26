@@ -46,7 +46,7 @@
 //! | layer | self-describing? | swappable? | what a swap would cost |
 //! |---|---|---|---|
 //! | KEM suites | yes — [`Suite`] is tagged on the wire | **yes**, additively | nothing; a new leg moves no id |
-//! | record signatures | **no** — the algorithm is implied by the submitter being 64 hex, which *is* an ed25519 key | no | every submitter string changes, so every signed record's id moves |
+//! | record signatures | ed25519 is implied by the 64-hex submitter; ML-DSA-65 is an extra field, omitted when absent | the extra signature, not the identity | replacing ed25519 moves every signed id |
 //! | content addressing | in form — ids are `sha256:<hex>` | no | every id in the network moves at once |
 //!
 //! The bottom row is the real lock-in, and the answer is not to swap it. It is

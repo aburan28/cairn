@@ -1015,6 +1015,8 @@ fn cli(args: &[String]) -> Result<(), String> {
                 cites,
                 relations,
                 signature: None,
+                pq_key: None,
+                pq_signature: None,
             };
             claim.validate().map_err(|e| e.to_string())?;
             let outcome = node.reveal(&claim, &ts)?;
