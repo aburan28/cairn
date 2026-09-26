@@ -47,9 +47,13 @@ conclusion.
 
 ## Key exchange: Classic McEliece, mandatory, plus whatever else you publish
 
-Built: [`src/crypto/kem.rs`](../src/crypto/kem.rs), used by
-[`src/p2p/handshake.rs`](../src/p2p/handshake.rs) and by the sealed-envelope
-committee.
+Built: [`src/crypto/kem.rs`](../src/crypto/kem.rs), used by the
+sealed-envelope committee. The transport handshake
+([`src/p2p/handshake.rs`](../src/p2p/handshake.rs)) is Classic McEliece alone
+and takes only `kem::key_id` from this module, so that a bundle and a bare
+transport key derive the same peer id. The optional legs below therefore
+harden sealed submissions and never reach a session key; making the handshake
+hybrid is item 5 of [plan.md](plan.md).
 
 **There is one key-exchange primitive in this crate and it is a KEM.** Classic
 McEliece is mandatory in every key bundle; ML-KEM-768 and HQC-128 are optional
@@ -580,6 +584,13 @@ Behind a censoring firewall, add `--proxy socks5://127.0.0.1:9050` (a running
 Tor client, or a Tor bridge speaking obfs4/Snowflake on that port) and every
 dial leaves through it — see the transport-security section above and
 `docs/censorship.md` §5.
+
+A node needs no bootstrap file to reach the published seeds: the daemon dials
+the copy of `launch/seeds.json` compiled into the binary, asking each seed for
+its key and keeping it only if it hashes to the listed id (`src/p2p/seeds.rs`;
+`CAIRN_SEEDS=<file>` swaps the list, `CAIRN_SEEDS=off` drops it). A bootstrap
+file is for everything else — a peer not on the list, and every seed for a node
+whose dials go through `--proxy`, since a key request is a direct dial.
 
 `cairn seeds resolve` is where a real one comes from. `make seeds` runs
 `scripts/seeds-fetch.sh`, which downloads the list this project publishes at

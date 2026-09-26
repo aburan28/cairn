@@ -25,7 +25,7 @@ struct SettingsView: View {
                     TextField("Bootstrap file(s), colon-separated (optional)", text: $model.bootstrapFile).disabled(model.isLive)
                     Button("Choose…") { chooseBootstrap() }.disabled(model.isLive)
                 }
-                Text("Peers on this LAN are found by themselves. To reach a seed elsewhere, give the node a bootstrap file with the seed's address and real public key; `cairn gen-bootstrap` writes the shape, and a placeholder key is warned about at start.")
+                Text("Peers on this LAN and the seeds built into cairn are found by themselves; CAIRN_SEEDS=off turns the seeds off. To reach any other peer, give the node a bootstrap file with its address and real public key; `cairn gen-bootstrap` writes the shape, and a placeholder key is warned about at start.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Short epochs make a local trial quick; a real round takes 600s. The node, the researcher and the audit all read the same value. 8080/9000 are what an operator's own cairn run binds, which is why the defaults are 8090/9010.")
                     .font(.caption).foregroundStyle(.secondary)

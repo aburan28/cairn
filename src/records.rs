@@ -2184,23 +2184,22 @@ pub struct Undertaking {
     /// been paid and has not already locked: see
     /// `crate::node::Node::balances_within`.
     ///
-    /// # It is not scarce yet, and the difference matters
+    /// # Scarce only on a log that declares a supply
     ///
-    /// A balance comes from a settlement, a settlement comes from an objective,
-    /// and `crate::node::Node::post_objective` **takes no deposit**: a funder
-    /// names a reward and nothing checks it had one. So an attacker posts a
-    /// bounty for an arbitrary sum against a verifier it chose, answers its own
-    /// question, and stakes the proceeds -- and does it once per key.
-    /// `node::tests::minting_a_bond_is_free_because_an_objective_needs_no_deposit`
-    /// mints 10^12 units in four commands and audits clean afterwards, because
-    /// nothing there breaks a rule; the rule is missing.
+    /// A balance comes from a settlement, and a settlement comes from an
+    /// objective. On a log with a genesis [`Issuance`],
+    /// `crate::node::Node::post_objective` escrows the reward from the funder's
+    /// own balance, per tier, so a bounty cannot be funded with units nobody
+    /// was issued and the bond behind this field is backed by something.
     ///
-    /// So what this field buys today is *invariance*, not resistance: splitting
-    /// a stake across identities is exactly neutral, which is the property a
-    /// scarce stake would need and is not by itself enough. Closing it means
-    /// debiting an objective's reward from its funder's own balance, which
-    /// needs a genesis rule and moves both implementations. Until then, an
-    /// availability pool should not carry real money.
+    /// On a log with no issuance record -- the published launch log among them
+    /// -- nothing is escrowed: a funder names a reward and nothing checks it
+    /// had one, so an attacker can post a bounty for any sum against a verifier
+    /// it chose, answer it, and stake the proceeds, once per key. There this
+    /// field buys *invariance*, not resistance: splitting a stake across
+    /// identities is exactly neutral, which a scarce stake needs and is not by
+    /// itself enough. An availability pool on such a log should not carry real
+    /// money.
     pub bond: u64,
     pub created_at: String,
     /// Ed25519 signature over [`Undertaking::signing_payload`], hex.

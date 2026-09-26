@@ -51,6 +51,13 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
 - **Ports** are the command line's, 8080 and 9000, when they are free, and any
   free ports when they are not, so it runs beside a `cairn run` of your own.
   The toolbar shows which.
+- **Peers** come from the seed list compiled into `cairn` (`launch/seeds.json`)
+  and from the LAN. The app passes no `--bootstrap`, and before the list was
+  compiled in that made every node it started LAN-only. A seed that does not
+  answer is named in `node.log` once a minute. Launching with
+  `open --env CAIRN_SEEDS=<file>` points the node at another list and
+  `CAIRN_SEEDS=off` at none. The p2p port is bound on loopback, so the node
+  dials out and nobody dials in: it can sync, and it cannot yet seed.
 - **Stopping** is the node's own: the app holds the node's stdin open and
   closes it, and `cairn run` stops when stdin closes. A node that has not gone
   in three seconds gets SIGTERM, then SIGKILL. Because the pipe is the signal,

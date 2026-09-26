@@ -8,8 +8,12 @@ model output authoritative:
 3. explicit attestation levels; and
 4. per-request encrypted envelopes.
 
-The implementation is in `src/compute.rs`. It is intentionally outside the
-ledger record and verifier state machines. A model response is a candidate
+The implementation is written in `src/compute.rs` and is **not compiled**:
+nothing declares it as a module of the crate, so no build or test has ever
+exercised it. It seals requests with X25519, which the crate has since removed
+and `tests/cipher_policy.rs` forbids, so wiring it in means moving those
+envelopes onto the KEM bundle first. It is intentionally outside the ledger
+record and verifier state machines. A model response is a candidate
 artifact. It becomes a research result only after a pinned cairn verifier
 accepts it and the ordinary immutable log rules settle it.
 

@@ -879,6 +879,73 @@ fn a_node_handed_a_log_is_handed_the_network_with_it() {
     assert_eq!(alice.with_directory(|d| d.routing().len()), 1);
 }
 
+/// A node that has nothing but a seed list -- an address and an id, no key --
+/// reaches a live seed, and a list entry naming an id the machine at that
+/// address does not hold reaches nobody.
+///
+/// This is the state every node started from Cairn.app is in: no bootstrap
+/// file, an empty log, and whatever list was compiled into the binary. The key
+/// comes from the seed, and is kept only because it hashes to the listed id.
+#[test]
+fn a_seed_list_alone_makes_a_live_seed_dialable_and_an_impostor_nobody() {
+    use cairn::p2p::seeds::Seed;
+    use cairn::p2p::service::SeedOutcome;
+    use cairn::p2p::transport;
+
+    let seed = Arc::new(PeerIdentity::generate());
+    let listener = transport::listen("127.0.0.1:0".parse().expect("addr")).expect("binds");
+    let addr = listener.local_addr().expect("addr");
+    // Two connections: the honest ask, then the impostor's. A key request ends
+    // the connection without a session either way, which is why each accept
+    // returns an error here.
+    let served = {
+        let seed = Arc::clone(&seed);
+        thread::spawn(move || {
+            (0..2).all(|_| {
+                let (stream, _) = listener.accept().expect("accepts");
+                transport::accept(stream, &seed).is_err()
+            })
+        })
+    };
+
+    let alice = Service::new(Arc::new(PeerIdentity::generate()));
+    let listed = |name: &str, transport: [u8; 32]| Seed {
+        name: name.into(),
+        addr: addr.to_string(),
+        transport,
+    };
+
+    let honest = [listed("local", seed.id())];
+    assert_eq!(
+        alice.seed_from_list(&honest),
+        vec![SeedOutcome::Learned(addr)]
+    );
+    assert_eq!(alice.known_peers(), 1, "the seed did not become dialable");
+    assert_eq!(
+        alice.key_for(&seed.id()).map(|key| key.id()),
+        Some(seed.id()),
+        "the book holds a key that is not the one the list named"
+    );
+    // Idempotent and silent once dialable: the daemon runs this every tick.
+    assert_eq!(alice.seed_from_list(&honest), vec![SeedOutcome::Dialable]);
+
+    // The same machine, listed under an id it does not hold. It refuses to
+    // answer for somebody else, so nothing reaches the book.
+    let impostor = [listed("impostor", [7u8; 32])];
+    match alice.seed_from_list(&impostor).as_slice() {
+        [SeedOutcome::Failed { addr: tried, .. }] => assert_eq!(*tried, addr),
+        other => panic!("an impostor entry came to {other:?}"),
+    }
+    assert_eq!(alice.known_peers(), 1, "an impostor entry reached the book");
+    // And it is not asked again every tick: the same backoff as a beacon.
+    assert_eq!(alice.seed_from_list(&impostor), vec![SeedOutcome::Waiting]);
+    assert!(served.join().expect("seed thread"));
+
+    // An entry naming this node is never dialled.
+    let own = [listed("me", alice.identity())];
+    assert_eq!(alice.seed_from_list(&own), vec![SeedOutcome::Ourselves]);
+}
+
 #[test]
 fn a_replayed_peer_record_cannot_steer_the_routing_table_back() {
     // What `dht::Contact::seq` exists for, in its own words: without a

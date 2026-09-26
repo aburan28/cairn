@@ -3,6 +3,11 @@
 Ordered by value delivered per unit of consensus complexity — roughly the
 reverse of how these projects are usually built.
 
+[plan.md](plan.md) is the forward-looking companion to this record: an
+evaluation of where the whole tool stands against the goal of a volunteer
+network, where anyone can contribute compute, models or ideas, and the work
+that implies.
+
 ## Stage 0 — verifiable log, no token *(this repository)*
 
 One operator. Objectives with runnable pinned verifiers, commit–reveal,
@@ -355,21 +360,24 @@ behaviour ships and is tested, not that TLC has checked it.
       `splitting_a_stake_across_many_identities_earns_what_one_identity_earns`,
       where the old rule paid the splitter an 88% premium.
 
-      **Three bounds remain, and the first is the one that matters.**
-      `post_objective` takes no deposit, so a balance can be minted: post a
+      **Three bounds remained, and the first was the one that mattered.**
+      `post_objective` took no deposit, so a balance could be minted: post a
       bounty for any sum against a verifier you chose, answer it yourself,
-      stake the proceeds, repeat per key.
-      `minting_a_bond_is_free_because_an_objective_needs_no_deposit` does it for
-      10^12 units and the log audits clean. Splitting is exactly neutral, which
-      is the property a scarce stake needs and is not by itself resistance;
-      closing it means debiting a reward from its funder's balance, which needs
-      a genesis rule and moves both implementations. Second, the answer proves
+      stake the proceeds, repeat per key. That closed with #100, **on a log
+      that declares a supply**: the genesis `issuance` rule it named now
+      exists, and `post_objective` escrows the reward from the funder's own
+      balance, per tier (`Node::afford`, `Node::afford_in`), so the same four
+      commands are refused as an unfunded reward. On a log with no `issuance`
+      record — the published launch log among them — nothing is escrowed and
+      the mint is still available; the audit says the backing there is the
+      operator's word. Splitting is exactly neutral, which is the property a
+      scarce stake needs and is not by itself resistance. Second, the answer proves
       a node **produced** the challenged entry, not that it **stored** it —
       closing that needs proof of replication. Third, the bond is locked but
       never **slashed**: silence is recorded and the units are held, so a
       penalty has something to attach to, but nothing takes them. Stage 2
-      finishes all three; **until then an availability pool should not carry
-      real money.**
+      finishes the second and third; **until then, and on any log that
+      declares no supply, an availability pool should not carry real money.**
 - [x] A V3 statistical verifier with the test statistic and rejection threshold
       registered *with the objective*, before any data exists.
 - [x] Epoch-batched commit-reveal, so nobody sees a competitor's artifact while

@@ -241,6 +241,12 @@ const GROUPS: Group[] = [
         name: "roadmap.md",
         blurb: "what Stage 1–3 add, in the order worth doing",
       },
+      {
+        path: "docs/plan.md",
+        name: "plan.md",
+        blurb:
+          "where the whole tool stands against a volunteer network, and the fifteen items between here and there",
+      },
     ],
   },
 ];

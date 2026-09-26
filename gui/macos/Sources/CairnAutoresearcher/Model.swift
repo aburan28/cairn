@@ -1051,11 +1051,11 @@ final class ResearcherModel: ObservableObject {
             if l.contains("beacons: heard") { d.beaconTicks += 1 }
             if l.contains("inbound session:") && l.contains(" ok") { d.inboundOK += 1 }
             if l.contains("outbound session:") && l.contains(" ok") { d.outboundOK += 1 }
-            if l.contains("outbound session to") || (l.contains("inbound session:") && !l.contains(" ok")) {
+            if l.contains("outbound session to") || l.contains("did not hand over its key") || (l.contains("inbound session:") && !l.contains(" ok")) {
                 d.failures.append(l); if d.failures.count > 5 { d.failures.removeFirst() }
             }
             if l.contains("bootstrap") { d.bootstrap.append(l); if d.bootstrap.count > 5 { d.bootstrap.removeFirst() } }
-            if l.contains("multicast") || l.contains("beacon") || l.contains("session") || l.contains("bootstrap") || l.contains("listening on") {
+            if l.contains("multicast") || l.contains("beacon") || l.contains("session") || l.contains("bootstrap") || l.contains("seeds:") || l.contains("listening on") {
                 d.lines.append(l); if d.lines.count > 40 { d.lines.removeFirst() }
             }
         }
