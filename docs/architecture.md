@@ -24,10 +24,11 @@ fixed evaluator. The check is the payment condition, and the contributor's
 hardware, honesty, and diligence stop being things anyone has to verify.
 
 This inverts the usual design. A compute marketplace sells GPU-hours and then
-spends enormous effort proving the hours were real. A results market sells
-accepted artifacts and doesn't care how they were produced — hand-derived on
-paper, found by a 70B model on a gaming GPU, or guessed. Same payout, same
-verification cost, zero attestation machinery.
+spends enormous effort proving the hours were real. A results market — a
+distributed Library of Alexandria — sells accepted artifacts and doesn't care
+how they were produced — hand-derived on paper, found by a 70B model on a
+gaming GPU, or guessed. Same payout, same verification cost, zero attestation
+machinery.
 
 The corollary is a constraint, and it is the whole engineering problem:
 **the network can only work on tasks whose outputs are cheap to check.** Not a

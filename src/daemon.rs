@@ -664,6 +664,30 @@ pub fn run(config: Config) -> Result<(), String> {
         log::info!("multicast: off ({BEACON_PORT_ENV}); no LAN discovery for this node");
     }
 
+    // Mainline is a rendezvous, not a peer. A hint that comes back is dialled
+    // only through the handshake, and a bootstrap that does not answer is a
+    // node without that rendezvous, not a node that cannot start. Off unless
+    // asked: tests must not open a socket to the public DHT.
+    if crate::p2p::mainline::enabled_from_env() {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let epoch = crate::partition::epoch_of(seconds, crate::partition::epoch_seconds());
+        let listen_port = config.listen.port();
+        std::thread::spawn(
+            move || match crate::p2p::mainline::meet_public(epoch, listen_port) {
+                Ok(peers) => log::info!(
+                    "mainline: {} peer hint(s) for this epoch; the handshake still authenticates",
+                    peers.len()
+                ),
+                Err(error) => {
+                    log::warn!("mainline: {error}; continuing without a DHT rendezvous")
+                }
+            },
+        );
+    }
+
     let listener = service.listen(config.listen).map_err(|e| {
         // The one bind failure worth explaining, because the address that
         // causes it is the address an operator has every reason to think is

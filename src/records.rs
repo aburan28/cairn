@@ -205,7 +205,12 @@ impl fmt::Display for RecordError {
             ),
             RecordError::SealedNotImplemented => f.write_str(
                 "confidentiality \"sealed\" requires zero-knowledge verification, \
-                 which is not implemented; use \"embargoed\" for delayed disclosure",
+                 which is not implemented; use \"embargoed\" for delayed disclosure. \
+                 Building it is gated on docs/verification.md \"The rule for any \
+                 proof-system verifier\": every verifier kind here re-executes, so \
+                 no Fiat-Shamir transform exists in the settlement path to attack, \
+                 and a proof-system kind must not reintroduce one over a circuit \
+                 the funder chose",
             ),
             RecordError::MalformedEnvelope { reason } => {
                 write!(f, "sealed envelope cannot be decoded: {reason}")
@@ -1649,6 +1654,21 @@ pub struct Claim {
     /// canonical form when absent, so adding it moved no ids. See
     /// [`signed_submitter`].
     pub signature: Option<String>,
+    /// ML-DSA-65 verifying key, hex. Inside the ed25519 signing payload when
+    /// present, so the classical signature binds the post-quantum key.
+    /// Omitted when absent: records that predate the field keep their ids.
+    pub pq_key: Option<String>,
+    /// ML-DSA-65 signature over the signing payload, hex. Not inside the
+    /// payload (a signature cannot cover itself). Omitted when absent.
+    pub pq_signature: Option<String>,
+    /// SQIsign level-1 public key, hex. Inside the ed25519 signing payload
+    /// when present, so the classical signature binds it. Omitted when absent.
+    /// Never a sole signature: a claim that carries it still has to verify
+    /// under its ed25519 `submitter`.
+    pub sqisign_key: Option<String>,
+    /// SQIsign level-1 standard signature, hex, 148 bytes. Not inside the
+    /// payload. Omitted when absent.
+    pub sqisign_signature: Option<String>,
 }
 
 impl Claim {
@@ -1671,6 +1691,10 @@ impl Claim {
             cites,
             relations: Vec::new(),
             signature: None,
+            pq_key: None,
+            pq_signature: None,
+            sqisign_key: None,
+            sqisign_signature: None,
         };
         claim.validate()?;
         Ok(claim)
@@ -1742,6 +1766,19 @@ impl Claim {
         if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
             map.insert("signature".to_string(), Value::string(signature.clone()));
         }
+        if let (Value::Object(map), Some(pq_signature)) = (&mut value, &self.pq_signature) {
+            map.insert(
+                "pq_signature".to_string(),
+                Value::string(pq_signature.clone()),
+            );
+        }
+        if let (Value::Object(map), Some(sqisign_signature)) = (&mut value, &self.sqisign_signature)
+        {
+            map.insert(
+                "sqisign_signature".to_string(),
+                Value::string(sqisign_signature.clone()),
+            );
+        }
         value
     }
 
@@ -1778,6 +1815,15 @@ impl Claim {
                 );
             }
         }
+        if let (Value::Object(map), Some(pq_key)) = (&mut value, &self.pq_key) {
+            map.insert("pq_key".to_string(), Value::string(pq_key.clone()));
+        }
+        if let (Value::Object(map), Some(sqisign_key)) = (&mut value, &self.sqisign_key) {
+            map.insert(
+                "sqisign_key".to_string(),
+                Value::string(sqisign_key.clone()),
+            );
+        }
         value
     }
 
@@ -1792,6 +1838,58 @@ impl Claim {
         self
     }
 
+    /// Ed25519 plus ML-DSA-65 over the same payload. The post-quantum key is
+    /// bound by the ed25519 signature; the post-quantum signature is not
+    /// inside the payload.
+    pub fn signed_with_pq(
+        mut self,
+        identity: &crate::crypto::identity::Identity,
+        pq: &crate::crypto::pq::PqKey,
+    ) -> Claim {
+        // The submitter string is inside the payload. Signing before
+        // `signed_with` writes it produces a signature over a different
+        // record than the one verification checks.
+        self.submitter = identity.submitter_id();
+        self.pq_key = Some(pq.public_hex());
+        let message = self.signing_payload().canonical_bytes();
+        self.pq_signature = Some(pq.sign_hex(&message));
+        self.signed_with(identity)
+    }
+
+    /// Ed25519 plus SQIsign over the same payload. The SQIsign key is bound
+    /// by the ed25519 signature. SQIsign does not replace it.
+    pub fn signed_with_sqisign<R: rand_core::RngCore + rand_core::CryptoRng>(
+        mut self,
+        identity: &crate::crypto::identity::Identity,
+        sqi: &crate::crypto::sqisign::SqiKey,
+        rng: &mut R,
+    ) -> Option<Claim> {
+        self.submitter = identity.submitter_id();
+        self.sqisign_key = Some(sqi.public_hex());
+        let message = self.signing_payload().canonical_bytes();
+        self.sqisign_signature = Some(sqi.sign_hex(&message, rng)?);
+        Some(self.signed_with(identity))
+    }
+
+    /// Ed25519, ML-DSA-65, and SQIsign over one payload. Both extra keys are
+    /// written before either extra signature, so each signature covers both
+    /// keys and neither signature covers the other.
+    pub fn signed_with_pq_and_sqisign<R: rand_core::RngCore + rand_core::CryptoRng>(
+        mut self,
+        identity: &crate::crypto::identity::Identity,
+        pq: &crate::crypto::pq::PqKey,
+        sqi: &crate::crypto::sqisign::SqiKey,
+        rng: &mut R,
+    ) -> Option<Claim> {
+        self.submitter = identity.submitter_id();
+        self.pq_key = Some(pq.public_hex());
+        self.sqisign_key = Some(sqi.public_hex());
+        let message = self.signing_payload().canonical_bytes();
+        self.pq_signature = Some(pq.sign_hex(&message));
+        self.sqisign_signature = Some(sqi.sign_hex(&message, rng)?);
+        Some(self.signed_with(identity))
+    }
+
     /// Check the signature this record carries, if the rules demand one.
     pub fn verify_signature(&self) -> Result<(), SignatureError> {
         verify_record_signature(
@@ -1799,7 +1897,37 @@ impl Claim {
             &self.submitter,
             &self.signing_payload(),
             self.signature.as_deref(),
-        )
+        )?;
+        let invalid = || SignatureError::Invalid {
+            record: "claim",
+            submitter: self.submitter.clone(),
+        };
+        let message = self.signing_payload().canonical_bytes();
+        match (&self.pq_key, &self.pq_signature) {
+            (None, None) => {}
+            (Some(key), Some(signature)) => {
+                if !crate::crypto::pq::verify(key, &message, signature) {
+                    return Err(invalid());
+                }
+            }
+            _ => return Err(invalid()),
+        }
+        match (&self.sqisign_key, &self.sqisign_signature) {
+            (None, None) => Ok(()),
+            (Some(key), Some(signature)) => {
+                // A nickname has no ed25519 signature. Accepting SQIsign on
+                // one would make it the sole signature, which it is not.
+                if signed_submitter(&self.submitter).is_none() {
+                    return Err(invalid());
+                }
+                if crate::crypto::sqisign::verify(key, &message, signature) {
+                    Ok(())
+                } else {
+                    Err(invalid())
+                }
+            }
+            _ => Err(invalid()),
+        }
     }
 
     /// Identity of the artifact alone -- used to detect duplicate submissions.
@@ -1891,6 +2019,10 @@ impl Claim {
             cites,
             relations,
             signature: optional_string(value, RECORD, "signature")?,
+            pq_key: optional_string(value, RECORD, "pq_key")?,
+            pq_signature: optional_string(value, RECORD, "pq_signature")?,
+            sqisign_key: optional_string(value, RECORD, "sqisign_key")?,
+            sqisign_signature: optional_string(value, RECORD, "sqisign_signature")?,
         };
         claim.validate()?;
         Ok(claim)
@@ -3944,6 +4076,50 @@ mod tests {
                 expected: "an object"
             })
         );
+    }
+
+    #[test]
+    fn a_pq_signature_is_omitted_when_absent_and_checked_when_present() {
+        let plain = Claim::new(OBJ_PLAIN, "alice", artifact(1), "n", TS, vec![]).unwrap();
+        let text = String::from_utf8(plain.to_value().canonical_bytes()).unwrap();
+        assert!(!text.contains("pq_"));
+        let who = crate::crypto::identity::Identity::from_secret_bytes([42u8; 32]);
+        let pq = crate::crypto::pq::PqKey::from_seed([7u8; 32]);
+        let signed = plain.signed_with_pq(&who, &pq);
+        signed.verify_signature().expect("both signatures");
+        assert!(signed
+            .to_value()
+            .canonical_bytes()
+            .windows(6)
+            .any(|w| w == b"pq_key"));
+        let mut one_sided = signed.clone();
+        one_sided.pq_signature = None;
+        assert!(one_sided.verify_signature().is_err());
+        let mut tampered = signed;
+        let mut sig = tampered.pq_signature.take().unwrap();
+        let last = sig.pop().unwrap();
+        sig.push(if last == 'a' { 'b' } else { 'a' });
+        tampered.pq_signature = Some(sig);
+        assert!(tampered.verify_signature().is_err());
+    }
+
+    #[test]
+    fn sqisign_sits_beside_ed25519_and_is_omitted_when_absent() {
+        let plain = Claim::new(OBJ_PLAIN, "alice", artifact(1), "n", TS, vec![]).unwrap();
+        let text = String::from_utf8(plain.to_value().canonical_bytes()).unwrap();
+        assert!(!text.contains("sqisign_"));
+        let who = crate::crypto::identity::Identity::from_secret_bytes([42u8; 32]);
+        let mut rng = crate::crypto::sqisign::TestRng::new([9u8; 32]);
+        let sqi = crate::crypto::sqisign::SqiKey::generate(&mut rng);
+        let signed = plain
+            .signed_with_sqisign(&who, &sqi, &mut rng)
+            .expect("sqisign");
+        signed.verify_signature().expect("ed25519 and sqisign");
+        let encoded = signed.to_value().canonical_bytes();
+        assert!(encoded.windows(11).any(|window| window == b"sqisign_key"));
+        let mut one_sided = signed.clone();
+        one_sided.sqisign_signature = None;
+        assert!(one_sided.verify_signature().is_err());
     }
 
     #[test]

@@ -201,9 +201,11 @@ the derived fields needed to reproduce the verdict are retained.
 
 Two gaps remain real and neither is hypothetical:
 
-1. **It is not a VM boundary.** A kernel or policy bug is still an escape.
-   gVisor, Firecracker or WASM would bound that; none is implemented.
-2. **A host with neither mechanism runs the child unconfined.** Set
+1. **bubblewrap and seatbelt are not a VM boundary.** A host-kernel or policy
+   bug is still an escape under those jails. gVisor (`runsc`) bounds that
+   surface when `CAIRN_SANDBOX_MECHANISM=gvisor` and the probe succeeds.
+   Firecracker or WASM would bound it further and are not implemented.
+2. **A host with no jail mechanism runs the child unconfined.** Set
    `CAIRN_REQUIRE_SANDBOX=1` to make that `UNAVAILABLE` instead of a silent
    downgrade. Any node running third-party objectives should set it. The
    switch fails closed: any value other than an explicit `0`/`false`/`no`/`off`

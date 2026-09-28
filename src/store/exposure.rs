@@ -233,6 +233,12 @@ pub fn exposure(store: &Store, path: &Path, sealed_log: bool) -> Exposure {
         };
     }
 
+    if name == crate::p2p::cache::FILE_NAME {
+        return Exposure::Plaintext {
+            reason: "last-known peer addresses; routing hints, not a ledger",
+        };
+    }
+
     match first.as_deref() {
         Some(CACHE_DIR) => Exposure::Plaintext {
             reason: "a local copy of something fetchable; losing it costs \

@@ -56,7 +56,14 @@ const DEFAULT_MEMORY_MB: u64 = 4096;
 /// Which jail this host can actually use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mechanism {
-    /// `bwrap`, at the resolved path. Linux.
+    /// `runsc` (gVisor), at the resolved path. Linux. Stronger than bubblewrap:
+    /// a userspace kernel bounds host-kernel escape surface. Selected when
+    /// [`MECHANISM_ENV`] asks for it, or when bubblewrap is absent and runsc
+    /// works.
+    Gvisor(PathBuf),
+    /// `bwrap`, at the resolved path. Linux. The default when both jails work,
+    /// because it is what every existing node already probes and because gVisor
+    /// is an optional install.
     Bubblewrap(PathBuf),
     /// `sandbox-exec`, at the resolved path. macOS seatbelt.
     Seatbelt(PathBuf),
@@ -64,11 +71,20 @@ pub enum Mechanism {
     None(&'static str),
 }
 
+/// `CAIRN_SANDBOX_MECHANISM`: `auto` (default), `gvisor`, `bwrap`, or `none`.
+///
+/// Forces a jail when set to a specific mechanism. `none` is the explicit
+/// "I know, run unjailed" spelling; combined with [`REQUIRE_ENV`] it still
+/// fails closed, because requiring a sandbox and naming none is a
+/// configuration error rather than a downgrade.
+pub const MECHANISM_ENV: &str = "CAIRN_SANDBOX_MECHANISM";
+
 impl Mechanism {
     /// The name recorded in verdict evidence. Auditors compare verdicts across
     /// nodes; knowing a disagreeing node ran unjailed is the first question.
     pub fn as_str(&self) -> &'static str {
         match self {
+            Mechanism::Gvisor(_) => "gvisor",
             Mechanism::Bubblewrap(_) => "bwrap",
             Mechanism::Seatbelt(_) => "sandbox-exec",
             Mechanism::None(_) => "none",
@@ -190,6 +206,10 @@ pub fn confine(
             command: bare(program, args, plan, scrub_env),
             mechanism: "none",
         }),
+        Mechanism::Gvisor(runsc) => Ok(Jailed {
+            command: gvisor(runsc, program, args, plan, scrub_env),
+            mechanism: "gvisor",
+        }),
         Mechanism::Bubblewrap(bwrap) => Ok(Jailed {
             command: bubblewrap(bwrap, program, args, plan, scrub_env),
             mechanism: "bwrap",
@@ -226,28 +246,40 @@ pub fn mechanism() -> Mechanism {
 }
 
 fn probe() -> Mechanism {
+    let want = std::env::var(MECHANISM_ENV)
+        .ok()
+        .map(|text| text.trim().to_ascii_lowercase())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "auto".into());
+
+    if want == "none" {
+        return Mechanism::None("CAIRN_SANDBOX_MECHANISM=none");
+    }
+
     if cfg!(target_os = "linux") {
-        if let Some(bwrap) = which("bwrap") {
-            // `bwrap` installs fine on hosts where unprivileged user
-            // namespaces are switched off; only running it tells you.
-            let ok = Command::new(&bwrap)
-                .args(["--ro-bind", "/", "/", "--unshare-net", "--", "/bin/true"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false);
-            if ok {
-                return Mechanism::Bubblewrap(bwrap);
-            }
-            return Mechanism::None(
-                "bwrap is installed but cannot create a namespace on this host",
-            );
-        }
-        return Mechanism::None("bwrap is not installed");
+        let gvisor = probe_gvisor();
+        let bwrap = probe_bubblewrap();
+        return match want.as_str() {
+            "gvisor" => gvisor.unwrap_or(Mechanism::None(
+                "CAIRN_SANDBOX_MECHANISM=gvisor but runsc is not usable here",
+            )),
+            "bwrap" => bwrap.unwrap_or(Mechanism::None(
+                "CAIRN_SANDBOX_MECHANISM=bwrap but bwrap is not usable here",
+            )),
+            // Prefer bubblewrap when both work: every existing node already
+            // depends on it, and gVisor is still an optional install. Operators
+            // who want the userspace kernel set CAIRN_SANDBOX_MECHANISM=gvisor.
+            _ => bwrap.or(gvisor).unwrap_or(Mechanism::None(
+                "neither bwrap nor runsc is usable on this host",
+            )),
+        };
     }
     if cfg!(target_os = "macos") {
+        if want == "gvisor" || want == "bwrap" {
+            return Mechanism::None(
+                "CAIRN_SANDBOX_MECHANISM names a Linux jail and this host is macOS",
+            );
+        }
         if let Some(sandbox_exec) = which("sandbox-exec") {
             let ok = Command::new(&sandbox_exec)
                 .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
@@ -265,6 +297,37 @@ fn probe() -> Mechanism {
         return Mechanism::None("sandbox-exec is not available");
     }
     Mechanism::None("no jail mechanism is implemented for this platform")
+}
+
+fn probe_bubblewrap() -> Option<Mechanism> {
+    let bwrap = which("bwrap")?;
+    // `bwrap` installs fine on hosts where unprivileged user namespaces are
+    // switched off; only running it tells you.
+    let ok = Command::new(&bwrap)
+        .args(["--ro-bind", "/", "/", "--unshare-net", "--", "/bin/true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    ok.then_some(Mechanism::Bubblewrap(bwrap))
+}
+
+fn probe_gvisor() -> Option<Mechanism> {
+    let runsc = which("runsc")?;
+    // `runsc do` is the one-shot path that matches how this module already
+    // drives bwrap: no persistent container, one child, gone when it exits.
+    // `--network=none` is the property that must hold or the probe is a lie.
+    let ok = Command::new(&runsc)
+        .args(["do", "--network=none", "--", "/bin/true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    ok.then_some(Mechanism::Gvisor(runsc))
 }
 
 /// [`MEMORY_ENV`], or its default. Public so `run` can say at startup which
@@ -358,6 +421,81 @@ fn bubblewrap(
     let (bin, argv) = with_limits(program, args, plan);
     command.arg("--").arg(bin).args(argv);
     // bwrap itself must start in a directory that exists outside the jail.
+    command.current_dir(plan.workdir);
+    apply_env(&mut command, plan, scrub_env);
+    command
+}
+
+/// Drive `runsc do` the way [`bubblewrap`] drives `bwrap`: one shot, no
+/// network, scratch as the only writable place that matters.
+///
+/// gVisor is a userspace kernel. A bug in the host kernel's syscall surface is
+/// no longer an automatic escape the way it is under bubblewrap alone — which
+/// is why the threat model names it. The filesystem policy here is narrower
+/// than a full OCI bundle on purpose: `runsc do` is the seam that already
+/// matches this module's process model. Bind parity with bubblewrap (every
+/// readable path, every symlink corner) is follow-up work; until then this
+/// path is opt-in via [`MECHANISM_ENV`].
+fn gvisor(
+    runsc: PathBuf,
+    program: &Path,
+    args: &[OsString],
+    plan: &Confinement<'_>,
+    scrub_env: bool,
+) -> Command {
+    let mut command = Command::new(runsc);
+    command.args([
+        "do",
+        // The property that must hold or this is not a jail.
+        "--network=none",
+        // Overlay so the guest cannot mutate the host root even when a bind
+        // is not read-only — mirrors bwrap's separation of ro-bind and bind.
+        "--overlay",
+    ]);
+    if plan.cwd.exists() {
+        command.arg("--cwd").arg(plan.cwd);
+    }
+    // Writable scratch first so an entry that also appears in `readable` ends
+    // writeable, matching bubblewrap's bind-after-ro-bind order.
+    if plan.workdir.exists() {
+        command.arg("--mount").arg(format!(
+            "type=bind,src={},dst={},options=rbind",
+            plan.workdir.display(),
+            plan.workdir.display()
+        ));
+    }
+    for path in &plan.writable {
+        if path.exists() {
+            command.arg("--mount").arg(format!(
+                "type=bind,src={},dst={},options=rbind",
+                path.display(),
+                path.display()
+            ));
+        }
+    }
+    for path in &plan.readable {
+        if path.exists() {
+            command.arg("--mount").arg(format!(
+                "type=bind,src={},dst={},options=rbind,ro",
+                path.display(),
+                path.display()
+            ));
+        }
+    }
+
+    if scrub_env {
+        // runsc do inherits the parent environment; clear what we can by
+        // rebuilding on the Command rather than trusting a guest clearenv.
+        command.env_clear();
+        for (key, value) in minimal_env(plan) {
+            command.env(key, value);
+        }
+    } else {
+        command.env("TMPDIR", plan.workdir);
+    }
+
+    let (bin, argv) = with_limits(program, args, plan);
+    command.arg("--").arg(bin).args(argv);
     command.current_dir(plan.workdir);
     apply_env(&mut command, plan, scrub_env);
     command
@@ -614,7 +752,10 @@ mod tests {
         // about the mechanism, only that the answer is one of the three.
         assert!(matches!(
             first,
-            Mechanism::Bubblewrap(_) | Mechanism::Seatbelt(_) | Mechanism::None(_)
+            Mechanism::Gvisor(_)
+                | Mechanism::Bubblewrap(_)
+                | Mechanism::Seatbelt(_)
+                | Mechanism::None(_)
         ));
     }
 

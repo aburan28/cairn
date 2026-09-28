@@ -373,28 +373,32 @@ impl fmt::Display for Direction {
 pub const SANDBOXING: &str = "\
 Objective-authored code -- pinned checkers, evaluators, and statistics, replay \
 commands, and Lean on submitted proof text -- runs in a child process inside an \
-OS jail: bubblewrap on Linux, a seatbelt profile on macOS. Enforced by the \
-kernel: no network of any kind (including unix sockets to a local daemon), no \
-reads outside declared bundle, toolchain, and system paths, no writes outside a \
-scratch directory that is deleted when the check finishes, a wall-clock \
-deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. While the child runs the node \
-also measures its process tree and holds it to a CPU cap (CAIRN_SANDBOX_CPUS, \
-by pausing it) and, on macOS, which has no RLIMIT_AS, to the memory cap; a \
-process that leaves both the tree and its process group escapes that \
-measurement, as it escapes the deadline's kill. Every child process gets a \
-scrubbed environment, so objective code cannot return the operator's credentials \
-in verdict evidence. Raw child output is retained only by digest. \
+OS jail: gVisor (runsc) when CAIRN_SANDBOX_MECHANISM=gvisor and runsc works, \
+bubblewrap on Linux by default, a seatbelt profile on macOS. Enforced by the \
+kernel or by gVisor's userspace kernel: no network of any kind (including unix \
+sockets to a local daemon), no reads outside declared bundle, toolchain, and \
+system paths (bubblewrap/seatbelt; gVisor's bind set is the declared paths), \
+no writes outside a scratch directory that is deleted when the check finishes, \
+a wall-clock deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. While the child \
+runs the node also measures its process tree and holds it to a CPU cap \
+(CAIRN_SANDBOX_CPUS, by pausing it) and, on macOS, which has no RLIMIT_AS, to \
+the memory cap; a process that leaves both the tree and its process group \
+escapes that measurement, as it escapes the deadline's kill. Every child \
+process gets a scrubbed environment, so objective code cannot return the \
+operator's credentials in verdict evidence. Raw child output is retained only \
+by digest. \
 Directories a spec can name (replay's cwd, \
 lean's project_root) resolve against the objective root and are refused when \
 they escape it, including through symlinks, so a record cannot choose which host paths are bound into its \
 own jail. \
 \
-It is NOT a VM boundary, and two gaps are real. (1) A kernel or policy bug is \
-still an escape; gVisor/Firecracker/WASM would bound that and are not \
-implemented. (2) On a host with no jail mechanism \
-the child runs as before, unconfined; set CAIRN_REQUIRE_SANDBOX=1 to make \
-that Unavailable instead. When a jailed run fails, the verdict's evidence names \
-the mechanism, so an operator can tell a broken jail from a broken checker.";
+bubblewrap and seatbelt are NOT a VM boundary: a host-kernel or policy bug is \
+still an escape. gVisor bounds that surface when selected and working \
+(CAIRN_SANDBOX_MECHANISM=gvisor); Firecracker and WASM would bound it further \
+and are not implemented. On a host with no jail mechanism the child runs as \
+before, unconfined; set CAIRN_REQUIRE_SANDBOX=1 to make that Unavailable \
+instead. When a jailed run fails, the verdict's evidence names the mechanism, \
+so an operator can tell a broken jail from a broken checker.";
 
 /// Wall-clock bound for pinned checkers and evaluators when the spec is silent.
 ///
@@ -4190,15 +4194,16 @@ mod tests {
     /// edit is tempted to drop.
     #[test]
     fn the_sandboxing_note_names_both_the_boundary_and_its_gaps() {
-        for enforced in ["bubblewrap", "seatbelt", "no network", "scrubbed"] {
+        for enforced in ["bubblewrap", "seatbelt", "gVisor", "no network", "scrubbed"] {
             assert!(SANDBOXING.contains(enforced), "missing: {enforced}");
         }
         assert!(SANDBOXING.contains("NOT a VM boundary"));
         for gap in [
-            // A kernel escape is still an escape.
+            // A kernel escape is still an escape under bubblewrap/seatbelt.
             "kernel",
             // No jail at all on an unsupported host.
             sandbox::REQUIRE_ENV,
+            sandbox::MECHANISM_ENV,
         ] {
             assert!(SANDBOXING.contains(gap), "gap not stated: {gap}");
         }
