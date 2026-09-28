@@ -674,18 +674,18 @@ pub fn run(config: Config) -> Result<(), String> {
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or(0);
         let epoch = crate::partition::epoch_of(seconds, crate::partition::epoch_seconds());
-        std::thread::spawn(move || {
-            match crate::p2p::mainline::find_bootstrap(epoch) {
-            Ok(reply) => log::info!(
-                "mainline: bootstrap answered {} bytes, {} node hint(s); the handshake still authenticates",
-                reply.bytes,
-                reply.nodes.len()
-            ),
-            Err(error) => {
-                log::warn!("mainline: {error}; continuing without a DHT rendezvous")
-            }
-        }
-        });
+        let listen_port = config.listen.port();
+        std::thread::spawn(
+            move || match crate::p2p::mainline::meet_public(epoch, listen_port) {
+                Ok(peers) => log::info!(
+                    "mainline: {} peer hint(s) for this epoch; the handshake still authenticates",
+                    peers.len()
+                ),
+                Err(error) => {
+                    log::warn!("mainline: {error}; continuing without a DHT rendezvous")
+                }
+            },
+        );
     }
 
     let listener = service.listen(config.listen).map_err(|e| {

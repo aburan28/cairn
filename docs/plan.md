@@ -664,9 +664,11 @@ when it is done, and which of the repository's invariants it touches.
      check, [agility.md](agility.md);
    - item 8 design — [design/multi-operator-ordering.md](design/multi-operator-ordering.md);
    - gVisor jail path (`CAIRN_SANDBOX_MECHANISM=gvisor`);
-   - Mainline UDP client behind `CAIRN_MAINLINE` (item 2): hints only, no CI
-     dependency on the public DHT. Two fresh nodes finding each other with
-     every seed down is still open.
+   - Mainline UDP client behind `CAIRN_MAINLINE` (item 2): `get_peers` and
+     `announce_peer`. Two nodes that were not given each other's address learn
+     it from a rendezvous; the test uses an in-process one, so CI does not dial
+     the public DHT. A full iterative walk on `router.bittorrent.com` with
+     every cairn seed down is the same client and is still not what CI proves.
    - still open: ECC2K-130 throughput measure (item 11 step 1). The orbit
      index lives under the shard store and keeps both witnesses; it is not
      on the swarm and it does not pay.
