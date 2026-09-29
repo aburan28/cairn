@@ -21,5 +21,10 @@
 	<!-- The reader is served by the node over plain HTTP on loopback. -->
 	<key>NSAppTransportSecurity</key>
 	<dict><key>NSAllowsLocalNetworking</key><true/></dict>
+	<!-- Asked when P2P is bound past loopback, or when the node looks for
+	     peers on the local segment. Without it, macOS 15 quietly denies the
+	     multicast beacon and the node looks isolated for no visible reason. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Cairn finds other nodes on this network and, when you allow inbound connections, answers their dials.</string>
 </dict>
 </plist>

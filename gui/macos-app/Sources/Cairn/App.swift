@@ -26,6 +26,8 @@ struct CairnApp: App {
                 Button("Restart Node") { delegate.node.restart() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 Divider()
+                Button("Copy Peer Id") { delegate.copyPeerId() }
+                    .disabled(delegate.node.peerId == nil)
                 Button("Show Data Folder") {
                     NSWorkspace.shared.activateFileViewerSelecting([delegate.node.dataDir])
                 }
@@ -62,6 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func openInBrowser() {
         if case .running(let url) = node.state { NSWorkspace.shared.open(url) }
     }
+
+    func copyPeerId() {
+        guard let id = node.peerId else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(id, forType: .string)
+    }
 }
 
 struct ContentView: View {
@@ -72,9 +80,12 @@ struct ContentView: View {
         Group {
             switch node.state {
             case .running(let url):
-                WebView(browser: browser)
-                    .onAppear { browser.show(url) }
-                    .onChange(of: url) { browser.show($0) }
+                VStack(spacing: 0) {
+                    NetworkStrip(node: node)
+                    WebView(browser: browser)
+                        .onAppear { browser.show(url) }
+                        .onChange(of: url) { browser.show($0) }
+                }
             case .starting, .stopped:
                 Starting(node: node)
             case .failed(let message):
@@ -90,15 +101,89 @@ struct ContentView: View {
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .help("This node's reader. The same page opens in any browser on this Mac.")
+                    if let listen = node.listenAddress {
+                        Text(verbatim: "p2p \(listen)")
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .help(node.settings.listensLocallyOnly
+                                  ? "P2P is on loopback: this node dials out and nothing dials in."
+                                  : "P2P listen address. Hand this out with the peer id from Settings.")
+                    }
                     Button { browser.reload() } label: { Label("Reload", systemImage: "arrow.clockwise") }
                         .help("Reload the page")
                     Button { NSWorkspace.shared.open(url) } label: { Label("Open in Browser", systemImage: "safari") }
                         .help("Open this page in your browser")
                 }
                 OpenSettingsButton(iconOnly: true)
-                    .help("How much of this Mac the node may use, and where it keeps its data")
+                    .help("How much of this Mac the node may use, where it keeps its data, and how it reaches peers")
             }
         }
+    }
+}
+
+/// One line above the reader: whether anyone can dial this node, and whether
+/// it has reached anyone. Taken from the node's own log, never guessed.
+private struct NetworkStrip: View {
+    @ObservedObject var node: Node
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+            Text(summary)
+                .font(.callout)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            if let id = node.peerId {
+                Text(verbatim: String(id.prefix(12)) + "…")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .help("Transport peer id \(id). Copy it from Node → Copy Peer Id or Settings.")
+            }
+            if node.sessionsOK > 0 {
+                Text("\(node.sessionsOK) session\(node.sessionsOK == 1 ? "" : "s")")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+    }
+
+    private var summary: String {
+        if node.settings.listensLocallyOnly {
+            if node.sessionsOK > 0 {
+                return "Dialling out from this Mac only — reached a peer."
+            }
+            if node.settings.bootstrapFiles.isEmpty {
+                return "Listening on this Mac only. LAN peers may find it; set a bootstrap or accept inbound in Settings to reach further."
+            }
+            return "Listening on this Mac only. Dialling bootstrap peers…"
+        }
+        if node.sessionsOK > 0 {
+            return "Accepting inbound and reached \(node.sessionsOK) peer session\(node.sessionsOK == 1 ? "" : "s")."
+        }
+        if node.settings.bootstrapFiles.isEmpty {
+            return "Accepting inbound. Waiting for a LAN peer, or add a bootstrap in Settings."
+        }
+        return "Accepting inbound. Dialling bootstrap peers…"
+    }
+
+    private var icon: String {
+        if node.sessionsOK > 0 { return "antenna.radiowaves.left.and.right" }
+        if node.settings.listensLocallyOnly { return "lock.laptopcomputer" }
+        return "network"
+    }
+
+    private var tint: Color {
+        if node.sessionsOK > 0 { return .green }
+        if node.settings.listensLocallyOnly { return .orange }
+        return .secondary
     }
 }
 

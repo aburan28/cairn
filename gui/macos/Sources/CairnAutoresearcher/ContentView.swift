@@ -65,11 +65,15 @@ struct ContentView: View {
                         .help("Stop the researcher; it takes its node down with it")
                 } else if model.foreignPid == nil {
                     Button { model.start(once: false) } label: { Label("Start", systemImage: "play.fill") }
-                        .disabled(model.isBuilding)
-                        .help("Post the selected objectives, start the node, and keep sweeping")
+                        .disabled(model.isBuilding || !model.ready)
+                        .help(model.ready
+                              ? "Post the selected objectives, start the node, and keep sweeping"
+                              : "Finish the setup checks on Overview before starting")
                     Button { model.start(once: true) } label: { Label("One sweep", systemImage: "forward.end.fill") }
-                        .disabled(model.isBuilding)
-                        .help("One pass over every objective, then stop")
+                        .disabled(model.isBuilding || !model.ready)
+                        .help(model.ready
+                              ? "One pass over every objective, then stop"
+                              : "Finish the setup checks on Overview before starting")
                 }
                 Button { model.build() } label: { Label("Build", systemImage: "hammer") }
                     .disabled(model.isLive || model.isBuilding)

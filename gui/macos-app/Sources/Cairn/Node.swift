@@ -26,6 +26,14 @@ final class Node: ObservableObject {
     /// reached the running node yet.
     @Published private(set) var settings = NodeSettings.current()
 
+    /// Parsed from the node's own log lines as they arrive. Empty until the
+    /// node has said so; never invented by the app.
+    @Published private(set) var peerId: String?
+    @Published private(set) var listenAddress: String?
+    /// Recent discovery / session lines, newest last, for the status strip.
+    @Published private(set) var networkLines: [String] = []
+    @Published private(set) var sessionsOK = 0
+
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }
     var logFile: URL { dataDir.appendingPathComponent("node.log") }
@@ -97,6 +105,10 @@ final class Node: ObservableObject {
         guard process == nil else { return }
         stopping = false
         lines = []
+        peerId = nil
+        listenAddress = nil
+        networkLines = []
+        sessionsOK = 0
         state = .starting
         settings = NodeSettings.current()
 
@@ -142,23 +154,40 @@ final class Node: ObservableObject {
             return
         }
 
+        // A missing bootstrap file is a dial that never happens, and the node
+        // would say so once per file after starting. Refusing here keeps the
+        // reason next to the setting that named the path.
+        for path in settings.bootstrapFiles {
+            guard FileManager.default.fileExists(atPath: path) else {
+                state = .failed("""
+                    Bootstrap file \(path) is not there. Choose another in Settings, \
+                    or remove it from the list.
+                    """)
+                return
+            }
+        }
+
         // The command line's defaults when they are free, so a node started
         // here is where the docs say it is; otherwise any free port, so a
-        // second node on this Mac does not stop this one starting.
-        let http = Self.freePort(preferring: 8080)
-        let p2p = Self.freePort(preferring: 9000)
+        // second node on this Mac does not stop this one starting. The HTTP
+        // half stays on loopback: the window is the reader, and serving it
+        // past this Mac is a different product. The P2P half uses the host
+        // Settings chose -- loopback dials out only; 0.0.0.0 also accepts.
+        let http = Self.freePort(preferring: 8080, on: NodeSettings.loopbackHost)
+        let p2p = Self.freePort(preferring: 9000, on: settings.p2pHost)
         guard http != 0, p2p != 0 else {
-            state = .failed("Could not find a free port on 127.0.0.1.")
+            state = .failed("Could not find a free port for the node to bind.")
             return
         }
+        listenAddress = "\(settings.p2pHost):\(p2p)"
 
         let p = Process()
         p.executableURL = binary
         p.currentDirectoryURL = dataDir
         p.arguments = settings.arguments + [
             "run",
-            "--listen", "127.0.0.1:\(p2p)",
-            "--serve", "127.0.0.1:\(http)",
+            "--listen", "\(settings.p2pHost):\(p2p)",
+            "--serve", "\(NodeSettings.loopbackHost):\(http)",
         ]
         // Finder gives an app /usr/bin:/bin:/usr/sbin:/sbin. Verifiers the
         // node runs want python3 and friends from where people install them.
@@ -269,10 +298,6 @@ final class Node: ObservableObject {
         stdin = nil
     }
 
-    private func refresh() {
-        if let sink { lines = sink.snapshot() }
-    }
-
     private static func wait(for p: Process, seconds: Double) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while p.isRunning && Date() < deadline {
@@ -281,11 +306,60 @@ final class Node: ObservableObject {
         return !p.isRunning
     }
 
-    /// `preferred` if nothing on 127.0.0.1 holds it, otherwise a port the
-    /// kernel picks; 0 if not even that works. There is a window between this
-    /// check and the node binding the port, and if something takes it in that
-    /// window the node says so and the window shows it.
-    nonisolated static func freePort(preferring preferred: UInt16) -> UInt16 {
+    private func refresh() {
+        if let sink { lines = sink.snapshot() }
+        absorbLog()
+    }
+
+    /// Pull peer id, listen confirmation and session counts out of what the
+    /// node already wrote. The app never invents a peer id: it is `sha256` of
+    /// the transport key the node just loaded, and only the node knows it.
+    ///
+    /// Rescans the capped tail each time rather than tracking an offset:
+    /// `Stderr` drops old lines under load, and an offset into a truncated
+    /// buffer would skip the new ones that replaced them.
+    private func absorbLog() {
+        var id = peerId
+        var listen = listenAddress
+        var ok = 0
+        var net: [String] = []
+        for line in lines {
+            if id == nil, let r = line.range(of: "peer id ") {
+                let rest = line[r.upperBound...].prefix(64)
+                if rest.count == 64, rest.allSatisfy(\.isHexDigit) {
+                    id = String(rest)
+                }
+            }
+            if line.contains("listening on"),
+               let r = line.range(of: "listening on ") {
+                let addr = line[r.upperBound...].trimmingCharacters(in: .whitespaces)
+                if !addr.isEmpty {
+                    listen = String(addr.split(separator: " ").first ?? Substring(addr))
+                }
+            }
+            if (line.contains("inbound session:") || line.contains("outbound session:"))
+                && line.contains(" ok") {
+                ok += 1
+            }
+            if line.contains("bootstrap") || line.contains("multicast") || line.contains("beacon")
+                || line.contains("session") || line.contains("seeds:") || line.contains("listening on") {
+                net.append(line)
+            }
+        }
+        if id != peerId { peerId = id }
+        if listen != listenAddress { listenAddress = listen }
+        if ok != sessionsOK { sessionsOK = ok }
+        if net.count > 40 { net = Array(net.suffix(40)) }
+        if net != networkLines { networkLines = net }
+    }
+
+    /// `preferred` if nothing on `host` holds it, otherwise a port the kernel
+    /// picks; 0 if not even that works. Checked against the same host the
+    /// node will bind, so a free loopback port is not mistaken for a free
+    /// wildcard one. There is a window between this check and the node
+    /// binding, and if something takes it in that window the node says so
+    /// and the window shows it.
+    nonisolated static func freePort(preferring preferred: UInt16, on host: String) -> UInt16 {
         func bound(_ port: UInt16) -> UInt16 {
             let fd = socket(AF_INET, SOCK_STREAM, 0)
             guard fd >= 0 else { return 0 }
@@ -294,7 +368,7 @@ final class Node: ObservableObject {
             addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
             addr.sin_family = sa_family_t(AF_INET)
             addr.sin_port = port.bigEndian
-            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+            addr.sin_addr.s_addr = inet_addr(host)
             let ok = withUnsafePointer(to: &addr) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                     bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
@@ -311,6 +385,38 @@ final class Node: ObservableObject {
         }
         let got = bound(preferred)
         return got != 0 ? got : bound(0)
+    }
+
+    /// Run `cairn gen-bootstrap` against the same binary this app starts.
+    /// The file gets a placeholder key; the node warns until the peer's real
+    /// one replaces it. Completion is on the main actor.
+    func generateBootstrap(addr: String, to url: URL, completion: @escaping (String?) -> Void) {
+        guard let binary = binary ?? Self.locateBinary() else {
+            completion("No cairn command was found.")
+            return
+        }
+        let p = Process()
+        p.executableURL = binary
+        p.arguments = ["gen-bootstrap", "--addr", addr, "--out", url.path]
+        let err = Pipe()
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = err
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try p.run() } catch {
+                DispatchQueue.main.async { completion(error.localizedDescription) }
+                return
+            }
+            p.waitUntilExit()
+            let text = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                if p.terminationStatus == 0 {
+                    completion(nil)
+                } else {
+                    completion(text.isEmpty ? "gen-bootstrap exited with status \(p.terminationStatus)" : text)
+                }
+            }
+        }
     }
 }
 

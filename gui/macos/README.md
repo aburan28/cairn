@@ -21,7 +21,9 @@ when it is never distributed.
 that carries the embedded reader, Node for the one-time build), an activity
 card with the running engine's own progress line and elapsed time, tiles for
 solved / declined / open / earned / spendable, an earnings chart in settlement
-order, the accepted claims, and the researcher's state.
+order, the accepted claims, and the researcher's state. Start and One sweep
+stay disabled until the first four checks have run and passed — an empty
+check list is not "ready".
 
 The activity card counts down to the next sweep against the time the
 researcher itself published, shows how far through the objective list the

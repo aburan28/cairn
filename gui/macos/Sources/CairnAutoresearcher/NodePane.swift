@@ -233,19 +233,23 @@ struct NodeView: View {
     }
 
     private var peersTable: some View {
-        Table(model.peers) {
-            TableColumn("identity") { p in Text(String(p.identity.prefix(24))).font(.caption.monospaced()) }
-            TableColumn("address") { p in Text(p.addr) }
-            TableColumn("transport") { p in Text(p.transport) }.width(90)
-            TableColumn("since") { p in Text(p.createdAt).font(.caption.monospaced()) }
-        }
-        .overlay {
-            if model.peers.isEmpty {
-                VStack(spacing: 8) {
-                    Text("No peer records in this log.").foregroundStyle(.secondary)
-                    Text("Peers appear when the node is given a bootstrap file or hears one on the LAN; this researcher's node runs alone by default.")
-                        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
-                    Button("Add a peer…") { showAddPeer = true }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Announcements in this log — where an identity said it answers — not live sessions. A wrong address costs a dial; the handshake still authenticates the key.")
+                .font(.caption).foregroundStyle(.secondary)
+            Table(model.peers) {
+                TableColumn("identity") { p in Text(String(p.identity.prefix(24))).font(.caption.monospaced()) }
+                TableColumn("address") { p in Text(p.addr) }
+                TableColumn("transport") { p in Text(p.transport) }.width(90)
+                TableColumn("since") { p in Text(p.createdAt).font(.caption.monospaced()) }
+            }
+            .overlay {
+                if model.peers.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("No peer records in this log.").foregroundStyle(.secondary)
+                        Text("Peers appear when the node reaches a seed, is given a bootstrap file, or hears one on the LAN.")
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
+                        Button("Add a peer…") { showAddPeer = true }
+                    }
                 }
             }
         }

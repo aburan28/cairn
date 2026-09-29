@@ -338,6 +338,9 @@ final class ResearcherModel: ObservableObject {
     private var binaryProbe: (mtime: Date, hasReader: Bool)?
     private var notifiedClaims = Set<String>()
     private var checking = false
+    /// Set once the deferred first-tick disk work has run, so a second tick
+    /// does not rescan the catalog every second.
+    private var didLoadFromDisk = false
 
     init() {
         root = defaults.string(forKey: "root") ?? ResearcherModel.guessRoot()
@@ -355,13 +358,6 @@ final class ResearcherModel: ObservableObject {
         // first file is read, because on an external volume the first read
         // can block on a system consent prompt, and a blocked launch shows
         // the user nothing to consent to. The first tick does the reading.
-        rescanCatalog()
-        if selectedObjectives.isEmpty {
-            Task.detached(priority: .utility) { [scriptDir] in
-                let list = ResearcherModel.readList(scriptDir + "/objectives.txt")
-                await MainActor.run { if self.selectedObjectives.isEmpty { self.selectedObjectives = Set(list) } }
-            }
-        }
     }
 
     nonisolated private static func readList(_ path: String) -> [String] {
@@ -454,7 +450,12 @@ final class ResearcherModel: ObservableObject {
         }
     }
 
-    var ready: Bool { checks.prefix(4).allSatisfy { $0.ok } }
+    var ready: Bool {
+        // Empty means the checks have not run yet — not that everything is
+        // fine. `allSatisfy` on an empty collection is true, which used to
+        // enable Start for the first few seconds of a launch.
+        checks.count >= 4 && checks.prefix(4).allSatisfy(\.ok)
+    }
 
     // MARK: catalog
 
@@ -959,6 +960,20 @@ final class ResearcherModel: ObservableObject {
     private func tick() {
         ticks += 1
         now = Date()
+        if !didLoadFromDisk {
+            didLoadFromDisk = true
+            rescanCatalog()
+            if selectedObjectives.isEmpty {
+                Task.detached(priority: .utility) { [scriptDir] in
+                    let list = ResearcherModel.readList(scriptDir + "/objectives.txt")
+                    await MainActor.run { [weak self] in
+                        guard let self, self.selectedObjectives.isEmpty else { return }
+                        self.selectedObjectives = Set(list)
+                    }
+                }
+            }
+            runChecks()
+        }
         readStatus()
         checkForeign()
         readProgress()
