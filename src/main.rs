@@ -84,8 +84,8 @@ use cairn::records::{
 };
 use cairn::scaffold;
 use cairn::schema::{validate_claim, validate_objective, SchemaError};
-use cairn::serve::Spool;
 use cairn::secrets::{self, SecretsError};
+use cairn::serve::Spool;
 use cairn::store::atrest::{AtRestError, Cipher};
 use cairn::store::{exposure, mirror, quota, Store, StoreError};
 use cairn::time::timestamp;
@@ -3860,7 +3860,10 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      create the at-rest key that seals the local store",
     );
-    say(out, "  secret set <name> (<value> | --value V | --file PATH | --stdin)");
+    say(
+        out,
+        "  secret set <name> (<value> | --value V | --file PATH | --stdin)",
+    );
     say(
         out,
         "      store an operator secret under ~/.cairn/secrets/ (AWS keys,",
@@ -10478,15 +10481,8 @@ mod tests {
             .command,
             Command::Secret {
                 action: SecretAction::Run {
-                    names: vec![
-                        "AWS_ACCESS_KEY_ID".into(),
-                        "AWS_SECRET_ACCESS_KEY".into()
-                    ],
-                    command: vec![
-                        "aws".into(),
-                        "sts".into(),
-                        "get-caller-identity".into()
-                    ],
+                    names: vec!["AWS_ACCESS_KEY_ID".into(), "AWS_SECRET_ACCESS_KEY".into()],
+                    command: vec!["aws".into(), "sts".into(), "get-caller-identity".into()],
                 }
             }
         );
@@ -10537,10 +10533,15 @@ mod tests {
             .expect("get"),
             0
         );
-        assert_eq!(String::from_utf8(out.clone()).unwrap().trim(), "AKIAEXAMPLE");
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap().trim(),
+            "AKIAEXAMPLE"
+        );
         out.clear();
         assert_eq!(cmd_secret(&mut out, &SecretAction::List).expect("list"), 0);
-        assert!(String::from_utf8(out).unwrap().contains("AWS_ACCESS_KEY_ID"));
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("AWS_ACCESS_KEY_ID"));
         assert_eq!(
             cmd_secret(
                 &mut Vec::new(),
