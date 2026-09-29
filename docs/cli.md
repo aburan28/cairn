@@ -439,16 +439,18 @@ For S3: `--provider s3 --bucket … --prefix dp/ --region us-west-2`, with
 Grants are issued as SigV4 presigned PUT URLs. Full design:
 [design/deposit-grants.md](design/deposit-grants.md).
 
-### `secret set <name> (<value> | --value V | --file PATH | --stdin)` · `secret get` · `secret list` · `secret delete` · `secret run <name>... -- <cmd>`
+### `secret set <name> (<value> | --value V | --file PATH | --stdin)` · `secret get` · `secret list` · `secret delete` · `secret path` · `secret run [--env NAME[=ENVVAR]]... -- <cmd>`
 
 Named operator secrets under `~/.cairn/secrets/` (or `$CAIRN_SECRETS_DIR`).
 This is not the at-rest key and not a submitter identity — those have their
 own commands. Names are environment-variable spellings
 (`[A-Za-z_][A-Za-z0-9_]*`); `secret run` exports them into a child, which is
 how `scripts/ecc2k-dp.sh` feeds AWS keys and a `DATABASE_URL` into the ECC2K-130
-DP upload and ingester without putting them in the shell. `--stdin` refuses a
-TTY so a secret is not typed into scrollback. MCP exposes `set_secret` /
-`list_secrets` only; values never cross into an agent transcript.
+DP upload and ingester without putting them in the shell. A binding may be
+`NAME=ENVVAR` (or `--env NAME=ENVVAR`) when the child expects a different
+variable. `secret path` prints the directory. `--stdin` refuses a TTY so a
+secret is not typed into scrollback. MCP exposes `set_secret` / `list_secrets`
+only; values never cross into an agent transcript.
 
 ### `store status`
 

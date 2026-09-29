@@ -1211,7 +1211,13 @@ enum SecretAction {
     List,
     /// Remove a named secret. Missing is success.
     Delete { name: String },
+    /// Print the secrets directory path.
+    Path,
     /// Run a command with the named secrets exported into its environment.
+    ///
+    /// Each entry of `names` is `SECRET` (exported under that name) or
+    /// `SECRET=ENVVAR` (exported under a different variable). `--env` in the
+    /// parser accepts the same spellings.
     Run {
         names: Vec<String>,
         /// Everything after `--`.
@@ -2923,6 +2929,10 @@ fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
             expect_end(cursor, "secret list")?;
             SecretAction::List
         }
+        Some("path") => {
+            expect_end(cursor, "secret path")?;
+            SecretAction::Path
+        }
         Some("get") => {
             let name = require(cursor.take(), "secret get", "<name>")?;
             expect_end(cursor, "secret get")?;
@@ -2991,6 +3001,10 @@ fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
                     past_separator = true;
                     continue;
                 }
+                if token == "--env" {
+                    names.push(cursor.value("--env")?);
+                    continue;
+                }
                 if is_flag(&token) {
                     return Err(CliError::Usage(format!(
                         "secret run: unknown option {token:?}; put the command after --"
@@ -3000,7 +3014,7 @@ fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
             }
             if names.is_empty() {
                 return Err(CliError::Usage(String::from(
-                    "secret run needs at least one secret name before --",
+                    "secret run needs at least one secret name (or --env NAME[=ENVVAR]) before --",
                 )));
             }
             if !past_separator || command.is_empty() {
@@ -3009,11 +3023,26 @@ fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
                      cairn secret run AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY -- aws sts get-caller-identity",
                 )));
             }
+            for binding in &names {
+                let secret_name = binding.split_once('=').map(|(n, _)| n).unwrap_or(binding);
+                if !secrets::valid_name(secret_name) {
+                    return Err(CliError::Usage(format!(
+                        "secret run: {secret_name:?} is not a valid secret name"
+                    )));
+                }
+                if let Some((_, env)) = binding.split_once('=') {
+                    if env.is_empty() || !secrets::valid_name(env) {
+                        return Err(CliError::Usage(format!(
+                            "secret run: {binding:?} needs a non-empty env-var name after ="
+                        )));
+                    }
+                }
+            }
             SecretAction::Run { names, command }
         }
         Some(other) => {
             return Err(CliError::Usage(format!(
-                "secret: unknown action {other:?}; try set, get, list, delete, or run"
+                "secret: unknown action {other:?}; try set, get, list, delete, path, or run"
             )))
         }
     };
@@ -4067,10 +4096,15 @@ fn print_help(out: &mut dyn Write) {
     say(out, "      names only");
     say(out, "  secret delete <name>");
     say(out, "      remove a named secret");
-    say(out, "  secret run <name>... -- <command>");
+    say(out, "  secret path");
     say(
         out,
-        "      run a command with the named secrets exported into its environment",
+        "      print the secrets directory ($CAIRN_SECRETS_DIR or ~/.cairn/secrets)",
+    );
+    say(out, "  secret run [--env NAME[=ENVVAR]]... -- <command>");
+    say(
+        out,
+        "      run a command with named secrets exported; NAME=ENVVAR remaps the variable",
     );
     say(
         out,
@@ -7753,14 +7787,22 @@ fn cmd_secret(out: &mut dyn Write, action: &SecretAction) -> Result<i32, CliErro
             say(out, format!("secret {name} deleted"));
             Ok(0)
         }
+        SecretAction::Path => {
+            say(out, dir.display().to_string());
+            Ok(0)
+        }
         SecretAction::Run { names, command } => {
-            let loaded = secrets::load_all(&dir, names).map_err(CliError::Secrets)?;
             let program = &command[0];
             let args = &command[1..];
             let mut child = process::Command::new(program);
             child.args(args);
-            for (name, value) in &loaded {
-                child.env(name, value);
+            for binding in names {
+                let (secret_name, env_name) = match binding.split_once('=') {
+                    Some((name, env)) => (name, env),
+                    None => (binding.as_str(), binding.as_str()),
+                };
+                let value = secrets::get(&dir, secret_name).map_err(CliError::Secrets)?;
+                child.env(env_name, value);
             }
             // The child's stdout/stderr are the operator's; we do not capture.
             let status = child.status().map_err(|source| CliError::Io {
@@ -10791,6 +10833,12 @@ mod tests {
             }
         );
         assert_eq!(
+            parse(argv(&["secret", "path"])).expect("parses").command,
+            Command::Secret {
+                action: SecretAction::Path
+            }
+        );
+        assert_eq!(
             parse(argv(&[
                 "secret",
                 "run",
@@ -10807,6 +10855,25 @@ mod tests {
                 action: SecretAction::Run {
                     names: vec!["AWS_ACCESS_KEY_ID".into(), "AWS_SECRET_ACCESS_KEY".into()],
                     command: vec!["aws".into(), "sts".into(), "get-caller-identity".into()],
+                }
+            }
+        );
+        assert_eq!(
+            parse(argv(&[
+                "secret",
+                "run",
+                "--env",
+                "DATABASE_URL=PGURL",
+                "AWS_ACCESS_KEY_ID",
+                "--",
+                "env"
+            ]))
+            .expect("parses")
+            .command,
+            Command::Secret {
+                action: SecretAction::Run {
+                    names: vec!["DATABASE_URL=PGURL".into(), "AWS_ACCESS_KEY_ID".into()],
+                    command: vec!["env".into()],
                 }
             }
         );

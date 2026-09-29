@@ -21,9 +21,11 @@
 #   # or pass --crypto /path/to/aburan28/crypto
 #
 # Usage:
+#   ./scripts/ecc2k-dp.sh secrets-check
+#   ./scripts/ecc2k-dp.sh status              # live Pages snapshot (JSON)
+#   ./scripts/ecc2k-dp.sh status-url
 #   ./scripts/ecc2k-dp.sh upload --dp-file dps.bin [--slot N]
 #   ./scripts/ecc2k-dp.sh ingest [once|pending|verify]
-#   ./scripts/ecc2k-dp.sh status-url
 #
 set -euo pipefail
 
@@ -38,19 +40,20 @@ if [[ ! -x "$CAIRN" ]]; then
 fi
 
 CRYPTO_ROOT="${CAIRN_CRYPTO_ROOT:-}"
+STATUS_URL="${ECC2K130_STATUS_URL:-https://aburan28.github.io/crypto/status/status.json}"
 ACTION=""
 DP_FILE=""
 SLOT=""
 INGEST_MODE="once"
 
 usage() {
-  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    upload|ingest|status-url) ACTION="$1"; shift ;;
+    upload|ingest|status-url|status|secrets-check) ACTION="$1"; shift ;;
     --crypto) CRYPTO_ROOT="$2"; shift 2 ;;
     --dp-file) DP_FILE="$2"; shift 2 ;;
     --slot) SLOT="$2"; shift 2 ;;
@@ -92,6 +95,11 @@ secret_names=(
   INGEST_THREADS
 )
 
+required_for_upload=(
+  AWS_ACCESS_KEY_ID
+  AWS_SECRET_ACCESS_KEY
+)
+
 with_secrets() {
   local present=()
   local name
@@ -110,6 +118,26 @@ with_secrets() {
 }
 
 case "$ACTION" in
+  secrets-check)
+    echo "secrets directory: $($CAIRN secret path)"
+    missing=0
+    for name in "${required_for_upload[@]}"; do
+      if "$CAIRN" secret get "$name" >/dev/null 2>&1; then
+        echo "  $name: set"
+      else
+        echo "  $name: MISSING"
+        missing=1
+      fi
+    done
+    for name in DATABASE_URL RHO_DB_HOST RHO_WORK_FEED_URL AWS_DEFAULT_REGION ECC_BUCKET; do
+      if "$CAIRN" secret get "$name" >/dev/null 2>&1; then
+        echo "  $name: set (optional)"
+      else
+        echo "  $name: unset (optional)"
+      fi
+    done
+    exit "$missing"
+    ;;
   status-url)
     # The public page; the feed URL is optional and named so Pages can
     # publish without an AWS identity when RHO_WORK_FEED_URL is set in the
@@ -117,6 +145,17 @@ case "$ACTION" in
     echo "https://aburan28.github.io/crypto/status/"
     if "$CAIRN" secret get RHO_WORK_FEED_URL >/dev/null 2>&1; then
       echo "feed: $($CAIRN secret get RHO_WORK_FEED_URL)"
+    fi
+    ;;
+  status)
+    echo "GET $STATUS_URL"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "$STATUS_URL" | python3 -m json.tool 2>/dev/null || curl -fsSL "$STATUS_URL"
+    else
+      python3 - "$STATUS_URL" <<'PY'
+import json, sys, urllib.request
+print(json.dumps(json.load(urllib.request.urlopen(sys.argv[1])), indent=2))
+PY
     fi
     ;;
   ingest)
