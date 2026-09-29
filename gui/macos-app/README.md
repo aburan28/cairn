@@ -87,6 +87,7 @@ objective's pinned checker, one at a time, in a jail.
 
 | setting | default | passed to the node as |
 |---|---|---|
+| Attach to URL | off (run a local node) | — (no process; window loads the URL) |
 | CPU cores | all | `CAIRN_SANDBOX_CPUS` |
 | Memory for each verifier | 4 GB | `CAIRN_SANDBOX_MEMORY_MB` (`0` when switched off) |
 | P2P listen | this Mac only (`127.0.0.1`) | `--listen <host>:<port>` |
