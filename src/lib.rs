@@ -29,6 +29,7 @@ pub mod cli;
 pub mod corpus;
 pub mod crypto;
 pub mod daemon;
+pub mod deposit;
 pub mod dht;
 pub mod drand;
 pub mod frontier;

@@ -71,6 +71,7 @@ use cairn::canonical::{short, CanonicalError, Value};
 use cairn::checkpoint::{RootKey, SignedCheckpoint};
 use cairn::crypto::identity::Identity;
 use cairn::daemon::{self, Config as DaemonConfig};
+use cairn::deposit::{self, DepositDir, DepositError, DepositSpec};
 use cairn::drand;
 use cairn::frontier::Ratchet;
 use cairn::incentive::design::Report as IncentiveReport;
@@ -340,6 +341,8 @@ enum CliError {
     AtRest(AtRestError),
     /// A named operator secret could not be set, read, or listed.
     Secrets(SecretsError),
+    /// A deposit config or grant could not be issued or redeemed.
+    Deposit(DepositError),
     /// An argument is not valid UTF-8. `std::env::args` would panic on this.
     NotUnicode(usize),
 }
@@ -352,6 +355,7 @@ impl fmt::Display for CliError {
             CliError::Store(error) => write!(f, "{error}"),
             CliError::AtRest(error) => write!(f, "{error}"),
             CliError::Secrets(error) => write!(f, "{error}"),
+            CliError::Deposit(error) => write!(f, "{error}"),
             CliError::Refused(message) => f.write_str(message),
             CliError::Io { context, source } => write!(f, "{context}: {source}"),
             CliError::Json { path, source } => write!(f, "{path}: {source}"),
@@ -381,6 +385,7 @@ impl std::error::Error for CliError {
             CliError::Ledger(source) => Some(source),
             CliError::Flow(source) => Some(source),
             CliError::Secrets(source) => Some(source),
+            CliError::Deposit(source) => Some(source),
             _ => None,
         }
     }
@@ -868,6 +873,11 @@ enum Command {
     Secret {
         action: SecretAction,
     },
+    /// Mediated uploads to stranger-owned storage. See
+    /// `docs/design/deposit-grants.md`.
+    Deposit {
+        action: DepositAction,
+    },
     /// Copy the store to a directory of the operator's choosing.
     Sync {
         destination: String,
@@ -1210,6 +1220,34 @@ enum SecretAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum DepositAction {
+    /// Write a deposit config (public location + secret *names*).
+    Add {
+        name: String,
+        provider: String,
+        root: Option<String>,
+        bucket: Option<String>,
+        prefix: Option<String>,
+        region: Option<String>,
+        max_bytes: Option<u64>,
+        ttl_secs: Option<u64>,
+    },
+    /// Names only.
+    List,
+    /// Public parts of one deposit; never secret values.
+    Show { name: String },
+    /// Issue a grant (CLI / tests).
+    Grant {
+        deposit: String,
+        submitter: String,
+        bytes: Option<u64>,
+        digest: Option<String>,
+    },
+    /// Redeem a grant by uploading a file through this node.
+    Put { grant: String, file: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Invocation {
     options: Options,
     command: Command,
@@ -1481,6 +1519,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "keygen" => parse_keygen(&mut cursor)?,
         "store" => parse_store(&mut cursor)?,
         "secret" => parse_secret(&mut cursor)?,
+        "deposit" => parse_deposit(&mut cursor)?,
         "sync" => parse_sync(&mut cursor)?,
         "log" => {
             expect_end(&mut cursor, "log")?;
@@ -2981,6 +3020,153 @@ fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Secret { action })
 }
 
+fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = match cursor.take().as_deref() {
+        None | Some("list") => {
+            expect_end(cursor, "deposit list")?;
+            DepositAction::List
+        }
+        Some("show") => {
+            let name = require(cursor.take(), "deposit show", "<name>")?;
+            expect_end(cursor, "deposit show")?;
+            DepositAction::Show { name }
+        }
+        Some("add") => {
+            let mut name: Option<String> = None;
+            let mut provider: Option<String> = None;
+            let mut root: Option<String> = None;
+            let mut bucket: Option<String> = None;
+            let mut prefix: Option<String> = None;
+            let mut region: Option<String> = None;
+            let mut max_bytes: Option<u64> = None;
+            let mut ttl_secs: Option<u64> = None;
+            while let Some(token) = cursor.take() {
+                match token.as_str() {
+                    "--name" => name = Some(cursor.value("--name")?),
+                    "--provider" => provider = Some(cursor.value("--provider")?),
+                    "--root" => root = Some(cursor.value("--root")?),
+                    "--bucket" => bucket = Some(cursor.value("--bucket")?),
+                    "--prefix" => prefix = Some(cursor.value("--prefix")?),
+                    "--region" => region = Some(cursor.value("--region")?),
+                    "--max-bytes" => {
+                        let raw = cursor.value("--max-bytes")?;
+                        max_bytes = Some(raw.parse::<u64>().map_err(|_| {
+                            CliError::Usage(String::from(
+                                "deposit add --max-bytes needs a positive integer",
+                            ))
+                        })?);
+                    }
+                    "--ttl-secs" => {
+                        let raw = cursor.value("--ttl-secs")?;
+                        ttl_secs = Some(raw.parse::<u64>().map_err(|_| {
+                            CliError::Usage(String::from(
+                                "deposit add --ttl-secs needs a positive integer",
+                            ))
+                        })?);
+                    }
+                    other if is_flag(other) => {
+                        return Err(CliError::Usage(format!(
+                            "deposit add: unknown option {other:?}"
+                        )));
+                    }
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "deposit add: unexpected argument {other:?}"
+                        )));
+                    }
+                }
+            }
+            let name =
+                name.ok_or_else(|| CliError::Usage(String::from("deposit add needs --name")))?;
+            let provider = provider.ok_or_else(|| {
+                CliError::Usage(String::from("deposit add needs --provider file|s3"))
+            })?;
+            DepositAction::Add {
+                name,
+                provider,
+                root,
+                bucket,
+                prefix,
+                region,
+                max_bytes,
+                ttl_secs,
+            }
+        }
+        Some("grant") => {
+            let mut deposit: Option<String> = None;
+            let mut submitter: Option<String> = None;
+            let mut bytes: Option<u64> = None;
+            let mut digest: Option<String> = None;
+            while let Some(token) = cursor.take() {
+                match token.as_str() {
+                    "--deposit" => deposit = Some(cursor.value("--deposit")?),
+                    "--submitter" => submitter = Some(cursor.value("--submitter")?),
+                    "--bytes" => {
+                        let raw = cursor.value("--bytes")?;
+                        bytes = Some(raw.parse::<u64>().map_err(|_| {
+                            CliError::Usage(String::from(
+                                "deposit grant --bytes needs a positive integer",
+                            ))
+                        })?);
+                    }
+                    "--digest" => digest = Some(cursor.value("--digest")?),
+                    other if is_flag(other) => {
+                        return Err(CliError::Usage(format!(
+                            "deposit grant: unknown option {other:?}"
+                        )));
+                    }
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "deposit grant: unexpected argument {other:?}"
+                        )));
+                    }
+                }
+            }
+            let deposit = deposit
+                .ok_or_else(|| CliError::Usage(String::from("deposit grant needs --deposit")))?;
+            let submitter = submitter
+                .ok_or_else(|| CliError::Usage(String::from("deposit grant needs --submitter")))?;
+            DepositAction::Grant {
+                deposit,
+                submitter,
+                bytes,
+                digest,
+            }
+        }
+        Some("put") => {
+            let mut grant: Option<String> = None;
+            let mut file: Option<String> = None;
+            while let Some(token) = cursor.take() {
+                match token.as_str() {
+                    "--grant" => grant = Some(cursor.value("--grant")?),
+                    "--file" => file = Some(cursor.value("--file")?),
+                    other if is_flag(other) => {
+                        return Err(CliError::Usage(format!(
+                            "deposit put: unknown option {other:?}"
+                        )));
+                    }
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "deposit put: unexpected argument {other:?}"
+                        )));
+                    }
+                }
+            }
+            let grant =
+                grant.ok_or_else(|| CliError::Usage(String::from("deposit put needs --grant")))?;
+            let file =
+                file.ok_or_else(|| CliError::Usage(String::from("deposit put needs --file")))?;
+            DepositAction::Put { grant, file }
+        }
+        Some(other) => {
+            return Err(CliError::Usage(format!(
+                "deposit: unknown action {other:?}; try add, list, show, grant, or put"
+            )))
+        }
+    };
+    Ok(Command::Deposit { action })
+}
+
 fn parse_sync(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut destination: Option<String> = None;
     let mut options = mirror::Options::default();
@@ -3885,6 +4071,31 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      run a command with the named secrets exported into its environment",
+    );
+    say(
+        out,
+        "  deposit add --name N --provider file|s3 [--root DIR | --bucket B --prefix P --region R]",
+    );
+    say(
+        out,
+        "      configure a mediated upload target; secret *names* only, values via `secret set`",
+    );
+    say(out, "  deposit list");
+    say(out, "      names of deposits on this node");
+    say(out, "  deposit show <name>");
+    say(out, "      public location; never credential values");
+    say(
+        out,
+        "  deposit grant --deposit N --submitter S [--bytes N] [--digest HEX]",
+    );
+    say(
+        out,
+        "      issue a short-lived single-use upload grant (JSON on stdout)",
+    );
+    say(out, "  deposit put --grant ID --file PATH");
+    say(
+        out,
+        "      redeem a grant through this node (file backend, or curl for s3)",
     );
     say(out, "  store [status|gc|encrypt]");
     say(
@@ -7368,6 +7579,118 @@ fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32,
     Ok(0)
 }
 
+fn deposits_dir(options: &Options) -> DepositDir {
+    DepositDir::under_store(options.store().root())
+}
+
+fn cmd_deposit(
+    out: &mut dyn Write,
+    options: &Options,
+    action: &DepositAction,
+) -> Result<i32, CliError> {
+    let dir = deposits_dir(options);
+    let secrets_dir = secrets::default_dir();
+    match action {
+        DepositAction::Add {
+            name,
+            provider,
+            root,
+            bucket,
+            prefix,
+            region,
+            max_bytes,
+            ttl_secs,
+        } => {
+            let mut spec = match provider.as_str() {
+                "file" => {
+                    let root = root.as_ref().ok_or_else(|| {
+                        CliError::Usage(String::from("deposit add --provider file needs --root"))
+                    })?;
+                    DepositSpec::file(name, root)
+                }
+                "s3" => {
+                    let bucket = bucket.as_ref().ok_or_else(|| {
+                        CliError::Usage(String::from("deposit add --provider s3 needs --bucket"))
+                    })?;
+                    let region = region.as_ref().ok_or_else(|| {
+                        CliError::Usage(String::from("deposit add --provider s3 needs --region"))
+                    })?;
+                    DepositSpec::s3(name, bucket, prefix.as_deref().unwrap_or(""), region)
+                }
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "deposit add: unknown provider {other:?}; expected file or s3"
+                    )));
+                }
+            };
+            if let Some(n) = *max_bytes {
+                spec.max_bytes = n;
+            }
+            if let Some(n) = *ttl_secs {
+                spec.ttl_secs = n;
+            }
+            let path = dir.add(&spec).map_err(CliError::Deposit)?;
+            say(
+                out,
+                format!(
+                    "deposit {} ({}) written to {}\n{}",
+                    spec.name,
+                    spec.provider.as_str(),
+                    path.display(),
+                    spec.public_summary()
+                ),
+            );
+            Ok(0)
+        }
+        DepositAction::List => {
+            let names = dir.list().map_err(CliError::Deposit)?;
+            if names.is_empty() {
+                say(out, format!("(no deposits in {})", dir.path().display()));
+            } else {
+                for name in names {
+                    say(out, name);
+                }
+            }
+            Ok(0)
+        }
+        DepositAction::Show { name } => {
+            let spec = dir.load(name).map_err(CliError::Deposit)?;
+            say(out, spec.public_summary());
+            Ok(0)
+        }
+        DepositAction::Grant {
+            deposit,
+            submitter,
+            bytes,
+            digest,
+        } => {
+            let grant = deposit::issue_grant(
+                &dir,
+                deposit,
+                submitter,
+                *bytes,
+                digest.as_deref(),
+                None,
+                &secrets_dir,
+            )
+            .map_err(CliError::Deposit)?;
+            // JSON on stdout so scripts capture the grant id / put_url.
+            say(out, grant.public_response(None).to_string());
+            Ok(0)
+        }
+        DepositAction::Put { grant, file } => {
+            let body = fs::read(file).map_err(|source| CliError::Io {
+                context: format!("reading {file}"),
+                source,
+            })?;
+            let receipt = deposit::redeem_grant(&dir, grant, &body, &secrets_dir)
+                .map_err(CliError::Deposit)?;
+            say(out, receipt.to_json());
+            Ok(0)
+        }
+    }
+}
+
 fn cmd_secret(out: &mut dyn Write, action: &SecretAction) -> Result<i32, CliError> {
     let dir = secrets::default_dir();
     match action {
@@ -9233,6 +9556,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
         Command::Store { action } => cmd_store(out, options, action),
         Command::Secret { action } => cmd_secret(out, action),
+        Command::Deposit { action } => cmd_deposit(out, options, action),
         Command::Sync {
             destination,
             options: mirror_options,
@@ -10497,6 +10821,167 @@ mod tests {
     }
 
     #[test]
+    fn deposit_parses_add_list_show_grant_and_put() {
+        assert_eq!(
+            parse(argv(&["deposit", "list"])).expect("parses").command,
+            Command::Deposit {
+                action: DepositAction::List
+            }
+        );
+        assert_eq!(
+            parse(argv(&[
+                "deposit",
+                "add",
+                "--name",
+                "demo",
+                "--provider",
+                "file",
+                "--root",
+                "/tmp/d"
+            ]))
+            .expect("parses")
+            .command,
+            Command::Deposit {
+                action: DepositAction::Add {
+                    name: "demo".into(),
+                    provider: "file".into(),
+                    root: Some("/tmp/d".into()),
+                    bucket: None,
+                    prefix: None,
+                    region: None,
+                    max_bytes: None,
+                    ttl_secs: None,
+                }
+            }
+        );
+        assert_eq!(
+            parse(argv(&[
+                "deposit",
+                "grant",
+                "--deposit",
+                "demo",
+                "--submitter",
+                "alice",
+                "--bytes",
+                "1024"
+            ]))
+            .expect("parses")
+            .command,
+            Command::Deposit {
+                action: DepositAction::Grant {
+                    deposit: "demo".into(),
+                    submitter: "alice".into(),
+                    bytes: Some(1024),
+                    digest: None,
+                }
+            }
+        );
+        let grant_id = "ab".repeat(32);
+        assert_eq!(
+            parse(argv(&[
+                "deposit",
+                "put",
+                "--grant",
+                &grant_id,
+                "--file",
+                "./dps.bin"
+            ]))
+            .expect("parses")
+            .command,
+            Command::Deposit {
+                action: DepositAction::Put {
+                    grant: grant_id,
+                    file: "./dps.bin".into(),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn deposit_file_round_trips_through_the_command() {
+        let data = std::env::temp_dir().join(format!(
+            "cairn-deposit-cmd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&data);
+        fs::create_dir_all(&data).unwrap();
+        let root = data.join("objects");
+        let options = Options {
+            log: data.join("cairn.jsonl").display().to_string(),
+            log_chosen: true,
+            root: String::from("."),
+            data: Some(data.display().to_string()),
+            key_file: None,
+            passphrase_file: None,
+            max_size: None,
+        };
+        let mut out = Vec::new();
+        assert_eq!(
+            cmd_deposit(
+                &mut out,
+                &options,
+                &DepositAction::Add {
+                    name: "demo".into(),
+                    provider: "file".into(),
+                    root: Some(root.display().to_string()),
+                    bucket: None,
+                    prefix: None,
+                    region: None,
+                    max_bytes: Some(4096),
+                    ttl_secs: None,
+                }
+            )
+            .expect("add"),
+            0
+        );
+        out.clear();
+        assert_eq!(
+            cmd_deposit(
+                &mut out,
+                &options,
+                &DepositAction::Grant {
+                    deposit: "demo".into(),
+                    submitter: "alice".into(),
+                    bytes: Some(64),
+                    digest: None,
+                }
+            )
+            .expect("grant"),
+            0
+        );
+        let grant_json: serde_json::Value =
+            serde_json::from_str(String::from_utf8(out.clone()).unwrap().trim()).unwrap();
+        let grant_id = grant_json["grant_id"].as_str().unwrap().to_string();
+        let body_path = data.join("payload.bin");
+        fs::write(&body_path, b"hello-deposit").unwrap();
+        out.clear();
+        assert_eq!(
+            cmd_deposit(
+                &mut out,
+                &options,
+                &DepositAction::Put {
+                    grant: grant_id,
+                    file: body_path.display().to_string(),
+                }
+            )
+            .expect("put"),
+            0
+        );
+        let receipt = String::from_utf8(out).unwrap();
+        assert!(
+            !receipt.contains("hello-deposit"),
+            "receipt must not echo the body"
+        );
+        assert!(receipt.contains("\"digest\""));
+        assert!(root.read_dir().unwrap().next().is_some());
+        let _ = fs::remove_dir_all(data);
+    }
+
+    #[test]
     fn secret_round_trips_through_the_command() {
         let dir = std::env::temp_dir().join(format!(
             "cairn-secret-cmd-{}-{}",
@@ -11486,6 +11971,7 @@ mod tests {
             "identity",
             "keygen",
             "secret",
+            "deposit",
             "store",
             "sync",
             "log",

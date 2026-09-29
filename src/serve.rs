@@ -52,9 +52,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::canonical::{digest_bytes, Value};
+use crate::deposit::{self, DepositDir, DepositError, MAX_PROXY_BYTES};
 use crate::ledger::{Codec, Ledger};
 use crate::node::Node;
 use crate::records::{Claim, Commitment, Objective};
+use crate::secrets;
 
 /// Largest request body accepted, in bytes.
 ///
@@ -362,6 +364,12 @@ pub struct Serving {
     root: PathBuf,
     spool: Option<Spool>,
     checkpoint: Option<PathBuf>,
+    /// Node-local deposit configs and outstanding grants.
+    ///
+    /// Defaults to `<log's parent>/deposits`. Absent credentials or an empty
+    /// directory make `/deposit/grant` answer unavailable rather than 404 —
+    /// the route exists; this node just cannot mint against that deposit.
+    deposits: PathBuf,
     /// Where the at-rest key lives, and the passphrase that unwraps it.
     ///
     /// Resolved per request rather than held as a [`crate::store::atrest::Cipher`],
@@ -385,13 +393,26 @@ struct KeySource {
 
 impl Serving {
     pub fn new(log: impl Into<PathBuf>, root: impl Into<PathBuf>) -> Serving {
+        let log = log.into();
+        let deposits = log
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join("deposits");
         Serving {
-            log: log.into(),
+            log,
             root: root.into(),
             spool: None,
             checkpoint: None,
+            deposits,
             key: None,
         }
+    }
+
+    /// Override where deposit configs and grants live.
+    pub fn with_deposits(mut self, dir: impl Into<PathBuf>) -> Serving {
+        self.deposits = dir.into();
+        self
     }
 
     /// Read a sealed log with the key at `path`.
@@ -601,6 +622,14 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", path) if path == "/ui" || path.starts_with("/ui/") => ui_asset(stream, path),
         ("POST", "/submit") => submit(stream, &mut reader, serving, &request),
         ("POST", "/objective/prepare") => prepare_objective(stream, &mut reader, &request),
+        ("POST", "/deposit/grant") => deposit_grant(stream, &mut reader, serving, &request),
+        ("PUT", path) if path.starts_with("/deposit/upload/") => deposit_upload(
+            stream,
+            &mut reader,
+            serving,
+            &request,
+            &path["/deposit/upload/".len()..],
+        ),
         ("GET", _) | ("HEAD", _) => respond(
             stream,
             404,
@@ -664,8 +693,17 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
                 length = value
                     .parse::<u64>()
                     .map_err(|_| "content-length is not a number".to_string())?;
-                if length > MAX_BODY_BYTES {
-                    return Err(format!("body larger than {MAX_BODY_BYTES} bytes"));
+                // Deposit proxy uploads are not claims: they may be tens of
+                // megabytes. The grant's own max_bytes is the real cap; this
+                // ceiling only stops a stranger making the server allocate
+                // without a grant at all.
+                let limit = if path.starts_with("/deposit/upload/") {
+                    MAX_PROXY_BYTES
+                } else {
+                    MAX_BODY_BYTES
+                };
+                if length > limit {
+                    return Err(format!("body larger than {limit} bytes"));
                 }
             }
             if name == "content-type" {
@@ -767,6 +805,12 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                     "POST /submit (disabled: this node is read-only)"
                 }),
                 Value::string("POST /objective/prepare"),
+                // Always listed: a node with no deposits configured still
+                // answers these, with unavailable / missing rather than 404,
+                // so a contributor learns "this node has no deposit" instead
+                // of guessing whether the path exists.
+                Value::string("POST /deposit/grant"),
+                Value::string("PUT /deposit/upload/{grant_id}"),
             ]),
         ),
         (
@@ -1431,9 +1475,163 @@ fn submit(
     }
 }
 
+/// Issue a short-lived upload grant against a node-local deposit.
+///
+/// Body: `{"deposit":"…","submitter":"…","max_bytes":N?,"digest":"hex?"}`.
+/// The response never includes cloud credentials — only a grant id, object
+/// key, mode, and put URL. See `docs/design/deposit-grants.md`.
+fn deposit_grant(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    serving: &Serving,
+    request: &Request,
+) -> io::Result<()> {
+    let value = match read_json_body(reader, request, "/deposit/grant") {
+        Ok(value) => value,
+        Err((status, message)) => {
+            return respond(
+                stream,
+                status,
+                "application/json",
+                error_body(&message).as_bytes(),
+            );
+        }
+    };
+    let deposit = match value.get("deposit").and_then(Value::as_str) {
+        Some(name) => name,
+        None => {
+            return respond(
+                stream,
+                400,
+                "application/json",
+                error_body("deposit grant needs a string \"deposit\" name").as_bytes(),
+            );
+        }
+    };
+    let submitter = match value.get("submitter").and_then(Value::as_str) {
+        Some(name) => name,
+        None => {
+            return respond(
+                stream,
+                400,
+                "application/json",
+                error_body("deposit grant needs a string \"submitter\"").as_bytes(),
+            );
+        }
+    };
+    let max_bytes = match value.get("max_bytes") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n),
+            None => {
+                return respond(
+                    stream,
+                    400,
+                    "application/json",
+                    error_body("max_bytes must be a non-negative integer").as_bytes(),
+                );
+            }
+        },
+    };
+    let digest = match value.get("digest") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_str() {
+            Some(s) => Some(s),
+            None => {
+                return respond(
+                    stream,
+                    400,
+                    "application/json",
+                    error_body("digest must be a hex string").as_bytes(),
+                );
+            }
+        },
+    };
+
+    let dir = DepositDir::at(&serving.deposits);
+    let secrets_dir = secrets::default_dir();
+    match deposit::issue_grant(
+        &dir,
+        deposit,
+        submitter,
+        max_bytes,
+        digest,
+        None,
+        &secrets_dir,
+    ) {
+        Ok(grant) => {
+            let body = grant.public_response(None).to_string();
+            respond(stream, 200, "application/json", body.as_bytes())
+        }
+        Err(error) => respond_deposit_error(stream, &error),
+    }
+}
+
+/// Proxy redemption of a grant: PUT the bytes, get a receipt.
+///
+/// For S3 grants issued as presigned, contributors should PUT to the
+/// signed URL directly; this endpoint still works as a fallback by having
+/// the node curl the store, which is how `cairn deposit put` redeems.
+fn deposit_upload(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    serving: &Serving,
+    request: &Request,
+    grant_id: &str,
+) -> io::Result<()> {
+    if request.length == 0 {
+        return respond(
+            stream,
+            400,
+            "application/json",
+            error_body("empty body").as_bytes(),
+        );
+    }
+    let mut body = Vec::new();
+    if reader.take(request.length).read_to_end(&mut body).is_err() {
+        return respond(
+            stream,
+            400,
+            "application/json",
+            error_body("could not read the body").as_bytes(),
+        );
+    }
+    let dir = DepositDir::at(&serving.deposits);
+    let secrets_dir = secrets::default_dir();
+    match deposit::redeem_grant(&dir, grant_id, &body, &secrets_dir) {
+        Ok(receipt) => respond(
+            stream,
+            200,
+            "application/json",
+            receipt.to_json().as_bytes(),
+        ),
+        Err(error) => respond_deposit_error(stream, &error),
+    }
+}
+
+fn respond_deposit_error(stream: &mut TcpStream, error: &DepositError) -> io::Result<()> {
+    let (status, message) = match error {
+        DepositError::MissingDeposit(_) | DepositError::MissingGrant(_) => (404, error.to_string()),
+        DepositError::Unavailable(_) => (503, error.to_string()),
+        DepositError::Expired(_)
+        | DepositError::Consumed(_)
+        | DepositError::TooLarge { .. }
+        | DepositError::DigestMismatch { .. }
+        | DepositError::BadName(_)
+        | DepositError::Invalid(_) => (400, error.to_string()),
+        DepositError::Json { .. } | DepositError::Io { .. } => (500, error.to_string()),
+    };
+    respond(
+        stream,
+        status,
+        "application/json",
+        error_body(&message).as_bytes(),
+    )
+}
+
 /// Read a JSON request body, or the status and message to answer with.
 ///
-/// Shared by the two POST routes so they cannot disagree about the content
+/// Shared by the POST routes so they cannot disagree about the content
 /// type they demand or the length they trust. The length was checked against
 /// `MAX_BODY_BYTES` before the request reached a handler, and `take` bounds
 /// the read to it -- nothing here allocates on a declared size.

@@ -50,6 +50,7 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | `audit` | no | re-derive the whole log (`rerun: true` re-runs verifiers; slow) |
 | `set_secret` | no† | store a named operator secret on this machine; the value is never returned |
 | `list_secrets` | no | names of those secrets; values never returned |
+| `request_upload_grant` | no‡ | short-lived right to PUT one object into a named deposit; never returns cloud keys |
 
 \* — with one automatic exception: a reveal epoch that has already closed is
 settled by whichever call looks at the log next, `frontier_status` included.
@@ -61,6 +62,10 @@ agent that revealed and then only polled.
 credentials (AWS keys, `DATABASE_URL`) that `scripts/ecc2k-dp.sh` exports into
 the DP upload / ingester. There is deliberately no `get_secret`: agents log
 what they see.
+
+‡ — the grant response has a `put_url` and object key. Credentials that back
+the deposit stay on the operator's node. See
+[design/deposit-grants.md](design/deposit-grants.md).
 
 ## `submit_claim` is two calls, and that is the protocol showing through
 
