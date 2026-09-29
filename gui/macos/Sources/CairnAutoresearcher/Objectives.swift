@@ -182,6 +182,13 @@ struct ObjectiveDetail: View {
 
     private var frontier: some View {
         VStack(alignment: .leading, spacing: 8) {
+            ProvenanceLine("from GET /frontier/\(row.shortId)…")
+            if let reward = row.reward ?? model.nodeObjectives.first(where: { $0.id == row.id })?.reward,
+               model.isOverspent(objectiveId: row.id, reward: reward) {
+                Label("Paid + remaining exceeds this objective's reward — the node's own numbers do not add up.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             if let f = model.frontiers[row.id] {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
                     KeyValueRow(key: "Score", value: f.score.map(String.init) ?? "–")
@@ -199,6 +206,25 @@ struct ObjectiveDetail: View {
                     .foregroundStyle(.secondary)
             } else {
                 Text("The frontier is read from the node, which is not running.").foregroundStyle(.secondary)
+            }
+            let moves = model.moves(for: row.id)
+            if !moves.isEmpty {
+                Text("Frontier history").font(.subheadline.bold()).padding(.top, 8)
+                ProvenanceLine("from GET /log frontier + settlement records")
+                ForEach(moves) { m in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("#\(m.seq)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+                        Text("score \(m.score)").font(.callout.monospacedDigit())
+                        Text("+\(m.paidThisMove.formatted())").font(.callout.monospacedDigit())
+                            .foregroundStyle(m.consistent ? Color.primary : .orange)
+                            .help(m.consistent
+                                  ? "This move's payout"
+                                  : "Settlement paid \(m.settlementReward.map { $0.formatted() } ?? "?"), not \(m.paidThisMove.formatted())")
+                        Text(String(m.holder.prefix(12))).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        Spacer()
+                        Text(String(m.claimId.prefix(18))).font(.caption.monospaced()).foregroundStyle(.tertiary)
+                    }
+                }
             }
         }
     }

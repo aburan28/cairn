@@ -20,6 +20,7 @@ struct SettingsView: View {
     @AppStorage(NodeSettings.Key.dataFolder) private var dataFolder = ""
     @AppStorage(NodeSettings.Key.p2pHost) private var p2pHost = NodeSettings.loopbackHost
     @AppStorage(NodeSettings.Key.bootstrap) private var bootstrap = ""
+    @AppStorage(NodeSettings.Key.attachURL) private var attachURL = ""
 
     @State private var usage: DataFolder.Usage?
     @State private var pending: FolderChange?
@@ -30,9 +31,25 @@ struct SettingsView: View {
 
     private var current: NodeSettings { NodeSettings.current() }
     private var bootstrapPaths: [String] { NodeSettings.parseBootstrap(bootstrap) }
+    private var attaching: Bool { !attachURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         Form {
+            Section {
+                attach
+            } header: {
+                Text("Window")
+            } footer: {
+                Caption("""
+                    By default this app runs a local node and shows its reader. \
+                    Attach instead to open any node's reader without starting one \
+                    — the same idea as pointing the iPhone app at a URL. Resource \
+                    limits, bootstrap files and the data folder then apply only \
+                    when you switch back to running a node here.
+                    """)
+            }
+
+            if !attaching {
             Section {
                 processor
             } header: {
@@ -111,6 +128,7 @@ struct SettingsView: View {
                     and tells you. It never deletes the ledger to fit.
                     """)
             }
+            } // !attaching
 
             if needsRestart {
                 Section {
@@ -151,6 +169,29 @@ struct SettingsView: View {
     }
 
     // MARK: sections
+
+    private var attach: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Attach to an existing node", isOn: Binding(
+                get: { attaching },
+                set: { on in
+                    if on {
+                        if attachURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            attachURL = "http://127.0.0.1:8080/ui/"
+                        }
+                    } else {
+                        attachURL = ""
+                    }
+                }
+            ))
+            if attaching {
+                TextField("Reader URL", text: $attachURL)
+                    .font(.body.monospaced())
+                Text("Example: http://192.168.1.10:8080/ui/ — the page this window will show. Nothing is started on this Mac.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
 
     private var processor: some View {
         let all = NodeSettings.cores

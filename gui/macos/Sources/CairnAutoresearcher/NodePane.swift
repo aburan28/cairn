@@ -22,11 +22,19 @@ struct NodeView: View {
                         Tile(title: "Ledger height", value: model.chain?.height.map(String.init) ?? "–", color: .blue,
                              caption: model.chain?.ledger_head.map { String($0.prefix(18)) } ?? "entries in the log")
                         Tile(title: "Epoch links", value: model.chain?.links.map(String.init) ?? "–", color: .indigo,
-                             caption: model.chain?.head.flatMap { $0.isEmpty ? nil : String($0.prefix(18)) } ?? "settled epochs")
+                             caption: model.brokenLinkEpoch.map { "breaks at epoch \($0)" }
+                                ?? model.chain?.head.flatMap { $0.isEmpty ? nil : String($0.prefix(18)) }
+                                ?? "settled epochs")
                         Tile(title: "Peers", value: model.peerCount.map(String.init) ?? "–", color: .cyan, caption: "peer records in the log")
                         Tile(title: "Objectives", value: model.nodeReachable ? "\(model.nodeObjectives.count)" : "–", color: .purple,
                              caption: "\(model.frontiers.count) with a frontier")
                     }
+                    if let broken = model.brokenLinkEpoch {
+                        Label("Chain integrity: epoch \(broken) does not follow the previous link. The node published a chain this reader cannot walk.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    ProvenanceLine("tiles from GET /chain, /peers, /objectives · balances from cairn balances")
                     HStack(alignment: .top, spacing: 14) {
                         VStack(spacing: 14) {
                             discoveryCard

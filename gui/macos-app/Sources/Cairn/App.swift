@@ -23,17 +23,20 @@ struct CairnApp: App {
             CommandMenu("Node") {
                 Button("Open in Browser") { delegate.openInBrowser() }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
-                Button("Restart Node") { delegate.node.restart() }
+                Button("Restart / Reconnect") { delegate.node.restart() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 Divider()
+                Button("Peers…") { delegate.node.presentPeers = true }
                 Button("Copy Peer Id") { delegate.copyPeerId() }
                     .disabled(delegate.node.peerId == nil)
                 Button("Show Data Folder") {
                     NSWorkspace.shared.activateFileViewerSelecting([delegate.node.dataDir])
                 }
+                .disabled(delegate.node.isAttached)
                 Button("Show Node Log") {
                     NSWorkspace.shared.open(delegate.node.logFile)
                 }
+                .disabled(delegate.node.isAttached)
             }
         }
 
@@ -54,7 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Closing the window is closing the node: nothing keeps running where
-    // nobody can see it.
+    // nobody can see it. Attach mode has no process; still quit with the window.
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -100,8 +103,10 @@ struct ContentView: View {
                     Text(verbatim: url.host.map { "\($0):\(url.port ?? 80)" } ?? "")
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .help("This node's reader. The same page opens in any browser on this Mac.")
-                    if let listen = node.listenAddress {
+                        .help(node.isAttached
+                              ? "Attached reader URL."
+                              : "This node's reader. The same page opens in any browser on this Mac.")
+                    if !node.isAttached, let listen = node.listenAddress {
                         Text(verbatim: "p2p \(listen)")
                             .font(.callout.monospacedDigit())
                             .foregroundStyle(.secondary)
@@ -109,6 +114,10 @@ struct ContentView: View {
                                   ? "P2P is on loopback: this node dials out and nothing dials in."
                                   : "P2P listen address. Hand this out with the peer id from Settings.")
                     }
+                    Button { node.presentPeers = true } label: {
+                        Label("Peers", systemImage: "person.badge.plus")
+                    }
+                    .help("Announce a peer, manage bootstrap, or copy what to give someone adding this node")
                     Button { browser.reload() } label: { Label("Reload", systemImage: "arrow.clockwise") }
                         .help("Reload the page")
                     Button { NSWorkspace.shared.open(url) } label: { Label("Open in Browser", systemImage: "safari") }
@@ -117,6 +126,9 @@ struct ContentView: View {
                 OpenSettingsButton(iconOnly: true)
                     .help("How much of this Mac the node may use, where it keeps its data, and how it reaches peers")
             }
+        }
+        .sheet(isPresented: $node.presentPeers) {
+            PeersSheet(node: node, isPresented: $node.presentPeers)
         }
     }
 }
@@ -156,6 +168,9 @@ private struct NetworkStrip: View {
     }
 
     private var summary: String {
+        if node.isAttached {
+            return "Attached to an existing node — this app owns no process."
+        }
         if node.settings.listensLocallyOnly {
             if node.sessionsOK > 0 {
                 return "Dialling out from this Mac only — reached a peer."
@@ -175,12 +190,14 @@ private struct NetworkStrip: View {
     }
 
     private var icon: String {
+        if node.isAttached { return "link" }
         if node.sessionsOK > 0 { return "antenna.radiowaves.left.and.right" }
         if node.settings.listensLocallyOnly { return "lock.laptopcomputer" }
         return "network"
     }
 
     private var tint: Color {
+        if node.isAttached { return .blue }
         if node.sessionsOK > 0 { return .green }
         if node.settings.listensLocallyOnly { return .orange }
         return .secondary
@@ -193,11 +210,18 @@ private struct Starting: View {
     var body: some View {
         VStack(spacing: 14) {
             ProgressView()
-            Text("Starting a node…").font(.title3)
-            Text(node.dataDir.path)
-                .font(.callout.monospaced())
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
+            Text(node.isAttached ? "Connecting…" : "Starting a node…").font(.title3)
+            if node.isAttached, let url = node.settings.attachURL {
+                Text(url.absoluteString)
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } else {
+                Text(node.dataDir.path)
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
             if let last = node.lines.last(where: { !$0.isEmpty }) {
                 Text(last)
                     .font(.caption.monospaced())
@@ -218,7 +242,8 @@ private struct Failed: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("The node is not running", systemImage: "exclamationmark.triangle.fill")
+            Label(node.isAttached ? "Could not reach that node" : "The node is not running",
+                  systemImage: "exclamationmark.triangle.fill")
                 .font(.title2)
                 .foregroundStyle(.orange)
             Text(message)
@@ -238,12 +263,14 @@ private struct Failed: View {
             HStack {
                 Button("Try Again") { node.restart() }
                     .keyboardShortcut(.defaultAction)
-                Button("Show Node Log") { NSWorkspace.shared.open(node.logFile) }
-                Button("Show Data Folder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([node.dataDir])
+                if !node.isAttached {
+                    Button("Show Node Log") { NSWorkspace.shared.open(node.logFile) }
+                    Button("Show Data Folder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([node.dataDir])
+                    }
                 }
-                // The storage cap and the data folder are both reasons a node
-                // stops or never starts, and both are fixed there.
+                // The storage cap, the data folder and the attach URL are all
+                // reasons a window shows this page, and all are fixed there.
                 OpenSettingsButton()
             }
         }

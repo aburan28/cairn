@@ -18,6 +18,10 @@ struct NodeSettings: Equatable {
         static let storageGB = "storageLimitGB"
         static let p2pHost = "p2pHost"
         static let bootstrap = "bootstrap"
+        /// Empty = this app runs the node. Non-empty = open that reader's URL
+        /// and do not spawn `cairn run`. Same idea as the iOS reader's
+        /// retargetable node URL.
+        static let attachURL = "attachURL"
     }
 
     /// The node's own default cap, 4096 MiB, so a person who never opens
@@ -56,6 +60,8 @@ struct NodeSettings: Equatable {
     /// `--bootstrap` files, in the order given. Dial hints only; the handshake
     /// authenticates the key, not the socket that answered.
     var bootstrapFiles: [String]
+    /// When set, the app is a window onto this URL and owns no process.
+    var attachURL: URL?
 
     var isDefaultFolder: Bool {
         dataFolder.standardizedFileURL.path == Self.defaultDataFolder.standardizedFileURL.path
@@ -66,6 +72,8 @@ struct NodeSettings: Equatable {
     var listensLocallyOnly: Bool {
         p2pHost == Self.loopbackHost || p2pHost == "localhost" || p2pHost.hasPrefix("127.")
     }
+
+    var isAttached: Bool { attachURL != nil }
 
     /// Registered before every read, so an unset key reads as its default
     /// rather than as `false` or `0` -- which for the memory cap would
@@ -81,6 +89,7 @@ struct NodeSettings: Equatable {
             Key.storageGB: defaultStorageGB,
             Key.p2pHost: loopbackHost,
             Key.bootstrap: "",
+            Key.attachURL: "",
         ]
     }
 
@@ -89,6 +98,8 @@ struct NodeSettings: Equatable {
         let path = defaults.string(forKey: Key.dataFolder) ?? ""
         let cpus = defaults.integer(forKey: Key.cpus)
         let host = defaults.string(forKey: Key.p2pHost) ?? loopbackHost
+        let attach = (defaults.string(forKey: Key.attachURL) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return NodeSettings(
             dataFolder: path.isEmpty ? defaultDataFolder : URL(fileURLWithPath: path, isDirectory: true),
             // A count at or past this Mac's cores caps nothing; say so as 0.
@@ -102,8 +113,27 @@ struct NodeSettings: Equatable {
             // to bind at start with a message most people would not expect
             // from typing an address into Settings.
             p2pHost: host == anyHost ? anyHost : loopbackHost,
-            bootstrapFiles: Self.parseBootstrap(defaults.string(forKey: Key.bootstrap) ?? "")
+            bootstrapFiles: Self.parseBootstrap(defaults.string(forKey: Key.bootstrap) ?? ""),
+            attachURL: Self.parseAttachURL(attach)
         )
+    }
+
+    /// Accept `http://host:port` or `http://host:port/ui/`; store the reader
+    /// URL the WebView will load. Reject anything that is not http(s).
+    static func parseAttachURL(_ raw: String) -> URL? {
+        guard !raw.isEmpty, let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil
+        else { return nil }
+        var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let path = parts?.path ?? ""
+        if path.isEmpty || path == "/" {
+            parts?.path = "/ui/"
+        } else if !path.hasSuffix("/") && !path.contains(".") {
+            parts?.path = path + (path.hasSuffix("/ui") ? "/" : "")
+        }
+        return parts?.url ?? url
     }
 
     static func parseBootstrap(_ raw: String) -> [String] {

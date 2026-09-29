@@ -60,12 +60,14 @@ holds are marked *posted* and left alone on a re-post, which is refused by
 id.
 
 **Node.** Health, the current epoch with a countdown to the next, ledger
-height, epoch links, peers and objective count from the node's routes;
-balances for every holder from `cairn balances`; the identity's public key
-with copy and reveal; records by kind; then a native **Ledger** table of
-every entry, a **Peers** table, and the node's own reader, chain page,
-objectives JSON and log JSON in an embedded web view. **Audit log** runs
-`cairn audit` and shows whether every settled claim re-verifies.
+height, epoch links (and whether the chain walks — the first broken `prev`
+is named), peers and objective count from the node's routes; balances for
+every holder from `cairn balances`; the identity's public key with copy and
+reveal; records by kind; then a native **Ledger** table of every entry, a
+**Peers** table (log announcements, not live sessions), and the node's own
+reader, chain page, objectives JSON and log JSON in an embedded web view.
+Tiles say which HTTP route or CLI command each number came from. **Audit log**
+runs `cairn audit` and shows whether every settled claim re-verifies.
 
 **Add peer…** covers both halves of adding one, because the network has two
 and they answer different questions. *Announce in the log* appends a peer

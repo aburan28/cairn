@@ -71,12 +71,13 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
   to the node's stdin, so it never answers on stdout.
 - **Links** to anywhere but the node open in your browser.
 
-The **Node** menu has Open in Browser, Restart Node, Copy Peer Id, Show Data
-Folder and Show Node Log. The strip above the reader shows whether the node
-is loopback-only and whether it has completed a peer session; the peer id
-comes from the node's own log, never invented here. If the node exits or
-never comes up, the window says why, with the end of its log, a Try Again
-button and a way into Settings.
+The **Node** menu has Open in Browser, Restart / Reconnect, Peers…, Copy Peer
+Id, Show Data Folder and Show Node Log. **Peers…** announces a peer in the
+log (stopping the node briefly — a ledger has one writer), points at
+bootstrap management in Settings, and copies what to hand someone adding this
+node. The strip above the reader shows whether the node is loopback-only,
+attached to another node's URL, or accepting inbound, and whether a peer
+session has completed.
 
 ## Settings
 

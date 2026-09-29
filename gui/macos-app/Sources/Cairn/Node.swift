@@ -33,10 +33,16 @@ final class Node: ObservableObject {
     /// Recent discovery / session lines, newest last, for the status strip.
     @Published private(set) var networkLines: [String] = []
     @Published private(set) var sessionsOK = 0
+    /// Drives the Peers sheet from the Node menu and the toolbar.
+    @Published var presentPeers = false
 
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }
     var logFile: URL { dataDir.appendingPathComponent("node.log") }
+    var identityFile: URL { dataDir.appendingPathComponent("node.identity.json") }
+    var hasIdentity: Bool { FileManager.default.fileExists(atPath: identityFile.path) }
+    /// True when Settings points at an existing node rather than spawning one.
+    var isAttached: Bool { settings.attachURL != nil }
 
     private(set) var binary: URL?
     private var process: Process?
@@ -111,6 +117,14 @@ final class Node: ObservableObject {
         sessionsOK = 0
         state = .starting
         settings = NodeSettings.current()
+
+        // Attach mode: no process of our own. Probe the URL and show it, the
+        // same way the iOS reader retargets. Resource limits and bootstrap
+        // files do not apply — that node already chose them.
+        if let attach = settings.attachURL {
+            Task { await waitUntilServing(attach, process: nil) }
+            return
+        }
 
         guard let binary = Self.locateBinary() else {
             state = .failed("""
@@ -236,9 +250,13 @@ final class Node: ObservableObject {
 
     /// Stop the node and wait, briefly, for it to go. Closing stdin is the
     /// node's own "stop" -- the same one `run.sh` and Ctrl-D use -- and the
-    /// signals are only for a node that does not listen.
+    /// signals are only for a node that does not listen. Attach mode has no
+    /// process to stop.
     func stop() {
-        guard let p = process else { return }
+        guard let p = process else {
+            state = .stopped
+            return
+        }
         stopping = true
         try? stdin?.fileHandleForWriting.close()
         if !Self.wait(for: p, seconds: 3) {
@@ -260,24 +278,31 @@ final class Node: ObservableObject {
 
     // MARK: internals
 
-    private func waitUntilServing(_ url: URL, process p: Process) async {
+    private func waitUntilServing(_ url: URL, process p: Process?) async {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 2
         let session = URLSession(configuration: config)
-        let deadline = Date().addingTimeInterval(60)
+        let attached = p == nil
+        let deadline = Date().addingTimeInterval(attached ? 15 : 60)
         while Date() < deadline {
-            // A node that exited, or was replaced by a restart, is not ours
-            // to wait for any more; `exited` has already said why.
-            guard process === p, p.isRunning else { return }
+            if let p {
+                // A spawned node that exited, or was replaced by a restart, is
+                // not ours to wait for any more; `exited` has already said why.
+                guard process === p, p.isRunning else { return }
+            }
             if let (_, response) = try? await session.data(from: url),
                (response as? HTTPURLResponse)?.statusCode == 200 {
-                if process === p { state = .running(url) }
+                if attached || process === p { state = .running(url) }
                 return
             }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
-        if process === p {
-            state = .failed("The node started but did not serve \(url.absoluteString) within a minute.")
+        if attached || process === p {
+            state = .failed(
+                attached
+                    ? "Did not reach \(url.absoluteString) within 15s.\n\nIs that node up, and does the URL point at its reader (/ui/)?"
+                    : "The node started but did not serve \(url.absoluteString) within a minute."
+            )
         }
     }
 
@@ -417,6 +442,72 @@ final class Node: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Announce a peer in the log with `cairn peer`. The log has one writer,
+    /// so a running node is stopped for the command and started again after.
+    func announcePeer(transport: String, addr: String, completion: @escaping (String?) -> Void) {
+        guard !isAttached else {
+            completion("This window is attached to another node; it cannot write that log.")
+            return
+        }
+        guard hasIdentity else {
+            completion("No identity yet. Start the node once so it can create node.identity.json.")
+            return
+        }
+        guard let binary = binary ?? Self.locateBinary() else {
+            completion("No cairn command was found.")
+            return
+        }
+        let wasRunning: Bool = {
+            if case .running = state { return true }
+            if case .starting = state { return true }
+            return false
+        }()
+        if wasRunning { stop() }
+        let log = dataDir.appendingPathComponent("log/cairn.jsonl")
+        let p = Process()
+        p.executableURL = binary
+        p.arguments = [
+            "--log", log.path, "--root", dataDir.path, "peer",
+            "--identity", identityFile.path,
+            "--transport", transport, "--addr", addr,
+        ]
+        let err = Pipe()
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = err
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do { try p.run() } catch {
+                DispatchQueue.main.async {
+                    if wasRunning { self?.start() }
+                    completion(error.localizedDescription)
+                }
+                return
+            }
+            p.waitUntilExit()
+            let text = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                if wasRunning { self?.start() }
+                if p.terminationStatus == 0 {
+                    completion(nil)
+                } else {
+                    completion(text.isEmpty ? "cairn peer exited with status \(p.terminationStatus)" : text)
+                }
+            }
+        }
+    }
+
+    /// A transport id is sha256 of a McEliece public key, hex.
+    static func isPeerId(_ s: String) -> Bool {
+        s.count == 64 && s.allSatisfy(\.isHexDigit)
+    }
+
+    /// `host:port`, split at the last colon so `[::1]:9010` works.
+    static func isHostPort(_ s: String) -> Bool {
+        guard let i = s.lastIndex(of: ":") else { return false }
+        let host = s[s.startIndex..<i], port = s[s.index(after: i)...]
+        return !host.isEmpty && (UInt16(port).map { $0 != 0 } ?? false)
     }
 }
 
