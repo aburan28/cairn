@@ -48,12 +48,19 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | `submit_claim` | yes | commit, then reveal on a later call |
 | `post_objective` | yes | fund a question: the same record `cairn post` reads, signed by `--identity` when one is set |
 | `audit` | no | re-derive the whole log (`rerun: true` re-runs verifiers; slow) |
+| `set_secret` | no† | store a named operator secret on this machine; the value is never returned |
+| `list_secrets` | no | names of those secrets; values never returned |
 
 \* — with one automatic exception: a reveal epoch that has already closed is
 settled by whichever call looks at the log next, `frontier_status` included.
 The batch order was fixed by the epoch beacon when the epoch closed, so the
 caller merely materialises it and cannot influence it. This is what pays an
 agent that revealed and then only polled.
+
+† — writes under `~/.cairn/secrets/`, never to the log. Used for campaign
+credentials (AWS keys, `DATABASE_URL`) that `scripts/ecc2k-dp.sh` exports into
+the DP upload / ingester. There is deliberately no `get_secret`: agents log
+what they see.
 
 ## `submit_claim` is two calls, and that is the protocol showing through
 

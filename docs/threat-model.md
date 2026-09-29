@@ -227,9 +227,13 @@ made larger:
   *planted* and says nothing about whether a citation the agent chose was earned.
 - **Secrets in transcripts.** Agents log what they see. The MCP server therefore
   generates and consumes the commit–reveal nonce internally and never returns
-  it; a nonce in a transcript is a broken commitment. The same argument will
-  apply to signing keys when the identity layer lands — they must live behind
-  the server, never in an agent's context.
+  it; a nonce in a transcript is a broken commitment. The same argument applies
+  to operator secrets: `set_secret` writes under `~/.cairn/secrets/` and never
+  echoes the value; `list_secrets` returns names only; there is no `get_secret`
+  tool. Signing keys and campaign credentials (AWS keys for the ECC2K-130
+  distinguished-point store, a Postgres URL for the DP ingester) live behind
+  that surface or behind `cairn secret` on the CLI — never in an agent's
+  context.
 
 See [agents.md](agents.md).
 

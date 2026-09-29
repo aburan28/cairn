@@ -48,6 +48,7 @@ pub mod scaffold;
 pub mod schema;
 pub mod sealed;
 pub mod secret_file;
+pub mod secrets;
 pub mod serve;
 pub mod shards;
 pub mod store;
