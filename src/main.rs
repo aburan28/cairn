@@ -61,7 +61,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Read as _, Write};
+use std::io::{self, IsTerminal, Read as _, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -85,6 +85,7 @@ use cairn::records::{
 use cairn::scaffold;
 use cairn::schema::{validate_claim, validate_objective, SchemaError};
 use cairn::serve::Spool;
+use cairn::secrets::{self, SecretsError};
 use cairn::store::atrest::{AtRestError, Cipher};
 use cairn::store::{exposure, mirror, quota, Store, StoreError};
 use cairn::time::timestamp;
@@ -337,6 +338,8 @@ enum CliError {
     Store(StoreError),
     /// The at-rest key could not be created, found, or used.
     AtRest(AtRestError),
+    /// A named operator secret could not be set, read, or listed.
+    Secrets(SecretsError),
     /// An argument is not valid UTF-8. `std::env::args` would panic on this.
     NotUnicode(usize),
 }
@@ -348,6 +351,7 @@ impl fmt::Display for CliError {
             CliError::Params(error) => write!(f, "{error}"),
             CliError::Store(error) => write!(f, "{error}"),
             CliError::AtRest(error) => write!(f, "{error}"),
+            CliError::Secrets(error) => write!(f, "{error}"),
             CliError::Refused(message) => f.write_str(message),
             CliError::Io { context, source } => write!(f, "{context}: {source}"),
             CliError::Json { path, source } => write!(f, "{path}: {source}"),
@@ -376,6 +380,7 @@ impl std::error::Error for CliError {
             CliError::Schema(source) => Some(source),
             CliError::Ledger(source) => Some(source),
             CliError::Flow(source) => Some(source),
+            CliError::Secrets(source) => Some(source),
             _ => None,
         }
     }
@@ -856,6 +861,13 @@ enum Command {
     Store {
         action: StoreAction,
     },
+    /// Named operator secrets (AWS keys, campaign DB URL, …). Not the at-rest
+    /// key and not an identity — those have their own commands. Living behind
+    /// this command keeps credentials out of agent transcripts and out of the
+    /// data directory a sync copies.
+    Secret {
+        action: SecretAction,
+    },
     /// Copy the store to a directory of the operator's choosing.
     Sync {
         destination: String,
@@ -1171,6 +1183,33 @@ enum StoreAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum SecretAction {
+    /// Write or replace a named secret.
+    Set {
+        name: String,
+        /// Literal value, or `None` to read from `--file` / stdin.
+        value: Option<String>,
+        /// File holding the value. Mutually exclusive with `value`.
+        file: Option<String>,
+        /// Read the value from stdin (refuses a TTY so a secret is not typed
+        /// into shell history by accident via a forgotten flag).
+        stdin: bool,
+    },
+    /// Print one secret's value. Operator / scripting only — MCP never does this.
+    Get { name: String },
+    /// Names only.
+    List,
+    /// Remove a named secret. Missing is success.
+    Delete { name: String },
+    /// Run a command with the named secrets exported into its environment.
+    Run {
+        names: Vec<String>,
+        /// Everything after `--`.
+        command: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Invocation {
     options: Options,
     command: Command,
@@ -1441,6 +1480,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         }
         "keygen" => parse_keygen(&mut cursor)?,
         "store" => parse_store(&mut cursor)?,
+        "secret" => parse_secret(&mut cursor)?,
         "sync" => parse_sync(&mut cursor)?,
         "log" => {
             expect_end(&mut cursor, "log")?;
@@ -2838,6 +2878,109 @@ fn parse_store(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Store { action })
 }
 
+fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let action = match cursor.take().as_deref() {
+        Some("list") | None => {
+            expect_end(cursor, "secret list")?;
+            SecretAction::List
+        }
+        Some("get") => {
+            let name = require(cursor.take(), "secret get", "<name>")?;
+            expect_end(cursor, "secret get")?;
+            SecretAction::Get { name }
+        }
+        Some("delete") | Some("rm") => {
+            let name = require(cursor.take(), "secret delete", "<name>")?;
+            expect_end(cursor, "secret delete")?;
+            SecretAction::Delete { name }
+        }
+        Some("set") => {
+            let name = require(cursor.take(), "secret set", "<name>")?;
+            let mut value: Option<String> = None;
+            let mut file: Option<String> = None;
+            let mut stdin = false;
+            while let Some(token) = cursor.take() {
+                match token.as_str() {
+                    "--value" => value = Some(cursor.value("--value")?),
+                    "--file" => file = Some(cursor.value("--file")?),
+                    "--stdin" => stdin = true,
+                    other if is_flag(other) => {
+                        return Err(CliError::Usage(format!(
+                            "secret set: unknown option {other:?}"
+                        )))
+                    }
+                    other if value.is_none() && file.is_none() && !stdin => {
+                        // Positional value, so `cairn secret set NAME VALUE`
+                        // works without a flag. Prefer `--value` / `--file` /
+                        // `--stdin` in scripts so a value that looks like a
+                        // flag is not swallowed.
+                        value = Some(other.to_string());
+                    }
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "secret set: unexpected argument {other:?}"
+                        )))
+                    }
+                }
+            }
+            let sources = [value.is_some(), file.is_some(), stdin]
+                .into_iter()
+                .filter(|on| *on)
+                .count();
+            if sources != 1 {
+                return Err(CliError::Usage(String::from(
+                    "secret set needs exactly one of a positional value, --value, --file, or --stdin",
+                )));
+            }
+            SecretAction::Set {
+                name,
+                value,
+                file,
+                stdin,
+            }
+        }
+        Some("run") => {
+            let mut names: Vec<String> = Vec::new();
+            let mut command: Vec<String> = Vec::new();
+            let mut past_separator = false;
+            while let Some(token) = cursor.take() {
+                if past_separator {
+                    command.push(token);
+                    continue;
+                }
+                if token == "--" {
+                    past_separator = true;
+                    continue;
+                }
+                if is_flag(&token) {
+                    return Err(CliError::Usage(format!(
+                        "secret run: unknown option {token:?}; put the command after --"
+                    )));
+                }
+                names.push(token);
+            }
+            if names.is_empty() {
+                return Err(CliError::Usage(String::from(
+                    "secret run needs at least one secret name before --",
+                )));
+            }
+            if !past_separator || command.is_empty() {
+                return Err(CliError::Usage(String::from(
+                    "secret run needs a command after --, for example: \
+                     cairn secret run AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY -- aws sts get-caller-identity",
+                )));
+            }
+            SecretAction::Run { names, command }
+        }
+        Some(other) => {
+            return Err(CliError::Usage(format!(
+                "secret: unknown action {other:?}; try set, get, list, delete, or run"
+            )))
+        }
+    };
+    Ok(Command::Secret { action })
+}
+
 fn parse_sync(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut destination: Option<String> = None;
     let mut options = mirror::Options::default();
@@ -3716,6 +3859,29 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      create the at-rest key that seals the local store",
+    );
+    say(out, "  secret set <name> (<value> | --value V | --file PATH | --stdin)");
+    say(
+        out,
+        "      store an operator secret under ~/.cairn/secrets/ (AWS keys,",
+    );
+    say(
+        out,
+        "      campaign DB URL, …). Never put these in the data directory.",
+    );
+    say(out, "  secret get <name>");
+    say(
+        out,
+        "      print one secret's value (operators and scripts; MCP never does)",
+    );
+    say(out, "  secret list");
+    say(out, "      names only");
+    say(out, "  secret delete <name>");
+    say(out, "      remove a named secret");
+    say(out, "  secret run <name>... -- <command>");
+    say(
+        out,
+        "      run a command with the named secrets exported into its environment",
     );
     say(out, "  store [status|gc|encrypt]");
     say(
@@ -7199,6 +7365,93 @@ fn cmd_keygen(out: &mut dyn Write, options: &Options, wrap: bool) -> Result<i32,
     Ok(0)
 }
 
+fn cmd_secret(out: &mut dyn Write, action: &SecretAction) -> Result<i32, CliError> {
+    let dir = secrets::default_dir();
+    match action {
+        SecretAction::Set {
+            name,
+            value,
+            file,
+            stdin,
+        } => {
+            let body = if let Some(value) = value {
+                value.clone()
+            } else if let Some(path) = file {
+                fs::read_to_string(path).map_err(|source| CliError::Io {
+                    context: format!("reading {path}"),
+                    source,
+                })?
+            } else if *stdin {
+                if atty_stdin() {
+                    return Err(CliError::Usage(String::from(
+                        "secret set --stdin refuses a terminal: pipe the value, \
+                         or pass --file / --value, so it is not typed into scrollback",
+                    )));
+                }
+                let mut buf = String::new();
+                io::stdin()
+                    .read_to_string(&mut buf)
+                    .map_err(|source| CliError::Io {
+                        context: String::from("reading stdin"),
+                        source,
+                    })?;
+                buf
+            } else {
+                return Err(CliError::Usage(String::from(
+                    "secret set needs a value, --file, or --stdin",
+                )));
+            };
+            let path = secrets::set(&dir, name, &body).map_err(CliError::Secrets)?;
+            say(out, format!("secret {name} written to {}", path.display()));
+            Ok(0)
+        }
+        SecretAction::Get { name } => {
+            let value = secrets::get(&dir, name).map_err(CliError::Secrets)?;
+            // No trailing commentary: scripts capture stdout as the value.
+            say(out, value);
+            Ok(0)
+        }
+        SecretAction::List => {
+            let names = secrets::list(&dir).map_err(CliError::Secrets)?;
+            if names.is_empty() {
+                say(out, format!("(no secrets in {})", dir.display()));
+            } else {
+                for name in names {
+                    say(out, name);
+                }
+            }
+            Ok(0)
+        }
+        SecretAction::Delete { name } => {
+            secrets::delete(&dir, name).map_err(CliError::Secrets)?;
+            say(out, format!("secret {name} deleted"));
+            Ok(0)
+        }
+        SecretAction::Run { names, command } => {
+            let loaded = secrets::load_all(&dir, names).map_err(CliError::Secrets)?;
+            let program = &command[0];
+            let args = &command[1..];
+            let mut child = process::Command::new(program);
+            child.args(args);
+            for (name, value) in &loaded {
+                child.env(name, value);
+            }
+            // The child's stdout/stderr are the operator's; we do not capture.
+            let status = child.status().map_err(|source| CliError::Io {
+                context: format!("running {program}"),
+                source,
+            })?;
+            Ok(status.code().unwrap_or(1))
+        }
+    }
+}
+
+/// Whether stdin is a terminal. Used only to refuse typing a secret into a
+/// TTY under `--stdin`; a pipe or a redirected file is fine.
+fn atty_stdin() -> bool {
+    io::stdin().is_terminal()
+}
+
 fn cmd_store(
     out: &mut dyn Write,
     options: &Options,
@@ -8976,6 +9229,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         } => cmd_peer(out, options, identity, transport, addr, *seq),
         Command::Keygen { wrap } => cmd_keygen(out, options, *wrap),
         Command::Store { action } => cmd_store(out, options, action),
+        Command::Secret { action } => cmd_secret(out, action),
         Command::Sync {
             destination,
             options: mirror_options,
@@ -10144,6 +10398,164 @@ mod tests {
     }
 
     #[test]
+    fn secret_parses_set_get_list_delete_and_run() {
+        assert_eq!(
+            parse(argv(&["secret", "list"])).expect("parses").command,
+            Command::Secret {
+                action: SecretAction::List
+            }
+        );
+        assert_eq!(
+            parse(argv(&["secret"])).expect("parses").command,
+            Command::Secret {
+                action: SecretAction::List
+            }
+        );
+        assert_eq!(
+            parse(argv(&["secret", "set", "AWS_ACCESS_KEY_ID", "AKIA"]))
+                .expect("parses")
+                .command,
+            Command::Secret {
+                action: SecretAction::Set {
+                    name: "AWS_ACCESS_KEY_ID".into(),
+                    value: Some("AKIA".into()),
+                    file: None,
+                    stdin: false,
+                }
+            }
+        );
+        assert_eq!(
+            parse(argv(&[
+                "secret",
+                "set",
+                "DATABASE_URL",
+                "--file",
+                "/tmp/db.url"
+            ]))
+            .expect("parses")
+            .command,
+            Command::Secret {
+                action: SecretAction::Set {
+                    name: "DATABASE_URL".into(),
+                    value: None,
+                    file: Some("/tmp/db.url".into()),
+                    stdin: false,
+                }
+            }
+        );
+        assert_eq!(
+            parse(argv(&["secret", "get", "TOKEN"]))
+                .expect("parses")
+                .command,
+            Command::Secret {
+                action: SecretAction::Get {
+                    name: "TOKEN".into()
+                }
+            }
+        );
+        assert_eq!(
+            parse(argv(&["secret", "delete", "TOKEN"]))
+                .expect("parses")
+                .command,
+            Command::Secret {
+                action: SecretAction::Delete {
+                    name: "TOKEN".into()
+                }
+            }
+        );
+        assert_eq!(
+            parse(argv(&[
+                "secret",
+                "run",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "--",
+                "aws",
+                "sts",
+                "get-caller-identity"
+            ]))
+            .expect("parses")
+            .command,
+            Command::Secret {
+                action: SecretAction::Run {
+                    names: vec![
+                        "AWS_ACCESS_KEY_ID".into(),
+                        "AWS_SECRET_ACCESS_KEY".into()
+                    ],
+                    command: vec![
+                        "aws".into(),
+                        "sts".into(),
+                        "get-caller-identity".into()
+                    ],
+                }
+            }
+        );
+        assert!(matches!(
+            parse(argv(&["secret", "set", "NAME"])).expect_err("needs a value"),
+            CliError::Usage(_)
+        ));
+        assert!(matches!(
+            parse(argv(&["secret", "run", "TOKEN"])).expect_err("needs --"),
+            CliError::Usage(_)
+        ));
+    }
+
+    #[test]
+    fn secret_round_trips_through_the_command() {
+        let dir = std::env::temp_dir().join(format!(
+            "cairn-secret-cmd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        env::set_var(cairn::secrets::SECRETS_DIR_ENV, &dir);
+        let mut out = Vec::new();
+        assert_eq!(
+            cmd_secret(
+                &mut out,
+                &SecretAction::Set {
+                    name: "AWS_ACCESS_KEY_ID".into(),
+                    value: Some("AKIAEXAMPLE\n".into()),
+                    file: None,
+                    stdin: false,
+                }
+            )
+            .expect("set"),
+            0
+        );
+        out.clear();
+        assert_eq!(
+            cmd_secret(
+                &mut out,
+                &SecretAction::Get {
+                    name: "AWS_ACCESS_KEY_ID".into()
+                }
+            )
+            .expect("get"),
+            0
+        );
+        assert_eq!(String::from_utf8(out.clone()).unwrap().trim(), "AKIAEXAMPLE");
+        out.clear();
+        assert_eq!(cmd_secret(&mut out, &SecretAction::List).expect("list"), 0);
+        assert!(String::from_utf8(out).unwrap().contains("AWS_ACCESS_KEY_ID"));
+        assert_eq!(
+            cmd_secret(
+                &mut Vec::new(),
+                &SecretAction::Delete {
+                    name: "AWS_ACCESS_KEY_ID".into()
+                }
+            )
+            .expect("delete"),
+            0
+        );
+        env::remove_var(cairn::secrets::SECRETS_DIR_ENV);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn global_options_precede_the_command() {
         let parsed =
             parse(argv(&["--log", "/tmp/x.jsonl", "--root", "/srv", "log"])).expect("this parses");
@@ -11072,6 +11484,7 @@ mod tests {
             "peer",
             "identity",
             "keygen",
+            "secret",
             "store",
             "sync",
             "log",

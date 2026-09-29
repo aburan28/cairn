@@ -17,6 +17,7 @@ and they are not conveniences.
 | `CAIRN_LOG` | — | **deprecated**, and ambiguous by construction — see below |
 | `CAIRN_DATA` | — | the data directory, when `--data-dir` is not given |
 | `CAIRN_KEY` | `~/.cairn/key` | the at-rest key file |
+| `CAIRN_SECRETS_DIR` | `~/.cairn/secrets` | directory for named operator secrets (`cairn secret`) |
 | `CAIRN_PASSPHRASE` | — | passphrase for a wrapped at-rest key |
 | `CAIRN_REQUIRE_SANDBOX` | unset | `1` refuses to run objective code at all without a working jail |
 | `CAIRN_SANDBOX_MEMORY_MB` | `4096` (MiB) | memory cap for pinned pure functions: `RLIMIT_AS` on Linux, the process tree's measured footprint on macOS; `0` disables it |

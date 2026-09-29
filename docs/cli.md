@@ -420,6 +420,17 @@ Execute the single disputed step and settle it; report open disputes.
 
 Create the at-rest key that seals the local store. `--passphrase` wraps it.
 
+### `secret set <name> (<value> | --value V | --file PATH | --stdin)` · `secret get` · `secret list` · `secret delete` · `secret run <name>... -- <cmd>`
+
+Named operator secrets under `~/.cairn/secrets/` (or `$CAIRN_SECRETS_DIR`).
+This is not the at-rest key and not a submitter identity — those have their
+own commands. Names are environment-variable spellings
+(`[A-Za-z_][A-Za-z0-9_]*`); `secret run` exports them into a child, which is
+how `scripts/ecc2k-dp.sh` feeds AWS keys and a `DATABASE_URL` into the ECC2K-130
+DP upload and ingester without putting them in the shell. `--stdin` refuses a
+TTY so a secret is not typed into scrollback. MCP exposes `set_secret` /
+`list_secrets` only; values never cross into an agent transcript.
+
 ### `store status`
 
 Where the store is, whether the log is sealed, which key is in use, and how much

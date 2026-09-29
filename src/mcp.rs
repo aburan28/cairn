@@ -40,6 +40,8 @@
 //!   closed is applied automatically whenever a tool reads the log -- the
 //!   batch order was fixed by the beacon when the epoch closed, so whoever
 //!   looks next merely materialises it and cannot influence it.
+//!   `set_secret` writes under `~/.cairn/secrets/` and never to the log, and
+//!   never returns the value — agents log what they see.
 //!
 //! # Claim relations are readable here and not writable
 //!
@@ -106,6 +108,7 @@ use crate::partition::{assignment_for, epoch_of, epoch_seconds};
 use crate::piecework::Piecework;
 use crate::records::{commitment_hash, Claim, Commitment, Objective};
 use crate::schema::{validate_claim, validate_objective};
+use crate::secrets;
 use crate::time::{parse_rfc3339, timestamp};
 use crate::verifiers::VerifierRegistry;
 
@@ -922,6 +925,8 @@ impl Server {
             "pending_reveals" => self.pending_reveals(&args),
             "work_assignment" => self.work_assignment(&args),
             "audit" => self.audit(&args),
+            "set_secret" => self.set_secret(&args),
+            "list_secrets" => self.list_secrets(),
             other => Err(format!("unknown tool {other:?}")),
         };
 
@@ -1163,6 +1168,39 @@ fn tool_definitions() -> Json {
                     }
                 }
             }
+        },
+        {
+            "name": "set_secret",
+            "description":
+                "Store a named operator secret on this machine (AWS keys, a campaign DATABASE_URL, \
+                 …) under ~/.cairn/secrets/. The value is written and never returned — agents log \
+                 what they see, and a secret in a transcript is a leaked secret. Use list_secrets \
+                 to confirm the name landed. For ECC2K-130 campaign credentials the usual names \
+                 are AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and DATABASE_URL; scripts/ecc2k-dp.sh \
+                 then exports them into the DP upload / dp_ingest child.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["name", "value"],
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description":
+                            "Environment-variable spelling: [A-Za-z_][A-Za-z0-9_]*. The name is \
+                             what cairn secret run exports into a child."
+                    },
+                    "value": {
+                        "type": "string",
+                        "description":
+                            "The secret. It is stored and this tool's response never echoes it."
+                    }
+                }
+            }
+        },
+        {
+            "name": "list_secrets",
+            "description":
+                "Names of operator secrets stored on this machine. Values are never returned.",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }
@@ -2080,6 +2118,29 @@ impl Server {
             objective.verifier_kind().unwrap_or("?"),
             objective.funder,
         ))
+    }
+
+    /// Store a named operator secret. The value is written and never returned.
+    fn set_secret(&self, args: &Json) -> Result<String, String> {
+        let name = string_arg(args, "name")?;
+        let value = string_arg(args, "value")?;
+        let dir = secrets::default_dir();
+        secrets::set(&dir, &name, &value).map_err(|e| e.to_string())?;
+        // Confirm the name only. Echoing the value would put it in the agent's
+        // transcript, which is exactly the leak this tool exists to avoid.
+        Ok(format!(
+            "secret {name} stored under {}. Value not returned. list_secrets to confirm.",
+            dir.display()
+        ))
+    }
+
+    fn list_secrets(&self) -> Result<String, String> {
+        let dir = secrets::default_dir();
+        let names = secrets::list(&dir).map_err(|e| e.to_string())?;
+        if names.is_empty() {
+            return Ok(format!("(no secrets in {})", dir.display()));
+        }
+        Ok(names.join("\n"))
     }
 }
 

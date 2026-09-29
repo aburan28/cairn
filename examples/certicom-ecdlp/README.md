@@ -278,6 +278,14 @@ or tampered copy is refused. Why the walk is worth paying for, what a private
 walk buys and does not, and the batch stage that closes that gap:
 [`docs/design/rho-piecework.md`](../../docs/design/rho-piecework.md).
 
+## ECC2K-130 campaign status (separate from the paid path)
+
+The live Certicom search publishes aggregates at
+[aburan28.github.io/crypto/status](https://aburan28.github.io/crypto/status/).
+Operator credentials and the DP upload / ingester seam are documented in
+[`ECC2K130-CAMPAIGN.md`](ECC2K130-CAMPAIGN.md); `cairn secret` holds the
+keys and `scripts/ecc2k-dp.sh` runs the upload and `dp_ingest`.
+
 ## Working on one
 
 Pollard rho with distinguished points parallelises linearly and needs almost no
