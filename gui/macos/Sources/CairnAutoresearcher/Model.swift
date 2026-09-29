@@ -255,7 +255,23 @@ final class ResearcherModel: ObservableObject {
     @Published var notifyOnSettle: Bool { didSet { defaults.set(notifyOnSettle, forKey: "notify") } }
     @Published var bootstrapFile: String { didSet { defaults.set(bootstrapFile, forKey: "bootstrap") } }
     @Published var selectedObjectives: Set<String> {
-        didSet { defaults.set(Array(selectedObjectives).sorted(), forKey: "selected") }
+        didSet {
+            defaults.set(Array(selectedObjectives).sorted(), forKey: "selected")
+            guard !syncingTaskSelection else { return }
+            if let match = GuiTasks.task(matching: selectedObjectives) {
+                selectedTaskId = match.id
+            } else if let id = selectedTaskId,
+                      Set(GuiTasks.task(id: id)?.paths ?? []) != selectedObjectives {
+                selectedTaskId = nil
+            }
+        }
+    }
+    /// Which curated task is active; drives Catalog checkboxes when set.
+    @Published var selectedTaskId: String? {
+        didSet {
+            if let id = selectedTaskId { defaults.set(id, forKey: "selectedTask") }
+            else { defaults.removeObject(forKey: "selectedTask") }
+        }
     }
 
     // Live state from the researcher's files.
@@ -347,6 +363,7 @@ final class ResearcherModel: ObservableObject {
     /// Set once the deferred first-tick disk work has run, so a second tick
     /// does not rescan the catalog every second.
     private var didLoadFromDisk = false
+    private var syncingTaskSelection = false
 
     init() {
         root = defaults.string(forKey: "root") ?? ResearcherModel.guessRoot()
@@ -358,6 +375,7 @@ final class ResearcherModel: ObservableObject {
         notifyOnSettle = defaults.object(forKey: "notify") as? Bool ?? true
         bootstrapFile = defaults.string(forKey: "bootstrap") ?? ""
         selectedObjectives = Set(defaults.stringArray(forKey: "selected") ?? [])
+        selectedTaskId = defaults.string(forKey: "selectedTask")
         timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
             .sink { [weak self] _ in self?.tick() }
         // Nothing here touches the disk: the window must appear before the
@@ -534,6 +552,22 @@ final class ResearcherModel: ObservableObject {
     func selectResearcherDefault() { selectedObjectives = Set(researcherDefault) }
     func selectAll() { selectedObjectives = Set(catalog.map(\.path)) }
     func selectNone() { selectedObjectives = [] }
+
+    var activeTask: GuiTask? {
+        if let id = selectedTaskId { return GuiTasks.task(id: id) }
+        return GuiTasks.task(matching: selectedObjectives)
+    }
+
+    var selectedUnpostedCatalog: [CatalogItem] {
+        catalog.filter { selectedObjectives.contains($0.path) && !isPosted($0) }
+    }
+
+    func selectTask(_ task: GuiTask) {
+        syncingTaskSelection = true
+        selectedTaskId = task.id
+        selectedObjectives = Set(task.paths)
+        syncingTaskSelection = false
+    }
 
     /// Whether the node already holds this example, by goal.
     func isPosted(_ item: CatalogItem) -> Bool {
@@ -977,6 +1011,9 @@ final class ResearcherModel: ObservableObject {
                         self.selectedObjectives = Set(list)
                     }
                 }
+            } else if let id = selectedTaskId, let task = GuiTasks.task(id: id),
+                      Set(task.paths) != selectedObjectives {
+                selectTask(task)
             }
             runChecks()
         }

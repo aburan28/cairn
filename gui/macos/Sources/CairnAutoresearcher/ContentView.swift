@@ -2,6 +2,7 @@ import SwiftUI
 
 enum Pane: String, CaseIterable, Identifiable {
     case overview = "Overview"
+    case tasks = "Tasks"
     case objectives = "Objectives"
     case catalog = "Catalog"
     case node = "Node"
@@ -11,6 +12,7 @@ enum Pane: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .overview: return "gauge.with.dots.needle.33percent"
+        case .tasks: return "target"
         case .objectives: return "list.bullet.rectangle.portrait"
         case .catalog: return "shippingbox"
         case .node: return "server.rack"
@@ -37,6 +39,7 @@ struct ContentView: View {
         } detail: {
             switch model.pane ?? .overview {
             case .overview: OverviewView()
+            case .tasks: TasksView()
             case .objectives: ObjectivesView()
             case .catalog: CatalogView()
             case .node: NodeView()
@@ -102,6 +105,7 @@ struct ContentView: View {
     private func badge(for p: Pane) -> Int {
         switch p {
         case .objectives: return model.open.count + model.pendingReveals.count
+        case .tasks: return model.activeTask == nil ? 0 : 1
         case .catalog: return model.selectedObjectives.count
         default: return 0
         }

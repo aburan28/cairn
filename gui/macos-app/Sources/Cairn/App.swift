@@ -26,6 +26,8 @@ struct CairnApp: App {
                 Button("Restart / Reconnect") { delegate.node.restart() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 Divider()
+                Button("Tasks…") { delegate.node.presentTasks = true }
+                    .disabled(delegate.node.isAttached)
                 Button("Peers…") { delegate.node.presentPeers = true }
                 Button("Copy Peer Id") { delegate.copyPeerId() }
                     .disabled(delegate.node.peerId == nil)
@@ -114,6 +116,11 @@ struct ContentView: View {
                                   ? "P2P is on loopback: this node dials out and nothing dials in."
                                   : "P2P listen address. Hand this out with the peer id from Settings.")
                     }
+                    Button { node.presentTasks = true } label: {
+                        Label("Tasks", systemImage: "target")
+                    }
+                    .help("Post a curated objective (e.g. ECC2K-130) into this node's log")
+                    .disabled(node.isAttached)
                     Button { node.presentPeers = true } label: {
                         Label("Peers", systemImage: "person.badge.plus")
                     }
@@ -129,6 +136,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $node.presentPeers) {
             PeersSheet(node: node, isPresented: $node.presentPeers)
+        }
+        .sheet(isPresented: $node.presentTasks) {
+            TasksSheet(node: node, browser: browser, isPresented: $node.presentTasks)
         }
     }
 }
