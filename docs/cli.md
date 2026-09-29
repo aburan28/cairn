@@ -420,6 +420,25 @@ Execute the single disputed step and settle it; report open disputes.
 
 Create the at-rest key that seals the local store. `--passphrase` wraps it.
 
+### `deposit add` · `deposit list` · `deposit show` · `deposit grant` · `deposit put`
+
+Mediated uploads to stranger-owned storage. A deposit is a named place to put
+bytes (`file` root or `s3` bucket/prefix); a grant is a short-lived single-use
+right to PUT one object under it. Credentials stay in `cairn secret` — the
+grant response never includes them. Config lives under
+`<data-dir>/deposits/<name>.json`.
+
+```
+cairn deposit add --name demo --provider file --root /tmp/cairn-deposit
+cairn deposit grant --deposit demo --submitter alice --bytes 1024
+cairn deposit put --grant <grant_id> --file ./payload.bin
+```
+
+For S3: `--provider s3 --bucket … --prefix dp/ --region us-west-2`, with
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` already set via `cairn secret`.
+Grants are issued as SigV4 presigned PUT URLs. Full design:
+[design/deposit-grants.md](design/deposit-grants.md).
+
 ### `secret set <name> (<value> | --value V | --file PATH | --stdin)` · `secret get` · `secret list` · `secret delete` · `secret run <name>... -- <cmd>`
 
 Named operator secrets under `~/.cairn/secrets/` (or `$CAIRN_SECRETS_DIR`).
