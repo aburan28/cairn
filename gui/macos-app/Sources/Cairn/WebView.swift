@@ -7,6 +7,10 @@ import WebKit
 @MainActor
 final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
     let view: WKWebView
+    /// Host (and optional port) of the node this window is showing. Links on
+    /// that host stay here; everything else opens in the system browser.
+    private var nodeHost: String?
+    private var nodePort: Int?
 
     override init() {
         view = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
@@ -17,7 +21,9 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     }
 
     func show(_ url: URL) {
-        if view.url?.host != url.host || view.url?.port != url.port {
+        nodeHost = url.host
+        nodePort = url.port
+        if view.url?.host != url.host || view.url?.port != url.port || view.url?.path != url.path {
             view.load(URLRequest(url: url))
         }
     }
@@ -29,7 +35,7 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     // where their bookmarks and logins are.
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-        if let url = action.request.url, !Self.isLocal(url) {
+        if let url = action.request.url, !isNode(url) {
             NSWorkspace.shared.open(url)
             decisionHandler(.cancel)
         } else {
@@ -41,16 +47,26 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if let url = action.request.url {
-            if Self.isLocal(url) { webView.load(URLRequest(url: url)) } else { NSWorkspace.shared.open(url) }
+            if isNode(url) { webView.load(URLRequest(url: url)) } else { NSWorkspace.shared.open(url) }
         }
         return nil
     }
 
-    private static func isLocal(_ url: URL) -> Bool {
+    private func isNode(_ url: URL) -> Bool {
         guard let scheme = url.scheme, scheme == "http" || scheme == "https" else {
             return url.scheme == "about" || url.scheme == "blob" || url.scheme == "data"
         }
-        return url.host == "127.0.0.1" || url.host == "localhost"
+        guard let host = url.host else { return false }
+        // Loopback aliases count as the same node when that is what we opened.
+        let local: Set<String> = ["127.0.0.1", "localhost"]
+        if let nodeHost {
+            if host == nodeHost { return url.port == nodePort || (url.port == nil && nodePort == nil) }
+            if local.contains(host) && local.contains(nodeHost) {
+                return url.port == nodePort || (url.port == nil && (nodePort == nil || nodePort == 80))
+            }
+            return false
+        }
+        return local.contains(host)
     }
 }
 
