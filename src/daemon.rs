@@ -57,7 +57,8 @@ use crate::p2p::multicast;
 /// module for why a node must be able to opt out.
 pub const BEACON_PORT_ENV: &str = "CAIRN_BEACON_PORT";
 use crate::p2p::pop::PopLimits;
-use crate::p2p::service::Service;
+use crate::p2p::seeds::{self, Seed};
+use crate::p2p::service::{SeedOutcome, Service, KEY_FETCH_BACKOFF};
 use crate::p2p::transport;
 use crate::records::Objective;
 use crate::serve;
@@ -572,6 +573,46 @@ pub fn run(config: Config) -> Result<(), String> {
         service.add_bootstrap(endpoint);
     }
 
+    // The seed list: built in, named by `CAIRN_SEEDS`, or off. Before this a
+    // node reached `launch/seeds.json` only through `make seeds` and a
+    // `--bootstrap` file, which Cairn.app never ran, so every node it started
+    // was LAN-only. Read at startup so a named list that cannot be read is a
+    // refusal here rather than a node that looks like a network that is down.
+    let seed_source = seeds::Source::from_env();
+    let seed_list = seed_source
+        .load()
+        .map_err(|e| format!("seeds ({}): {e}", seed_source.describe()))?;
+    for skipped in &seed_list.skipped {
+        log::warn!("seeds: skipping {}: {}", skipped.name, skipped.why);
+    }
+    let seed_list = seed_list.seeds;
+    if seed_source == seeds::Source::Off {
+        log::info!(
+            "seeds: off ({}); this node dials only bootstrap files, its log's peers and the LAN",
+            seeds::SEEDS_ENV
+        );
+    } else if seed_list.is_empty() {
+        log::warn!(
+            "seeds: {} names no seed this node can dial",
+            seed_source.describe()
+        );
+    } else if !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) {
+        // A seed's key is fetched by a direct dial, and a proxied node has a
+        // censor to hide from. Said once rather than by a seed that is
+        // silently never asked.
+        log::warn!(
+            "seeds: dials go through a proxy and a seed's key is fetched by a direct dial, \
+             so the seed list is unused; pass the seeds' bootstrap files from `make seeds` instead"
+        );
+    } else {
+        log::info!(
+            "seeds: {} from {}; {}=off runs without them",
+            seed_list.len(),
+            seed_source.describe(),
+            seeds::SEEDS_ENV
+        );
+    }
+
     // Bound before either loop starts, so a node that cannot publish refuses at
     // startup rather than looking healthy while serving nothing.
     let http = bind_http(&config)?;
@@ -719,6 +760,23 @@ pub fn run(config: Config) -> Result<(), String> {
     }
 
     let service = Arc::new(service);
+
+    // Seeds are asked for their keys on a thread of their own. A seed that is
+    // down costs `DIAL_TIMEOUT` per ask, and on the tick thread that would be
+    // ten seconds a minute of no draining, no settling and no dialling of the
+    // peers that *are* up -- for exactly the node that most needs them, the one
+    // whose only other hope is the LAN. `Service` is shared by design; the
+    // accept thread already learns into the same book.
+    if !seed_list.is_empty() && matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) {
+        let seeding = Arc::clone(&service);
+        thread::spawn(move || loop {
+            for (seed, outcome) in seed_list.iter().zip(seeding.seed_from_list(&seed_list)) {
+                report_seed(seed, &outcome);
+            }
+            thread::sleep(Duration::from_secs(TICK_SECONDS));
+        });
+    }
+
     let accept_service = Arc::clone(&service);
     let accept_state = Arc::clone(&state);
     let accept_root_key = Arc::clone(&root_key);
@@ -969,6 +1027,39 @@ pub fn run(config: Config) -> Result<(), String> {
             }
         }
         thread::sleep(Duration::from_secs(TICK_SECONDS));
+    }
+}
+
+/// Say what asking one seed came to.
+///
+/// Only what changed is said. A seed that is dialable, or was asked too
+/// recently to ask again, is silence; a failure is said once per
+/// `KEY_FETCH_BACKOFF`, because it is asked no more often than that. Before this
+/// a node whose seed was down said nothing at all, which from the app reads as
+/// "p2p does not work" rather than as "that machine is not answering".
+fn report_seed(seed: &Seed, outcome: &SeedOutcome) {
+    match outcome {
+        SeedOutcome::Learned(addr) => log::info!(
+            "seeds: {} answered at {addr} with the key its id names; dialable now",
+            seed.name
+        ),
+        SeedOutcome::Failed { addr, error } => log::warn!(
+            "seeds: {} at {addr} did not hand over its key ({error}); asking again in {}s. \
+             A seed that never answers is down or firewalled -- {} names another list",
+            seed.name,
+            KEY_FETCH_BACKOFF.as_secs(),
+            seeds::SEEDS_ENV
+        ),
+        SeedOutcome::Unresolvable => log::warn!(
+            "seeds: {}: {:?} is neither an address nor a name that resolves; asking again in {}s",
+            seed.name,
+            seed.addr,
+            KEY_FETCH_BACKOFF.as_secs()
+        ),
+        SeedOutcome::Dialable
+        | SeedOutcome::Waiting
+        | SeedOutcome::Ourselves
+        | SeedOutcome::Proxied => {}
     }
 }
 

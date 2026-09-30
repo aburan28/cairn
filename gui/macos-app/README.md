@@ -53,13 +53,16 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
   free ports when they are not, so it runs beside a `cairn run` of your own.
   The toolbar shows which.
 - **P2P** listens on loopback by default: the node dials out and nothing
-  dials in, which is enough to sync from a bootstrap peer or a LAN beacon
-  and not enough to be one. Settings can bind `0.0.0.0` instead, and the
-  strip above the reader says which. The HTTP reader stays on loopback
-  either way — this window is for you, not for the network.
+  dials in, which is enough to sync from a bootstrap peer, a compiled-in
+  seed (`launch/seeds.json`), or a LAN beacon, and not enough to be one.
+  Settings can bind `0.0.0.0` instead, and the strip above the reader says
+  which. The HTTP reader stays on loopback either way — this window is for
+  you, not for the network. A seed that does not answer is named in
+  `node.log` once a minute. Launching with `open --env CAIRN_SEEDS=<file>`
+  points the node at another list and `CAIRN_SEEDS=off` at none.
 - **Bootstrap** files are optional dial hints, chosen in Settings. Without
-  one the node finds peers on the local segment (and any seeds the `cairn`
-  binary itself dials). A missing file refuses to start rather than leaving
+  one the node finds peers on the local segment and any seeds the `cairn`
+  binary itself dials. A missing file refuses to start rather than leaving
   a silent gap. Generate writes a placeholder key via `cairn gen-bootstrap`;
   the node warns until the peer's real key replaces it.
 - **Stopping** is the node's own: the app holds the node's stdin open and
