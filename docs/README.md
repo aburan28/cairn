@@ -66,6 +66,10 @@ The six pages a user needs and nothing else in this repository provides.
   unit is an **orbit** and a point cannot carry its own certificate: ECC2K-130,
   and the eight-counter witness that makes one of its distinguished points
   something a network can pay for.
+- [../examples/certicom-ecdlp/ECC2K130-CAMPAIGN.md](../examples/certicom-ecdlp/ECC2K130-CAMPAIGN.md)
+  — paid orbits vs the unpaid corpus path that feeds
+  [aburan28.github.io/crypto/status](https://aburan28.github.io/crypto/status/);
+  `cairn secret` and `scripts/ecc2k-dp.sh`.
 - [knowledge.md](knowledge.md) — typed relations, derived standing, and
   reader-chosen confidence: revising knowledge without rewriting history.
 - [../examples/README.md](../examples/README.md) — worked objectives with real
