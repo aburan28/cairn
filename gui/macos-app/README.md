@@ -71,8 +71,11 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
   to the node's stdin, so it never answers on stdout.
 - **Links** to anywhere but the node open in your browser.
 
-The **Node** menu has Open in Browser, Restart / Reconnect, Peers…, Copy Peer
-Id, Show Data Folder and Show Node Log. **Peers…** announces a peer in the
+The **Node** menu has Open in Browser, Restart / Reconnect, **Tasks…**, Peers…,
+Copy Peer Id, Show Data Folder and Show Node Log. **Tasks…** posts a curated
+objective (including ECC2K-130 orbit piecework) from a source checkout into
+this node's log; point it at the repository folder or set `CAIRN_REPO` when
+launching. **Peers…** announces a peer in the
 log (stopping the node briefly — a ledger has one writer), points at
 bootstrap management in Settings, and copies what to hand someone adding this
 node. The strip above the reader shows whether the node is loopback-only,

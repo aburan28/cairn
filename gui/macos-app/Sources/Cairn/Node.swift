@@ -35,6 +35,7 @@ final class Node: ObservableObject {
     @Published private(set) var sessionsOK = 0
     /// Drives the Peers sheet from the Node menu and the toolbar.
     @Published var presentPeers = false
+    @Published var presentTasks = false
 
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }
@@ -440,6 +441,60 @@ final class Node: ObservableObject {
                 } else {
                     completion(text.isEmpty ? "gen-bootstrap exited with status \(p.terminationStatus)" : text)
                 }
+            }
+        }
+    }
+
+    /// Post one or more objective JSON files with `cairn post`. Stops a running
+    /// node briefly, same as announcing a peer.
+    func postObjectives(at paths: [String], completion: @escaping (String?) -> Void) {
+        guard !isAttached else {
+            completion("This window is attached to another node; it cannot write that log.")
+            return
+        }
+        guard let binary = binary ?? Self.locateBinary() else {
+            completion("No cairn command was found.")
+            return
+        }
+        for path in paths where !FileManager.default.fileExists(atPath: path) {
+            completion("Missing \(path)")
+            return
+        }
+        let wasRunning: Bool = {
+            if case .running = state { return true }
+            if case .starting = state { return true }
+            return false
+        }()
+        if wasRunning { stop() }
+        let log = dataDir.appendingPathComponent("log/cairn.jsonl")
+        let root = dataDir.path
+        let posts = paths.map { path in
+            ["--log", log.path, "--root", root, "post", path]
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var lastError: String?
+            for args in posts {
+                let p = Process()
+                p.executableURL = binary
+                p.arguments = args
+                let err = Pipe()
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = err
+                do { try p.run() } catch {
+                    lastError = error.localizedDescription
+                    break
+                }
+                p.waitUntilExit()
+                let text = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if p.terminationStatus != 0 {
+                    lastError = text.isEmpty ? "cairn post exited with status \(p.terminationStatus)" : text
+                    break
+                }
+            }
+            DispatchQueue.main.async {
+                if wasRunning { self?.start() }
+                completion(lastError)
             }
         }
     }

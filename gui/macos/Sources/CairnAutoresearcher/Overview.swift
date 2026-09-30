@@ -32,7 +32,7 @@ struct OverviewView: View {
                     stateCard.frame(width: 360)
                 }
                 if model.status == nil && model.ready {
-                    Text("Nothing has run yet. Choose objectives in Catalog, then press Start to post them, launch the node and begin sweeping, or One sweep to run a single pass and stop.")
+                    Text("Nothing has run yet. Pick a task in Tasks (or objectives in Catalog), then press Start to post them, launch the node and begin sweeping, or One sweep to run a single pass and stop.")
                         .foregroundStyle(.secondary)
                 }
             }

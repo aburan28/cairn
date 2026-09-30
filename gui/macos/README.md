@@ -48,6 +48,11 @@ objective's pinned verifier on an artifact JSON of your own through
 `cairn propose --dry-run`, recording nothing; **Open in reader** jumps to the
 node's page for it. The context menu copies ids.
 
+**Tasks.** Curated work to select in one step — ECC2K-130 paid orbits, the
+frontier answer objective, and the ECC2K-23 demo twin. Choosing a task checks
+its objectives in Catalog for posting; the autoresearcher still does not solve
+ECC2K-130 itself.
+
 **Catalog.** Every `examples/**/objective*.json` in the checkout, grouped by
 family, with a checkbox each and the researcher's own verdict under it,
 computed by `autoresearcher.py --plan` at the current budget and recomputed
