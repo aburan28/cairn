@@ -41,6 +41,8 @@ record instead.
 | `GET /ui/` | the embedded reader, when the binary was built with the `ui` feature |
 | `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type` |
 | `POST /objective/prepare` | canonicalize a draft objective and return the exact bytes its funder must sign — see below |
+| `POST /deposit/grant` | issue a short-lived upload grant against a node-local deposit; response never includes cloud keys |
+| `PUT /deposit/upload/{grant_id}` | proxy redemption of a grant (file backend, or curl-to-S3 fallback) |
 
 Everything except `/log` is a convenience. `/log` is the product.
 

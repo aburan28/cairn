@@ -28,13 +28,16 @@ cairn secret set AWS_SECRET_ACCESS_KEY --file ~/aws.key.secret
 cairn secret set DATABASE_URL --file ~/rho-dp.url
 
 export CAIRN_CRYPTO_ROOT=/path/to/aburan28/crypto
+./scripts/ecc2k-dp.sh secrets-check   # which credentials are stored
+./scripts/ecc2k-dp.sh status          # live Pages snapshot (JSON)
 ./scripts/ecc2k-dp.sh upload --dp-file dps.bin --slot 0
 ./scripts/ecc2k-dp.sh ingest once     # or: pending | verify
 ./scripts/ecc2k-dp.sh status-url
 ```
 
-`cairn secret run NAME… -- cmd` is what the script uses internally: named
-secrets are exported into the child's environment and never printed.
+`cairn secret path` prints the secrets directory. `cairn secret run` is what
+the script uses internally: named secrets are exported into the child's
+environment (optionally remapped with `NAME=ENVVAR`) and never printed.
 
 MCP agents that need to configure the same credentials call `set_secret`
 (value written, never returned) and `list_secrets` (names only). There is no

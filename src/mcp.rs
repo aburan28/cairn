@@ -42,6 +42,8 @@
 //!   looks next merely materialises it and cannot influence it.
 //!   `set_secret` writes under `~/.cairn/secrets/` and never to the log, and
 //!   never returns the value — agents log what they see.
+//!   `request_upload_grant` issues a short-lived deposit grant (put URL + key)
+//!   and never returns the cloud credentials behind it.
 //!
 //! # Claim relations are readable here and not writable
 //!
@@ -100,6 +102,7 @@ use serde_json::{json, Map, Value as Json};
 
 use crate::canonical::Value;
 use crate::crypto::identity::Identity;
+use crate::deposit::{self, DepositDir};
 use crate::frontier::{Ratchet, Stall};
 use crate::knowledge::{ConfidencePolicy, Standing};
 use crate::ledger::Ledger;
@@ -927,6 +930,7 @@ impl Server {
             "audit" => self.audit(&args),
             "set_secret" => self.set_secret(&args),
             "list_secrets" => self.list_secrets(),
+            "request_upload_grant" => self.request_upload_grant(&args),
             other => Err(format!("unknown tool {other:?}")),
         };
 
@@ -1201,6 +1205,40 @@ fn tool_definitions() -> Json {
             "description":
                 "Names of operator secrets stored on this machine. Values are never returned.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "request_upload_grant",
+            "description":
+                "Ask this node for a short-lived, single-use right to upload one object into a \
+                 named deposit (an S3 prefix, a local directory, …). The response has a grant id, \
+                 object key, mode (proxy or presigned), and put_url — never cloud credentials. \
+                 PUT the bytes to put_url (or use cairn deposit put). Configure deposits with \
+                 `cairn deposit add`; credentials stay in `cairn secret`. If this node cannot \
+                 mint against the deposit it answers unavailable, the same way a missing \
+                 verifier does — that says nothing about your artifact.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["deposit", "submitter"],
+                "properties": {
+                    "deposit": {
+                        "type": "string",
+                        "description": "Deposit name configured on this node (e.g. ecc2k130-campaign)."
+                    },
+                    "submitter": {
+                        "type": "string",
+                        "description": "Your submitter identity; bound into the object key prefix."
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "Optional size cap for this grant; defaults to the deposit's."
+                    },
+                    "digest": {
+                        "type": "string",
+                        "description":
+                            "Optional sha-256 hex of the body. When set, the PUT must match."
+                    }
+                }
+            }
         }
     ])
 }
@@ -2141,6 +2179,34 @@ impl Server {
             return Ok(format!("(no secrets in {})", dir.display()));
         }
         Ok(names.join("\n"))
+    }
+
+    /// Issue a deposit grant. Never returns cloud credentials.
+    fn request_upload_grant(&self, args: &Json) -> Result<String, String> {
+        let deposit = string_arg(args, "deposit")?;
+        let submitter = string_arg(args, "submitter")?;
+        let max_bytes = args.get("max_bytes").and_then(Json::as_u64);
+        let digest = args.get("digest").and_then(Json::as_str);
+        let ledger_path = self.node.read().ledger().path().to_path_buf();
+        let deposits = DepositDir::under_store(
+            ledger_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        );
+        let secrets_dir = secrets::default_dir();
+        let grant = deposit::issue_grant(
+            &deposits,
+            &deposit,
+            &submitter,
+            max_bytes,
+            digest,
+            None,
+            &secrets_dir,
+        )
+        .map_err(|e| e.to_string())?;
+        // Compact JSON the agent can parse; no secret values by construction.
+        Ok(grant.public_response(None).to_string())
     }
 }
 
