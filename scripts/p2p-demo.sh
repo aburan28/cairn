@@ -59,7 +59,7 @@ mkdir -p "$A" "$B"
 # changing production defaults.
 export CAIRN_KEY="$WORK/no-at-rest-key"
 cleanup() {
-  for pid in ${APID:-} ${BPID:-} ${SERVE_PID:-}; do kill "$pid" 2>/dev/null || true; done
+  for pid in ${APID:-} ${BPID:-} ${CPID:-} ${SERVE_PID:-}; do kill "$pid" 2>/dev/null || true; done
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -73,6 +73,10 @@ trap cleanup EXIT
 # live node on the same segment, synced with it, and failed here because its
 # claim had been settled elsewhere.
 export CAIRN_BEACON_PORT=off
+# No built-in seeds either, for the same reason one step further away: a node
+# here that reached the public seed would sync the real network's log. Node C
+# below names its own list instead, which is the path this turns off.
+export CAIRN_SEEDS=off
 export CAIRN_EPOCH_SECONDS=1
 # Two free ports, taken by binding and releasing rather than guessed: a fixed
 # port makes this script fail for whoever is already using it.
@@ -208,6 +212,42 @@ done
 GOT=$(entries "$B/log.jsonl")
 echo "  A has $WANT entries, B has $GOT"
 [ "$GOT" -ge "$WANT" ] || { sed 's/^/  /' "$B/daemon.log"; fail "B did not sync A's log"; }
+
+rule "C starts with an empty log and a seed list: an address and an id, no key"
+# The state of every node Cairn.app starts: no bootstrap file, a log that
+# starts empty, and whatever seed list the binary carries. B above needed A's
+# whole 261 KiB key in a file; C gets only A's address and peer id, asks A for
+# the key, and keeps it because it hashes to that id. Beacons are off, so the
+# seed list is the only way C can learn A exists.
+C="$WORK/c"
+mkdir -p "$C"
+C_PORT=$(free_port)
+A_ID=$(grep -o 'peer id [0-9a-f]\{64\}' "$A/daemon.log" | head -1 | awk '{print $3}')
+[ -n "$A_ID" ] || fail "A never said its peer id"
+python3 -c "
+import json
+json.dump({'version': 1, 'seeds': [
+    {'name': 'a', 'addr': '127.0.0.1:$A_PORT', 'transport': '$A_ID'}]},
+    open('$WORK/seeds.json', 'w'))"
+: > "$C/log.jsonl"
+CAIRN_SEEDS="$WORK/seeds.json" "$RUST" --log "$C/log.jsonl" --root "$C" p2p \
+  --identity "$C/id.json" --root-key "$C/rootkey.json" \
+  --checkpoint "$C/checkpoint.json" --listen "127.0.0.1:$C_PORT" > "$C/daemon.log" 2>&1 &
+CPID=$!
+WANT=$(entries "$A/log.jsonl")
+for _ in $(seq 1 200); do
+  [ "$(entries "$C/log.jsonl")" -ge "$WANT" ] && break
+  sleep 0.5
+done
+GOT=$(entries "$C/log.jsonl")
+echo "  A has $WANT entries, C has $GOT"
+[ "$GOT" -ge "$WANT" ] || { sed 's/^/  /' "$C/daemon.log"; fail "C did not sync A's log from a seed list"; }
+grep "seeds:" "$C/daemon.log" | sed 's/^/  /' || true
+grep -q "seeds: a answered at" "$C/daemon.log" \
+  || fail "C synced, but not through the seed list, so this checked nothing"
+kill "$CPID" 2>/dev/null || true
+wait "$CPID" 2>/dev/null || true
+CPID=
 
 rule "B has the verifier code too, not just the records"
 "$RUST" --log "$B/log.jsonl" --root "$B" blob need | sed 's/^/  /'

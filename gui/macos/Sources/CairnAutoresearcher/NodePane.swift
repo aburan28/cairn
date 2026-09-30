@@ -159,7 +159,7 @@ struct NodeView: View {
                     Text("Another node on this Mac bound the beacon port first without sharing it. Nodes built after this change share the port; restart the older node on a current build and both will hear each other.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text(model.bootstrapFile.isEmpty ? "No bootstrap file: LAN peers only. Set one in Settings to reach a seed." : "Bootstrap: \(model.bootstrapFile)")
+                Text(model.bootstrapFile.isEmpty ? "No bootstrap file: the built-in seeds and LAN peers. Set one in Settings to reach any other peer." : "Bootstrap: \(model.bootstrapFile)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -243,7 +243,7 @@ struct NodeView: View {
             if model.peers.isEmpty {
                 VStack(spacing: 8) {
                     Text("No peer records in this log.").foregroundStyle(.secondary)
-                    Text("Peers appear when the node is given a bootstrap file or hears one on the LAN; this researcher's node runs alone by default.")
+                    Text("Peers appear when the node reaches a seed built into cairn, is given a bootstrap file, or hears one on the LAN. A seed that does not answer is named in the node log.")
                         .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
                     Button("Add a peer…") { showAddPeer = true }
                 }
