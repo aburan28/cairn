@@ -156,7 +156,7 @@ bls12_381 = { version = "0.8", default-features = false, features = ["groups", "
 # file that leaves the machine (which is the entire point of `cairn sync`)
 # is an offline-attackable target, and PBKDF2 at any iteration count is the
 # wrong shape of defence against a GPU.
-argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
 
 # The logging *facade* only -- the backend that writes the lines is
 # `src/logging.rs`, about a hundred lines, and is deliberately ours.
