@@ -42,7 +42,8 @@ open --env CAIRN_BINARY="$PWD/bin/cairn" gui/macos-app/build/Cairn.app
 ```
 CAIRN_SANDBOX_CPUS=<cores> CAIRN_SANDBOX_MEMORY_MB=<MiB> \
 cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
-      run --listen 127.0.0.1:<p2p> --serve 127.0.0.1:<http>
+      [--bootstrap <file> ...] \
+      run --listen <p2p-host>:<p2p> --serve 127.0.0.1:<http>
 ```
 
 - **Data** lives in `~/Library/Application Support/Cairn` unless Settings
@@ -51,13 +52,19 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
 - **Ports** are the command line's, 8080 and 9000, when they are free, and any
   free ports when they are not, so it runs beside a `cairn run` of your own.
   The toolbar shows which.
-- **Peers** come from the seed list compiled into `cairn` (`launch/seeds.json`)
-  and from the LAN. The app passes no `--bootstrap`, and before the list was
-  compiled in that made every node it started LAN-only. A seed that does not
-  answer is named in `node.log` once a minute. Launching with
-  `open --env CAIRN_SEEDS=<file>` points the node at another list and
-  `CAIRN_SEEDS=off` at none. The p2p port is bound on loopback, so the node
-  dials out and nobody dials in: it can sync, and it cannot yet seed.
+- **P2P** listens on loopback by default: the node dials out and nothing
+  dials in, which is enough to sync from a bootstrap peer, a compiled-in
+  seed (`launch/seeds.json`), or a LAN beacon, and not enough to be one.
+  Settings can bind `0.0.0.0` instead, and the strip above the reader says
+  which. The HTTP reader stays on loopback either way — this window is for
+  you, not for the network. A seed that does not answer is named in
+  `node.log` once a minute. Launching with `open --env CAIRN_SEEDS=<file>`
+  points the node at another list and `CAIRN_SEEDS=off` at none.
+- **Bootstrap** files are optional dial hints, chosen in Settings. Without
+  one the node finds peers on the local segment and any seeds the `cairn`
+  binary itself dials. A missing file refuses to start rather than leaving
+  a silent gap. Generate writes a placeholder key via `cairn gen-bootstrap`;
+  the node warns until the peer's real key replaces it.
 - **Stopping** is the node's own: the app holds the node's stdin open and
   closes it, and `cairn run` stops when stdin closes. A node that has not gone
   in three seconds gets SIGTERM, then SIGKILL. Because the pipe is the signal,
@@ -67,9 +74,16 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
   to the node's stdin, so it never answers on stdout.
 - **Links** to anywhere but the node open in your browser.
 
-The **Node** menu has Open in Browser, Restart Node, Show Data Folder and Show
-Node Log. If the node exits or never comes up, the window says why, with the
-end of its log, a Try Again button and a way into Settings.
+The **Node** menu has Open in Browser, Restart / Reconnect, **Tasks…**, Peers…,
+Copy Peer Id, Show Data Folder and Show Node Log. **Tasks…** posts a curated
+objective (including ECC2K-130 orbit piecework) from a source checkout into
+this node's log; point it at the repository folder or set `CAIRN_REPO` when
+launching. **Peers…** announces a peer in the
+log (stopping the node briefly — a ledger has one writer), points at
+bootstrap management in Settings, and copies what to hand someone adding this
+node. The strip above the reader shows whether the node is loopback-only,
+attached to another node's URL, or accepting inbound, and whether a peer
+session has completed.
 
 ## Settings
 
@@ -79,8 +93,11 @@ objective's pinned checker, one at a time, in a jail.
 
 | setting | default | passed to the node as |
 |---|---|---|
+| Attach to URL | off (run a local node) | — (no process; window loads the URL) |
 | CPU cores | all | `CAIRN_SANDBOX_CPUS` |
 | Memory for each verifier | 4 GB | `CAIRN_SANDBOX_MEMORY_MB` (`0` when switched off) |
+| P2P listen | this Mac only (`127.0.0.1`) | `--listen <host>:<port>` |
+| Bootstrap files | none | `--bootstrap <file>` (repeatable) |
 | Data folder | `~/Library/Application Support/Cairn` | `--data-dir` and `--root` |
 | Storage limit | off | `--max-size <n>GB` |
 
@@ -95,6 +112,14 @@ exactly how each one works. In short:
 - **Memory** covers each pinned checker's whole process tree. macOS has no
   `RLIMIT_AS`, so the node measures the tree's footprint and stops it past
   the cap. Replay commands and Lean proofs have never had a memory cap.
+- **P2P listen**: loopback means dial-out only. `0.0.0.0` accepts inbound on
+  every interface; the address you hand someone else is this Mac's LAN or
+  public address, written into *their* bootstrap file, never into the listen
+  field (a cloud public IP is not on any local interface and will not bind).
+- **Bootstrap**: each file is an address plus a transport key. The handshake
+  authenticates the key, so a wrong file costs a dial and never a wrong
+  result. Generate writes a placeholder; replace the key before expecting a
+  session.
 - **Storage**: past the limit the node evicts what it can download again. If
   the ledger alone outgrows it, the node stops and the window says so. It
   never prunes the ledger to fit.

@@ -1,5 +1,6 @@
 import SwiftUI
 import Charts
+import AppKit
 
 struct OverviewView: View {
     @EnvironmentObject var model: ResearcherModel
@@ -31,7 +32,7 @@ struct OverviewView: View {
                     stateCard.frame(width: 360)
                 }
                 if model.status == nil && model.ready {
-                    Text("Nothing has run yet. Choose objectives in Catalog, then press Start to post them, launch the node and begin sweeping, or One sweep to run a single pass and stop.")
+                    Text("Nothing has run yet. Pick a task in Tasks (or objectives in Catalog), then press Start to post them, launch the node and begin sweeping, or One sweep to run a single pass and stop.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -66,6 +67,10 @@ struct OverviewView: View {
                     Button("Build cairn (make ui-build)") { model.build() }.disabled(model.isBuilding || model.isLive)
                     if #available(macOS 14, *) {
                         SettingsLink { Text("Settings…") }
+                    } else {
+                        Button("Settings…") {
+                            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                        }
                     }
                 }
                 .padding(.top, 4)
@@ -109,8 +114,10 @@ struct OverviewView: View {
                     } else if model.foreignPid == nil {
                         // Not the window's default button: a prominent Start would
                         // answer a stray Return by launching a node.
-                        Button("Start") { model.start(once: false) }.disabled(model.isBuilding)
-                        Button("One sweep") { model.start(once: true) }.disabled(model.isBuilding)
+                        Button("Start") { model.start(once: false) }
+                            .disabled(model.isBuilding || !model.ready)
+                        Button("One sweep") { model.start(once: true) }
+                            .disabled(model.isBuilding || !model.ready)
                     }
                 }
                 if let f = model.idleFraction, let s = model.secondsToNextSweep {

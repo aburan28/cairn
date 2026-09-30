@@ -107,6 +107,7 @@ struct ChainInfo: Decodable {
     var links: Int?
     var head: String?
     var ledger_head: String?
+    var chain: [EpochLink]?
 }
 
 struct FrontierInfo: Decodable, Equatable {
@@ -254,7 +255,23 @@ final class ResearcherModel: ObservableObject {
     @Published var notifyOnSettle: Bool { didSet { defaults.set(notifyOnSettle, forKey: "notify") } }
     @Published var bootstrapFile: String { didSet { defaults.set(bootstrapFile, forKey: "bootstrap") } }
     @Published var selectedObjectives: Set<String> {
-        didSet { defaults.set(Array(selectedObjectives).sorted(), forKey: "selected") }
+        didSet {
+            defaults.set(Array(selectedObjectives).sorted(), forKey: "selected")
+            guard !syncingTaskSelection else { return }
+            if let match = GuiTasks.task(matching: selectedObjectives) {
+                selectedTaskId = match.id
+            } else if let id = selectedTaskId,
+                      Set(GuiTasks.task(id: id)?.paths ?? []) != selectedObjectives {
+                selectedTaskId = nil
+            }
+        }
+    }
+    /// Which curated task is active; drives Catalog checkboxes when set.
+    @Published var selectedTaskId: String? {
+        didSet {
+            if let id = selectedTaskId { defaults.set(id, forKey: "selectedTask") }
+            else { defaults.removeObject(forKey: "selectedTask") }
+        }
     }
 
     // Live state from the researcher's files.
@@ -275,6 +292,9 @@ final class ResearcherModel: ObservableObject {
     @Published private(set) var nodeReachable = false
     @Published private(set) var nodeObjectives: [NodeObjective] = []
     @Published private(set) var chain: ChainInfo?
+    /// First epoch whose `prev` is not the previous link, or nil if intact /
+    /// not yet loaded. Computed from `/chain`, never guessed.
+    @Published private(set) var brokenLinkEpoch: Int?
     @Published private(set) var peerCount: Int?
     @Published private(set) var logKinds: [String: Int] = [:]
     @Published private(set) var frontiers: [String: FrontierInfo] = [:]
@@ -288,6 +308,8 @@ final class ResearcherModel: ObservableObject {
 
     // More of the node.
     @Published private(set) var ledger: [LedgerEntry] = []
+    /// Full payloads for frontier history; kept beside the table rows.
+    @Published private(set) var logRecords: [LogRecord] = []
     @Published private(set) var peers: [PeerRow] = []
     @Published private(set) var auditOutput: String?
     @Published private(set) var auditing = false
@@ -338,6 +360,10 @@ final class ResearcherModel: ObservableObject {
     private var binaryProbe: (mtime: Date, hasReader: Bool)?
     private var notifiedClaims = Set<String>()
     private var checking = false
+    /// Set once the deferred first-tick disk work has run, so a second tick
+    /// does not rescan the catalog every second.
+    private var didLoadFromDisk = false
+    private var syncingTaskSelection = false
 
     init() {
         root = defaults.string(forKey: "root") ?? ResearcherModel.guessRoot()
@@ -349,19 +375,13 @@ final class ResearcherModel: ObservableObject {
         notifyOnSettle = defaults.object(forKey: "notify") as? Bool ?? true
         bootstrapFile = defaults.string(forKey: "bootstrap") ?? ""
         selectedObjectives = Set(defaults.stringArray(forKey: "selected") ?? [])
+        selectedTaskId = defaults.string(forKey: "selectedTask")
         timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
             .sink { [weak self] _ in self?.tick() }
         // Nothing here touches the disk: the window must appear before the
         // first file is read, because on an external volume the first read
         // can block on a system consent prompt, and a blocked launch shows
         // the user nothing to consent to. The first tick does the reading.
-        rescanCatalog()
-        if selectedObjectives.isEmpty {
-            Task.detached(priority: .utility) { [scriptDir] in
-                let list = ResearcherModel.readList(scriptDir + "/objectives.txt")
-                await MainActor.run { if self.selectedObjectives.isEmpty { self.selectedObjectives = Set(list) } }
-            }
-        }
     }
 
     nonisolated private static func readList(_ path: String) -> [String] {
@@ -454,7 +474,12 @@ final class ResearcherModel: ObservableObject {
         }
     }
 
-    var ready: Bool { checks.prefix(4).allSatisfy { $0.ok } }
+    var ready: Bool {
+        // Empty means the checks have not run yet — not that everything is
+        // fine. `allSatisfy` on an empty collection is true, which used to
+        // enable Start for the first few seconds of a launch.
+        checks.count >= 4 && checks.prefix(4).allSatisfy(\.ok)
+    }
 
     // MARK: catalog
 
@@ -527,6 +552,22 @@ final class ResearcherModel: ObservableObject {
     func selectResearcherDefault() { selectedObjectives = Set(researcherDefault) }
     func selectAll() { selectedObjectives = Set(catalog.map(\.path)) }
     func selectNone() { selectedObjectives = [] }
+
+    var activeTask: GuiTask? {
+        if let id = selectedTaskId { return GuiTasks.task(id: id) }
+        return GuiTasks.task(matching: selectedObjectives)
+    }
+
+    var selectedUnpostedCatalog: [CatalogItem] {
+        catalog.filter { selectedObjectives.contains($0.path) && !isPosted($0) }
+    }
+
+    func selectTask(_ task: GuiTask) {
+        syncingTaskSelection = true
+        selectedTaskId = task.id
+        selectedObjectives = Set(task.paths)
+        syncingTaskSelection = false
+    }
 
     /// Whether the node already holds this example, by goal.
     func isPosted(_ item: CatalogItem) -> Bool {
@@ -959,6 +1000,23 @@ final class ResearcherModel: ObservableObject {
     private func tick() {
         ticks += 1
         now = Date()
+        if !didLoadFromDisk {
+            didLoadFromDisk = true
+            rescanCatalog()
+            if selectedObjectives.isEmpty {
+                Task.detached(priority: .utility) { [scriptDir] in
+                    let list = ResearcherModel.readList(scriptDir + "/objectives.txt")
+                    await MainActor.run { [weak self] in
+                        guard let self, self.selectedObjectives.isEmpty else { return }
+                        self.selectedObjectives = Set(list)
+                    }
+                }
+            } else if let id = selectedTaskId, let task = GuiTasks.task(id: id),
+                      Set(task.paths) != selectedObjectives {
+                selectTask(task)
+            }
+            runChecks()
+        }
         readStatus()
         checkForeign()
         readProgress()
@@ -1102,7 +1160,11 @@ final class ResearcherModel: ObservableObject {
                 guard let self else { return }
                 if self.nodeReachable != ok {
                     self.nodeReachable = ok
-                    if ok { self.pollNode() } else { self.nodeObjectives = []; self.chain = nil; self.peerCount = nil; self.logKinds = [:]; self.peers = []; self.ledger = [] }
+                    if ok { self.pollNode() } else {
+                        self.nodeObjectives = []; self.chain = nil; self.brokenLinkEpoch = nil
+                        self.peerCount = nil; self.logKinds = [:]; self.peers = []
+                        self.ledger = []; self.logRecords = []
+                    }
                 }
             }
         }.resume()
@@ -1128,7 +1190,11 @@ final class ResearcherModel: ObservableObject {
         fetch("/chain", as: ChainInfo.self) { [weak self] c in
             guard let self else { return }
             let grew = c.height != self.chain?.height || c.links != self.chain?.links
-            if c.height != self.chain?.height || c.links != self.chain?.links || c.head != self.chain?.head { self.chain = c }
+            if c.height != self.chain?.height || c.links != self.chain?.links || c.head != self.chain?.head
+                || c.chain?.count != self.chain?.chain?.count {
+                self.chain = c
+                self.brokenLinkEpoch = firstBrokenLink(c.chain ?? [])
+            }
             if grew || self.ledger.isEmpty || self.ticks - self.lastFullPoll >= 60 { self.pollLog() }
         }
         fetch("/peers", as: PeersRawDoc.self) { [weak self] p in
@@ -1155,12 +1221,23 @@ final class ResearcherModel: ObservableObject {
         URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             guard let data, let text = String(data: data, encoding: .utf8) else { return }
             let entries = LedgerEntry.parse(ndjson: text)
+            let records = LogRecord.parse(ndjson: text)
             let kinds = entries.reduce(into: [String: Int]()) { $0[$1.kind, default: 0] += 1 }
             Task { @MainActor in
                 if kinds != self?.logKinds { self?.logKinds = kinds }
                 if entries != self?.ledger { self?.ledger = entries }
+                if records != self?.logRecords { self?.logRecords = records }
             }
         }.resume()
+    }
+
+    func moves(for objectiveId: String) -> [FrontierMove] {
+        buildMoves(logRecords, objectiveId: objectiveId)
+    }
+
+    func isOverspent(objectiveId: String, reward: Int?) -> Bool {
+        guard let reward, let f = frontiers[objectiveId] else { return false }
+        return overspent(reward: reward, paid: f.paid_cumulative, remaining: f.pool_remaining)
     }
 
     private struct PeerRaw: Decodable { var identity: String?; var addr: String?; var transport: String?; var created_at: String? }

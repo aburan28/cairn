@@ -54,9 +54,12 @@ and shows its reader; quit it and the node stops. It is the one exception to
 directory you started it from, so its node keeps its log, keys and queue in
 `~/Library/Application Support/Cairn`. It uses the command line's ports,
 8080 and 9000, when they are free and any free ones when they are not, so it
-can run beside a `cairn run` of your own. **Node → Open in Browser** opens the
-same page in your browser; **Node → Show Data Folder** and **Show Node Log**
-are where to look when it will not start.
+can run beside a `cairn run` of your own. P2P listens on loopback by default
+(dial out, nothing dials in); Settings can bind every interface and attach
+bootstrap files so the node reaches peers past the LAN. **Node → Open in
+Browser** opens the same page in your browser; **Node → Show Data Folder**,
+**Show Node Log** and **Copy Peer Id** are where to look when it will not
+start or when someone else is adding this node.
 
 **macOS will refuse to open it the first time.** The installer is not signed
 with an Apple Developer ID, because this project does not have one, so macOS

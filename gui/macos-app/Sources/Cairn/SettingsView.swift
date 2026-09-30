@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// ⌘, -- how much of this Mac the node's work may use, and where its data
 /// lives.
@@ -17,16 +18,38 @@ struct SettingsView: View {
     @AppStorage(NodeSettings.Key.limitStorage) private var limitStorage = false
     @AppStorage(NodeSettings.Key.storageGB) private var storageGB = NodeSettings.defaultStorageGB
     @AppStorage(NodeSettings.Key.dataFolder) private var dataFolder = ""
+    @AppStorage(NodeSettings.Key.p2pHost) private var p2pHost = NodeSettings.loopbackHost
+    @AppStorage(NodeSettings.Key.bootstrap) private var bootstrap = ""
+    @AppStorage(NodeSettings.Key.attachURL) private var attachURL = ""
 
     @State private var usage: DataFolder.Usage?
     @State private var pending: FolderChange?
     @State private var copying = false
     @State private var problem: String?
+    @State private var bootstrapAddr = ""
+    @State private var bootstrapBusy = false
 
     private var current: NodeSettings { NodeSettings.current() }
+    private var bootstrapPaths: [String] { NodeSettings.parseBootstrap(bootstrap) }
+    private var attaching: Bool { !attachURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         Form {
+            Section {
+                attach
+            } header: {
+                Text("Window")
+            } footer: {
+                Caption("""
+                    By default this app runs a local node and shows its reader. \
+                    Attach instead to open any node's reader without starting one \
+                    — the same idea as pointing the iPhone app at a URL. Resource \
+                    limits, bootstrap files and the data folder then apply only \
+                    when you switch back to running a node here.
+                    """)
+            }
+
+            if !attaching {
             Section {
                 processor
             } header: {
@@ -64,6 +87,21 @@ struct SettingsView: View {
             }
 
             Section {
+                network
+            } header: {
+                Text("Network")
+            } footer: {
+                Caption("""
+                    The reader stays on this Mac. Peers on the local segment find each \
+                    other without a file. A peer elsewhere needs a bootstrap file with \
+                    its address and real transport key; `cairn gen-bootstrap` writes the \
+                    shape, and a placeholder key is warned about at every start until \
+                    the real one replaces it. A bootstrap is a dial hint, never a trust \
+                    decision — the handshake authenticates the key.
+                    """)
+            }
+
+            Section {
                 folder
                 Toggle("Limit storage", isOn: $limitStorage)
                 if limitStorage {
@@ -90,6 +128,7 @@ struct SettingsView: View {
                     and tells you. It never deletes the ledger to fit.
                     """)
             }
+            } // !attaching
 
             if needsRestart {
                 Section {
@@ -102,9 +141,9 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 540)
+        .frame(width: 560)
         .fixedSize(horizontal: false, vertical: true)
-        .disabled(copying)
+        .disabled(copying || bootstrapBusy)
         .task(id: current.dataFolder) { await measure() }
         .alert(pending?.title ?? "", isPresented: Binding(
             get: { pending != nil }, set: { if !$0 { pending = nil } }
@@ -120,7 +159,7 @@ struct SettingsView: View {
         } message: { change in
             Text(change.message)
         }
-        .alert("Could not change the data folder", isPresented: Binding(
+        .alert("Something went wrong", isPresented: Binding(
             get: { problem != nil }, set: { if !$0 { problem = nil } }
         )) {
             Button("OK", role: .cancel) {}
@@ -130,6 +169,29 @@ struct SettingsView: View {
     }
 
     // MARK: sections
+
+    private var attach: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Attach to an existing node", isOn: Binding(
+                get: { attaching },
+                set: { on in
+                    if on {
+                        if attachURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            attachURL = "http://127.0.0.1:8080/ui/"
+                        }
+                    } else {
+                        attachURL = ""
+                    }
+                }
+            ))
+            if attaching {
+                TextField("Reader URL", text: $attachURL)
+                    .font(.body.monospaced())
+                Text("Example: http://192.168.1.10:8080/ui/ — the page this window will show. Nothing is started on this Mac.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
 
     private var processor: some View {
         let all = NodeSettings.cores
@@ -143,6 +205,95 @@ struct SettingsView: View {
             range: 1...max(1, all),
             text: cpus == 0 || cpus >= all ? "All \(all) cores" : "\(cpus) of \(all) cores"
         )
+    }
+
+    private var network: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("P2P listen", selection: $p2pHost) {
+                Text("This Mac only").tag(NodeSettings.loopbackHost)
+                Text("Any interface (accept inbound)").tag(NodeSettings.anyHost)
+            }
+            if p2pHost == NodeSettings.loopbackHost {
+                Text("The node dials peers and nothing dials it. Enough to sync; not enough to be a peer others reach.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("Binds 0.0.0.0 on the P2P port. Hand out this Mac's LAN or public address with the peer id below — never put a cloud public IP in the listen field; it is not on any local interface.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            LabeledContent("Peer id") {
+                Text(node.peerId ?? "shown once the node has started")
+                    .font(.callout.monospaced())
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(node.peerId == nil ? .secondary : .primary)
+            }
+            if let listen = node.listenAddress {
+                LabeledContent("Listening") {
+                    Text(listen).font(.callout.monospaced()).textSelection(.enabled)
+                }
+            } else {
+                LabeledContent("Will listen") {
+                    Text("\(current.p2pHost):9000 (or next free)")
+                        .font(.callout.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                Button("Copy peer id") {
+                    guard let id = node.peerId else { return }
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(id, forType: .string)
+                }
+                .disabled(node.peerId == nil)
+                Button("Copy peer id and listen address") {
+                    guard let id = node.peerId else { return }
+                    let addr = node.listenAddress ?? "\(current.p2pHost):9000"
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString("\(id) \(addr)", forType: .string)
+                }
+                .disabled(node.peerId == nil)
+            }
+            .font(.callout)
+
+            Divider()
+
+            Text("Bootstrap files").font(.headline)
+            if bootstrapPaths.isEmpty {
+                Text("None. LAN peers only, unless this cairn binary dials built-in seeds on its own.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                ForEach(bootstrapPaths, id: \.self) { path in
+                    HStack {
+                        Image(systemName: FileManager.default.fileExists(atPath: path)
+                              ? "doc" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(FileManager.default.fileExists(atPath: path)
+                                             ? Color.secondary : .orange)
+                        Text(path)
+                            .font(.caption.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(path)
+                        Spacer()
+                        Button("Remove") { removeBootstrap(path) }
+                            .buttonStyle(.link)
+                    }
+                }
+            }
+            HStack {
+                Button("Choose…") { chooseBootstrap() }
+                TextField("host:port for generate", text: $bootstrapAddr)
+                    .font(.body.monospaced())
+                    .frame(width: 160)
+                Button("Generate…") { generateBootstrap() }
+                    .disabled(!Self.isHostPort(bootstrapAddr.trimmingCharacters(in: .whitespacesAndNewlines))
+                              || bootstrapBusy)
+            }
+            .font(.callout)
+        }
     }
 
     private var folder: some View {
@@ -221,6 +372,59 @@ struct SettingsView: View {
         if panel.runModal() == .OK, let url = panel.url {
             propose(url)
         }
+    }
+
+    private func chooseBootstrap() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Use as Bootstrap"
+        panel.message = "A bootstrap file is an address and a transport key. The handshake authenticates the key."
+        if panel.runModal() == .OK {
+            var paths = bootstrapPaths
+            for url in panel.urls {
+                let path = url.path
+                if !paths.contains(path) { paths.append(path) }
+            }
+            bootstrap = NodeSettings.joinBootstrap(paths)
+        }
+    }
+
+    private func removeBootstrap(_ path: String) {
+        bootstrap = NodeSettings.joinBootstrap(bootstrapPaths.filter { $0 != path })
+    }
+
+    private func generateBootstrap() {
+        let addr = bootstrapAddr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isHostPort(addr) else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "bootstrap.json"
+        panel.allowedContentTypes = [.json]
+        panel.prompt = "Generate"
+        panel.message = "Writes a placeholder key. Paste the peer's real transport key into the file before the node can authenticate them."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        bootstrapBusy = true
+        node.generateBootstrap(addr: addr, to: url) { error in
+            bootstrapBusy = false
+            if let error {
+                problem = error
+            } else {
+                var paths = bootstrapPaths
+                if !paths.contains(url.path) { paths.append(url.path) }
+                bootstrap = NodeSettings.joinBootstrap(paths)
+            }
+        }
+    }
+
+    /// host:port with a non-empty host and a 1…65535 port. Same shape the
+    /// Autoresearcher sheet accepts; kept local so this app does not share types.
+    private static func isHostPort(_ value: String) -> Bool {
+        guard let idx = value.lastIndex(of: ":") else { return false }
+        let host = value[..<idx]
+        let port = value[value.index(after: idx)...]
+        guard !host.isEmpty, let n = UInt16(port), n > 0 else { return false }
+        return true
     }
 
     /// Decide what choosing `target` means, and ask when it could cost

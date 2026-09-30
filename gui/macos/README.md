@@ -21,7 +21,9 @@ when it is never distributed.
 that carries the embedded reader, Node for the one-time build), an activity
 card with the running engine's own progress line and elapsed time, tiles for
 solved / declined / open / earned / spendable, an earnings chart in settlement
-order, the accepted claims, and the researcher's state.
+order, the accepted claims, and the researcher's state. Start and One sweep
+stay disabled until the first four checks have run and passed — an empty
+check list is not "ready".
 
 The activity card counts down to the next sweep against the time the
 researcher itself published, shows how far through the objective list the
@@ -46,6 +48,11 @@ objective's pinned verifier on an artifact JSON of your own through
 `cairn propose --dry-run`, recording nothing; **Open in reader** jumps to the
 node's page for it. The context menu copies ids.
 
+**Tasks.** Curated work to select in one step — ECC2K-130 paid orbits, the
+frontier answer objective, and the ECC2K-23 demo twin. Choosing a task checks
+its objectives in Catalog for posting; the autoresearcher still does not solve
+ECC2K-130 itself.
+
 **Catalog.** Every `examples/**/objective*.json` in the checkout, grouped by
 family, with a checkbox each and the researcher's own verdict under it,
 computed by `autoresearcher.py --plan` at the current budget and recomputed
@@ -58,12 +65,14 @@ holds are marked *posted* and left alone on a re-post, which is refused by
 id.
 
 **Node.** Health, the current epoch with a countdown to the next, ledger
-height, epoch links, peers and objective count from the node's routes;
-balances for every holder from `cairn balances`; the identity's public key
-with copy and reveal; records by kind; then a native **Ledger** table of
-every entry, a **Peers** table, and the node's own reader, chain page,
-objectives JSON and log JSON in an embedded web view. **Audit log** runs
-`cairn audit` and shows whether every settled claim re-verifies.
+height, epoch links (and whether the chain walks — the first broken `prev`
+is named), peers and objective count from the node's routes; balances for
+every holder from `cairn balances`; the identity's public key with copy and
+reveal; records by kind; then a native **Ledger** table of every entry, a
+**Peers** table (log announcements, not live sessions), and the node's own
+reader, chain page, objectives JSON and log JSON in an embedded web view.
+Tiles say which HTTP route or CLI command each number came from. **Audit log**
+runs `cairn audit` and shows whether every settled claim re-verifies.
 
 **Add peer…** covers both halves of adding one, because the network has two
 and they answer different questions. *Announce in the log* appends a peer

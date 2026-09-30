@@ -22,11 +22,19 @@ struct NodeView: View {
                         Tile(title: "Ledger height", value: model.chain?.height.map(String.init) ?? "–", color: .blue,
                              caption: model.chain?.ledger_head.map { String($0.prefix(18)) } ?? "entries in the log")
                         Tile(title: "Epoch links", value: model.chain?.links.map(String.init) ?? "–", color: .indigo,
-                             caption: model.chain?.head.flatMap { $0.isEmpty ? nil : String($0.prefix(18)) } ?? "settled epochs")
+                             caption: model.brokenLinkEpoch.map { "breaks at epoch \($0)" }
+                                ?? model.chain?.head.flatMap { $0.isEmpty ? nil : String($0.prefix(18)) }
+                                ?? "settled epochs")
                         Tile(title: "Peers", value: model.peerCount.map(String.init) ?? "–", color: .cyan, caption: "peer records in the log")
                         Tile(title: "Objectives", value: model.nodeReachable ? "\(model.nodeObjectives.count)" : "–", color: .purple,
                              caption: "\(model.frontiers.count) with a frontier")
                     }
+                    if let broken = model.brokenLinkEpoch {
+                        Label("Chain integrity: epoch \(broken) does not follow the previous link. The node published a chain this reader cannot walk.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    ProvenanceLine("tiles from GET /chain, /peers, /objectives · balances from cairn balances")
                     HStack(alignment: .top, spacing: 14) {
                         VStack(spacing: 14) {
                             discoveryCard
@@ -233,19 +241,23 @@ struct NodeView: View {
     }
 
     private var peersTable: some View {
-        Table(model.peers) {
-            TableColumn("identity") { p in Text(String(p.identity.prefix(24))).font(.caption.monospaced()) }
-            TableColumn("address") { p in Text(p.addr) }
-            TableColumn("transport") { p in Text(p.transport) }.width(90)
-            TableColumn("since") { p in Text(p.createdAt).font(.caption.monospaced()) }
-        }
-        .overlay {
-            if model.peers.isEmpty {
-                VStack(spacing: 8) {
-                    Text("No peer records in this log.").foregroundStyle(.secondary)
-                    Text("Peers appear when the node reaches a seed built into cairn, is given a bootstrap file, or hears one on the LAN. A seed that does not answer is named in the node log.")
-                        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
-                    Button("Add a peer…") { showAddPeer = true }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Announcements in this log — where an identity said it answers — not live sessions. A wrong address costs a dial; the handshake still authenticates the key.")
+                .font(.caption).foregroundStyle(.secondary)
+            Table(model.peers) {
+                TableColumn("identity") { p in Text(String(p.identity.prefix(24))).font(.caption.monospaced()) }
+                TableColumn("address") { p in Text(p.addr) }
+                TableColumn("transport") { p in Text(p.transport) }.width(90)
+                TableColumn("since") { p in Text(p.createdAt).font(.caption.monospaced()) }
+            }
+            .overlay {
+                if model.peers.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("No peer records in this log.").foregroundStyle(.secondary)
+                        Text("Peers appear when the node reaches a seed built into cairn, is given a bootstrap file, or hears one on the LAN. A seed that does not answer is named in the node log.")
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
+                        Button("Add a peer…") { showAddPeer = true }
+                    }
                 }
             }
         }
