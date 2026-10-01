@@ -11,7 +11,7 @@ struct SecretsView: View {
     @State private var value = ""
     @State private var revealValue = false
     @State private var busy = false
-    @State private var error: String?
+    @State private var problem: String?
     @State private var info: String?
 
     private static let suggestions = [
@@ -80,9 +80,9 @@ struct SecretsView: View {
                     Button("Refresh") { refresh() }.disabled(busy)
                 }
 
-                if let error {
+                if let problem {
                     Section {
-                        Text(error).foregroundStyle(.red).textSelection(.enabled)
+                        Text(problem).foregroundStyle(.red).textSelection(.enabled)
                     }
                 }
                 if let info {
@@ -107,27 +107,23 @@ struct SecretsView: View {
 
     private func refresh() {
         busy = true
-        error = nil
-        model.listSecrets { result in
+        problem = nil
+        model.listSecrets { listed, message in
             busy = false
-            switch result {
-            case .success(let listed):
-                names = listed.names
-                secretsDir = listed.dir
-            case .failure(let message):
-                error = message
-            }
+            if let message { problem = message; return }
+            names = listed?.names ?? []
+            secretsDir = listed?.dir
         }
     }
 
     private func save() {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         busy = true
-        error = nil
+        problem = nil
         info = nil
         model.setSecret(name: n, value: value) { err in
             busy = false
-            if let err { error = err; return }
+            if let err { problem = err; return }
             value = ""
             revealValue = false
             info = "Saved \(n)."
@@ -137,10 +133,10 @@ struct SecretsView: View {
 
     private func delete(_ n: String) {
         busy = true
-        error = nil
+        problem = nil
         model.deleteSecret(name: n) { err in
             busy = false
-            if let err { error = err; return }
+            if let err { problem = err; return }
             info = "Deleted \(n)."
             refresh()
         }

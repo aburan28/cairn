@@ -425,9 +425,9 @@ final class Node: ObservableObject {
         var dir: String?
     }
 
-    func listSecrets(completion: @escaping (Result<SecretsList, String>) -> Void) {
+    func listSecrets(completion: @escaping (SecretsList?, String?) -> Void) {
         guard let binary = binary ?? Self.locateBinary() else {
-            completion(.failure("No cairn command was found."))
+            completion(nil, "No cairn command was found.")
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {
@@ -435,9 +435,9 @@ final class Node: ObservableObject {
             let listOut = Self.runCairn(binary, ["secret", "list"])
             DispatchQueue.main.async {
                 if listOut.status != 0 {
-                    completion(.failure(listOut.err.isEmpty
-                                        ? "cairn secret list failed (\(listOut.status))"
-                                        : listOut.err))
+                    completion(nil, listOut.err.isEmpty
+                               ? "cairn secret list failed (\(listOut.status))"
+                               : listOut.err)
                     return
                 }
                 let dir = pathOut.status == 0 ? pathOut.out : nil
@@ -445,7 +445,7 @@ final class Node: ObservableObject {
                     .split(separator: "\n")
                     .map { String($0).trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty && !$0.hasPrefix("(") }
-                completion(.success(SecretsList(names: names, dir: dir)))
+                completion(SecretsList(names: names, dir: dir), nil)
             }
         }
     }
@@ -507,13 +507,13 @@ final class Node: ObservableObject {
         }
     }
 
-    private struct CairnRun {
+    private struct CairnRun: Sendable {
         var status: Int32
         var out: String
         var err: String
     }
 
-    private static func runCairn(_ binary: URL, _ args: [String]) -> CairnRun {
+    nonisolated private static func runCairn(_ binary: URL, _ args: [String]) -> CairnRun {
         let p = Process()
         p.executableURL = binary
         p.arguments = args

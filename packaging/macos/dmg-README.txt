@@ -7,8 +7,9 @@ Double-click "Install Cairn.pkg". It installs:
     /usr/local/cairn/bin/cairn     the command-line program the app runs
     /usr/local/bin/cairn           a link to it, so `cairn` is on your PATH
 
-It starts no background service and adds no login item. The app's node runs
-only while the app is open, and keeps its data in
+It starts no background service and adds no login item. When the package
+finishes, it opens Cairn.app for the logged-in user. The app's node runs only
+while the app is open, and keeps its data in
 ~/Library/Application Support/Cairn.
 
 
@@ -18,7 +19,8 @@ only while the app is open, and keeps its data in
 THEN
 ----------------------------------------------------------------------
 
-Open Cairn from Applications. Or, from a new terminal window:
+Cairn should already be open. If not, open it from Applications. Or, from a
+new terminal window:
 
     cairn --version
     cairn run                  # a complete local node

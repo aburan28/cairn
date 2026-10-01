@@ -17,7 +17,7 @@ struct SecretsSheet: View {
     @State private var value = ""
     @State private var revealValue = false
     @State private var busy = false
-    @State private var error: String?
+    @State private var problem: String?
     @State private var info: String?
 
     /// Names the ECC2K campaign path and similar ops already read.
@@ -49,8 +49,8 @@ struct SecretsSheet: View {
             Divider()
             storedList
 
-            if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
+            if let problem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.red).textSelection(.enabled)
             }
             if let info {
@@ -157,16 +157,12 @@ struct SecretsSheet: View {
 
     private func refresh() {
         busy = true
-        error = nil
-        node.listSecrets { result in
+        problem = nil
+        node.listSecrets { listed, message in
             busy = false
-            switch result {
-            case .success(let listed):
-                names = listed.names
-                secretsDir = listed.dir
-            case .failure(let message):
-                error = message
-            }
+            if let message { problem = message; return }
+            names = listed?.names ?? []
+            secretsDir = listed?.dir
         }
     }
 
@@ -174,12 +170,12 @@ struct SecretsSheet: View {
         let n = name.trimmed
         guard nameOK, !value.isEmpty else { return }
         busy = true
-        error = nil
+        problem = nil
         info = nil
         let payload = value
         node.setSecret(name: n, value: payload) { err in
             busy = false
-            if let err { error = err; return }
+            if let err { problem = err; return }
             value = ""
             revealValue = false
             info = "Saved \(n). The value is not shown again."
@@ -189,11 +185,11 @@ struct SecretsSheet: View {
 
     private func delete(_ n: String) {
         busy = true
-        error = nil
+        problem = nil
         info = nil
         node.deleteSecret(name: n) { err in
             busy = false
-            if let err { error = err; return }
+            if let err { problem = err; return }
             info = "Deleted \(n)."
             if name.trimmed == n { name = ""; value = "" }
             refresh()
@@ -216,7 +212,7 @@ struct SecretsSheet: View {
             }
             info = "Loaded from \(url.lastPathComponent). Press Save to store."
         } catch {
-            self.error = error.localizedDescription
+            problem = error.localizedDescription
         }
     }
 }

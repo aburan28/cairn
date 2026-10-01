@@ -1,0 +1,37 @@
+#!/bin/sh
+# Runs as root after Cairn.app is written to /Applications/Cairn.app.
+#
+# Opens the GUI for the console user so a double-click install lands on a
+# running window, not only a receipt. Installer scripts run as root, so a bare
+# `open` would start the app as root and put its data in the wrong home; launch
+# as the logged-in user instead. Failures here must not fail the install: the
+# package already put the bits on disk.
+set -eu
+
+TARGET="${3:-/}"
+[ "$TARGET" = "/" ] && TARGET=""
+
+APP="$TARGET/Applications/Cairn.app"
+[ -d "$APP" ] || exit 0
+
+# Only the boot volume has a console session worth opening into. A package
+# pointed at another volume still installs; it just does not launch.
+if [ -n "$TARGET" ]; then
+  exit 0
+fi
+
+CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+case "$CONSOLE_USER" in
+  ""|root) exit 0 ;;
+esac
+
+CONSOLE_UID="$(id -u "$CONSOLE_USER" 2>/dev/null || true)"
+[ -n "$CONSOLE_UID" ] || exit 0
+
+# Prefer launchctl asuser (Aqua session); fall back to open as that user.
+if launchctl asuser "$CONSOLE_UID" /usr/bin/open "$APP" 2>/dev/null; then
+  exit 0
+fi
+/usr/bin/su - "$CONSOLE_USER" -c "/usr/bin/open '$APP'" 2>/dev/null || true
+
+exit 0

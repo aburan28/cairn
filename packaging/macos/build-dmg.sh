@@ -227,7 +227,8 @@ pkgbuild --quiet \
 # leave behind any file this version no longer has, and a stray file inside a
 # bundle breaks its signature.
 cp "$HERE/preinstall-app" "$WORK/app-scripts/preinstall"
-chmod 0755 "$WORK/app-scripts/preinstall"
+cp "$HERE/postinstall-app" "$WORK/app-scripts/postinstall"
+chmod 0755 "$WORK/app-scripts/preinstall" "$WORK/app-scripts/postinstall"
 pkgbuild --quiet \
     --root "$APP_ROOT" \
     --install-location /Applications/Cairn.app \

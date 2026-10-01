@@ -576,9 +576,9 @@ final class ResearcherModel: ObservableObject {
         var dir: String?
     }
 
-    func listSecrets(completion: @escaping (Result<SecretsList, String>) -> Void) {
+    func listSecrets(completion: @escaping (SecretsList?, String?) -> Void) {
         guard hasBinary else {
-            completion(.failure("bin/cairn is missing. Build first."))
+            completion(nil, "bin/cairn is missing. Build first.")
             return
         }
         let bin = cairnBinary
@@ -587,13 +587,13 @@ final class ResearcherModel: ObservableObject {
             let list = ResearcherModel.runCairn(bin, ["secret", "list"])
             DispatchQueue.main.async {
                 if list.status != 0 {
-                    completion(.failure(list.err.isEmpty ? "cairn secret list failed" : list.err))
+                    completion(nil, list.err.isEmpty ? "cairn secret list failed" : list.err)
                     return
                 }
                 let names = list.out.split(separator: "\n")
                     .map { String($0).trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty && !$0.hasPrefix("(") }
-                completion(.success(SecretsList(names: names, dir: path.status == 0 ? path.out : nil)))
+                completion(SecretsList(names: names, dir: path.status == 0 ? path.out : nil), nil)
             }
         }
     }
@@ -638,13 +638,13 @@ final class ResearcherModel: ObservableObject {
         }
     }
 
-    private struct CairnRun {
+    private struct CairnRun: Sendable {
         var status: Int32
         var out: String
         var err: String
     }
 
-    private static func runCairn(_ binary: String, _ args: [String]) -> CairnRun {
+    nonisolated private static func runCairn(_ binary: String, _ args: [String]) -> CairnRun {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
         p.arguments = args
