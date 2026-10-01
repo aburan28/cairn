@@ -671,8 +671,13 @@ impl SealedEnvelope {
         // one entity holds two shares, which quietly lowers the threshold the
         // rest of the system believes it has. Both are caller bugs worth
         // refusing loudly (docs/censorship.md §2 on collusion cost).
+        //
+        // Ids are hashed once up front: each is a SHA-256 over the 261 KB
+        // McEliece leg, and computing it inside the pairwise loop cost a
+        // gigabyte of hashing per seal at a 64-seat committee.
+        let ids: Vec<_> = committee.iter().map(|member| member.id()).collect();
         for (i, member) in committee.iter().enumerate() {
-            for other in committee.iter().skip(i + 1) {
+            for (j, other) in committee.iter().enumerate().skip(i + 1) {
                 if member.index == other.index {
                     return Err(EnvelopeError::DuplicateMemberIndex {
                         index: member.index,
@@ -684,7 +689,7 @@ impl SealedEnvelope {
                 // whole bundles would let one entity dodge this rule by
                 // publishing a second bundle that reuses its McEliece key and
                 // adds an ML-KEM one. Cheaper too: 32 bytes rather than 261 KB.
-                if member.id() == other.id() {
+                if ids[i] == ids[j] {
                     return Err(EnvelopeError::DuplicateMemberKey { index: other.index });
                 }
             }

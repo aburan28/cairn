@@ -579,8 +579,16 @@ impl Service {
             return 0;
         }
         let mut learned = 0;
+        let mut asked = 0;
         let now = Instant::now();
-        for (peer, addr) in contacts.iter().take(limit) {
+        // `limit` caps the requests made, not the contacts looked at. Taking
+        // the first `limit` contacts before the backoff check meant the same
+        // few keyless peers -- first in map order -- held every slot forever,
+        // each skipped for its backoff, and nobody after them was ever asked.
+        for (peer, addr) in contacts {
+            if asked >= limit {
+                break;
+            }
             if *peer == self.identity.id() || self.with_book(|book| !book.for_peer(peer).is_empty())
             {
                 continue;
@@ -588,6 +596,7 @@ impl Service {
             if !self.may_ask_for_key(peer, now) {
                 continue;
             }
+            asked += 1;
             // A beacon's address is the datagram's source, which for a node
             // bound to every interface is the host's LAN address -- and a
             // node on *this* host that listens on loopback only is not there.
@@ -1296,6 +1305,16 @@ fn replay_records_with_horizon(
             .unwrap_or("")
             .to_string()
     };
+    // What the log already holds, digested once. Probing the ledger per record
+    // re-encoded and re-hashed every entry for every record offered, so one
+    // sync between two peers already in step cost O(L^2) digests -- all of
+    // it under the daemon's lock.
+    let mut held_digests: BTreeSet<(String, String)> = node
+        .ledger()
+        .entries()
+        .iter()
+        .map(|entry| (entry.kind.clone(), entry.payload.digest()))
+        .collect();
     for kind in ["objective", "commitment", "claim"] {
         let mut batch: Vec<&(String, crate::canonical::Value)> =
             records.iter().filter(|(k, _)| k == kind).collect();
@@ -1311,14 +1330,10 @@ fn replay_records_with_horizon(
             (crate::time::parse_rfc3339(&stamp), payload.digest())
         });
         for (_, payload) in batch {
-            if node
-                .ledger()
-                .entries()
-                .iter()
-                .any(|entry| entry.kind == *kind && entry.payload.digest() == payload.digest())
-            {
+            if held_digests.contains(&(kind.to_string(), payload.digest())) {
                 continue;
             }
+            let before = node.ledger().entries().len();
             let stamp = held(payload);
             let record_epoch = crate::time::parse_rfc3339(&stamp)
                 .and_then(|seconds| u64::try_from(seconds).ok())
@@ -1348,6 +1363,11 @@ fn replay_records_with_horizon(
                     }
                 }
                 _ => {}
+            }
+            // Whatever the append wrote, the next probe must see -- exactly as
+            // the per-record scan did.
+            for entry in node.ledger().entries().get(before..).unwrap_or_default() {
+                held_digests.insert((entry.kind.clone(), entry.payload.digest()));
             }
         }
     }

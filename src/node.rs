@@ -2378,12 +2378,30 @@ impl Node {
     /// stake at all, and no committee size fixes that.
     pub fn custody_guard(&self, epoch: u64, size: u8, positions: usize) -> u128 {
         let boundary = self.epoch_boundary(epoch, positions);
+        let balances = self.balances_within(boundary);
+        self.custody_guard_given(epoch, size, positions, &balances)
+    }
+
+    /// [`Node::custody_guard`] against balances already derived at the epoch
+    /// boundary.
+    ///
+    /// Every seat reads the same prefix, so deriving the balances once is the
+    /// same answer as asking [`Node::spendable_within`] per seat -- which
+    /// replayed the whole ledger for each one, and [`Node::committee_size_at`]
+    /// asks for every size up to the maximum: thousands of replays per draw.
+    fn custody_guard_given(
+        &self,
+        epoch: u64,
+        size: u8,
+        positions: usize,
+        balances: &BTreeMap<String, u128>,
+    ) -> u128 {
         let Ok(seats) = self.committee_of_size(epoch, size, positions) else {
             return 0;
         };
         let mut stakes: Vec<u128> = seats
             .iter()
-            .map(|seat| self.spendable_within(&seat.identity, boundary))
+            .map(|seat| balances.get(&seat.identity).copied().unwrap_or(0))
             .collect();
         stakes.sort_unstable();
         let threshold = usize::from(partition::threshold_for(size));
@@ -2434,9 +2452,10 @@ impl Node {
             return floor;
         }
         let ceiling = partition::MAX_COMMITTEE_SIZE.min(peers.min(255) as u8);
+        let balances = self.balances_within(boundary);
         let mut size = floor;
         while size < ceiling {
-            if self.custody_guard(epoch, size, positions) >= carried {
+            if self.custody_guard_given(epoch, size, positions, &balances) >= carried {
                 return size;
             }
             size = size.saturating_add(1);
@@ -8401,11 +8420,17 @@ fn render_previous(previous: Option<i64>) -> String {
 /// where discrete log is hard, which is the assumption this network has
 /// deliberately declined to make. See [`Node::open_sealed`].
 ///
-/// Bounded by construction: shares come from `committee_shares_for`, which
-/// admits at most one per seat, and a committee is `COMMITTEE_SIZE` seats. So
-/// this is at most `C(COMMITTEE_SIZE, threshold)` AEAD checks — ten at the
-/// default three-of-five — and cannot be driven higher by anyone, because
-/// adding a share means holding a seat the beacon drew for you.
+/// Bounded only by the committee: shares come from `committee_shares_for`,
+/// which admits at most one per seat, so this is at most `C(n, threshold)` AEAD
+/// checks for a committee of `n`. That is ten at the default three-of-five, but
+/// [`Node::committee_size_at`] grows `n` towards `MAX_COMMITTEE_SIZE` as the
+/// value sealed grows, and the count does not stay small: with one bad share
+/// published first it is `C(n - 1, threshold - 1)` failed checks before an
+/// honest subset is reached — about a second at nineteen seats, and
+/// effectively forever at sixty-four. One seat-holder posting a garbage share
+/// can therefore stall the reveal of a large committee. Making each published
+/// share checkable on its own, without a discrete-log assumption, is the fix;
+/// see the MPC notes in `docs/review/mpc-censorship-discovery.md`.
 ///
 /// Subsets are tried in lexicographic index order, which is log order, which is
 /// the same order on every node: two nodes opening the same submission from the

@@ -422,7 +422,8 @@ fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]
     // A Homebrew, rustup, pyenv, or elan executable normally loads libraries
     // and adjacent resources from the version root two levels above `bin`.
     // Allow that version root, not the whole package manager or home directory.
-    for executable in [resolve(program)] {
+    {
+        let executable = resolve(program);
         if let Some(runtime_root) = narrow_runtime_root(&executable) {
             // A runtime root is an installation prefix such as
             // `/opt/homebrew/Cellar/python@3.13/3.13.2`, never the filesystem
