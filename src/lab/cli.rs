@@ -75,13 +75,16 @@ DOCS, LEASES, MESSAGES
     ack MSG-ID --as ADDR --identity FILE
 
 ENVIRONMENTS AND RUNS
-    env import NAME (--docker IMAGE | --podman IMAGE | --tar FILE | --dir DIR) --identity FILE
-               [--env KEY=VALUE]... [--workdir DIR] [--note TEXT]
+    env import NAME (--docker IMAGE | --podman IMAGE | --tar FILE | --dir DIR [--move])
+               --identity FILE [--env KEY=VALUE]... [--workdir DIR] [--note TEXT]
     env ls [--json] | env show NAME | env verify NAME
     exec --env NAME --identity FILE [--input LABPATH[:TARGET]]... [--mount HOSTDIR:TARGET]...
          [--publish PREFIX] [--cwd DIR] [--setenv KEY=VALUE]... [--timeout SECONDS]
          [--memory MB] [--cpus N] [--pids N] [--network] [--sandbox auto|runsc|bwrap|none]
          [--task TASK] [--note TEXT] [--keep] [--json] -- COMMAND [ARGS]...
+                                    inputs are read-only: a prefix becomes a directory at
+                                    TARGET (default /in/LABPATH), a single file that file;
+                                    whatever the command writes to /out is published
     runs [--limit N] [--json]       run receipts, newest first
     sandbox                         which sandbox this host can use
 
@@ -1341,6 +1344,7 @@ fn cmd_env(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32, 
                     image: image.into(),
                 },
                 (None, None, Some(tar), None) => Source::Tar(tar.into()),
+                (None, None, None, Some(dir)) if parsed.has("move") => Source::Move(dir.into()),
                 (None, None, None, Some(dir)) => Source::Dir(dir.into()),
                 _ => return usage("give exactly one of --docker, --podman, --tar, --dir"),
             };

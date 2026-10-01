@@ -178,6 +178,12 @@ pub fn rootfs_path(lab: &Lab, tree: &str) -> Result<PathBuf, LabError> {
 pub enum Source {
     /// A directory, copied.
     Dir(PathBuf),
+    /// A directory, moved into the lab rather than copied. For a tree built
+    /// in place (see `examples/lab/environments/`): a Sage environment is
+    /// gigabytes, and a copy would need that much free space again. The
+    /// directory must be on the same filesystem as the lab and is gone
+    /// afterwards.
+    Move(PathBuf),
     /// A tarball of a root filesystem (`docker export` writes one), extracted.
     Tar(PathBuf),
     /// A local container image, exported through `docker` (or `podman`).
@@ -253,7 +259,18 @@ pub fn import(
             return Err(e);
         }
     };
-    let tree = tree_digest(&rootfs)?;
+    let tree = match tree_digest(&rootfs) {
+        Ok(tree) => tree,
+        Err(e) => {
+            // A moved tree goes back where it came from rather than being
+            // left in staging or deleted with it: it may be hours of build.
+            if let Source::Move(dir) = source {
+                let _ = fs::rename(&rootfs, dir);
+            }
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
     let dest = rootfs_path(lab, &tree.digest)?;
     if dest.exists() {
         let _ = fs::remove_dir_all(&staging);
@@ -352,6 +369,27 @@ fn materialise(source: &Source, rootfs: &Path) -> Result<Materialised, LabError>
                 Value::object([
                     ("kind", Value::string("dir")),
                     ("path", Value::string(dir.display().to_string())),
+                ]),
+                BTreeMap::new(),
+                None,
+            ))
+        }
+        Source::Move(dir) => {
+            // `rootfs` was created empty for the other sources; a rename needs
+            // its destination absent.
+            fs::remove_dir(rootfs)?;
+            fs::rename(dir, rootfs).map_err(|e| {
+                LabError::Io(format!(
+                    "cannot move {} into the lab ({e}); it must be on the same \
+                     filesystem — import with --dir to copy instead",
+                    dir.display()
+                ))
+            })?;
+            Ok((
+                Value::object([
+                    ("kind", Value::string("dir")),
+                    ("path", Value::string(dir.display().to_string())),
+                    ("moved", Value::Bool(true)),
                 ]),
                 BTreeMap::new(),
                 None,

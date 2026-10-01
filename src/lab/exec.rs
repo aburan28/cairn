@@ -13,6 +13,28 @@
 //! directory, a tmpfs `/tmp`, **no network** unless asked, a wall-clock
 //! deadline, and optional memory, CPU and process limits.
 //!
+//! # The environment's tree is never the runtime's root
+//!
+//! A run's root is an empty directory of its own, with the environment's
+//! top-level entries bound into it read-only, and every mount point is made in
+//! that root. gVisor's gofer creates a missing mount point on the host, in the
+//! directory the OCI root names, before that root is made read-only — and it
+//! does so through a read-only bind as well. Handed the environment's tree as
+//! its root, one run with an input at `/work/x` left an empty `/work/x` behind
+//! in it, and the tree stopped matching the digest every later receipt named.
+//! For the same reason a mount target that would have to be created *inside*
+//! one of the environment's own directories is refused ([`check_targets`]); a
+//! new top-level path such as `/work` or `/in` is made in the run's own root.
+//!
+//! No two mounts share a destination. runsc sorts a config's mounts before
+//! mounting them, and not stably: with an environment's `/out` bound read-only
+//! and the run's writable output at `/out` too, which one ended up on top
+//! changed with the number of mounts, and a Sage run found its output
+//! directory read-only. So a mount at a top-level path *replaces* the
+//! environment's entry there rather than covering it, and targets may neither
+//! repeat nor nest. Bubblewrap gets the identical layout, so a request means
+//! the same thing under either backend.
+//!
 //! # Memory is limited by resident set or cgroup, never `RLIMIT_AS`
 //!
 //! Computer algebra systems reserve address space far beyond what they touch;
@@ -77,6 +99,12 @@ pub struct Spec {
     pub tmp_mb: u64,
     /// Allow network access. Off by default and recorded either way.
     pub network: bool,
+    /// Where the sandbox runtime keeps its state, shared by every run of one
+    /// lab. Not a per-run directory: `runsc --network=none` bind-mounts a
+    /// `null-netns` file into its state root and never unmounts it, so a
+    /// fresh root per run leaks one mount per run and leaves a directory that
+    /// cannot be deleted. One root per lab holds exactly one.
+    pub runtime_dir: PathBuf,
 }
 
 /// Which jail runs it.
@@ -341,11 +369,11 @@ pub fn run(backend: &Backend, spec: &Spec, work: &Path) -> Outcome {
         notes: Vec::new(),
     };
     let started = Instant::now();
-    let result = match backend {
+    let result = check_targets(&spec.rootfs, &spec.mounts).and_then(|()| match backend {
         Backend::Gvisor { runsc, .. } => run_gvisor(runsc, spec, work, &mut outcome),
         Backend::Bubblewrap { bwrap, .. } => run_bwrap(bwrap, spec, work, &mut outcome),
         Backend::Unconfined => run_unconfined(spec, work, &mut outcome),
-    };
+    });
     if let Err(why) = result {
         outcome.error = Some(why);
     }
@@ -361,11 +389,225 @@ pub fn run(backend: &Backend, spec: &Spec, work: &Path) -> Outcome {
     outcome
 }
 
+// -- the run's root --------------------------------------------------------------
+
+/// Top-level names the sandbox supplies itself. The environment's own
+/// `/proc`, `/dev` and `/tmp` are never bound: each run gets fresh ones.
+const SANDBOX_OWNED: [&str; 3] = ["dev", "proc", "tmp"];
+
+/// One top-level entry of a run's root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Top {
+    /// Bound read-only from the environment's tree.
+    Bind { name: String, dir: bool },
+    /// Recreated as the same symbolic link.
+    Link { name: String, target: PathBuf },
+    /// An empty directory for the sandbox to mount its own filesystem on.
+    Own { name: String },
+}
+
+/// The top-level layout of a run's root, read from the environment's tree, in
+/// byte order of name. An entry that one of `mounts` replaces is left out, and
+/// so are device nodes, sockets and fifos; nothing a program needs lives there.
+fn top_level(rootfs: &Path, mounts: &[Mount]) -> Result<Vec<Top>, String> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(rootfs).map_err(|e| format!("{}: {e}", rootfs.display()))? {
+        let entry = entry.map_err(|e| format!("{}: {e}", rootfs.display()))?;
+        let name = entry.file_name().into_string().map_err(|name| {
+            format!(
+                "the environment has a top-level entry whose name is not UTF-8: {}",
+                name.to_string_lossy()
+            )
+        })?;
+        names.push(name);
+    }
+    names.sort();
+    let mut layout = Vec::new();
+    for name in names {
+        if SANDBOX_OWNED.contains(&name.as_str())
+            || mounts
+                .iter()
+                .any(|mount| mount.target.strip_prefix('/') == Some(name.as_str()))
+        {
+            continue;
+        }
+        let path = rootfs.join(&name);
+        let meta = fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            let target = fs::read_link(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            layout.push(Top::Link { name, target });
+        } else if file_type.is_dir() || file_type.is_file() {
+            layout.push(Top::Bind {
+                name,
+                dir: file_type.is_dir(),
+            });
+        }
+    }
+    layout.extend(SANDBOX_OWNED.iter().map(|name| Top::Own {
+        name: (*name).to_string(),
+    }));
+    Ok(layout)
+}
+
+/// Refuse a mount the runtime would have to create inside the environment's
+/// tree, reach through a link in it, or stack on another mount.
+///
+/// Allowed: a top-level target (it replaces the environment's entry of that
+/// name, if any); a deeper target whose first component the environment does
+/// not have (made in the run's own root); anything under `/tmp` (the run's own
+/// tmpfs); and a deeper target that already exists in the environment as the
+/// same kind — a directory over a directory, a file over a file — which a
+/// mount covers without creating anything. Targets may not repeat or nest.
+/// See the module docs for why the rest is refused.
+pub fn check_targets(rootfs: &Path, mounts: &[Mount]) -> Result<(), String> {
+    for (n, mount) in mounts.iter().enumerate() {
+        check_target(rootfs, &mount.target, mount.source.is_dir())?;
+        for other in &mounts[..n] {
+            let (a, b) = (other.target.as_str(), mount.target.as_str());
+            if a == b {
+                return Err(format!("two mounts at {a:?}"));
+            }
+            let nested = |outer: &str, inner: &str| {
+                inner
+                    .strip_prefix(outer)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            };
+            if nested(a, b) || nested(b, a) {
+                return Err(format!(
+                    "mounts at {a:?} and {b:?} nest; mount them side by side"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_target(rootfs: &Path, target: &str, dir: bool) -> Result<(), String> {
+    let Some(relative) = target.strip_prefix('/') else {
+        return Err(format!("mount target {target:?} is not absolute"));
+    };
+    let segments: Vec<&str> = relative.split('/').collect();
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
+        return Err(format!(
+            "mount target {target:?} is not a normal path (empty, `.` or `..` segment)"
+        ));
+    }
+    match segments[0] {
+        "dev" | "proc" | "tmp" if segments.len() == 1 => {
+            return Err(format!(
+                "mount target {target:?} is a filesystem the sandbox provides"
+            ))
+        }
+        "tmp" => return Ok(()),
+        "dev" | "proc" => {
+            return Err(format!(
+                "mount target {target:?} is inside /{}, which the sandbox provides",
+                segments[0]
+            ))
+        }
+        // Replaces whatever the environment has there; see `top_level`.
+        _ if segments.len() == 1 => return Ok(()),
+        _ => {}
+    }
+    let kind = |is_dir: bool| if is_dir { "directory" } else { "file" };
+    let mut path = rootfs.to_path_buf();
+    for (depth, segment) in segments.iter().enumerate() {
+        path.push(segment);
+        let here = segments[..=depth].join("/");
+        match fs::symlink_metadata(&path) {
+            Err(_) if depth == 0 => return Ok(()),
+            Err(_) => {
+                return Err(format!(
+                    "mount target {target:?} does not exist in the environment, and making it \
+                     would write into the environment's /{}; mount it at a path the \
+                     environment does not have, such as /work/{}",
+                    segments[..depth].join("/"),
+                    segments[depth..].join("/")
+                ))
+            }
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "mount target {target:?} passes through /{here}, a symbolic link in the \
+                     environment; name the path it resolves to"
+                ))
+            }
+            Ok(meta) if depth + 1 == segments.len() => {
+                if meta.is_dir() != dir {
+                    return Err(format!(
+                        "mount target {target:?} is a {} in the environment and the mount is a {}",
+                        kind(meta.is_dir()),
+                        kind(dir)
+                    ));
+                }
+            }
+            Ok(meta) if !meta.is_dir() => {
+                return Err(format!(
+                    "mount target {target:?} passes through /{here}, a file in the environment"
+                ))
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, at: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, at)
+}
+
+#[cfg(not(unix))]
+fn symlink(_target: &Path, _at: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "sandboxed runs need a Unix host",
+    ))
+}
+
+/// Make the run's own root under `root` and return the read-only binds that
+/// fill it from the environment. The run's own `mounts` go on top of these;
+/// the mount points they need are made here, by the runtime.
+fn scaffold_root(rootfs: &Path, root: &Path, mounts: &[Mount]) -> Result<Vec<Mount>, String> {
+    fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let mut binds = Vec::new();
+    for entry in top_level(rootfs, mounts)? {
+        match entry {
+            Top::Bind { name, dir } => {
+                let at = root.join(&name);
+                let made = if dir {
+                    fs::create_dir_all(&at)
+                } else {
+                    File::create(&at).map(drop)
+                };
+                made.map_err(|e| format!("{}: {e}", at.display()))?;
+                binds.push(Mount {
+                    source: rootfs.join(&name),
+                    target: format!("/{name}"),
+                    writable: false,
+                });
+            }
+            Top::Link { name, target } => {
+                let at = root.join(&name);
+                symlink(&target, &at).map_err(|e| format!("{}: {e}", at.display()))?;
+            }
+            Top::Own { name } => {
+                let at = root.join(&name);
+                fs::create_dir_all(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+            }
+        }
+    }
+    Ok(binds)
+}
+
 // -- gVisor ------------------------------------------------------------------
 
 fn run_gvisor(runsc: &Path, spec: &Spec, work: &Path, outcome: &mut Outcome) -> Result<(), String> {
     let bundle = work.join("bundle");
-    let state = work.join("runsc-state");
+    let state = spec.runtime_dir.clone();
     fs::create_dir_all(&bundle).map_err(|e| e.to_string())?;
     fs::create_dir_all(&state).map_err(|e| e.to_string())?;
     let id = format!(
@@ -384,7 +626,9 @@ fn run_gvisor(runsc: &Path, spec: &Spec, work: &Path, outcome: &mut Outcome) -> 
             .unenforced
             .push("memory/cpu/pids: rootless gVisor has no cgroups here".into());
     }
-    let config = oci_config(spec, use_cgroups);
+    let root = work.join("root");
+    let binds = scaffold_root(&spec.rootfs, &root, &spec.mounts)?;
+    let config = oci_config(spec, &root, &binds, use_cgroups);
     fs::write(bundle.join("config.json"), config.canonical_string()).map_err(|e| e.to_string())?;
 
     let base = |command: &mut Command| {
@@ -459,8 +703,9 @@ fn run_gvisor(runsc: &Path, spec: &Spec, work: &Path, outcome: &mut Outcome) -> 
     Ok(())
 }
 
-/// The OCI runtime config for a run.
-fn oci_config(spec: &Spec, cgroups: bool) -> Value {
+/// The OCI runtime config for a run: `root` is the run's own root, which
+/// `binds` fill from the environment before any input or output is mounted.
+fn oci_config(spec: &Spec, root: &Path, binds: &[Mount], cgroups: bool) -> Value {
     let mut env: Vec<Value> = vec![Value::string(
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     )];
@@ -496,7 +741,7 @@ fn oci_config(spec: &Spec, cgroups: bool) -> Value {
             ),
         ]),
     ];
-    for mount in &spec.mounts {
+    for mount in binds.iter().chain(&spec.mounts) {
         mounts.push(Value::object([
             ("destination", Value::string(&mount.target)),
             ("type", Value::string("bind")),
@@ -573,7 +818,7 @@ fn oci_config(spec: &Spec, cgroups: bool) -> Value {
         (
             "root",
             Value::object([
-                ("path", Value::string(spec.rootfs.display().to_string())),
+                ("path", Value::string(root.display().to_string())),
                 ("readonly", Value::Bool(true)),
             ]),
         ),
@@ -596,25 +841,23 @@ fn run_bwrap(bwrap: &Path, spec: &Spec, work: &Path, outcome: &mut Outcome) -> R
     if spec.network {
         command.arg("--share-net");
     }
-    // The root is a tmpfs with the environment's top-level entries bound into
-    // it read-only. Binding the tree itself at `/` read-only would leave
-    // nowhere to create the mount points for inputs and outputs.
+    // The run's own root is a tmpfs, laid out as gVisor's is (see the module
+    // docs): binding the tree itself at `/` would leave nowhere to create the
+    // mount points for inputs and outputs.
     command.args(["--tmpfs", "/"]);
-    let entries =
-        fs::read_dir(&spec.rootfs).map_err(|e| format!("{}: {e}", spec.rootfs.display()))?;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if matches!(name.as_str(), "proc" | "dev" | "tmp") {
-            continue;
-        }
-        let path = entry.path();
-        let target = format!("/{name}");
-        let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if meta.file_type().is_symlink() {
-            let link = fs::read_link(&path).map_err(|e| e.to_string())?;
-            command.arg("--symlink").arg(link).arg(&target);
-        } else {
-            command.arg("--ro-bind").arg(&path).arg(&target);
+    for entry in top_level(&spec.rootfs, &spec.mounts)? {
+        match entry {
+            Top::Bind { name, .. } => {
+                command
+                    .arg("--ro-bind")
+                    .arg(spec.rootfs.join(&name))
+                    .arg(format!("/{name}"));
+            }
+            Top::Link { name, target } => {
+                command.arg("--symlink").arg(target).arg(format!("/{name}"));
+            }
+            // Mounted below, each by its own option.
+            Top::Own { .. } => {}
         }
     }
     command.args(["--proc", "/proc", "--dev", "/dev"]);
@@ -887,10 +1130,24 @@ mod tests {
             pids: 64,
             tmp_mb: 64,
             network: false,
+            runtime_dir: PathBuf::from("/var/lib/cairn-lab/runsc"),
         };
-        let config = oci_config(&spec, true);
+        let binds = vec![Mount {
+            source: PathBuf::from("/env/usr"),
+            target: "/usr".into(),
+            writable: false,
+        }];
+        let config = oci_config(&spec, Path::new("/work/root"), &binds, true);
         let text = config.canonical_string();
         assert!(text.contains(r#""readonly":true"#), "{text}");
+        // The runtime is handed the run's own root, never the environment's.
+        assert_eq!(
+            config
+                .get("root")
+                .and_then(|r| r.get("path"))
+                .and_then(Value::as_str),
+            Some("/work/root")
+        );
         assert!(text.contains(r#""PATH=/opt/sage/bin:/usr/bin""#), "{text}");
         let mounts = config
             .get("mounts")
@@ -906,6 +1163,15 @@ mod tests {
         };
         assert!(find("/in").contains("\"ro\""));
         assert!(find("/out").contains("\"rw\""));
+        assert!(find("/usr").contains("\"ro\""));
+        // The environment is mounted before anything is mounted inside it.
+        let position = |target: &str| {
+            mounts
+                .iter()
+                .position(|m| m.get("destination").and_then(Value::as_str) == Some(target))
+                .expect("mounted")
+        };
+        assert!(position("/usr") < position("/in"));
         let memory = config
             .get("linux")
             .and_then(|l| l.get("resources"))
@@ -914,7 +1180,7 @@ mod tests {
             .and_then(Value::as_i128);
         assert_eq!(memory, Some(512 * 1024 * 1024));
         // Without cgroups there is no resources block to pretend with.
-        let rootless = oci_config(&spec, false);
+        let rootless = oci_config(&spec, Path::new("/work/root"), &binds, false);
         assert!(rootless
             .get("linux")
             .and_then(|l| l.get("resources"))
@@ -953,11 +1219,110 @@ mod tests {
             pids: 0,
             tmp_mb: 16,
             network: false,
+            runtime_dir: std::env::temp_dir().join("cairn-lab-runtime"),
         };
         let outcome = run(&Backend::Unconfined, &spec, &work);
         assert!(outcome.timed_out, "{outcome:?}");
         assert!(outcome.wall_ms < 10_000);
         assert!(!outcome.succeeded());
         let _ = fs::remove_dir_all(&work);
+    }
+
+    fn environment(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "cairn-lab-layout-{name}-{}-{}",
+            std::process::id(),
+            crate::hex::encode(&nonce())
+        ));
+        fs::create_dir_all(root.join("usr/share/doc")).expect("mkdir");
+        fs::create_dir_all(root.join("proc")).expect("mkdir");
+        fs::create_dir_all(root.join("out")).expect("mkdir");
+        fs::write(root.join(".dockerenv"), b"").expect("write");
+        fs::write(root.join("usr/share/motd"), b"hi").expect("write");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("usr/bin", root.join("bin")).expect("link");
+        root
+    }
+
+    #[test]
+    fn a_mount_point_the_environment_lacks_is_refused_unless_it_is_new_at_the_top() {
+        let env = environment("targets");
+        let check = |target: &str, dir: bool| check_target(&env, target, dir);
+        // New at the top level: made in the run's own root.
+        assert!(check("/work/x", true).is_ok());
+        assert!(check("/in/experiments/a.py", false).is_ok());
+        // At the top level: replaces the environment's entry, whatever it is.
+        assert!(check("/out", true).is_ok());
+        assert!(check("/out", false).is_ok());
+        assert!(check("/.dockerenv", true).is_ok());
+        // Deeper and already there as the same kind: covered, nothing made.
+        assert!(check("/usr/share/doc", true).is_ok());
+        assert!(check("/usr/share/motd", false).is_ok());
+        // The run's own tmpfs.
+        assert!(check("/tmp/scratch", true).is_ok());
+        // Would be created inside the environment's own directories.
+        let inside = check("/usr/share/new", true).expect_err("refused");
+        assert!(inside.contains("/work/new"), "{inside}");
+        assert!(check("/out/sub", true).is_err());
+        // Through a link, a file, or over the wrong kind.
+        #[cfg(unix)]
+        assert!(check("/bin/x", true).is_err());
+        assert!(check("/usr/share/motd/x", true).is_err());
+        assert!(check("/usr/share/doc", false).is_err());
+        assert!(check("/usr/share/motd", true).is_err());
+        // Not a path the sandbox can take.
+        assert!(check("/proc/x", true).is_err());
+        assert!(check("/tmp", true).is_err());
+        assert!(check("relative", true).is_err());
+        assert!(check("/a/../b", true).is_err());
+        assert!(check("/a//b", true).is_err());
+
+        // Mounts may neither repeat nor nest: runsc orders them itself.
+        let at = |target: &str| Mount {
+            source: env.join("usr"),
+            target: target.into(),
+            writable: false,
+        };
+        assert!(check_targets(&env, &[at("/in/a"), at("/in/b"), at("/out")]).is_ok());
+        assert!(check_targets(&env, &[at("/out"), at("/out")]).is_err());
+        assert!(check_targets(&env, &[at("/work"), at("/work/sub")]).is_err());
+        assert!(check_targets(&env, &[at("/work/sub"), at("/work")]).is_err());
+        assert!(check_targets(&env, &[at("/work"), at("/workshop")]).is_ok());
+        let _ = fs::remove_dir_all(&env);
+    }
+
+    #[test]
+    fn a_runs_root_mirrors_the_top_level_and_leaves_the_environment_alone() {
+        let env = environment("scaffold");
+        let before = super::super::env::tree_digest(&env).expect("digest");
+        let root = env.with_extension("root");
+        let output = Mount {
+            source: root.with_extension("out"),
+            target: "/out".into(),
+            writable: true,
+        };
+        let binds = scaffold_root(&env, &root, std::slice::from_ref(&output)).expect("scaffold");
+        // The environment's own `/out` is replaced by the run's, not covered.
+        let targets: Vec<&str> = binds.iter().map(|b| b.target.as_str()).collect();
+        assert_eq!(targets, ["/.dockerenv", "/usr"]);
+        assert!(!root.join("out").exists());
+        assert!(binds.iter().all(|b| !b.writable));
+        assert!(root.join("usr").is_dir() && root.join(".dockerenv").is_file());
+        // The sandbox's own mount points exist; the environment's `/proc` is
+        // not bound.
+        for own in SANDBOX_OWNED {
+            assert!(root.join(own).is_dir(), "{own}");
+        }
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_link(root.join("bin")).expect("link"),
+            PathBuf::from("usr/bin")
+        );
+        assert_eq!(
+            super::super::env::tree_digest(&env).expect("digest"),
+            before
+        );
+        let _ = fs::remove_dir_all(&env);
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -351,8 +351,39 @@ fn exec_in(
         let prefix = input.prefix.trim_end_matches('/');
         let dir = work.join(format!("in-{n}"));
         fs::create_dir_all(&dir)?;
-        let mut count = 0usize;
-        for (path, value) in state.list(prefix) {
+        let listed = state.list(prefix);
+        // A prefix that names one file, and nothing under it, is that file:
+        // `--input x/run.py:/work/run.py` puts a file at `/work/run.py`, not
+        // a directory there holding `run.py`.
+        if let [(path, value)] = listed.as_slice() {
+            if *path == prefix {
+                let blob = value.blob.as_deref().unwrap_or_default();
+                let name = Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "input".into());
+                let file = dir.join(name);
+                lab.blobs().copy_to(blob, &file)?;
+                mounts.push(Mount {
+                    source: file,
+                    target: input.target.clone(),
+                    writable: false,
+                });
+                mount_records.push(Value::object([
+                    ("target", Value::string(&input.target)),
+                    ("kind", Value::string("lab")),
+                    ("prefix", Value::string(prefix)),
+                    ("blob", Value::string(blob)),
+                ]));
+                continue;
+            }
+        }
+        if listed.is_empty() {
+            return Err(LabError::NotFound(format!(
+                "input {prefix:?} matches no file in the space"
+            )));
+        }
+        for (path, value) in listed {
             let relative = if path == prefix {
                 Path::new(path)
                     .file_name()
@@ -363,12 +394,6 @@ fn exec_in(
             };
             let Some(blob) = &value.blob else { continue };
             lab.blobs().copy_to(blob, &dir.join(&relative))?;
-            count += 1;
-        }
-        if count == 0 {
-            return Err(LabError::NotFound(format!(
-                "input {prefix:?} matches no file in the space"
-            )));
         }
         let tree = env::tree_digest(&dir)?;
         mounts.push(Mount {
@@ -421,7 +446,11 @@ fn exec_in(
         pids: request.pids,
         tmp_mb: request.tmp_mb,
         network: request.network,
+        runtime_dir: fs::canonicalize(lab.root())?.join("runtime"),
     };
+    // A mount the runtime would have to create inside the environment is a
+    // mistake in the request: refused before anything runs or is recorded.
+    exec::check_targets(&spec.rootfs, &spec.mounts).map_err(LabError::Refused)?;
     let outcome = exec::run(backend, &spec, work);
 
     // Outputs become write-once entries under the publish prefix.

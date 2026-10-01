@@ -901,6 +901,16 @@ fn exercise(preference: Preference, backend: &str) {
     write(&mut lab, &alice, "inputs/params.txt", "n=42\n");
     let rootfs = temp("exec-rootfs");
     assert!(tiny_rootfs(&rootfs), "could not build a tiny rootfs");
+    // The top level of a container image, including the `/out` an image's
+    // `WORKDIR /out` leaves. Enough entries that runsc's unstable sort of its
+    // mounts reorders equal destinations, which is how a run once found its
+    // writable `/out` under the image's read-only one.
+    for dir in [
+        "boot", "etc", "home", "media", "mnt", "opt", "out", "root", "run", "srv", "sys", "var",
+    ] {
+        fs::create_dir_all(rootfs.join(dir)).expect("mkdir");
+    }
+    fs::write(rootfs.join(".dockerenv"), b"").expect("write");
     let (env, _) = cairn::lab::env::import(
         &mut lab,
         &alice,
@@ -974,4 +984,52 @@ fn exercise(preference: Preference, backend: &str) {
     let result = api::exec(&mut lab, &alice, &slow).expect("exec");
     assert!(result.outcome.timed_out, "{:?}", result.outcome);
     assert!(!result.outcome.succeeded());
+
+    // One file is mounted as that file, at a path the environment lacks.
+    let mut single = ExecRequest::new("tiny", sh("read line < /work/params.txt; echo \"$line\""));
+    single.inputs.push(Input {
+        prefix: "inputs/params.txt".into(),
+        target: "/work/params.txt".into(),
+    });
+    single.sandbox = preference;
+    let result = api::exec(&mut lab, &alice, &single).expect("exec");
+    assert_eq!(
+        result.outcome.exit_status,
+        Some(0),
+        "{:?} {}",
+        result.outcome,
+        result.stderr
+    );
+    assert_eq!(result.stdout.trim(), "n=42");
+
+    // A mount point that would have to be made inside one of the
+    // environment's own directories is refused, and nothing is recorded.
+    let runs = State::of(&lab).runs.len();
+    let mut inside = ExecRequest::new("tiny", sh("true"));
+    inside.inputs.push(Input {
+        prefix: "inputs".into(),
+        target: "/bin/inputs".into(),
+    });
+    inside.sandbox = preference;
+    assert!(matches!(
+        api::exec(&mut lab, &alice, &inside),
+        Err(LabError::Refused(_))
+    ));
+    assert_eq!(State::of(&lab).runs.len(), runs);
+
+    // And after every run above, the environment is still the tree its name
+    // says: gVisor creates missing mount points on the host, and once did so
+    // inside the environment.
+    assert!(
+        cairn::lab::env::verify(&lab, &env.tree).expect("verify"),
+        "a run changed the environment's tree"
+    );
+
+    // runsc leaves one `null-netns` mount in a lab's runtime root, by design
+    // (see `exec::Spec::runtime_dir`). Best effort: a test should not leave a
+    // mount behind on the machine that ran it.
+    let _ = std::process::Command::new("umount")
+        .arg(lab.root().join("runtime/null-netns"))
+        .stderr(std::process::Stdio::null())
+        .status();
 }
