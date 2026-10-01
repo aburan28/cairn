@@ -48,9 +48,15 @@ struct TasksSheet: View {
             if let info {
                 Text(info).font(.callout).foregroundStyle(.secondary)
             }
+            Text("Campaign DP upload needs AWS credentials in Secrets (Node → Secrets…), not in this sheet.")
+                .font(.caption).foregroundStyle(.tertiary)
             Spacer(minLength: 0)
             HStack {
                 if busy { ProgressView().controlSize(.small) }
+                Button("Secrets…") {
+                    isPresented = false
+                    node.presentSecrets = true
+                }
                 Spacer()
                 Button("Cancel") { isPresented = false }.keyboardShortcut(.cancelAction)
                 Button("Post to log") { postSelected() }

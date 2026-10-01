@@ -569,6 +569,102 @@ final class ResearcherModel: ObservableObject {
         syncingTaskSelection = false
     }
 
+    // MARK: secrets
+
+    struct SecretsList {
+        var names: [String]
+        var dir: String?
+    }
+
+    func listSecrets(completion: @escaping (Result<SecretsList, String>) -> Void) {
+        guard hasBinary else {
+            completion(.failure("bin/cairn is missing. Build first."))
+            return
+        }
+        let bin = cairnBinary
+        DispatchQueue.global(qos: .userInitiated).async {
+            let path = ResearcherModel.runCairn(bin, ["secret", "path"])
+            let list = ResearcherModel.runCairn(bin, ["secret", "list"])
+            DispatchQueue.main.async {
+                if list.status != 0 {
+                    completion(.failure(list.err.isEmpty ? "cairn secret list failed" : list.err))
+                    return
+                }
+                let names = list.out.split(separator: "\n")
+                    .map { String($0).trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty && !$0.hasPrefix("(") }
+                completion(.success(SecretsList(names: names, dir: path.status == 0 ? path.out : nil)))
+            }
+        }
+    }
+
+    func setSecret(name: String, value: String, completion: @escaping (String?) -> Void) {
+        guard hasBinary else { completion("bin/cairn is missing."); return }
+        let bin = cairnBinary
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: bin)
+            p.arguments = ["secret", "set", name, "--stdin"]
+            let stdin = Pipe()
+            let err = Pipe()
+            p.standardInput = stdin
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = err
+            do { try p.run() } catch {
+                DispatchQueue.main.async { completion(error.localizedDescription) }
+                return
+            }
+            if let data = value.data(using: .utf8) {
+                try? stdin.fileHandleForWriting.write(contentsOf: data)
+            }
+            try? stdin.fileHandleForWriting.close()
+            p.waitUntilExit()
+            let text = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                completion(p.terminationStatus == 0 ? nil : (text.isEmpty ? "secret set failed (\(p.terminationStatus))" : text))
+            }
+        }
+    }
+
+    func deleteSecret(name: String, completion: @escaping (String?) -> Void) {
+        guard hasBinary else { completion("bin/cairn is missing."); return }
+        let bin = cairnBinary
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = ResearcherModel.runCairn(bin, ["secret", "delete", name])
+            DispatchQueue.main.async {
+                completion(result.status == 0 ? nil : (result.err.isEmpty ? "delete failed" : result.err))
+            }
+        }
+    }
+
+    private struct CairnRun {
+        var status: Int32
+        var out: String
+        var err: String
+    }
+
+    private static func runCairn(_ binary: String, _ args: [String]) -> CairnRun {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: binary)
+        p.arguments = args
+        let out = Pipe()
+        let err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        do { try p.run() } catch {
+            return CairnRun(status: -1, out: "", err: error.localizedDescription)
+        }
+        p.waitUntilExit()
+        return CairnRun(
+            status: p.terminationStatus,
+            out: String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            err: String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
     /// Whether the node already holds this example, by goal.
     func isPosted(_ item: CatalogItem) -> Bool {
         nodeObjectives.contains { $0.goal == item.goal } || rows.contains { $0.goal == item.goal }
