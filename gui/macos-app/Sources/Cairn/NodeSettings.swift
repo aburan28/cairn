@@ -152,8 +152,15 @@ struct NodeSettings: Equatable {
     var arguments: [String] {
         var args = ["--data-dir", dataFolder.path, "--root", dataFolder.path]
         if storageGB > 0 { args += ["--max-size", "\(storageGB)GB"] }
-        for path in bootstrapFiles { args += ["--bootstrap", path] }
         return args
+    }
+
+    /// Flags of `run` itself, which go after it. `--bootstrap` is one: the
+    /// global parser stops at the first flag it does not know, so before
+    /// `run` it reads as a command named "--bootstrap" and the node never
+    /// starts.
+    var runArguments: [String] {
+        bootstrapFiles.flatMap { ["--bootstrap", $0] }
     }
 
     /// Both always set, so the value chosen here is the one that applies and

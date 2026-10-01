@@ -34,6 +34,25 @@ public struct Frontier: Codable, Hashable, Sendable {
     }
 }
 
+/// A piecework objective's standing, as `/objectives` publishes it. A
+/// piecework pool pays per unit: it has no frontier, and its `settlement` is
+/// null even after it has paid for hundreds of units.
+public struct Piecework: Codable, Hashable, Sendable {
+    public var unit_price: Int
+    public var paid_units: Int
+    public var paid_total: Int
+    public var pool_remaining: Int
+    public var units: Int?
+
+    public init(unit_price: Int, paid_units: Int, paid_total: Int, pool_remaining: Int, units: Int? = nil) {
+        self.unit_price = unit_price
+        self.paid_units = paid_units
+        self.paid_total = paid_total
+        self.pool_remaining = pool_remaining
+        self.units = units
+    }
+}
+
 /// A certificate's one payment. `null` for a ratchet, whose payouts are many
 /// and live on `frontier.paid_cumulative`.
 public struct Settlement: Codable, Hashable, Sendable {
@@ -68,6 +87,7 @@ public struct Objective: Codable, Hashable, Identifiable, Sendable {
     public var open: Bool
     public var settlement: Settlement?
     public var frontier: Frontier?
+    public var piecework: Piecework?
     public var record: ObjectiveRecord?
 
     public init(
@@ -81,7 +101,8 @@ public struct Objective: Codable, Hashable, Identifiable, Sendable {
         open: Bool,
         settlement: Settlement? = nil,
         frontier: Frontier? = nil,
-        record: ObjectiveRecord? = nil
+        record: ObjectiveRecord? = nil,
+        piecework: Piecework? = nil
     ) {
         self.id = id
         self.goal = goal
@@ -94,6 +115,7 @@ public struct Objective: Codable, Hashable, Identifiable, Sendable {
         self.settlement = settlement
         self.frontier = frontier
         self.record = record
+        self.piecework = piecework
     }
 }
 

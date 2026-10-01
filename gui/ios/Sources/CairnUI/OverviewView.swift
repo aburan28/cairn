@@ -155,6 +155,8 @@ public struct ObjectiveRow: View {
                     HashText(frontier.holder, chars: 6)
                 } else if let settlement = objective.settlement {
                     Text("settled — \(units(settlement.reward))")
+                } else if let piecework = objective.piecework, piecework.paid_units > 0 {
+                    Text("\(piecework.paid_units) unit\(piecework.paid_units == 1 ? "" : "s") paid — \(units(piecework.paid_total))")
                 } else {
                     Text("no claim yet").foregroundStyle(.tertiary)
                 }

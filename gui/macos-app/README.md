@@ -48,7 +48,9 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
 
 - **Data** lives in `~/Library/Application Support/Cairn` unless Settings
   names another folder, because an app has no directory a person started it
-  from. The node's stderr goes to `node.log` there, rewritten on each start.
+  from. The node's stderr goes to `node.log` there, rewritten on each start;
+  the run before it is kept as `node.previous.log`, so a failed start's log
+  survives Try Again.
 - **Ports** are the command line's, 8080 and 9000, when they are free, and any
   free ports when they are not, so it runs beside a `cairn run` of your own.
   The toolbar shows which.
