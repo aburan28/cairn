@@ -166,13 +166,13 @@ pub const SANDBOX_ENV: &str = "CAIRN_LAB_SANDBOX";
 /// like a spawn error at the worst moment.
 pub fn backend(preference: Preference) -> Result<Backend, LabError> {
     match preference {
-        Preference::Gvisor => gvisor().map_err(LabError::Io),
-        Preference::Bubblewrap => bubblewrap().map_err(LabError::Io),
+        Preference::Gvisor => gvisor().map_err(LabError::Unavailable),
+        Preference::Bubblewrap => bubblewrap().map_err(LabError::Unavailable),
         Preference::Unconfined => Ok(Backend::Unconfined),
         Preference::Auto => match gvisor() {
             Ok(backend) => Ok(backend),
             Err(gvisor_why) => bubblewrap().map_err(|bwrap_why| {
-                LabError::Io(format!(
+                LabError::Unavailable(format!(
                     "no sandbox works on this host: runsc: {gvisor_why}; bwrap: {bwrap_why}. \
                      Install gVisor (https://gvisor.dev) or bubblewrap, or pass \
                      --sandbox none to run unconfined"
@@ -945,10 +945,21 @@ fn run_unconfined(spec: &Spec, work: &Path, outcome: &mut Outcome) -> Result<(),
                 .to_ascii_uppercase()
         );
         command.env(key, &mount.source);
+        // The one writable mount is the output directory. `CAIRN_LAB_OUT`
+        // names it inside a sandbox; here it has to name the host path, or a
+        // program that writes where it is told writes nowhere.
+        if mount.writable {
+            command.env("CAIRN_LAB_OUT", &mount.source);
+        }
     }
     outcome
         .unenforced
         .push("isolation: unconfined run on the host".into());
+    outcome.notes.push(
+        "unconfined: mounts are host paths, exported as CAIRN_LAB_MOUNT_<TARGET>; \
+         CAIRN_LAB_OUT is the host output directory"
+            .into(),
+    );
     let child = command
         .stdin(Stdio::null())
         .stdout(File::create(&outcome.stdout).map_err(|e| e.to_string())?)

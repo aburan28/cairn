@@ -8,8 +8,9 @@
 //! --out` writes.
 //!
 //! Exit codes follow the verifier taxonomy: `0` done, `1` a check found
-//! problems or a command it ran failed, `2` bad usage or the rules refused,
-//! `3` nothing was learned — the sandbox could not run the command, which is a
+//! problems or a command it ran failed (including running out of time or
+//! memory), `2` bad usage or the rules refused, `3` nothing was learned — no
+//! sandbox works here, or the sandbox could not run the command, which is a
 //! fact about this host and not about the command.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,8 +101,9 @@ AGENTS
     mcp --identity FILE [--as ADDR] the lab as MCP tools over stdio
 
 EXIT CODES
-    0 done   1 a check failed, or the command run under `exec` failed
-    2 bad usage, or the rules refused   3 the sandbox could not run the command
+    0 done   1 a check failed, or the command run under `exec` failed or ran out of
+    time or memory   2 bad usage, or the rules refused   3 nothing was learned: no
+    sandbox works on this host, or the sandbox could not run the command
 ";
 
 /// Entry point: `cairn lab ARGS…`. Returns the process exit code.
@@ -117,6 +119,7 @@ pub fn main(args: Vec<String>) -> i32 {
             eprintln!("cairn lab: {error}");
             match error {
                 LabError::Refused(_) | LabError::Invalid(_) | LabError::NotFound(_) => 2,
+                LabError::Unavailable(_) => 3,
                 _ => 1,
             }
         }
@@ -1558,7 +1561,10 @@ fn cmd_exec(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32,
             say(out, format!("  work kept at {}", work.display()));
         }
     }
-    Ok(if outcome.error.is_some() || outcome.limit_exceeded {
+    // A memory-limit kill is the command not finishing within its budget, as
+    // a timeout is: the command failed (1). Only a sandbox that could not run
+    // it at all is "nothing learned" (3).
+    Ok(if outcome.error.is_some() {
         3
     } else if outcome.succeeded() {
         0

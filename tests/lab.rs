@@ -814,6 +814,19 @@ fn checkout_edit_commit_supersedes_only_what_was_seen() {
         "the immutable edit is refused before signing"
     );
 
+    // The refused edit is still on disk, and a forced checkout puts the record
+    // back. It once called the file up to date from the index alone and
+    // recorded the edited file's size and mtime beside the original blob,
+    // which hid the edit from every later status and commit.
+    let state = State::of(&b);
+    tree::checkout(&b, &state, &work, &Filter::default(), true).expect("forced checkout");
+    assert_eq!(
+        fs::read_to_string(work.join("records/R-1.yaml")).expect("read"),
+        "immutable\n"
+    );
+    let changes = tree::status(&b, &state, &work, &Filter::default()).expect("status");
+    assert!(changes.is_empty(), "{changes:?}");
+
     // Bob's edit superseded what bob saw, not alice's newer edit: a conflict.
     let state = State::of(&b);
     assert_eq!(state.files["head.yaml"].len(), 2);

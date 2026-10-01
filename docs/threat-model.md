@@ -240,6 +240,31 @@ made larger:
 
 See [agents.md](agents.md).
 
+## The lab
+
+`cairn lab` ([lab.md](lab.md)) is a multi-writer research workspace beside the
+ledger, and an experiment runner. It settles nothing, so none of these rows can
+move money; they decide whether a research record or a run receipt can be
+trusted.
+
+| attack | mechanism | status |
+|---|---|---|
+| **forged op** — write into a space as somebody else | every op is ed25519-signed over a domain-prefixed canonical encoding (`cairn/lab/op/v1`), so a lab signature never doubles as a ledger one; every replica checks it on ingest, whichever peer relayed the op | handled |
+| **unauthorised writer** — a non-member, or a reader, writes | an op is authorised by the membership folded from its own causal past, which never changes, so every replica decides it identically | handled |
+| **revoked writer keeps writing** — by choosing `deps` that never include the revocation | once a replica holds the revocation, every op by that key that is not an ancestor of it is excluded, cascading to admissions it made. A replica that has not received the revocation cannot know, so a view can lose an op it showed earlier | partial |
+| **an immutable record edited or replaced** | write-once globs: an entry with a `pred` or a deletion on a write-once path is excluded by every replica and refused locally before signing; two different first writes stay an open conflict for a human | handled |
+| **a concurrent edit silently overwritten** | multi-value registers with explicit `pred`; a commit supersedes what its checkout saw, so an edit nobody saw becomes a visible sibling | handled |
+| **tampered content** — a blob, a bundle, a synced directory | blobs are addressed by sha256 and checked when they arrive and by `cairn lab verify` | handled |
+| **reading a space in transit** | the network carrier is the `cairn p2p` transport (Classic McEliece to an AEAD channel). A bundle file and a synced directory are plaintext | partial |
+| **a stranger pulls the space** | `cairn lab serve` answers only transport ids a member lists under `peers`, or `--allow`. Every member who syncs holds the whole space; there is no per-path confidentiality | handled for strangers |
+| **the workspace at rest** | none: `ops.jsonl` and `blobs/` are plaintext | not handled |
+| **holding a lease forever** — a claim stamped far in the future | expiry is the claim's own `time` plus a ttl capped at thirty days, judged against each reader's clock. `time` is still the writer's claim; a lease is scheduling, never a permission | partial |
+| **an experiment escapes its sandbox** | gVisor serves the program's syscalls from a user-space kernel; bubblewrap is namespaces over the host kernel. Read-only root and inputs, one writable output, no network unless the receipt says otherwise. A gVisor or kernel bug is still an escape | partial |
+| **a run changes the environment its receipt names** | each run gets its own root with the environment's entries bound read-only, and a mount target that would have to be created inside the tree is refused. gVisor creates missing mount points on the host, before the root is made read-only and through read-only binds; it did, in this tree, before the fix. `cairn lab env verify` re-digests the tree | handled |
+| **an infrastructure failure read as a result** | a sandbox that did not start is recorded as `error` with no exit status, and exits 3; a timeout or memory kill is flagged in the receipt, never presented as the program's answer | handled |
+| **an agent opts out of the sandbox** | MCP `lab_exec` takes the backend only from the server's `CAIRN_LAB_SANDBOX`; no tool argument can ask for an unconfined run | handled |
+| **instructions planted in lab content** | the MCP server marks every read as untrusted, but it signs every write with its own identity, so text that steers an agent can still make it write under the server's key | partial |
+
 ## The operator's own disk
 
 Five rows above concern what the network can do to a node. These concern what

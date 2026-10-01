@@ -47,7 +47,8 @@ use std::fmt;
 /// `Refused` is the one to read carefully: it means the lab understood the
 /// request and declined it on the rules — an unauthorised author, a write to an
 /// immutable path, an op whose dependencies are missing. It is never used for
-/// an infrastructure failure, which is `Io`.
+/// an infrastructure failure, which is `Io`, or for a host that lacks what the
+/// request needs, which is `Unavailable`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LabError {
     /// The filesystem or a subprocess failed.
@@ -60,6 +61,11 @@ pub enum LabError {
     NotFound(String),
     /// The store on disk is not one this implementation wrote, or was damaged.
     Corrupt(String),
+    /// This host cannot do what was asked: no sandbox works here, say. A fact
+    /// about the machine, never about the request or the program — the
+    /// verifiers' `Unavailable` — and kept apart from `Io` so a caller can say
+    /// "nothing was learned" instead of "it failed".
+    Unavailable(String),
 }
 
 impl fmt::Display for LabError {
@@ -70,6 +76,7 @@ impl fmt::Display for LabError {
             LabError::Refused(m) => write!(f, "refused: {m}"),
             LabError::NotFound(m) => write!(f, "not found: {m}"),
             LabError::Corrupt(m) => write!(f, "corrupt store: {m}"),
+            LabError::Unavailable(m) => write!(f, "unavailable on this host: {m}"),
         }
     }
 }

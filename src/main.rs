@@ -3837,6 +3837,16 @@ fn print_help(out: &mut dyn Write) {
         "      standing and confidence for a claim, under a policy you choose;",
     );
     say(out, "      reads the log, writes nothing, moves no money");
+    say(out, "  lab <command> ...");
+    say(
+        out,
+        "      a research workspace: signed ops that merge without git, leases,",
+    );
+    say(
+        out,
+        "      messages, and runs in gVisor sandboxes; never touches the log",
+    );
+    say(out, "      (`cairn lab help` lists its commands)");
     say(out, "  blob [ls|need|publish|gc]");
     say(
         out,

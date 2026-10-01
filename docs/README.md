@@ -23,6 +23,7 @@ below is either reference (what a command, a setting, or a word does) or design
 | know what a word means | [glossary.md](glossary.md) |
 | fix something that is not working | [troubleshooting.md](troubleshooting.md) |
 | understand the whole design | [architecture.md](architecture.md), then [diagrams.md](diagrams.md) |
+| keep a research program's shared state without git, and run its experiments in sandboxes | [lab.md](lab.md) |
 | attack it | [threat-model.md](threat-model.md) |
 | work on this repository | [../AGENTS.md](../AGENTS.md), [../CONTRIBUTING.md](../CONTRIBUTING.md) |
 
@@ -72,6 +73,10 @@ The six pages a user needs and nothing else in this repository provides.
   `cairn secret` and `scripts/ecc2k-dp.sh`.
 - [knowledge.md](knowledge.md) — typed relations, derived standing, and
   reader-chosen confidence: revising knowledge without rewriting history.
+- [lab.md](lab.md) — **the lab**: a research program's working state (records,
+  leases, messages, run outputs) as signed ops that merge like a CRDT, with no
+  git and no server, and experiments run in content-addressed environments
+  under gVisor. The notebook beside the ledger; it settles nothing.
 - [../examples/README.md](../examples/README.md) — worked objectives with real
   artifacts, which is the fastest way to see what a checkable question is.
 

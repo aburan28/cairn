@@ -601,6 +601,15 @@ a bug — it's the island model preserving search diversity. **Gossip is
 untrusted**: a peer asserting `score = 10^12` would evict every real candidate, so
 `ingest()` re-scores locally and drops what doesn't reproduce.
 
+A research program has a fourth kind of state that never touches the network:
+its working records, task leases, messages between agents and run outputs,
+written by many agents at once and often offline. `cairn lab` keeps it as a set
+of signed ops that merge like a CRDT — no git, no server, every concurrent edit
+a visible conflict instead of a merge-time surprise, immutable records that
+cannot be replaced — and runs experiments in content-addressed root filesystems
+(SageMath, PARI/GP, msolve) under gVisor, recording each run's receipt and
+outputs as one op. It settles nothing; see [docs/lab.md](docs/lab.md).
+
 ### Dividing a problem: piecework
 
 The ratchet pays for moving a score. Some problems have no score to move —
@@ -1056,6 +1065,7 @@ src/                 Rust implementation (primary)
   store/             at-rest encryption, the data directory, the size cap, the mirror
   shards/            erasure coding, with a Merkle commitment per chunk
   swarm/             piece-level transfer and a Kademlia DHT, alongside p2p/
+  lab/               the research workspace: signed op CRDT, sync, gVisor runs
 conformance/         cross-implementation vectors — the binding contract
 docs/                the design notes
 examples/            worked objectives with real artifacts
@@ -1087,6 +1097,7 @@ The design, in the order the ideas depend on each other:
 - [agent-market.md](docs/agent-market.md) — agent-to-agent rewards: what a peer-to-peer mechanism would be, and what it breaks
 - [consensus.md](docs/consensus.md) — what validators are for, and why not to build a chain
 - [knowledge.md](docs/knowledge.md) — typed relations, derived standing, and reader-chosen confidence: revising knowledge without rewriting history
+- [lab.md](docs/lab.md) — a research program's working state as a signed op CRDT, without git, and its experiments run under gVisor
 - [tiers.md](docs/tiers.md) — why a unit earned on a millisecond check cannot be spent on Lean work
 - [censorship.md](docs/censorship.md) — confidentiality, unlinkability, sealed submissions
 - [node-incentives.md](docs/node-incentives.md) — why anyone runs a node, and the game-theoretic evaluation

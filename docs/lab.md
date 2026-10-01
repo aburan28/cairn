@@ -192,11 +192,15 @@ An **environment** is a root filesystem, identified by a digest over its tree:
 every path, its type, its permission bits, its size, and the sha256 of its
 bytes or its link target — not owners or timestamps, which change on every
 extraction and say nothing about what a program computes. Importing one
-(`cairn lab env import NAME --docker IMAGE | --tar FILE | --dir DIR`) copies it
-under `.cairn-lab/envs/<digest>/rootfs` and writes an `env` op naming it, with a
-manifest blob recording where it came from and, with `--probe`, what versions
-of what tools it carries. A peer that rebuilds the same image gets the same
-digest; one that does not, does not, and nothing pretends otherwise.
+(`cairn lab env import NAME --docker IMAGE | --podman IMAGE | --tar FILE |
+--dir DIR [--move]`) puts it under `.cairn-lab/envs/<digest>/rootfs` and writes
+an `env` op naming it, with a manifest blob recording where it came from (the
+image id and repo digests, or the tarball's hash), the environment variables
+and working directory it declares, and any `--env`, `--workdir` or `--note`
+given. `--move` renames a tree built in place instead of copying gigabytes. A
+peer that rebuilds the same image gets the same digest; one that does not, does
+not, and nothing pretends otherwise. `cairn lab env verify NAME` re-digests the
+tree on this machine.
 
 `cairn lab exec --env NAME -- CMD …` runs a command in one:
 
@@ -204,12 +208,28 @@ digest; one that does not, does not, and nothing pretends otherwise.
 |---|---|---|
 | **gVisor** (`runsc`) | a user-space kernel between the program and the host; no network, read-only root, declared mounts only | `runsc` is on `PATH` and starts a sandbox (probed, like `bwrap` is) |
 | **bubblewrap** | namespaces and the host kernel; same mounts, no network | `runsc` is unusable and `bwrap` works |
-| none | none | only with `--allow-unsandboxed`, and the receipt says so |
+| none | none | only when asked for (`--sandbox none`, or `CAIRN_LAB_SANDBOX=none`), and the receipt says so; an MCP agent cannot ask |
 
 Inputs are mounted read-only (a lab path prefix checked out to a scratch
-directory, or a host directory), one output directory is writable, `/tmp` is a
-tmpfs, and the network is absent unless asked for — in which case the receipt
-says that too. A wall-clock deadline kills the sandbox; a memory limit is a
+directory, a single lab file as that file, or a host directory), one output
+directory is writable (`/out`, also `$CAIRN_LAB_OUT`), `/tmp` is a tmpfs, and
+the network is absent unless asked for — in which case the receipt says that
+too.
+
+**The environment's tree is never the runtime's root.** Each run gets an empty
+root of its own with the environment's top-level entries bound into it
+read-only, the same layout under gVisor and bubblewrap. gVisor's gofer creates a
+missing mount point on the host, inside whatever directory the OCI root names,
+before that root is made read-only — and through read-only binds too. Handed the
+tree itself, one run with an input at `/work/x` left an empty `/work/x` in it,
+and the environment stopped matching the digest every later receipt named;
+`env verify` is what caught it. So a mount target at a new top-level path
+(`/work`, `/in`, `/data`) is made in the run's own root; a top-level target the
+environment already has *replaces* that entry rather than covering it (runsc
+sorts mounts unstably, and an image's read-only `/out` once landed on top of the
+run's writable one); a deeper target must already exist in the environment as
+the same kind; and targets may neither repeat nor nest. Anything else is refused
+before the run starts or is recorded. A wall-clock deadline kills the sandbox; a memory limit is a
 cgroup limit under gVisor and a resident-set watchdog otherwise, **never**
 `RLIMIT_AS` — algebra systems reserve far more address space than they touch,
 and an address-space cap kills them for nothing (the research program paid for
@@ -224,29 +244,75 @@ that produced them or a run without its outputs. A sandbox that failed to start
 is recorded as `error`, never as an exit status: an infrastructure failure is
 not a result, the same rule as `Unavailable` in the verifiers.
 
-`examples/lab/environments/` has recipes: `numtheory` (PARI/GP, msolve,
-python-flint, cypari2, valgrind — what the GFPN experiments need) and `sage`
-(the above plus SageMath from conda-forge at `/opt/conda-sage`, the path the
-GFPN anchor comparator expects).
+`examples/lab/environments/` has recipes: `numtheory` (PARI/GP 2.15.4 with
+the SEA data, msolve 0.6.5, valgrind, python-flint, cypari2, numpy — what the
+GFPN experiments need) and `sage` (the above plus SageMath 10.9 from
+conda-forge at `/opt/conda-sage/envs/sage`, the path the GFPN anchor comparator
+expects). `build.sh` builds either with docker; `sage/build-rootfs.sh` builds
+Sage's tree without docker — micromamba run inside bubblewrap, so the conda
+prefix baked into every file is the path it will run at — and holds the
+gigabytes once, for `env import --dir … --move` to hand to the lab.
+
+`cairn lab exec` exits `0` when the command succeeded; `1` when it failed, timed
+out or hit its memory limit; `2` when the request was refused; and `3` when
+nothing was learned — no sandbox works on this host, or the sandbox could not
+start the command.
+
+### Measured
+
+On one 2026 cloud VM, gVisor `release-20260928.0`:
+
+| run | wall |
+|---|---|
+| PARI/GP solves a 20-bit toy ECDLP, numtheory environment | 0.16 s |
+| msolve solves a two-equation system | 0.21 s |
+| SageMath 10.9: `import sage.all`, then `discrete_log` on a prime-order curve of order 1,001,389 | 3.1 s (2.6 s of it the import); 1.3 s under bubblewrap |
+
+Both environments still verified against their digests after every run.
 
 ## Using it for the crypto-autoresearcher program
 
 ```sh
-cairn identity --out ~/.cairn/lab.identity.json
-cairn lab init --name ecdlp-program --identity ~/.cairn/lab.identity.json \
+cairn lab identity --out ~/.cairn/lab.identity.json
+export CAIRN_LAB_IDENTITY=~/.cairn/lab.identity.json
+cairn lab init --name ecdlp-program \
     --policy examples/lab/crypto-autoresearcher.policy.json
-cairn lab commit ~/crypto-autoresearcher --identity …   # first import
+cairn lab commit ~/crypto-autoresearcher                 # first import
 cairn lab checkout ~/work                                # anywhere else
 # … the program's own tools read and write files under ~/work …
-cairn lab commit ~/work --identity …                     # signed, batched
+cairn lab commit ~/work                                  # signed, batched
 cairn lab sync --peer <id>@host:9100                     # or --dir, or a bundle
 ```
+
+`scripts/lab-demo.sh` runs that workflow end to end with two writers and checks
+every step: a concurrent edit becoming a visible conflict and then resolved, an
+immutable record refused, an identifier collision kept visible, a lease race,
+a message, a revocation, all three sync carriers, and a run.
 
 `commit` remembers what each file was when it was checked out, so an edit to a
 mutable file supersedes *that* version — a concurrent edit that arrived in the
 meantime becomes a visible sibling, not a silent overwrite. Editing a
 write-once file is refused locally with the reason (add a correction instead),
-before anything is signed.
+before anything is signed. The memory is an index file,
+`.cairn-lab-checkout.json`, at the top of the directory; add it to
+`.gitignore` where the directory is also a git working tree.
+
+Measured against the program's own records — `ledger/`, `knowledge/`, `docs/`,
+`tools/` and `orchestration/` from its `main`, 20,859 files and 204 MB:
+
+| step | wall |
+|---|---|
+| first `commit` (six signed ops) | 10.6 s |
+| `commit` again with nothing changed | 1.4 s |
+| `checkout` into an empty directory | 1.8 s — byte-identical, executable bits included |
+| `verify` every signature and all 20,842 distinct blobs | 1.3 s |
+| `clone --dir` a second replica | 13.7 s |
+| `sync` two replicas already in step | 0.3 s |
+| a concurrent edit of one goal record on two replicas | one sync, one visible conflict |
+
+Most of the first commit and the clone is one `fsync` per blob, so an op never
+names content a crash could tear; batching those is a known, unclaimed
+speedup.
 
 `cairn lab mcp` exposes the same operations to agents: read and list files,
 write records, claim and release tasks, send and read messages, list

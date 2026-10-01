@@ -513,6 +513,73 @@ every shard of one blob.
 
 ---
 
+## The lab
+
+`cairn lab …` is a replicated research workspace: records, leases, messages and
+run outputs as signed ops that merge like a CRDT, with no git and no server, and
+commands run in content-addressed environments under gVisor. It never touches
+the log. [lab.md](lab.md) is the design; `cairn lab help` prints every flag.
+Every command reads `--lab DIR` (else `$CAIRN_LAB`, else `./.cairn-lab`), and
+every command that writes signs with `--identity FILE` (else
+`$CAIRN_LAB_IDENTITY`).
+
+### `lab init` · `lab clone` · `lab admit` · `lab revoke` · `lab policy` · `lab identity --out FILE`
+
+Create a space (`--policy FILE` sets its write-once, mutable and ignore globs;
+`examples/lab/crypto-autoresearcher.policy.json` is the research program's),
+clone one from a directory, a bundle or a peer, and manage who may write. Only
+an admin admits, revokes or changes the policy.
+
+### `lab checkout DIR` · `lab commit DIR` · `lab changes DIR` · `lab conflicts` · `lab resolve PATH`
+
+A working copy for tools that read files. `commit` signs what changed since the
+checkout and supersedes exactly what the checkout saw, so a concurrent edit
+becomes a visible sibling, never a silent overwrite; it refuses an edit to a
+write-once path before signing anything. Conflicting values are written beside
+the file as `PATH.lab-conflict-<id>`. The checkout keeps its index in
+`DIR/.cairn-lab-checkout.json`; add it to `.gitignore` when `DIR` is also a git
+working tree.
+
+### `lab claim TASK` · `lab release` · `lab tasks` · `lab send` · `lab inbox ADDR` · `lab ack`
+
+Leases on tasks and messages to role addresses. Two concurrent claims resolve
+the same way on every replica: the first in `(lamport, id)` order holds, the
+other reads `contended`. A lease is scheduling, never a permission.
+
+### `lab sync` · `lab serve` · `lab bundle` · `lab unbundle` · `lab peer-id`
+
+Reconcile with another lab directory, a peer over the encrypted transport, or a
+bundle file. `serve` answers only peers a member lists under `peers`, or
+`--allow PEERID`.
+
+### `lab env import NAME (--docker IMAGE | --podman IMAGE | --tar FILE | --dir DIR [--move])` · `lab env ls|show|verify`
+
+Name a root filesystem in the space by its tree digest. `--move` renames a
+built tree into the lab instead of copying it. `env verify` re-digests the tree
+on this machine; a mismatch means something changed it.
+
+### `lab exec --env NAME -- COMMAND …` · `lab runs` · `lab sandbox`
+
+Run a command in an environment under gVisor, else bubblewrap; `--sandbox none`
+(or `CAIRN_LAB_SANDBOX=none`) runs it unconfined and the receipt says so.
+`--input LABPATH[:TARGET]` mounts a lab prefix read-only (a single file as that
+file); whatever the command writes to `/out` (`$CAIRN_LAB_OUT`) is published
+under `--publish PREFIX` together with the receipt, as one op. A mount target
+that would have to be created inside one of the environment's own directories
+is refused. `lab sandbox` says which backend this host can use.
+
+Exit codes follow the table above: `0` done; `1` a check failed, or the command
+failed, timed out or hit its memory limit; `2` bad usage or the rules refused;
+`3` nothing was learned — no sandbox works on this host, or the sandbox could
+not start the command.
+
+### `lab mcp --identity FILE [--as ADDR]`
+
+The lab as MCP tools over stdio, signed by the server's identity. An agent
+cannot choose `--sandbox none`; only the server's environment can.
+
+---
+
 ## Analysis
 
 Neither of these reads a log. They answer questions about the *rules*.

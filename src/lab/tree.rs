@@ -516,8 +516,14 @@ pub fn checkout(
             }
             Some(blob) => {
                 let current = index.entries.get(path);
-                let up_to_date =
-                    current.is_some_and(|entry| entry.blob == *blob) && target.is_file();
+                // A local edit is never up to date, whatever the index says the
+                // file was: under `--force` it is overwritten. Trusting the
+                // index alone here once stamped an edited file's size and mtime
+                // beside the original blob, which hid the edit from every later
+                // `changes` and `commit`.
+                let up_to_date = !locally_changed.contains(path.as_str())
+                    && current.is_some_and(|entry| entry.blob == *blob)
+                    && target.is_file();
                 if up_to_date {
                     report.unchanged += 1;
                 } else if !lab.blobs().has(blob) {
