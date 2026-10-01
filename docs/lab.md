@@ -267,8 +267,13 @@ On one 2026 cloud VM, gVisor `release-20260928.0`:
 | PARI/GP solves a 20-bit toy ECDLP, numtheory environment | 0.16 s |
 | msolve solves a two-equation system | 0.21 s |
 | SageMath 10.9: `import sage.all`, then `discrete_log` on a prime-order curve of order 1,001,389 | 3.1 s (2.6 s of it the import); 1.3 s under bubblewrap |
+| the research program's GFPN anchor comparator, `k4a_anchor_system.py`, in `sage` | 5.1 s |
 
-Both environments still verified against their digests after every run.
+The comparator is the step that once failed a gate package with
+`infrastructure_error` because its host had no Sage at the path it calls. In the
+`sage` environment it ran to completion, and the four msolve systems it wrote are
+byte-identical to the ones the program recorded for `RUN-GFPN-f5412a`. Both
+environments still verified against their digests after every run.
 
 ## Using it for the crypto-autoresearcher program
 
