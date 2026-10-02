@@ -153,7 +153,7 @@ lines; that is the authority, and this table is the index to it.
 | [shard-assignment.md](design/shard-assignment.md) — what erasure coding prices | analysis only |
 | [embargo-release.md](design/embargo-release.md) — holding an artifact the log already owes you | design only |
 | [heir-fhe-compilation.md](design/heir-fhe-compilation.md) — buy the search, refuse the compute | integration review; half of it is refused on purpose |
-| [workspace-benchmarks.md](design/workspace-benchmarks.md) — repository-shaped benchmarks | design review, with the code changes it would need |
+| [workspace-benchmarks.md](design/workspace-benchmarks.md) — repository-shaped benchmarks | **verifier built**, in both implementations; `cairn bench` and MCP notes are not |
 | [rho-piecework.md](design/rho-piecework.md) — distributed Pollard rho as piecework | **Stages A and B built** (`src/piecework.rs`); Stage C is not |
 | [orbit-piecework.md](design/orbit-piecework.md) — ECC2K-130: paying per orbit, and the witness that makes one checkable | **built**, with no consensus change; the corpus still does not fit a log |
 | [index-calculus-p224.md](design/index-calculus-p224.md) — index calculus as piecework | proposal; nothing here is built |

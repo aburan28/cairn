@@ -1,0 +1,41 @@
+{
+  "artifact_schema": {
+    "properties": {
+      "files": {
+        "description": "Map of tree path to the bare sha256 of that file's bytes, every path under solution/. The bytes go in the blob store; pack.py does both.",
+        "type": "object"
+      },
+      "results": {
+        "description": "{\"score\": <int>}: what score.py prints for this tree. The verifier re-derives it and rejects any other number.",
+        "type": "object"
+      },
+      "note": {
+        "description": "Optional. What you tried and why it worked, for the next solver. Ignored by the verifier.",
+        "type": "string"
+      }
+    },
+    "required": ["files", "results"],
+    "type": "object"
+  },
+  "created_at": "2026-10-02T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-workspace-sorting-network",
+  "ratchet": {
+    "baseline": 364,
+    "direction": "minimize",
+    "min_improvement": 1,
+    "reward": 100000,
+    "target": 114
+  },
+  "reward": 100000,
+  "statement": "Write solution/build.py so that it prints a sorting network for 8 inputs: a JSON list of [low, high] comparators with 0 <= low < high < 8, applied in order. Score is comparators x depth, lower is better; the pinned score.py checks the network sorts every 0-1 input and derives the score itself. You may change only files under solution/. Submit {\"files\": {path: sha256}, \"results\": {\"score\": n}} with every file's bytes in the blob store. Baseline 364 is a bubble-sort network (28 comparators, depth 13). Target 114 is the optimum: 19 comparators and depth 6 are both proven minimums for 8 inputs, and one network reaches both.",
+  "verifier": {
+    "base": "examples/workspace-network/base.manifest.json",
+    "base_sha256": "46d7caf4f9c820397aaa9be86154bbb00ecc22b85092b297f2ce52c3955dd62c",
+    "editable_paths": ["solution"],
+    "kind": "workspace",
+    "score_command": ["python3", "score.py"],
+    "score_path": "score.json",
+    "timeout_seconds": 120
+  }
+}

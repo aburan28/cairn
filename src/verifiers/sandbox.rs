@@ -341,7 +341,13 @@ fn bubblewrap(
             command.arg("--bind").arg(path).arg(path);
         }
     }
-    if plan.cwd.exists() {
+    // A `cwd` the plan already made writable stays writable. `workspace` is
+    // the caller that needs this: its tree is where the build runs and what
+    // the build writes, and re-binding it read-only here would undo the
+    // `--bind` above, since a later bind wins.
+    let cwd_writable = plan.cwd.starts_with(plan.workdir)
+        || plan.writable.iter().any(|path| plan.cwd.starts_with(path));
+    if plan.cwd.exists() && !cwd_writable {
         command.arg("--ro-bind-try").arg(plan.cwd).arg(plan.cwd);
     }
     command.arg("--chdir").arg(plan.cwd);

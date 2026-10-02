@@ -30,7 +30,7 @@
 //! - [`Status::Unavailable`] blames *this node*: no `lean`, no `python3`, a
 //!   crash, a timeout. Another node may well reach a verdict.
 //!
-//! # Five verifiers
+//! # Six verifiers
 //!
 //! | kind | what it proves | cost |
 //! |---|---|---|
@@ -39,6 +39,7 @@
 //! | `statistical` | a pinned, seeded test statistic clears a threshold | one evaluation |
 //! | `lean` | a proof-assistant kernel accepted the proof | seconds to minutes |
 //! | `replay` | a pinned computation reproduces its declared fields | a full re-run |
+//! | `workspace` | files over a pinned base tree reproduce a declared score | a build and a run |
 //!
 //! # Jailed subprocess, not in-process execution
 //!
@@ -71,6 +72,7 @@
 
 pub mod limits;
 pub mod sandbox;
+pub mod workspace;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -271,6 +273,7 @@ pub enum Kind {
     Lean,
     Replay,
     Statistical,
+    Workspace,
 }
 
 impl Kind {
@@ -285,6 +288,7 @@ impl Kind {
         Kind::Lean,
         Kind::Replay,
         Kind::Statistical,
+        Kind::Workspace,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -294,6 +298,7 @@ impl Kind {
             Kind::Lean => "lean",
             Kind::Replay => "replay",
             Kind::Statistical => "statistical",
+            Kind::Workspace => "workspace",
         }
     }
 
@@ -304,6 +309,7 @@ impl Kind {
             "lean" => Some(Kind::Lean),
             "replay" => Some(Kind::Replay),
             "statistical" => Some(Kind::Statistical),
+            "workspace" => Some(Kind::Workspace),
             _ => None,
         }
     }
@@ -675,6 +681,13 @@ pub fn pinned_code(spec: &Value) -> Vec<PinnedCode> {
                 );
             }
         }
+        // The manifest only. The files it names are blobs too, but finding
+        // them means reading the manifest, and this function reads specs.
+        Some("workspace") => push(
+            "base manifest",
+            spec.get("base").and_then(Value::as_str),
+            spec.get("base_sha256").and_then(Value::as_str),
+        ),
         _ => {}
     }
     out
@@ -777,7 +790,14 @@ impl VerifierRegistry {
 
     /// Every kind this build can answer to, in sorted order.
     pub fn kinds() -> &'static [&'static str] {
-        &["certificate", "evaluator", "lean", "replay", "statistical"]
+        &[
+            "certificate",
+            "evaluator",
+            "lean",
+            "replay",
+            "statistical",
+            "workspace",
+        ]
     }
 
     /// Whether an objective naming this kind can be posted at all. The node
@@ -858,6 +878,7 @@ impl VerifierRegistry {
             Some(Kind::Lean) => self.verify_lean(spec, artifact),
             Some(Kind::Replay) => self.verify_replay(spec, artifact),
             Some(Kind::Statistical) => self.verify_statistical(spec, artifact),
+            Some(Kind::Workspace) => self.verify_workspace(spec, artifact),
             // Unknown kind is Unavailable, not InvalidSpec: another node, or a
             // later version of this crate, may well know this verifier. Saying
             // "your objective is broken" because *we* are old would be wrong.
@@ -2942,7 +2963,14 @@ mod tests {
     fn kinds_are_sorted_and_complete() {
         assert_eq!(
             VerifierRegistry::kinds(),
-            &["certificate", "evaluator", "lean", "replay", "statistical"]
+            &[
+                "certificate",
+                "evaluator",
+                "lean",
+                "replay",
+                "statistical",
+                "workspace"
+            ]
         );
         for kind in VerifierRegistry::kinds() {
             assert!(VerifierRegistry::supports(kind));

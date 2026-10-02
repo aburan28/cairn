@@ -1,0 +1,5 @@
+{
+  "files": {"solution/build.py": "2ab7c6c603c0051b7331900bbfc63ec0ca684e051c2c05bfdd6f10e7901b5898"},
+  "note": "Batcher's odd-even merge sort: 19 comparators at depth 6.",
+  "results": {"score": 114}
+}

@@ -39,7 +39,8 @@
             "evaluator",
             "lean",
             "replay",
-            "statistical"
+            "statistical",
+            "workspace"
           ]
         }
       },
