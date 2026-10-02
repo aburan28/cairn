@@ -8,6 +8,12 @@
 // (Sources/Cairn/Updates.swift). It is a prebuilt framework, so it costs no
 // Xcode either; build.sh copies it into Contents/Frameworks, where the rpath
 // below finds it.
+//
+// The test target reaches the executable with `@testable import Cairn`. It
+// covers what decides the bytes a node is handed: which request goes to
+// which provider, how a model's reply is read, the objective built from a
+// draft and the pin inside it, and the verdicts read back from `cairn
+// propose`. CI's gui-macos job runs it.
 import PackageDescription
 
 let package = Package(
@@ -25,6 +31,11 @@ let package = Package(
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
             ]
-        )
+        ),
+        .testTarget(
+            name: "CairnTests",
+            dependencies: ["Cairn"],
+            path: "Tests/CairnTests"
+        ),
     ]
 )

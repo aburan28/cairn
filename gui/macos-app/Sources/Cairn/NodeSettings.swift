@@ -22,8 +22,6 @@ struct NodeSettings: Equatable {
         /// and do not spawn `cairn run`. Same idea as the iOS reader's
         /// retargetable node URL.
         static let attachURL = "attachURL"
-        /// Source checkout for posting example objectives (Tasks sheet).
-        static let checkoutRoot = "checkoutRoot"
     }
 
     /// The node's own default cap, 4096 MiB, so a person who never opens
@@ -92,7 +90,6 @@ struct NodeSettings: Equatable {
             Key.p2pHost: loopbackHost,
             Key.bootstrap: "",
             Key.attachURL: "",
-            Key.checkoutRoot: "",
         ]
     }
 

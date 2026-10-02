@@ -242,6 +242,22 @@ made larger:
 
 See [agents.md](agents.md).
 
+## Agents as authors
+
+Cairn.app's **New Challenge…** has a model the funder chose (Claude, OpenAI,
+Fireworks, OpenCode Zen, OpenRouter, or any OpenAI-compatible endpoint) write
+the statement, the answer format and the checker from a plain description.
+The checker is the one thing in a bounty that decides payment, so a model
+writing it moves the weak point from "a funder who cannot write the schema"
+to "a funder who cannot read the code".
+
+| attack | mechanism | status |
+|---|---|---|
+| **a checker that pays the wrong answers** — the model writes one that accepts anything, or compares against a solution hard-coded in its source, which every node that syncs the blob can read | before anything is posted the app runs the drafted checker through the node's own verifier (`cairn propose --dry-run` against a throwaway log, so the same jail, interpreter and verdict rules as settlement) on a wrong answer it must reject and, when the model knows one, a right answer it must accept. **Post** stays disabled until both hold, and the code is shown above the button. Two examples are a smoke test and not a proof: a checker can reject one wrong answer and accept another, and nothing reads the code for a hard-coded answer beyond the prompt forbidding one and saying why. The funder is the only reviewer | partial |
+| **a steered description** — text pasted into the description (from a forum post, say) steers the model toward a checker that pays a particular answer or party | the same tests and the same reading, nothing more. The model's output is code that runs inside the verifier jail and data the app shows; nothing it returns runs on the app's side | partial |
+| **the API key at rest** — the key pasted into Settings is read by another process, or copied off the machine in a backup | kept in `~/.cairn/secrets` beside the other operator credentials: mode 0600 in a 0700 directory and **not encrypted**, so any process running as that user can read it and a home-folder backup carries it. It is written through `cairn secret set --stdin`, never on a command line, read back only when a request is made, and never reaches the node: requests go from the app to the provider over TLS, and a custom endpoint over plain http is refused unless it is this Mac | partial |
+| **the problem leaves the Mac before it is public** — the description and the draft go to a third-party provider | inherent to drafting with a hosted model, and not hidden: nothing is sent until **Draft Challenge** is pressed, and the sheet names the provider. A problem meant for an `embargoed` or `sealed` objective should not be drafted this way | not handled |
+
 ## The lab
 
 `cairn lab` ([lab.md](lab.md)) is a multi-writer research workspace beside the

@@ -133,6 +133,8 @@ struct SettingsView: View {
 
             UpdatesSection(updates: updates, nodeVersion: node.binaryVersion)
 
+            AISettingsSection(node: node)
+
             if needsRestart {
                 Section {
                     HStack {
@@ -573,6 +575,7 @@ private struct Caption: View {
 /// the old selector.
 struct OpenSettingsButton: View {
     var iconOnly = false
+    var title = "Settings…"
 
     var body: some View {
         if #available(macOS 14, *) {
@@ -588,7 +591,7 @@ struct OpenSettingsButton: View {
         if iconOnly {
             Label("Settings", systemImage: "gearshape")
         } else {
-            Text("Settings…")
+            Text(title)
         }
     }
 }

@@ -399,6 +399,11 @@ jobs:
       # release.yml builds it, so an x86_64-only break shows up here and not
       # on a tag.
       - run: gui/macos-app/build.sh --universal
+      # What decides the bytes a node is handed from the app: the request
+      # each AI provider gets, how a model's reply is read, the objective and
+      # pin built from a draft, the verdicts read back from `cairn propose`,
+      # and the checker staging Tasks does. Nothing else runs them.
+      - run: swift test --package-path gui/macos-app
 
   gui-ios:
     # The iPhone reader, including Cairn.xcodeproj. Lives in ios-app.yml so

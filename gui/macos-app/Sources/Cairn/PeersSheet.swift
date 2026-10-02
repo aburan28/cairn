@@ -20,9 +20,23 @@ struct PeersSheet: View {
     @State private var busy = false
     @State private var error: String?
     @State private var info: String?
+    /// The last port test of the address field, and the address it was of.
+    @State private var probe: (address: String, result: PortProbe.Result)?
+    @State private var probing = false
 
     private var transportOK: Bool { Node.isPeerId(transport.trimmed) }
     private var addrOK: Bool { Node.isHostPort(addr.trimmed) }
+
+    private func testAddress() {
+        let address = addr.trimmed
+        guard let target = PortProbe.split(address) else { return }
+        probing = true
+        Task {
+            let result = await PortProbe.tcp(target.host, target.port)
+            probe = (address, result)
+            probing = false
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -75,9 +89,25 @@ struct PeersSheet: View {
             Form {
                 TextField("Transport peer id", text: $transport, prompt: Text("64 hex characters"))
                     .font(.body.monospaced())
-                TextField("Address", text: $addr, prompt: Text("host:port, e.g. 198.51.100.7:9000"))
+                HStack {
+                    TextField("Address", text: $addr, prompt: Text("host:port, e.g. 198.51.100.7:9000"))
+                    // Before vouching for an address in the log: does
+                    // anything listen there at all? A refused port is a
+                    // typo or a peer that is down, and either is better
+                    // found now than by every node that dials it.
+                    Button("Test") { testAddress() }
+                        .disabled(!addrOK || probing)
+                }
             }
             .formStyle(.columns)
+            if probing {
+                ProgressView().controlSize(.small)
+            } else if let probe, probe.address == addr.trimmed {
+                Label("\(probe.address) \(probe.result.summary)",
+                      systemImage: probe.result.isOpen ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                    .font(.caption)
+                    .foregroundStyle(probe.result.isOpen ? Color.green : Color.red)
+            }
             Text("The address is a hint and the id is a promise: a dialler derives the id from the handshake or gets no session.")
                 .font(.caption).foregroundStyle(.tertiary)
             HStack {

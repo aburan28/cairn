@@ -76,11 +76,17 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
   to the node's stdin, so it never answers on stdout.
 - **Links** to anywhere but the node open in your browser.
 
-The **Node** menu has Open in Browser, Restart / Reconnect, **Tasks…**,
-**Secrets…**, Peers…, Copy Peer Id, Show Data Folder and Show Node Log.
+The **Node** menu has Open in Browser, Restart / Reconnect, **New
+Challenge…** (⇧⌘N, [below](#new-challenge)), **Tasks…**,
+**Secrets…**, Peers…, **Test Connectivity…** (⇧⌘K, below), Copy Peer Id,
+Show Data Folder and Show Node Log.
 **Tasks…** posts a curated objective (including ECC2K-130 orbit piecework)
-from a source checkout into this node's log; point it at the repository
-folder or set `CAIRN_REPO` when launching. **Secrets…** pastes named
+into this node's log in one click. The objectives and the checkers they pin
+ship inside the app, copied from `examples/` by `build.sh`, which also fails
+if a checker no longer matches its pin; posting puts the checker under the
+node's data folder first, so the node can run it and serve it to peers.
+Launch with `CAIRN_REPO=<checkout>` to post a checkout's edited copies
+instead. **Secrets…** pastes named
 operator credentials (AWS keys, `DATABASE_URL`, …) into `~/.cairn/secrets`
 via `cairn secret set --stdin` — values are never shown again after Save,
 and never go on the command line. **Peers…** announces a peer in the log
@@ -89,7 +95,32 @@ management in Settings, and copies what to hand someone adding this node.
 The status button in the toolbar says, in a word or two, whether
 the node is on this Mac only, attached to another node's URL, or has reached
 peers. Its popover has the reader and P2P addresses, the peer id and the
-session count, each with a copy button.
+session count, each with a copy button, and **Test…**.
+
+**Test Connectivity…** (⇧⌘K, or **Test…** in that popover) checks the ports
+themselves rather than reading a status word, each attempt made now from
+this Mac:
+
+- **Reader**: an HTTP request to the page this window shows.
+- **P2P listener**: a TCP connect to the port the node said it bound. When
+  Settings accepts inbound, also to that port on each of this Mac's LAN
+  addresses, with whether the macOS firewall is on (it asks once per program
+  whether to accept incoming connections, and a denied answer looks from
+  outside exactly like a closed port). It also prints the `nc -vz <address>
+  <port>` to run from another machine, which is the one direction a Mac
+  cannot test for itself.
+- **Peers it dials**: a TCP connect to every bootstrap file's address and to
+  every seed the node's log names, beside what that log says about the
+  handshake. A port that answers proves a listener, not a cairn node holding
+  the key its id names; only the handshake proves that, and only the node
+  runs it.
+- **Sessions**: how many peer sessions the log reports.
+
+Each attempt is told apart: *refused* (the host answered and nothing listens
+there), *no answer* (the host is down or a firewall drops the connection),
+or a name that does not resolve. **Copy Report** puts the lot on the
+clipboard. The Peers sheet's address field has its own **Test**, so an
+address can be checked before it is vouched for in the log.
 
 The page itself is the node's `/ui/`, which recognises this window by the
 `CairnApp` its web view appends to the user agent and drops the public site's
@@ -115,6 +146,54 @@ A build with no `SUPublicEDKey` in its Info.plist, such as one from
 item opens the releases page. [packaging/README.md](../../packaging/README.md#updates-for-cairnapp)
 has the release side and the one secret it needs.
 
+## New challenge
+
+**Node → New Challenge…**, or the sparkles in the toolbar: describe a problem
+in plain words, set a reward, and post a challenge without meeting the
+objective schema.
+
+1. A model you have a key for drafts the parts that need judgment: the
+   statement solvers read, the answer's shape, a Python checker, a correct
+   answer when it knows one, and a plausible wrong one.
+2. The app adds the parts that need none. It writes the checker under the
+   node's data folder (`challenges/<goal>-<hash>/checker.py`), pins it by its
+   SHA-256, caps it at 60 seconds, and writes `objective.json` beside it.
+3. It **tests the checker through the node's own verifier**, in the same
+   jail settlement uses. It posts the draft into a throwaway log and runs
+   `cairn propose --dry-run` on both answers; the real log is never touched.
+   **Post Challenge** stays disabled until the wrong answer is rejected and
+   the right one, if there is one, accepted. The review shows both verdicts
+   and the checker's code, because that code decides who gets paid.
+4. **Redraft** sends the earlier attempt back with whatever failed and
+   whatever you typed in *What should change?*.
+
+The statement, goal, reward and funder can be edited in review; the checker
+cannot, so what was tested is what is posted. The funder is a name shown on
+the bounty, `treasury` by default, unsigned.
+
+**Keys.** The first time, the sheet asks for one inline; **Settings → AI**
+chooses the provider and model, tests the key, and removes it.
+
+| provider | default model | key saved as |
+|---|---|---|
+| Claude (Anthropic) | `claude-opus-5-5` | `ANTHROPIC_API_KEY` |
+| OpenAI | `gpt-6.1-sol` | `OPENAI_API_KEY` |
+| Fireworks AI | `accounts/fireworks/models/kimi-k3` | `FIREWORKS_API_KEY` |
+| OpenCode Zen | `kimi-k3` (Claude models also work; GPT models need Zen's Responses API, which this app does not speak) | `OPENCODE_API_KEY` |
+| OpenRouter | `moonshotai/kimi-k3` | `OPENROUTER_API_KEY` |
+| Other (OpenAI-compatible) | — | `CAIRN_AI_API_KEY` |
+
+Keys go into `~/.cairn/secrets` with `cairn secret set --stdin`, beside
+every other credential this app handles, so they also show in **Secrets…**.
+They are kept under the names each provider's own tools read, so a terminal
+agent can be handed the same key (`cairn secret run --env ANTHROPIC_API_KEY
+-- claude`). They are readable by your user only and **not encrypted on
+disk**. The node never sees them: the node has no TLS by design
+(`tests/cipher_policy.rs`), so the app makes the request. On Claude's own API
+the request opts into server-side refusal fallbacks (`fallbacks: "default"`).
+What this does and does not protect is in
+[docs/threat-model.md](../../docs/threat-model.md#agents-as-authors).
+
 ## Settings
 
 ⌘, or the gear in the toolbar. How much of this Mac the node's work may take,
@@ -130,6 +209,7 @@ objective's pinned checker, one at a time, in a jail.
 | Bootstrap files | none | `--bootstrap <file>` (repeatable) |
 | Data folder | `~/Library/Application Support/Cairn` | `--data-dir` and `--root` |
 | Storage limit | off | `--max-size <n>GB` |
+| AI provider, model and key | Claude, `claude-opus-5-5`, no key | — (the app's own; see [New challenge](#new-challenge)) |
 
 The app enforces none of these itself. Each is a setting any `cairn run`
 takes, enforced by the node, so the window cannot promise more than the
