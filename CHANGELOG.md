@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/aburan28/cairn/compare/v1.7.0...v1.8.0) (2026-10-02)
+
+
+### Features
+
+* **ui:** app layout for the reader and Cairn.app ([#193](https://github.com/aburan28/cairn/issues/193)) ([90a7645](https://github.com/aburan28/cairn/commit/90a76458d04446aeda3772741fcf8db0df65d2bd))
+
 ## [1.7.0](https://github.com/aburan28/cairn/compare/v1.6.0...v1.7.0) (2026-10-02)
 
 
