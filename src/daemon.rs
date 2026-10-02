@@ -695,14 +695,6 @@ pub fn run(config: Config) -> Result<(), String> {
             "seeds: {} names no seed this node can dial",
             seed_source.describe()
         );
-    } else if !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) {
-        // A seed's key is fetched by a direct dial, and a proxied node has a
-        // censor to hide from. Said once rather than by a seed that is
-        // silently never asked.
-        log::warn!(
-            "seeds: dials go through a proxy and a seed's key is fetched by a direct dial, \
-             so the seed list is unused; pass the seeds' bootstrap files from `make seeds` instead"
-        );
     } else {
         log::info!(
             "seeds: {} from {}; {}=off runs without them",
@@ -882,7 +874,7 @@ pub fn run(config: Config) -> Result<(), String> {
     // peers that *are* up -- for exactly the node that most needs them, the one
     // whose only other hope is the LAN. `Service` is shared by design; the
     // accept thread already learns into the same book.
-    if !seed_list.is_empty() && matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) {
+    if !seed_list.is_empty() {
         let seeding = Arc::clone(&service);
         thread::spawn(move || loop {
             for (seed, outcome) in seed_list.iter().zip(seeding.seed_from_list(&seed_list)) {
@@ -1231,10 +1223,15 @@ fn report_seed(seed: &Seed, outcome: &SeedOutcome) {
             seed.addr,
             KEY_FETCH_BACKOFF.as_secs()
         ),
-        SeedOutcome::Dialable
-        | SeedOutcome::Waiting
-        | SeedOutcome::Ourselves
-        | SeedOutcome::Proxied => {}
+        SeedOutcome::Proxied => log::warn!(
+            "seeds: {}: {:?} is a name, and dials go through a proxy; resolving it here would \
+             tell the local network which seed this node wants. List the seed by address to \
+             use it; asking again in {}s",
+            seed.name,
+            seed.addr,
+            KEY_FETCH_BACKOFF.as_secs()
+        ),
+        SeedOutcome::Dialable | SeedOutcome::Waiting | SeedOutcome::Ourselves => {}
     }
 }
 

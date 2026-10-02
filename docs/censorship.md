@@ -287,7 +287,10 @@ three separate ways to block it that need three separate answers:
   and a bootstrap file naming a host is refused, because the lookup alone tells
   the local resolver whom the node is reaching), and LAN beacons default to off
   rather than announcing the node's id to the segment it is hiding from.
-  `cairn blob fetch` and `cairn commit --sealed` still dial directly.
+  Key requests go through the proxy like every other dial, so a proxied node
+  still learns the keys of the peers its log and seed list name (a seed listed
+  by host is skipped, not resolved), and `cairn blob fetch` and `cairn commit
+  --sealed` take `--proxy` too.
 - Pluggable transports / Tor / mixnets are therefore reachable *today* for
   participants under active network censorship, by pointing `--proxy` at one,
   rather than being a future the library has no seam for.
