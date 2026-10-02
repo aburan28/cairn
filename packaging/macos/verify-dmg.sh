@@ -160,6 +160,10 @@ plist="$APP/Contents/Info.plist"
     || fail "Cairn.app says version $(plutil -extract CFBundleShortVersionString raw -o - "$plist"), not $UPSTREAM_VERSION"
 [ "$(plutil -extract CFBundleVersion raw -o - "$plist")" = "$MACOS_PKG_VERSION" ] \
     || fail "Cairn.app's build version is not $MACOS_PKG_VERSION"
+# The Dock and Finder look for CFBundleIconFile in Resources; without it the
+# app shows the generic blank icon.
+[ -s "$APP/Contents/Resources/$(plutil -extract CFBundleIconFile raw -o - "$plist").icns" ] \
+    || fail "Cairn.app has no icon"
 # The app runs the command at this path and nowhere else the installer puts
 # anything, so the two must agree; the string is in the binary as a literal.
 grep -aq '/usr/local/cairn/bin/cairn' "$APP/Contents/MacOS/Cairn" \

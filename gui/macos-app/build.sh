@@ -87,16 +87,11 @@ for objective in "$TASKS"/examples/certicom-ecdlp/objective-*.json; do
         || { echo "build failed: $checker hashes to $got, but $(basename "$objective") pins $pin" >&2; exit 1; }
 done
 
-# The same picture as the autoresearcher's, rendered from the same code, so
-# nothing binary is committed. A missing icon is a cosmetic loss and does not
-# fail the build.
-ICONSET="$OUT/AppIcon.iconset"
-if swift "$HERE/../macos/Resources/render-icon.swift" "$ICONSET" >/dev/null 2>&1 \
-   && iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns" 2>/dev/null; then
-    :
-else
-    echo "note: could not render the icon; the app will use the generic one" >&2
-fi
+# The icon is drawn by packaging/macos/icon/make-icon.py and committed as an
+# .icns, so the build needs no renderer. The autoresearcher uses the same one.
+ICON="$HERE/../../packaging/macos/icon/AppIcon.icns"
+[ -f "$ICON" ] || { echo "build failed: $ICON missing" >&2; exit 1; }
+cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
 
 codesign --force --sign - "$APP" >/dev/null
 codesign --verify --strict "$APP"

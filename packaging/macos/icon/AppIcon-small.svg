@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1b2230"/><stop offset="1" stop-color="#0b0f16"/></linearGradient>
+<radialGradient id="hl" cx="0.35" cy="0.15" r="0.6"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+<linearGradient id="s0" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9aa0a8"/><stop offset="1" stop-color="#5d636c"/></linearGradient>
+<linearGradient id="s1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a9aeb5"/><stop offset="1" stop-color="#6a7078"/></linearGradient>
+<linearGradient id="s2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ef0a8"/><stop offset="1" stop-color="#14a46a"/></linearGradient>
+<filter id="blur" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="14"/></filter>
+<filter id="soft" x="-30%" y="-100%" width="160%" height="300%"><feGaussianBlur stdDeviation="14"/></filter>
+<clipPath id="body"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+</defs>
+<rect x="100" y="112" width="824" height="824" rx="185" fill="#000" opacity="0.30" filter="url(#blur)"/>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+<g clip-path="url(#body)">
+<g transform="rotate(0 512 705.0)"><path d="M232.0,720.2 C232.0,648.0 344.0,610.0 512.0,610.0 C680.0,610.0 792.0,648.0 792.0,720.2 C792.0,781.0 680.0,800.0 512.0,800.0 C344.0,800.0 232.0,781.0 232.0,720.2 Z" fill="url(#s0)"/></g>
+<g transform="rotate(-3 520 501.5)"><path d="M310.0,514.7 C310.0,452.0 381.4,419.0 507.4,419.0 C633.4,419.0 730.0,452.0 730.0,514.7 C730.0,567.5 646.0,584.0 520.0,584.0 C394.0,584.0 310.0,567.5 310.0,514.7 Z" fill="url(#s1)"/></g>
+<g transform="rotate(2 508 323.0)"><path d="M373.0,334.2 C373.0,281.0 435.1,253.0 516.1,253.0 C597.1,253.0 643.0,281.0 643.0,334.2 C643.0,379.0 589.0,393.0 508.0,393.0 C427.0,393.0 373.0,379.0 373.0,334.2 Z" fill="url(#s2)"/></g>
+</g>
+<rect x="101" y="101" width="822" height="822" rx="184" fill="none" stroke="#ffffff" stroke-opacity="0.1" stroke-width="2"/>
+</svg>

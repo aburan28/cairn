@@ -10,8 +10,8 @@ open "gui/macos/build/Cairn Autoresearcher.app"
 ```
 
 It is a SwiftPM executable wrapped into an `.app` by `build.sh`, so it builds
-with the Command Line Tools alone; Xcode is not needed. The icon is rendered
-from `Resources/render-icon.swift` at build time, and the bundle is ad-hoc
+with the Command Line Tools alone; Xcode is not needed. The icon is Cairn.app's
+(`packaging/macos/icon/`), and the bundle is ad-hoc
 signed, which is what a locally built app needs to launch and all it needs
 when it is never distributed.
 
