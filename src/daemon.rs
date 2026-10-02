@@ -76,6 +76,25 @@ const BEACONS_PER_TICK: usize = 64;
 /// Seconds between sync rounds.
 const TICK_SECONDS: u64 = 5;
 
+/// Ticks between LAN beacon announcements.
+const BEACON_EVERY_TICKS: u64 = multicast::INTERVAL_SECONDS.div_ceil(TICK_SECONDS);
+
+/// Inbound sessions allowed in progress at once, handshake included.
+///
+/// A silent one holds its thread for at most the handshake timeout, so this bounds what
+/// a peer that opens sockets and goes quiet can cost: a few idle threads, not
+/// the accept loop.
+const MAX_INBOUND_HANDSHAKES: usize = 16;
+
+/// Releases one inbound handshake slot however the session ends.
+struct InFlight(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 /// Ticks between checks of the store against its cap: a minute. Walking the
 /// data directory is not free, and a log does not grow by a meaningful
 /// fraction of any sensible cap in sixty seconds.
@@ -649,8 +668,9 @@ pub fn run(config: Config) -> Result<(), String> {
                 // printed a 30-second cadence (announcing happens every tick)
                 // and the default port even when `CAIRN_BEACON_PORT` moved it.
                 log::info!(
-                    "multicast: beacon bound on {}:{port}; announcing every {TICK_SECONDS}s",
-                    multicast::GROUP
+                    "multicast: beacon bound on {}:{port}; announcing every {}s",
+                    multicast::GROUP,
+                    BEACON_EVERY_TICKS * TICK_SECONDS
                 );
                 Some(responder)
             }
@@ -783,6 +803,7 @@ pub fn run(config: Config) -> Result<(), String> {
     let accept_checkpoint = config.checkpoint.clone();
     let accept_population = config.population.clone();
     let accept_registry = registry.clone();
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     thread::spawn(move || loop {
         // Accept **before** taking the lock, and this ordering is the whole
         // reason `Service::serve_node_once` exists.
@@ -802,67 +823,91 @@ pub fn run(config: Config) -> Result<(), String> {
                 continue;
             }
         };
-        // The first frame is read **before** the lock, so a key request is
-        // answered with nothing held. The tick thread below holds this lock
-        // while it dials, and a peer's tick thread holds *its* lock while it
-        // waits for our key; two fresh nodes that found each other in the
-        // same tick sat like that until a handshake timeout, then one of
-        // them saw a reset and backed off for a minute.
-        let inbound = match transport::Inbound::read(stream) {
-            Ok(inbound) => inbound,
-            Err(error) => {
-                log::warn!("inbound session: {error}");
-                continue;
-            }
-        };
-        if inbound.is_key_request() {
-            match accept_service.answer_key_request(inbound) {
-                Ok(true) => log::info!("served our transport key to a peer that heard our beacon"),
-                Ok(false) => log::debug!("refused a key request that named another peer"),
-                Err(error) => log::warn!("key request: {error}"),
-            }
+        // The handshake runs off the accept thread. `Inbound::read` blocks for
+        // up to the handshake timeout, so one dialler that connects and sends
+        // nothing -- once every ten seconds is enough -- used to hold the only
+        // accept thread and starve every honest inbound peer. The cap keeps
+        // the same trick from turning into a thread per socket instead.
+        if in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel) >= MAX_INBOUND_HANDSHAKES {
+            in_flight.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            log::debug!(
+                "inbound session: {MAX_INBOUND_HANDSHAKES} handshakes already pending; dropped one"
+            );
             continue;
         }
-        let mut guard = accept_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let State {
-            node, population, ..
-        } = &mut *guard;
-        let outcome = match accept_population {
-            Some(_) => {
-                let mut scorer = RoundScorer::new(accept_registry.clone());
-                accept_service
-                    .serve_inbound_and_population(
-                        inbound,
-                        node,
-                        population,
-                        PopLimits::default(),
-                        |node, candidate| scorer.score(node, candidate),
-                    )
-                    .map(|(remote, _)| remote)
+        let in_flight = Arc::clone(&in_flight);
+        let accept_service = Arc::clone(&accept_service);
+        let accept_state = Arc::clone(&accept_state);
+        let accept_root_key = Arc::clone(&accept_root_key);
+        let accept_checkpoint = accept_checkpoint.clone();
+        let accept_population = accept_population.clone();
+        let accept_registry = accept_registry.clone();
+        thread::spawn(move || {
+            let _slot = InFlight(in_flight);
+            // The first frame is read **before** the lock, so a key request is
+            // answered with nothing held. The tick thread below holds this lock
+            // while it dials, and a peer's tick thread holds *its* lock while it
+            // waits for our key; two fresh nodes that found each other in the
+            // same tick sat like that until a handshake timeout, then one of
+            // them saw a reset and backed off for a minute.
+            let inbound = match transport::Inbound::read(stream) {
+                Ok(inbound) => inbound,
+                Err(error) => {
+                    log::warn!("inbound session: {error}");
+                    return;
+                }
+            };
+            if inbound.is_key_request() {
+                match accept_service.answer_key_request(inbound) {
+                    Ok(true) => {
+                        log::info!("served our transport key to a peer that heard our beacon")
+                    }
+                    Ok(false) => log::debug!("refused a key request that named another peer"),
+                    Err(error) => log::warn!("key request: {error}"),
+                }
+                return;
             }
-            None => accept_service.serve_inbound_once(inbound, node),
-        };
-        match outcome {
-            Ok(remote) => {
-                // The only positive signal this daemon ever gave was a growing
-                // log file, checked by hand across two terminals. Every other
-                // line here is a failure; a session that worked was silent.
-                log::info!(
-                    "inbound session: {} ok, {} entries now",
-                    peer_id_string(&remote),
-                    node.ledger().len()
-                );
-                persist(
-                    &guard,
-                    &accept_checkpoint,
-                    &accept_root_key,
-                    accept_population.as_ref(),
-                );
+            let mut guard = accept_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let State {
+                node, population, ..
+            } = &mut *guard;
+            let outcome = match accept_population {
+                Some(_) => {
+                    let mut scorer = RoundScorer::new(accept_registry.clone());
+                    accept_service
+                        .serve_inbound_and_population(
+                            inbound,
+                            node,
+                            population,
+                            PopLimits::default(),
+                            |node, candidate| scorer.score(node, candidate),
+                        )
+                        .map(|(remote, _)| remote)
+                }
+                None => accept_service.serve_inbound_once(inbound, node),
+            };
+            match outcome {
+                Ok(remote) => {
+                    // The only positive signal this daemon ever gave was a growing
+                    // log file, checked by hand across two terminals. Every other
+                    // line here is a failure; a session that worked was silent.
+                    log::info!(
+                        "inbound session: {} ok, {} entries now",
+                        peer_id_string(&remote),
+                        node.ledger().len()
+                    );
+                    persist(
+                        &guard,
+                        &accept_checkpoint,
+                        &accept_root_key,
+                        accept_population.as_ref(),
+                    );
+                }
+                Err(error) => log::warn!("inbound session: {error}"),
             }
-            Err(error) => log::warn!("inbound session: {error}"),
-        }
+        });
     });
 
     let mut ticks: u64 = 0;
@@ -946,23 +991,31 @@ pub fn run(config: Config) -> Result<(), String> {
             }
         }
 
+        // Beacons are heard outside the node lock. Nothing here reads the log,
+        // and a key request to a beacon's sender can block on a dial: a host
+        // on the segment announcing ids from a port it firewalls used to hold
+        // the lock -- and every inbound session with it -- for that long.
+        if let Some(responder) = &beacon {
+            // Announce on the first tick, so a node that has just started is
+            // findable at once, then every `multicast::INTERVAL_SECONDS`.
+            // Announcing every tick sent six times the traffic documented.
+            if ticks.wrapping_sub(1).is_multiple_of(BEACON_EVERY_TICKS) {
+                let _ = responder.announce(beacon_port.unwrap_or(multicast::PORT));
+            }
+            let heard = service.absorb_beacons(responder, BEACONS_PER_TICK);
+            // Discovery used to be silent until a session succeeded, which
+            // reads as "not working" from outside for as long as the key
+            // exchange takes. One line per tick that heard anything.
+            if heard > 0 {
+                log::info!("beacons: heard {heard} peer(s) on the local segment this tick");
+            }
+        }
+
         let needs = {
             let guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             service.seed_from_log(&guard.node);
-            if let Some(responder) = &beacon {
-                // Announce first, then listen: a node that has just started
-                // becomes findable this tick rather than next.
-                let _ = responder.announce(beacon_port.unwrap_or(multicast::PORT));
-                let heard = service.absorb_beacons(responder, BEACONS_PER_TICK);
-                // Discovery used to be silent until a session succeeded, which
-                // reads as "not working" from outside for as long as the key
-                // exchange takes. One line per tick that heard anything.
-                if heard > 0 {
-                    log::info!("beacons: heard {heard} peer(s) on the local segment this tick");
-                }
-            }
             guard.node.missing_code()
         };
         for endpoint in service.peers_for(&needs, config.fanout) {
