@@ -789,6 +789,13 @@ mod tests {
             first,
             Mechanism::Bubblewrap(_) | Mechanism::Seatbelt(_) | Mechanism::None(_)
         ));
+        // Except where a run says which jail it installed. A jail that cannot
+        // start falls back to running unjailed, and every other test here
+        // passes either way, so CI's `jail` job would go green having tested
+        // nothing it exists to test.
+        if let Ok(expected) = std::env::var("CAIRN_EXPECT_SANDBOX") {
+            assert_eq!(first.as_str(), expected, "{first:?}");
+        }
     }
 
     #[test]
