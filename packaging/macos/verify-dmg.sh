@@ -165,6 +165,21 @@ plist="$APP/Contents/Info.plist"
 grep -aq '/usr/local/cairn/bin/cairn' "$APP/Contents/MacOS/Cairn" \
     || fail "Cairn.app does not look for the command where this installer puts it"
 
+# Check for Updates…: Sparkle has to be inside the bundle and on the binary's
+# rpath, or the app does not launch at all -- dyld stops it before main.
+[ -f "$APP/Contents/Frameworks/Sparkle.framework/Versions/Current/Sparkle" ] \
+    || fail "Cairn.app has no Contents/Frameworks/Sparkle.framework; it would not launch"
+otool -l "$APP/Contents/MacOS/Cairn" | grep -q '@executable_path/../Frameworks' \
+    || fail "Cairn.app's binary does not look in Contents/Frameworks for Sparkle"
+plutil -extract SUFeedURL raw -o - "$plist" | grep -q '^https://' \
+    || fail "Cairn.app has no https SUFeedURL"
+# Set by release.yml when the update key exists: the app must trust that key
+# and no other, or every update it is offered is refused.
+if [ -n "${CAIRN_UPDATES_PUBLIC_KEY:-}" ]; then
+    [ "$(plutil -extract SUPublicEDKey raw -o - "$plist" 2>/dev/null)" = "$CAIRN_UPDATES_PUBLIC_KEY" ] \
+        || fail "Cairn.app's SUPublicEDKey is not the release's update key"
+fi
+
 # App postinstall opens Cairn.app for the console user after install.
 APP_POST="$APP_COMPONENT/Scripts/postinstall"
 [ -x "$APP_POST" ] || fail "no executable app postinstall; install would not launch Cairn.app"

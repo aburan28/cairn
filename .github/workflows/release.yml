@@ -472,6 +472,32 @@ jobs:
             dist/*.rpm
             dist/*.rpm.sha256
 
+  # The public half of the key Cairn.app's Check for Updates… trusts, for
+  # macos-dmg to build in. Derived from the one secret, SPARKLE_ED_PRIVATE_KEY,
+  # rather than kept as a second setting that could disagree with it. Here on
+  # Linux because macOS's LibreSSL has no Ed25519; packaging/macos/updates.sh
+  # says the rest. No secret, no key, and the app opens the releases page.
+  updates-key:
+    name: update signing key
+    runs-on: ubuntu-latest
+    outputs:
+      public_key: ${{ steps.key.outputs.public_key }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: key
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "::notice::No SPARKLE_ED_PRIVATE_KEY secret: Cairn.app will not check for updates. packaging/README.md says how to add one."
+            echo "public_key=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PUBLIC_KEY="$(packaging/macos/updates.sh public-key)"
+          echo "SUPublicEDKey $PUBLIC_KEY"
+          echo "public_key=$PUBLIC_KEY" >> "$GITHUB_OUTPUT"
+
   # The macOS disk image: both darwin binaries `build` already tested, joined
   # into one universal binary, in an installer package, in a .dmg.
   #
@@ -482,15 +508,21 @@ jobs:
   # installer rather than an app to drag.
   macos-dmg:
     name: universal .dmg
-    needs: build
+    needs: [build, updates-key]
     # As for `linux-packages`: a broken Linux target is no reason to withhold
-    # the macOS image, and a missing darwin tarball fails the download.
-    if: ${{ !cancelled() }}
+    # the macOS image, and a missing darwin tarball fails the download. A
+    # malformed update key is, though: shipped anyway, the image would hold an
+    # app that never offers an update, and nobody would notice until the next
+    # release did not arrive.
+    if: ${{ !cancelled() && needs.updates-key.result == 'success' }}
     runs-on: macos-latest
     env:
       # `secrets` cannot be read in a step's `if:`, so whether there is a
       # certificate is decided here, once, as a plain string.
       HAVE_DEVELOPER_ID: ${{ secrets.MACOS_CERTIFICATES_P12 != '' }}
+      # Read by build-dmg.sh, which writes it into Cairn.app as SUPublicEDKey,
+      # and by verify-dmg.sh, which checks it landed. Empty without the secret.
+      CAIRN_UPDATES_PUBLIC_KEY: ${{ needs.updates-key.outputs.public_key }}
     steps:
       - uses: actions/checkout@v7
 
@@ -671,3 +703,54 @@ jobs:
           if [ "$HAVE_DEVELOPER_ID" = "true" ]; then SIGNED="--macos-signed"; fi
           packaging/release-notes.sh --tag "$VERSION" --print $SIGNED \
             --assets-file assets.txt --body-file /dev/null >> "$GITHUB_STEP_SUMMARY"
+
+  # Cairn.app's update feed: `appcast.xml` on the release, naming that
+  # release's .dmg and carrying an Ed25519 signature over it.
+  #
+  # After `notes`, so it is the last thing a release gets. The app reads the
+  # feed from releases/latest, so until this upload a check finds no feed and
+  # offers nothing: the app is never pointed at a release whose image is still
+  # uploading, or whose page still lacks its install section. The feed's
+  # release notes are that page, as GitHub renders it.
+  #
+  # A dry run writes and checks the feed against the image it just built and
+  # keeps it as an artifact, so the script that runs only at release time has
+  # run before one.
+  appcast:
+    name: update feed
+    needs: [updates-key, macos-dmg, notes]
+    if: ${{ !cancelled() && needs.macos-dmg.result == 'success' && needs.updates-key.outputs.public_key != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist
+      - name: write and check the feed
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          PUBLIC_KEY: ${{ needs.updates-key.outputs.public_key }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DMG="dist/cairn-${VERSION}-macos-universal.dmg"
+          : > notes.html
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            gh api -H "Accept: application/vnd.github.html+json" \
+              "repos/${{ github.repository }}/releases/tags/$VERSION" --jq '.body_html // ""' > notes.html
+          fi
+          packaging/macos/updates.sh appcast --dmg "$DMG" --version "$VERSION" \
+            --repo "${{ github.repository }}" --notes-html notes.html --out dist/appcast.xml
+          packaging/macos/updates.sh verify --appcast dist/appcast.xml --dmg "$DMG" \
+            --public-key "$PUBLIC_KEY"
+      - name: publish it
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$VERSION" dist/appcast.xml --clobber --repo "${{ github.repository }}"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: appcast
+          path: dist/appcast.xml

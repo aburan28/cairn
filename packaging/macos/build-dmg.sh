@@ -180,10 +180,34 @@ APP_ARCHS="$(lipo -archs "$APP_ROOT/Contents/MacOS/Cairn" | tr ' ' '\n' | LC_ALL
     || die "Cairn.app's bundle identifier is not $APP_IDENTIFIER"
 plutil -replace CFBundleShortVersionString -string "$UPSTREAM_VERSION" "$APP_ROOT/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$MACOS_PKG_VERSION" "$APP_ROOT/Contents/Info.plist"
+# The key Check for Updates… holds every update to: the public half of the
+# release's SPARKLE_ED_PRIVATE_KEY, which release.yml derives with
+# packaging/macos/updates.sh. Without it the app does not start its updater
+# and its menu item opens the releases page instead, so an image built
+# anywhere else is still a working app.
+if [ -n "${CAIRN_UPDATES_PUBLIC_KEY:-}" ]; then
+    plutil -replace SUPublicEDKey -string "$CAIRN_UPDATES_PUBLIC_KEY" "$APP_ROOT/Contents/Info.plist"
+    UPDATES="signed updates (SUPublicEDKey $CAIRN_UPDATES_PUBLIC_KEY)"
+else
+    UPDATES="none: no CAIRN_UPDATES_PUBLIC_KEY, so Check for Updates… opens the releases page"
+fi
 # Signed after the stamp, since the signature seals Info.plist. The hardened
 # runtime needs no entitlements here: the app starts a process and loads
 # pages from loopback, and neither is something the runtime restricts.
 if [ "$SIGNED" -eq 1 ]; then
+    # Sparkle arrives signed by its own developers. Under the hardened runtime
+    # the app may load only code signed by its own team, so each piece of the
+    # framework is signed again, innermost first, in the order Sparkle's
+    # documentation gives. Never yet run; see the header.
+    SPARKLE="$APP_ROOT/Contents/Frameworks/Sparkle.framework"
+    for part in "$SPARKLE"/Versions/B/XPCServices/*.xpc \
+                "$SPARKLE/Versions/B/Autoupdate" \
+                "$SPARKLE/Versions/B/Updater.app" \
+                "$SPARKLE"; do
+        [ -e "$part" ] || continue
+        codesign --force --options runtime --timestamp --preserve-metadata=entitlements \
+            --sign "$APP_ID" "$part"
+    done
     codesign --force --options runtime --timestamp --sign "$APP_ID" "$APP_ROOT"
 else
     codesign --force --sign - "$APP_ROOT"
@@ -328,6 +352,7 @@ echo "built $DMG"
 echo "    architectures  $ARCHS"
 echo "    installs       /usr/local/cairn/bin/cairn, linked from /usr/local/bin/cairn"
 echo "                   /Applications/Cairn.app"
+echo "    updates        $UPDATES"
 if [ "$SIGNED" -eq 1 ]; then
     echo "    signing        Developer ID, notarized and stapled"
 else

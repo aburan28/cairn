@@ -3,16 +3,28 @@
 // than an Xcode project, so it builds with the Command Line Tools alone;
 // build.sh wraps the binary into an .app bundle, and the release's .dmg
 // installs that bundle beside the `cairn` command it runs.
+//
+// Sparkle is the one dependency: Check for Updates… and the daily check
+// (Sources/Cairn/Updates.swift). It is a prebuilt framework, so it costs no
+// Xcode either; build.sh copies it into Contents/Frameworks, where the rpath
+// below finds it.
 import PackageDescription
 
 let package = Package(
     name: "Cairn",
     platforms: [.macOS(.v13)],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
+    ],
     targets: [
         .executableTarget(
             name: "Cairn",
+            dependencies: [.product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/Cairn",
-            swiftSettings: [.unsafeFlags(["-parse-as-library"])]
+            swiftSettings: [.unsafeFlags(["-parse-as-library"])],
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
+            ]
         )
     ]
 )

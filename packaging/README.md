@@ -122,6 +122,36 @@ to.
 **Never run, and will not be until there is a certificate:** Developer ID
 signing and notarization, below.
 
+## Updates for Cairn.app
+
+Cairn.app's **Check for Updates…** (and its once-a-day check) is Sparkle,
+reading `appcast.xml` from the newest release. The `appcast` job in
+`release.yml` writes that feed last, after the .dmg and the release notes are
+up, and signs the .dmg in it with an Ed25519 key. The app installs only an
+update whose signature matches the key it was built with, then runs the same
+`Install Cairn.pkg` a first install does, which asks for an administrator
+password and replaces the command and the app together. This works on
+unsigned releases: the Ed25519 signature is Sparkle's check, not Apple's.
+
+It needs **one repository secret**, `SPARKLE_ED_PRIVATE_KEY`. Make it once, on
+any machine with OpenSSL 3 or Swift:
+
+```sh
+packaging/macos/updates.sh generate-key > cairn-updates.key   # keep this file somewhere safe
+gh secret set SPARKLE_ED_PRIVATE_KEY < cairn-updates.key
+```
+
+Everything else is derived from it: the `updates-key` job computes the public
+half, and `macos-dmg` writes it into the app as `SUPublicEDKey`. Without the
+secret, releases build as before and the menu item opens the releases page.
+
+**Do not lose or replace the key.** Every installed copy trusts exactly the key
+its release was built with. A new key means each user installs the next .dmg
+by hand once, after which updates work again.
+
+The first release built with the key is the first that can update itself;
+copies installed from earlier releases need that one .dmg installed by hand.
+
 ## Signing the macOS installer
 
 Unsigned is how every release has been built. Gatekeeper stops a user who

@@ -42,10 +42,15 @@ for arch in "${ARCHS[@]}"; do
         echo "swift build failed for $arch (exit $rc); nothing was packaged" >&2
         exit "$rc"
     fi
-    bin="$(swift build -c release --triple "$triple" --show-bin-path)/Cairn"
+    bindir="$(swift build -c release --triple "$triple" --show-bin-path)"
+    bin="$bindir/Cairn"
     [ -x "$bin" ] || { echo "build failed: $bin missing" >&2; exit 1; }
     SLICES+=("$bin")
+    # Sparkle ships as one framework holding both architectures, so any
+    # slice's copy is the one to embed.
+    SPARKLE="$bindir/Sparkle.framework"
 done
+[ -d "$SPARKLE" ] || { echo "build failed: no Sparkle.framework beside the binary in $(dirname "$SPARKLE")" >&2; exit 1; }
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -55,6 +60,10 @@ else
     lipo -create "${SLICES[@]}" -output "$APP/Contents/MacOS/Cairn"
 fi
 cp "$HERE/Info.plist" "$APP/Contents/Info.plist"
+# ditto, not cp -R: the framework's Versions/Current links have to stay links,
+# or its signature no longer matches its layout.
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
 
 # The same picture as the autoresearcher's, rendered from the same code, so
 # nothing binary is committed. A missing icon is a cosmetic loss and does not

@@ -11,6 +11,7 @@ import UniformTypeIdentifiers
 /// button that restarts it.
 struct SettingsView: View {
     @ObservedObject var node: Node
+    @ObservedObject var updates: Updates
 
     @AppStorage(NodeSettings.Key.cpus) private var cpus = 0
     @AppStorage(NodeSettings.Key.limitMemory) private var limitMemory = true
@@ -129,6 +130,8 @@ struct SettingsView: View {
                     """)
             }
             } // !attaching
+
+            UpdatesSection(updates: updates, nodeVersion: node.binaryVersion)
 
             if needsRestart {
                 Section {
