@@ -29,7 +29,7 @@ import {
 } from "@/lib/wallet";
 import { NODE_URL } from "@/lib/objectives";
 import { repoLink } from "@/lib/site";
-import { Badge, Card, CopyButton, Hash, Note, SectionHeading } from "@/components/ui";
+import { Badge, Card, CopyButton, Hash, Note, PageHeader, SectionHeading } from "@/components/ui";
 
 /**
  * Post a challenge, funded by a key a wallet holds.
@@ -251,15 +251,10 @@ export default function Page() {
 
   return (
     <>
-      <header className="mb-8 max-w-[62rem]">
-        <h1 className="text-[26px] font-semibold">Post a challenge</h1>
-        <p className="prose-block mt-2">
-          A challenge is a question with a <b>pinned checker</b> and a bounty. The
-          checker decides what passes — not the prose, and not you, once it is
-          posted. Editing it later posts a <i>different</i> objective, and claims
-          against the original stop resolving.
-        </p>
-      </header>
+      <PageHeader
+        title="Post a challenge"
+        subtitle="A question with a pinned checker and a bounty. Once posted the checker decides what passes, and editing it later posts a different objective."
+      />
 
       {!canWrite && (
         <div className="mb-6">

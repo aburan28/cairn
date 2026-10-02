@@ -18,7 +18,18 @@ import {
   short,
   units,
 } from "@/lib/site";
-import { Badge, Card, Hash, Note, Progress, SectionHeading, Stat } from "@/components/ui";
+import {
+  Box,
+  Card,
+  CopyButton,
+  Hash,
+  Note,
+  PageHeader,
+  Progress,
+  SectionHeading,
+  Stat,
+  StatusPill,
+} from "@/components/ui";
 
 /**
  * The landing page.
@@ -77,25 +88,21 @@ export default function Page() {
 
   return (
     <>
-      <section className="mb-10 max-w-[62rem]">
-        <h1 className="text-[clamp(1.6rem,4vw,2.35rem)] leading-[1.15] font-semibold">
+      {/* The pitch is for a visitor to the public site. Inside Cairn.app the
+          reader already installed it, and the page opens on the numbers. */}
+      <section className="site-only mb-8 max-w-[62rem]">
+        <h1 className="text-[clamp(1.5rem,3.2vw,2rem)] leading-[1.15] font-semibold">
           A research network where{" "}
           <span className="text-accent">verified results</span> are the unit of
           account.
         </h1>
-        <p className="prose-block mt-4 text-[15px]">
+        <p className="prose-block mt-3 text-[15px]">
           Post a question with a pinned checker and a bounty. Anyone who moves the
           answer forward is paid in proportion to how far they moved it, and every
-          payment is re-derivable from the log by anyone who has a copy of it.
-        </p>
-        <p className="prose-block mt-3">
-          A cairn is a marker each traveller adds a stone to, and the pile is the
-          record of the route. An improvement must cite the result it beat, so
-          attribution is a rule rather than an etiquette — and the citation pays.{" "}
+          payment is re-derivable from the log by anyone who has a copy of it.{" "}
           <Link href="/how-it-works">How it works</Link>.
         </p>
-
-        <div className="mt-6 flex flex-wrap gap-2">
+        <div className="mt-5 flex flex-wrap items-center gap-2">
           <Link href="/submit" className="btn btn-primary">
             Post a challenge
           </Link>
@@ -103,35 +110,40 @@ export default function Page() {
             Browse objectives
           </Link>
         </div>
-      </section>
-
-      <Card className="card-pad mb-8">
-        <div className="note-title">install</div>
-        <pre className="code mt-1">
-          {`curl -fsSL ${REPO}/releases/latest/download/install.sh | sh`}
-        </pre>
-        <p className="hint">
-          Linux and macOS, amd64 and arm64. Checks the tarball against its published
-          sha256 — which detects a corrupted download and nothing more, because both
-          files come from the same server. The check that means something is the one
-          at the bottom of this page.
-        </p>
-        <p className="hint">
-          On a phone, Add to Home Screen — this reader is a standalone web app,
-          same pages, no service worker — or the native reader in{" "}
+        <div className="relative mt-5 max-w-[46rem]">
+          <pre className="code pr-9">
+            {`curl -fsSL ${REPO}/releases/latest/download/install.sh | sh`}
+          </pre>
+          <div className="absolute top-2 right-2">
+            <CopyButton value={`curl -fsSL ${REPO}/releases/latest/download/install.sh | sh`} />
+          </div>
+        </div>
+        <p className="hint max-w-[46rem]">
+          Linux and macOS, amd64 and arm64. The download&rsquo;s sha256 only catches
+          corruption; the check that means something is re-deriving the log, below.
+          On a phone, Add to Home Screen, or use the native reader in{" "}
           <a className="text-accent hover:underline" href={repoLink("gui/ios/")}>
             gui/ios
           </a>
-          . Neither runs a node; both read one.
+          .
         </p>
-      </Card>
+      </section>
 
-      <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <Stat label="objectives" value={String(objectives.length)} from={objectivesFrom} />
-        <Stat label="open" value={String(open.length)} from={objectivesFrom} />
-        <Stat label="pool" value={units(pool)} from={objectivesFrom} />
-        <Stat label="paid out" value={units(paid)} from={objectivesFrom} />
-        <Stat label="chain links" value={String(links)} from={chainFrom} />
+      <div className="app-only">
+        <PageHeader title="Overview" subtitle={objectivesFrom} />
+      </div>
+
+      <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        <Stat label="Objectives" value={String(objectives.length)} from={objectivesFrom} />
+        <Stat
+          label="Open"
+          value={String(open.length)}
+          from={open.length ? "worth working on" : "all settled"}
+          tone={open.length ? "accent" : "neutral"}
+        />
+        <Stat label="Pool" value={units(pool)} from="funded, all time" tone="violet" />
+        <Stat label="Paid out" value={units(paid)} from="to accepted claims" tone="info" />
+        <Stat label="Chain links" value={String(links)} from={chainFrom} tone="warn" />
       </div>
 
       {/* A node that answered in a shape this page does not read, or that
@@ -139,7 +151,7 @@ export default function Page() {
           folded silently into the fallback, because the first is a bug and the
           second is the reason the panel below is labelled. */}
       {notes.length > 0 && (
-        <div className="mb-8">
+        <div className="mb-5">
           <Note title="showing the snapshot for part of this page" tone="warn">
             {notes.map((note) => (
               <div key={note}>{note}</div>
@@ -148,86 +160,105 @@ export default function Page() {
         </div>
       )}
 
-      <section className="mb-12">
-        <SectionHeading
-          count={objectives.length}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+        <Box
+          title={
+            <>
+              Challenges <span className="mono ml-1 font-normal text-ink-3">{objectives.length}</span>
+            </>
+          }
           aside={
-            <Link href="/objectives" className="text-[12.5px] text-accent hover:underline">
-              all objectives →
+            <Link href="/objectives" className="text-[12px] font-normal text-accent hover:underline">
+              All objectives →
             </Link>
           }
+          flush
         >
-          Challenges
-        </SectionHeading>
-
-        {objectives.length === 0 ? (
-          <p className="py-8 text-ink-3">No objectives yet.</p>
-        ) : (
-          <ul className="grid gap-3 md:grid-cols-2">
-            {objectives.map((o) => {
-              const ratchet = o.record?.ratchet ?? null;
-              const pct = ratchet && o.frontier ? progress(o.frontier.score, ratchet) : null;
-              return (
-                <Card as="li" key={o.id} className="card-pad flex flex-col gap-3">
-                  <div className="flex flex-wrap items-center gap-2">
+          {objectives.length === 0 ? (
+            <p className="px-4 py-8 text-center text-ink-3">No objectives yet.</p>
+          ) : (
+            <ul className="divide-edge-y">
+              {objectives.map((o) => {
+                const ratchet = o.record?.ratchet ?? null;
+                const pct = ratchet && o.frontier ? progress(o.frontier.score, ratchet) : null;
+                return (
+                  <li key={o.id}>
                     <Link
                       href={`/challenge?id=${encodeURIComponent(o.id)}`}
-                      className="text-[14px] font-semibold text-ink hover:text-accent"
+                      className="group flex items-center gap-4 px-4 py-3 transition-colors hover:bg-surface-2"
                     >
-                      {o.goal || short(o.id)}
-                    </Link>
-                    <Badge tone={o.settled ? "neutral" : "accent"}>
-                      {o.settled ? "settled" : "open"}
-                    </Badge>
-                    <Badge tone="info">{o.verifier_kind}</Badge>
-                  </div>
-
-                  {/* Labelled untrusted wherever it is shown. The funder wrote
-                      it, and an agent reading this page has no other warning. */}
-                  <p className="text-[13px] leading-relaxed text-ink-2">
-                    <span className="text-ink-3">statement (untrusted): </span>
-                    {o.statement.slice(0, 160)}
-                    {o.statement.length > 160 ? "…" : ""}
-                  </p>
-
-                  <div className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-ink-2">
-                    <span>
-                      pool <span className="mono text-ink">{units(o.reward)}</span>
-                    </span>
-                    {o.frontier ? (
-                      <>
-                        <Link
-                          href={`/frontier?id=${encodeURIComponent(o.id)}`}
-                          className="text-accent hover:underline"
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate font-semibold text-ink group-hover:text-accent">
+                            {o.goal || short(o.id)}
+                          </span>
+                          <StatusPill settled={o.settled} />
+                        </div>
+                        {/* Quoted and dimmed: the funder wrote it, and the
+                            objective's own page carries it under its
+                            "not checked" label. */}
+                        <p
+                          className="mt-0.5 truncate text-[12.5px] text-ink-3"
+                          title={`Funder's statement, not checked: ${o.statement}`}
                         >
-                          best <span className="mono">{o.frontier.score}</span>
-                        </Link>
-                        <span className="flex items-center gap-1 text-ink-3">
-                          held by <Hash value={o.frontier.holder} chars={6} />
-                        </span>
-                      </>
-                    ) : o.settlement ? (
-                      <span className="flex flex-wrap items-center gap-1 text-ink-3">
-                        settled — <span className="mono text-ink">{units(o.settlement.reward)}</span>{" "}
-                        paid to <Hash value={o.settlement.submitter} chars={6} /> for claim{" "}
-                        <Hash value={o.settlement.claim_id} chars={6} />
-                      </span>
-                    ) : (
-                      <span className="text-ink-3">no claim yet</span>
-                    )}
-                  </div>
+                          &ldquo;{o.statement}&rdquo;
+                        </p>
+                      </div>
+                      <div className="hidden w-32 shrink-0 sm:block">
+                        {pct !== null ? (
+                          <Progress value={pct / 100} />
+                        ) : (
+                          <span className="text-[12px] text-ink-3">
+                            {o.frontier
+                              ? `best ${o.frontier.score}`
+                              : o.settlement
+                                ? `paid to ${o.settlement.submitter}`
+                                : "no claim yet"}
+                          </span>
+                        )}
+                      </div>
+                      <span className="mono w-24 shrink-0 text-right text-ink">{units(o.reward)}</span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Box>
 
-                  {pct !== null && (
-                    <Progress value={pct / 100} label="frontier across the span" />
-                  )}
-                </Card>
-              );
-            })}
-          </ul>
-        )}
-      </section>
+        <Box title="Checkpoint" className="self-start">
+          <dl className="kv">
+            <dt>merkle root</dt>
+            <dd>
+              <Hash value={signed.root} chars={8} />
+            </dd>
+            <dt>height</dt>
+            <dd className="mono">{signed.height}</dd>
+            <dt>signed</dt>
+            <dd className="mono text-[12px]">{signed.issued_at.replace("T", " ").slice(0, 16)}</dd>
+            <dt>by</dt>
+            <dd>
+              <Hash value={signed.public_key} chars={8} />
+            </dd>
+          </dl>
+          {/* The label is the point of the panel. A live node's root and the
+              bundled log's signature are different facts, and the sentence that
+              says which this is must sit beside the number. */}
+          <p className="mt-3 text-[11.5px] leading-relaxed text-ink-3">{checkpointFrom}</p>
+          <details className="mt-3 text-[12.5px]">
+            <summary className="cursor-pointer text-accent">Re-derive it yourself</summary>
+            <p className="mt-2 text-ink-2">
+              Every settlement recomputed from the records, each batch checked against
+              the anchor it recorded:
+            </p>
+            <pre className="code mt-2 text-[11.5px]">{`git clone ${REPO}
+cd cairn
+cairn --log launch/cairn.jsonl --root . audit`}</pre>
+          </details>
+        </Box>
+      </div>
 
-      <section className="mb-12">
+      <section className="site-only mt-10">
         <SectionHeading>Three ways in</SectionHeading>
         {/* The three roles the protocol actually has, with the one command each
             starts from. Anything longer belongs on /how-it-works or in the
@@ -289,57 +320,16 @@ export default function Page() {
         </ul>
       </section>
 
-      <section>
-        <SectionHeading>Check it before you trust it</SectionHeading>
-        <p className="prose-block mb-4">
-          Every number above says where it came from: a node that answered, or{" "}
-          {SNAPSHOT.source} — a real settled log that ships in the repository, not a
-          mock. Either way, re-derive it yourself. This recomputes every settlement
-          from the records and checks each batch against the anchor it recorded:
-        </p>
-        <Card className="card-pad">
-          <pre className="code">{`git clone ${REPO}
-cd cairn
-cairn --log launch/cairn.jsonl --root . audit`}</pre>
-          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-ink-2">
-            <span className="flex items-center gap-1">
-              merkle root <Hash value={signed.root} chars={10} />
-            </span>
-            <span>signed at height {signed.height}</span>
-            <span className="mono">{signed.issued_at}</span>
-            <span className="flex items-center gap-1">
-              by <Hash value={signed.public_key} chars={8} />
-            </span>
-          </div>
-          {/* The label is the point of the panel. A live node's root and the
-              bundled log's signature are different facts, and the sentence that
-              says which this is must sit beside the number, not three
-              paragraphs up. */}
-          <p className="hint">
-            {checkpointFrom}
-            {checkpoint?.live && (
-              <>
-                {" "}
-                — the command above audits the bundled log; this node&rsquo;s own log
-                is at <Link href="/log" className="text-accent hover:underline">/log</Link>{" "}
-                and its chain at{" "}
-                <Link href="/chain" className="text-accent hover:underline">/chain</Link>.
-              </>
-            )}
-          </p>
-        </Card>
-        <p className="prose-block mt-4 text-[13px]">
-          A second implementation in{" "}
-          <a href={repoLink("reference/rust/")}>
-            <code className="mono">reference/rust/</code>
-          </a>{" "}
-          re-derives the same log independently, and{" "}
-          <a href={repoLink("conformance/README.md")}>448 frozen conformance vectors</a>{" "}
-          pin the byte encoding both must agree on. That is what &ldquo;verified&rdquo;
-          is doing in the first sentence on this page —{" "}
-          <Link href="/how-it-works">the long version</Link>.
-        </p>
-      </section>
+      <p className="site-only prose-block mt-8 text-[13px]">
+        A second implementation in{" "}
+        <a href={repoLink("reference/rust/")}>
+          <code className="mono">reference/rust/</code>
+        </a>{" "}
+        re-derives the same log independently, and{" "}
+        <a href={repoLink("conformance/README.md")}>448 frozen conformance vectors</a>{" "}
+        pin the byte encoding both must agree on. That is what &ldquo;verified&rdquo; is
+        doing in the first sentence on this page.
+      </p>
     </>
   );
 }

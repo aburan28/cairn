@@ -97,22 +97,152 @@ export function Stat({
   value,
   from,
   hint,
+  tone = "neutral",
 }: {
   label: string;
   value: string;
   from?: string;
   hint?: string;
+  tone?: "neutral" | "accent" | "warn" | "info" | "violet" | "bad";
 }) {
   return (
-    <div className="card card-pad min-w-0 flex-1">
-      <div className="text-[11px] font-medium tracking-[0.06em] text-ink-3 uppercase">
-        {label}
-      </div>
-      <div className="mono mt-1 text-[22px] leading-none font-semibold" title={hint}>
+    <div className={`tile tile-${tone} flex-1`}>
+      <div className="text-[11.5px] font-medium text-ink-2">{label}</div>
+      <div
+        className="tile-value mono mt-1 truncate text-[22px] leading-tight font-semibold"
+        title={hint ?? value}
+      >
         {value}
       </div>
-      {from && <div className="mt-2 truncate text-[11px] text-ink-3">{from}</div>}
+      {from && <div className="mt-1 truncate text-[11px] text-ink-3">{from}</div>}
     </div>
+  );
+}
+
+/**
+ * A page's title, one line saying what it is for, and its controls.
+ *
+ * One line, not a paragraph. The explanations that used to open every page
+ * are true and are still on `/how-it-works`; repeated above every readout
+ * they pushed the data below the fold of a laptop window.
+ */
+export function PageHeader({
+  title,
+  subtitle,
+  meta,
+  actions,
+  crumb,
+}: {
+  title: React.ReactNode;
+  subtitle?: React.ReactNode;
+  meta?: React.ReactNode;
+  actions?: React.ReactNode;
+  crumb?: { href: string; label: string };
+}) {
+  return (
+    <header className="mb-5 flex flex-wrap items-start gap-x-6 gap-y-3">
+      <div className="min-w-0 flex-1">
+        {crumb && (
+          <Link
+            href={crumb.href}
+            className="mb-1 inline-flex items-center gap-1 text-[12px] text-ink-3 hover:text-ink"
+          >
+            ← {crumb.label}
+          </Link>
+        )}
+        <h1 className="text-[22px] leading-tight font-semibold [overflow-wrap:anywhere]">
+          {title}
+        </h1>
+        {subtitle && <p className="mt-1 max-w-[80ch] text-[13px] text-ink-2">{subtitle}</p>}
+        {meta && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2">
+            {meta}
+          </div>
+        )}
+      </div>
+      {actions && (
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">{actions}</div>
+      )}
+    </header>
+  );
+}
+
+/**
+ * Which node this page reads, retargetable without a redeploy: comparing one
+ * node's answer against a peer's is the whole value of the box. It sits in the
+ * page header's corner, not in a full-width card above the data.
+ */
+export function NodePicker({
+  value,
+  onChange,
+  onRead,
+  loading,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  onRead: () => void;
+  loading: boolean;
+}) {
+  return (
+    <form
+      className="flex w-full items-center gap-1.5 sm:w-auto"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onRead();
+      }}
+    >
+      <label htmlFor="node" className="text-[12px] text-ink-3">
+        Node
+      </label>
+      <input
+        id="node"
+        className="field field-mono min-w-0 flex-1 py-1.5 sm:w-64 sm:flex-none"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        spellCheck={false}
+        title="Read another node without a redeploy"
+      />
+      <button className="btn btn-sm py-1.5" type="submit" disabled={loading}>
+        {loading ? "Reading…" : "Read"}
+      </button>
+    </form>
+  );
+}
+
+/** A titled box of facts. See `.box` in the stylesheet. */
+export function Box({
+  title,
+  aside,
+  children,
+  className = "",
+  flush = false,
+}: {
+  title?: React.ReactNode;
+  aside?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+  /** No body padding: for a table or tabs that draw their own. */
+  flush?: boolean;
+}) {
+  return (
+    <section className={`box ${className}`}>
+      {title && (
+        <div className="box-head">
+          <span className="min-w-0 flex-1 truncate">{title}</span>
+          {aside}
+        </div>
+      )}
+      {flush ? children : <div className="box-body">{children}</div>}
+    </section>
+  );
+}
+
+/** Open or settled, the node's word for it, as a pill. */
+export function StatusPill({ settled }: { settled: boolean }) {
+  return (
+    <span className={`pill ${settled ? "pill-settled" : "pill-open"}`}>
+      {settled ? "Settled" : "Open"}
+    </span>
   );
 }
 

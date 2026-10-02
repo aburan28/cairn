@@ -86,12 +86,9 @@ struct ContentView: View {
         Group {
             switch node.state {
             case .running(let url):
-                VStack(spacing: 0) {
-                    NetworkStrip(node: node)
-                    WebView(browser: browser)
-                        .onAppear { browser.show(url) }
-                        .onChange(of: url) { browser.show($0) }
-                }
+                WebView(browser: browser)
+                    .onAppear { browser.show(url) }
+                    .onChange(of: url) { browser.show($0) }
             case .starting, .stopped:
                 Starting(node: node)
             case .failed(let message):
@@ -101,22 +98,11 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup {
                 if case .running(let url) = node.state {
-                    // Verbatim: as a localized key the port is a number to
-                    // format, and 8080 reads "8,080".
-                    Text(verbatim: url.host.map { "\($0):\(url.port ?? 80)" } ?? "")
-                        .font(.callout.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .help(node.isAttached
-                              ? "Attached reader URL."
-                              : "This node's reader. The same page opens in any browser on this Mac.")
-                    if !node.isAttached, let listen = node.listenAddress {
-                        Text(verbatim: "p2p \(listen)")
-                            .font(.callout.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .help(node.settings.listensLocallyOnly
-                                  ? "P2P is on loopback: this node dials out and nothing dials in."
-                                  : "P2P listen address. Hand this out with the peer id from Settings.")
-                    }
+                    // One status button rather than two raw addresses run
+                    // together ("127.0.0.1:8080p2p 127.0.0.1:9000") and a
+                    // full-width strip of prose above the page. The addresses
+                    // and the explanation are one click away, in its popover.
+                    NodeStatusButton(node: node, url: url)
                     Button { node.presentTasks = true } label: {
                         Label("Tasks", systemImage: "target")
                     }
@@ -151,73 +137,142 @@ struct ContentView: View {
     }
 }
 
-/// One line above the reader: whether anyone can dial this node, and whether
-/// it has reached anyone. Taken from the node's own log, never guessed.
-private struct NetworkStrip: View {
+/// Whether anyone can dial this node, and whether it has reached anyone, as
+/// one toolbar button. Taken from the node's own log, never guessed. It used
+/// to be a strip of prose across the top of the window, permanently orange on
+/// a default install, which read as a warning about a state that is normal.
+private struct NodeStatusButton: View {
     @ObservedObject var node: Node
+    let url: URL
+    @State private var showing = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .foregroundStyle(tint)
-            Text(summary)
-                .font(.callout)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 8)
-            if let id = node.peerId {
-                Text(verbatim: String(id.prefix(12)) + "…")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .help("Transport peer id \(id). Copy it from Node → Copy Peer Id or Settings.")
-            }
-            if node.sessionsOK > 0 {
-                Text("\(node.sessionsOK) session\(node.sessionsOK == 1 ? "" : "s")")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+        Button { showing.toggle() } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(node.networkTint)
+                    .frame(width: 7, height: 7)
+                Text(node.networkLabel)
+                    .font(.callout)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .overlay(alignment: .bottom) {
-            Divider()
+        .help(node.networkSummary)
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            NodeDetails(node: node, url: url)
         }
     }
+}
 
-    private var summary: String {
-        if node.isAttached {
-            return "Attached to an existing node — this app owns no process."
-        }
-        if node.settings.listensLocallyOnly {
-            if node.sessionsOK > 0 {
-                return "Dialling out from this Mac only — reached a peer."
+private struct NodeDetails: View {
+    @ObservedObject var node: Node
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(node.networkSummary, systemImage: node.networkIcon)
+                .foregroundStyle(node.networkTint)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 8) {
+                // Verbatim: as a localized key the port is a number to
+                // format, and 8080 reads "8,080".
+                row("Reader", url.host.map { "\($0):\(url.port ?? 80)" } ?? url.absoluteString)
+                if !node.isAttached, let listen = node.listenAddress {
+                    row("P2P", listen)
+                }
+                if let id = node.peerId {
+                    row("Peer id", id)
+                }
+                GridRow {
+                    Text("Sessions").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                    Text(verbatim: "\(node.sessionsOK)").monospacedDigit()
+                }
             }
-            if node.settings.bootstrapFiles.isEmpty {
-                return "Listening on this Mac only. LAN peers may find it; set a bootstrap or accept inbound in Settings to reach further."
+            .font(.callout)
+
+            HStack {
+                Button("Peers…") {
+                    // Close the popover first: a sheet presented from under
+                    // an open popover leaves the popover floating over it.
+                    dismiss()
+                    node.presentPeers = true
+                }
+                OpenSettingsButton()
+                Spacer()
+                Button("Open in Browser") { NSWorkspace.shared.open(url) }
+            }
+        }
+        .padding(16)
+        .frame(width: 380)
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+            HStack(spacing: 4) {
+                Text(verbatim: value)
+                    .font(.callout.monospaced())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(value, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Copy")
+            }
+        }
+    }
+}
+
+extension Node {
+    /// The toolbar's word for the network state: two at most.
+    var networkLabel: String {
+        if isAttached { return "Attached" }
+        if sessionsOK > 0 { return sessionsOK == 1 ? "1 peer" : "\(sessionsOK) peers" }
+        if settings.listensLocallyOnly { return "This Mac only" }
+        return "Waiting for peers"
+    }
+
+    var networkSummary: String {
+        if isAttached {
+            return "Attached to an existing node. This app owns no process."
+        }
+        if settings.listensLocallyOnly {
+            if sessionsOK > 0 {
+                return "Dialling out from this Mac only, and reached a peer."
+            }
+            if settings.bootstrapFiles.isEmpty {
+                return "Listening on this Mac only. LAN peers may find it; add a bootstrap or accept inbound in Settings to reach further."
             }
             return "Listening on this Mac only. Dialling bootstrap peers…"
         }
-        if node.sessionsOK > 0 {
-            return "Accepting inbound and reached \(node.sessionsOK) peer session\(node.sessionsOK == 1 ? "" : "s")."
+        if sessionsOK > 0 {
+            return "Accepting inbound, and reached \(sessionsOK) peer session\(sessionsOK == 1 ? "" : "s")."
         }
-        if node.settings.bootstrapFiles.isEmpty {
+        if settings.bootstrapFiles.isEmpty {
             return "Accepting inbound. Waiting for a LAN peer, or add a bootstrap in Settings."
         }
         return "Accepting inbound. Dialling bootstrap peers…"
     }
 
-    private var icon: String {
-        if node.isAttached { return "link" }
-        if node.sessionsOK > 0 { return "antenna.radiowaves.left.and.right" }
-        if node.settings.listensLocallyOnly { return "lock.laptopcomputer" }
+    var networkIcon: String {
+        if isAttached { return "link" }
+        if sessionsOK > 0 { return "antenna.radiowaves.left.and.right" }
+        if settings.listensLocallyOnly { return "lock.laptopcomputer" }
         return "network"
     }
 
-    private var tint: Color {
-        if node.isAttached { return .blue }
-        if node.sessionsOK > 0 { return .green }
-        if node.settings.listensLocallyOnly { return .orange }
+    var networkTint: Color {
+        if isAttached { return .blue }
+        if sessionsOK > 0 { return .green }
+        if settings.listensLocallyOnly { return .orange }
         return .secondary
     }
 }

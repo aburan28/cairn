@@ -13,7 +13,13 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     private var nodePort: Int?
 
     override init() {
-        view = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let configuration = WKWebViewConfiguration()
+        // How the reader knows it is in this window rather than a browser tab:
+        // it drops the public site's pitch and footer (`.in-app` in
+        // ui/app/layout.tsx). Appended to WebKit's own user agent, not
+        // replacing it, so nothing that sniffs for Safari changes.
+        configuration.applicationNameForUserAgent = "CairnApp/1"
+        view = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         view.navigationDelegate = self
         view.uiDelegate = self

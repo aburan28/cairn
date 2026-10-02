@@ -16,13 +16,14 @@ import {
 } from "@/lib/objectives";
 import {
   Badge,
-  Card,
   EmptyState,
-  Hash,
+  NodePicker,
   Note,
+  PageHeader,
   Progress,
   SectionHeading,
   Skeleton,
+  Stat,
 } from "@/components/ui";
 import { resolveNode } from "@/lib/site";
 
@@ -148,44 +149,40 @@ export default function Page() {
     0,
   );
 
+  const paidOut = (objectives ?? []).reduce(
+    (sum, o) => sum + (o.frontier?.paid_cumulative ?? o.settlement?.reward ?? 0),
+    0,
+  );
+  const openCount = (objectives ?? []).filter((o) => o.open).length;
+
   return (
     <>
-      <header className="mb-6 max-w-[62rem]">
-        <h1 className="text-[26px] font-semibold">Objectives</h1>
-        <p className="prose-block mt-2">
-          Every question this node has been told about, and what remains payable on
-          it. A <code className="mono">certificate</code> objective settles once; an{" "}
-          <code className="mono">evaluator</code> objective ratchets, paying each
-          improvement in proportion to the distance it moved the frontier. Nothing
-          here is this page&rsquo;s opinion — the node derived it from its log, and{" "}
-          <code className="mono">cairn audit</code> re-derives it from nothing.
-        </p>
-      </header>
-
-      <Card className="card-pad mb-4">
-        <label className="label" htmlFor="node">
-          Node
-        </label>
-        <div className="flex flex-wrap gap-2">
-          <input
-            id="node"
-            className="field field-mono flex-1"
+      <PageHeader
+        title="Objectives"
+        subtitle="Every question this node knows about, and what is still payable on it. The node derived all of it from its log."
+        actions={
+          <NodePicker
             value={base}
-            onChange={(event) => setBase(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void load(base);
-            }}
-            spellCheck={false}
+            onChange={setBase}
+            onRead={() => void load(base)}
+            loading={loading}
           />
-          <button className="btn" onClick={() => void load(base)} disabled={loading}>
-            {loading ? "reading…" : "Read"}
-          </button>
+        }
+      />
+
+      {objectives && objectives.length > 0 && (
+        <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
+          <Stat label="Objectives" value={String(objectives.length)} />
+          <Stat
+            label="Open"
+            value={String(openCount)}
+            from={openCount ? "worth working on" : "all settled"}
+            tone={openCount ? "accent" : "neutral"}
+          />
+          <Stat label="Still payable" value={amount(remaining)} from={`of ${amount(pool)} funded`} tone="violet" />
+          <Stat label="Paid out" value={amount(paidOut)} tone="info" />
         </div>
-        <p className="hint">
-          Retarget without a redeploy — comparing one node&rsquo;s answer against a
-          peer&rsquo;s is the whole value of the box.
-        </p>
-      </Card>
+      )}
 
       {error && (
         <div className="mb-4">
@@ -196,77 +193,60 @@ export default function Page() {
       )}
 
       {objectives && objectives.length > 0 && (
-        <div className="mb-4 flex flex-wrap items-end gap-3">
-          <div className="min-w-52 flex-1">
-            <label className="label" htmlFor="search">
-              Search
-            </label>
-            <input
-              id="search"
-              className="field"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="goal, statement, funder or id"
-            />
-          </div>
-          <div>
-            <label className="label" htmlFor="kind">
-              Verifier
-            </label>
-            <select
-              id="kind"
-              className="field"
-              value={kind}
-              onChange={(event) => setKind(event.target.value)}
-            >
-              <option value="all">all kinds</option>
-              {kinds.map((k) => (
-                <option key={k} value={k}>
-                  {k}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="label" htmlFor="sort">
-              Sort
-            </label>
-            <select
-              id="sort"
-              className="field"
-              value={sort}
-              onChange={(event) => setSort(event.target.value as Sort)}
-            >
-              <option value="reward">largest bounty</option>
-              <option value="progress">most left to earn</option>
-              <option value="goal">goal, A–Z</option>
-            </select>
-          </div>
-          <label className="flex cursor-pointer items-center gap-2 pb-2 text-[13px]">
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <input
+            id="search"
+            aria-label="Search"
+            className="field max-w-sm min-w-52 flex-1 py-1.5"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search goal, statement, funder or id"
+          />
+          <select
+            id="kind"
+            aria-label="Verifier"
+            className="field w-auto py-1.5"
+            value={kind}
+            onChange={(event) => setKind(event.target.value)}
+          >
+            <option value="all">All verifiers</option>
+            {kinds.map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
+          <select
+            id="sort"
+            aria-label="Sort"
+            className="field w-auto py-1.5"
+            value={sort}
+            onChange={(event) => setSort(event.target.value as Sort)}
+          >
+            <option value="reward">Largest bounty</option>
+            <option value="progress">Most left to earn</option>
+            <option value="goal">Goal, A–Z</option>
+          </select>
+          <label className="flex cursor-pointer items-center gap-2 px-1 text-[13px] text-ink-2">
             <input
               type="checkbox"
               className="accent-[var(--accent)]"
               checked={showSettled}
               onChange={(event) => setShowSettled(event.target.checked)}
             />
-            show settled
+            Show settled
           </label>
-          <div className="ml-auto pb-2 text-[12.5px] text-ink-2">
-            <span className="mono text-ink">{amount(remaining)}</span> still payable of{" "}
-            <span className="mono">{amount(pool)}</span>
-          </div>
         </div>
       )}
 
       {loading && !objectives && (
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="box divide-edge-y">
           {[0, 1, 2, 3].map((n) => (
-            <Card key={n} className="card-pad flex flex-col gap-3">
-              <Skeleton className="h-4 w-40" />
-              <Skeleton className="h-3 w-full" />
-              <Skeleton className="h-3 w-3/4" />
-              <Skeleton className="h-1.5 w-full" />
-            </Card>
+            <div key={n} className="flex items-center gap-4 px-4 py-3.5">
+              <Skeleton className="h-4 w-48" />
+              <Skeleton className="h-3 flex-1" />
+              <Skeleton className="h-3 w-20" />
+            </div>
           ))}
         </div>
       )}
@@ -293,206 +273,142 @@ export default function Page() {
       )}
 
       {open.length > 0 && (
-        <section className="mb-8">
-          <SectionHeading count={open.length}>Open</SectionHeading>
-          <ul className="grid gap-3 md:grid-cols-2">
-            {open.map((objective) => (
-              <ObjectiveCard
-                key={objective.id}
-                objective={objective}
-                detail={details[objective.id]}
-              />
-            ))}
-          </ul>
-        </section>
+        <ObjectiveTable title="Open" rows={open} details={details} />
       )}
 
       {settled.length > 0 && (
-        <section>
-          <SectionHeading count={settled.length}>Settled</SectionHeading>
-          <ul className="grid gap-3 md:grid-cols-2">
-            {settled.map((objective) => (
-              <ObjectiveCard
-                key={objective.id}
-                objective={objective}
-                detail={details[objective.id]}
-              />
-            ))}
-          </ul>
-        </section>
+        <ObjectiveTable title="Settled" rows={settled} details={details} />
       )}
     </>
   );
 }
 
-function ObjectiveCard({
+/**
+ * One row per objective. It used to be one card per objective, each carrying
+ * its statement, funder, pinned checker and two progress bars, so a node with
+ * six objectives was three screens of cards. The detail is all still one click
+ * away on the objective's own page; a list is for choosing which one to open.
+ */
+function ObjectiveTable({
+  title,
+  rows,
+  details,
+}: {
+  title: string;
+  rows: Objective[];
+  details: Record<string, ObjectiveDetail>;
+}) {
+  return (
+    <section className="mb-6">
+      <SectionHeading count={rows.length}>{title}</SectionHeading>
+      <div className="box overflow-x-auto">
+        {/* Fixed layout, so Open and Settled line up column for column. */}
+        <table className="w-full min-w-[46rem] table-fixed border-collapse text-left text-[13px]">
+          <colgroup>
+            <col />
+            <col className="w-28" />
+            <col className="w-28" />
+            <col className="w-48" />
+            <col className="w-28" />
+            <col className="w-28" />
+          </colgroup>
+          <thead>
+            <tr className="border-b border-edge text-[11.5px] text-ink-3">
+              <th className="px-4 py-2 font-medium">Objective</th>
+              <th className="px-3 py-2 font-medium">Verifier</th>
+              <th className="px-3 py-2 text-right font-medium">Bounty</th>
+              <th className="px-3 py-2 font-medium">Progress</th>
+              <th className="px-3 py-2 font-medium">Held by</th>
+              <th className="px-4 py-2 text-right font-medium">Posted</th>
+            </tr>
+          </thead>
+          <tbody className="divide-edge-y">
+            {rows.map((objective) => (
+              <ObjectiveRow
+                key={objective.id}
+                objective={objective}
+                detail={details[objective.id]}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ObjectiveRow({
   objective,
   detail,
 }: {
   objective: Objective;
   detail?: ObjectiveDetail;
 }) {
+  const href = `/challenge?id=${encodeURIComponent(objective.id)}`;
   const fraction = poolFraction(objective);
   const suspect = overspent(objective);
   const moved =
     detail?.ratchet && objective.frontier
       ? ratchetProgress(detail.ratchet, objective.frontier.score)
       : null;
+  const holder = objective.frontier?.holder ?? objective.settlement?.submitter;
 
   return (
-    <Card as="li" className="card-pad flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-[14px] font-semibold">{objective.goal}</h3>
-        <Badge tone={objective.settled ? "neutral" : "accent"}>
-          {objective.settled ? "settled" : "open"}
-        </Badge>
-        <Badge tone="info">{objective.verifier_kind}</Badge>
-        <span className="ml-auto">
-          <Hash value={objective.id} chars={8} label="id" />
-        </span>
-      </div>
-
-      {/* The statement is objective-authored text — attacker-supplied, in the
-          terms src/mcp.rs uses. React escapes it, and it is kept in its own
-          block, visually quoted and explicitly labelled, so that no sentence
-          inside it can read as a field this page rendered. */}
-      <div>
-        <div className="mb-1 text-[11px] tracking-wide text-ink-3 uppercase">
-          statement — written by the funder, not checked
-        </div>
-        <blockquote className="border-l-2 border-edge pl-3 text-[13px] leading-relaxed text-ink-2">
-          {objective.statement}
-        </blockquote>
-      </div>
-
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[12.5px] sm:grid-cols-3">
-        <div>
-          <dt className="text-[11px] text-ink-3">funder</dt>
-          <dd className="mt-0.5">
-            <Hash value={objective.funder} chars={8} />
-          </dd>
-        </div>
-        <div>
-          <dt className="text-[11px] text-ink-3">funded</dt>
-          <dd className="mono mt-0.5 text-ink">{amount(objective.reward)}</dd>
-        </div>
-        {detail?.created_at && (
-          <div>
-            <dt className="text-[11px] text-ink-3">posted</dt>
-            <dd className="mono mt-0.5" title={detail.created_at}>
-              {detail.created_at.slice(0, 10)}
-            </dd>
-          </div>
-        )}
-      </dl>
-
-      {/* The pinned checker, by hash. This is the whole reason an objective can
-          be worked on before anyone trusts anybody: the code that decides
-          payment is fixed at posting time and its hash is inside the
-          objective's id, so swapping it means posting a different objective. */}
-      {detail?.verifier && (
-        <div className="flex flex-wrap items-center gap-1.5 rounded-lg bg-surface-2 px-2.5 py-1.5 text-[12px] text-ink-2">
-          <span className="text-ink-3">pins</span>
-          <span className="mono">
-            {detail.verifier.checker ?? detail.verifier.evaluator ?? "?"}
-          </span>
-          {(detail.verifier.checker_sha256 ?? detail.verifier.evaluator_sha256) && (
-            <>
-              <span className="text-ink-3">@</span>
-              <Hash
-                value={
-                  detail.verifier.checker_sha256 ?? detail.verifier.evaluator_sha256 ?? ""
-                }
-                chars={8}
-              />
-            </>
-          )}
-        </div>
-      )}
-
-      {objective.frontier ? (
-        <div className="flex flex-col gap-3">
-          {/* Baseline → current → target, because a bare score is unreadable
-              without knowing which direction counts as better. `minimize`
-              objectives count *down*, so a bar keyed to raw score would show a
-              submitter improving things as though they were losing ground. */}
-          {detail?.ratchet && (
-            <div className="flex flex-col gap-1.5">
-              <div className="flex flex-wrap items-baseline gap-1.5 text-[12.5px]">
-                <Badge>{detail.ratchet.direction}</Badge>
-                <span className="mono text-ink-3">{detail.ratchet.baseline}</span>
-                <span className="text-ink-3">baseline →</span>
-                <span className="mono font-semibold text-accent">
-                  {objective.frontier.score}
-                </span>
-                <span className="text-ink-3">now →</span>
-                <span className="mono text-ink-3">{detail.ratchet.target}</span>
-                <span className="text-ink-3">target</span>
-              </div>
-              {moved !== null && <Progress value={moved} label="baseline to target" />}
-              <p className="text-[11.5px] text-ink-3">
-                an improvement must move the score by at least{" "}
-                <span className="mono">{detail.ratchet.min_improvement}</span>
-              </p>
-            </div>
-          )}
-
-          {fraction !== null && (
-            <Progress
-              value={fraction}
-              label={`${amount(objective.frontier.pool_remaining)} of ${amount(
-                objective.reward,
-              )} pool remaining`}
-            />
-          )}
-
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-ink-2">
-            <Link
-              href={`/frontier?id=${encodeURIComponent(objective.id)}`}
-              className="text-accent hover:underline"
-            >
-              frontier <span className="mono">{objective.frontier.score}</span>
-            </Link>
-            <span className="flex items-center gap-1">
-              held by <Hash value={objective.frontier.holder} chars={6} />
-            </span>
-            <span className="mono">{amount(objective.frontier.paid_cumulative)} paid</span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-1 text-[12px] text-ink-2">
-            an improvement must cite{" "}
-            <Hash value={objective.frontier.must_cite} chars={8} />
-          </div>
-
-          {/* The one claim this page makes on its own behalf, matching
-              firstBrokenLink on the chain page: paid + remaining cannot exceed
-              what was funded, and if it does the node published something its
-              own arithmetic does not support. */}
-          {suspect && (
-            <Note title="this pool does not add up" tone="bad">
-              {amount(objective.frontier.paid_cumulative)} paid plus{" "}
-              {amount(objective.frontier.pool_remaining)} remaining exceeds the{" "}
-              {amount(objective.reward)} funded. Audit this node before trusting any
-              figure on this card.
-            </Note>
-          )}
-        </div>
-      ) : objective.settlement ? (
-        /* A settled certificate: one claim, one payment, and nothing left to
-           cite. Without this branch the card wore a "settled" tag directly
-           above "no claim yet", which is two facts contradicting each other. */
-        <div className="flex flex-wrap items-center gap-1.5 text-[12.5px] text-ink-2">
-          settled — <span className="mono font-semibold text-ink">
-            {amount(objective.settlement.reward)}
-          </span>{" "}
-          paid to <Hash value={objective.settlement.submitter} chars={8} /> for claim{" "}
-          <Hash value={objective.settlement.claim_id} chars={8} />
-        </div>
-      ) : (
-        <p className="text-[12.5px] text-ink-3">
-          no claim yet — the frontier starts at the objective&rsquo;s baseline
+    <tr className="group align-top transition-colors hover:bg-surface-2">
+      <td className="px-4 py-3">
+        <Link
+          href={href}
+          className="block truncate font-semibold text-ink group-hover:text-accent"
+        >
+          {objective.goal || short(objective.id)}
+        </Link>
+        {/* The funder's words, quoted and dimmed: attacker-supplied text in
+            src/mcp.rs's terms. React escapes it; the objective's own page
+            carries it in full under its "not checked" label. */}
+        <p
+          className="mt-0.5 line-clamp-1 text-[12.5px] text-ink-3"
+          title={`Funder's statement, not checked: ${objective.statement}`}
+        >
+          &ldquo;{objective.statement}&rdquo;
         </p>
-      )}
-    </Card>
+        {suspect && (
+          <p className="mt-1 text-[12px] text-bad">
+            Paid plus remaining exceeds what was funded. Audit this node before trusting it.
+          </p>
+        )}
+      </td>
+      <td className="px-3 py-3">
+        <Badge tone="info">{objective.verifier_kind}</Badge>
+      </td>
+      <td className="mono px-3 py-3 text-right text-ink">{amount(objective.reward)}</td>
+      <td className="px-3 py-3">
+        {objective.frontier && detail?.ratchet ? (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-baseline justify-between text-[12px] text-ink-2">
+              <span>
+                <span className="mono font-semibold text-accent">{objective.frontier.score}</span>
+                <span className="text-ink-3"> of {detail.ratchet.target}</span>
+              </span>
+              {fraction !== null && (
+                <span className="text-[11px] text-ink-3">
+                  {amount(objective.frontier.pool_remaining)} left
+                </span>
+              )}
+            </div>
+            {moved !== null && <Progress value={moved} />}
+          </div>
+        ) : objective.settlement ? (
+          <span className="text-[12px] text-ink-2">
+            paid <span className="mono text-ink">{amount(objective.settlement.reward)}</span>
+          </span>
+        ) : (
+          <span className="text-[12px] text-ink-3">no claim yet</span>
+        )}
+      </td>
+      <td className="mono px-3 py-3 text-[12.5px] text-ink-2">{holder ?? "—"}</td>
+      <td className="mono px-4 py-3 text-right text-[12px] text-ink-3" title={detail?.created_at}>
+        {detail?.created_at?.slice(0, 10) ?? ""}
+      </td>
+    </tr>
   );
 }

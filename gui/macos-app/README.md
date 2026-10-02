@@ -53,11 +53,11 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
   survives Try Again.
 - **Ports** are the command line's, 8080 and 9000, when they are free, and any
   free ports when they are not, so it runs beside a `cairn run` of your own.
-  The toolbar shows which.
+  The status button in the toolbar shows which.
 - **P2P** listens on loopback by default: the node dials out and nothing
   dials in, which is enough to sync from a bootstrap peer, a compiled-in
   seed (`launch/seeds.json`), or a LAN beacon, and not enough to be one.
-  Settings can bind `0.0.0.0` instead, and the strip above the reader says
+  Settings can bind `0.0.0.0` instead, and the toolbar's status button says
   which. The HTTP reader stays on loopback either way — this window is for
   you, not for the network. A seed that does not answer is named in
   `node.log` once a minute. Launching with `open --env CAIRN_SEEDS=<file>`
@@ -86,9 +86,15 @@ via `cairn secret set --stdin` — values are never shown again after Save,
 and never go on the command line. **Peers…** announces a peer in the log
 (stopping the node briefly — a ledger has one writer), points at bootstrap
 management in Settings, and copies what to hand someone adding this node.
-The strip above the reader shows whether the node is loopback-only,
-attached to another node's URL, or accepting inbound, and whether a peer
-session has completed.
+The status button in the toolbar says, in a word or two, whether
+the node is on this Mac only, attached to another node's URL, or has reached
+peers. Its popover has the reader and P2P addresses, the peer id and the
+session count, each with a copy button.
+
+The page itself is the node's `/ui/`, which recognises this window by the
+`CairnApp` its web view appends to the user agent and drops the public site's
+pitch and footer: here the sidebar is the only navigation, and the page opens
+on the node's numbers.
 
 ## Settings
 

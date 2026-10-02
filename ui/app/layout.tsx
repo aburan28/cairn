@@ -71,8 +71,13 @@ export const metadata: Metadata = {
  * Wrapped in try/catch because `localStorage` *throws* on access in a browser
  * set to block site data, rather than returning null, and an exception here
  * would take the rest of the document with it.
+ *
+ * It also marks the page `.in-app` when Cairn.app's web view is the one
+ * reading it (the app appends `CairnApp` to its user agent), for the same
+ * before-first-paint reason: the site-only footer and pitch should never
+ * flash into the window and then vanish.
  */
-const THEME_SCRIPT = `try{var t=localStorage.getItem("cairn-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}`;
+const THEME_SCRIPT = `try{if(/\\bCairnApp\\//.test(navigator.userAgent))document.documentElement.classList.add("in-app")}catch(e){}try{var t=localStorage.getItem("cairn-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}`;
 
 export default function RootLayout({
   children,
