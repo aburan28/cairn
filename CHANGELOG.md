@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.6.0](https://github.com/aburan28/cairn/compare/v1.5.0...v1.6.0) (2026-10-02)
+
+
+### Features
+
+* **lab:** a replicated research workspace — signed op CRDT, sync, and gVisor runs ([3e44934](https://github.com/aburan28/cairn/commit/3e4493445311cc0a08d95567dc5c3ecdee35e5a8))
+* **lab:** lab-demo.sh, honest exit codes, and a forced checkout that restores ([59bc69d](https://github.com/aburan28/cairn/commit/59bc69ddb8fc6b909149a5372f034a13facf40ea))
+* **verifiers:** workspace kind in both implementations ([#187](https://github.com/aburan28/cairn/issues/187)) ([43cac5c](https://github.com/aburan28/cairn/commit/43cac5c52f7834b51af56968b5605f8bb85c435b))
+
+
+### Fixes
+
+* **gui:** Mac bootstrap launch bug and iOS App Store blockers ([84cf759](https://github.com/aburan28/cairn/commit/84cf759ac5e0a4f101c703287e237a75a9144dab))
+* **gui:** restart without freezing Cairn.app; staple the installer pkg ([e7701dd](https://github.com/aburan28/cairn/commit/e7701dd559850cf01438908febbaaa404faa863b))
+* **gui:** restart without freezing Cairn.app; staple the installer pkg ([490afd4](https://github.com/aburan28/cairn/commit/490afd4009166f5435f239effdb56b17ca165fcb))
+* **gui:** unblock bootstrap launches on macOS, clear iOS App Store blockers ([c491681](https://github.com/aburan28/cairn/commit/c491681d352f563cc0c3d83e8117bcc39f81e609))
+* **lab:** a run never writes into its environment; Sage and PARI environments ([2f0c5c1](https://github.com/aburan28/cairn/commit/2f0c5c1a14708e7c84637aa2573a94870c1065df))
+* **sandbox:** drop single-element loop flagged by clippy 1.99 ([8294dc0](https://github.com/aburan28/cairn/commit/8294dc0a8e4f7911297b14d73bff67fba0c2b119))
+* **sandbox:** drop single-item loop clippy 1.99 rejects ([abf79c2](https://github.com/aburan28/cairn/commit/abf79c2b423e1d1475f2c46279e9d15377b6070d))
+* **sandbox:** satisfy clippy 1.99's single_element_loop (ported from [#181](https://github.com/aburan28/cairn/issues/181)) ([8b18cc2](https://github.com/aburan28/cairn/commit/8b18cc22bf81e52d1bfe82bbf2c9abb7db1d9f85))
+
+
+### Documentation
+
+* **design:** swarm targeting and compute, from ecdsa.fail and Yukon ([e2a0b8c](https://github.com/aburan28/cairn/commit/e2a0b8c721ce92e31d279d932ad804c4f43a080a))
+* **design:** swarm targeting and compute, from ecdsa.fail and Yukon ([f7ee892](https://github.com/aburan28/cairn/commit/f7ee892ffbd2ff49b6c9c4bba2b45527a30d9db4))
+* **lab:** the GFPN anchor comparator reproduces its recorded output in `sage` ([512821f](https://github.com/aburan28/cairn/commit/512821fc4cc87d00558be967ad98eae18f90e678))
+
 ## [1.5.0](https://github.com/aburan28/cairn/compare/v1.4.0...v1.5.0) (2026-09-29)
 
 
