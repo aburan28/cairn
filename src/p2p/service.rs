@@ -13,7 +13,7 @@ use super::sync::{Peer, SyncError};
 use super::transport::{self, Connection, TransportError};
 use crate::gossip::{Candidate, Population};
 use crate::node::Node;
-use crate::records::{Claim, Commitment, Objective, PeerRecord};
+use crate::records::{Claim, Commitment, CommitteeShare, Objective, PeerRecord};
 use crate::time::timestamp;
 use rand_core::OsRng;
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,7 +81,9 @@ pub enum SeedOutcome {
     Unresolvable,
     /// The entry names this node.
     Ourselves,
-    /// Dials leave through a proxy, and a key request is a direct dial.
+    /// Dials leave through a proxy and the entry names a host, which this
+    /// node will not resolve itself: the lookup would leak the seed it is
+    /// about to reach. List the seed by address to use it behind a proxy.
     Proxied,
 }
 
@@ -233,9 +235,30 @@ impl Service {
         if peer == self.identity.id() {
             return;
         }
-        self.with_directory(|directory| {
+        let id = NodeId::from_bytes(peer);
+        let previous = self.with_directory(|directory| {
+            let previous = directory
+                .routing()
+                .contacts()
+                .find(|held| held.id == id)
+                .map(|held| held.seq);
             directory.saw(PeerContact::new(peer, addr, seq));
+            previous
         });
+        // A signed record that supersedes the one routing held is a peer that
+        // moved. Routing took the new address, but every dial reads the
+        // address book, which only ever appended -- so a peer whose key was
+        // already held stayed dialled at the address it had left, and no key
+        // fetch was ever made to fix it because the book was not empty. The
+        // key is the identity and did not change; only where to reach it did.
+        if seq > 0 && previous.is_some_and(|held| seq > held) {
+            self.with_book(|book| book.promote(&peer, addr));
+        }
+    }
+
+    /// Drop lapsed DHT state. Run once a tick; see [`Directory::expire`].
+    pub fn expire(&self, now: u64) -> usize {
+        self.with_directory(|directory| directory.expire(now))
     }
 
     /// The endpoints worth dialling when specific blobs are missing.
@@ -425,7 +448,7 @@ impl Service {
             // take from a stranger for the reason `discovery::dialable` gives:
             // the peer id is the hash of the key, so a hostile answer costs a
             // failed handshake and never a wrong peer.
-            let Some(addr) = crate::p2p::discovery::dialable(&record.addr) else {
+            let Some(addr) = crate::p2p::discovery::dialable_via(&record.addr, &self.proxy) else {
                 continue;
             };
             // The record's own signed sequence, not zero. `Node::peers` has
@@ -495,7 +518,7 @@ impl Service {
             if transport == self.identity.id() {
                 continue;
             }
-            let Some(addr) = crate::p2p::discovery::dialable(&record.addr) else {
+            let Some(addr) = crate::p2p::discovery::dialable_via(&record.addr, &self.proxy) else {
                 continue;
             };
             self.note_contact_at(transport, addr, record.seq);
@@ -570,14 +593,11 @@ impl Service {
     /// Fetch the transport key of contacts this node can name but not dial,
     /// straight from the contact, and file the result as an endpoint.
     ///
-    /// Direct dials only: a node whose dials go through a proxy has a censor
-    /// to hide from, and a plain connection to a LAN address is not what it
-    /// asked for. Bounded per call and backed off per peer, because every
+    /// Through the node's proxy, like every other dial: a proxied node asks
+    /// for keys too, rather than staying keyless for every peer its log and
+    /// gossip name. Bounded per call and backed off per peer, because every
     /// attempt here is a blocking dial on the daemon's tick thread.
     pub fn fetch_missing_keys(&self, contacts: &[(PeerId, SocketAddr)], limit: usize) -> usize {
-        if !matches!(self.proxy, Proxy::Direct) {
-            return 0;
-        }
         let mut learned = 0;
         let mut asked = 0;
         let now = Instant::now();
@@ -646,8 +666,15 @@ impl Service {
         addr: SocketAddr,
         retry_on_loopback: bool,
     ) -> Result<SocketAddr, TransportError> {
-        let mut attempt = transport::request_key(addr, *peer).map(|public| (public, addr));
-        if retry_on_loopback && attempt.is_err() && !addr.ip().is_loopback() {
+        let mut attempt =
+            transport::request_key_through(&self.proxy, addr, *peer).map(|public| (public, addr));
+        // Never through a proxy: the far side's loopback is the proxy's own
+        // host, not this one.
+        if retry_on_loopback
+            && attempt.is_err()
+            && !addr.ip().is_loopback()
+            && matches!(self.proxy, Proxy::Direct)
+        {
             let local = SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port());
             if let Ok(public) = transport::request_key(local, *peer) {
                 attempt = Ok((public, local));
@@ -690,9 +717,6 @@ impl Service {
         if seed.transport == self.identity.id() {
             return SeedOutcome::Ourselves;
         }
-        if !matches!(self.proxy, Proxy::Direct) {
-            return SeedOutcome::Proxied;
-        }
         if self.with_book(|book| !book.for_peer(&seed.transport).is_empty()) {
             return SeedOutcome::Dialable;
         }
@@ -702,8 +726,12 @@ impl Service {
         if !self.may_ask_for_key(&seed.transport, now) {
             return SeedOutcome::Waiting;
         }
-        let Some(addr) = super::discovery::dialable(&seed.addr) else {
-            return SeedOutcome::Unresolvable;
+        let Some(addr) = super::discovery::dialable_via(&seed.addr, &self.proxy) else {
+            return if matches!(self.proxy, Proxy::Direct) {
+                SeedOutcome::Unresolvable
+            } else {
+                SeedOutcome::Proxied
+            };
         };
         // Zero, not a sequence: a list entry makes no freshness claim, so a
         // signed peer record for the same identity always outranks it.
@@ -1190,7 +1218,7 @@ fn needed_code(node: &Node, peer: &Peer) -> BTreeSet<String> {
 fn records_from_node(node: &Node) -> Peer {
     let mut peer = Peer::new();
     for entry in node.ledger().entries() {
-        if ["objective", "commitment", "claim"].contains(&entry.kind.as_str()) {
+        if super::sync::EXCHANGEABLE.contains(&entry.kind.as_str()) {
             let _ = peer.insert(super::sync::Record::new(
                 entry.kind.clone(),
                 entry.payload.clone(),
@@ -1221,6 +1249,7 @@ fn decode_record(record: &super::sync::Record) -> Result<(), SyncError> {
         "objective" => Objective::from_value(&record.payload).map(|_| ()),
         "commitment" => Commitment::from_value(&record.payload).map(|_| ()),
         "claim" => Claim::from_value(&record.payload).map(|_| ()),
+        "committee_share" => CommitteeShare::from_value(&record.payload).map(|_| ()),
         // No `peer` arm, on purpose: peer records travel as routing hints in
         // their own family (`super::peers`), and must never replay into the
         // log -- see `records_from_node`.
@@ -1315,7 +1344,10 @@ fn replay_records_with_horizon(
         .iter()
         .map(|entry| (entry.kind.clone(), entry.payload.digest()))
         .collect();
-    for kind in ["objective", "commitment", "claim"] {
+    // Shares before claims: a share opens a commitment the batch may also
+    // carry, and the claim a committee reveal produces is replayed like any
+    // other claim, so order within the batch matters only in that direction.
+    for kind in ["objective", "commitment", "committee_share", "claim"] {
         let mut batch: Vec<&(String, crate::canonical::Value)> =
             records.iter().filter(|(k, _)| k == kind).collect();
         // RFC-3339 offsets make raw strings unsuitable as an instant order:
@@ -1357,6 +1389,11 @@ fn replay_records_with_horizon(
                         let _ = node.commit(&value, &stamp);
                     }
                 }
+                "committee_share" => {
+                    if let Ok(value) = CommitteeShare::from_value(payload) {
+                        let _ = node.post_committee_share(&value, &stamp);
+                    }
+                }
                 "claim" => {
                     if let Ok(value) = Claim::from_value(payload) {
                         let _ = node.reveal(&value, &stamp);
@@ -1376,7 +1413,7 @@ fn replay_records_with_horizon(
 /// Replay a sync peer's records, then settle whatever came due.
 ///
 /// A `"peer"`-kind match arm used to sit in the replay loop and was
-/// unreachable: the loop iterates `["objective", "commitment", "claim"]`, and
+/// unreachable: the loop iterates the exchangeable kinds, and
 /// `sync::EXCHANGEABLE` has never included `"peer"`. Whether it *should* was
 /// an open question here for a while, and the answer is a settled **no**:
 /// `docs/censorship.md` derives the sealed-submission committee from the log's

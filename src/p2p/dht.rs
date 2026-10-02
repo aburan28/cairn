@@ -785,7 +785,19 @@ pub struct Directory {
     /// module docs), so a newly-heard-of contact is undialable until its key
     /// arrives. This is the queue [`DhtMessage::GetKey`] drains.
     key_wants: BTreeSet<NodeId>,
+    /// The last want asked for. [`Directory::key_wants`] starts after it, so
+    /// the queue rotates: always sending the smallest id meant one want nobody
+    /// could answer -- a dead peer, or a made-up id -- was asked for every
+    /// round forever and every other want behind it starved.
+    key_cursor: Option<NodeId>,
 }
+
+/// Key wants held at once.
+///
+/// The queue is fed by gossip and beacons, which anybody can fill with fresh
+/// ids. Past the cap a new want is dropped; it is re-queued the next time the
+/// contact is seen, once room has been made.
+pub const MAX_KEY_WANTS: usize = 256;
 
 impl Directory {
     /// A directory for a node with this peer id.
@@ -799,6 +811,7 @@ impl Directory {
             pending: BTreeMap::new(),
             outstanding: BTreeMap::new(),
             key_wants: BTreeSet::new(),
+            key_cursor: None,
         }
     }
 
@@ -824,10 +837,14 @@ impl Directory {
     /// tested without one), so the newcomer is parked here and admitted by
     /// [`Directory::on_unreachable`] if the probe turns out to be dead.
     ///
-    /// Seeing a peer also clears its failure count: a contact that answers is
-    /// alive whatever it did last time.
+    /// Seeing a peer does **not** clear its failure count. A sighting is a
+    /// hint -- a log record, a gossiped record, a beacon -- and the daemon
+    /// re-reads the log's records every tick, so clearing here meant a dead
+    /// peer named in the log never reached [`MAX_FAILURES`] and was moved back
+    /// to the fresh end of its bucket every five seconds. Only an answer on an
+    /// authenticated session clears it: [`Directory::on_providers`] and
+    /// [`Directory::record_tell`].
     pub fn saw(&mut self, contact: PeerContact) -> Insertion<PeerContact> {
-        self.failures.remove(&contact.id());
         let newcomer = contact.clone();
         let decision = self.routing.insert(contact);
         if let Insertion::Pending { probe } = &decision {
@@ -935,8 +952,22 @@ impl Directory {
         Some(Lookup::new(key, self.routing.closest(key, K)))
     }
 
-    /// Drop lapsed provider records. Returns how many went.
+    /// Drop lapsed provider records, and the bookkeeping for contacts the
+    /// routing table no longer holds. Returns how many provider records went.
+    ///
+    /// Meant to run every tick. Nothing else prunes these maps, and a node
+    /// that hears a stream of fresh ids would otherwise carry a failure count
+    /// or a parked newcomer for every one of them for the life of the process.
     pub fn expire(&mut self, now: u64) -> usize {
+        let routing = &self.routing;
+        let held = |id: &NodeId| routing.contacts().any(|held| held.id() == *id);
+        self.failures.retain(|id, _| held(id));
+        self.pending.retain(|probe, _| held(probe));
+        if self.lookups.is_empty() {
+            // Deferral counts belong to lookups; with none in flight there is
+            // nothing for them to bound.
+            self.deferrals.clear();
+        }
         self.providers.expire(now)
     }
 
@@ -1010,6 +1041,7 @@ impl Directory {
         let mut chosen: Vec<PeerContact> = Vec::new();
         let mut seen: BTreeSet<NodeId> = BTreeSet::new();
         let mut deferred: Vec<NodeId> = Vec::new();
+        let mut exhausted: Vec<NodeId> = Vec::new();
         for (address, lookup) in &mut self.lookups {
             for contact in lookup.next_queries() {
                 if !dialable(contact.id()) {
@@ -1019,6 +1051,7 @@ impl Directory {
                         // The key never came. Treat it as the silent peer it
                         // has turned out to be, or this lookup never ends.
                         lookup.on_timeout(contact.id());
+                        exhausted.push(contact.id());
                     } else {
                         lookup.defer(contact.id());
                         deferred.push(contact.id());
@@ -1036,6 +1069,15 @@ impl Directory {
         }
         for peer in deferred {
             self.wants_key(peer);
+        }
+        // Running out of deferrals is a failed probe like any other. A keyless
+        // contact is never dialled, so without this it could never fail, never
+        // be evicted, and a bucket full of made-up ids stayed full for ever.
+        exhausted.sort_unstable();
+        exhausted.dedup();
+        for peer in exhausted {
+            self.deferrals.remove(&peer);
+            self.fail(peer);
         }
         // Nearest to *some* target first. A total order across lookups with
         // different targets does not exist, so this orders by how many
@@ -1131,7 +1173,7 @@ impl Directory {
                     // Heard of but not admitted -- the bucket was full. Still
                     // worth a key, because the probe that might admit it has to
                     // be able to dial it.
-                    self.key_wants.insert(contact.id());
+                    self.wants_key(contact.id());
                 }
             }
             if let Some(lookup) = self.lookups.get_mut(&answer.address) {
@@ -1174,6 +1216,11 @@ impl Directory {
                 lookup.on_timeout(peer);
             }
         }
+        self.fail(peer);
+    }
+
+    /// Count one failed probe against `peer`, evicting it at [`MAX_FAILURES`].
+    fn fail(&mut self, peer: NodeId) {
         let failures = self.failures.entry(peer).or_insert(0);
         *failures += 1;
         if *failures < MAX_FAILURES {
@@ -1220,12 +1267,30 @@ impl Directory {
     }
 
     /// Peers whose public key this node wants, so it can dial them.
+    ///
+    /// Starts after the last want asked for and wraps, so every want is asked
+    /// in turn. Call [`Directory::asked_keys`] with what was sent.
     pub fn key_wants(&self) -> Vec<NodeId> {
-        self.key_wants
-            .iter()
-            .take(MAX_KEYS_PER_MESSAGE)
+        let after = self
+            .key_cursor
+            .map_or(self.key_wants.range::<NodeId, _>(..), |cursor| {
+                self.key_wants.range::<NodeId, _>((
+                    std::ops::Bound::Excluded(cursor),
+                    std::ops::Bound::Unbounded,
+                ))
+            });
+        after
+            .chain(self.key_wants.iter())
+            .take(MAX_KEYS_PER_MESSAGE.min(self.key_wants.len()))
             .copied()
             .collect()
+    }
+
+    /// Note which wants were just asked for, so the next round asks others.
+    pub fn asked_keys(&mut self, asked: &[NodeId]) {
+        if let Some(last) = asked.last() {
+            self.key_cursor = Some(*last);
+        }
     }
 
     /// Record that a key is now held, or that asking for it is pointless.
@@ -1235,7 +1300,7 @@ impl Directory {
 
     /// Note that a contact is undialable, so its key is worth fetching.
     pub fn wants_key(&mut self, peer: NodeId) {
-        if peer != self.local() {
+        if peer != self.local() && self.key_wants.len() < MAX_KEY_WANTS {
             self.key_wants.insert(peer);
         }
     }
@@ -2036,5 +2101,86 @@ mod tests {
         assert!(!directory
             .key_wants()
             .contains(&Directory::new(peer(1)).local()));
+    }
+
+    #[test]
+    fn a_sighting_does_not_wipe_out_a_history_of_failures() {
+        // The daemon re-reads the log's peer records every tick. If a sighting
+        // cleared the count, a dead peer named in the log could never reach
+        // the eviction threshold.
+        let mut directory = Directory::new(peer(1));
+        let dead = PeerContact::new(peer(2), addr(9002), 1);
+        directory.saw(dead.clone());
+        for _ in 0..MAX_FAILURES - 1 {
+            directory.on_unreachable(NodeId::from_bytes(peer(2)));
+            directory.saw(dead.clone());
+        }
+        directory.on_unreachable(NodeId::from_bytes(peer(2)));
+        assert_eq!(
+            directory.routing().len(),
+            0,
+            "re-seeing a dead peer kept it alive"
+        );
+    }
+
+    #[test]
+    fn a_contact_whose_key_never_arrives_is_eventually_evicted() {
+        // A keyless contact is never dialled, so it can never fail a dial.
+        // Running out of deferrals has to count as the failure instead, or a
+        // bucket full of made-up ids stays full for ever.
+        let mut directory = Directory::new(peer(1));
+        directory.saw(PeerContact::new(peer(2), addr(9002), 0));
+        for round in 0..MAX_FAILURES {
+            assert_eq!(directory.routing().len(), 1, "evicted early, round {round}");
+            directory.seek(&address(0xf0 + round as u8));
+            for _ in 0..=MAX_DEFERRALS {
+                directory.next_hops(3, |_| false);
+            }
+            directory.take_finished();
+        }
+        assert_eq!(directory.routing().len(), 0, "a keyless phantom was kept");
+    }
+
+    #[test]
+    fn key_wants_rotate_so_one_unanswerable_want_cannot_starve_the_rest() {
+        let mut directory = Directory::new(peer(1));
+        for n in 2..6u8 {
+            directory.wants_key(NodeId::from_bytes(peer(n)));
+        }
+        let mut asked = BTreeSet::new();
+        for _ in 0..4 {
+            let wants = directory.key_wants();
+            directory.asked_keys(&wants);
+            asked.extend(wants);
+        }
+        assert_eq!(asked.len(), 4, "some wants were never asked for");
+    }
+
+    #[test]
+    fn the_key_want_queue_is_capped() {
+        let mut directory = Directory::new(peer(1));
+        for n in 0..(MAX_KEY_WANTS as u32 + 10) {
+            let mut raw = [0u8; 32];
+            raw[..4].copy_from_slice(&n.to_be_bytes());
+            raw[31] = 0xaa;
+            directory.wants_key(NodeId::from_bytes(raw));
+        }
+        assert_eq!(directory.key_wants.len(), MAX_KEY_WANTS);
+    }
+
+    #[test]
+    fn expiry_drops_bookkeeping_for_contacts_no_longer_held() {
+        let mut directory = Directory::new(peer(1));
+        directory.saw(PeerContact::new(peer(2), addr(9002), 0));
+        directory.on_unreachable(NodeId::from_bytes(peer(2)));
+        // A failure count for a peer the table never held.
+        directory.on_unreachable(NodeId::from_bytes(peer(3)));
+        assert_eq!(directory.failing(), 2);
+        directory.expire(0);
+        assert_eq!(
+            directory.failing(),
+            1,
+            "a stranger's failure count was kept"
+        );
     }
 }

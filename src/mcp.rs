@@ -312,7 +312,7 @@ fn serve_stdio(mut server: Server) {
 /// `public` is checked against `secret` rather than trusted: a file whose
 /// halves disagree signs under a name its owner cannot prove, and an agent
 /// would discover that only when a reveal was refused an epoch later.
-fn load_identity(path: &std::path::Path) -> Result<Identity, String> {
+pub(crate) fn load_identity(path: &std::path::Path) -> Result<Identity, String> {
     let text = crate::secret_file::read_to_string(path)
         .map_err(|error| format!("cannot read identity {}: {error}", path.display()))?;
     let value = Value::from_json(&text)

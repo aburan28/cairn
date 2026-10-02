@@ -862,8 +862,9 @@ impl fmt::Display for RuleViolation {
             RuleViolation::RatchetNeedsEvaluator { kind } => write!(
                 f,
                 "a ratchet objective needs a score-producing verifier \
-                 ({}), not {kind:?}",
-                Kind::Evaluator
+                 ({} or {}), not {kind:?}",
+                Kind::Evaluator,
+                Kind::Workspace
             ),
             RuleViolation::RatchetRewardMismatch { ratchet, objective } => write!(
                 f,
@@ -1479,7 +1480,11 @@ impl Node {
 
         if let Some(block) = &objective.ratchet {
             let ratchet = Ratchet::from_value(block).map_err(RuleViolation::MalformedRatchet)?;
-            if kind != Kind::Evaluator.as_str() {
+            // `workspace` derives a score from the tree it builds, exactly as
+            // `evaluator` does from an artifact, and is the kind a repository
+            // benchmark ratchets on. No log held a `workspace` objective before
+            // this widening, because no node could post one.
+            if kind != Kind::Evaluator.as_str() && kind != Kind::Workspace.as_str() {
                 return Err(RuleViolation::RatchetNeedsEvaluator {
                     kind: kind.to_string(),
                 });
@@ -3999,6 +4004,92 @@ impl Node {
             .to_claim(&commitment.objective_id, &commitment.submitter, ts)
             .map_err(RuleViolation::InadmissibleRecord)?;
         self.reveal(&claim, ts)
+    }
+
+    /// Publish every committee share this node owes, as `signer`.
+    ///
+    /// The duty half of a sealed submission, done by the node rather than by a
+    /// person. For each sealed commitment whose epoch has closed, every seat
+    /// drawn for `key`'s transport id and held by `signer` that has not yet
+    /// published has its share opened from the envelope and posted. Timing is
+    /// [`Node::post_committee_share`]'s to enforce, so a share still under
+    /// embargo is refused there and simply owed again next round.
+    ///
+    /// Returns one result per share attempted: the record id, or why the log
+    /// refused it.
+    pub fn post_owed_committee_shares(
+        &mut self,
+        key: &crate::crypto::envelope::CommitteeKey,
+        signer: &crate::crypto::identity::Identity,
+        now_epoch: u64,
+        ts: &str,
+    ) -> Vec<(String, Result<String, RuleViolation>)> {
+        let transport = crate::hex::encode(&key.id());
+        let identity = signer.submitter_id();
+        let mut owed: Vec<(String, u8)> = Vec::new();
+        for pending in self.pending_sealed_reveals(now_epoch) {
+            for seat in &pending.seats {
+                if seat.transport == transport
+                    && seat.identity == identity
+                    && !pending.published.contains(&seat.seat)
+                {
+                    owed.push((pending.commitment.clone(), seat.seat));
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(owed.len());
+        for (commitment_id, seat) in owed {
+            let Some(envelope) = self
+                .commitment_of(&commitment_id)
+                .and_then(|commitment| commitment.envelope)
+            else {
+                continue;
+            };
+            // A share that will not open is a dealer who sealed garbage to this
+            // seat. Nothing honest can be posted for it, and posting anything
+            // else would be this node lying.
+            let Ok(share) = key.open_share(&envelope, seat) else {
+                continue;
+            };
+            let record = CommitteeShare::new(
+                &commitment_id,
+                seat,
+                share.index,
+                crate::hex::encode(&share.data),
+                ts,
+            )
+            .signed_with(signer);
+            out.push((commitment_id, self.post_committee_share(&record, ts)));
+        }
+        out
+    }
+
+    /// Open every sealed submission whose published shares meet its threshold.
+    ///
+    /// Anybody can do this -- it needs no key and no seat -- and the claim it
+    /// writes is byte-identical to the one the submitter would have revealed,
+    /// so it does not matter which node gets there first. `skip` lets a caller
+    /// pass over commitments it already failed to open with the shares now
+    /// published, so a bad share costs one failed search rather than one a tick.
+    pub fn open_due_sealed(
+        &mut self,
+        now_epoch: u64,
+        ts: &str,
+        skip: impl Fn(&str, usize) -> bool,
+    ) -> Vec<(String, usize, Result<Outcome, RuleViolation>)> {
+        let due: Vec<(String, usize)> = self
+            .pending_sealed_reveals(now_epoch)
+            .into_iter()
+            .filter(PendingReveal::openable)
+            .map(|pending| (pending.commitment, pending.published.len()))
+            .filter(|(commitment, published)| !skip(commitment, *published))
+            .collect();
+        due.into_iter()
+            .map(|(commitment, published)| {
+                let outcome = self.open_sealed(&commitment, ts);
+                (commitment, published, outcome)
+            })
+            .collect()
     }
 
     // -- commit / reveal --------------------------------------------------
@@ -8428,7 +8519,8 @@ fn render_previous(previous: Option<i64>) -> String {
 /// published first it is `C(n - 1, threshold - 1)` failed checks before an
 /// honest subset is reached — about a second at nineteen seats, and
 /// effectively forever at sixty-four. One seat-holder posting a garbage share
-/// can therefore stall the reveal of a large committee. Making each published
+/// can therefore stall the reveal of a large committee; [`MAX_SUBSET_TRIALS`]
+/// bounds what that costs a node, not the stall itself. Making each published
 /// share checkable on its own, without a discrete-log assumption, is the fix;
 /// see the MPC notes in `docs/review/mpc-censorship-discovery.md`.
 ///
@@ -8439,6 +8531,15 @@ fn render_previous(previous: Option<i64>) -> String {
 /// check makes that a theorem — because "deterministic for a reason anyone can
 /// restate" is cheaper to trust than "deterministic because the output happens
 /// to be unique".
+/// AEAD checks [`open_with_any_subset`] makes before giving up.
+///
+/// Every subset of a five-seat committee is ten; of a nineteen-seat one, with
+/// one bad share published first, about 48,000. This cap is a few hundred
+/// milliseconds of work at most: enough to step past bad shares at the default
+/// committee size, not at grown ones, where only shares checkable one at a
+/// time fix it (`docs/review/mpc-censorship-discovery.md` §1).
+const MAX_SUBSET_TRIALS: usize = 4096;
+
 fn open_with_any_subset(
     submission: &SealedSubmission,
     shares: &[crate::crypto::shamir::Share],
@@ -8450,7 +8551,16 @@ fn open_with_any_subset(
     // The common case, and worth taking first rather than as subset number one:
     // when every published share is honest, this is a single AEAD check.
     let mut chosen: Vec<usize> = (0..threshold).collect();
+    let mut trials = 0usize;
     loop {
+        // A cap on liveness, not on correctness: any subset that opens yields
+        // the same claim, so giving up only means this node does not open it
+        // *now*. Without it one bad share at a grown committee is a search a
+        // daemon would run for the rest of its life, once per tick.
+        trials += 1;
+        if trials > MAX_SUBSET_TRIALS {
+            return None;
+        }
         let subset: Vec<crate::crypto::shamir::Share> =
             chosen.iter().map(|&i| shares[i].clone()).collect();
         if let Ok(opened) = crate::sealed::open(submission, &subset) {

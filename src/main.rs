@@ -549,6 +549,11 @@ enum Command {
         /// Identity file to sign with. When set, the signing key's public half
         /// replaces `--submitter`: a signed record's submitter *is* its key.
         identity: Option<String>,
+        /// Seal the claim to this epoch's committee, so it is revealed by the
+        /// committee's shares even if the submitter never comes back.
+        sealed: bool,
+        /// How a sealed commit reaches the committee for its keys.
+        proxy: cairn::p2p::proxy::Proxy,
     },
     Reveal {
         objective_id: String,
@@ -920,6 +925,7 @@ struct RunRequest {
     fanout: Option<usize>,
     max_queue: Option<usize>,
     mcp_identity: Option<String>,
+    committee_identity: Option<String>,
     no_mcp: bool,
 }
 
@@ -963,6 +969,8 @@ enum BlobAction {
         identity: String,
         peers: Vec<String>,
         seconds: u64,
+        /// How each seeder is dialled.
+        proxy: cairn::p2p::proxy::Proxy,
     },
 }
 
@@ -1626,6 +1634,7 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
         fanout: None,
         max_queue: None,
         mcp_identity: None,
+        committee_identity: None,
         no_mcp: false,
     };
 
@@ -1669,6 +1678,9 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
                 }
             }
             "--mcp-identity" => request.mcp_identity = Some(cursor.value("run: --mcp-identity")?),
+            "--committee-identity" => {
+                request.committee_identity = Some(cursor.value("run: --committee-identity")?)
+            }
             "--no-mcp" => request.no_mcp = true,
             "--help" | "-h" => return Ok(Command::Help),
             other => return Err(CliError::Usage(format!("run: unknown option {other:?}"))),
@@ -1732,6 +1744,8 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut artifact: Option<String> = None;
     let mut nonce: Option<String> = None;
     let mut identity: Option<String> = None;
+    let mut sealed = false;
+    let mut proxy = cairn::p2p::proxy::Proxy::Direct;
 
     while let Some(token) = cursor.take() {
         if token == "--submitter" {
@@ -1742,6 +1756,10 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
             nonce = Some(cursor.value("--nonce")?);
         } else if token == "--identity" {
             identity = Some(cursor.value("--identity")?);
+        } else if token == "--sealed" {
+            sealed = true;
+        } else if token == "--proxy" {
+            proxy = parse_proxy(&cursor.value("--proxy")?, "commit")?;
         } else if is_flag(&token) {
             return Err(CliError::Usage(format!("commit: unknown option {token:?}")));
         } else if objective_id.is_some() {
@@ -1753,6 +1771,13 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
         }
     }
 
+    // A plain commit dials nobody, so a proxy for it is a misunderstanding
+    // worth saying rather than a flag silently ignored.
+    if !sealed && proxy != cairn::p2p::proxy::Proxy::Direct {
+        return Err(CliError::Usage(String::from(
+            "commit: --proxy needs --sealed; a plain commit makes no network connection",
+        )));
+    }
     Ok(Command::Commit {
         objective_id: require(objective_id, "commit", "an objective id")?,
         // With `--identity` the key decides the submitter, so the flag is
@@ -1772,7 +1797,15 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
         // `args.nonce or token_hex(16)` does. An empty nonce is not a nonce.
         nonce: nonce.filter(|value| !value.is_empty()),
         identity,
+        sealed,
+        proxy,
     })
+}
+
+/// A `--proxy` value, refused at parse time rather than at the first dial.
+fn parse_proxy(text: &str, command: &str) -> Result<cairn::p2p::proxy::Proxy, CliError> {
+    cairn::p2p::proxy::Proxy::parse(text)
+        .map_err(|error| CliError::Usage(format!("{command}: --proxy: {error}")))
 }
 
 fn parse_reveal(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -3391,10 +3424,12 @@ fn parse_blob_fetch(cursor: &mut Cursor) -> Result<BlobAction, CliError> {
     let mut identity: Option<String> = None;
     let mut peers: Vec<String> = Vec::new();
     let mut seconds = DEFAULT_FETCH_SECONDS;
+    let mut proxy = cairn::p2p::proxy::Proxy::Direct;
     while let Some(token) = cursor.take() {
         match token.as_str() {
             "--identity" => identity = Some(cursor.value("--identity")?),
             "--peer" => peers.push(cursor.value("--peer")?),
+            "--proxy" => proxy = parse_proxy(&cursor.value("--proxy")?, "blob fetch")?,
             "--timeout" => {
                 let raw = cursor.value("--timeout")?;
                 seconds = parse_u64(&raw, "--timeout")?;
@@ -3415,6 +3450,7 @@ fn parse_blob_fetch(cursor: &mut Cursor) -> Result<BlobAction, CliError> {
         identity: require(identity, "blob fetch", "--identity <file>")?,
         peers,
         seconds,
+        proxy,
     })
 }
 
@@ -3638,7 +3674,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "      fund a checkable question");
     say(
         out,
-        "  commit <objective-id> --submitter S --artifact FILE [--nonce N]",
+        "  commit <objective-id> --submitter S --artifact FILE [--nonce N] [--sealed [--proxy URL]]",
     );
     say(out, "      bind to an artifact without revealing it");
     say(
@@ -3863,7 +3899,7 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "  blob fetch --identity <file> --peer <file> [--peer <file>]... [--timeout N]",
+        "  blob fetch --identity <file> --peer <file> [--peer <file>]... [--timeout N] [--proxy URL]",
     );
     say(
         out,
@@ -3976,6 +4012,10 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      MCP uses stdio; pass --mcp-identity FILE to sign its submissions",
+    );
+    say(
+        out,
+        "      --committee-identity FILE serves the committee seats that identity registered",
     );
     say(
         out,
@@ -4345,6 +4385,7 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
         .unwrap_or(cairn::serve::DEFAULT_MAX_QUEUED);
     config.mcp = !request.no_mcp;
     config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
+    config.committee_identity = request.committee_identity.as_ref().map(PathBuf::from);
     config.store = store.limit().is_some().then(|| store.clone());
     if !request.no_queue {
         config.queue = Some(
@@ -5008,6 +5049,130 @@ fn cmd_commit(
     say(
         out,
         format!("  nonce {nonce}   <- keep this; you need it to reveal"),
+    );
+    Ok(0)
+}
+
+/// `cairn commit --sealed`: commit, and hand the reveal to the committee.
+///
+/// The claim is signed now and sealed to the committee drawn for this epoch,
+/// so nothing after this command is the submitter's to do: once the epoch
+/// closes, the seats publish their shares and any node opens the claim. A
+/// submitter who is blocked, detained or simply offline is still revealed and
+/// still paid -- the censorship `docs/censorship.md` §1 describes.
+///
+/// Each seat's McEliece key is fetched from the address its peer record gives
+/// and kept only if it hashes to the seat's transport id, so a wrong address
+/// costs a failed fetch and never a share sealed to the wrong party.
+fn cmd_commit_sealed(
+    out: &mut dyn Write,
+    options: &Options,
+    objective_id: &str,
+    identity: Option<&str>,
+    artifact_path: &str,
+    nonce: Option<&str>,
+    proxy: &cairn::p2p::proxy::Proxy,
+) -> Result<i32, CliError> {
+    use cairn::crypto::envelope::CommitteeMember;
+    use cairn::crypto::kem::{Bundle, PublicKey, Suite};
+
+    let identity = load_identity(identity)?.ok_or_else(|| {
+        CliError::Usage(String::from(
+            "commit --sealed: --identity is required; the committee cannot sign a claim for you",
+        ))
+    })?;
+    let mut node = open_node_for_writing(options)?;
+    let artifact = read_json(artifact_path)?;
+    let nonce = match nonce {
+        Some(nonce) => nonce.to_string(),
+        None => random_nonce()?,
+    };
+    let stamp = timestamp();
+    let epoch = cairn::time::parse_rfc3339(&stamp)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .map(|seconds| cairn::partition::epoch_of(seconds, cairn::partition::epoch_seconds()))
+        .ok_or_else(|| CliError::Usage(format!("commit --sealed: unreadable clock {stamp}")))?;
+    let seats = node
+        .committee_for(epoch, node.ledger().len())
+        .map_err(|violation| CliError::Refused(violation.to_string()))?;
+
+    let mut committee = Vec::with_capacity(seats.len());
+    for seat in &seats {
+        let transport = decode_hex32(&seat.transport).ok_or_else(|| {
+            CliError::Refused(format!("seat {}: transport id is not hex", seat.seat))
+        })?;
+        let addr = cairn::p2p::discovery::dialable_via(&seat.addr, proxy).ok_or_else(|| {
+            CliError::Refused(format!(
+                "seat {}: cannot resolve {}{}",
+                seat.seat,
+                seat.addr,
+                if matches!(proxy, cairn::p2p::proxy::Proxy::Direct) {
+                    ""
+                } else {
+                    " (a name is not resolved locally behind --proxy)"
+                }
+            ))
+        })?;
+        let public = cairn::p2p::transport::request_key_through(proxy, addr, transport).map_err(
+            |error| {
+                CliError::Refused(format!(
+                    "seat {} at {}: cannot fetch its key: {error}",
+                    seat.seat, seat.addr
+                ))
+            },
+        )?;
+        let key = PublicKey::from_bytes(Suite::McEliece, public.as_bytes())
+            .and_then(Bundle::mceliece_only)
+            .map_err(|error| CliError::Refused(format!("seat {}: {error}", seat.seat)))?;
+        committee.push(CommitteeMember {
+            index: seat.seat,
+            keys: key,
+        });
+    }
+    let size = u8::try_from(seats.len())
+        .map_err(|_| CliError::Refused(String::from("committee larger than 255 seats")))?;
+    let threshold = cairn::partition::threshold_for(size);
+
+    let claim = Claim::new(
+        objective_id,
+        identity.submitter_id(),
+        artifact,
+        &nonce,
+        &stamp,
+        Vec::new(),
+    )
+    .map_err(|error| CliError::Refused(error.to_string()))?
+    .signed_with(&identity);
+    let submission = cairn::sealed::SealedSubmission::seal_claim(
+        &claim,
+        epoch,
+        &stamp,
+        &committee,
+        threshold,
+        &mut rand_core::OsRng,
+    )
+    .map_err(|error| CliError::Refused(error.to_string()))?;
+    let commitment = Commitment::new(
+        objective_id,
+        identity.submitter_id(),
+        submission.commitment.as_str(),
+        stamp.as_str(),
+    )
+    .sealed_with(submission.envelope.clone())
+    .signed_with(&identity);
+    post_commitment(&mut node, &commitment, &stamp)?;
+
+    say(
+        out,
+        format!(
+            "committed {} sealed to {} seats, {threshold} to open",
+            short(&submission.commitment),
+            seats.len()
+        ),
+    );
+    say(
+        out,
+        "  nothing more to do: the committee reveals it after this epoch closes",
     );
     Ok(0)
 }
@@ -8530,7 +8695,8 @@ fn cmd_blob(out: &mut dyn Write, options: &Options, action: &BlobAction) -> Resu
             identity,
             peers,
             seconds,
-        } => return cmd_blob_fetch(out, &node, store, identity, peers, *seconds),
+            proxy,
+        } => return cmd_blob_fetch(out, &node, store, identity, peers, *seconds, proxy),
     }
     Ok(0)
 }
@@ -8606,6 +8772,7 @@ fn cmd_blob_fetch(
     identity_path: &str,
     peers: &[String],
     seconds: u64,
+    proxy: &cairn::p2p::proxy::Proxy,
 ) -> Result<i32, CliError> {
     let missing = node.missing_code();
     if missing.is_empty() {
@@ -8618,7 +8785,7 @@ fn cmd_blob_fetch(
     let identity = std::sync::Arc::new(load_transport_identity(identity_path)?);
     let mut endpoints = Vec::with_capacity(peers.len());
     for path in peers {
-        endpoints.push(load_endpoint(path)?);
+        endpoints.push(load_endpoint(path, proxy)?);
     }
     if endpoints.is_empty() {
         return Err(CliError::Usage(String::from(
@@ -8639,13 +8806,14 @@ fn cmd_blob_fetch(
     let mut got = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for address in &missing {
-        match cairn::p2p::swarm::tcp::fetch(
+        match cairn::p2p::swarm::tcp::fetch_through(
             address,
             &endpoints,
             std::sync::Arc::clone(&identity),
             store,
             cairn::p2p::swarm::Limits::default(),
             deadline,
+            proxy,
         ) {
             Ok(bytes) => {
                 // Written through the store, which re-hashes: a seed that
@@ -9112,7 +9280,10 @@ fn load_transport_identity(path: &str) -> Result<cairn::p2p::handshake::PeerIden
 }
 
 /// Load one `{addr, public}` endpoint file.
-fn load_endpoint(path: &str) -> Result<cairn::p2p::discovery::Endpoint, CliError> {
+fn load_endpoint(
+    path: &str,
+    proxy: &cairn::p2p::proxy::Proxy,
+) -> Result<cairn::p2p::discovery::Endpoint, CliError> {
     let text =
         std::fs::read_to_string(path).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
     let value = Value::from_json(&text).map_err(|e| CliError::Usage(format!("{path}: {e}")))?;
@@ -9121,11 +9292,17 @@ fn load_endpoint(path: &str) -> Result<cairn::p2p::discovery::Endpoint, CliError
         .and_then(Value::as_str)
         .ok_or_else(|| CliError::Usage(format!("{path}: addr missing")))?;
     // A hostname is accepted as well as a literal -- see
-    // `p2p::discovery::dialable` for why a name is safe to take on trust.
-    let addr = cairn::p2p::discovery::dialable(addr).ok_or_else(|| {
-        CliError::Usage(format!(
-            "{path}: addr {addr:?} is neither an address nor a name that resolves"
-        ))
+    // `p2p::discovery::dialable` for why a name is safe to take on trust --
+    // except behind a proxy, where resolving it here would leak the peer.
+    let addr = cairn::p2p::discovery::dialable_via(addr, proxy).ok_or_else(|| {
+        CliError::Usage(if matches!(proxy, cairn::p2p::proxy::Proxy::Direct) {
+            format!("{path}: addr {addr:?} is neither an address nor a name that resolves")
+        } else {
+            format!(
+                "{path}: addr {addr:?} is a name, and dials go through --proxy; resolving it \
+                 here would tell the local network which peer this is. Use the peer's address"
+            )
+        })
     })?;
     let hex = value
         .get("public")
@@ -9432,10 +9609,29 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Balances => cmd_balances(out, options),
         Command::Commit {
             objective_id,
+            submitter: _,
+            artifact,
+            nonce,
+            identity,
+            sealed: true,
+            proxy,
+        } => cmd_commit_sealed(
+            out,
+            options,
+            objective_id,
+            identity.as_deref(),
+            artifact,
+            nonce.as_deref(),
+            proxy,
+        ),
+        Command::Commit {
+            objective_id,
             submitter,
             artifact,
             nonce,
             identity,
+            sealed: false,
+            proxy: _,
         } => cmd_commit(
             out,
             options,
@@ -11178,6 +11374,98 @@ mod tests {
             Command::Commit { nonce, .. } => assert_eq!(nonce, None),
             other => panic!("expected commit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn commit_sealed_is_a_flag_and_off_by_default() {
+        let sealed = parse(argv(&[
+            "commit",
+            "OID",
+            "--identity",
+            "me.json",
+            "--artifact",
+            "a.json",
+            "--sealed",
+        ]))
+        .expect("this parses");
+        assert!(matches!(
+            sealed.command,
+            Command::Commit { sealed: true, .. }
+        ));
+        let plain = parse(argv(&[
+            "commit",
+            "OID",
+            "--identity",
+            "me.json",
+            "--artifact",
+            "a.json",
+        ]))
+        .expect("this parses");
+        assert!(matches!(
+            plain.command,
+            Command::Commit { sealed: false, .. }
+        ));
+    }
+
+    #[test]
+    fn a_proxy_is_taken_where_a_command_dials_and_refused_where_it_does_not() {
+        let tor = cairn::p2p::proxy::Proxy::parse("socks5h://127.0.0.1:9050").expect("parses");
+        let sealed = parse(argv(&[
+            "commit",
+            "OID",
+            "--identity",
+            "me.json",
+            "--artifact",
+            "a.json",
+            "--sealed",
+            "--proxy",
+            "socks5h://127.0.0.1:9050",
+        ]))
+        .expect("this parses");
+        assert!(matches!(
+            &sealed.command,
+            Command::Commit { sealed: true, proxy, .. } if *proxy == tor
+        ));
+        // A plain commit dials nobody, so the flag is a mistake to point out.
+        assert!(parse(argv(&[
+            "commit",
+            "OID",
+            "--identity",
+            "me.json",
+            "--artifact",
+            "a.json",
+            "--proxy",
+            "socks5h://127.0.0.1:9050",
+        ]))
+        .is_err());
+        // And a malformed one is refused before anything runs.
+        assert!(parse(argv(&[
+            "commit",
+            "OID",
+            "--identity",
+            "me.json",
+            "--artifact",
+            "a.json",
+            "--sealed",
+            "--proxy",
+            "127.0.0.1:9050",
+        ]))
+        .is_err());
+        let fetch = parse(argv(&[
+            "blob",
+            "fetch",
+            "--identity",
+            "me.json",
+            "--peer",
+            "p.json",
+            "--proxy",
+            "socks5h://127.0.0.1:9050",
+        ]))
+        .expect("this parses");
+        assert!(matches!(
+            &fetch.command,
+            Command::Blob { action: BlobAction::Fetch { proxy, .. } } if *proxy == tor
+        ));
     }
 
     #[test]

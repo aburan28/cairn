@@ -86,6 +86,21 @@ pub fn dialable(addr: &str) -> Option<SocketAddr> {
     Some(answers.find(SocketAddr::is_ipv4).unwrap_or(first))
 }
 
+/// [`dialable`], refusing names when dials go through a proxy.
+///
+/// A proxy exists because this machine's own network is the one being
+/// watched, and resolving a name here asks that network's resolver -- the
+/// lookup itself says which peer this node is about to reach, before the
+/// proxy is involved at all. `socks5h://` users rely on exactly that never
+/// happening. Literal addresses are unaffected; a name is skipped, which
+/// costs one hint and leaks nothing.
+pub fn dialable_via(addr: &str, proxy: &super::proxy::Proxy) -> Option<SocketAddr> {
+    if matches!(proxy, super::proxy::Proxy::Direct) {
+        return dialable(addr);
+    }
+    addr.parse::<SocketAddr>().ok()
+}
+
 /// Errors while decoding peer ids or registering an endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiscoveryError {
@@ -122,6 +137,9 @@ pub fn peer_id_string(id: &PeerId) -> String {
     peer_id_hex(id)
 }
 
+/// Addresses kept per peer once one has been promoted over the others.
+pub const MAX_ENDPOINTS_PER_PEER: usize = 4;
+
 /// In-memory address book. A production deployment can replace this with a
 /// signed rendezvous or DHT backend without changing the transport API.
 #[derive(Clone, Debug, Default)]
@@ -142,6 +160,30 @@ impl AddressBook {
         {
             entries.push(endpoint);
         }
+    }
+
+    /// Make `addr` the first endpoint tried for `peer`, under the key already
+    /// held for it. Does nothing for a peer with no key in the book: an
+    /// address alone cannot be dialled.
+    ///
+    /// Older addresses are kept behind it as fallbacks, up to
+    /// [`MAX_ENDPOINTS_PER_PEER`], so a peer that moves often does not grow
+    /// its entry without bound.
+    pub fn promote(&mut self, peer: &PeerId, addr: SocketAddr) -> bool {
+        let Some(entries) = self.peers.get_mut(peer) else {
+            return false;
+        };
+        let Some(first) = entries.first() else {
+            return false;
+        };
+        if first.addr == addr {
+            return false;
+        }
+        let key = first.peer.clone();
+        entries.retain(|entry| entry.addr != addr);
+        entries.insert(0, Endpoint::new(addr, key));
+        entries.truncate(MAX_ENDPOINTS_PER_PEER);
+        true
     }
 
     pub fn remove(&mut self, peer: &PeerId, addr: SocketAddr) -> bool {
@@ -373,5 +415,42 @@ mod tests {
         assert_eq!(book.len(), 1);
         assert!(book.remove(&identity.id(), addr));
         assert!(book.is_empty());
+    }
+
+    #[test]
+    fn a_peer_that_moved_is_dialled_at_its_new_address_first() {
+        use super::{AddressBook, Endpoint, MAX_ENDPOINTS_PER_PEER};
+        let identity = crate::p2p::handshake::PeerIdentity::generate();
+        let id = identity.id();
+        let old: std::net::SocketAddr = "10.0.0.1:9000".parse().expect("addr");
+        let mut book = AddressBook::new();
+        let public = crate::p2p::handshake::PeerPublic::from_bytes(identity.public_key().as_ref())
+            .expect("key");
+        book.insert(Endpoint::new(old, public));
+
+        for port in 1..=MAX_ENDPOINTS_PER_PEER as u16 + 2 {
+            let moved: std::net::SocketAddr = format!("10.0.1.{port}:9000").parse().expect("addr");
+            assert!(book.promote(&id, moved));
+            assert_eq!(
+                book.for_peer(&id)[0].addr,
+                moved,
+                "the new address was not tried first"
+            );
+        }
+        assert_eq!(book.for_peer(&id).len(), MAX_ENDPOINTS_PER_PEER);
+        // No key, no endpoint: an address alone is not dialable.
+        assert!(!book.promote(&[7u8; 32], old));
+    }
+
+    #[test]
+    fn a_proxied_node_never_asks_its_own_resolver() {
+        let direct = crate::p2p::proxy::Proxy::Direct;
+        let tor = crate::p2p::proxy::Proxy::parse("socks5h://127.0.0.1:9050").expect("proxy");
+        assert!(super::dialable_via("localhost:9000", &direct).is_some());
+        assert_eq!(super::dialable_via("localhost:9000", &tor), None);
+        assert_eq!(
+            super::dialable_via("10.0.0.1:9000", &tor),
+            Some("10.0.0.1:9000".parse().expect("literal"))
+        );
     }
 }

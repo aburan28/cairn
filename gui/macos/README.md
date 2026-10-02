@@ -53,6 +53,10 @@ frontier answer objective, and the ECC2K-23 demo twin. Choosing a task checks
 its objectives in Catalog for posting; the autoresearcher still does not solve
 ECC2K-130 itself.
 
+**Secrets.** Paste named operator credentials (`AWS_ACCESS_KEY_ID`, …) into
+`~/.cairn/secrets` via `cairn secret set --stdin`. Values are never listed
+after Save. Needed for `scripts/ecc2k-dp.sh` and similar campaign tools.
+
 **Catalog.** Every `examples/**/objective*.json` in the checkout, grouped by
 family, with a checkbox each and the researcher's own verdict under it,
 computed by `autoresearcher.py --plan` at the current budget and recomputed

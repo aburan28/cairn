@@ -70,12 +70,14 @@ F="$(mktemp -u /tmp/pw-interop-rel1-XXXXXX).jsonl"
 G="$(mktemp -u /tmp/pw-interop-rel2-XXXXXX).jsonl"
 H="$(mktemp -u /tmp/pw-interop-dang1-XXXXXX).jsonl"
 I="$(mktemp -u /tmp/pw-interop-dang2-XXXXXX).jsonl"
+J="$(mktemp -u /tmp/pw-interop-ws1-XXXXXX).jsonl"
+K="$(mktemp -u /tmp/pw-interop-ws2-XXXXXX).jsonl"
 # A user's default ~/.proofwork/key would make every new primary log sealed,
 # which the deliberately independent reference implementation cannot read. The
 # interop fixture is public test data, so force a unique absent key path and
 # therefore a plaintext log regardless of operator configuration.
 export CAIRN_KEY="${A}.absent-key"
-trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$CAIRN_KEY"' EXIT
+trap 'rm -f "$A" "$B" "$C" "$D" "$E" "$F" "$G" "$H" "$I" "$J" "$K" "$CAIRN_KEY"' EXIT
 
 # --- the primary writes, the reference reads ------------------------------
 rule "Rust produces a log"
@@ -128,6 +130,37 @@ MIN_VIEW=$("$REF" --log "$C" --root . audit)
 echo "$MIN_VIEW"
 echo "$MIN_VIEW" | grep -q "log verified" \
   || fail "the reference could not verify a minimize objective the primary settled"
+
+# --- a workspace objective, built and scored by both ------------------------
+#
+# `workspace` materializes a base tree from blobs, applies the claim's files,
+# runs the pinned scorer, and ratchets on the score it derives. Each side posts
+# and settles one, and the other re-derives it -- which means rebuilding the
+# tree and re-running the scorer, not reading the recorded verdict back.
+rule "a workspace objective, settled by one implementation and re-run by the other"
+python3 examples/workspace-network/pack.py examples/workspace-network/base >/dev/null
+python3 examples/workspace-network/pack.py examples/workspace-network/submissions/batcher >/dev/null
+for pair in "$RUST:$REF:$J" "$REF:$RUST:$K"; do
+  IFS=: read -r WRITER READER LOG <<<"$pair"
+  WS_OID=$("$WRITER" --log "$LOG" --root . post examples/workspace-network/objective.json \
+    | head -1 | awk '{print $2}')
+  "$WRITER" --log "$LOG" --root . commit "$WS_OID" --submitter erin \
+      --artifact examples/workspace-network/artifact.json --nonce w1 >/dev/null
+  tick
+  "$WRITER" --log "$LOG" --root . reveal "$WS_OID" --submitter erin \
+      --artifact examples/workspace-network/artifact.json --nonce w1
+  settle_tick
+  "$WRITER" --log "$LOG" --root . settle
+  grep -q '"kind": *"settlement"' "$LOG" || fail "$WRITER did not settle the workspace claim"
+  if [ "$READER" = "$REF" ]; then
+    VIEW=$("$READER" --log "$LOG" --root . audit --rerun)
+  else
+    VIEW=$("$READER" --log "$LOG" --root . audit)
+  fi
+  echo "$VIEW"
+  echo "$VIEW" | grep -q "log verified" \
+    || fail "$READER could not re-derive a workspace claim $WRITER settled"
+done
 
 # --- a lean rejection, which needs no Lean toolchain to reproduce ----------
 #

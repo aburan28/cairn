@@ -177,7 +177,8 @@ which is a smaller and more useful audience than everyone.
 ## Order of work
 
 1. **`workspace` with notes**, as already designed. Nothing else here has a
-   real objective to run against until it exists.
+   real objective to run against until it exists. *The verifier is built;
+   notes over MCP and `cairn bench` are not.*
 2. **Beacon-seeded challenges** (Proposal 1). Small, no record change, and
    without it a sampled `workspace` objective is grindable the day it ships.
 3. **Prefilter tier and tree-keyed score cache** (Proposal 2, first two

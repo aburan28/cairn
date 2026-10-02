@@ -350,7 +350,14 @@ print(json.dumps({"ok": func(artifact) if seed is None else func(artifact, seed)
 /// still named only `certificate` and `evaluator` long after three more kinds
 /// were implemented -- so this crate could verify a kind it refused to accept,
 /// and the interop script could only ever drive those kinds in one direction.
-pub const KINDS: &[&str] = &["certificate", "evaluator", "statistical", "replay", "lean"];
+pub const KINDS: &[&str] = &[
+    "certificate",
+    "evaluator",
+    "statistical",
+    "replay",
+    "lean",
+    "workspace",
+];
 
 pub fn implements(kind: &str) -> bool {
     KINDS.contains(&kind)
@@ -380,6 +387,26 @@ fn confinement_required() -> bool {
     })
 }
 
+/// `confinement_refusal`, for `crate::workspace`.
+pub(crate) fn refuse_unconfined() -> Option<Verdict> {
+    confinement_refusal()
+}
+
+/// `pinned`, for `crate::workspace`.
+pub(crate) fn pinned_path(root: &Path, relative: &str, declared: &str) -> Result<PathBuf, Verdict> {
+    pinned(root, relative, declared)
+}
+
+/// `scrub_environment`, for `crate::workspace`.
+pub(crate) fn scrub(command: &mut Command, home: &Path) {
+    scrub_environment(command, home);
+}
+
+/// `next_scratch`, for `crate::workspace`.
+pub(crate) fn scratch_counter() -> u64 {
+    next_scratch()
+}
+
 fn confinement_refusal() -> Option<Verdict> {
     if confinement_required() {
         return Some(Verdict::plain(
@@ -404,6 +431,7 @@ pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
         Some("statistical") => statistical(root, spec, artifact),
         Some("replay") => replay(root, spec, artifact),
         Some("lean") => lean(root, spec, artifact),
+        Some("workspace") => crate::workspace::workspace(root, spec, artifact),
         // An unknown kind says nothing about the artifact: another node may
         // well implement it.
         Some(other) => Verdict::plain(
@@ -1231,7 +1259,14 @@ mod tests {
         // Reading them from the same constant would make the check circular:
         // drop a kind from `KINDS` and from `run` together and it would still
         // pass while the audit went quietly back to skipping that kind.
-        for kind in ["certificate", "evaluator", "statistical", "replay", "lean"] {
+        for kind in [
+            "certificate",
+            "evaluator",
+            "statistical",
+            "replay",
+            "lean",
+            "workspace",
+        ] {
             assert!(
                 implements(kind),
                 "the primary settles {kind} and this crate no longer claims to"

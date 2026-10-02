@@ -424,6 +424,22 @@ impl CommitteeKey {
         CommitteeKey { secrets }
     }
 
+    /// The committee key a node already holds: its transport identity.
+    ///
+    /// A node's transport key is a `mceliece348864` keypair, and a committee
+    /// seat is drawn on `sha256` of exactly that key (the peer record's
+    /// `transport`), so the seat's share is sealed to it. Reusing it means an
+    /// operator has no second key to generate, back up or publish, and the
+    /// 261 KB public half is fetched by the same `GetKey` that makes the node
+    /// dialable.
+    pub fn from_transport(public: &[u8], secret: &[u8]) -> Result<CommitteeKey, EnvelopeError> {
+        let key = super::kem::SecretKey::from_bytes(Suite::McEliece, secret, public)
+            .map_err(EnvelopeError::Kem)?;
+        SecretBundle::new([key])
+            .map(CommitteeKey::from_secrets)
+            .map_err(EnvelopeError::Kem)
+    }
+
     pub fn secrets(&self) -> &SecretBundle {
         &self.secrets
     }
@@ -1942,5 +1958,34 @@ d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6\
             .expect("seal succeeds");
         assert_ne!(a.ciphertext(), b.ciphertext());
         assert_ne!(a.digest(), b.digest());
+    }
+
+    #[test]
+    fn a_node_transport_key_serves_as_its_committee_key() {
+        // The seat is drawn on the transport id, so the share must be sealed
+        // to the transport key and opened with it. No second key exists.
+        let transport = crate::p2p::handshake::PeerIdentity::generate();
+        let key = CommitteeKey::from_transport(
+            transport.public_key().as_ref(),
+            transport.secret_key().as_ref(),
+        )
+        .expect("a mceliece348864 pair is a committee key");
+        assert_eq!(
+            key.id(),
+            transport.id(),
+            "the seat id and the key id differ"
+        );
+
+        let others: Vec<CommitteeKey> =
+            (0..2).map(|_| CommitteeKey::generate(&mut OsRng)).collect();
+        let committee = vec![key.member(1), others[0].member(2), others[1].member(3)];
+        let envelope =
+            SealedEnvelope::seal(b"artifact", AAD, &committee, 2, &mut OsRng).expect("seals");
+        assert!(
+            key.open_share(&envelope, 1).is_ok(),
+            "the transport key cannot open its share"
+        );
+
+        assert!(CommitteeKey::from_transport(&[0u8; 3], &[0u8; 3]).is_err());
     }
 }

@@ -350,11 +350,15 @@ fn bubblewrap(
     for path in &plan.writable {
         view.write(&mut command, path);
     }
-    // The cwd only has to be readable, and a pinned run's cwd *is* its scratch
-    // directory. Bound read-only unconditionally, as it used to be, that mount
-    // landed on top of the writable one above and won: under bubblewrap, and
-    // nowhere else, every pinned checker found its `$TMPDIR` read-only. A
-    // read-only bind is now skipped wherever the jail already shows the path.
+    // The cwd only has to be readable, and for two callers it is also writable:
+    // a pinned run's cwd *is* its scratch directory, and `workspace` runs its
+    // build in a tree it binds writable. Bound read-only unconditionally, as it
+    // used to be, that mount landed on top of the writable one above and won (a
+    // later bind wins): under bubblewrap, and nowhere else, every pinned
+    // checker found its `$TMPDIR` read-only, and a `workspace` build could not
+    // write its tree. A read-only bind is now skipped wherever the jail already
+    // shows the path, which covers a cwd inside the scratch directory, inside a
+    // writable path, or inside anything bound read-only already.
     view.read(&mut command, "--ro-bind-try", plan.cwd);
     view.recreate_links(&mut command);
     command.arg("--chdir").arg(plan.cwd);
@@ -1021,6 +1025,68 @@ mod tests {
         // And the scratch directory's last mount is the writable one.
         let scratch = mounts.iter().rev().find(|(_, at)| *at == work);
         assert_eq!(scratch.map(|(flag, _)| *flag), Some(OsStr::new("--bind")));
+    }
+
+    /// `(flag, path)` for each mount a bubblewrap command makes, in the order
+    /// it makes them, which is the order that decides who wins.
+    #[cfg(target_os = "linux")]
+    fn mounts_of(command: &Command) -> Vec<(String, PathBuf)> {
+        let args: Vec<&OsStr> = command.get_args().collect();
+        args.windows(3)
+            .filter(|op| op[0] == "--bind" || op[0] == "--ro-bind" || op[0] == "--ro-bind-try")
+            .map(|op| (op[0].to_string_lossy().into_owned(), PathBuf::from(op[2])))
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cwd_the_plan_made_writable_is_not_bound_read_only_on_top() {
+        // Two callers run in a directory they also write: a pinned checker in
+        // its scratch directory, and `workspace` in the tree it builds. A later
+        // bind wins, so a read-only bind of the cwd after the writable one made
+        // both read-only, under bubblewrap alone.
+        let (_dir, base) = scratch("cairn-bwrap-cwd");
+        let (work, tree, inside, plain) = (
+            base.join("work"),
+            base.join("tree"),
+            base.join("tree/pkg"),
+            base.join("plain"),
+        );
+        for dir in [&work, &tree, &inside, &plain] {
+            std::fs::create_dir_all(dir).expect("dir");
+        }
+        let mounts = |plan: &Confinement<'_>| {
+            let command = bubblewrap(
+                PathBuf::from("bwrap"),
+                Path::new("/bin/true"),
+                &[],
+                plan,
+                true,
+            );
+            mounts_of(&command)
+        };
+        let last_flag = |mounts: &[(String, PathBuf)], path: &Path| {
+            mounts
+                .iter()
+                .rev()
+                .find(|(_, at)| at == path)
+                .map(|(flag, _)| flag.clone())
+        };
+
+        // The pinned shape: the cwd is the scratch directory.
+        let pinned = mounts(&Confinement::new(&work, &work, 5));
+        assert_eq!(last_flag(&pinned, &work).as_deref(), Some("--bind"));
+        // The workspace shape: the cwd is a separate tree the plan writes.
+        let workspace = mounts(&Confinement::new(&work, &tree, 5).writing(&tree));
+        assert_eq!(last_flag(&workspace, &tree).as_deref(), Some("--bind"));
+        // Inside that tree nothing more is mounted: the jail already shows it.
+        let nested = mounts(&Confinement::new(&work, &inside, 5).writing(&tree));
+        assert_eq!(last_flag(&nested, &inside), None);
+        assert_eq!(last_flag(&nested, &tree).as_deref(), Some("--bind"));
+        // A cwd nothing else shows is still bound, read-only: the skip above
+        // is for what the jail shows, not a way to drop the cwd.
+        let bare = mounts(&Confinement::new(&work, &plain, 5));
+        assert_eq!(last_flag(&bare, &plain).as_deref(), Some("--ro-bind-try"));
     }
 
     #[cfg(target_os = "linux")]

@@ -44,8 +44,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::canonical::Value;
+use crate::canonical::{short, Value};
 use crate::checkpoint::RootKey;
+use crate::crypto::envelope::CommitteeKey;
 use crate::gossip::{Candidate, Population};
 use crate::ledger::Ledger;
 use crate::node::Node;
@@ -155,6 +156,12 @@ pub struct Config {
     /// Ed25519 identity used to sign MCP submissions. This is deliberately
     /// separate from [`Config::identity`], which is the transport KEM key.
     pub mcp_identity: Option<PathBuf>,
+    /// Ed25519 identity this node's committee seats are registered under: the
+    /// one that signed the peer record naming [`Config::identity`]'s transport
+    /// id. With it, the node publishes the shares its seats owe for sealed
+    /// submissions; without it, it still opens sealed submissions that others'
+    /// shares have made openable. Falls back to [`Config::mcp_identity`].
+    pub committee_identity: Option<PathBuf>,
     /// A store with a size cap to hold this node under while it runs.
     ///
     /// Checked once a minute: reclaimable content is
@@ -192,6 +199,7 @@ impl Config {
             proxy: None,
             mcp: false,
             mcp_identity: None,
+            committee_identity: None,
             store: None,
         }
     }
@@ -273,7 +281,10 @@ fn is_placeholder(value: &Value, endpoint: &Endpoint) -> bool {
         .is_some_and(|recorded| recorded == peer_id_string(&endpoint.peer.id()))
 }
 
-fn load_endpoint(path: &Path) -> Result<(Endpoint, bool), String> {
+fn load_endpoint(
+    path: &Path,
+    proxy: &crate::p2p::proxy::Proxy,
+) -> Result<(Endpoint, bool), String> {
     let value = Value::from_json(&fs::read_to_string(path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let addr = value
@@ -284,8 +295,16 @@ fn load_endpoint(path: &Path) -> Result<(Endpoint, bool), String> {
     // public DNS name keeps working across a restart that moves its IP, and a
     // name is safe to accept because the peer id decides -- see
     // `p2p::discovery::dialable`.
-    let addr = crate::p2p::discovery::dialable(addr).ok_or_else(|| {
-        format!("bootstrap.addr {addr:?} is neither an address nor a name that resolves")
+    let addr = crate::p2p::discovery::dialable_via(addr, proxy).ok_or_else(|| {
+        if matches!(proxy, crate::p2p::proxy::Proxy::Direct) {
+            format!("bootstrap.addr {addr:?} is neither an address nor a name that resolves")
+        } else {
+            format!(
+                "bootstrap.addr {addr:?} is a name, and dials go through a proxy: resolving it \
+                 here would tell this network's resolver whom this node is reaching. Use the \
+                 peer's IP address"
+            )
+        }
     })?;
     let public = hex_decode(
         value
@@ -382,6 +401,67 @@ fn save_population(path: &Path, population: &Population) -> Result<(), String> {
 /// case, and re-signing and rewriting the checkpoint every five seconds for a
 /// log that has not moved is churn a reader polling `/checkpoint` would see as
 /// change.
+/// What a node needs to serve on sealed-submission committees.
+struct Committee {
+    /// The transport identity, as a committee key. See
+    /// [`CommitteeKey::from_transport`].
+    key: CommitteeKey,
+    /// The identity the seats were registered under. `None` opens others'
+    /// reveals but publishes no shares.
+    signer: Option<crate::crypto::identity::Identity>,
+    /// Commitments that failed to open, with how many shares were published
+    /// at the time. Retried only once more shares arrive: the subset search is
+    /// bounded, but repeating a failed one every tick is pure waste.
+    failed: BTreeMap<String, usize>,
+}
+
+/// Publish owed committee shares and open what has become openable.
+///
+/// The step that makes a sealed submission survive its submitter. Before it
+/// existed, nothing in a running node ever published a share or opened a
+/// reveal, so a sequencer that dropped a reveal simply won.
+fn committee_tick(node: &mut Node, committee: &mut Committee, now: &str) -> bool {
+    let Some(now_epoch) = crate::time::parse_rfc3339(now)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .map(|seconds| crate::partition::epoch_of(seconds, crate::partition::epoch_seconds()))
+    else {
+        return false;
+    };
+    let before = node.ledger().len();
+    if let Some(signer) = &committee.signer {
+        for (commitment, result) in
+            node.post_owed_committee_shares(&committee.key, signer, now_epoch, now)
+        {
+            match result {
+                Ok(_) => log::info!("committee: published our share of {}", short(&commitment)),
+                Err(error) => log::debug!(
+                    "committee: share of {} refused: {error}",
+                    short(&commitment)
+                ),
+            }
+        }
+    }
+    let failed = &committee.failed;
+    let attempts = node.open_due_sealed(now_epoch, now, |commitment, published| {
+        failed
+            .get(commitment)
+            .is_some_and(|tried| *tried >= published)
+    });
+    for (commitment, published, outcome) in attempts {
+        match outcome {
+            Ok(_) => {
+                log::info!("committee: opened sealed submission {}", short(&commitment));
+                committee.failed.remove(&commitment);
+            }
+            Err(error) => {
+                log::warn!("committee: cannot open {} yet: {error}", short(&commitment));
+                committee.failed.insert(commitment, published);
+            }
+        }
+    }
+    node.ledger().len() != before
+}
+
 fn settle_tick(node: &mut Node, now: &str) -> bool {
     let before = node.ledger().len();
     match node.settle_at(now) {
@@ -569,8 +649,8 @@ pub fn run(config: Config) -> Result<(), String> {
     );
     let mut service = Service::with_proxy(Arc::clone(&identity), proxy);
     for path in &config.bootstrap {
-        let (endpoint, placeholder) =
-            load_endpoint(path).map_err(|e| format!("bootstrap {}: {e}", path.display()))?;
+        let (endpoint, placeholder) = load_endpoint(path, service.proxy())
+            .map_err(|e| format!("bootstrap {}: {e}", path.display()))?;
         if placeholder {
             // Loud, and at startup rather than at the first failed dial: a
             // placeholder key fails the handshake with a transport error
@@ -615,14 +695,6 @@ pub fn run(config: Config) -> Result<(), String> {
             "seeds: {} names no seed this node can dial",
             seed_source.describe()
         );
-    } else if !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) {
-        // A seed's key is fetched by a direct dial, and a proxied node has a
-        // censor to hide from. Said once rather than by a seed that is
-        // silently never asked.
-        log::warn!(
-            "seeds: dials go through a proxy and a seed's key is fetched by a direct dial, \
-             so the seed list is unused; pass the seeds' bootstrap files from `make seeds` instead"
-        );
     } else {
         log::info!(
             "seeds: {} from {}; {}=off runs without them",
@@ -658,6 +730,18 @@ pub fn run(config: Config) -> Result<(), String> {
                 Some(multicast::PORT)
             }
         },
+        // Off by default behind a proxy. A beacon announces this node's peer id
+        // and port to the local segment every interval, and a node that routes
+        // through Tor or a bridge is hiding from whoever runs that segment.
+        // Setting the variable explicitly still turns them on.
+        Err(_) if !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) => {
+            log::info!(
+                "multicast: beacons off because dials go through a proxy; \
+                 {BEACON_PORT_ENV}={} turns them on",
+                multicast::PORT
+            );
+            None
+        }
         Err(_) => Some(multicast::PORT),
     };
     let beacon = beacon_port.and_then(|port| {
@@ -680,7 +764,10 @@ pub fn run(config: Config) -> Result<(), String> {
             }
         }
     });
-    if beacon.is_none() && beacon_port.is_none() {
+    if beacon.is_none()
+        && beacon_port.is_none()
+        && matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct)
+    {
         log::info!("multicast: off ({BEACON_PORT_ENV}); no LAN discovery for this node");
     }
 
@@ -787,7 +874,7 @@ pub fn run(config: Config) -> Result<(), String> {
     // peers that *are* up -- for exactly the node that most needs them, the one
     // whose only other hope is the LAN. `Service` is shared by design; the
     // accept thread already learns into the same book.
-    if !seed_list.is_empty() && matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) {
+    if !seed_list.is_empty() {
         let seeding = Arc::clone(&service);
         thread::spawn(move || loop {
             for (seed, outcome) in seed_list.iter().zip(seeding.seed_from_list(&seed_list)) {
@@ -910,6 +997,31 @@ pub fn run(config: Config) -> Result<(), String> {
         });
     });
 
+    let mut committee = Committee {
+        key: CommitteeKey::from_transport(identity.public_key(), identity.secret_key())
+            .map_err(|error| format!("committee key: {error}"))?,
+        signer: match config
+            .committee_identity
+            .as_deref()
+            .or(config.mcp_identity.as_deref())
+        {
+            Some(path) => Some(
+                crate::mcp::load_identity(path).map_err(|error| format!("committee: {error}"))?,
+            ),
+            None => None,
+        },
+        failed: BTreeMap::new(),
+    };
+    match &committee.signer {
+        Some(signer) => log::info!(
+            "committee: serving seats registered to {}",
+            short(&signer.submitter_id())
+        ),
+        None => log::info!(
+            "committee: opening sealed submissions; no --committee-identity, so no seats served"
+        ),
+    }
+
     let mut ticks: u64 = 0;
     loop {
         if let Some(store) = config.store.as_ref() {
@@ -980,6 +1092,7 @@ pub fn run(config: Config) -> Result<(), String> {
             // Settlement is deferred to the close of the reveal epoch, and the
             // clock closes epochs whether or not anything arrived this tick.
             // See `settle_tick` for what happened when this waited on a drain.
+            changed |= committee_tick(&mut guard.node, &mut committee, &now);
             changed |= settle_tick(&mut guard.node, &now);
             if changed {
                 persist(
@@ -1016,6 +1129,7 @@ pub fn run(config: Config) -> Result<(), String> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             service.seed_from_log(&guard.node);
+            service.expire(crate::time::unix_seconds());
             guard.node.missing_code()
         };
         for endpoint in service.peers_for(&needs, config.fanout) {
@@ -1109,10 +1223,15 @@ fn report_seed(seed: &Seed, outcome: &SeedOutcome) {
             seed.addr,
             KEY_FETCH_BACKOFF.as_secs()
         ),
-        SeedOutcome::Dialable
-        | SeedOutcome::Waiting
-        | SeedOutcome::Ourselves
-        | SeedOutcome::Proxied => {}
+        SeedOutcome::Proxied => log::warn!(
+            "seeds: {}: {:?} is a name, and dials go through a proxy; resolving it here would \
+             tell the local network which seed this node wants. List the seed by address to \
+             use it; asking again in {}s",
+            seed.name,
+            seed.addr,
+            KEY_FETCH_BACKOFF.as_secs()
+        ),
+        SeedOutcome::Dialable | SeedOutcome::Waiting | SeedOutcome::Ourselves => {}
     }
 }
 

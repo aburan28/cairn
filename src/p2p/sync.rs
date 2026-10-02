@@ -57,7 +57,13 @@ use std::fmt;
 pub const BUCKETS: usize = 256;
 
 /// Record kinds that may cross the wire. Everything else is derived locally.
-pub const EXCHANGEABLE: &[&str] = &["objective", "commitment", "claim"];
+///
+/// `committee_share` travels because a sealed submission is opened by shares
+/// published on *other* nodes: a share that stayed on the node that wrote it
+/// would leave every reveal to whichever node happened to hold a threshold of
+/// seats, which on a real network is none of them. A peer that predates it
+/// refuses the kind one record at a time and keeps the session.
+pub const EXCHANGEABLE: &[&str] = &["objective", "commitment", "committee_share", "claim"];
 
 /// A record as it travels: the kind, and the canonical body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -779,7 +785,10 @@ mod tests {
 
     #[test]
     fn the_exchangeable_kinds_are_exactly_the_inputs() {
-        assert_eq!(EXCHANGEABLE, &["objective", "commitment", "claim"]);
+        assert_eq!(
+            EXCHANGEABLE,
+            &["objective", "commitment", "committee_share", "claim"]
+        );
         for kind in EXCHANGEABLE {
             assert!(Peer::new().insert(record(kind, 1)).is_ok(), "{kind}");
         }

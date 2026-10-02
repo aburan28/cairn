@@ -6,6 +6,7 @@ enum Pane: String, CaseIterable, Identifiable {
     case objectives = "Objectives"
     case catalog = "Catalog"
     case node = "Node"
+    case secrets = "Secrets"
     case journal = "Journal"
     case console = "Console"
     var id: String { rawValue }
@@ -16,6 +17,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .objectives: return "list.bullet.rectangle.portrait"
         case .catalog: return "shippingbox"
         case .node: return "server.rack"
+        case .secrets: return "key.fill"
         case .journal: return "text.book.closed"
         case .console: return "terminal"
         }
@@ -43,6 +45,7 @@ struct ContentView: View {
             case .objectives: ObjectivesView()
             case .catalog: CatalogView()
             case .node: NodeView()
+            case .secrets: SecretsView()
             case .journal: JournalView()
             case .console: ConsoleView()
             }

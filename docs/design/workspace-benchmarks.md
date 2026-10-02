@@ -1,5 +1,15 @@
 # Repository-shaped benchmarks: parity with Yukon, minus the oracle
 
+**Status: the verifier is built, in both implementations** — `workspace` in
+`src/verifiers/workspace.rs` and `reference/rust/src/workspace.rs`, ratchets
+allowed on it, an interop round in `scripts/interop.sh`, and a worked example in
+`examples/workspace-network/`. Not built yet: `cairn bench` (init, prime,
+checkout, diff), surfacing `note` and `model` over MCP through `taint_from`,
+moving base and claim blobs over `p2p::code`, and retargeting
+`examples/ecdsa-fail/`. One rule changed in the building: a float in the score
+file is a `Reject`, not an `InvalidSpec`, because the scored run executed
+submission code and what it left there cannot be pinned on the objective.
+
 [Yukon](https://yukon.org) (Eigen Labs) turns a GitHub repository into an
 optimization benchmark, and it is running `ecdsa.fail` — the objective
 `examples/ecdsa-fail/` already imitates. Its

@@ -12,6 +12,7 @@ proves, and how to author a verifier that cannot be gamed.
 | **V1** | machine-checked proof | anyone, seconds to minutes; the kernel is the arbiter | `lean` |
 | **V2** | bounded re-execution at a pinned commit, seed, environment | anyone with the compute; deterministic *only on reproducible fields* | `replay` |
 | **V3** | statistical validation against a pre-registered test statistic | anyone, by rerunning the pinned statistic at the pinned seed | `statistical` |
+| **V2** | a submission's files over a pinned base tree, built and scored by a pinned command | anyone holding the blobs and the toolchain; a build and a run per claim | `workspace` |
 | **V4** | judgement: is this novel, is this promising, is this important | nobody, mechanically. ever | never |
 
 The `evaluator` verifier sits alongside V0: a pinned deterministic fitness
@@ -26,6 +27,17 @@ Stage 0 admits only statistics whose randomness is driven by a seed the
 objective pins, so two honest nodes get the same integer rather than two draws
 that agree probabilistically. A test that genuinely needs independent resampling
 by several parties needs a committee, and that is Stage 2.
+
+The `workspace` row is V2 with a different artifact: instead of declared fields
+from a pinned computation, a claim is a manifest of `path → blob address` that
+replaces the objective's `editable_paths` in a pinned base tree, and the pinned
+`score_command` derives the score. It is the shape of a repository benchmark
+(ecdsa.fail, Yukon), and its design and refusals are in
+[design/workspace-benchmarks.md](design/workspace-benchmarks.md).
+`examples/workspace-network/` is a worked one. Two things it does not do yet:
+the blobs a base manifest and a claim name are not moved by `p2p::code`, so a
+peer must be given them some other way, and there is no `cairn bench` command;
+`examples/workspace-network/pack.py` stands in for `bench init`.
 
 V4 is where most of the intellectual value of research lives, and it is
 permanently unmintable. Any design that forgets this produces a token backed by
