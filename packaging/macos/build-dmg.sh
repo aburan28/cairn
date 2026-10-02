@@ -188,8 +188,9 @@ plutil -replace CFBundleVersion -string "$MACOS_PKG_VERSION" "$APP_ROOT/Contents
 # opens the releases page instead, so an image built anywhere else is still
 # a working app; with one, it would ship an app that never offers an update.
 if [ -n "${CAIRN_UPDATES_PUBLIC_KEY:-}" ] || [ -n "${CAIRN_UPDATES_PQ_PUBLIC_KEY:-}" ]; then
-    [ -n "${CAIRN_UPDATES_PUBLIC_KEY:-}" ] && [ -n "${CAIRN_UPDATES_PQ_PUBLIC_KEY:-}" ] \
-        || die "CAIRN_UPDATES_PUBLIC_KEY and CAIRN_UPDATES_PQ_PUBLIC_KEY go together; updates.sh public-key and pq-public-key print them"
+    if [ -z "${CAIRN_UPDATES_PUBLIC_KEY:-}" ] || [ -z "${CAIRN_UPDATES_PQ_PUBLIC_KEY:-}" ]; then
+        die "CAIRN_UPDATES_PUBLIC_KEY and CAIRN_UPDATES_PQ_PUBLIC_KEY go together; updates.sh public-key and pq-public-key print them"
+    fi
     plutil -replace SUPublicEDKey -string "$CAIRN_UPDATES_PUBLIC_KEY" "$APP_ROOT/Contents/Info.plist"
     plutil -replace CairnMLDSA87PublicKey -string "$CAIRN_UPDATES_PQ_PUBLIC_KEY" "$APP_ROOT/Contents/Info.plist"
     UPDATES="signed updates (SUPublicEDKey $CAIRN_UPDATES_PUBLIC_KEY, CairnMLDSA87PublicKey ${CAIRN_UPDATES_PQ_PUBLIC_KEY:0:16}…)"
