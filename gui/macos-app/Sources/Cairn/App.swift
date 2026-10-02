@@ -9,15 +9,16 @@ struct CairnApp: App {
         // `Window`, not `WindowGroup`: there is one node, so there is one
         // window, and ⌘N has nothing to make.
         Window("Cairn", id: "main") {
-            ContentView(node: delegate.node, browser: delegate.browser, updater: delegate.updater)
+            ContentView(node: delegate.node, browser: delegate.browser)
                 .frame(minWidth: 720, minHeight: 480)
         }
         .defaultSize(width: 1180, height: 800)
         .commands {
-            CommandGroup(replacing: .newItem) {}
-            CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") { delegate.updater.checkNow() }
+            CommandGroup(replacing: .appInfo) {
+                Button("About Cairn") { showAboutPanel(node: delegate.node) }
+                CheckForUpdatesButton(updates: delegate.updates)
             }
+            CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { delegate.browser.reload() }
                     .keyboardShortcut("r")
@@ -48,7 +49,7 @@ struct CairnApp: App {
 
         // ⌘, and the app menu's Settings… item come with the scene.
         Settings {
-            SettingsView(node: delegate.node, updater: delegate.updater)
+            SettingsView(node: delegate.node, updates: delegate.updates)
         }
     }
 }
@@ -57,13 +58,10 @@ struct CairnApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let node = Node()
     let browser = Browser()
-    lazy var updater = Updater(node: node)
+    let updates = Updates()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // The node first: its start reads the `cairn` binary's version, which
-        // the update check compares against.
         node.start()
-        updater.start()
     }
 
     // Closing the window is closing the node: nothing keeps running where
@@ -88,7 +86,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ContentView: View {
     @ObservedObject var node: Node
     @ObservedObject var browser: Browser
-    @ObservedObject var updater: Updater
 
     var body: some View {
         Group {
@@ -103,21 +100,11 @@ struct ContentView: View {
                 Failed(node: node, message: message)
             }
         }
-        // Under "Cairn" in the title bar, where it is visible without a menu:
-        // the first thing anybody asks of a bug report, and the thing to look
-        // at after an update.
-        .navigationSubtitle(node.versionSubtitle)
+        // The version under the window's title, so "which one am I on" needs
+        // no menu. The node's is in the status popover and About Cairn.
+        .navigationSubtitle(AppVersion.label)
         .toolbar {
             ToolbarItemGroup {
-                // Not only while running: a node that fails to start is the
-                // likeliest to be fixed by a newer release.
-                if let release = updater.badge {
-                    Button { updater.presentSheet = true } label: {
-                        Label("Update to \(release.version.description)", systemImage: "arrow.down.circle.fill")
-                            .foregroundStyle(Color.accentColor)
-                    }
-                    .help("Cairn \(release.version.description) is available")
-                }
                 if case .running(let url) = node.state {
                     // One status button rather than two raw addresses run
                     // together ("127.0.0.1:8080p2p 127.0.0.1:9000") and a
@@ -154,9 +141,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $node.presentSecrets) {
             SecretsSheet(node: node, isPresented: $node.presentSecrets)
-        }
-        .sheet(isPresented: $updater.presentSheet) {
-            UpdateSheet(updater: updater, node: node)
         }
     }
 }
@@ -215,11 +199,24 @@ private struct NodeDetails: View {
                     Text(verbatim: "\(node.sessionsOK)").monospacedDigit()
                 }
                 GridRow {
-                    Text("Version").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                    Text(verbatim: node.versionDetail)
+                    Text("App").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                    Text(verbatim: AppVersion.label)
+                }
+                if let v = node.binaryVersion {
+                    GridRow {
+                        Text("Node").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                        Text(verbatim: "cairn \(v)")
+                    }
                 }
             }
             .font(.callout)
+
+            if AppVersion.differs(fromNode: node.binaryVersion) {
+                Label("The app and the cairn command are different versions.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
 
             HStack {
                 Button("Peers…") {
@@ -260,20 +257,6 @@ private struct NodeDetails: View {
 }
 
 extension Node {
-    /// The title bar's line: the release, and the command's version only
-    /// when it says something the release does not -- a checkout's build,
-    /// or a `cairn` that is not the one the app was installed with.
-    var versionSubtitle: String {
-        guard let cli = cliVersion, cli != AppVersion.release?.description else { return AppVersion.label }
-        return "\(AppVersion.label) · cairn \(cli)"
-    }
-
-    /// Both versions, always, for the popover.
-    var versionDetail: String {
-        let app = AppVersion.release.map { "Cairn.app \($0)" } ?? "Cairn.app (development build)"
-        return app + " · cairn " + (cliVersion ?? (isAttached ? "not run in attach mode" : "not found"))
-    }
-
     /// The toolbar's word for the network state: two at most.
     var networkLabel: String {
         if isAttached { return "Attached" }
@@ -375,10 +358,6 @@ private struct Failed: View {
                 .background(Color(nsColor: .textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             }
-            Text(verbatim: node.versionDetail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
             HStack {
                 Button("Try Again") { node.restart() }
                     .keyboardShortcut(.defaultAction)

@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 /// button that restarts it.
 struct SettingsView: View {
     @ObservedObject var node: Node
-    @ObservedObject var updater: Updater
+    @ObservedObject var updates: Updates
 
     @AppStorage(NodeSettings.Key.cpus) private var cpus = 0
     @AppStorage(NodeSettings.Key.limitMemory) private var limitMemory = true
@@ -22,7 +22,6 @@ struct SettingsView: View {
     @AppStorage(NodeSettings.Key.p2pHost) private var p2pHost = NodeSettings.loopbackHost
     @AppStorage(NodeSettings.Key.bootstrap) private var bootstrap = ""
     @AppStorage(NodeSettings.Key.attachURL) private var attachURL = ""
-    @AppStorage(Updater.Key.automatic) private var checkForUpdates = true
 
     @State private var usage: DataFolder.Usage?
     @State private var pending: FolderChange?
@@ -132,20 +131,7 @@ struct SettingsView: View {
             }
             } // !attaching
 
-            Section {
-                updates
-            } header: {
-                Text("Updates")
-            } footer: {
-                Caption("""
-                    Checks GitHub's latest release of \(Release.repository) when Cairn opens \
-                    and every six hours. Nothing is installed without your say-so: an \
-                    update is that release's disk image, checked against its published \
-                    SHA-256 and installed with an administrator password, exactly as if \
-                    you had downloaded it. The checksum proves the download is intact, \
-                    not who published it — the release is not signed.
-                    """)
-            }
+            UpdatesSection(updates: updates, nodeVersion: node.binaryVersion)
 
             if needsRestart {
                 Section {
@@ -311,51 +297,6 @@ struct SettingsView: View {
             }
             .font(.callout)
         }
-    }
-
-    private var updates: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LabeledContent("Cairn.app") {
-                Text(verbatim: AppVersion.release?.description ?? "development build")
-                    .textSelection(.enabled)
-            }
-            LabeledContent("cairn command") {
-                Text(verbatim: node.cliVersion ?? "not run yet")
-                    .textSelection(.enabled)
-                    .foregroundStyle(node.cliVersion == nil ? .secondary : .primary)
-            }
-            Toggle("Check for updates automatically", isOn: $checkForUpdates)
-                .disabled(updater.disabledByEnvironment)
-            if updater.disabledByEnvironment {
-                Text("Off for this launch: Cairn was opened with CAIRN_UPDATES=off.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            HStack {
-                Text(updateStatus)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                Spacer()
-                if updater.available != nil {
-                    Button("Show Update…") { updater.presentSheet = true }
-                }
-                Button("Check Now") { updater.checkNow() }
-                    .disabled(updater.phase != .idle)
-            }
-            .font(.callout)
-        }
-    }
-
-    private var updateStatus: String {
-        if updater.phase == .checking { return "Checking…" }
-        if updater.phase != .idle { return "Updating…" }
-        if let failure = updater.checkFailure { return failure }
-        if let release = updater.available { return "Cairn \(release.version) is available." }
-        guard let when = updater.lastChecked else { return "Not checked yet." }
-        let ago = when.formatted(.relative(presentation: .named))
-        if let latest = updater.latest, updater.installed.isEmpty {
-            return "The newest release is \(latest.version). Checked \(ago)."
-        }
-        return updater.latest == nil ? "No release published yet. Checked \(ago)." : "Up to date. Checked \(ago)."
     }
 
     private var folder: some View {

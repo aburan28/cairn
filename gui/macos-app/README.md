@@ -7,8 +7,7 @@ Open it and it runs `cairn run`, waits for the node to serve its reader, and
 shows the reader. Quit it, or close the window, and the node stops. There is
 nothing else in it: every page is the node's own `/ui/`, the same one a
 browser opens, so nothing is rendered twice and nothing here can disagree with
-what the node says. The one thing it does beside that is
-[keep itself up to date](#updates).
+what the node says.
 
 ```sh
 make mac-app                     # gui/macos-app/build/Cairn.app, this Mac's architecture
@@ -89,16 +88,8 @@ and never go on the command line. **Peers…** announces a peer in the log
 management in Settings, and copies what to hand someone adding this node.
 The status button in the toolbar says, in a word or two, whether
 the node is on this Mac only, attached to another node's URL, or has reached
-peers. Its popover has the reader and P2P addresses, the peer id, the
-session count, and the versions of the app and of the `cairn` it runs.
-
-The **version** is under the window's title: *Version 1.9.0* for an
-installed release, and *Development build · cairn 1.9.0* for a checkout's
-build, which `build.sh` leaves at 0.0.0 for `build-dmg.sh` to stamp. When the
-`cairn` it runs is not the release the app came with — a `CAIRN_BINARY`, or
-a Homebrew copy — the title says that version too. **Cairn → About Cairn**
-shows the bundle's own version; the status popover, Settings → Updates and
-the page shown when the node will not start show both.
+peers. Its popover has the reader and P2P addresses, the peer id and the
+session count, each with a copy button.
 
 The page itself is the node's `/ui/`, which recognises this window by the
 `CairnApp` its web view appends to the user agent and drops the public site's
@@ -107,49 +98,22 @@ on the node's numbers.
 
 ## Updates
 
-Cairn checks GitHub for the newest release of `aburan28/cairn` when it opens
-and every six hours after (**Cairn → Check for Updates…** checks now). When
-one is newer than the app or the `cairn` it runs, a sheet shows its changelog
-and an **Update** button appears in the toolbar until it is installed or
-skipped.
+**Cairn → Check for Updates…**, and a check once a day, both by
+[Sparkle](https://sparkle-project.org). The feed is `appcast.xml` on the newest
+GitHub release; an update is that release's .dmg, verified against the
+Ed25519 key built into the app, and installed by its own `Install Cairn.pkg`
+after an administrator password. The installer replaces the `cairn` command
+and this app together and opens the app again. Settings has the automatic
+check's switch and a Check Now button.
 
-**Install and Relaunch** does what installing by hand does, without the
-clicks:
+The app's version is under the window title. The toolbar's status popover,
+About Cairn and Settings also show the `cairn` command's version, from
+`cairn --version`, and the popover warns when the two differ.
 
-1. downloads `cairn-<tag>-macos-universal.dmg` from that release, and
-   requires its SHA-256 to match both the `.sha256` beside it and the digest
-   GitHub recorded when the image was uploaded;
-2. asks for an administrator password, then, as root, copies the image to a
-   folder only root can write, **hashes it again** there, and takes
-   `Install Cairn.pkg` out of it. The second hash is the point: the first
-   copy sat in a folder any process of yours could write, between the check
-   and the install;
-3. quits, which stops the node as quitting always does, and runs
-   `installer -pkg … -target /` once the app has gone. The package's own
-   `postinstall-app` opens the new version.
-
-It is the release's own installer, so it replaces Cairn.app and the `cairn`
-command together, and leaves the data folder — ledger, identity, keys —
-alone. If `installer` fails, the old app is opened again and says so; what
-happened is in `/Library/Logs/Cairn/update.log`, and Installer's side in
-`/var/log/install.log`.
-
-What the checksum does **not** prove is who published the release: the same
-GitHub release serves the image and its checksum, and nothing is signed by a
-key of this project's. An update is exactly as trustworthy as downloading the
-`.dmg` by hand, and no more — see "a substituted update" in
-[docs/threat-model.md](../../docs/threat-model.md). That is why nothing is
-ever installed without a click and a password.
-
-A development build (version 0.0.0) checks and says what is out, but offers
-the release page rather than replacing itself, since installing would put the
-release in `/Applications` and quit the build you are running.
-
-| to | do |
-|---|---|
-| stop checking on a schedule | Settings → Updates, or launch with `open --env CAIRN_UPDATES=off` |
-| skip one release | **Skip This Version** in the sheet; the next release is offered again |
-| try the install path against a fork | `open --env CAIRN_UPDATE_REPO=owner/name` — assets still come only from github.com under that repository |
+A build with no `SUPublicEDKey` in its Info.plist, such as one from
+`build.sh`, cannot verify an update, so it never starts Sparkle and the menu
+item opens the releases page. [packaging/README.md](../../packaging/README.md#updates-for-cairnapp)
+has the release side and the one secret it needs.
 
 ## Settings
 
@@ -166,7 +130,6 @@ objective's pinned checker, one at a time, in a jail.
 | Bootstrap files | none | `--bootstrap <file>` (repeatable) |
 | Data folder | `~/Library/Application Support/Cairn` | `--data-dir` and `--root` |
 | Storage limit | off | `--max-size <n>GB` |
-| Check for updates automatically | on | — (the app's own; see [Updates](#updates)) |
 
 The app enforces none of these itself. Each is a setting any `cairn run`
 takes, enforced by the node, so the window cannot promise more than the
