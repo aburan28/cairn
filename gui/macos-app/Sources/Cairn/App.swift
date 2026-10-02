@@ -37,6 +37,8 @@ struct CairnApp: App {
                     .disabled(delegate.node.isAttached)
                 Button("Secrets…") { delegate.node.presentSecrets = true }
                 Button("Peers…") { delegate.node.presentPeers = true }
+                Button("Test Connectivity…") { delegate.node.presentConnectivity = true }
+                    .keyboardShortcut("k", modifiers: [.command, .shift])
                 Button("Copy Peer Id") { delegate.copyPeerId() }
                     .disabled(delegate.node.peerId == nil)
                 Button("Show Data Folder") {
@@ -153,6 +155,9 @@ struct ContentView: View {
         .sheet(isPresented: $node.presentNewChallenge) {
             NewChallengeSheet(node: node, browser: browser, isPresented: $node.presentNewChallenge)
         }
+        .sheet(isPresented: $node.presentConnectivity) {
+            ConnectivitySheet(node: node, isPresented: $node.presentConnectivity)
+        }
     }
 }
 
@@ -236,6 +241,13 @@ private struct NodeDetails: View {
                     dismiss()
                     node.presentPeers = true
                 }
+                // The status word above is read from the log; this tests the
+                // ports themselves.
+                Button("Test…") {
+                    dismiss()
+                    node.presentConnectivity = true
+                }
+                .help("Test whether this node is listening, and whether the peers it dials answer")
                 OpenSettingsButton()
                 Spacer()
                 Button("Open in Browser") { NSWorkspace.shared.open(url) }

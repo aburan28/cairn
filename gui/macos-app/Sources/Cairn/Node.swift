@@ -42,6 +42,7 @@ final class Node: ObservableObject {
     @Published var presentTasks = false
     @Published var presentSecrets = false
     @Published var presentNewChallenge = false
+    @Published var presentConnectivity = false
 
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }

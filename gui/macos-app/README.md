@@ -78,7 +78,8 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
 
 The **Node** menu has Open in Browser, Restart / Reconnect, **New
 Challenge…** (⇧⌘N, [below](#new-challenge)), **Tasks…**,
-**Secrets…**, Peers…, Copy Peer Id, Show Data Folder and Show Node Log.
+**Secrets…**, Peers…, **Test Connectivity…** (⇧⌘K, below), Copy Peer Id,
+Show Data Folder and Show Node Log.
 **Tasks…** posts a curated objective (including ECC2K-130 orbit piecework)
 into this node's log in one click. The objectives and the checkers they pin
 ship inside the app, copied from `examples/` by `build.sh`, which also fails
@@ -94,7 +95,32 @@ management in Settings, and copies what to hand someone adding this node.
 The status button in the toolbar says, in a word or two, whether
 the node is on this Mac only, attached to another node's URL, or has reached
 peers. Its popover has the reader and P2P addresses, the peer id and the
-session count, each with a copy button.
+session count, each with a copy button, and **Test…**.
+
+**Test Connectivity…** (⇧⌘K, or **Test…** in that popover) checks the ports
+themselves rather than reading a status word, each attempt made now from
+this Mac:
+
+- **Reader**: an HTTP request to the page this window shows.
+- **P2P listener**: a TCP connect to the port the node said it bound. When
+  Settings accepts inbound, also to that port on each of this Mac's LAN
+  addresses, with whether the macOS firewall is on (it asks once per program
+  whether to accept incoming connections, and a denied answer looks from
+  outside exactly like a closed port). It also prints the `nc -vz <address>
+  <port>` to run from another machine, which is the one direction a Mac
+  cannot test for itself.
+- **Peers it dials**: a TCP connect to every bootstrap file's address and to
+  every seed the node's log names, beside what that log says about the
+  handshake. A port that answers proves a listener, not a cairn node holding
+  the key its id names; only the handshake proves that, and only the node
+  runs it.
+- **Sessions**: how many peer sessions the log reports.
+
+Each attempt is told apart: *refused* (the host answered and nothing listens
+there), *no answer* (the host is down or a firewall drops the connection),
+or a name that does not resolve. **Copy Report** puts the lot on the
+clipboard. The Peers sheet's address field has its own **Test**, so an
+address can be checked before it is vouched for in the log.
 
 The page itself is the node's `/ui/`, which recognises this window by the
 `CairnApp` its web view appends to the user agent and drops the public site's
