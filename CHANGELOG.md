@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.11.0](https://github.com/aburan28/cairn/compare/v1.10.0...v1.11.0) (2026-10-02)
+
+
+### Features
+
+* **macos:** a real app icon for Cairn.app ([#203](https://github.com/aburan28/cairn/issues/203)) ([2beee5f](https://github.com/aburan28/cairn/commit/2beee5fe22dbb76d47125cdeeef5f1c241d7843a))
+* **macos:** AI-drafted challenges, Tasks without a checkout, and a connectivity test ([#200](https://github.com/aburan28/cairn/issues/200)) ([8981801](https://github.com/aburan28/cairn/commit/8981801475be4baf0439bb5064520472a41f9632))
+
+
+### Fixes
+
+* **macos:** let the Settings window scroll instead of running off screen ([#201](https://github.com/aburan28/cairn/issues/201)) ([90b5eda](https://github.com/aburan28/cairn/commit/90b5edac18c946b891b3da98832b8d58026af8aa))
+
 ## [1.10.0](https://github.com/aburan28/cairn/compare/v1.9.0...v1.10.0) (2026-10-02)
 
 
