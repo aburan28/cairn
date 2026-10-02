@@ -472,31 +472,39 @@ jobs:
             dist/*.rpm
             dist/*.rpm.sha256
 
-  # The public half of the key Cairn.app's Check for Updates… trusts, for
-  # macos-dmg to build in. Derived from the one secret, SPARKLE_ED_PRIVATE_KEY,
-  # rather than kept as a second setting that could disagree with it. Here on
-  # Linux because macOS's LibreSSL has no Ed25519; packaging/macos/updates.sh
-  # says the rest. No secret, no key, and the app opens the releases page.
+  # The public halves of the keys Cairn.app's Check for Updates… trusts, for
+  # macos-dmg to build in: Ed25519 for Sparkle, ML-DSA-87 (post-quantum) for
+  # the app's own check. Both derived from the one secret, CAIRN_UPDATES_KEY,
+  # rather than kept as settings that could disagree with it. On macOS
+  # because the Linux image's OpenSSL predates ML-DSA (3.5) and Homebrew's
+  # does not; packaging/macos/updates.sh says the rest. No secret, no keys,
+  # and the app opens the releases page.
   updates-key:
-    name: update signing key
-    runs-on: ubuntu-latest
+    name: update signing keys
+    runs-on: macos-latest
     outputs:
       public_key: ${{ steps.key.outputs.public_key }}
+      pq_public_key: ${{ steps.key.outputs.pq_public_key }}
     steps:
       - uses: actions/checkout@v7
       - id: key
         env:
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          CAIRN_UPDATES_KEY: ${{ secrets.CAIRN_UPDATES_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
-            echo "::notice::No SPARKLE_ED_PRIVATE_KEY secret: Cairn.app will not check for updates. packaging/README.md says how to add one."
+          if [ -z "$CAIRN_UPDATES_KEY" ]; then
+            echo "::notice::No CAIRN_UPDATES_KEY secret: Cairn.app will not check for updates. packaging/README.md says how to add one."
             echo "public_key=" >> "$GITHUB_OUTPUT"
+            echo "pq_public_key=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
           PUBLIC_KEY="$(packaging/macos/updates.sh public-key)"
+          PQ_PUBLIC_KEY="$(packaging/macos/updates.sh pq-public-key)"
           echo "SUPublicEDKey $PUBLIC_KEY"
+          echo "CairnMLDSA87PublicKey ${PQ_PUBLIC_KEY:0:16}… ($(printf '%s' "$PQ_PUBLIC_KEY" | base64 -d | wc -c | tr -d ' ') bytes)"
           echo "public_key=$PUBLIC_KEY" >> "$GITHUB_OUTPUT"
+          echo "pq_public_key=$PQ_PUBLIC_KEY" >> "$GITHUB_OUTPUT"
 
   # The macOS disk image: both darwin binaries `build` already tested, joined
   # into one universal binary, in an installer package, in a .dmg.
@@ -520,9 +528,11 @@ jobs:
       # `secrets` cannot be read in a step's `if:`, so whether there is a
       # certificate is decided here, once, as a plain string.
       HAVE_DEVELOPER_ID: ${{ secrets.MACOS_CERTIFICATES_P12 != '' }}
-      # Read by build-dmg.sh, which writes it into Cairn.app as SUPublicEDKey,
-      # and by verify-dmg.sh, which checks it landed. Empty without the secret.
+      # Read by build-dmg.sh, which writes them into Cairn.app as SUPublicEDKey
+      # and CairnMLDSA87PublicKey, and by verify-dmg.sh, which checks they
+      # landed. Empty without the secret.
       CAIRN_UPDATES_PUBLIC_KEY: ${{ needs.updates-key.outputs.public_key }}
+      CAIRN_UPDATES_PQ_PUBLIC_KEY: ${{ needs.updates-key.outputs.pq_public_key }}
     steps:
       - uses: actions/checkout@v7
 
@@ -705,7 +715,8 @@ jobs:
             --assets-file assets.txt --body-file /dev/null >> "$GITHUB_STEP_SUMMARY"
 
   # Cairn.app's update feed: `appcast.xml` on the release, naming that
-  # release's .dmg and carrying an Ed25519 signature over it.
+  # release's .dmg, with an Ed25519 signature over the image for Sparkle and
+  # an ML-DSA-87 one over the item for the app (packaging/macos/updates.sh).
   #
   # After `notes`, so it is the last thing a release gets. The app reads the
   # feed from releases/latest, so until this upload a check finds no feed and
@@ -720,7 +731,8 @@ jobs:
     name: update feed
     needs: [updates-key, macos-dmg, notes]
     if: ${{ !cancelled() && needs.macos-dmg.result == 'success' && needs.updates-key.outputs.public_key != '' }}
-    runs-on: ubuntu-latest
+    # macOS for the same reason as updates-key: an OpenSSL with ML-DSA.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
@@ -729,11 +741,13 @@ jobs:
           path: dist
       - name: write and check the feed
         env:
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          CAIRN_UPDATES_KEY: ${{ secrets.CAIRN_UPDATES_KEY }}
           PUBLIC_KEY: ${{ needs.updates-key.outputs.public_key }}
+          PQ_PUBLIC_KEY: ${{ needs.updates-key.outputs.pq_public_key }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
           DMG="dist/cairn-${VERSION}-macos-universal.dmg"
           : > notes.html
           if [ "${{ github.ref_type }}" = "tag" ]; then
@@ -743,7 +757,7 @@ jobs:
           packaging/macos/updates.sh appcast --dmg "$DMG" --version "$VERSION" \
             --repo "${{ github.repository }}" --notes-html notes.html --out dist/appcast.xml
           packaging/macos/updates.sh verify --appcast dist/appcast.xml --dmg "$DMG" \
-            --public-key "$PUBLIC_KEY"
+            --public-key "$PUBLIC_KEY" --pq-public-key "$PQ_PUBLIC_KEY"
       - name: publish it
         if: startsWith(github.ref, 'refs/tags/')
         env:

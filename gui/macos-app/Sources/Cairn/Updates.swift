@@ -12,17 +12,26 @@ import SwiftUI
 /// it, asks for an administrator password, and runs `Install Cairn.pkg`, which
 /// replaces both the `cairn` command and this app and opens the app again.
 ///
-/// An update is accepted only if its Ed25519 signature matches
-/// `SUPublicEDKey`, which build-dmg.sh writes into Info.plist from the
-/// release's signing key. A build without one -- a checkout's, or a release
-/// cut before the key existed -- has nothing to verify an update against, so
-/// it never starts Sparkle, and Check for Updates… opens the releases page
-/// instead.
+/// An update is installed only if two signatures match the two keys
+/// build-dmg.sh wrote into Info.plist from the release's signing key:
+///
+///   * `SUPublicEDKey`, Ed25519 over the image, which Sparkle checks after
+///     the download;
+///   * `CairnMLDSA87PublicKey`, ML-DSA-87 -- post-quantum -- over the feed
+///     item and that Ed25519 signature, which `UpdateGate` checks before the
+///     download (UpdateSignature.swift says why that is as good as over the
+///     image).
+///
+/// A build without both keys -- a checkout's, or a release cut before the
+/// key existed -- has nothing to verify an update against, so it never
+/// starts Sparkle, and Check for Updates… opens the releases page instead.
 @MainActor
 final class Updates: ObservableObject {
     static let releasesPage = URL(string: "https://github.com/aburan28/cairn/releases/latest")!
 
     private let controller: SPUStandardUpdaterController?
+    /// Sparkle holds its delegate weakly; this is the strong reference.
+    private let gate: UpdateGate?
     private var observations: Set<AnyCancellable> = []
 
     /// Sparkle says no while a check is already running.
@@ -42,13 +51,18 @@ final class Updates: ObservableObject {
     var lastCheck: Date? { controller?.updater.lastUpdateCheckDate }
 
     init() {
-        let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
-        guard let key, !key.trimmingCharacters(in: .whitespaces).isEmpty else {
+        let edKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
+        guard let edKey, !edKey.trimmingCharacters(in: .whitespaces).isEmpty,
+              let pqKey = UpdateSignature.publicKey()
+        else {
             controller = nil
+            gate = nil
             return
         }
+        let gate = UpdateGate(publicKey: pqKey)
+        self.gate = gate
         controller = SPUStandardUpdaterController(
-            startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+            startingUpdater: true, updaterDelegate: gate, userDriverDelegate: nil)
         controller?.updater.publisher(for: \.canCheckForUpdates)
             .receive(on: RunLoop.main)
             .sink { [weak self] in self?.canCheck = $0 }
@@ -61,6 +75,22 @@ final class Updates: ObservableObject {
         } else {
             NSWorkspace.shared.open(Self.releasesPage)
         }
+    }
+}
+
+/// Sparkle's delegate: the one question it is here to answer is whether the
+/// update it picked carries a post-quantum signature under the key this app
+/// was built with. Thrown errors are shown to the person and stop the
+/// update before anything is downloaded.
+final class UpdateGate: NSObject, SPUUpdaterDelegate {
+    private let publicKey: MLDSA87.PublicKey
+
+    init(publicKey: MLDSA87.PublicKey) {
+        self.publicKey = publicKey
+    }
+
+    func updater(_ updater: SPUUpdater, shouldProceedWithUpdate updateItem: SUAppcastItem, updateCheck: SPUUpdateCheck) throws {
+        try UpdateSignature.check(item: updateItem.propertiesDictionary as? [String: Any] ?? [:], publicKey: publicKey)
     }
 }
 
@@ -159,7 +189,7 @@ struct UpdatesSection: View {
         guard updates.isEnabled else {
             return "This build cannot verify updates, so it does not install them. Download the newest .dmg from the releases page."
         }
-        var text = "An update installs the cairn command and this app together, and asks for an administrator password."
+        var text = "An update is installed only if its post-quantum (ML-DSA-87) and Ed25519 signatures match this app's keys. It installs the cairn command and this app together, and asks for an administrator password."
         if let last = updates.lastCheck {
             text += " Last checked \(last.formatted(.relative(presentation: .named)))."
         }

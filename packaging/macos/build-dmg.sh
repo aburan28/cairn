@@ -180,14 +180,19 @@ APP_ARCHS="$(lipo -archs "$APP_ROOT/Contents/MacOS/Cairn" | tr ' ' '\n' | LC_ALL
     || die "Cairn.app's bundle identifier is not $APP_IDENTIFIER"
 plutil -replace CFBundleShortVersionString -string "$UPSTREAM_VERSION" "$APP_ROOT/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$MACOS_PKG_VERSION" "$APP_ROOT/Contents/Info.plist"
-# The key Check for Updates… holds every update to: the public half of the
-# release's SPARKLE_ED_PRIVATE_KEY, which release.yml derives with
-# packaging/macos/updates.sh. Without it the app does not start its updater
-# and its menu item opens the releases page instead, so an image built
-# anywhere else is still a working app.
-if [ -n "${CAIRN_UPDATES_PUBLIC_KEY:-}" ]; then
+# The keys Check for Updates… holds every update to: the public halves of
+# the release's CAIRN_UPDATES_KEY, which release.yml derives with
+# packaging/macos/updates.sh -- Ed25519 for Sparkle's check of the image, and
+# ML-DSA-87 (post-quantum) for the app's own check of the feed item. Both or
+# neither: with neither the app does not start its updater and its menu item
+# opens the releases page instead, so an image built anywhere else is still
+# a working app; with one, it would ship an app that never offers an update.
+if [ -n "${CAIRN_UPDATES_PUBLIC_KEY:-}" ] || [ -n "${CAIRN_UPDATES_PQ_PUBLIC_KEY:-}" ]; then
+    [ -n "${CAIRN_UPDATES_PUBLIC_KEY:-}" ] && [ -n "${CAIRN_UPDATES_PQ_PUBLIC_KEY:-}" ] \
+        || die "CAIRN_UPDATES_PUBLIC_KEY and CAIRN_UPDATES_PQ_PUBLIC_KEY go together; updates.sh public-key and pq-public-key print them"
     plutil -replace SUPublicEDKey -string "$CAIRN_UPDATES_PUBLIC_KEY" "$APP_ROOT/Contents/Info.plist"
-    UPDATES="signed updates (SUPublicEDKey $CAIRN_UPDATES_PUBLIC_KEY)"
+    plutil -replace CairnMLDSA87PublicKey -string "$CAIRN_UPDATES_PQ_PUBLIC_KEY" "$APP_ROOT/Contents/Info.plist"
+    UPDATES="signed updates (SUPublicEDKey $CAIRN_UPDATES_PUBLIC_KEY, CairnMLDSA87PublicKey ${CAIRN_UPDATES_PQ_PUBLIC_KEY:0:16}…)"
 else
     UPDATES="none: no CAIRN_UPDATES_PUBLIC_KEY, so Check for Updates… opens the releases page"
 fi

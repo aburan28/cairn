@@ -131,9 +131,11 @@ on the node's numbers.
 
 **Cairn → Check for Updates…**, and a check once a day, both by
 [Sparkle](https://sparkle-project.org). The feed is `appcast.xml` on the newest
-GitHub release; an update is that release's .dmg, verified against the
-Ed25519 key built into the app, and installed by its own `Install Cairn.pkg`
-after an administrator password. The installer replaces the `cairn` command
+GitHub release; an update is that release's .dmg, verified against two keys
+built into the app -- Sparkle's Ed25519 over the image, and the app's own
+post-quantum ML-DSA-87 over the feed item, checked before anything is
+downloaded (`Sources/Cairn/UpdateSignature.swift`) -- and installed by its
+own `Install Cairn.pkg` after an administrator password. The installer replaces the `cairn` command
 and this app together and opens the app again. Settings has the automatic
 check's switch and a Check Now button.
 
@@ -141,9 +143,9 @@ The app's version is under the window title. The toolbar's status popover,
 About Cairn and Settings also show the `cairn` command's version, from
 `cairn --version`, and the popover warns when the two differ.
 
-A build with no `SUPublicEDKey` in its Info.plist, such as one from
-`build.sh`, cannot verify an update, so it never starts Sparkle and the menu
-item opens the releases page. [packaging/README.md](../../packaging/README.md#updates-for-cairnapp)
+A build without both keys in its Info.plist (`SUPublicEDKey` and
+`CairnMLDSA87PublicKey`), such as one from `build.sh`, cannot verify an
+update, so it never starts Sparkle and the menu item opens the releases page. [packaging/README.md](../../packaging/README.md#updates-for-cairnapp)
 has the release side and the one secret it needs.
 
 ## New challenge

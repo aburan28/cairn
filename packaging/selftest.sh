@@ -128,6 +128,34 @@ if grep -q '_arm64\.deb' "$WORK/partial.md"; then bad "the page links to a packa
 notes --assets-file "$WORK/assets.txt" --body-file /dev/null >"$WORK/empty.md"
 if [ "$(sed -n '1p' "$WORK/empty.md" | cut -c1-24)" = "<!-- cairn:install-notes" ]; then ok "an empty body yields just the install section"; else bad "an empty body is mishandled"; fi
 
+# -- the update feed ----------------------------------------------------------------
+# updates.sh's whole round trip, under a throwaway key: both public halves
+# derive, the feed it writes verifies, and a feed for some other image or
+# item does not. Needs an OpenSSL with ML-DSA (3.5+), which a laptop with
+# Homebrew's openssl@3 has and the Linux CI image does not; release.yml's
+# dry run covers the same script where it runs for real.
+echo "updates.sh"
+if OPENSSL="${OPENSSL:-}" "$HERE/macos/updates.sh" generate-key >"$WORK/updates.key" 2>/dev/null \
+    && CAIRN_UPDATES_KEY="$(cat "$WORK/updates.key")" "$HERE/macos/updates.sh" public-key >"$WORK/ed.pub" 2>"$WORK/updates.err"; then
+    export CAIRN_UPDATES_KEY; CAIRN_UPDATES_KEY="$(cat "$WORK/updates.key")"
+    updates() { "$HERE/macos/updates.sh" "$@"; }
+    updates pq-public-key >"$WORK/pq.pub"
+    if [ "$(base64 -d <"$WORK/pq.pub" | wc -c | tr -d ' ')" = "2592" ]; then ok "the ML-DSA-87 public key is 2592 bytes"; else bad "the ML-DSA-87 public key has the wrong size"; fi
+    if [ "$(updates public-key)" = "$(cat "$WORK/ed.pub")" ]; then ok "the keys derive the same way twice"; else bad "key derivation is not deterministic"; fi
+    printf 'image\n' >"$WORK/cairn-v1.4.0-macos-universal.dmg"
+    printf 'other\n' >"$WORK/other.dmg"
+    updates appcast --dmg "$WORK/cairn-v1.4.0-macos-universal.dmg" --version v1.4.0 --repo example/cairn --out "$WORK/appcast.xml" >/dev/null
+    verify() { updates verify --appcast "$1" --dmg "$2" --public-key "$(cat "$WORK/ed.pub")" --pq-public-key "$(cat "$WORK/pq.pub")" >/dev/null 2>&1; }
+    if verify "$WORK/appcast.xml" "$WORK/cairn-v1.4.0-macos-universal.dmg"; then ok "the feed verifies under both keys"; else bad "the feed does not verify"; fi
+    if verify "$WORK/appcast.xml" "$WORK/other.dmg"; then bad "a feed verified for another image"; else ok "another image is refused"; fi
+    sed 's|<sparkle:version>1.4.0</sparkle:version>|<sparkle:version>1.4.1</sparkle:version>|' "$WORK/appcast.xml" >"$WORK/edited.xml"
+    if verify "$WORK/edited.xml" "$WORK/cairn-v1.4.0-macos-universal.dmg"; then bad "an edited item verified"; else ok "an edited item is refused by the post-quantum signature"; fi
+    if grep -q '<cairn:mlDSA87Signature>' "$WORK/appcast.xml" && grep -q 'sparkle:edSignature="' "$WORK/appcast.xml"; then ok "the feed carries both signatures"; else bad "a signature is missing from the feed"; fi
+    unset CAIRN_UPDATES_KEY
+else
+    echo "  --    $(tr -d '\n' <"$WORK/updates.err" | cut -c1-120); skipped here, and the release dry run will not skip it"
+fi
+
 # -- lint -------------------------------------------------------------------------
 # Here as well as in CI's own step, so `make packaging-check` on a laptop and
 # the pull request gate cannot come to mean different things.
