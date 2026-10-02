@@ -967,3 +967,140 @@ fn objective_embargoed_for(epochs: u64) -> cairn::records::Objective {
     .with_embargo(epochs)
     .expect("embargoed")
 }
+
+// -- the running node ------------------------------------------------------
+
+/// What a daemon does each tick, done by hand: every member serves its own
+/// seats with `post_owed_committee_shares`, and a bystander opens with
+/// `open_due_sealed`. No test-side share construction, so this pins the code a
+/// running node runs rather than the records it would write.
+#[test]
+fn members_serve_their_own_seats_and_anyone_opens() {
+    let (_dir, mut node, objective, members) = network("duty");
+    let submitter = Identity::from_secret_bytes([201u8; 32]);
+    let commitment_id = commit_sealed(
+        &mut node,
+        &objective,
+        &members,
+        &submitter,
+        n(42),
+        COMMITTEE_THRESHOLD,
+    );
+
+    // Inside the commitment's own epoch nothing is owed yet.
+    for member in &members {
+        assert!(node
+            .post_owed_committee_shares(
+                &member.committee,
+                &member.identity,
+                epoch_of(COMMIT_AT),
+                COMMIT_AT
+            )
+            .is_empty());
+    }
+
+    let mut posted = 0;
+    for member in &members {
+        for (commitment, result) in node.post_owed_committee_shares(
+            &member.committee,
+            &member.identity,
+            epoch_of(REVEAL_AT),
+            REVEAL_AT,
+        ) {
+            assert_eq!(commitment, commitment_id);
+            result.expect("a drawn member's own share is admitted");
+            posted += 1;
+        }
+    }
+    assert_eq!(
+        posted,
+        usize::from(COMMITTEE_SIZE),
+        "every seat served, no more"
+    );
+
+    // A second pass owes nothing: each seat publishes once.
+    for member in &members {
+        assert!(node
+            .post_owed_committee_shares(
+                &member.committee,
+                &member.identity,
+                epoch_of(REVEAL_AT),
+                REVEAL_AT
+            )
+            .is_empty());
+    }
+
+    let opened = node.open_due_sealed(epoch_of(REVEAL_AT), REVEAL_AT, |_, _| false);
+    assert_eq!(opened.len(), 1);
+    opened[0].2.as_ref().expect("the shares open it");
+    assert!(node
+        .accepted_claims()
+        .into_values()
+        .any(|claim| claim.artifact == n(42) && claim.submitter == submitter.submitter_id()));
+    assert!(
+        node.open_due_sealed(epoch_of(REVEAL_AT), REVEAL_AT, |_, _| false)
+            .is_empty(),
+        "an opened submission is no longer pending"
+    );
+}
+
+/// Shares written on one node open the submission on another. The reason
+/// `committee_share` is an exchangeable kind: a share that never left the node
+/// that wrote it could only ever be combined there.
+#[test]
+fn shares_replayed_from_a_peer_open_the_submission_there() {
+    let (_dir, mut writer, objective, members) = network("share-writer");
+    let submitter = Identity::from_secret_bytes([202u8; 32]);
+    let commitment_id = commit_sealed(
+        &mut writer,
+        &objective,
+        &members,
+        &submitter,
+        n(42),
+        COMMITTEE_THRESHOLD,
+    );
+    for member in &members {
+        for (_, result) in writer.post_owed_committee_shares(
+            &member.committee,
+            &member.identity,
+            epoch_of(REVEAL_AT),
+            REVEAL_AT,
+        ) {
+            result.expect("admitted");
+        }
+    }
+
+    // A second node with the same history up to the commitment: the same
+    // objective and peer records, written at the same instants.
+    let dir = TempDir::new("share-reader");
+    fs::write(dir.file("c.py"), CHECKER).expect("pinned checker is writable");
+    let mut reader = Node::with_registry(
+        Ledger::open(dir.file("log.jsonl")).expect("empty log"),
+        VerifierRegistry::new(&dir.path).with_lean_binary(NO_LEAN),
+    );
+    reader.post_objective(&objective, COMMIT_AT).expect("post");
+    for (i, member) in members.iter().enumerate() {
+        reader
+            .post_peer(&member.peer_record(9000 + i as u16), COMMIT_AT)
+            .expect("peer registers");
+    }
+
+    let records: Vec<(String, Value)> = writer
+        .ledger()
+        .entries()
+        .iter()
+        .filter(|entry| cairn::p2p::sync::EXCHANGEABLE.contains(&entry.kind.as_str()))
+        .filter(|entry| entry.kind != "objective")
+        .map(|entry| (entry.kind.clone(), entry.payload.clone()))
+        .collect();
+    cairn::p2p::service::replay_records(&mut reader, &records);
+
+    assert_eq!(
+        reader.committee_shares_for(&commitment_id).len(),
+        usize::from(COMMITTEE_SIZE),
+        "the shares did not replay"
+    );
+    let opened = reader.open_due_sealed(epoch_of(REVEAL_AT), REVEAL_AT, |_, _| false);
+    assert_eq!(opened.len(), 1);
+    opened[0].2.as_ref().expect("replayed shares open it");
+}

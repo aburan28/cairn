@@ -176,6 +176,18 @@ resistance. Grinding for a seat does cost a McEliece keypair — the draw ranks 
 the transport id, which is the hash of one — and a constant factor is not a
 defence.
 
+**How a running node takes part.** A node's transport key is its committee
+key: the seat is drawn on the transport id, and `CommitteeKey::from_transport`
+opens shares with the McEliece pair the node already holds. Each tick, `cairn
+run` publishes the shares owed by every seat registered to its
+`--committee-identity` (the ed25519 identity that signed its peer record), and
+opens every sealed submission whose published shares meet the threshold.
+`committee_share` records sync between nodes like objectives, commitments and
+claims, so the shares meet wherever they are needed. A submitter seals with
+`cairn commit --sealed`. Until per-share verification lands, one bad share at a
+grown committee can still stall a reveal; the subset search is capped so that
+costs a node a bounded search rather than one per tick for ever.
+
 This caveat is now load-bearing in the p2p layer, not only a warning. Peer
 records gossip between nodes as *routing hints* — the discovery exchange in
 `p2p.md` — and they are kept out of the log **because of this paragraph**: an
@@ -400,7 +412,7 @@ membership this section requires to be "diverse and rotated per epoch".
 | sequencer | drop submissions it dislikes | blind inclusion — it cannot see what it drops | **built** |
 | sequencer | drop everything | forced inclusion on a base layer | **unsolved at Stage 0** |
 | competitor | front-run an in-flight artifact | threshold reveal, and a share published before the commitment's epoch closes is refused | **built** |
-| attacker | stop a submitter from revealing | committee reveals without them, from records | **built** |
+| attacker | stop a submitter from revealing | committee reveals without them, from records; daemons publish shares and open reveals each tick, and shares sync between nodes | **built** — one bad share can still stall a grown committee |
 | a member | publish for somebody else's seat | the draw names the identity, the signature proves it | **built** |
 | a member | stall a reveal with a bad share | subset search over the published shares | mitigated — the liar is not identifiable, see above |
 | a submitter | seal at a threshold one member can open | `t` and `n` pinned at commit against the network's constants | **built** |

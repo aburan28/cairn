@@ -549,6 +549,9 @@ enum Command {
         /// Identity file to sign with. When set, the signing key's public half
         /// replaces `--submitter`: a signed record's submitter *is* its key.
         identity: Option<String>,
+        /// Seal the claim to this epoch's committee, so it is revealed by the
+        /// committee's shares even if the submitter never comes back.
+        sealed: bool,
     },
     Reveal {
         objective_id: String,
@@ -920,6 +923,7 @@ struct RunRequest {
     fanout: Option<usize>,
     max_queue: Option<usize>,
     mcp_identity: Option<String>,
+    committee_identity: Option<String>,
     no_mcp: bool,
 }
 
@@ -1626,6 +1630,7 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
         fanout: None,
         max_queue: None,
         mcp_identity: None,
+        committee_identity: None,
         no_mcp: false,
     };
 
@@ -1669,6 +1674,9 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
                 }
             }
             "--mcp-identity" => request.mcp_identity = Some(cursor.value("run: --mcp-identity")?),
+            "--committee-identity" => {
+                request.committee_identity = Some(cursor.value("run: --committee-identity")?)
+            }
             "--no-mcp" => request.no_mcp = true,
             "--help" | "-h" => return Ok(Command::Help),
             other => return Err(CliError::Usage(format!("run: unknown option {other:?}"))),
@@ -1732,6 +1740,7 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut artifact: Option<String> = None;
     let mut nonce: Option<String> = None;
     let mut identity: Option<String> = None;
+    let mut sealed = false;
 
     while let Some(token) = cursor.take() {
         if token == "--submitter" {
@@ -1742,6 +1751,8 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
             nonce = Some(cursor.value("--nonce")?);
         } else if token == "--identity" {
             identity = Some(cursor.value("--identity")?);
+        } else if token == "--sealed" {
+            sealed = true;
         } else if is_flag(&token) {
             return Err(CliError::Usage(format!("commit: unknown option {token:?}")));
         } else if objective_id.is_some() {
@@ -1772,6 +1783,7 @@ fn parse_commit(cursor: &mut Cursor) -> Result<Command, CliError> {
         // `args.nonce or token_hex(16)` does. An empty nonce is not a nonce.
         nonce: nonce.filter(|value| !value.is_empty()),
         identity,
+        sealed,
     })
 }
 
@@ -3638,7 +3650,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "      fund a checkable question");
     say(
         out,
-        "  commit <objective-id> --submitter S --artifact FILE [--nonce N]",
+        "  commit <objective-id> --submitter S --artifact FILE [--nonce N] [--sealed]",
     );
     say(out, "      bind to an artifact without revealing it");
     say(
@@ -3976,6 +3988,10 @@ fn print_help(out: &mut dyn Write) {
     say(
         out,
         "      MCP uses stdio; pass --mcp-identity FILE to sign its submissions",
+    );
+    say(
+        out,
+        "      --committee-identity FILE serves the committee seats that identity registered",
     );
     say(
         out,
@@ -4345,6 +4361,7 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
         .unwrap_or(cairn::serve::DEFAULT_MAX_QUEUED);
     config.mcp = !request.no_mcp;
     config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
+    config.committee_identity = request.committee_identity.as_ref().map(PathBuf::from);
     config.store = store.limit().is_some().then(|| store.clone());
     if !request.no_queue {
         config.queue = Some(
@@ -5008,6 +5025,118 @@ fn cmd_commit(
     say(
         out,
         format!("  nonce {nonce}   <- keep this; you need it to reveal"),
+    );
+    Ok(0)
+}
+
+/// `cairn commit --sealed`: commit, and hand the reveal to the committee.
+///
+/// The claim is signed now and sealed to the committee drawn for this epoch,
+/// so nothing after this command is the submitter's to do: once the epoch
+/// closes, the seats publish their shares and any node opens the claim. A
+/// submitter who is blocked, detained or simply offline is still revealed and
+/// still paid -- the censorship `docs/censorship.md` §1 describes.
+///
+/// Each seat's McEliece key is fetched from the address its peer record gives
+/// and kept only if it hashes to the seat's transport id, so a wrong address
+/// costs a failed fetch and never a share sealed to the wrong party.
+fn cmd_commit_sealed(
+    out: &mut dyn Write,
+    options: &Options,
+    objective_id: &str,
+    identity: Option<&str>,
+    artifact_path: &str,
+    nonce: Option<&str>,
+) -> Result<i32, CliError> {
+    use cairn::crypto::envelope::CommitteeMember;
+    use cairn::crypto::kem::{Bundle, PublicKey, Suite};
+
+    let identity = load_identity(identity)?.ok_or_else(|| {
+        CliError::Usage(String::from(
+            "commit --sealed: --identity is required; the committee cannot sign a claim for you",
+        ))
+    })?;
+    let mut node = open_node_for_writing(options)?;
+    let artifact = read_json(artifact_path)?;
+    let nonce = match nonce {
+        Some(nonce) => nonce.to_string(),
+        None => random_nonce()?,
+    };
+    let stamp = timestamp();
+    let epoch = cairn::time::parse_rfc3339(&stamp)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .map(|seconds| cairn::partition::epoch_of(seconds, cairn::partition::epoch_seconds()))
+        .ok_or_else(|| CliError::Usage(format!("commit --sealed: unreadable clock {stamp}")))?;
+    let seats = node
+        .committee_for(epoch, node.ledger().len())
+        .map_err(|violation| CliError::Refused(violation.to_string()))?;
+
+    let mut committee = Vec::with_capacity(seats.len());
+    for seat in &seats {
+        let transport = decode_hex32(&seat.transport).ok_or_else(|| {
+            CliError::Refused(format!("seat {}: transport id is not hex", seat.seat))
+        })?;
+        let addr = cairn::p2p::discovery::dialable(&seat.addr).ok_or_else(|| {
+            CliError::Refused(format!("seat {}: cannot resolve {}", seat.seat, seat.addr))
+        })?;
+        let public = cairn::p2p::transport::request_key(addr, transport).map_err(|error| {
+            CliError::Refused(format!(
+                "seat {} at {}: cannot fetch its key: {error}",
+                seat.seat, seat.addr
+            ))
+        })?;
+        let key = PublicKey::from_bytes(Suite::McEliece, public.as_bytes())
+            .and_then(Bundle::mceliece_only)
+            .map_err(|error| CliError::Refused(format!("seat {}: {error}", seat.seat)))?;
+        committee.push(CommitteeMember {
+            index: seat.seat,
+            keys: key,
+        });
+    }
+    let size = u8::try_from(seats.len())
+        .map_err(|_| CliError::Refused(String::from("committee larger than 255 seats")))?;
+    let threshold = cairn::partition::threshold_for(size);
+
+    let claim = Claim::new(
+        objective_id,
+        identity.submitter_id(),
+        artifact,
+        &nonce,
+        &stamp,
+        Vec::new(),
+    )
+    .map_err(|error| CliError::Refused(error.to_string()))?
+    .signed_with(&identity);
+    let submission = cairn::sealed::SealedSubmission::seal_claim(
+        &claim,
+        epoch,
+        &stamp,
+        &committee,
+        threshold,
+        &mut rand_core::OsRng,
+    )
+    .map_err(|error| CliError::Refused(error.to_string()))?;
+    let commitment = Commitment::new(
+        objective_id,
+        identity.submitter_id(),
+        submission.commitment.as_str(),
+        stamp.as_str(),
+    )
+    .sealed_with(submission.envelope.clone())
+    .signed_with(&identity);
+    post_commitment(&mut node, &commitment, &stamp)?;
+
+    say(
+        out,
+        format!(
+            "committed {} sealed to {} seats, {threshold} to open",
+            short(&submission.commitment),
+            seats.len()
+        ),
+    );
+    say(
+        out,
+        "  nothing more to do: the committee reveals it after this epoch closes",
     );
     Ok(0)
 }
@@ -9432,10 +9561,26 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Balances => cmd_balances(out, options),
         Command::Commit {
             objective_id,
+            submitter: _,
+            artifact,
+            nonce,
+            identity,
+            sealed: true,
+        } => cmd_commit_sealed(
+            out,
+            options,
+            objective_id,
+            identity.as_deref(),
+            artifact,
+            nonce.as_deref(),
+        ),
+        Command::Commit {
+            objective_id,
             submitter,
             artifact,
             nonce,
             identity,
+            sealed: false,
         } => cmd_commit(
             out,
             options,
@@ -11178,6 +11323,37 @@ mod tests {
             Command::Commit { nonce, .. } => assert_eq!(nonce, None),
             other => panic!("expected commit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn commit_sealed_is_a_flag_and_off_by_default() {
+        let sealed = parse(argv(&[
+            "commit",
+            "OID",
+            "--identity",
+            "me.json",
+            "--artifact",
+            "a.json",
+            "--sealed",
+        ]))
+        .expect("this parses");
+        assert!(matches!(
+            sealed.command,
+            Command::Commit { sealed: true, .. }
+        ));
+        let plain = parse(argv(&[
+            "commit",
+            "OID",
+            "--identity",
+            "me.json",
+            "--artifact",
+            "a.json",
+        ]))
+        .expect("this parses");
+        assert!(matches!(
+            plain.command,
+            Command::Commit { sealed: false, .. }
+        ));
     }
 
     #[test]

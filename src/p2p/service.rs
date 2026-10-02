@@ -13,7 +13,7 @@ use super::sync::{Peer, SyncError};
 use super::transport::{self, Connection, TransportError};
 use crate::gossip::{Candidate, Population};
 use crate::node::Node;
-use crate::records::{Claim, Commitment, Objective, PeerRecord};
+use crate::records::{Claim, Commitment, CommitteeShare, Objective, PeerRecord};
 use crate::time::timestamp;
 use rand_core::OsRng;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1211,7 +1211,7 @@ fn needed_code(node: &Node, peer: &Peer) -> BTreeSet<String> {
 fn records_from_node(node: &Node) -> Peer {
     let mut peer = Peer::new();
     for entry in node.ledger().entries() {
-        if ["objective", "commitment", "claim"].contains(&entry.kind.as_str()) {
+        if super::sync::EXCHANGEABLE.contains(&entry.kind.as_str()) {
             let _ = peer.insert(super::sync::Record::new(
                 entry.kind.clone(),
                 entry.payload.clone(),
@@ -1242,6 +1242,7 @@ fn decode_record(record: &super::sync::Record) -> Result<(), SyncError> {
         "objective" => Objective::from_value(&record.payload).map(|_| ()),
         "commitment" => Commitment::from_value(&record.payload).map(|_| ()),
         "claim" => Claim::from_value(&record.payload).map(|_| ()),
+        "committee_share" => CommitteeShare::from_value(&record.payload).map(|_| ()),
         // No `peer` arm, on purpose: peer records travel as routing hints in
         // their own family (`super::peers`), and must never replay into the
         // log -- see `records_from_node`.
@@ -1336,7 +1337,10 @@ fn replay_records_with_horizon(
         .iter()
         .map(|entry| (entry.kind.clone(), entry.payload.digest()))
         .collect();
-    for kind in ["objective", "commitment", "claim"] {
+    // Shares before claims: a share opens a commitment the batch may also
+    // carry, and the claim a committee reveal produces is replayed like any
+    // other claim, so order within the batch matters only in that direction.
+    for kind in ["objective", "commitment", "committee_share", "claim"] {
         let mut batch: Vec<&(String, crate::canonical::Value)> =
             records.iter().filter(|(k, _)| k == kind).collect();
         // RFC-3339 offsets make raw strings unsuitable as an instant order:
@@ -1378,6 +1382,11 @@ fn replay_records_with_horizon(
                         let _ = node.commit(&value, &stamp);
                     }
                 }
+                "committee_share" => {
+                    if let Ok(value) = CommitteeShare::from_value(payload) {
+                        let _ = node.post_committee_share(&value, &stamp);
+                    }
+                }
                 "claim" => {
                     if let Ok(value) = Claim::from_value(payload) {
                         let _ = node.reveal(&value, &stamp);
@@ -1397,7 +1406,7 @@ fn replay_records_with_horizon(
 /// Replay a sync peer's records, then settle whatever came due.
 ///
 /// A `"peer"`-kind match arm used to sit in the replay loop and was
-/// unreachable: the loop iterates `["objective", "commitment", "claim"]`, and
+/// unreachable: the loop iterates the exchangeable kinds, and
 /// `sync::EXCHANGEABLE` has never included `"peer"`. Whether it *should* was
 /// an open question here for a while, and the answer is a settled **no**:
 /// `docs/censorship.md` derives the sealed-submission committee from the log's
