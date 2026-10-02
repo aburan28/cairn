@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/aburan28/cairn/compare/v1.9.0...v1.10.0) (2026-10-02)
+
+
+### Features
+
+* **macos:** check for updates in Cairn.app and show its version ([#197](https://github.com/aburan28/cairn/issues/197)) ([d342181](https://github.com/aburan28/cairn/commit/d34218181400ed44fc65933b45ce1da51fd2fd59))
+
 ## [1.9.0](https://github.com/aburan28/cairn/compare/v1.8.1...v1.9.0) (2026-10-02)
 
 
