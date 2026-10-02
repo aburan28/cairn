@@ -36,6 +36,7 @@ final class Node: ObservableObject {
     /// Drives the Peers sheet from the Node menu and the toolbar.
     @Published var presentPeers = false
     @Published var presentTasks = false
+    @Published var presentSecrets = false
 
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }
@@ -460,6 +461,126 @@ final class Node: ObservableObject {
         }
         let got = bound(preferred)
         return got != 0 ? got : bound(0)
+    }
+
+    // MARK: secrets
+    //
+    // Operator credentials for campaign scripts (AWS keys, DATABASE_URL, …).
+    // Outside the node data dir; writing them does not need the log lock.
+    // Values go in via `--stdin` so they never appear on argv.
+
+    struct SecretsList {
+        var names: [String]
+        var dir: String?
+    }
+
+    func listSecrets(completion: @escaping (SecretsList?, String?) -> Void) {
+        guard let binary = binary ?? Self.locateBinary() else {
+            completion(nil, "No cairn command was found.")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let pathOut = Self.runCairn(binary, ["secret", "path"])
+            let listOut = Self.runCairn(binary, ["secret", "list"])
+            DispatchQueue.main.async {
+                if listOut.status != 0 {
+                    completion(nil, listOut.err.isEmpty
+                               ? "cairn secret list failed (\(listOut.status))"
+                               : listOut.err)
+                    return
+                }
+                let dir = pathOut.status == 0 ? pathOut.out : nil
+                let names = listOut.out
+                    .split(separator: "\n")
+                    .map { String($0).trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty && !$0.hasPrefix("(") }
+                completion(SecretsList(names: names, dir: dir), nil)
+            }
+        }
+    }
+
+    /// Write a secret by piping the value to `cairn secret set NAME --stdin`.
+    func setSecret(name: String, value: String, completion: @escaping (String?) -> Void) {
+        guard let binary = binary ?? Self.locateBinary() else {
+            completion("No cairn command was found.")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process()
+            p.executableURL = binary
+            p.arguments = ["secret", "set", name, "--stdin"]
+            let stdin = Pipe()
+            let err = Pipe()
+            let out = Pipe()
+            p.standardInput = stdin
+            p.standardOutput = out
+            p.standardError = err
+            do { try p.run() } catch {
+                DispatchQueue.main.async { completion(error.localizedDescription) }
+                return
+            }
+            // Trailing newline stripped by cairn; send bytes as pasted.
+            if let data = value.data(using: .utf8) {
+                try? stdin.fileHandleForWriting.write(contentsOf: data)
+            }
+            try? stdin.fileHandleForWriting.close()
+            p.waitUntilExit()
+            let text = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                if p.terminationStatus == 0 {
+                    completion(nil)
+                } else {
+                    completion(text.isEmpty ? "cairn secret set exited with status \(p.terminationStatus)" : text)
+                }
+            }
+        }
+    }
+
+    func deleteSecret(name: String, completion: @escaping (String?) -> Void) {
+        guard let binary = binary ?? Self.locateBinary() else {
+            completion("No cairn command was found.")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Self.runCairn(binary, ["secret", "delete", name])
+            DispatchQueue.main.async {
+                if result.status == 0 {
+                    completion(nil)
+                } else {
+                    completion(result.err.isEmpty
+                               ? "cairn secret delete exited with status \(result.status)"
+                               : result.err)
+                }
+            }
+        }
+    }
+
+    private struct CairnRun: Sendable {
+        var status: Int32
+        var out: String
+        var err: String
+    }
+
+    nonisolated private static func runCairn(_ binary: URL, _ args: [String]) -> CairnRun {
+        let p = Process()
+        p.executableURL = binary
+        p.arguments = args
+        let out = Pipe()
+        let err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        do { try p.run() } catch {
+            return CairnRun(status: -1, out: "", err: error.localizedDescription)
+        }
+        p.waitUntilExit()
+        return CairnRun(
+            status: p.terminationStatus,
+            out: String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            err: String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
 
     /// Run `cairn gen-bootstrap` against the same binary this app starts.

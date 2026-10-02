@@ -49,7 +49,7 @@ struct CairnAutoresearcherApp: App {
                     .keyboardShortcut("b", modifiers: [.command])
                     .disabled(model.isLive || model.isBuilding)
             }
-            // ⌘1…⌘6 walk the sidebar, as in Mail and Finder.
+            // ⌘1… walk the sidebar, as in Mail and Finder.
             CommandGroup(after: .sidebar) {
                 Divider()
                 ForEach(Array(Pane.allCases.enumerated()), id: \.element) { i, p in

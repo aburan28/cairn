@@ -46,6 +46,12 @@ struct TasksView: View {
             }
             Spacer()
             Button {
+                model.pane = .secrets
+            } label: {
+                Label("Secrets…", systemImage: "key.fill")
+            }
+            .help("Paste AWS keys for campaign DP upload")
+            Button {
                 model.pane = .catalog
             } label: {
                 Label("Catalog…", systemImage: "shippingbox")

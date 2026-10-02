@@ -165,6 +165,14 @@ plist="$APP/Contents/Info.plist"
 grep -aq '/usr/local/cairn/bin/cairn' "$APP/Contents/MacOS/Cairn" \
     || fail "Cairn.app does not look for the command where this installer puts it"
 
+# App postinstall opens Cairn.app for the console user after install.
+APP_POST="$APP_COMPONENT/Scripts/postinstall"
+[ -x "$APP_POST" ] || fail "no executable app postinstall; install would not launch Cairn.app"
+sh -n "$APP_POST" || fail "app postinstall does not parse"
+grep -q 'open' "$APP_POST" || fail "app postinstall does not open Cairn.app"
+grep -q 'launchctl asuser\|/usr/bin/su' "$APP_POST" \
+    || fail "app postinstall does not launch as the console user (would run as root)"
+
 # preinstall, against a scratch volume: an old Cairn.app goes, anything else
 # called Cairn.app stays and fails the install.
 FAKE_APPS="$WORK/app-volume"

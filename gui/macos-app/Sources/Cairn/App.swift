@@ -28,6 +28,7 @@ struct CairnApp: App {
                 Divider()
                 Button("Tasks…") { delegate.node.presentTasks = true }
                     .disabled(delegate.node.isAttached)
+                Button("Secrets…") { delegate.node.presentSecrets = true }
                 Button("Peers…") { delegate.node.presentPeers = true }
                 Button("Copy Peer Id") { delegate.copyPeerId() }
                     .disabled(delegate.node.peerId == nil)
@@ -130,6 +131,10 @@ struct ContentView: View {
                     Button { NSWorkspace.shared.open(url) } label: { Label("Open in Browser", systemImage: "safari") }
                         .help("Open this page in your browser")
                 }
+                Button { node.presentSecrets = true } label: {
+                    Label("Secrets", systemImage: "key.fill")
+                }
+                .help("Paste AWS keys and other named secrets for campaign scripts")
                 OpenSettingsButton(iconOnly: true)
                     .help("How much of this Mac the node may use, where it keeps its data, and how it reaches peers")
             }
@@ -139,6 +144,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $node.presentTasks) {
             TasksSheet(node: node, browser: browser, isPresented: $node.presentTasks)
+        }
+        .sheet(isPresented: $node.presentSecrets) {
+            SecretsSheet(node: node, isPresented: $node.presentSecrets)
         }
     }
 }
