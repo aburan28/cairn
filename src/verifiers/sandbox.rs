@@ -7,8 +7,11 @@
 //!
 //! # What this is and is not
 //!
-//! It is a *kernel-enforced* boundary: no network, and no writes outside a
-//! scratch directory that is deleted when the check finishes. It is not a VM
+//! It is a *kernel-enforced* boundary: no network, and nothing written to the
+//! host outside a scratch directory that is deleted when the check finishes.
+//! (Under bubblewrap a write to a path the jail does not show from the host
+//! lands on the jail's own tmpfs and goes with it; seatbelt refuses it. Neither
+//! reaches the host.) It is not a VM
 //! and not a container image. A kernel bug or a sandbox-policy bug is still an
 //! escape. See [`super::SANDBOXING`] for the enforced/not-enforced list that is
 //! kept honest against the threat model.
@@ -31,7 +34,7 @@
 //! attacker a way to fail honest submissions by breaking a host.
 
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -311,6 +314,7 @@ fn bubblewrap(
     command.args(["--dev", "/dev"]);
     command.args(["--tmpfs", "/tmp"]);
 
+    let mut view = View::default();
     // System directories, read only. `/bin` and friends are symlinks into
     // `/usr` on merged-usr distributions; binding a symlink source as a
     // directory fails, so recreate the link instead.
@@ -320,30 +324,39 @@ fn bubblewrap(
             Ok(meta) if meta.file_type().is_symlink() => {
                 if let Ok(target) = std::fs::read_link(path) {
                     command.arg("--symlink").arg(target).arg(top);
+                    view.shown.push(path.to_path_buf());
                 }
             }
             Ok(_) => {
                 command.arg("--ro-bind").arg(top).arg(top);
+                view.shown.push(path.to_path_buf());
             }
             Err(_) => {}
         }
     }
 
+    // What the child executes must be in the jail under the name it is
+    // executed by: the shell that sets the limits, and the program that shell
+    // hands over to. Callers list the program as readable anyway; the seatbelt
+    // profile allows both regardless of the plan, and so does this.
+    let (bin, argv) = with_limits(program, args, plan);
+    view.read(&mut command, "--ro-bind", Path::new(&bin));
+    view.read(&mut command, "--ro-bind", program);
     for path in &plan.readable {
-        if path.exists() {
-            command.arg("--ro-bind").arg(path).arg(path);
-        }
+        view.read(&mut command, "--ro-bind", path);
     }
     // After the read-only binds, so an entry in both lists ends up writable.
-    command.arg("--bind").arg(plan.workdir).arg(plan.workdir);
+    view.write(&mut command, plan.workdir);
     for path in &plan.writable {
-        if path.exists() {
-            command.arg("--bind").arg(path).arg(path);
-        }
+        view.write(&mut command, path);
     }
-    if plan.cwd.exists() {
-        command.arg("--ro-bind-try").arg(plan.cwd).arg(plan.cwd);
-    }
+    // The cwd only has to be readable, and a pinned run's cwd *is* its scratch
+    // directory. Bound read-only unconditionally, as it used to be, that mount
+    // landed on top of the writable one above and won: under bubblewrap, and
+    // nowhere else, every pinned checker found its `$TMPDIR` read-only. A
+    // read-only bind is now skipped wherever the jail already shows the path.
+    view.read(&mut command, "--ro-bind-try", plan.cwd);
+    view.recreate_links(&mut command);
     command.arg("--chdir").arg(plan.cwd);
 
     if scrub_env {
@@ -355,12 +368,174 @@ fn bubblewrap(
         command.arg("--setenv").arg("TMPDIR").arg(plan.workdir);
     }
 
-    let (bin, argv) = with_limits(program, args, plan);
     command.arg("--").arg(bin).args(argv);
     // bwrap itself must start in a directory that exists outside the jail.
     command.current_dir(plan.workdir);
     apply_env(&mut command, plan, scrub_env);
     command
+}
+
+/// The host paths a bubblewrap jail shows, and the symlinks that lead to them.
+///
+/// bwrap creates a bind's destination inside its own scratch root, before
+/// that root becomes `/`. A destination running through a symlink the jail
+/// already has -- `/usr/local/bin/python3 -> /usr/bin/python3.11`, inside the
+/// `/usr` bind -- is followed *there*, where an absolute target names nothing,
+/// so binding the interpreter at the name `which` found died with "Can't create
+/// file at /usr/local/bin/python3" before the checker started, and every
+/// verdict on the host was `Unavailable`. Where the bind did not fail, the name
+/// could still be dead inside the jail: Debian's `/usr/bin/python3 ->
+/// /etc/alternatives/python3` points out of everything the jail shows.
+///
+/// So each path is bound where its symlinks end, a destination that by
+/// construction runs through none, and the symlinks between the caller's name
+/// and that place are recreated inside the jail -- unless it already has them,
+/// as it does anything under `/usr`. The child still runs a program by the name
+/// it was given. Executing the resolved file instead would be simpler and wrong:
+/// argv\[0\] is how busybox and rustup-style proxies (elan's `lean` among them)
+/// choose what to be. bwrap's `--argv0` cannot help either: bwrap executes the
+/// limits shell, not the program, and the flag only exists from bwrap 0.9.
+#[derive(Default)]
+struct View {
+    /// What the jail shows from the host, with everything beneath it: the
+    /// system directories, then each bind as it is made.
+    shown: Vec<PathBuf>,
+    /// `(link, target)` for each symlink met on the way to a bind.
+    links: Vec<(PathBuf, PathBuf)>,
+}
+
+impl View {
+    fn shows(&self, path: &Path) -> bool {
+        self.shown.iter().any(|shown| path.starts_with(shown))
+    }
+
+    /// Bind `path` read-only, unless the jail already shows it. Either way it
+    /// is readable, and a read-only mount over something already mounted
+    /// writable takes the write away: the later mount wins.
+    fn read(&mut self, command: &mut Command, flag: &str, path: &Path) {
+        if let Some(at) = self.place(path) {
+            if !self.shows(&at) {
+                self.mount(command, flag, at);
+            }
+        }
+    }
+
+    /// Bind `path` writable, whatever already shows it.
+    fn write(&mut self, command: &mut Command, path: &Path) {
+        if let Some(at) = self.place(path) {
+            self.mount(command, "--bind", at);
+        }
+    }
+
+    /// Where `path` is bound, noting the symlinks that lead there. `None` when
+    /// it does not resolve, the same "nothing to bind" the `exists()` checks
+    /// here always gave.
+    fn place(&mut self, path: &Path) -> Option<PathBuf> {
+        let trace = trace(path)?;
+        if trace.links.iter().any(|(link, _)| mounted_by_jail(link)) {
+            // A symlink where bwrap mounts something of its own -- a host whose
+            // `/tmp` is a link -- cannot be recreated, so the only place this
+            // path can appear is where the caller named it, as every bind did
+            // before. Under `/tmp` that works: bwrap resolves the source
+            // itself, and the destination is in the jail's fresh tmpfs, which
+            // holds no host symlinks to follow.
+            return Some(path.to_path_buf());
+        }
+        for link in trace.links {
+            if !self.links.contains(&link) {
+                self.links.push(link);
+            }
+        }
+        Some(trace.canonical)
+    }
+
+    fn mount(&mut self, command: &mut Command, flag: &str, at: PathBuf) {
+        command.arg(flag).arg(&at).arg(&at);
+        self.shown.push(at);
+    }
+
+    /// Recreate the links the jail does not already have. Last, so that
+    /// everything the jail will show is known: a link inside a bound directory
+    /// is the host's own and already there.
+    fn recreate_links(&self, command: &mut Command) {
+        for (link, target) in &self.links {
+            if !self.shows(link) {
+                command.arg("--symlink").arg(target).arg(link);
+            }
+        }
+    }
+}
+
+/// Paths bubblewrap mounts for the jail itself, before any bind.
+fn mounted_by_jail(path: &Path) -> bool {
+    path == Path::new("/tmp") || path.starts_with("/proc") || path.starts_with("/dev")
+}
+
+/// How a path reaches its file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Trace {
+    /// The path with every symlink resolved; it runs through none.
+    canonical: PathBuf,
+    /// `(link, target)` for each symlink followed, in order. A link's parent is
+    /// always canonical, so `link` is exactly where the jail needs it.
+    links: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Resolve `path` a component at a time, as the kernel does, and record each
+/// symlink followed. [`std::fs::canonicalize`] gives the same end point and
+/// throws away the links the jail has to recreate.
+///
+/// `None` when the path does not resolve: a missing component, a file used as
+/// a directory, or a loop.
+fn trace(path: &Path) -> Option<Trace> {
+    // Linux's own limit (MAXSYMLINKS) before a lookup fails with ELOOP.
+    const MAX_LINKS: usize = 40;
+
+    let mut canonical = if path.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        std::env::current_dir().ok()?
+    };
+    let mut pending = Vec::new();
+    queue_components(&mut pending, path);
+    let mut links = Vec::new();
+    while let Some(name) = pending.pop() {
+        if name == ".." {
+            canonical.pop();
+            continue;
+        }
+        let next = canonical.join(&name);
+        let meta = std::fs::symlink_metadata(&next).ok()?;
+        if !meta.file_type().is_symlink() {
+            canonical = next;
+            continue;
+        }
+        if links.len() == MAX_LINKS {
+            return None;
+        }
+        let target = std::fs::read_link(&next).ok()?;
+        if target.is_absolute() {
+            canonical = PathBuf::from("/");
+        }
+        queue_components(&mut pending, &target);
+        links.push((next, target));
+    }
+    Some(Trace { canonical, links })
+}
+
+/// Push `path`'s components so that popping returns them first to last.
+///
+/// `..` stays a marker rather than being folded away lexically. It means the
+/// parent of what has been resolved so far, and after a symlink that is not the
+/// parent of what was written.
+fn queue_components(pending: &mut Vec<OsString>, path: &Path) {
+    for component in path.components().rev() {
+        match component {
+            Component::Normal(name) => pending.push(name.to_os_string()),
+            Component::ParentDir => pending.push(OsString::from("..")),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+        }
+    }
 }
 
 fn seatbelt(
@@ -703,6 +878,184 @@ mod tests {
         ] {
             assert!(!require_sandbox(off), "{off:?} must not require the jail");
         }
+    }
+
+    #[cfg(unix)]
+    fn link(target: impl AsRef<Path>, at: impl AsRef<Path>) {
+        std::os::unix::fs::symlink(target, at).expect("symlink");
+    }
+
+    /// A scratch directory and its canonical name, so that the links a test
+    /// makes are the only ones in play. macOS reaches its temporary directory
+    /// through `/var -> private/var`.
+    #[cfg(unix)]
+    fn scratch(prefix: &str) -> (super::super::TempDir, PathBuf) {
+        let dir = super::super::TempDir::new(prefix).expect("temp dir");
+        let base = std::fs::canonicalize(dir.path()).expect("canonical");
+        (dir, base)
+    }
+
+    /// `/usr/local/bin/python3 -> /usr/bin/python3.11`, and Debian's
+    /// `/usr/bin/python3 -> /etc/alternatives/python3`, built where a test can
+    /// build them: `shown/bin/<name>`, inside a directory the jail is to show,
+    /// is an absolute link to `alternatives/<name>`, outside everything it
+    /// shows, which is an absolute link to `file`. Returns `(shown, program)`.
+    #[cfg(unix)]
+    fn alternatives(base: &Path, name: &str, file: &Path) -> (PathBuf, PathBuf) {
+        let shown = base.join("shown");
+        std::fs::create_dir_all(shown.join("bin")).expect("shown/bin");
+        std::fs::create_dir_all(base.join("alternatives")).expect("alternatives");
+        link(file, base.join("alternatives").join(name));
+        link(
+            base.join("alternatives").join(name),
+            shown.join("bin").join(name),
+        );
+        let program = shown.join("bin").join(name);
+        (shown, program)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_trace_ends_where_canonicalize_does_and_keeps_every_link() {
+        let (_dir, base) = scratch("cairn-trace");
+        let real = base.join("real");
+        std::fs::create_dir_all(real.join("bin")).expect("real/bin");
+        std::fs::write(real.join("bin/tool"), b"").expect("tool");
+        link("real", base.join("rel"));
+        link("../bin/tool", real.join("bin/up"));
+        link(base.join("rel/bin/up"), base.join("entry"));
+        link("real/bin", base.join("deep"));
+        link("loop-b", base.join("loop-a"));
+        link("loop-a", base.join("loop-b"));
+
+        // Absolute into relative into relative-through-`..`, every hop kept,
+        // each at a canonical parent, which is where the jail recreates it.
+        let traced = trace(&base.join("entry")).expect("resolves");
+        assert_eq!(traced.canonical, real.join("bin/tool"));
+        assert_eq!(
+            traced.links,
+            vec![
+                (base.join("entry"), base.join("rel/bin/up")),
+                (base.join("rel"), PathBuf::from("real")),
+                (real.join("bin/up"), PathBuf::from("../bin/tool")),
+            ]
+        );
+        // `..` after a link is the parent of where the link went. Folded away
+        // lexically, `deep/../bin/tool` would be `base/bin/tool`, which does
+        // not exist.
+        let physical = trace(&base.join("deep/../bin/tool")).expect("resolves");
+        assert_eq!(physical.canonical, real.join("bin/tool"));
+        for path in ["entry", "deep/../bin/tool", "real/bin/tool"] {
+            let traced = trace(&base.join(path)).expect("resolves").canonical;
+            assert_eq!(
+                Some(traced),
+                std::fs::canonicalize(base.join(path)).ok(),
+                "{path}"
+            );
+        }
+        let plain = trace(&real.join("bin/tool")).expect("resolves");
+        assert!(plain.links.is_empty());
+        // What does not resolve is not bound, as `exists()` used to decide.
+        assert_eq!(trace(&base.join("loop-a")), None);
+        assert_eq!(trace(&base.join("missing/tool")), None);
+        assert_eq!(trace(&real.join("bin/tool/under-a-file")), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bubblewrap_mounts_where_links_end_and_runs_the_name_it_was_given() {
+        let (_dir, base) = scratch("cairn-bwrap-args");
+        let real = base.join("real");
+        std::fs::write(&real, b"").expect("file");
+        let (shown, program) = alternatives(&base, "tool", &real);
+        let work = base.join("work");
+        std::fs::create_dir(&work).expect("work");
+        // As a pinned run: the scratch directory is also the cwd, and limits
+        // put the shell in front of the program.
+        let plan = Confinement::new(&work, &work, 5)
+            .reading(&shown)
+            .reading(&program);
+        let command = bubblewrap(PathBuf::from("bwrap"), &program, &[], &plan, true);
+        let args: Vec<&OsStr> = command.get_args().collect();
+        let mounts: Vec<(&OsStr, &Path)> = args
+            .windows(3)
+            .filter(|op| op[0] == "--bind" || op[0] == "--ro-bind" || op[0] == "--ro-bind-try")
+            .map(|op| (op[0], Path::new(op[2])))
+            .collect();
+        let links: Vec<(&Path, &Path)> = args
+            .windows(3)
+            .filter(|op| op[0] == "--symlink")
+            .map(|op| (Path::new(op[2]), Path::new(op[1])))
+            .collect();
+
+        // bwrap cannot mount on a symlink, so no destination may contain one.
+        for (_, at) in &mounts {
+            assert_eq!(
+                std::fs::canonicalize(at).ok().as_deref(),
+                Some(*at),
+                "mounted on a symlink: {}",
+                at.display()
+            );
+        }
+        assert!(mounts.iter().any(|(_, at)| *at == real));
+        // The link outside the shown directory is recreated, so the name still
+        // leads somewhere; the one inside it is already there.
+        let outside = base.join("alternatives/tool");
+        assert!(
+            links.contains(&(outside.as_path(), real.as_path())),
+            "{links:?}"
+        );
+        assert!(
+            !links.iter().any(|(at, _)| at.starts_with(&shown)),
+            "{links:?}"
+        );
+        // The program runs under the name it was given, not the file it is.
+        assert_eq!(args.last(), Some(&program.as_os_str()));
+        // And the scratch directory's last mount is the writable one.
+        let scratch = mounts.iter().rev().find(|(_, at)| *at == work);
+        assert_eq!(scratch.map(|(flag, _)| *flag), Some(OsStr::new("--bind")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_interpreter_named_through_absolute_links_runs_in_the_jail() {
+        let Some(python) = which("python3") else {
+            return;
+        };
+        let (_dir, base) = scratch("cairn-bwrap-python");
+        let (shown, program) = alternatives(&base, "python3", &python);
+        let work = base.join("work");
+        std::fs::create_dir(&work).expect("work");
+        // Bound like this, the old jail mounted `shown` and then the program at
+        // its own name, through the link inside `shown`, and bwrap died with
+        // "Can't create file at …/shown/bin/python3" before Python started.
+        let plan = Confinement::new(&work, &work, 30)
+            .reading(&shown)
+            .reading(&program)
+            .scrubbed();
+        let code = argv(["-c", "import sys; print(sys.executable)"]);
+        // Err only when a jail is required and this host has none.
+        let Ok(jailed) = confine(&program, &code, &plan) else {
+            return;
+        };
+        let mechanism = jailed.mechanism;
+        let mut command = jailed.command;
+        let output = command
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("spawn");
+        assert!(
+            output.status.success(),
+            "{mechanism}: {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // `sys.executable` is argv[0]: what a venv, or a busybox-style binary,
+        // decides by.
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            program.to_string_lossy()
+        );
     }
 
     #[test]
