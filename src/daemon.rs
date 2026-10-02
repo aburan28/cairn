@@ -281,7 +281,10 @@ fn is_placeholder(value: &Value, endpoint: &Endpoint) -> bool {
         .is_some_and(|recorded| recorded == peer_id_string(&endpoint.peer.id()))
 }
 
-fn load_endpoint(path: &Path) -> Result<(Endpoint, bool), String> {
+fn load_endpoint(
+    path: &Path,
+    proxy: &crate::p2p::proxy::Proxy,
+) -> Result<(Endpoint, bool), String> {
     let value = Value::from_json(&fs::read_to_string(path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let addr = value
@@ -292,8 +295,16 @@ fn load_endpoint(path: &Path) -> Result<(Endpoint, bool), String> {
     // public DNS name keeps working across a restart that moves its IP, and a
     // name is safe to accept because the peer id decides -- see
     // `p2p::discovery::dialable`.
-    let addr = crate::p2p::discovery::dialable(addr).ok_or_else(|| {
-        format!("bootstrap.addr {addr:?} is neither an address nor a name that resolves")
+    let addr = crate::p2p::discovery::dialable_via(addr, proxy).ok_or_else(|| {
+        if matches!(proxy, crate::p2p::proxy::Proxy::Direct) {
+            format!("bootstrap.addr {addr:?} is neither an address nor a name that resolves")
+        } else {
+            format!(
+                "bootstrap.addr {addr:?} is a name, and dials go through a proxy: resolving it \
+                 here would tell this network's resolver whom this node is reaching. Use the \
+                 peer's IP address"
+            )
+        }
     })?;
     let public = hex_decode(
         value
@@ -638,8 +649,8 @@ pub fn run(config: Config) -> Result<(), String> {
     );
     let mut service = Service::with_proxy(Arc::clone(&identity), proxy);
     for path in &config.bootstrap {
-        let (endpoint, placeholder) =
-            load_endpoint(path).map_err(|e| format!("bootstrap {}: {e}", path.display()))?;
+        let (endpoint, placeholder) = load_endpoint(path, service.proxy())
+            .map_err(|e| format!("bootstrap {}: {e}", path.display()))?;
         if placeholder {
             // Loud, and at startup rather than at the first failed dial: a
             // placeholder key fails the handshake with a transport error
@@ -727,6 +738,18 @@ pub fn run(config: Config) -> Result<(), String> {
                 Some(multicast::PORT)
             }
         },
+        // Off by default behind a proxy. A beacon announces this node's peer id
+        // and port to the local segment every interval, and a node that routes
+        // through Tor or a bridge is hiding from whoever runs that segment.
+        // Setting the variable explicitly still turns them on.
+        Err(_) if !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) => {
+            log::info!(
+                "multicast: beacons off because dials go through a proxy; \
+                 {BEACON_PORT_ENV}={} turns them on",
+                multicast::PORT
+            );
+            None
+        }
         Err(_) => Some(multicast::PORT),
     };
     let beacon = beacon_port.and_then(|port| {
@@ -749,7 +772,10 @@ pub fn run(config: Config) -> Result<(), String> {
             }
         }
     });
-    if beacon.is_none() && beacon_port.is_none() {
+    if beacon.is_none()
+        && beacon_port.is_none()
+        && matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct)
+    {
         log::info!("multicast: off ({BEACON_PORT_ENV}); no LAN discovery for this node");
     }
 

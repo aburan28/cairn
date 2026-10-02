@@ -282,6 +282,12 @@ three separate ways to block it that need three separate answers:
   and the peer-id fingerprint, may drop or delay, and cannot read, forge, or
   redirect — a substituted endpoint fails the handshake exactly as hostile DNS
   does.
+  Two leaks that would otherwise sit beside the tunnel are closed when a proxy
+  is set: the node never resolves a hostname itself (a name hint is skipped,
+  and a bootstrap file naming a host is refused, because the lookup alone tells
+  the local resolver whom the node is reaching), and LAN beacons default to off
+  rather than announcing the node's id to the segment it is hiding from.
+  `cairn blob fetch` and `cairn commit --sealed` still dial directly.
 - Pluggable transports / Tor / mixnets are therefore reachable *today* for
   participants under active network censorship, by pointing `--proxy` at one,
   rather than being a future the library has no seam for.

@@ -86,6 +86,21 @@ pub fn dialable(addr: &str) -> Option<SocketAddr> {
     Some(answers.find(SocketAddr::is_ipv4).unwrap_or(first))
 }
 
+/// [`dialable`], refusing names when dials go through a proxy.
+///
+/// A proxy exists because this machine's own network is the one being
+/// watched, and resolving a name here asks that network's resolver -- the
+/// lookup itself says which peer this node is about to reach, before the
+/// proxy is involved at all. `socks5h://` users rely on exactly that never
+/// happening. Literal addresses are unaffected; a name is skipped, which
+/// costs one hint and leaks nothing.
+pub fn dialable_via(addr: &str, proxy: &super::proxy::Proxy) -> Option<SocketAddr> {
+    if matches!(proxy, super::proxy::Proxy::Direct) {
+        return dialable(addr);
+    }
+    addr.parse::<SocketAddr>().ok()
+}
+
 /// Errors while decoding peer ids or registering an endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiscoveryError {
@@ -425,5 +440,17 @@ mod tests {
         assert_eq!(book.for_peer(&id).len(), MAX_ENDPOINTS_PER_PEER);
         // No key, no endpoint: an address alone is not dialable.
         assert!(!book.promote(&[7u8; 32], old));
+    }
+
+    #[test]
+    fn a_proxied_node_never_asks_its_own_resolver() {
+        let direct = crate::p2p::proxy::Proxy::Direct;
+        let tor = crate::p2p::proxy::Proxy::parse("socks5h://127.0.0.1:9050").expect("proxy");
+        assert!(super::dialable_via("localhost:9000", &direct).is_some());
+        assert_eq!(super::dialable_via("localhost:9000", &tor), None);
+        assert_eq!(
+            super::dialable_via("10.0.0.1:9000", &tor),
+            Some("10.0.0.1:9000".parse().expect("literal"))
+        );
     }
 }

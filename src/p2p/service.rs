@@ -446,7 +446,7 @@ impl Service {
             // take from a stranger for the reason `discovery::dialable` gives:
             // the peer id is the hash of the key, so a hostile answer costs a
             // failed handshake and never a wrong peer.
-            let Some(addr) = crate::p2p::discovery::dialable(&record.addr) else {
+            let Some(addr) = crate::p2p::discovery::dialable_via(&record.addr, &self.proxy) else {
                 continue;
             };
             // The record's own signed sequence, not zero. `Node::peers` has
@@ -516,7 +516,7 @@ impl Service {
             if transport == self.identity.id() {
                 continue;
             }
-            let Some(addr) = crate::p2p::discovery::dialable(&record.addr) else {
+            let Some(addr) = crate::p2p::discovery::dialable_via(&record.addr, &self.proxy) else {
                 continue;
             };
             self.note_contact_at(transport, addr, record.seq);
@@ -723,7 +723,7 @@ impl Service {
         if !self.may_ask_for_key(&seed.transport, now) {
             return SeedOutcome::Waiting;
         }
-        let Some(addr) = super::discovery::dialable(&seed.addr) else {
+        let Some(addr) = super::discovery::dialable_via(&seed.addr, &self.proxy) else {
             return SeedOutcome::Unresolvable;
         };
         // Zero, not a sequence: a list entry makes no freshness claim, so a

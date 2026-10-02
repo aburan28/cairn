@@ -99,11 +99,13 @@ least `t` but still fail to open is evidence against the dealer. Run
 
 ### 6. Censorship: proxy leaks and fingerprints
 
-- With `--proxy socks5h://`, hostnames are still resolved locally
-  (`discovery::dialable`), LAN beacons stay on and announce the node's id to the
-  segment the censor most likely controls, and `cairn blob fetch` has no proxy
-  at all. Refuse hostnames and default beacons off when proxied; give `blob
-  fetch` `--proxy`.
+- **Partly fixed in a follow-up:** a proxied node no longer resolves hostnames
+  itself (`discovery::dialable_via` skips names in gossip, log and seed hints,
+  and a bootstrap file naming a host is refused with an explanation), and LAN
+  beacons default to off behind a proxy. Still open: `cairn blob fetch` and
+  `cairn commit --sealed` have no `--proxy`, and `Proxy::dial` takes only a
+  socket address, so a proxied node cannot use names at all rather than
+  handing them to the proxy as `socks5h` would.
 - **Active probing**: a listener answers 261,216 random bytes with a well-formed
   reply, so any public listener is confirmable with no prior knowledge. Needs a
   pre-shared token (from the peer record or out of band) before the listener
