@@ -7,6 +7,13 @@ import Darwin
 import Glibc
 #endif
 
+/// The C `bind`. Inside an XCTestCase, which on macOS is an NSObject, a bare
+/// `bind(…)` resolves to Cocoa's `bind(_:to:withKeyPath:options:)` instead;
+/// at file scope there is no such method to find first.
+private func bindSocket(_ fd: Int32, _ address: UnsafePointer<sockaddr>, _ length: socklen_t) -> Int32 {
+    bind(fd, address, length)
+}
+
 /// The port test against real sockets on loopback, and the node's log read
 /// in the exact shapes `src/daemon.rs` writes.
 final class ConnectivityTests: XCTestCase {
@@ -25,7 +32,7 @@ final class ConnectivityTests: XCTestCase {
         var len = socklen_t(MemoryLayout<sockaddr_in>.size)
         let bound = withUnsafeMutablePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, len) == 0 && getsockname(fd, $0, &len) == 0
+                bindSocket(fd, $0, len) == 0 && getsockname(fd, $0, &len) == 0
             }
         }
         XCTAssertTrue(bound)
