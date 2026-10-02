@@ -101,7 +101,9 @@ cmd_appcast() {
         esac
     done
     [ -f "$dmg" ] || die "appcast: --dmg names no file: $dmg"
-    [ -n "$version" ] && [ -n "$repo" ] && [ -n "$out" ] || die "appcast: --version, --repo and --out are required"
+    if [ -z "$version" ] || [ -z "$repo" ] || [ -z "$out" ]; then
+        die "appcast: --version, --repo and --out are required"
+    fi
 
     # shellcheck source=packaging/version.sh
     . "$(cd "$(dirname "$0")/.." && pwd)/version.sh"
@@ -163,7 +165,9 @@ cmd_verify() {
             *) die "verify: unknown argument $1" ;;
         esac
     done
-    [ -f "$appcast" ] && [ -f "$dmg" ] && [ -n "$pub" ] || die "verify: --appcast, --dmg and --public-key are required"
+    if [ ! -f "$appcast" ] || [ ! -f "$dmg" ] || [ -z "$pub" ]; then
+        die "verify: --appcast, --dmg and --public-key are required"
+    fi
     local sig length
     sig="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' "$appcast")"
     length="$(sed -n 's/.*length="\([0-9]*\)".*/\1/p' "$appcast")"
