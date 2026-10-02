@@ -28,8 +28,50 @@ export const ROUTES = [
   { href: "/docs", label: "Docs", hint: "The design notes" },
 ] as const;
 
-/** The links in the top bar. The rest live in the palette. */
-const PRIMARY = ["/objectives", "/chain", "/log", "/peers", "/how-it-works", "/docs"];
+/**
+ * The sidebar, in three groups: what this node holds, what you can do to it,
+ * and the explanation. `match` lists the routes that belong under an entry
+ * without being it -- one objective, and its move history, are both
+ * "Objectives".
+ */
+const NAV: {
+  group: string;
+  siteOnly?: boolean;
+  items: { href: string; label: string; icon: React.ReactNode; match?: string[] }[];
+}[] = [
+  {
+    group: "Node",
+    items: [
+      { href: "/", label: "Overview", icon: <IconHome /> },
+      {
+        href: "/objectives",
+        label: "Objectives",
+        icon: <IconTarget />,
+        match: ["/challenge", "/frontier"],
+      },
+      { href: "/chain", label: "Chain", icon: <IconChain /> },
+      { href: "/log", label: "Log", icon: <IconList /> },
+      { href: "/peers", label: "Peers", icon: <IconPeers /> },
+    ],
+  },
+  {
+    group: "Fund",
+    items: [{ href: "/submit", label: "Post a challenge", icon: <IconPlus /> }],
+  },
+  {
+    group: "Learn",
+    items: [
+      { href: "/how-it-works", label: "How it works", icon: <IconBook /> },
+      { href: "/docs", label: "Docs", icon: <IconDoc /> },
+    ],
+  },
+];
+
+function isActive(pathname: string, href: string, match: string[] = []): boolean {
+  const path = pathname.replace(/\/$/, "") || "/";
+  if (href === "/") return path === "/";
+  return [href, ...match].some((root) => path === root || path.startsWith(`${root}/`));
+}
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -58,85 +100,112 @@ export function Shell({ children }: { children: React.ReactNode }) {
         Skip to content
       </a>
 
-      <header className="shell-header sticky top-0 z-30 border-b border-edge bg-canvas/85 backdrop-blur-md">
-        <div className="shell-gutter mx-auto flex h-14 max-w-[78rem] items-center gap-3">
+      <div className="lg:flex">
+        {/* Wide screens: one sidebar, the whole height of the window. */}
+        <aside
+          className="sticky top-0 hidden h-dvh w-56 shrink-0 flex-col border-r border-edge
+                     bg-surface/60 lg:flex"
+        >
           <Link
             href="/"
-            className="flex shrink-0 items-center gap-2 text-[14px] font-semibold tracking-tight"
+            className="flex h-14 shrink-0 items-center gap-2 px-5 text-[14px] font-semibold tracking-tight"
           >
             <Mark />
             cairn
           </Link>
-
-          <nav aria-label="Primary" className="ml-2 hidden items-center gap-0.5 lg:flex">
-            {ROUTES.filter((route) => PRIMARY.includes(route.href)).map((route) => {
-              const active =
-                pathname === route.href || pathname === `${route.href}/`;
-              return (
-                <Link
-                  key={route.href}
-                  href={route.href}
-                  aria-current={active ? "page" : undefined}
-                  className={`rounded-md px-2.5 py-1.5 text-[13px] transition-colors ${
-                    active
-                      ? "bg-surface-2 font-medium text-ink"
-                      : "text-ink-2 hover:bg-surface-2 hover:text-ink"
-                  }`}
-                >
-                  {route.label}
-                </Link>
-              );
-            })}
+          <nav aria-label="Primary" className="flex-1 overflow-y-auto px-3 pb-4">
+            {NAV.map((section) => (
+              <div key={section.group}>
+                <div className="sidebar-group">{section.group}</div>
+                {section.items.map((item) => (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    aria-current={isActive(pathname, item.href, item.match) ? "page" : undefined}
+                    className="sidebar-link"
+                  >
+                    <span className="text-ink-3">{item.icon}</span>
+                    {item.label}
+                  </Link>
+                ))}
+              </div>
+            ))}
           </nav>
-
-          <div className="ml-auto flex items-center gap-2">
-            <NodeStatus />
+          <div className="flex flex-col gap-2 border-t border-edge px-3 py-3">
             <button
               type="button"
               onClick={() => setPaletteOpen(true)}
-              className="btn btn-sm hidden text-ink-2 sm:inline-flex"
+              className="sidebar-link w-full cursor-pointer"
               aria-label="Open the command palette"
             >
-              <SearchIcon />
-              <span className="hidden md:inline">Search</span>
-              <span className="kbd ml-1 hidden md:inline">⌘K</span>
+              <span className="text-ink-3">
+                <SearchIcon />
+              </span>
+              Jump to…
+              <span className="kbd ml-auto">⌘K</span>
             </button>
-            <ThemeToggle />
-            <Link href="/submit" className="btn btn-sm btn-primary">
-              Post a challenge
-            </Link>
+            <div className="flex items-center justify-between gap-2 px-1">
+              <NodeStatus />
+              <ThemeToggle />
+            </div>
           </div>
-        </div>
+        </aside>
 
-        {/* The same links, wrapped, for narrow screens. A drawer would hide
-            six items behind a tap for no gain at this count. */}
-        <nav
-          aria-label="Primary, compact"
-          className="shell-gutter flex gap-1 overflow-x-auto border-t border-edge py-1.5 lg:hidden"
-        >
-          {ROUTES.map((route) => {
-            const active = pathname === route.href || pathname === `${route.href}/`;
-            return (
+        <div className="flex min-h-dvh min-w-0 flex-1 flex-col">
+          {/* Narrow screens: the old top bar, links wrapped under it. */}
+          <header className="shell-header sticky top-0 z-30 border-b border-edge bg-canvas/85 backdrop-blur-md lg:hidden">
+            <div className="shell-gutter flex h-12 items-center gap-3">
               <Link
-                key={route.href}
-                href={route.href}
-                aria-current={active ? "page" : undefined}
-                className={`rounded-md px-2 py-1 text-[12.5px] whitespace-nowrap ${
-                  active ? "bg-surface-2 font-medium text-ink" : "text-ink-2"
-                }`}
+                href="/"
+                className="flex shrink-0 items-center gap-2 text-[14px] font-semibold tracking-tight"
               >
-                {route.label}
+                <Mark />
+                cairn
               </Link>
-            );
-          })}
-        </nav>
-      </header>
+              <div className="ml-auto flex items-center gap-2">
+                <NodeStatus />
+                <button
+                  type="button"
+                  onClick={() => setPaletteOpen(true)}
+                  className="btn btn-sm btn-ghost"
+                  aria-label="Open the command palette"
+                >
+                  <SearchIcon />
+                </button>
+                <ThemeToggle />
+              </div>
+            </div>
+            <nav
+              aria-label="Primary, compact"
+              className="shell-gutter flex gap-1 overflow-x-auto border-t border-edge py-1.5"
+            >
+              {NAV.flatMap((section) => section.items).map((item) => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  aria-current={isActive(pathname, item.href, item.match) ? "page" : undefined}
+                  className={`rounded-md px-2 py-1 text-[12.5px] whitespace-nowrap ${
+                    isActive(pathname, item.href, item.match)
+                      ? "bg-surface-2 font-medium text-ink"
+                      : "text-ink-2"
+                  }`}
+                >
+                  {item.label}
+                </Link>
+              ))}
+            </nav>
+          </header>
 
-      <main id="content" className="shell-gutter mx-auto max-w-[78rem] py-8 sm:py-10">
-        {children}
-      </main>
+          <main
+            id="content"
+            className="shell-gutter w-full max-w-[90rem] flex-1 py-6 lg:px-8 lg:py-7"
+          >
+            {children}
+          </main>
 
-      <Footer />
+          <Footer />
+        </div>
+      </div>
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
     </>
   );
@@ -183,8 +252,8 @@ function NodeStatus() {
 
   return (
     <span
-      className="hidden items-center gap-1.5 rounded-md border border-edge bg-surface px-2 py-1
-                 text-[11.5px] text-ink-2 sm:inline-flex"
+      className="inline-flex items-center gap-1.5 rounded-md border border-edge bg-surface px-2 py-1
+                 text-[11.5px] text-ink-2"
       title={
         state === "live"
           ? `A node answered at ${target}.`
@@ -355,38 +424,29 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
 
 function Footer() {
   return (
-    <footer className="shell-footer mt-16 border-t border-edge bg-surface">
-      <div className="shell-gutter mx-auto max-w-[78rem] py-8">
-        <div className="flex flex-wrap gap-x-5 gap-y-2 text-[13px]">
-          <a className="text-accent hover:underline" href={REPO}>
-            source
-          </a>
-          <a className="text-accent hover:underline" href={`${REPO}/releases/latest`}>
-            releases
-          </a>
-          <a className="text-accent hover:underline" href={repoLink("gui/ios/")}>
-            iOS
-          </a>
-          <Link className="text-accent hover:underline" href="/docs">
-            docs
-          </Link>
-          <a className="text-accent hover:underline" href={repoLink("docs/threat-model.md")}>
-            threat model
-          </a>
-          <a className="text-accent hover:underline" href={repoLink("LICENSE")}>
-            Apache-2.0
-          </a>
-        </div>
-        <p className="mt-4 max-w-[70ch] text-[12.5px] leading-relaxed text-ink-3">
-          Stage 0 — one operator, no token, no consensus. What it does provide is the
-          property that matters: anyone can independently re-derive every result the
-          network has settled, from nothing but a copy of the log.
-        </p>
-        <p className="mt-2 max-w-[70ch] text-[12.5px] leading-relaxed text-ink-3">
-          This page loads no font, script, or image from anywhere but where it was
-          served. The only host it talks to is the node you point it at — which you
-          can confirm by watching the network tab stay empty.
-        </p>
+    <footer className="shell-footer site-only border-t border-edge">
+      <div className="shell-gutter flex max-w-[90rem] flex-wrap items-center gap-x-5 gap-y-2 py-5 text-[12.5px] lg:px-8">
+        <a className="text-ink-2 hover:text-accent" href={REPO}>
+          source
+        </a>
+        <a className="text-ink-2 hover:text-accent" href={`${REPO}/releases/latest`}>
+          releases
+        </a>
+        <a className="text-ink-2 hover:text-accent" href={repoLink("gui/ios/")}>
+          iOS
+        </a>
+        <a className="text-ink-2 hover:text-accent" href={repoLink("docs/threat-model.md")}>
+          threat model
+        </a>
+        <a className="text-ink-2 hover:text-accent" href={repoLink("LICENSE")}>
+          Apache-2.0
+        </a>
+        <span
+          className="text-ink-3 sm:ml-auto"
+          title="This page loads no font, script, or image from anywhere but where it was served. The only host it talks to is the node you point it at."
+        >
+          Stage 0: anyone can re-derive every settled result from a copy of the log.
+        </span>
       </div>
     </footer>
   );
@@ -445,5 +505,92 @@ function AutoIcon() {
       <circle cx="8" cy="8" r="5.5" stroke="currentColor" />
       <path d="M8 2.5v11A5.5 5.5 0 0 0 8 2.5Z" fill="currentColor" />
     </svg>
+  );
+}
+
+// Sidebar icons: 16px, one stroke, the same weight as the ones above.
+
+function Icon({ children }: { children: React.ReactNode }) {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {children}
+    </svg>
+  );
+}
+
+function IconHome() {
+  return (
+    <Icon>
+      <path d="M2.5 7 8 2.5 13.5 7v6a.5.5 0 0 1-.5.5h-3v-4h-4v4H3a.5.5 0 0 1-.5-.5Z" />
+    </Icon>
+  );
+}
+
+function IconTarget() {
+  return (
+    <Icon>
+      <circle cx="8" cy="8" r="5.5" />
+      <circle cx="8" cy="8" r="2.5" />
+    </Icon>
+  );
+}
+
+function IconChain() {
+  return (
+    <Icon>
+      <path d="M6.5 9.5 9.5 6.5M7 4.5l1-1a2.5 2.5 0 0 1 3.5 3.5l-1 1M9 11.5l-1 1A2.5 2.5 0 0 1 4.5 9l1-1" />
+    </Icon>
+  );
+}
+
+function IconList() {
+  return (
+    <Icon>
+      <path d="M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.01M2.5 8h.01M2.5 12h.01" />
+    </Icon>
+  );
+}
+
+function IconPeers() {
+  return (
+    <Icon>
+      <circle cx="6" cy="5.5" r="2" />
+      <path d="M2.5 13a3.5 3.5 0 0 1 7 0M10.5 3.8a2 2 0 0 1 0 3.4M11.5 9.6A3.5 3.5 0 0 1 13.5 13" />
+    </Icon>
+  );
+}
+
+function IconPlus() {
+  return (
+    <Icon>
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M8 5.5v5M5.5 8h5" />
+    </Icon>
+  );
+}
+
+function IconBook() {
+  return (
+    <Icon>
+      <path d="M2.5 3.5h4A1.5 1.5 0 0 1 8 5v8a1 1 0 0 0-1-1H2.5ZM13.5 3.5h-4A1.5 1.5 0 0 0 8 5v8a1 1 0 0 1 1-1h4.5Z" />
+    </Icon>
+  );
+}
+
+function IconDoc() {
+  return (
+    <Icon>
+      <path d="M4 1.5h5l3 3v10H4ZM9 1.5v3h3M6 8h4M6 10.5h4" />
+    </Icon>
   );
 }

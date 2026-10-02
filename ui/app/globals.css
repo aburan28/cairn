@@ -62,6 +62,8 @@
   --color-bad-soft: var(--bad-soft);
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
+  --color-violet: var(--violet);
+  --color-violet-soft: var(--violet-soft);
 
   --radius-card: 0.75rem;
 
@@ -92,6 +94,8 @@
   --bad-soft: #b3261e0f;
   --info: #1c5fb8;
   --info-soft: #1c5fb80f;
+  --violet: #7c3aed;
+  --violet-soft: #7c3aed0f;
 
   --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
@@ -124,6 +128,8 @@
     --bad-soft: #f2827a14;
     --info: #6aa8f5;
     --info-soft: #6aa8f514;
+    --violet: #c084fc;
+    --violet-soft: #c084fc14;
   }
 }
 
@@ -152,6 +158,8 @@
   --bad-soft: #f2827a14;
   --info: #6aa8f5;
   --info-soft: #6aa8f514;
+  --violet: #c084fc;
+  --violet-soft: #c084fc14;
 }
 
 @layer base {
@@ -391,11 +399,15 @@
            transition-colors hover:decoration-current;
   }
 
-  /* A shell for code and canonical payloads: scrolls inside itself so a long
-     line never makes the page scroll sideways. */
+  /* A shell for code and canonical payloads. It wraps rather than scrolls:
+     a command whose objective id ran off the right edge behind a scrollbar
+     was a command nobody could read without dragging, and the copy button is
+     what gets the exact bytes anyway. `anywhere` for the same reason `.mono`
+     uses it -- a 71-character id is one unbreakable token otherwise. */
   .code {
     @apply overflow-x-auto rounded-lg border border-edge bg-surface-2 p-3
-           font-mono text-[12px] leading-relaxed text-ink;
+           font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-ink
+           [overflow-wrap:anywhere];
   }
 
   .skeleton {
@@ -404,6 +416,121 @@
 
   .divide-edge-y > * + * {
     @apply border-t border-edge;
+  }
+}
+
+@layer components {
+  /* -- app chrome --------------------------------------------------------
+
+     The sidebar is the one navigation on a wide screen. It used to be a top
+     bar, and inside Cairn.app that made two stacked bars -- the window's
+     toolbar and this -- with the page squeezed into a centred column under
+     both. A sidebar is what a Mac app reading a node looks like, and it is
+     what the autoresearcher already does. */
+  .sidebar-link {
+    @apply flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] text-ink-2
+           transition-colors hover:bg-surface-2 hover:text-ink;
+  }
+
+  .sidebar-link[aria-current="page"] {
+    @apply bg-accent-soft font-medium text-ink;
+  }
+
+  .sidebar-link[aria-current="page"] svg {
+    @apply text-accent;
+  }
+
+  .sidebar-group {
+    @apply px-2.5 pt-4 pb-1 text-[10.5px] font-semibold tracking-[0.08em] text-ink-3 uppercase;
+  }
+
+  /* A titled box of dense facts: the autoresearcher's "Accepted claims" and
+     "State" panels, which is the shape that read better than prose. */
+  .box {
+    @apply min-w-0 rounded-[var(--radius-card)] border border-edge bg-surface;
+  }
+
+  .box-head {
+    @apply flex items-center gap-2 border-b border-edge px-4 py-2.5 text-[12.5px]
+           font-semibold text-ink;
+  }
+
+  .box-body {
+    @apply px-4 py-3;
+  }
+
+  /* Label/value rows, labels right-aligned against their values. */
+  .kv {
+    @apply grid grid-cols-[minmax(5.5rem,auto)_minmax(0,1fr)] items-baseline gap-x-4 gap-y-2
+           text-[12.5px];
+  }
+
+  .kv > dt {
+    @apply text-right text-ink-3;
+  }
+
+  .kv > dd {
+    @apply m-0 min-w-0 text-ink;
+  }
+
+  /* A stat tile, tinted by what it counts. */
+  .tile {
+    @apply min-w-0 rounded-[var(--radius-card)] border px-4 py-3;
+  }
+
+  .tile-neutral { @apply border-edge bg-surface; }
+  .tile-accent { @apply border-accent-line bg-accent-soft; }
+  .tile-warn { @apply border-warn/25 bg-warn-soft; }
+  .tile-info { @apply border-info/25 bg-info-soft; }
+  .tile-violet { @apply border-violet/25 bg-violet-soft; }
+  .tile-bad { @apply border-bad/25 bg-bad-soft; }
+
+  .tile-accent .tile-value { @apply text-accent; }
+  .tile-warn .tile-value { @apply text-warn; }
+  .tile-info .tile-value { @apply text-info; }
+  .tile-violet .tile-value { @apply text-violet; }
+  .tile-bad .tile-value { @apply text-bad; }
+
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11.5px]
+           font-medium whitespace-nowrap;
+  }
+
+  .pill::before {
+    content: "";
+    @apply h-1.5 w-1.5 rounded-full bg-current;
+  }
+
+  .pill-open { @apply border-accent-line bg-accent-soft text-accent; }
+  .pill-settled { @apply border-edge bg-surface-2 text-ink-2; }
+
+  .tabs {
+    @apply flex gap-1 border-b border-edge px-2;
+  }
+
+  .tab {
+    @apply -mb-px cursor-pointer border-b-2 border-transparent px-2.5 py-2 text-[12.5px]
+           text-ink-2 hover:text-ink;
+  }
+
+  .tab[aria-selected="true"] {
+    @apply border-accent font-medium text-ink;
+  }
+
+  /* Inside Cairn.app the page is a window, not a website: the footer's
+     licence links and the landing page's pitch are for a visitor, and the
+     person here already installed it. `layout.tsx` sets `.in-app` before
+     first paint from the web view's user agent. */
+  .in-app .site-only {
+    display: none !important;
+  }
+
+  .app-only {
+    display: none;
+  }
+
+  .in-app .app-only {
+    display: block;
   }
 }
 

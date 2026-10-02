@@ -11,7 +11,7 @@ import {
 import { resolveNode } from "@/lib/site";
 import { type Chain, fetchChain } from "@/lib/chain";
 import { type CheckpointAnswer, readCheckpoint } from "@/lib/checkpoint";
-import { Badge, Card, EmptyState, Hash, Note, SectionHeading, Stat } from "@/components/ui";
+import { Box, EmptyState, Hash, NodePicker, Note, PageHeader, Stat } from "@/components/ui";
 
 /**
  * The address book this node has been handed.
@@ -81,22 +81,24 @@ export default function Page() {
 
   return (
     <>
-      <header className="mb-6 max-w-[62rem]">
-        <h1 className="text-[26px] font-semibold">Peers</h1>
-        <p className="prose-block mt-2">
-          Where identities have <em>announced</em> that they answer. Obtaining the log
-          is obtaining the address book, which is why discovery needs no second file —
-          but an announcement is not a connection, and nothing retracts one. Read this
-          as &ldquo;who this node could try&rdquo;, never as &ldquo;who this node is
-          talking to&rdquo;.
-        </p>
-      </header>
+      <PageHeader
+        title="Peers"
+        subtitle="Who has announced that they answer. An announcement is not a connection: read this as who this node could try, not who it is talking to."
+        actions={
+          <NodePicker
+            value={base}
+            onChange={setBase}
+            onRead={() => void load(base)}
+            loading={loading}
+          />
+        }
+      />
 
       {(chain || checkpoint?.kind === "signed") && (
         <div className="mb-4 grid grid-cols-2 gap-3 sm:max-w-md">
-          {chain && <Stat label="chain links" value={String(chain.links)} />}
+          {chain && <Stat label="Chain links" value={String(chain.links)} />}
           {checkpoint?.kind === "signed" && (
-            <Stat label="checkpoint" value={`height ${checkpoint.value.checkpoint.height}`} />
+            <Stat label="Checkpoint" value={`height ${checkpoint.value.checkpoint.height}`} />
           )}
         </div>
       )}
@@ -118,26 +120,6 @@ export default function Page() {
         </p>
       )}
 
-      <Card className="card-pad mb-4">
-        <label className="label" htmlFor="node">
-          Node
-        </label>
-        <div className="flex flex-wrap gap-2">
-          <input
-            id="node"
-            className="field field-mono flex-1"
-            value={base}
-            onChange={(event) => setBase(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void load(base);
-            }}
-            spellCheck={false}
-          />
-          <button className="btn" onClick={() => void load(base)} disabled={loading}>
-            {loading ? "reading…" : "Read"}
-          </button>
-        </div>
-      </Card>
 
       <div className="flex flex-col gap-4">
         {checkpoint?.kind === "unreadable" && (
@@ -174,49 +156,51 @@ export default function Page() {
         )}
 
         {peers && peers.length > 0 && (
-          <section>
-            <SectionHeading count={peers.length}>Announced</SectionHeading>
-            <ul className="grid gap-3 md:grid-cols-2">
-              {peers.map((peer) => (
-                <Card as="li" key={peer.identity} className="card-pad flex flex-col gap-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="mono text-[13px] font-semibold">{peer.addr}</span>
-                    <Badge>seq {peer.seq}</Badge>
-                  </div>
-                  <dl className="grid gap-2 text-[12.5px] sm:grid-cols-2">
-                    <div>
-                      <dt className="text-[11px] text-ink-3">identity (ed25519)</dt>
-                      <dd className="mt-0.5">
+          <Box
+            title={
+              <>
+                Announced <span className="mono ml-1 font-normal text-ink-3">{peers.length}</span>
+              </>
+            }
+            flush
+          >
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[40rem] border-collapse text-left text-[12.5px]">
+                <thead>
+                  <tr className="border-b border-edge text-[11.5px] text-ink-3">
+                    <th className="px-4 py-2 font-medium">Address</th>
+                    <th className="px-3 py-2 font-medium">Identity (ed25519)</th>
+                    <th className="px-3 py-2 font-medium">Transport id</th>
+                    <th className="px-3 py-2 font-medium">Seq</th>
+                    <th className="px-4 py-2 font-medium">Announced</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-edge-y">
+                  {peers.map((peer) => (
+                    <tr key={peer.identity}>
+                      <td className="mono px-4 py-2.5 font-semibold text-ink">{peer.addr}</td>
+                      <td className="px-3 py-2.5">
                         <Hash value={peer.identity} chars={8} />
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-[11px] text-ink-3">transport id</dt>
-                      <dd className="mt-0.5">
+                      </td>
+                      <td className="px-3 py-2.5">
                         <Hash value={peer.transport} chars={8} />
-                      </dd>
-                    </div>
-                    <div className="sm:col-span-2">
-                      <dt className="text-[11px] text-ink-3">announced</dt>
-                      {/* Both, deliberately: the age is what a reader wants and
-                          the raw value is what the peer actually said.
-                          Timestamps here are self-reported and advisory
-                          (`src/time.rs`), so showing only a friendly age would
-                          present a peer's own claim as though this node had
-                          observed it. */}
-                      <dd className="mt-0.5" title={peer.created_at}>
+                      </td>
+                      <td className="mono px-3 py-2.5 text-ink-2">{peer.seq}</td>
+                      {/* The age is what a reader wants; the raw value, on
+                          hover, is what the peer actually said. Timestamps here
+                          are self-reported and advisory (`src/time.rs`). */}
+                      <td className="px-4 py-2.5 text-ink-2" title={`self-reported: ${peer.created_at}`}>
                         {age(peer.created_at) ?? peer.created_at}
-                        <span className="mono ml-1.5 text-ink-3">{peer.created_at}</span>
-                      </dd>
-                    </div>
-                  </dl>
-                </Card>
-              ))}
-            </ul>
-          </section>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Box>
         )}
 
-        {note && <p className="prose-block mt-2">{note}</p>}
+        {note && <p className="text-[12px] leading-relaxed text-ink-3">{note}</p>}
       </div>
     </>
   );

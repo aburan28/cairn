@@ -16,7 +16,7 @@ import {
   coversHead,
   readCheckpoint,
 } from "@/lib/checkpoint";
-import { Badge, Card, EmptyState, Hash, Note, SectionHeading } from "@/components/ui";
+import { Box, CopyButton, EmptyState, Hash, NodePicker, Note, PageHeader, Stat } from "@/components/ui";
 
 /**
  * The knowledge chain of one node.
@@ -88,36 +88,19 @@ export default function Page() {
 
   return (
     <>
-      <header className="mb-6 max-w-[62rem]">
-        <h1 className="text-[26px] font-semibold">Knowledge chain</h1>
-        <p className="prose-block mt-2">
-          Each link is <code className="mono">H({"{prev, epoch, sorted claim ids}"})</code> —
-          content only, so two nodes that settled the same claims in the same epochs
-          compute the same head. The head is the anchor every later batch is ordered
-          against. Nothing here is stored: the node derives it from its log.
-        </p>
-      </header>
-
-      <Card className="card-pad mb-4">
-        <label className="label" htmlFor="node">
-          Node
-        </label>
-        <div className="flex flex-wrap gap-2">
-          <input
-            id="node"
-            className="field field-mono flex-1"
+      <PageHeader
+        title="Knowledge chain"
+        subtitle="Each link hashes the one before it and the claims settled in its epoch. Two nodes that settled the same claims compute the same head; where they differ is where they forked."
+        actions={
+          <NodePicker
             value={base}
-            onChange={(event) => setBase(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void load(base);
-            }}
-            spellCheck={false}
+            onChange={setBase}
+            onRead={() => void load(base)}
+            loading={loading}
           />
-          <button className="btn" onClick={() => void load(base)} disabled={loading}>
-            {loading ? "reading…" : "Read"}
-          </button>
-        </div>
-      </Card>
+        }
+      />
+
 
       <div className="flex flex-col gap-4">
         {error && (
@@ -137,72 +120,25 @@ export default function Page() {
 
         {chain && (
           <>
-            <Card className="card-pad">
-              <div className="note-title">
-                head — compare with a peer&rsquo;s; if they differ, you have forked
-              </div>
-              <div className="mt-1 flex items-center gap-2">
-                <code className="mono text-[13px] break-all text-accent">
-                  {chain.head || "— empty chain"}
-                </code>
-                {chain.head && <Hash value={chain.head} chars={0} />}
-              </div>
-            </Card>
-
-            {checkpoint && (
-              <Note
-                tone={covers === "ahead" ? "bad" : "accent"}
-                title={
-                  /* `chain.height` — the ledger's entry count — and not
-                     `chain.links`. A checkpoint signs the entry count, and the
-                     two were compared for a while; since a log holds at least
-                     as many entries as batches, "behind" could never be seen. */
-                  `signed at height ${checkpoint.checkpoint.height} of ${chain.height} entries` +
-                  (covers === "at" ? " — covers every entry this node serves" : "") +
-                  (covers === "behind"
-                    ? " — behind the log, which is normal after further appends"
-                    : "") +
-                  (covers === "ahead"
-                    ? " — more entries than this node now serves; the signed prefix is not this log"
-                    : "")
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <Stat label="Links" value={String(chain.links)} from="one per settled epoch" tone="accent" />
+              <Stat label="Claims settled" value={String(claims)} tone="info" />
+              <Stat label="Log entries" value={String(chain.height)} />
+              <Stat
+                label="Checkpoint"
+                value={checkpoint ? `height ${checkpoint.checkpoint.height}` : "none"}
+                from={
+                  covers === "at"
+                    ? "covers every entry"
+                    : covers === "behind"
+                      ? "behind the log, normal after appends"
+                      : covers === "ahead"
+                        ? "ahead of this log: not this log"
+                        : "never signed"
                 }
-              >
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                  <span className="flex items-center gap-1">
-                    merkle root <Hash value={checkpoint.checkpoint.root} chars={8} />
-                  </span>
-                  <span className="flex items-center gap-1">
-                    ledger head <Hash value={checkpoint.checkpoint.head} chars={8} />
-                  </span>
-                  <span className="text-ink-3">
-                    {checkpoint.checkpoint.head === chain.ledger_head
-                      ? "(this node's)"
-                      : covers === "at"
-                        ? "(differs from this node's, at the same height — not the same log)"
-                        : ""}
-                  </span>
-                  <span className="mono text-ink-3">
-                    issued {checkpoint.checkpoint.issued_at}
-                  </span>
-                </div>
-                <div className="mt-1 flex flex-wrap items-center gap-1">
-                  signed by <Hash value={checkpoint.public_key} chars={8} />
-                  <span className="text-ink-3">
-                    — the ML-DSA key, in full on hover. Whether that is the key you were
-                    told to expect is yours to check.
-                  </span>
-                </div>
-                {/* Said plainly, because the alternative is a reader assuming
-                    the green text means somebody checked. Verifying ML-DSA here
-                    would put a third implementation of a consensus-critical
-                    primitive in a third language. */}
-                <p className="mt-1 text-ink-3">
-                  This page does not verify that signature — it shows that one exists and
-                  what it covers. <code className="mono">cairn verify --from</code> is what
-                  checks it.
-                </p>
-              </Note>
-            )}
+                tone={covers === "ahead" ? "bad" : checkpoint ? "violet" : "neutral"}
+              />
+            </div>
 
             {scales.length > 1 && (
               <Note title="this chain was settled under more than one epoch length" tone="bad">
@@ -226,70 +162,138 @@ export default function Page() {
               </Note>
             )}
 
-            {chain.chain.length === 0 ? (
-              <EmptyState title="No epoch has settled yet.">
-                The chain starts at the first batch.
-              </EmptyState>
-            ) : (
-              <section>
-                <SectionHeading count={chain.chain.length}>Links, newest first</SectionHeading>
-                <ol className="relative">
-                  {[...chain.chain].reverse().map((link, index, all) => (
-                    <li key={link.epoch} className="contain-rows relative pb-5 pl-7">
-                      {/* The spine. Drawn per row rather than on the list so the
-                          last row can stop it, and the genesis marker below can
-                          be hollow — "this link names nothing before it" is the
-                          one structural fact worth seeing rather than reading. */}
-                      {index < all.length - 1 && (
-                        <span
-                          className="absolute top-2 bottom-0 left-[5px] w-px bg-edge"
-                          aria-hidden
-                        />
-                      )}
-                      <span
-                        className={`absolute top-1.5 left-0 h-2.5 w-2.5 rounded-full ring-4 ring-canvas ${
-                          link.prev === "" ? "border-2 border-accent bg-canvas" : "bg-accent"
-                        }`}
-                        aria-hidden
-                      />
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-[13px] font-semibold">epoch {link.epoch}</span>
-                        <Hash value={link.link} chars={10} />
-                        <Badge>
-                          {link.claims.length} {link.claims.length === 1 ? "claim" : "claims"}
-                        </Badge>
-                      </div>
-                      <div className="mt-1 flex items-center gap-1 text-[12px] text-ink-2">
-                        prev{" "}
-                        {link.prev === "" ? (
-                          <span className="text-ink-3">— genesis</span>
-                        ) : (
-                          <Hash value={link.prev} chars={10} />
-                        )}
-                      </div>
-                      {link.claims.length === 0 ? (
-                        <div className="mt-1 text-[12px] text-ink-3">no claims settled</div>
-                      ) : (
-                        <ul className="mt-1.5 flex flex-col gap-0.5">
-                          {link.claims.map((claim) => (
-                            <li key={claim}>
-                              <Hash value={claim} chars={10} />
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            )}
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+              {chain.chain.length === 0 ? (
+                <EmptyState title="No epoch has settled yet.">
+                  The chain starts at the first batch.
+                </EmptyState>
+              ) : (
+                <Box
+                  className="self-start"
+                  title={
+                    <>
+                      Links, newest first{" "}
+                      <span className="mono ml-1 font-normal text-ink-3">{chain.chain.length}</span>
+                    </>
+                  }
+                  flush
+                >
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[36rem] border-collapse text-left text-[12.5px]">
+                      <thead>
+                        <tr className="border-b border-edge text-[11.5px] text-ink-3">
+                          <th className="px-4 py-2 font-medium">Epoch</th>
+                          <th className="px-3 py-2 font-medium">Link</th>
+                          <th className="px-3 py-2 font-medium">Prev</th>
+                          <th className="px-4 py-2 font-medium">Claims settled</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-edge-y">
+                        {[...chain.chain].reverse().map((link) => (
+                          <tr key={link.epoch} className="contain-rows align-top">
+                            <td className="mono px-4 py-2.5 font-semibold text-ink">{link.epoch}</td>
+                            <td className="px-3 py-2.5">
+                              <Hash value={link.link} chars={8} />
+                            </td>
+                            <td className="px-3 py-2.5">
+                              {/* "This link names nothing before it" is the one
+                                  structural fact worth seeing, not reading. */}
+                              {link.prev === "" ? (
+                                <span className="pill pill-open">genesis</span>
+                              ) : (
+                                <Hash value={link.prev} chars={8} />
+                              )}
+                            </td>
+                            <td className="px-4 py-2.5">
+                              {link.claims.length === 0 ? (
+                                <span className="text-ink-3">none</span>
+                              ) : (
+                                <ul className="flex flex-col gap-0.5">
+                                  {link.claims.map((claim) => (
+                                    <li key={claim}>
+                                      <Hash value={claim} chars={8} />
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Box>
+              )}
 
-            <p className="prose-block mt-4">
-              {chain.links} link(s) settling {claims} claim(s) in total, newest first,
-              derived from a log of {chain.height} entries. Verify none of it on trust:{" "}
-              <code className="mono">cairn --log &lt;log&gt; --root . audit</code>{" "}
-              re-derives the chain and checks every batch against the anchor it recorded.
-            </p>
+              <div className="flex min-w-0 flex-col gap-4">
+                <Box
+                  title="Head"
+                  aside={
+                    <span className="text-[11px] font-normal text-ink-3">
+                      differs from a peer&rsquo;s? you forked
+                    </span>
+                  }
+                >
+                  <div className="flex items-start gap-1">
+                    <code className="mono text-[12.5px] text-accent">
+                      {chain.head || "— empty chain"}
+                    </code>
+                    {chain.head && <CopyButton value={chain.head} />}
+                  </div>
+                </Box>
+
+                {checkpoint && (
+                  <Box title="Checkpoint">
+                    <dl className="kv">
+                      {/* `chain.height` — the ledger's entry count — and not
+                          `chain.links`. A checkpoint signs the entry count. */}
+                      <dt>signed at</dt>
+                      <dd className="mono">
+                        {checkpoint.checkpoint.height} of {chain.height}
+                      </dd>
+                      <dt>merkle root</dt>
+                      <dd>
+                        <Hash value={checkpoint.checkpoint.root} chars={8} />
+                      </dd>
+                      <dt>ledger head</dt>
+                      <dd>
+                        <Hash value={checkpoint.checkpoint.head} chars={8} />
+                        <div className="text-[11.5px] text-ink-3">
+                          {checkpoint.checkpoint.head === chain.ledger_head
+                            ? "this node's"
+                            : covers === "at"
+                              ? "differs from this node's at the same height: not the same log"
+                              : "an earlier head of this log"}
+                        </div>
+                      </dd>
+                      <dt>issued</dt>
+                      <dd className="mono text-[12px]">
+                        {checkpoint.checkpoint.issued_at.replace("T", " ").slice(0, 16)}
+                      </dd>
+                      <dt>signed by</dt>
+                      <dd>
+                        <Hash value={checkpoint.public_key} chars={8} />
+                      </dd>
+                    </dl>
+                    {/* Said plainly, because the alternative is a reader
+                        assuming the green text means somebody checked. Verifying
+                        ML-DSA here would put a third implementation of a
+                        consensus-critical primitive in a third language. */}
+                    <p className="mt-3 text-[11.5px] leading-relaxed text-ink-3">
+                      Shown, not verified: whether that is the key you expected is yours to
+                      check, and <code className="mono">cairn verify --from</code> checks the
+                      signature.
+                    </p>
+                  </Box>
+                )}
+
+                <p className="px-1 text-[11.5px] leading-relaxed text-ink-3">
+                  Verify none of it on trust:{" "}
+                  <code className="mono">cairn --log &lt;log&gt; --root . audit</code>{" "}
+                  re-derives the chain and checks every batch against the anchor it recorded.
+                </p>
+              </div>
+            </div>
           </>
         )}
       </div>

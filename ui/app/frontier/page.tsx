@@ -20,7 +20,9 @@ import {
   Card,
   EmptyState,
   Hash,
+  NodePicker,
   Note,
+  PageHeader,
   Progress,
   SectionHeading,
   Skeleton,
@@ -125,37 +127,19 @@ function FrontierPage() {
 
   return (
     <>
-      <header className="mb-6 max-w-[62rem]">
-        <h1 className="text-[26px] font-semibold">Frontier</h1>
-        <p className="prose-block mt-2">
-          The best verified result on one objective, and every result it displaced. The
-          node writes a frontier record when a claim beats the one before it, and each
-          move names the claim it beat — so this is the cairn itself, the pile of
-          stones, in order. Every number here is re-derivable with{" "}
-          <code className="mono">cairn audit</code>.
-        </p>
-      </header>
-
-      <Card className="card-pad mb-4">
-        <label className="label" htmlFor="node">
-          Node
-        </label>
-        <div className="flex flex-wrap gap-2">
-          <input
-            id="node"
-            className="field field-mono flex-1"
+      <PageHeader crumb={{ href: "/objectives", label: "Objectives" }}
+        title="Frontier"
+        subtitle="The best verified result on this objective, and every result it displaced, in order."
+        actions={
+          <NodePicker
             value={base}
-            onChange={(event) => setBase(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void load(base);
-            }}
-            spellCheck={false}
+            onChange={setBase}
+            onRead={() => void load(base)}
+            loading={loading}
           />
-          <button className="btn" onClick={() => void load(base)} disabled={loading}>
-            {loading ? "reading…" : "Read"}
-          </button>
-        </div>
-      </Card>
+        }
+      />
+
 
       <div className="flex flex-col gap-4">
         {notFound && (

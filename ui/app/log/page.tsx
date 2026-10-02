@@ -9,7 +9,7 @@ import {
   pretty,
   summarize,
 } from "@/lib/log";
-import { Badge, Card, EmptyState, Hash, Note } from "@/components/ui";
+import { Badge, Card, NodePicker, PageHeader, EmptyState, Hash, Note } from "@/components/ui";
 import { resolveNode } from "@/lib/site";
 
 /**
@@ -87,36 +87,19 @@ export default function Page() {
 
   return (
     <>
-      <header className="mb-6 max-w-[62rem]">
-        <h1 className="text-[26px] font-semibold">Log</h1>
-        <p className="prose-block mt-2">
-          Every record this node holds, in the order it admitted them. This is the
-          file <code className="mono">cairn audit</code> reads, and the one thing here
-          you have to fetch — everything else on this site is derived from it. Click a
-          row for the record as written.
-        </p>
-      </header>
-
-      <Card className="card-pad mb-4">
-        <label className="label" htmlFor="node">
-          Node
-        </label>
-        <div className="flex flex-wrap gap-2">
-          <input
-            id="node"
-            className="field field-mono flex-1"
+      <PageHeader
+        title="Log"
+        subtitle="Every record this node holds, in the order it admitted them: the file cairn audit reads. Click a row for the record as written."
+        actions={
+          <NodePicker
             value={base}
-            onChange={(event) => setBase(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void load(base);
-            }}
-            spellCheck={false}
+            onChange={setBase}
+            onRead={() => void load(base)}
+            loading={loading}
           />
-          <button className="btn" onClick={() => void load(base)} disabled={loading}>
-            {loading ? "reading…" : "Read"}
-          </button>
-        </div>
-      </Card>
+        }
+      />
+
 
       <div className="flex flex-col gap-4">
         {error && (
