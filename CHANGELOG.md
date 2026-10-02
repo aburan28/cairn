@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.1](https://github.com/aburan28/cairn/compare/v1.8.0...v1.8.1) (2026-10-02)
+
+
+### Fixes
+
+* **sandbox:** run symlinked interpreters under bwrap; test the jail in CI ([#189](https://github.com/aburan28/cairn/issues/189)) ([f7408a9](https://github.com/aburan28/cairn/commit/f7408a90829767a1cd876619721565190e64f4ad))
+
 ## [1.8.0](https://github.com/aburan28/cairn/compare/v1.7.0...v1.8.0) (2026-10-02)
 
 
