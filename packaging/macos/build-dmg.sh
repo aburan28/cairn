@@ -252,6 +252,19 @@ fill "$HERE/resources/welcome.html"      >"$WORK/resources/welcome.html"
 fill "$HERE/resources/conclusion.html"   >"$WORK/resources/conclusion.html"
 cp "$REPO/LICENSE" "$WORK/resources/LICENSE.txt"
 
+# `notarytool submit --wait` exits 0 once Apple has *answered*, whatever the
+# answer was. The status has to be read, or a rejected file sails on to
+# `stapler`, which fails with an error about a missing ticket and no mention of
+# why there is none.
+notarize_and_staple() {
+    status="$(xcrun notarytool submit "$1" --wait --output-format json \
+        --key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" \
+        | plutil -extract status raw -o - -)"
+    [ "$status" = "Accepted" ] \
+        || die "Apple's notary service answered '$status' for $1. \`xcrun notarytool log <submission id>\` says why."
+    xcrun stapler staple "$1"
+}
+
 SIGN_ARGS=()
 [ "$SIGNED" -eq 0 ] || SIGN_ARGS=(--sign "$INSTALLER_ID" --timestamp)
 # The `+` form because an empty array is an unbound variable to `set -u` under
@@ -262,6 +275,11 @@ productbuild --quiet \
     --resources "$WORK/resources" \
     ${SIGN_ARGS[@]+"${SIGN_ARGS[@]}"} \
     "$STAGE/Install Cairn.pkg"
+
+# The package carries its own ticket as well as the image's. Copied out of the
+# image -- to a USB stick, an offline Mac, a deployment tool -- a pkg with no
+# stapled ticket can only pass Gatekeeper by asking Apple online.
+[ "$SIGNED" -eq 0 ] || notarize_and_staple "$STAGE/Install Cairn.pkg"
 
 # -- what else is in the image --------------------------------------------------
 #
@@ -302,16 +320,7 @@ done
 # -- sign, notarize and staple the image (never yet run; see the header) --------
 if [ "$SIGNED" -eq 1 ]; then
     codesign --force --timestamp --sign "$APP_ID" "$DMG"
-    # `notarytool submit --wait` exits 0 once Apple has *answered*, whatever
-    # the answer was. The status has to be read, or a rejected image sails on
-    # to `stapler`, which fails with an error about a missing ticket and no
-    # mention of why there is none.
-    status="$(xcrun notarytool submit "$DMG" --wait --output-format json \
-        --key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" \
-        | plutil -extract status raw -o - -)"
-    [ "$status" = "Accepted" ] \
-        || die "Apple's notary service answered '$status'. \`xcrun notarytool log <submission id>\` says why."
-    xcrun stapler staple "$DMG"
+    notarize_and_staple "$DMG"
 fi
 
 echo "built $DMG"

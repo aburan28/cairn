@@ -257,30 +257,70 @@ final class Node: ObservableObject {
     /// node's own "stop" -- the same one `run.sh` and Ctrl-D use -- and the
     /// signals are only for a node that does not listen. Attach mode has no
     /// process to stop.
+    ///
+    /// This one blocks the main thread for up to seven seconds, which is
+    /// right at quit and wrong anywhere a person is looking at the window;
+    /// `stop(then:)` is the same stop with the wait on another queue.
     func stop() {
-        probe?.cancel()
-        probe = nil
-        guard let p = process else {
-            state = .stopped
-            return
-        }
-        stopping = true
-        try? stdin?.fileHandleForWriting.close()
-        if !Self.wait(for: p, seconds: 3) {
-            p.terminate()
-            if !Self.wait(for: p, seconds: 2) {
-                kill(p.processIdentifier, SIGKILL)
-                _ = Self.wait(for: p, seconds: 1)
-            }
-        }
-        sink?.waitForEnd(seconds: 1)
+        guard let p = beginStop() else { return }
+        Self.reap(p, sink: sink)
         cleanUp()
         state = .stopped
     }
 
+    /// `stop()`, waiting off the main thread, then `next` on it. A second
+    /// call while the first is still waiting reaps the same process; only
+    /// the first completion to arrive cleans up, and `start()` refuses to
+    /// run twice, so two quick Restarts start one node.
+    func stop(then next: @escaping () -> Void) {
+        guard let p = beginStop() else {
+            next()
+            return
+        }
+        let sink = self.sink
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            Node.reap(p, sink: sink)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.process === p {
+                    self.cleanUp()
+                    self.state = .stopped
+                }
+                next()
+            }
+        }
+    }
+
     func restart() {
-        stop()
-        start()
+        // The spinner, not a frozen window, while the old node goes.
+        if process != nil { state = .starting }
+        stop { [weak self] in self?.start() }
+    }
+
+    /// The part of a stop that must happen on the main actor: no more probe,
+    /// and the stdin close that asks the node to go.
+    private func beginStop() -> Process? {
+        probe?.cancel()
+        probe = nil
+        guard let p = process else {
+            state = .stopped
+            return nil
+        }
+        stopping = true
+        try? stdin?.fileHandleForWriting.close()
+        return p
+    }
+
+    /// The waiting part, safe on any queue.
+    nonisolated private static func reap(_ p: Process, sink: Stderr?) {
+        if !wait(for: p, seconds: 3) {
+            p.terminate()
+            if !wait(for: p, seconds: 2) {
+                kill(p.processIdentifier, SIGKILL)
+                _ = wait(for: p, seconds: 1)
+            }
+        }
+        sink?.waitForEnd(seconds: 1)
     }
 
     // MARK: internals
@@ -333,7 +373,7 @@ final class Node: ObservableObject {
         stdin = nil
     }
 
-    private static func wait(for p: Process, seconds: Double) -> Bool {
+    nonisolated private static func wait(for p: Process, seconds: Double) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while p.isRunning && Date() < deadline {
             usleep(50_000)
