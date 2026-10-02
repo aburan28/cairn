@@ -54,6 +54,9 @@ final class Node: ObservableObject {
     private var stdin: Pipe?
     private var sink: Stderr?
     private var stopping = false
+    /// The attach-mode probe, so a stop or a second start can cancel it
+    /// rather than leave it to set a state nobody asked for.
+    private var probe: Task<Void, Never>?
 
     // MARK: finding the binary
 
@@ -123,7 +126,8 @@ final class Node: ObservableObject {
         // same way the iOS reader retargets. Resource limits and bootstrap
         // files do not apply — that node already chose them.
         if let attach = settings.attachURL {
-            Task { await waitUntilServing(attach, process: nil) }
+            probe?.cancel()
+            probe = Task { await waitUntilServing(attach, process: nil) }
             return
         }
 
@@ -203,7 +207,7 @@ final class Node: ObservableObject {
             "run",
             "--listen", "\(settings.p2pHost):\(p2p)",
             "--serve", "\(NodeSettings.loopbackHost):\(http)",
-        ]
+        ] + settings.runArguments
         // Finder gives an app /usr/bin:/bin:/usr/sbin:/sbin. Verifiers the
         // node runs want python3 and friends from where people install them.
         var env = ProcessInfo.processInfo.environment
@@ -254,6 +258,8 @@ final class Node: ObservableObject {
     /// signals are only for a node that does not listen. Attach mode has no
     /// process to stop.
     func stop() {
+        probe?.cancel()
+        probe = nil
         guard let p = process else {
             state = .stopped
             return
@@ -286,6 +292,7 @@ final class Node: ObservableObject {
         let attached = p == nil
         let deadline = Date().addingTimeInterval(attached ? 15 : 60)
         while Date() < deadline {
+            if Task.isCancelled { return }
             if let p {
                 // A spawned node that exited, or was replaced by a restart, is
                 // not ours to wait for any more; `exited` has already said why.
@@ -293,11 +300,13 @@ final class Node: ObservableObject {
             }
             if let (_, response) = try? await session.data(from: url),
                (response as? HTTPURLResponse)?.statusCode == 200 {
+                if Task.isCancelled { return }
                 if attached || process === p { state = .running(url) }
                 return
             }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
+        if Task.isCancelled { return }
         if attached || process === p {
             state = .failed(
                 attached
@@ -579,6 +588,11 @@ final class Stderr: @unchecked Sendable {
     private static let maxLines = 2000
 
     init(file: URL) {
+        // The last run's log is kept beside this one, so the stderr of a node
+        // that failed survives the Try Again that starts the next.
+        let previous = file.deletingPathExtension().appendingPathExtension("previous.log")
+        try? FileManager.default.removeItem(at: previous)
+        try? FileManager.default.moveItem(at: file, to: previous)
         FileManager.default.createFile(atPath: file.path, contents: nil)
         handle = try? FileHandle(forWritingTo: file)
     }

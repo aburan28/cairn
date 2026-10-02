@@ -60,10 +60,12 @@ public final class AppModel: ObservableObject {
     public var pool: Int { objectives.value.reduce(0) { $0 + $1.reward } }
     public var paid: Int {
         // A ratchet's payouts are summed in its frontier and its settlement
-        // is null; a certificate has no frontier and one settlement. Adding
-        // both never counts a payment twice, and leaving either out did.
+        // is null; a certificate has no frontier and one settlement; a
+        // piecework pool has neither and sums its own units. Adding all three
+        // never counts a payment twice, and leaving any out did.
         objectives.value.reduce(0) { sum, o in
             sum + (o.frontier?.paid_cumulative ?? 0) + (o.settlement?.reward ?? 0)
+                + (o.piecework?.paid_total ?? 0)
         }
     }
 
@@ -170,9 +172,13 @@ public final class AppModel: ObservableObject {
     /// Trailing slashes are not part of the identity. `NodeClient` already
     /// strips them to talk to the host; the recents list has to do the same
     /// or the typed URL and the later resolved base both appear.
-    private static func normalizeNode(_ url: String) -> String {
+    ///
+    /// A bare `host:port` gets `http://`: without a scheme, `URL` reads the
+    /// host as the scheme and every request fails as "no node answered".
+    static func normalizeNode(_ url: String) -> String {
         var trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         while trimmed.hasSuffix("/") { trimmed.removeLast() }
+        if !trimmed.isEmpty, !trimmed.contains("://") { trimmed = "http://" + trimmed }
         return trimmed
     }
 
@@ -207,7 +213,12 @@ public final class AppModel: ObservableObject {
             let list = try await client.fetchObjectives(at: base)
             guard token == generation else { return }
             if list.isEmpty {
-                objectives = Sourced(value: snapshot.objectives, live: false, origin: snapshot.source)
+                // Health, chain and peers on this screen are the live node's,
+                // so the snapshot standing in here has to say so.
+                objectives = Sourced(
+                    value: snapshot.objectives, live: false, origin: snapshot.source,
+                    note: "\(base) has no objectives yet."
+                )
                 return
             }
             // Publish the summary first. Detail is an enhancement and used
