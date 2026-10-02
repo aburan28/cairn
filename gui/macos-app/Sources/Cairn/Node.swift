@@ -626,7 +626,9 @@ final class Node: ObservableObject {
     }
 
     /// Post one or more objective JSON files with `cairn post`. Stops a running
-    /// node briefly, same as announcing a peer.
+    /// node briefly, same as announcing a peer. The files a pin names must
+    /// already be under the node's root (`GuiTasks.stage`), or the node admits
+    /// an objective it cannot check.
     func postObjectives(at paths: [String], completion: @escaping (String?) -> Void) {
         guard !isAttached else {
             completion("This window is attached to another node; it cannot write that log.")

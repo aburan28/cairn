@@ -79,8 +79,12 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
 The **Node** menu has Open in Browser, Restart / Reconnect, **Tasks…**,
 **Secrets…**, Peers…, Copy Peer Id, Show Data Folder and Show Node Log.
 **Tasks…** posts a curated objective (including ECC2K-130 orbit piecework)
-from a source checkout into this node's log; point it at the repository
-folder or set `CAIRN_REPO` when launching. **Secrets…** pastes named
+into this node's log in one click. The objectives and the checkers they pin
+ship inside the app, copied from `examples/` by `build.sh`, which also fails
+if a checker no longer matches its pin; posting puts the checker under the
+node's data folder first, so the node can run it and serve it to peers.
+Launch with `CAIRN_REPO=<checkout>` to post a checkout's edited copies
+instead. **Secrets…** pastes named
 operator credentials (AWS keys, `DATABASE_URL`, …) into `~/.cairn/secrets`
 via `cairn secret set --stdin` — values are never shown again after Save,
 and never go on the command line. **Peers…** announces a peer in the log

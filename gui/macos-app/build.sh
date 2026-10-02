@@ -65,6 +65,28 @@ cp "$HERE/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Frameworks"
 ditto "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
 
+# Node → Tasks… posts these, so an installed app needs no checkout beside it
+# (Sources/Cairn/GuiTasks.swift). The copy keeps the repository-relative
+# paths, because each objective pins its checker by such a path and the app
+# stages the checker at the same path under the node's root before posting.
+# Each pin is checked here: a checker edited without re-pinning its objective
+# fails the build, rather than shipping a task the node would refuse.
+TASKS="$APP/Contents/Resources/Tasks"
+EXAMPLES="$HERE/../../examples/certicom-ecdlp"
+mkdir -p "$TASKS/examples/certicom-ecdlp/checkers"
+cp "$EXAMPLES"/objective-*.json "$TASKS/examples/certicom-ecdlp/"
+cp "$EXAMPLES"/checkers/*.py "$TASKS/examples/certicom-ecdlp/checkers/"
+for objective in "$TASKS"/examples/certicom-ecdlp/objective-*.json; do
+    checker="$(plutil -extract verifier.checker raw -o - "$objective")" \
+        || { echo "build failed: $(basename "$objective") pins no checker" >&2; exit 1; }
+    pin="$(plutil -extract verifier.checker_sha256 raw -o - "$objective")"
+    [ -f "$TASKS/$checker" ] \
+        || { echo "build failed: $(basename "$objective") pins $checker, which is not in examples/" >&2; exit 1; }
+    got="$(shasum -a 256 "$TASKS/$checker" | cut -d' ' -f1)"
+    [ "$got" = "$pin" ] \
+        || { echo "build failed: $checker hashes to $got, but $(basename "$objective") pins $pin" >&2; exit 1; }
+done
+
 # The same picture as the autoresearcher's, rendered from the same code, so
 # nothing binary is committed. A missing icon is a cosmetic loss and does not
 # fail the build.
