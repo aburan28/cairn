@@ -55,9 +55,8 @@ every reveal that has reached its threshold, each tick; the transport key
 doubles as the committee key (`CommitteeKey::from_transport`); and `cairn commit
 --sealed` seals a signed claim to the epoch's committee. The subset search is
 capped at `MAX_SUBSET_TRIALS`, so a bad share costs a node one bounded search
-per new share rather than an unbounded one per tick. Still open: `commit
---sealed` does not route key fetches through `--proxy`, and MCP has no sealed
-submit.
+per new share rather than an unbounded one per tick. Still open: MCP has no
+sealed submit.
 
 ### 3. Draw the committee from drand, not the log anchor (MPC, consensus)
 
@@ -102,10 +101,11 @@ least `t` but still fail to open is evidence against the dealer. Run
 - **Partly fixed in a follow-up:** a proxied node no longer resolves hostnames
   itself (`discovery::dialable_via` skips names in gossip, log and seed hints,
   and a bootstrap file naming a host is refused with an explanation), and LAN
-  beacons default to off behind a proxy. Still open: `cairn blob fetch` and
-  `cairn commit --sealed` have no `--proxy`, and `Proxy::dial` takes only a
-  socket address, so a proxied node cannot use names at all rather than
-  handing them to the proxy as `socks5h` would.
+  beacons default to off behind a proxy. Key requests now go through the
+  proxy rather than being skipped, so seeds and log peers work behind one, and
+  `cairn blob fetch` and `cairn commit --sealed` take `--proxy`. Still open:
+  `Proxy::dial` takes only a socket address, so a proxied node cannot use names
+  at all rather than handing them to the proxy as `socks5h` would.
 - **Active probing**: a listener answers 261,216 random bytes with a well-formed
   reply, so any public listener is confirmable with no prior knowledge. Needs a
   pre-shared token (from the peer record or out of band) before the listener

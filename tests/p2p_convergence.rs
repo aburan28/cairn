@@ -1333,6 +1333,119 @@ fn a_peer_record_travels_as_a_routing_hint_and_never_reaches_the_ledger() {
     );
 }
 
+/// A minimal SOCKS5 CONNECT proxy: one greeting, one CONNECT, then it splices
+/// the two streams. Enough to carry a real session, not a general proxy.
+/// Returns its address and a count of the connections it has accepted.
+fn spawn_socks_proxy() -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let connects = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&connects);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("proxy binds");
+    let addr = listener.local_addr().expect("proxy addr");
+    thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let Ok(mut client) = incoming else { continue };
+            counted.fetch_add(1, Ordering::SeqCst);
+            thread::spawn(move || {
+                let mut head = [0u8; 2];
+                if client.read_exact(&mut head).is_err() {
+                    return;
+                }
+                let mut methods = vec![0u8; head[1] as usize];
+                let _ = client.read_exact(&mut methods);
+                // No-auth.
+                let _ = client.write_all(&[0x05, 0x00]);
+                // CONNECT header + IPv4 target (the fixtures dial loopback).
+                let mut req = [0u8; 4];
+                if client.read_exact(&mut req).is_err() {
+                    return;
+                }
+                let mut ip = [0u8; 4];
+                let _ = client.read_exact(&mut ip);
+                let mut port = [0u8; 2];
+                let _ = client.read_exact(&mut port);
+                let target = SocketAddr::from((ip, u16::from_be_bytes(port)));
+                let Ok(mut upstream) = TcpStream::connect(target) else {
+                    let _ = client.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+                    return;
+                };
+                let _ = client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+                // Splice both directions until either end closes.
+                let mut a = client.try_clone().expect("clone");
+                let mut b = upstream.try_clone().expect("clone");
+                let up = thread::spawn(move || {
+                    let _ = std::io::copy(&mut client, &mut upstream);
+                });
+                let _ = std::io::copy(&mut b, &mut a);
+                let _ = up.join();
+            });
+        }
+    });
+    (addr, connects)
+}
+
+/// A node behind a proxy asks a seed for its key through the proxy, rather
+/// than directly or not at all, and leaves a seed named by host unresolved.
+#[test]
+fn a_proxied_node_fetches_a_seeds_key_through_the_proxy() {
+    use cairn::p2p::proxy::Proxy;
+    use cairn::p2p::seeds::Seed;
+    use cairn::p2p::service::SeedOutcome;
+    use cairn::p2p::transport;
+    use std::sync::atomic::Ordering;
+
+    let seed = Arc::new(PeerIdentity::generate());
+    let listener = transport::listen("127.0.0.1:0".parse().expect("addr")).expect("binds");
+    let addr = listener.local_addr().expect("addr");
+    let served = {
+        let seed = Arc::clone(&seed);
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accepts");
+            transport::accept(stream, &seed).is_err()
+        })
+    };
+    let (proxy_addr, connects) = spawn_socks_proxy();
+    let alice = Service::with_proxy(
+        Arc::new(PeerIdentity::generate()),
+        Proxy::Socks5 {
+            addr: proxy_addr,
+            auth: None,
+        },
+    );
+
+    let listed = [Seed {
+        name: "local".into(),
+        addr: addr.to_string(),
+        transport: seed.id(),
+    }];
+    assert_eq!(
+        alice.seed_from_list(&listed),
+        vec![SeedOutcome::Learned(addr)]
+    );
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        1,
+        "the key request did not go through the proxy"
+    );
+    assert_eq!(
+        alice.key_for(&seed.id()).map(|key| key.id()),
+        Some(seed.id())
+    );
+    assert!(served.join().expect("seed thread"));
+
+    // A name is neither resolved here nor handed over: the lookup is the leak.
+    let named = [Seed {
+        name: "named".into(),
+        addr: "localhost:9".into(),
+        transport: [9u8; 32],
+    }];
+    assert_eq!(alice.seed_from_list(&named), vec![SeedOutcome::Proxied]);
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn a_full_sync_completes_through_a_socks5_proxy() {
     // The firewall property, end to end. A censored node never dials its peer
@@ -1344,56 +1457,8 @@ fn a_full_sync_completes_through_a_socks5_proxy() {
     // objective still crosses -- the McEliece handshake runs end to end over
     // the tunnel, so the proxy is just another untrusted hop.
     use cairn::p2p::proxy::Proxy;
-    use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpListener, TcpStream};
 
-    // A minimal SOCKS5 CONNECT proxy: one greeting, one CONNECT, then it splices
-    // the two streams. Enough to carry a real session, not a general proxy.
-    fn spawn_socks_proxy() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("proxy binds");
-        let addr = listener.local_addr().expect("proxy addr");
-        thread::spawn(move || {
-            for incoming in listener.incoming() {
-                let Ok(mut client) = incoming else { continue };
-                thread::spawn(move || {
-                    let mut head = [0u8; 2];
-                    if client.read_exact(&mut head).is_err() {
-                        return;
-                    }
-                    let mut methods = vec![0u8; head[1] as usize];
-                    let _ = client.read_exact(&mut methods);
-                    // No-auth.
-                    let _ = client.write_all(&[0x05, 0x00]);
-                    // CONNECT header + IPv4 target (the fixtures dial loopback).
-                    let mut req = [0u8; 4];
-                    if client.read_exact(&mut req).is_err() {
-                        return;
-                    }
-                    let mut ip = [0u8; 4];
-                    let _ = client.read_exact(&mut ip);
-                    let mut port = [0u8; 2];
-                    let _ = client.read_exact(&mut port);
-                    let target = SocketAddr::from((ip, u16::from_be_bytes(port)));
-                    let Ok(mut upstream) = TcpStream::connect(target) else {
-                        let _ = client.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
-                        return;
-                    };
-                    let _ = client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
-                    // Splice both directions until either end closes.
-                    let mut a = client.try_clone().expect("clone");
-                    let mut b = upstream.try_clone().expect("clone");
-                    let up = thread::spawn(move || {
-                        let _ = std::io::copy(&mut client, &mut upstream);
-                    });
-                    let _ = std::io::copy(&mut b, &mut a);
-                    let _ = up.join();
-                });
-            }
-        });
-        addr
-    }
-
-    let proxy_addr = spawn_socks_proxy();
+    let (proxy_addr, _) = spawn_socks_proxy();
 
     let objective = collatz_objective();
     let bob_identity = Arc::new(PeerIdentity::generate());

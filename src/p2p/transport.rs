@@ -467,7 +467,22 @@ pub const KEY_REQUEST_MAGIC: [u8; 8] = *b"PWKEYRQ1";
 /// Ask the node at `addr` for its transport public key, and check that it
 /// hashes to `expected` before returning it.
 pub fn request_key(addr: SocketAddr, expected: PeerId) -> Result<PeerPublic, TransportError> {
-    let mut stream = TcpStream::connect_timeout(&addr, DIAL_TIMEOUT)?;
+    request_key_through(&super::proxy::Proxy::Direct, addr, expected)
+}
+
+/// [`request_key`], with the TCP stream obtained through `proxy`.
+///
+/// A key request is a plain-TCP dial like any other, and a node whose dials go
+/// through a proxy must not make it directly: the connection alone tells the
+/// watched network which peer the node is about to reach. The returned key is
+/// checked against `expected` exactly as before, so a proxy that answers for
+/// the peer can make the request fail and nothing more.
+pub fn request_key_through(
+    proxy: &super::proxy::Proxy,
+    addr: SocketAddr,
+    expected: PeerId,
+) -> Result<PeerPublic, TransportError> {
+    let mut stream = proxy.dial(addr, DIAL_TIMEOUT)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let mut request = vec![0u8; HELLO_BYTES];

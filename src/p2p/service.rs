@@ -81,7 +81,9 @@ pub enum SeedOutcome {
     Unresolvable,
     /// The entry names this node.
     Ourselves,
-    /// Dials leave through a proxy, and a key request is a direct dial.
+    /// Dials leave through a proxy and the entry names a host, which this
+    /// node will not resolve itself: the lookup would leak the seed it is
+    /// about to reach. List the seed by address to use it behind a proxy.
     Proxied,
 }
 
@@ -591,14 +593,11 @@ impl Service {
     /// Fetch the transport key of contacts this node can name but not dial,
     /// straight from the contact, and file the result as an endpoint.
     ///
-    /// Direct dials only: a node whose dials go through a proxy has a censor
-    /// to hide from, and a plain connection to a LAN address is not what it
-    /// asked for. Bounded per call and backed off per peer, because every
+    /// Through the node's proxy, like every other dial: a proxied node asks
+    /// for keys too, rather than staying keyless for every peer its log and
+    /// gossip name. Bounded per call and backed off per peer, because every
     /// attempt here is a blocking dial on the daemon's tick thread.
     pub fn fetch_missing_keys(&self, contacts: &[(PeerId, SocketAddr)], limit: usize) -> usize {
-        if !matches!(self.proxy, Proxy::Direct) {
-            return 0;
-        }
         let mut learned = 0;
         let mut asked = 0;
         let now = Instant::now();
@@ -667,8 +666,15 @@ impl Service {
         addr: SocketAddr,
         retry_on_loopback: bool,
     ) -> Result<SocketAddr, TransportError> {
-        let mut attempt = transport::request_key(addr, *peer).map(|public| (public, addr));
-        if retry_on_loopback && attempt.is_err() && !addr.ip().is_loopback() {
+        let mut attempt =
+            transport::request_key_through(&self.proxy, addr, *peer).map(|public| (public, addr));
+        // Never through a proxy: the far side's loopback is the proxy's own
+        // host, not this one.
+        if retry_on_loopback
+            && attempt.is_err()
+            && !addr.ip().is_loopback()
+            && matches!(self.proxy, Proxy::Direct)
+        {
             let local = SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port());
             if let Ok(public) = transport::request_key(local, *peer) {
                 attempt = Ok((public, local));
@@ -711,9 +717,6 @@ impl Service {
         if seed.transport == self.identity.id() {
             return SeedOutcome::Ourselves;
         }
-        if !matches!(self.proxy, Proxy::Direct) {
-            return SeedOutcome::Proxied;
-        }
         if self.with_book(|book| !book.for_peer(&seed.transport).is_empty()) {
             return SeedOutcome::Dialable;
         }
@@ -724,7 +727,11 @@ impl Service {
             return SeedOutcome::Waiting;
         }
         let Some(addr) = super::discovery::dialable_via(&seed.addr, &self.proxy) else {
-            return SeedOutcome::Unresolvable;
+            return if matches!(self.proxy, Proxy::Direct) {
+                SeedOutcome::Unresolvable
+            } else {
+                SeedOutcome::Proxied
+            };
         };
         // Zero, not a sequence: a list entry makes no freshness claim, so a
         // signed peer record for the same identity always outranks it.

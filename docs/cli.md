@@ -151,7 +151,7 @@ signing key's public half *is* the funder. Prints a decomposition note when the
 reward is below what the network costs to verify it — before you fund it, not
 after.
 
-### `commit <objective-id> --submitter S --artifact FILE [--nonce N] [--identity FILE] [--sealed]`
+### `commit <objective-id> --submitter S --artifact FILE [--nonce N] [--identity FILE] [--sealed [--proxy URL]]`
 
 Bind to an artifact without revealing it. A generated nonce is used when
 `--nonce` is absent; keep it, because the reveal needs it. With `--identity` the
@@ -163,8 +163,10 @@ committee drawn for this epoch, and there is no reveal for you to make: after
 the epoch closes, every node running `cairn run --committee-identity` publishes
 the shares its seats owe, and any node opens the claim once a threshold of them
 has arrived. Each seat's key is fetched from the address in its peer record and
-checked against the seat's transport id, so the command needs to reach the
-committee directly; it does not use `--proxy` yet. See `docs/censorship.md` §2.
+checked against the seat's transport id. `--proxy socks5://…` makes those
+fetches through a SOCKS5 proxy, as `cairn-p2p --proxy` does for a node; a seat
+whose record names a host rather than an address is then refused rather than
+resolved locally. See `docs/censorship.md` §2.
 
 ### `reveal <objective-id> --submitter S --artifact FILE --nonce N [--cites ID ...] [--relates KIND:CLAIM-ID ...] [--identity FILE]`
 
@@ -490,11 +492,13 @@ a node cannot distinguish a blob nobody wants from a blob pinned by an objective
 it has not synced yet, so a timer-driven collector would delete exactly the code
 its peers are about to ask for.
 
-### `blob serve --identity FILE [--listen ADDR]` · `blob fetch --identity FILE --peer FILE [--peer FILE ...] [--timeout N]`
+### `blob serve --identity FILE [--listen ADDR]` · `blob fetch --identity FILE --peer FILE [--peer FILE ...] [--timeout N] [--proxy URL]`
 
 Seed this node's blobs to strangers over the encrypted transport, and fetch
 every pin this log names and this node lacks. `--peer` takes the `{addr,
-public}` file that `blob serve` printed.
+public}` file that `blob serve` printed. With `--proxy socks5://…` every
+seeder is dialled through the proxy, and a `--peer` file naming a host rather
+than an address is refused.
 
 ### `shard plan <file> [--data K] [--parity M] [--chunk N]`
 

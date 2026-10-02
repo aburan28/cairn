@@ -48,6 +48,7 @@ use super::{Action, Dropped, Limits, PeerId, Swarm};
 use crate::blobs::{self, BlobStore};
 use crate::p2p::discovery::Endpoint;
 use crate::p2p::handshake::PeerIdentity;
+use crate::p2p::proxy::Proxy;
 use crate::p2p::transport::{
     self, Connection, Receiver as SealedReceiver, Sender as SealedSender, TransportError,
 };
@@ -709,6 +710,26 @@ pub fn fetch(
     fetch_with(digest, peers, local, blobs, limits, deadline, new_book())
 }
 
+/// [`fetch`], with every dial made through `proxy`.
+///
+/// What `cairn blob fetch --proxy` runs. The transfer is the same encrypted,
+/// authenticated session either way; the proxy only decides which network sees
+/// the TCP connection to each seeder.
+pub fn fetch_through(
+    digest: &str,
+    peers: &[Endpoint],
+    local: Arc<PeerIdentity>,
+    blobs: &BlobStore,
+    limits: Limits,
+    deadline: Duration,
+    proxy: &Proxy,
+) -> Result<Vec<u8>, TransferError> {
+    let book = new_book();
+    fetch_over(
+        digest, peers, local, blobs, limits, deadline, book, &NoKeys, proxy,
+    )
+}
+
 /// Fetch, against an address book the caller owns.
 ///
 /// # What encryption cost peer exchange, stated plainly
@@ -756,6 +777,32 @@ pub fn fetch_using(
     book: Book,
     keys: &dyn KeySource,
 ) -> Result<Vec<u8>, TransferError> {
+    fetch_over(
+        digest,
+        peers,
+        local,
+        blobs,
+        limits,
+        deadline,
+        book,
+        keys,
+        &Proxy::Direct,
+    )
+}
+
+/// The one fetch loop, dialling through `proxy`.
+#[allow(clippy::too_many_arguments)]
+fn fetch_over(
+    digest: &str,
+    peers: &[Endpoint],
+    local: Arc<PeerIdentity>,
+    blobs: &BlobStore,
+    limits: Limits,
+    deadline: Duration,
+    book: Book,
+    keys: &dyn KeySource,
+    proxy: &Proxy,
+) -> Result<Vec<u8>, TransferError> {
     // Both spellings arrive here and only one leaves. See `one_spelling`.
     let digest = &one_spelling(digest)[..];
     let mut peers: Vec<Endpoint> = peers.to_vec();
@@ -787,11 +834,13 @@ pub fn fetch_using(
         let book = Arc::clone(&book);
         let dht = dht.clone();
         let local = Arc::clone(&local);
+        let proxy = proxy.clone();
         thread::spawn(move || {
             // The endpoint carries the responder's McEliece key, so this dial
             // is authenticated before a swarm byte moves: a peer at that
             // address that cannot decapsulate gets no session at all.
-            let Ok(mut connection) = transport::connect(&endpoint.peer, endpoint.addr, &local)
+            let Ok(mut connection) =
+                transport::connect_through(&proxy, &endpoint.peer, endpoint.addr, &local)
             else {
                 return;
             };
