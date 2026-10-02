@@ -127,27 +127,48 @@ signing and notarization, below.
 Cairn.app's **Check for Updates…** (and its once-a-day check) is Sparkle,
 reading `appcast.xml` from the newest release. The `appcast` job in
 `release.yml` writes that feed last, after the .dmg and the release notes are
-up, and signs the .dmg in it with an Ed25519 key. The app installs only an
-update whose signature matches the key it was built with, then runs the same
-`Install Cairn.pkg` a first install does, which asks for an administrator
-password and replaces the command and the app together. This works on
-unsigned releases: the Ed25519 signature is Sparkle's check, not Apple's.
+up. The app installs only an update whose signatures match the keys it was
+built with, then runs the same `Install Cairn.pkg` a first install does, which
+asks for an administrator password and replaces the command and the app
+together. This works on unsigned releases: the signatures are the app's
+check, not Apple's.
 
-It needs **one repository secret**, `SPARKLE_ED_PRIVATE_KEY`. Make it once, on
-any machine with OpenSSL 3 or Swift:
+Two signatures, two keys, both derived from one secret:
+
+| signature | over | checked by | key in Info.plist |
+|---|---|---|---|
+| Ed25519 (`sparkle:edSignature`) | the .dmg | Sparkle, after the download | `SUPublicEDKey` |
+| ML-DSA-87 (`cairn:mlDSA87Signature`) | the feed item: version, URL, length and that Ed25519 signature | the app, before the download | `CairnMLDSA87PublicKey` |
+
+ML-DSA is NIST's post-quantum signature (FIPS 204) and 87 its strongest
+parameter set; Sparkle only knows Ed25519, which a large enough quantum
+computer breaks. The second signature is over the first rather than over the
+image because Sparkle never hands the app the bytes it downloaded -- and that
+is enough, because Ed25519 is deterministic and ends in SHA-512: no other
+image carries the signature value ML-DSA vouched for, short of a SHA-512
+collision, which stays out of a quantum computer's reach. The app checks it
+in pure Swift (`gui/macos-app/Sources/Cairn/MLDSA87.swift`), because
+CryptoKit's ML-DSA begins with macOS 26 and the app runs on 13; its tests hold
+it to signatures OpenSSL made.
+
+It needs **one repository secret**, `CAIRN_UPDATES_KEY`: 32 random bytes.
+Make it once, anywhere:
 
 ```sh
 packaging/macos/updates.sh generate-key > cairn-updates.key   # keep this file somewhere safe
-gh secret set SPARKLE_ED_PRIVATE_KEY < cairn-updates.key
+gh secret set CAIRN_UPDATES_KEY < cairn-updates.key
 ```
 
-Everything else is derived from it: the `updates-key` job computes the public
-half, and `macos-dmg` writes it into the app as `SUPublicEDKey`. Without the
-secret, releases build as before and the menu item opens the releases page.
+Everything else is derived from it: the `updates-key` job computes both
+public halves, and `macos-dmg` writes them into the app. Signing and checking
+need OpenSSL 3.5 or newer, the first with ML-DSA, which is why those jobs
+run on a macOS runner with Homebrew's `openssl@3` rather than on the Linux
+image. Without the secret, releases build as before and the menu item opens
+the releases page.
 
-**Do not lose or replace the key.** Every installed copy trusts exactly the key
-its release was built with. A new key means each user installs the next .dmg
-by hand once, after which updates work again.
+**Do not lose or replace the key.** Every installed copy trusts exactly the
+keys its release was built with. A new key means each user installs the next
+.dmg by hand once, after which updates work again.
 
 The first release built with the key is the first that can update itself;
 copies installed from earlier releases need that one .dmg installed by hand.

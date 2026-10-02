@@ -24,8 +24,11 @@
 	<dict><key>NSAllowsLocalNetworking</key><true/></dict>
 	<!-- Check for Updates… (Sources/Cairn/Updates.swift). The feed is on the
 	     newest release; release.yml adds it once that release's .dmg is up.
-	     SUPublicEDKey is not here: build-dmg.sh writes it from the release's
-	     signing key, and a build without one does not start the updater. -->
+	     SUPublicEDKey (Ed25519, Sparkle's check of the image) and
+	     CairnMLDSA87PublicKey (ML-DSA-87, the app's own post-quantum check of
+	     the feed item) are not here: build-dmg.sh writes them from the
+	     release's signing key, and a build without them does not start the
+	     updater. -->
 	<key>SUFeedURL</key>
 	<string>https://github.com/aburan28/cairn/releases/latest/download/appcast.xml</string>
 	<key>SUEnableAutomaticChecks</key><true/>

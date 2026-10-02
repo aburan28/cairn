@@ -177,11 +177,13 @@ otool -l "$APP/Contents/MacOS/Cairn" | grep -q '@executable_path/../Frameworks' 
     || fail "Cairn.app's binary does not look in Contents/Frameworks for Sparkle"
 plutil -extract SUFeedURL raw -o - "$plist" | grep -q '^https://' \
     || fail "Cairn.app has no https SUFeedURL"
-# Set by release.yml when the update key exists: the app must trust that key
-# and no other, or every update it is offered is refused.
+# Set by release.yml when the update key exists: the app must trust those
+# keys and no others, or every update it is offered is refused.
 if [ -n "${CAIRN_UPDATES_PUBLIC_KEY:-}" ]; then
     [ "$(plutil -extract SUPublicEDKey raw -o - "$plist" 2>/dev/null)" = "$CAIRN_UPDATES_PUBLIC_KEY" ] \
         || fail "Cairn.app's SUPublicEDKey is not the release's update key"
+    [ "$(plutil -extract CairnMLDSA87PublicKey raw -o - "$plist" 2>/dev/null)" = "${CAIRN_UPDATES_PQ_PUBLIC_KEY:-}" ] \
+        || fail "Cairn.app's CairnMLDSA87PublicKey is not the release's post-quantum update key"
 fi
 
 # App postinstall opens Cairn.app for the console user after install.
