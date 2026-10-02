@@ -399,6 +399,10 @@ jobs:
       # release.yml builds it, so an x86_64-only break shows up here and not
       # on a tag.
       - run: gui/macos-app/build.sh --universal
+      # The icon is committed as an .icns written off a Mac
+      # (packaging/macos/icon/make-icon.py); Apple's own tool reading it back
+      # is the check that the Dock will too.
+      - run: iconutil -c iconset -o "$RUNNER_TEMP/AppIcon.iconset" gui/macos-app/build/Cairn.app/Contents/Resources/AppIcon.icns && ls "$RUNNER_TEMP/AppIcon.iconset"
       # What decides the bytes a node is handed from the app: the request
       # each AI provider gets, how a model's reply is read, the objective and
       # pin built from a draft, the verdicts read back from `cairn propose`,

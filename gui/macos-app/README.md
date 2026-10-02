@@ -15,8 +15,8 @@ gui/macos-app/build.sh --universal   # both slices, as release.yml builds it
 ```
 
 Like `gui/macos`, it is a SwiftPM executable wrapped into a bundle by
-`build.sh`, so it builds with the Command Line Tools alone. The icon is the
-autoresearcher's, rendered from the same `render-icon.swift`.
+`build.sh`, so it builds with the Command Line Tools alone. The icon is
+`packaging/macos/icon/AppIcon.icns`, drawn by `make-icon.py` beside it.
 
 ## What it runs
 
