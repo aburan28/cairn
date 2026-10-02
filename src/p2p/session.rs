@@ -512,6 +512,7 @@ where
 
     // -- one public key, so a contact heard of can become one dialled -------
     let wanted_keys = directory.key_wants();
+    directory.asked_keys(&wanted_keys);
     send_dht(
         connection,
         DhtMessage::GetKey {

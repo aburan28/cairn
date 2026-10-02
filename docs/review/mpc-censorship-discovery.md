@@ -77,25 +77,17 @@ least `t` but still fail to open is evidence against the dealer. Run
 
 ### 5. Discovery: let peers move, and let the routing table forget
 
-- **Moved peers stay unreachable.** `AddressBook::insert` only appends, every
-  dial uses `for_peer().first()`, and a key fetch only happens when the book is
-  empty, so a newer signed address never reaches the book. Promote the endpoint
-  when `note_contact_at` advances a peer's `seq`.
-- **Eviction is defeated.** `Directory::saw` clears failures unconditionally and
-  `seed_from_log` calls it for every logged peer every tick, so a dead logged
-  peer is never evicted. Keyless contacts (beacons, `closer` hints) are never
-  dialled, so they never fail either, and fake ids fill buckets permanently.
-  Clear failures only on an authenticated session; count running out of
-  deferrals as a failure.
-- **One unanswerable key want blocks all of them.** `key_wants()` always sends
-  the smallest id; rotate, count attempts, cap the set.
+- **Fixed in a follow-up:** a peer that moved is now dialled at its new
+  address (a superseding signed record promotes the endpoint in the address
+  book); a sighting no longer clears a contact's failure count, and running out
+  of deferrals counts as a failure, so dead and keyless contacts are evicted;
+  key wants rotate and are capped at `MAX_KEY_WANTS`; and the daemon calls
+  `Directory::expire` each tick, which also drops failure counts and parked
+  newcomers for contacts the table no longer holds.
 - **Sybil records own both signed-record stores.** The swarm `AddressBook`
   evicts lowest `seq`, which the signer chooses (`u64::MAX` is never evicted);
   `peers::Hints` refuses everything after 512 records and never expires.
   Bound `seq` against local time and evict by locally observed age.
-- **Nothing expires.** `Directory::expire` and the swarm `ProviderStore::expire`
-  are called only from tests; call them each tick and bound `deferrals`,
-  `failures` and `key_fetches`.
 - **The rest of the lock problem.** `seed_from_log` and `seed_from_hints` still
   request keys, and resolve hostnames, under the node lock. Move key fetches to
   the worker the seed list already uses.

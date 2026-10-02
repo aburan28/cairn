@@ -1016,6 +1016,7 @@ pub fn run(config: Config) -> Result<(), String> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             service.seed_from_log(&guard.node);
+            service.expire(crate::time::unix_seconds());
             guard.node.missing_code()
         };
         for endpoint in service.peers_for(&needs, config.fanout) {
