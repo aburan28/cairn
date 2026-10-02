@@ -96,6 +96,9 @@ public struct NodeClient: Sendable {
     public func fetchSeeds(from url: URL) async throws -> SeedList {
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        // Offline, the default 60s would hold first launch on "checking…"
+        // for a minute before the snapshot shows.
+        request.timeoutInterval = 6
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             return SeedList(version: 0, seeds: [])

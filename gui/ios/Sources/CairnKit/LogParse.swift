@@ -76,16 +76,17 @@ func jsonValue(_ value: Any?) -> JSONValue {
     switch value {
     case nil, is NSNull: return .null
     case let s as String: return .string(s)
-    case let n as Bool: return .bool(n)
-    case let n as Int: return .int(n)
-    case let n as Int64: return .int(Int(n))
     case let n as NSNumber:
-        // NSNumber is also Bool. `CFGetTypeID` is the honest check; comparing
-        // against `true as NSNumber` is what Swift's overlay already does and
-        // would collapse 1 into true.
+        // Before `as Bool` and `as Int`, not after: JSONSerialization hands
+        // back NSNumber, and Swift's bridging lets an NSNumber 1 cast to
+        // `Bool` and a 1.0 cast to `Int`, so `"epoch": 1` came out as true.
+        // `CFGetTypeID` is the honest check.
         if CFGetTypeID(n) == CFBooleanGetTypeID() { return .bool(n.boolValue) }
         if CFNumberIsFloatType(n) { return .double(n.doubleValue) }
         return .int(n.intValue)
+    case let n as Bool: return .bool(n)
+    case let n as Int: return .int(n)
+    case let n as Int64: return .int(Int(n))
     case let obj as [String: Any]:
         return .object(obj.mapValues { jsonValue($0) })
     case let arr as [Any]:

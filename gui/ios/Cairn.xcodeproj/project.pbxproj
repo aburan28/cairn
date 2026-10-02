@@ -11,12 +11,14 @@
 		A11C00000000000000000002 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A12C00000000000000000002 /* Assets.xcassets */; };
 		A11C00000000000000000003 /* CairnKit in Frameworks */ = {isa = PBXBuildFile; productRef = A13C00000000000000000001 /* CairnKit */; };
 		A11C00000000000000000004 /* CairnUI in Frameworks */ = {isa = PBXBuildFile; productRef = A13C00000000000000000002 /* CairnUI */; };
+		A11C00000000000000000005 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A12C00000000000000000005 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		A12C00000000000000000001 /* CairnApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CairnApp.swift; sourceTree = "<group>"; };
 		A12C00000000000000000002 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A12C00000000000000000003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A12C00000000000000000005 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		A12C00000000000000000004 /* Cairn.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Cairn.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -47,6 +49,7 @@
 				A12C00000000000000000001 /* CairnApp.swift */,
 				A12C00000000000000000002 /* Assets.xcassets */,
 				A12C00000000000000000003 /* Info.plist */,
+				A12C00000000000000000005 /* PrivacyInfo.xcprivacy */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -120,6 +123,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A11C00000000000000000002 /* Assets.xcassets in Resources */,
+				A11C00000000000000000005 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

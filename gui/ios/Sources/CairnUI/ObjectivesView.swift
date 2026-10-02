@@ -155,6 +155,10 @@ private struct FrontierHistory: View {
                         Text("A certificate settles once and moves no frontier, so there are no moves to list.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                    } else if let piecework = objective.piecework {
+                        Text("Piecework pays \(units(piecework.unit_price)) per unit and moves no frontier. \(piecework.paid_units) paid, \(units(piecework.pool_remaining)) left in the pool.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     } else {
                         Text("The frontier starts at the objective's baseline.")
                             .font(.footnote)
