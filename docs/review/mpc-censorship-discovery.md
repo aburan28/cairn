@@ -47,17 +47,17 @@ collide with an honest member's index.
 Changes a record, so `src/` and `reference/rust/` together, plus new
 conformance vectors alongside the frozen ones.
 
-### 2. Wire the sealed path into the running node (censorship)
+### 2. Wire the sealed path into the running node (censorship) — done
 
-`post_committee_share`, `pending_sealed_reveals` and `open_sealed` are called
-only from tests, nothing in the CLI, daemon, HTTP or MCP surface seals a
-submission, and `sync::EXCHANGEABLE` (`["objective","commitment","claim"]`)
-means a `committee_share` never leaves the node that wrote it. Until that
-changes, a sequencer that drops a reveal wins. Needed: `committee_share` in
-`EXCHANGEABLE` and the replay loop; the daemon posting its own seat's shares
-each tick once their epoch is due; something calling `open_sealed` on pending
-reveals; and a `--sealed` submit path. Update the §8 table in
-`docs/censorship.md` to *partial* until then.
+Landed in a follow-up. `committee_share` is exchangeable and replays; `cairn
+run` publishes the shares its seats owe (`--committee-identity`) and opens
+every reveal that has reached its threshold, each tick; the transport key
+doubles as the committee key (`CommitteeKey::from_transport`); and `cairn commit
+--sealed` seals a signed claim to the epoch's committee. The subset search is
+capped at `MAX_SUBSET_TRIALS`, so a bad share costs a node one bounded search
+per new share rather than an unbounded one per tick. Still open: `commit
+--sealed` does not route key fetches through `--proxy`, and MCP has no sealed
+submit.
 
 ### 3. Draw the committee from drand, not the log anchor (MPC, consensus)
 

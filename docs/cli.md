@@ -151,12 +151,20 @@ signing key's public half *is* the funder. Prints a decomposition note when the
 reward is below what the network costs to verify it — before you fund it, not
 after.
 
-### `commit <objective-id> --submitter S --artifact FILE [--nonce N] [--identity FILE]`
+### `commit <objective-id> --submitter S --artifact FILE [--nonce N] [--identity FILE] [--sealed]`
 
 Bind to an artifact without revealing it. A generated nonce is used when
 `--nonce` is absent; keep it, because the reveal needs it. With `--identity` the
 signing key's public half replaces `--submitter`: a signed record's submitter
 *is* its key, so a name you sign for cannot be claimed by anyone else.
+
+With `--sealed` (which needs `--identity`) the signed claim is sealed to the
+committee drawn for this epoch, and there is no reveal for you to make: after
+the epoch closes, every node running `cairn run --committee-identity` publishes
+the shares its seats owe, and any node opens the claim once a threshold of them
+has arrived. Each seat's key is fetched from the address in its peer record and
+checked against the seat's transport id, so the command needs to reach the
+committee directly; it does not use `--proxy` yet. See `docs/censorship.md` §2.
 
 ### `reveal <objective-id> --submitter S --artifact FILE --nonce N [--cites ID ...] [--relates KIND:CLAIM-ID ...] [--identity FILE]`
 
@@ -236,6 +244,7 @@ a binary that says so rather than starting without the reader.
 | `--queue DIR` | `<data>/queue` |
 | `--no-queue` | accept no submissions over HTTP |
 | `--mcp-identity FILE` | unsigned MCP submissions |
+| `--committee-identity FILE` | `--mcp-identity`; with neither, the node opens sealed submissions but serves no committee seat |
 | `--no-mcp` | when stdin belongs to something else, such as a service manager |
 | `--bootstrap FILE` | repeatable dial hint |
 | `--population FILE` | gossip population file |
