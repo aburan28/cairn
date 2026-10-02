@@ -1155,7 +1155,14 @@ impl Node {
                 .copied()
                 .unwrap_or(0);
             let mut shortfalls: Vec<String> = Vec::new();
-            for tier in ["certificate", "evaluator", "lean", "replay", "statistical"] {
+            for tier in [
+                "certificate",
+                "evaluator",
+                "lean",
+                "replay",
+                "statistical",
+                "workspace",
+            ] {
                 let owes = committed
                     .get(&(name.clone(), tier.to_string()))
                     .copied()
@@ -1889,7 +1896,9 @@ impl Node {
         }
         if let Some(block) = &objective.ratchet {
             let ratchet = Ratchet::from_value(block)?;
-            if kind != "evaluator" {
+            // `workspace` derives its score from the tree it builds, as
+            // `evaluator` does from an artifact.
+            if kind != "evaluator" && kind != "workspace" {
                 return Err("a ratchet objective needs a score-producing verifier".into());
             }
             if ratchet.reward != objective.reward {

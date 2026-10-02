@@ -862,8 +862,9 @@ impl fmt::Display for RuleViolation {
             RuleViolation::RatchetNeedsEvaluator { kind } => write!(
                 f,
                 "a ratchet objective needs a score-producing verifier \
-                 ({}), not {kind:?}",
-                Kind::Evaluator
+                 ({} or {}), not {kind:?}",
+                Kind::Evaluator,
+                Kind::Workspace
             ),
             RuleViolation::RatchetRewardMismatch { ratchet, objective } => write!(
                 f,
@@ -1479,7 +1480,11 @@ impl Node {
 
         if let Some(block) = &objective.ratchet {
             let ratchet = Ratchet::from_value(block).map_err(RuleViolation::MalformedRatchet)?;
-            if kind != Kind::Evaluator.as_str() {
+            // `workspace` derives a score from the tree it builds, exactly as
+            // `evaluator` does from an artifact, and is the kind a repository
+            // benchmark ratchets on. No log held a `workspace` objective before
+            // this widening, because no node could post one.
+            if kind != Kind::Evaluator.as_str() && kind != Kind::Workspace.as_str() {
                 return Err(RuleViolation::RatchetNeedsEvaluator {
                     kind: kind.to_string(),
                 });
