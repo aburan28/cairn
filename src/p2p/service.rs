@@ -233,9 +233,30 @@ impl Service {
         if peer == self.identity.id() {
             return;
         }
-        self.with_directory(|directory| {
+        let id = NodeId::from_bytes(peer);
+        let previous = self.with_directory(|directory| {
+            let previous = directory
+                .routing()
+                .contacts()
+                .find(|held| held.id == id)
+                .map(|held| held.seq);
             directory.saw(PeerContact::new(peer, addr, seq));
+            previous
         });
+        // A signed record that supersedes the one routing held is a peer that
+        // moved. Routing took the new address, but every dial reads the
+        // address book, which only ever appended -- so a peer whose key was
+        // already held stayed dialled at the address it had left, and no key
+        // fetch was ever made to fix it because the book was not empty. The
+        // key is the identity and did not change; only where to reach it did.
+        if seq > 0 && previous.is_some_and(|held| seq > held) {
+            self.with_book(|book| book.promote(&peer, addr));
+        }
+    }
+
+    /// Drop lapsed DHT state. Run once a tick; see [`Directory::expire`].
+    pub fn expire(&self, now: u64) -> usize {
+        self.with_directory(|directory| directory.expire(now))
     }
 
     /// The endpoints worth dialling when specific blobs are missing.
