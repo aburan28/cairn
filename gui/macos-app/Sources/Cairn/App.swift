@@ -30,6 +30,9 @@ struct CairnApp: App {
                 Button("Restart / Reconnect") { delegate.node.restart() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 Divider()
+                Button("New Challenge…") { delegate.node.presentNewChallenge = true }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(delegate.node.isAttached)
                 Button("Tasks…") { delegate.node.presentTasks = true }
                     .disabled(delegate.node.isAttached)
                 Button("Secrets…") { delegate.node.presentSecrets = true }
@@ -111,6 +114,11 @@ struct ContentView: View {
                     // full-width strip of prose above the page. The addresses
                     // and the explanation are one click away, in its popover.
                     NodeStatusButton(node: node, url: url)
+                    Button { node.presentNewChallenge = true } label: {
+                        Label("New Challenge", systemImage: "sparkles")
+                    }
+                    .help("Describe a problem in plain words; Cairn drafts the challenge and tests its checker")
+                    .disabled(node.isAttached)
                     Button { node.presentTasks = true } label: {
                         Label("Tasks", systemImage: "target")
                     }
@@ -141,6 +149,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $node.presentSecrets) {
             SecretsSheet(node: node, isPresented: $node.presentSecrets)
+        }
+        .sheet(isPresented: $node.presentNewChallenge) {
+            NewChallengeSheet(node: node, browser: browser, isPresented: $node.presentNewChallenge)
         }
     }
 }

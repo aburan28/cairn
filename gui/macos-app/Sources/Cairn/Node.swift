@@ -41,6 +41,7 @@ final class Node: ObservableObject {
     @Published var presentPeers = false
     @Published var presentTasks = false
     @Published var presentSecrets = false
+    @Published var presentNewChallenge = false
 
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }
@@ -219,14 +220,7 @@ final class Node: ObservableObject {
             "--listen", "\(settings.p2pHost):\(p2p)",
             "--serve", "\(NodeSettings.loopbackHost):\(http)",
         ] + settings.runArguments
-        // Finder gives an app /usr/bin:/bin:/usr/sbin:/sbin. Verifiers the
-        // node runs want python3 and friends from where people install them.
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = ["/opt/homebrew/bin", "/usr/local/bin", env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"]
-            .joined(separator: ":")
-        // The limits on its work, which the node enforces itself.
-        env.merge(settings.environment) { _, chosen in chosen }
-        p.environment = env
+        p.environment = Self.childEnvironment(settings)
 
         let input = Pipe()
         p.standardInput = input
@@ -332,6 +326,21 @@ final class Node: ObservableObject {
             }
         }
         sink?.waitForEnd(seconds: 1)
+    }
+
+    /// What every `cairn` this app starts runs with.
+    ///
+    /// Finder gives an app /usr/bin:/bin:/usr/sbin:/sbin. Verifiers the node
+    /// runs want python3 and friends from where people install them. The
+    /// limits on its work are the node's own to enforce. One function, so a
+    /// checker tested before posting runs under exactly what the node gives
+    /// it after.
+    nonisolated static func childEnvironment(_ settings: NodeSettings) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = ["/opt/homebrew/bin", "/usr/local/bin", env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"]
+            .joined(separator: ":")
+        env.merge(settings.environment) { _, chosen in chosen }
+        return env
     }
 
     // MARK: internals
@@ -482,6 +491,16 @@ final class Node: ObservableObject {
     struct SecretsList {
         var names: [String]
         var dir: String?
+    }
+
+    /// One secret's value, from `cairn secret get`, or nil if it is not set.
+    /// Held only by the caller, in memory, for as long as it needs it.
+    func secretValue(_ name: String) async -> String? {
+        guard let binary = binary ?? Self.locateBinary() else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            let result = Self.runCairn(binary, ["secret", "get", name])
+            return result.status == 0 && !result.out.isEmpty ? result.out : nil
+        }.value
     }
 
     func listSecrets(completion: @escaping (SecretsList?, String?) -> Void) {
