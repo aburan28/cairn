@@ -399,6 +399,12 @@ jobs:
       # release.yml builds it, so an x86_64-only break shows up here and not
       # on a tag.
       - run: gui/macos-app/build.sh --universal
+      # Its updater decides which bytes get installed as root, and hands root
+      # a shell script and an AppleScript held in Swift strings. The tests
+      # pin the first and parse the other two -- `osacompile` exists only
+      # here, so this is the one place the AppleScript is ever compiled
+      # before somebody's update runs it.
+      - run: swift test --package-path gui/macos-app
 
   gui-ios:
     # The iPhone reader, including Cairn.xcodeproj. Lives in ios-app.yml so

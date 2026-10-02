@@ -297,6 +297,11 @@ cp "$REPO/LICENSE" "$STAGE/LICENSE.txt"
 
 # -- the image ------------------------------------------------------------------
 mkdir -p "$OUT"
+# Cairn.app's updater finds the release's image by this name, with
+# `universal` for the label, and its checksum by the name plus `.sha256`
+# (`Release.imageName` in gui/macos-app/Sources/Cairn/Release.swift). Rename
+# both or neither: an app that cannot find the image says the installer is
+# "still being uploaded", forever, and nothing fails.
 DMG="$OUT/cairn-$VERSION-macos-$ARCH_LABEL.dmg"
 VOLNAME="Cairn $UPSTREAM_VERSION"
 

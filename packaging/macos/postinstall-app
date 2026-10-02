@@ -2,10 +2,15 @@
 # Runs as root after Cairn.app is written to /Applications/Cairn.app.
 #
 # Opens the GUI for the console user so a double-click install lands on a
-# running window, not only a receipt. Installer scripts run as root, so a bare
-# `open` would start the app as root and put its data in the wrong home; launch
-# as the logged-in user instead. Failures here must not fail the install: the
-# package already put the bits on disk.
+# running window, not only a receipt. It is also how an update reopens it:
+# Cairn.app's updater quits before running `installer` on this package
+# (InstallScript in gui/macos-app/Sources/Cairn/Release.swift), and relies on
+# this script, not on itself, for the window that comes back.
+#
+# Installer scripts run as root, so a bare `open` would start the app as root
+# and put its data in the wrong home; launch as the logged-in user instead.
+# Failures here must not fail the install: the package already put the bits
+# on disk.
 set -eu
 
 TARGET="${3:-/}"

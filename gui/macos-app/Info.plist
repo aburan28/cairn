@@ -10,7 +10,10 @@
 	<key>CFBundleDisplayName</key><string>Cairn</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<!-- A checkout's build says 0.0.0; packaging/macos/build-dmg.sh stamps the
-	     release's version over both of these before it signs the bundle. -->
+	     release's version over both of these before it signs the bundle.
+	     The updater reads CFBundleShortVersionString to decide whether a
+	     release is newer, and 0.0.0 as "development build": checked, never
+	     replaced in place (Sources/Cairn/Version.swift). -->
 	<key>CFBundleShortVersionString</key><string>0.0.0</string>
 	<key>CFBundleVersion</key><string>0.0.0</string>
 	<key>LSMinimumSystemVersion</key><string>13.0</string>

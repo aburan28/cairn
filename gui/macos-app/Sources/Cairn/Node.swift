@@ -33,6 +33,10 @@ final class Node: ObservableObject {
     /// Recent discovery / session lines, newest last, for the status strip.
     @Published private(set) var networkLines: [String] = []
     @Published private(set) var sessionsOK = 0
+    /// What the `cairn` this app runs says it is, from its own `--version`.
+    /// Nil until a start has found and run one; kept across restarts, since
+    /// the binary does not change under a running app except by an update.
+    @Published private(set) var cliVersion: String?
     /// Drives the Peers sheet from the Node menu and the toolbar.
     @Published var presentPeers = false
     @Published var presentTasks = false
@@ -133,6 +137,7 @@ final class Node: ObservableObject {
         }
 
         guard let binary = Self.locateBinary() else {
+            cliVersion = nil
             state = .failed("""
                 No cairn command was found. Cairn.app runs the one the installer \
                 puts at /usr/local/cairn/bin/cairn; open "Install Cairn.pkg" from \
@@ -144,9 +149,11 @@ final class Node: ObservableObject {
         // `cairn run` refuses to start without the embedded reader, with an
         // error that talks about build features. Said here in the app's terms.
         guard let version = Self.version(of: binary) else {
+            cliVersion = nil
             state = .failed("\(binary.path) does not run.")
             return
         }
+        cliVersion = AppVersion.cli(fromVersionOutput: version)
         guard version.range(of: #"(?m)^\s*ui\s+embedded"#, options: .regularExpression) != nil else {
             state = .failed("""
                 \(binary.path) was built without the embedded reader, so it has \

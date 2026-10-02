@@ -61,6 +61,16 @@ Browser** opens the same page in your browser; **Node → Show Data Folder**,
 **Show Node Log** and **Copy Peer Id** are where to look when it will not
 start or when someone else is adding this node.
 
+**Upgrading.** The app's version is under its window title. It checks GitHub
+for a newer release when it opens and every six hours, and offers to install
+it: **Install and Relaunch** downloads that release's `.dmg`, checks it
+against its published SHA-256, and runs the same `Install Cairn.pkg` after
+asking for an administrator password — the command and the app move
+together, and the app's data folder is left alone. Nothing installs without
+that click. Settings → Updates turns the schedule off;
+[gui/macos-app/README.md](../gui/macos-app/README.md#updates) has the
+details. Installing a newer `.dmg` by hand does the same thing.
+
 **macOS will refuse to open it the first time.** The installer is not signed
 with an Apple Developer ID, because this project does not have one, so macOS
 cannot say who made it and says that instead of opening it.
@@ -82,7 +92,7 @@ dialog bothers you more than piping a script to a shell does, use that.
 To remove it:
 
 ```sh
-sudo rm -rf /usr/local/cairn /usr/local/bin/cairn /Applications/Cairn.app
+sudo rm -rf /usr/local/cairn /usr/local/bin/cairn /Applications/Cairn.app /Library/Logs/Cairn
 sudo pkgutil --forget org.cairn.cli
 sudo pkgutil --forget org.cairn.app
 ```
