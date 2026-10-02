@@ -131,7 +131,7 @@ struct SettingsView: View {
             }
             } // !attaching
 
-            UpdatesSection(updates: updates)
+            UpdatesSection(updates: updates, nodeVersion: node.binaryVersion)
 
             if needsRestart {
                 Section {

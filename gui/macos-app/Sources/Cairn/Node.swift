@@ -33,6 +33,10 @@ final class Node: ObservableObject {
     /// Recent discovery / session lines, newest last, for the status strip.
     @Published private(set) var networkLines: [String] = []
     @Published private(set) var sessionsOK = 0
+    /// The running binary's own version, from the first line of
+    /// `cairn --version` ("cairn 1.8.1"). Nil in attach mode, where this app
+    /// runs no binary and the reader's page says the node's.
+    @Published private(set) var binaryVersion: String?
     /// Drives the Peers sheet from the Node menu and the toolbar.
     @Published var presentPeers = false
     @Published var presentTasks = false
@@ -120,6 +124,7 @@ final class Node: ObservableObject {
         listenAddress = nil
         networkLines = []
         sessionsOK = 0
+        binaryVersion = nil
         state = .starting
         settings = NodeSettings.current()
 
@@ -146,6 +151,11 @@ final class Node: ObservableObject {
         guard let version = Self.version(of: binary) else {
             state = .failed("\(binary.path) does not run.")
             return
+        }
+        binaryVersion = version.split(separator: "\n").first.map { line in
+            var v = String(line).trimmingCharacters(in: .whitespaces)
+            if v.hasPrefix("cairn ") { v.removeFirst("cairn ".count) }
+            return v
         }
         guard version.range(of: #"(?m)^\s*ui\s+embedded"#, options: .regularExpression) != nil else {
             state = .failed("""

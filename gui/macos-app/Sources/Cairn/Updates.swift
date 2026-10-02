@@ -64,6 +64,55 @@ final class Updates: ObservableObject {
     }
 }
 
+/// This app's version as a person should read it. build-dmg.sh stamps the
+/// release's version into Info.plist; a checkout's build still says 0.0.0,
+/// which is not a version anyone released.
+enum AppVersion {
+    static var release: String? {
+        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        guard let v, v != "0.0.0" else { return nil }
+        return v
+    }
+
+    static var label: String { release ?? "development build" }
+
+    /// True when both are known and disagree: the .dmg installs the two
+    /// together, so a difference means one was replaced by some other route.
+    static func differs(fromNode node: String?) -> Bool {
+        guard let release, let node else { return false }
+        return release != node
+    }
+}
+
+/// About Cairn, with the `cairn` command's version under the app's: the
+/// standard panel knows only the bundle's.
+@MainActor
+func showAboutPanel(node: Node) {
+    var credits: [String] = []
+    if let v = node.binaryVersion {
+        credits.append("cairn command \(v)")
+        if AppVersion.differs(fromNode: v) {
+            credits.append("The app and the command are different versions. Check for Updates, or install the newest .dmg, to bring them together.")
+        }
+    } else if node.isAttached {
+        credits.append("Attached to another node; its reader shows its version.")
+    }
+    var options: [NSApplication.AboutPanelOptionKey: Any] = [
+        .credits: NSAttributedString(
+            string: credits.joined(separator: "\n"),
+            attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]),
+    ]
+    if AppVersion.release == nil {
+        options[.applicationVersion] = AppVersion.label
+        options[.version] = ""
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    NSApp.orderFrontStandardAboutPanel(options: options)
+}
+
 /// The app menu's item, under About Cairn, where a Mac app keeps it.
 struct CheckForUpdatesButton: View {
     @ObservedObject var updates: Updates
@@ -77,6 +126,7 @@ struct CheckForUpdatesButton: View {
 /// Settings' section: whether to look once a day, and when it last looked.
 struct UpdatesSection: View {
     @ObservedObject var updates: Updates
+    let nodeVersion: String?
 
     var body: some View {
         Section {
@@ -90,6 +140,9 @@ struct UpdatesSection: View {
                 Button(updates.isEnabled ? "Check Now" : "Open Releases Page") { updates.check() }
                     .disabled(!updates.canCheck)
             }
+            if let nodeVersion {
+                LabeledContent("cairn command") { Text(verbatim: nodeVersion) }
+            }
         } header: {
             Text("Updates")
         } footer: {
@@ -100,10 +153,7 @@ struct UpdatesSection: View {
         }
     }
 
-    private var version: String {
-        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        return "Cairn \(v)"
-    }
+    private var version: String { "Cairn \(AppVersion.label)" }
 
     private var footer: String {
         guard updates.isEnabled else {

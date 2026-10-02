@@ -106,6 +106,10 @@ after an administrator password. The installer replaces the `cairn` command
 and this app together and opens the app again. Settings has the automatic
 check's switch and a Check Now button.
 
+The app's version is under the window title. The toolbar's status popover,
+About Cairn and Settings also show the `cairn` command's version, from
+`cairn --version`, and the popover warns when the two differ.
+
 A build with no `SUPublicEDKey` in its Info.plist, such as one from
 `build.sh`, cannot verify an update, so it never starts Sparkle and the menu
 item opens the releases page. [packaging/README.md](../../packaging/README.md#updates-for-cairnapp)

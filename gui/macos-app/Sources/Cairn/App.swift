@@ -14,7 +14,8 @@ struct CairnApp: App {
         }
         .defaultSize(width: 1180, height: 800)
         .commands {
-            CommandGroup(after: .appInfo) {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Cairn") { showAboutPanel(node: delegate.node) }
                 CheckForUpdatesButton(updates: delegate.updates)
             }
             CommandGroup(replacing: .newItem) {}
@@ -99,6 +100,9 @@ struct ContentView: View {
                 Failed(node: node, message: message)
             }
         }
+        // The version under the window's title, so "which one am I on" needs
+        // no menu. The node's is in the status popover and About Cairn.
+        .navigationSubtitle(AppVersion.label)
         .toolbar {
             ToolbarItemGroup {
                 if case .running(let url) = node.state {
@@ -194,8 +198,25 @@ private struct NodeDetails: View {
                     Text("Sessions").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
                     Text(verbatim: "\(node.sessionsOK)").monospacedDigit()
                 }
+                GridRow {
+                    Text("App").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                    Text(verbatim: AppVersion.label)
+                }
+                if let v = node.binaryVersion {
+                    GridRow {
+                        Text("Node").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                        Text(verbatim: "cairn \(v)")
+                    }
+                }
             }
             .font(.callout)
+
+            if AppVersion.differs(fromNode: node.binaryVersion) {
+                Label("The app and the cairn command are different versions.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
 
             HStack {
                 Button("Peers…") {
