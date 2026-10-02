@@ -144,8 +144,12 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560)
-        .fixedSize(horizontal: false, vertical: true)
+        // Wide enough for a whole peer id on one line. Not sized to its
+        // content's height: with every section open that is taller than a
+        // laptop screen, and a window past the bottom edge cannot be scrolled.
+        // The form scrolls instead, and the window can be dragged taller.
+        .frame(width: 640)
+        .frame(minHeight: 360, idealHeight: idealHeight, maxHeight: .infinity)
         .disabled(copying || bootstrapBusy)
         .task(id: current.dataFolder) { await measure() }
         .alert(pending?.title ?? "", isPresented: Binding(
@@ -288,7 +292,11 @@ struct SettingsView: View {
             }
             HStack {
                 Button("Choose…") { chooseBootstrap() }
-                TextField("host:port for generate", text: $bootstrapAddr)
+                // A grouped form puts a field's title beside it, which in
+                // 160 points left no room for the field.
+                TextField("Address to generate for", text: $bootstrapAddr, prompt: Text("host:port"))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
                     .font(.body.monospaced())
                     .frame(width: 160)
                 Button("Generate…") { generateBootstrap() }
@@ -331,6 +339,13 @@ struct SettingsView: View {
     }
 
     // MARK: behaviour
+
+    /// The window's opening height: most of the form at once, with room left
+    /// on this screen for the title bar and some desktop around it.
+    private var idealHeight: CGFloat {
+        let visible = NSScreen.main?.visibleFrame.height ?? 800
+        return max(360, min(900, visible - 120))
+    }
 
     /// Settings a restart would change, on a node that is up or coming up. A
     /// stopped or failed node picks them up on its next start anyway.
