@@ -14,6 +14,9 @@ struct CairnApp: App {
         }
         .defaultSize(width: 1180, height: 800)
         .commands {
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesButton(updates: delegate.updates)
+            }
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { delegate.browser.reload() }
@@ -45,7 +48,7 @@ struct CairnApp: App {
 
         // ⌘, and the app menu's Settings… item come with the scene.
         Settings {
-            SettingsView(node: delegate.node)
+            SettingsView(node: delegate.node, updates: delegate.updates)
         }
     }
 }
@@ -54,6 +57,7 @@ struct CairnApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let node = Node()
     let browser = Browser()
+    let updates = Updates()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         node.start()

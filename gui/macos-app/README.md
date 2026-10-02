@@ -96,6 +96,21 @@ The page itself is the node's `/ui/`, which recognises this window by the
 pitch and footer: here the sidebar is the only navigation, and the page opens
 on the node's numbers.
 
+## Updates
+
+**Cairn → Check for Updates…**, and a check once a day, both by
+[Sparkle](https://sparkle-project.org). The feed is `appcast.xml` on the newest
+GitHub release; an update is that release's .dmg, verified against the
+Ed25519 key built into the app, and installed by its own `Install Cairn.pkg`
+after an administrator password. The installer replaces the `cairn` command
+and this app together and opens the app again. Settings has the automatic
+check's switch and a Check Now button.
+
+A build with no `SUPublicEDKey` in its Info.plist, such as one from
+`build.sh`, cannot verify an update, so it never starts Sparkle and the menu
+item opens the releases page. [packaging/README.md](../../packaging/README.md#updates-for-cairnapp)
+has the release side and the one secret it needs.
+
 ## Settings
 
 ⌘, or the gear in the toolbar. How much of this Mac the node's work may take,
