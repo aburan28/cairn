@@ -381,8 +381,10 @@ Objective-authored code -- pinned checkers, evaluators, and statistics, replay \
 commands, and Lean on submitted proof text -- runs in a child process inside an \
 OS jail: bubblewrap on Linux, a seatbelt profile on macOS. Enforced by the \
 kernel: no network of any kind (including unix sockets to a local daemon), no \
-reads outside declared bundle, toolchain, and system paths, no writes outside a \
-scratch directory that is deleted when the check finishes, a wall-clock \
+reads outside declared bundle, toolchain, and system paths, nothing written to \
+the host outside a scratch directory that is deleted when the check finishes \
+(under bubblewrap a write to a path the jail does not show from the host lands \
+on its own tmpfs and is discarded with it; seatbelt refuses it), a wall-clock \
 deadline, and best-effort RLIMIT_CPU/RLIMIT_AS. While the child runs the node \
 also measures its process tree and holds it to a CPU cap (CAIRN_SANDBOX_CPUS, \
 by pausing it) and, on macOS, which has no RLIMIT_AS, to the memory cap; a \
@@ -4287,8 +4289,130 @@ mod tests {
             ("entrypoint", Value::string("check")),
         ]);
         let verdict = registry.run(&spec, &empty_object());
-        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
-        assert!(!target.exists(), "the jail let a write through");
+        // The promise is the host's: nothing outside scratch is written there.
+        // How the attempt ends is the mechanism's, and the two differ. Seatbelt
+        // denies the write, the checker raises, and a crash is Unavailable.
+        // Under bubblewrap the write succeeds -- into the jail. It shows `w.py`
+        // and not the directory around it, so bwrap made that directory as a
+        // mount point on its own tmpfs: writable, and gone with the namespace.
+        // Refusing it would take more than `--remount-ro /`, because under
+        // `/tmp` that directory is on `/tmp`'s tmpfs, a mount of its own; and a
+        // read-only `/tmp` would fail honest code that writes there rather than
+        // to `$TMPDIR`, to protect nothing the host can see. So it is allowed,
+        // and this pins that it stays out of the host.
+        assert!(!target.exists(), "the jail let a write through to the host");
+        let expected = match sandbox::mechanism() {
+            sandbox::Mechanism::Bubblewrap(_) => Status::Accept,
+            _ => Status::Unavailable,
+        };
+        assert_eq!(verdict.status, expected, "{}", verdict.detail);
+    }
+
+    #[test]
+    fn objective_code_can_write_its_scratch_directory() {
+        // The other half of the test above: `$TMPDIR` is where objective code
+        // may write, and it has to be writable. Under bubblewrap it was not. A
+        // pinned run starts in its scratch directory, and the jail bound that
+        // cwd read-only after binding it writable, so the later mount won and a
+        // checker using `tempfile` was Unavailable on Linux alone.
+        if !have("python3") {
+            return;
+        }
+        let root = tmpdir("proofwork-jail-scratch");
+        let source = "import os\n\
+                      def check(artifact):\n\
+                      \x20   path = os.path.join(os.environ[\"TMPDIR\"], \"scratch\")\n\
+                      \x20   with open(path, \"w\") as out:\n\
+                      \x20       out.write(\"x\")\n\
+                      \x20   with open(path) as back:\n\
+                      \x20       return back.read() == \"x\"\n";
+        let sha = write_pinned(&root, "scratch.py", source);
+        let registry = VerifierRegistry::new(root.path());
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("scratch.py")),
+            ("checker_sha256", Value::string(sha)),
+            ("entrypoint", Value::string("check")),
+        ]);
+        let verdict = registry.run(&spec, &empty_object());
+        assert_eq!(verdict.status, Status::Accept, "{}", verdict.detail);
+    }
+
+    /// `name`, reached as `which` reaches `python3` on many hosts: through an
+    /// absolute symlink whose target is another absolute symlink, in a
+    /// directory the jail has no reason to show. Debian's `/usr/bin/python3 ->
+    /// /etc/alternatives/python3` is the shape. Returns the path to hand over.
+    #[cfg(unix)]
+    fn through_alternatives(dir: &Path, elsewhere: &TempDir, name: &str, file: &Path) -> PathBuf {
+        let hop = elsewhere.path().join(name);
+        std::os::unix::fs::symlink(file, &hop).expect("symlink");
+        fs::create_dir_all(dir).expect("dir");
+        std::os::unix::fs::symlink(&hop, dir.join(name)).expect("symlink");
+        dir.join(name)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_interpreter_named_through_absolute_symlinks_still_verifies() {
+        // `which` hands over a name, and on many hosts it is an absolute
+        // symlink. Under bubblewrap, `/usr/local/bin/python3 ->
+        // /usr/bin/python3.11` made every pinned verdict on its host
+        // Unavailable: the jail mounted the interpreter at that name, inside
+        // its `/usr` bind, and a mount cannot land on a symlink. A test cannot
+        // put a link under `/usr`; the sandbox's own tests rebuild that failure
+        // in a directory the jail shows. This is the pinned path end to end,
+        // with an interpreter that only runs if the jail recreates both links.
+        let Some(python) = which("python3") else {
+            return;
+        };
+        let root = tmpdir("proofwork-symlinked-python");
+        let elsewhere = tmpdir("proofwork-alternatives");
+        let interpreter =
+            through_alternatives(&root.path().join("bin"), &elsewhere, "python3", &python);
+        let sha = write_pinned(&root, "checker.py", CHECKER);
+        let registry = VerifierRegistry::new(root.path())
+            .with_python_binary(interpreter.to_string_lossy().into_owned());
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("checker.py")),
+            ("checker_sha256", Value::string(sha)),
+            ("entrypoint", Value::string("check")),
+        ]);
+        let verdict = registry.run(&spec, &Value::object([("n", Value::Int(42))]));
+        assert_eq!(verdict.status, Status::Accept, "{}", verdict.detail);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lean_named_through_absolute_symlinks_is_run_not_rejected() {
+        // Lean is the verifier whose non-zero exit is a verdict, and a jail
+        // that cannot execute the binary exits non-zero too. A `lean` reached
+        // through a link the jail showed but could not follow -- here inside
+        // the declared project, its target outside it -- came back Reject: the
+        // shell's "not found" read as the kernel refusing the proof. `true`
+        // stands in for Lean and accepts everything, so anything other than
+        // Accept is the jail's doing.
+        let Some(stand_in) = which("true") else {
+            return;
+        };
+        let root = tmpdir("proofwork-symlinked-lean");
+        let elsewhere = tmpdir("proofwork-lean-elsewhere");
+        let binary = through_alternatives(
+            &root.path().join("project/bin"),
+            &elsewhere,
+            "true",
+            &stand_in,
+        );
+        let registry =
+            VerifierRegistry::new(root.path()).with_lean_binary(binary.to_string_lossy());
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            ("statement", Value::string("theorem t : True")),
+            ("project_root", Value::string("project")),
+        ]);
+        let artifact = Value::object([("proof", Value::string(":= trivial"))]);
+        let verdict = registry.run(&spec, &artifact);
+        assert_eq!(verdict.status, Status::Accept, "{}", verdict.detail);
     }
 
     #[test]

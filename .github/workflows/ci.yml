@@ -172,6 +172,41 @@ jobs:
       - run: ./reference/rust/target/release/cairn-reference signed-records conformance/signed-records.json
       - run: ./reference/rust/target/release/cairn-reference signatures conformance/signatures.json
 
+  jail:
+    # The `rust` job has no bubblewrap, so it tests what a host without a jail
+    # gets. This job installs it, so the same suite runs with every verifier
+    # spawn inside the jail a Linux node actually uses.
+    #
+    # Until it existed nothing in CI ran that path, and three bugs lived only
+    # there: a program named through an absolute symlink
+    # (`/usr/local/bin/python3 -> /usr/bin/python3.11`, Debian's
+    # `/etc/alternatives`) could not start, so every pinned verdict on such a
+    # host was Unavailable and every Lean verdict, for a `lean` named that way,
+    # Reject; a pinned checker's scratch directory was mounted read-only; and
+    # a test expected a refusal the jail never gave.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # Ubuntu confines unprivileged user namespaces with AppArmor (on by
+      # default since 23.10), and where it does, bwrap installs and then cannot
+      # start. A node would grant /usr/bin/bwrap `userns` in an AppArmor
+      # profile; a throwaway runner can lift the restriction.
+      - run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      # The probe `sandbox::mechanism` runs. A jail that cannot start fails
+      # here, by name, rather than as a green job that ran everything unjailed.
+      - run: bwrap --version && bwrap --ro-bind / / --unshare-net -- /bin/true
+      # And the suite checks that its own probe reached the same answer.
+      - run: cargo test --locked --all-targets
+        env:
+          CAIRN_EXPECT_SANDBOX: bwrap
+
   msrv:
     # The crate claims rust-version 1.89 (`File::try_lock` stabilized there).
     # An unchecked MSRV is a claim, not a fact, and downstream users are the

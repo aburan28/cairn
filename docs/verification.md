@@ -189,8 +189,15 @@ Enforced by the kernel:
 - **No network of any kind**, including a unix socket to a daemon on the same
   host. An exfiltration path that only needs `localhost` is still an
   exfiltration path.
-- **No writes outside a scratch directory** that is deleted when the check
-  finishes.
+- **Nothing written to the host outside a scratch directory** that is deleted
+  when the check finishes. The scratch directory is the child's `$TMPDIR` and
+  `HOME`, and it is writable. A write anywhere else is refused by seatbelt.
+  Under bubblewrap it fails on a path the jail shows from the host, which is
+  read-only, and anywhere else lands on the jail's own tmpfs and is discarded
+  with it. So a checker that writes beside its own source is `UNAVAILABLE` on
+  macOS and can be `ACCEPT` on Linux, and on neither does the write reach the
+  host. Refusing it under bubblewrap too would take a read-only `/tmp`, which
+  fails honest code that writes there rather than to `$TMPDIR`.
 - A wall-clock deadline, and best-effort `RLIMIT_CPU` / `RLIMIT_AS`.
 - Two caps the node measures while the child runs, over its whole process tree:
   CPU cores (`CAIRN_SANDBOX_CPUS`, enforced by pausing the tree) and, on macOS,
@@ -210,6 +217,13 @@ toolchain. When a jailed run fails, the verdict's evidence names the mechanism,
 so an operator can tell a broken jail from a broken checker. Raw child
 stdout/stderr is not copied into consensus evidence: only SHA-256 digests and
 the derived fields needed to reproduce the verdict are retained.
+
+A toolchain reached through symlinks is fine: `/usr/local/bin/python3 ->
+/usr/bin/python3.11`, or Debian's `/usr/bin/python3 -> /etc/alternatives/python3`.
+bubblewrap cannot mount onto a symlink, so the jail mounts the file the links
+end at, recreates the links it does not already show, and runs the program under
+the name `PATH` found it by — the name a busybox- or rustup-style binary reads to
+decide what to be.
 
 **`python3` must resolve to a real interpreter, not a version-manager shim.**
 The jail allow-lists the interpreter binary and its runtime root — the
