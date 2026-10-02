@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/aburan28/cairn/compare/v1.6.0...v1.7.0) (2026-10-02)
+
+
+### Features
+
+* **macos:** paste named secrets in the GUI ([#179](https://github.com/aburan28/cairn/issues/179)) ([6a73cf9](https://github.com/aburan28/cairn/commit/6a73cf9134b81b1b963d011bf2d1fd04f32dee0f))
+
 ## [1.6.0](https://github.com/aburan28/cairn/compare/v1.5.0...v1.6.0) (2026-10-02)
 
 
