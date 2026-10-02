@@ -806,6 +806,11 @@ enum Command {
     Arena {
         args: Vec<String>,
     },
+    /// The replicated research workspace: signed ops, CRDT merge, sandboxed
+    /// runs. Parses its own tail; see `src/lab/cli.rs`.
+    Lab {
+        args: Vec<String>,
+    },
     /// Score candidate artifacts locally and submit only the ones that already
     /// pass. The proposer loop.
     Propose {
@@ -1458,6 +1463,9 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             args: cursor.rest(),
         },
         "arena" => Command::Arena {
+            args: cursor.rest(),
+        },
+        "lab" => Command::Lab {
             args: cursor.rest(),
         },
         "canon" => {
@@ -3829,6 +3837,16 @@ fn print_help(out: &mut dyn Write) {
         "      standing and confidence for a claim, under a policy you choose;",
     );
     say(out, "      reads the log, writes nothing, moves no money");
+    say(out, "  lab <command> ...");
+    say(
+        out,
+        "      a research workspace: signed ops that merge without git, leases,",
+    );
+    say(
+        out,
+        "      messages, and runs in gVisor sandboxes; never touches the log",
+    );
+    say(out, "      (`cairn lab help` lists its commands)");
     say(out, "  blob [ls|need|publish|gc]");
     say(
         out,
@@ -9539,6 +9557,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::GenBootstrap { args } => Ok(cairn::cli::gen_bootstrap(args.clone())),
         Command::Seeds { args } => Ok(cairn::cli::seeds(args.clone())),
         Command::Arena { args } => Ok(cairn::cli::arena(args.clone())),
+        Command::Lab { args } => Ok(cairn::lab::cli::main(args.clone())),
         Command::Propose {
             objective,
             artifacts,

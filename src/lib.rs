@@ -37,6 +37,7 @@ pub mod gossip;
 pub mod hex;
 pub mod incentive;
 pub mod knowledge;
+pub mod lab;
 pub mod ledger;
 pub mod logging;
 mod mcp;

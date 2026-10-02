@@ -28,6 +28,9 @@ and they are not conveniences.
 | `CAIRN_BEACON_PORT` | `47396` | moves the LAN discovery beacon port; `off` or `0` disables beacons |
 | `CAIRN_SEEDS` | built-in list | a seed list in the `launch/seeds.json` shape for `run`, `p2p` and `serve --p2p-listen` to dial; `off` or `0` dials no seeds. Unset or empty uses the list compiled into the binary |
 | `CAIRN_LEDGER_FSYNC` | unset | `1` calls `fsync` after every append |
+| `CAIRN_LAB` | `./.cairn-lab` | the lab directory for `cairn lab`, when `--lab` is not given |
+| `CAIRN_LAB_IDENTITY` | — | the ed25519 identity file `cairn lab` signs ops with, when `--identity` is not given |
+| `CAIRN_LAB_SANDBOX` | `auto` | backend for `cairn lab exec` and the lab's MCP `lab_exec`: `auto` (gVisor, else bubblewrap, else refuse), `runsc`, `bwrap`, or `none` (unconfined; the receipt says so). The only way an MCP agent's runs can be unconfined |
 
 `RUST_LOG` is **not** read. This is not `env_logger`, and pretending otherwise
 would promise a directive syntax (`p2p=debug,swarm=trace`) that does not work.
@@ -133,6 +136,12 @@ What the jail does: no network, declared reads only, confined writes, a
 deadline, and the memory and CPU caps above. What it does not do: survive a kernel
 or policy bug. `verifiers::SANDBOXING` in the source documents exactly what is
 and is not covered, and [threat-model.md](threat-model.md) marks the rest.
+
+`cairn lab exec` is a different runner with a different job: research code in a
+whole root filesystem (SageMath, PARI/GP, msolve), not a pinned pure function.
+It prefers **gVisor** (`runsc` on `PATH`, probed before use), falls back to
+bubblewrap, and limits memory by cgroup or a resident-set watchdog, never
+`RLIMIT_AS`. See [lab.md](lab.md).
 
 ## Files and directories
 

@@ -108,6 +108,13 @@ jobs:
       # itself -- is a script that drives it the way an operator would, across
       # separate invocations and separate directories.
       - run: ./scripts/shard-demo.sh
+      # Two agents, one research space, no git: conflicts that stay visible,
+      # write-once records, a lease race, messages, a revocation, all three
+      # sync carriers, and a run whose receipt and outputs are one op. A
+      # runner without gVisor or bubblewrap takes the script's other branch:
+      # `exec` must refuse (exit 3), and an explicitly unconfined run must say
+      # so in its receipt.
+      - run: ./scripts/lab-demo.sh
       # The binary and every subcommand answer `--help` with 0 and misuse with 2.
       #
       # Two of them exited 2 for `--help`, which tells somebody who asked a
@@ -122,7 +129,7 @@ jobs:
           # is what found it.
           ./target/release/cairn --help >/dev/null 2>&1 \
             || { echo "cairn --help exited $?" >&2; exit 1; }
-          for SUB in mcp p2p serve gen-bootstrap arena run; do
+          for SUB in mcp p2p serve gen-bootstrap arena run lab; do
             ./target/release/cairn $SUB --help >/dev/null 2>&1 \
               || { echo "cairn $SUB --help exited $?" >&2; exit 1; }
           done
@@ -133,7 +140,7 @@ jobs:
           # could never pass, and nobody saw it: until the clippy step ahead of
           # it went green this step was simply never reached, so the check meant
           # to pin the misuse codes had not run once since it was written.
-          for SUB in serve p2p; do
+          for SUB in serve p2p lab; do
             status=0
             ./target/release/cairn $SUB --definitely-not-a-flag >/dev/null 2>&1 || status=$?
             [ "$status" -eq 2 ] \

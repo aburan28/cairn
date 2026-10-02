@@ -1,0 +1,38 @@
+{
+  "write_once": [
+    "ledger/decisions/**",
+    "ledger/evidence/**",
+    "ledger/corrections/**",
+    "experiments/*/runs/**",
+    "coordination/bus/messages/**",
+    "coordination/bus/receipts/**",
+    "coordination/events/**",
+    "**/claims/*.claim.json",
+    "**/claims/*.release.json"
+  ],
+  "ignore": [
+    ".env",
+    ".tmp/**",
+    ".agent-state/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/*.raw",
+    "**/*.pkl",
+    "**/*.so",
+    "**/*.dylib",
+    "**/.DS_Store",
+    "knowledge/INDEX.md",
+    "knowledge/frontiers/ecdlp/MAP.md",
+    "**/dispatch_plan.json",
+    "**/dispatch_plan.md",
+    "kb/.env",
+    "kb/.venv/**",
+    "kb/.kb-corpus/**",
+    "kb/.kb-index/**",
+    "kb/.kb-queries.jsonl",
+    "experiments/**/smoke_work/**",
+    "experiments/**/runtime/sage/**",
+    "evals/results/**"
+  ]
+}
