@@ -157,6 +157,7 @@ lines; that is the authority, and this table is the index to it.
 | [rho-piecework.md](design/rho-piecework.md) — distributed Pollard rho as piecework | **Stages A and B built** (`src/piecework.rs`); Stage C is not |
 | [orbit-piecework.md](design/orbit-piecework.md) — ECC2K-130: paying per orbit, and the witness that makes one checkable | **built**, with no consensus change; the corpus still does not fit a log |
 | [index-calculus-p224.md](design/index-calculus-p224.md) — index calculus as piecework | proposal; nothing here is built |
+| [swarm-targeting.md](design/swarm-targeting.md) — aiming a swarm at one problem, and what ecdsa.fail's nonce grinding teaches | proposal; nothing here is built |
 
 ## Contributing
 
