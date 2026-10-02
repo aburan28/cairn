@@ -57,6 +57,21 @@ final class LogParseTests: XCTestCase {
         XCTAssertEqual(summarize(parsed.records[0]), "GOAL-x · certificate · 1,000 by treasury")
     }
 
+    func testZeroAndOneInAPayloadStayNumbers() {
+        // JSONSerialization returns NSNumber, which Swift will cast to Bool
+        // when it holds 0 or 1. An epoch of 1 read back as `true`.
+        let parsed = parseLog(recordJSON(
+            seq: 0,
+            kind: "frontier",
+            payload: "{\"epoch\":1,\"score\":0,\"ok\":true,\"ratio\":1.5}"
+        ))
+        let payload = parsed.records[0].payload
+        XCTAssertEqual(payload["epoch"], .int(1))
+        XCTAssertEqual(payload["score"], .int(0))
+        XCTAssertEqual(payload["ok"], .bool(true))
+        XCTAssertEqual(payload["ratio"], .double(1.5))
+    }
+
     func testKindCountsPreserveFirstSeenOrder() {
         let text = [
             recordJSON(seq: 0, kind: "objective"),

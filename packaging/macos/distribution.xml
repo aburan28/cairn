@@ -26,6 +26,11 @@
     <license file="LICENSE.txt" mime-type="text/plain"/>
     <conclusion file="conclusion.html" mime-type="text/html"/>
     <options customize="never" require-scripts="false" hostArchitectures="@HOST_ARCHS@"/>
+    <!-- Cairn.app sets LSMinimumSystemVersion 13.0; below that it installs
+         an app that will not open. -->
+    <allowed-os-versions>
+        <os-version min="13.0"/>
+    </allowed-os-versions>
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <choices-outline>
         <line choice="default"/>

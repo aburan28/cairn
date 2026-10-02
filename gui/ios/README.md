@@ -26,6 +26,20 @@ The same job is `gui-ios` on every PR. Drag the `.app` onto a Simulator.
 A device or App Store IPA needs an Apple team and certificates; those are
 not in this repository, and Automatic signing has no `DEVELOPMENT_TEAM`.
 
+### Before an App Store upload
+
+What the repository already carries: an opaque 1024 icon, a privacy
+manifest (`App/PrivacyInfo.xcprivacy`: no tracking, no collected data,
+`UserDefaults` for the node URL), all four iPad orientations, and the
+version read from `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`. Bump the
+build number for every upload.
+
+What only the account holder can add: `DEVELOPMENT_TEAM`, the bundle id
+`org.cairn.reader` registered under that team, and in App Store Connect a
+privacy policy URL, the "Data Not Collected" privacy answers, iPhone and
+iPad screenshots, and review notes that point the reviewer at the bundled
+snapshot (the app shows live data without any node of their own).
+
 ## What it shows
 
 **Overview.** Live stats when a node answers — objectives, open, pool, paid,
@@ -53,10 +67,14 @@ has actually answered — assigning a resolved URL is not the same as live.
 **How it works.** The protocol in one screen. The long form stays on the
 site; this is not a second copy of the payout curve.
 
-**Settings.** The node URL, and the last few that answered. Cleartext HTTP
-is allowed because an operator's node is often on a LAN or an SSH tunnel,
-and refusing it would make the app unable to read the one thing it exists
-to read.
+**Settings.** The node URL, and the last few that answered. A bare
+`host:port` is read as `http://host:port`. Cleartext HTTP is allowed to
+local addresses (a LAN IP, a `.local` name, localhost) because an operator's
+node is often on a LAN or an SSH tunnel, and refusing it would make the app
+unable to read the one thing it exists to read. A node on a public name
+needs HTTPS: App Transport Security ignores a blanket exception once a
+local one is declared, so `NSAllowsArbitraryLoads` bought nothing but an
+App Review question and is not set.
 
 ## Nothing on it is simulated
 
