@@ -48,13 +48,16 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::canonical::{digest_bytes, Value};
 use crate::deposit::{self, DepositDir, DepositError, MAX_PROXY_BYTES};
 use crate::ledger::{Codec, Ledger};
 use crate::node::Node;
+use crate::partition::{assignment_for, epoch_of, epoch_seconds};
+use crate::piecework::Piecework;
+use crate::progress::{self, Board, Heartbeat};
 use crate::records::{Claim, Commitment, Objective};
 use crate::secrets;
 
@@ -383,6 +386,14 @@ pub struct Serving {
     /// server would be doing an attacker's work for them. [`listen`] refuses
     /// that combination at startup rather than discovering it under load.
     key: Option<KeySource>,
+    /// Worker heartbeats, held in memory for `GET /progress/{id}`.
+    ///
+    /// Process-local on purpose. A heartbeat is not a record -- see
+    /// [`crate::progress`] -- so it has no business in the log, and a node
+    /// that restarts starts with an empty roster that refills within a
+    /// minute. The mutex is held for the few microseconds a lookup or an
+    /// insert takes, never across a read of the log.
+    progress: Mutex<Board>,
 }
 
 /// How this server obtains the at-rest key, when the log is sealed.
@@ -406,6 +417,7 @@ impl Serving {
             checkpoint: None,
             deposits,
             key: None,
+            progress: Mutex::new(Board::default()),
         }
     }
 
@@ -619,8 +631,13 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", path) if path.starts_with("/frontier/") => {
             frontier(stream, serving, &path["/frontier/".len()..])
         }
+        ("GET", path) if path.starts_with("/progress/") => {
+            progress_of(stream, serving, &path["/progress/".len()..], &request)
+        }
+        ("GET", "/work_assignment") => work_assignment(stream, serving, &request),
         ("GET", path) if path == "/ui" || path.starts_with("/ui/") => ui_asset(stream, path),
         ("POST", "/submit") => submit(stream, &mut reader, serving, &request),
+        ("POST", "/progress") => heartbeat(stream, &mut reader, serving, &request),
         ("POST", "/objective/prepare") => prepare_objective(stream, &mut reader, &request),
         ("POST", "/deposit/grant") => deposit_grant(stream, &mut reader, serving, &request),
         ("PUT", path) if path.starts_with("/deposit/upload/") => deposit_upload(
@@ -783,6 +800,8 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /objectives"),
                 Value::string("GET /objective/{id}"),
                 Value::string("GET /frontier/{id}"),
+                Value::string("GET /progress/{id}"),
+                Value::string("GET /work_assignment?objective_id=&node_id="),
                 Value::string("GET /log"),
                 Value::string("GET /checkpoint"),
                 Value::string("GET /chain"),
@@ -805,6 +824,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                     "POST /submit (disabled: this node is read-only)"
                 }),
                 Value::string("POST /objective/prepare"),
+                Value::string("POST /progress"),
                 // Always listed: a node with no deposits configured still
                 // answers these, with unavailable / missing rather than 404,
                 // so a contributor learns "this node has no deposit" instead
@@ -1082,6 +1102,273 @@ fn frontier_value(frontier: &crate::frontier::FrontierEntry, reward: u64) -> Val
         ),
         ("must_cite", Value::string(frontier.claim_id.clone())),
     ])
+}
+
+/// One objective's search, from the log and from the workers.
+///
+/// Two blocks, kept apart on purpose -- see [`crate::progress`]. `derived` is
+/// recomputed from this node's log on every request and is what a worker is
+/// actually paid for; `reported` is the heartbeats this process has been sent
+/// and is not evidence of anything. `?trail_bits=` lets the paid seeds be
+/// binned by unit when the caller knows the job's seed layout; otherwise the
+/// latest heartbeat that declared it is used, and with neither the coverage
+/// strip is absent rather than guessed. `?bins=` sizes the strip.
+fn progress_of(
+    stream: &mut TcpStream,
+    serving: &Serving,
+    id: &str,
+    request: &Request,
+) -> io::Result<()> {
+    let bins = match request.query.get("bins") {
+        None => progress::DEFAULT_BINS,
+        Some(text) => match text.parse::<usize>() {
+            Ok(bins) if (1..=progress::MAX_BINS).contains(&bins) => bins,
+            _ => {
+                return json_error(
+                    stream,
+                    400,
+                    &format!("bins must be an integer from 1 to {}", progress::MAX_BINS),
+                )
+            }
+        },
+    };
+    let query_trail_bits = match request.query.get("trail_bits") {
+        None => None,
+        Some(text) => match text.parse::<u32>() {
+            Ok(bits) if bits < 64 => Some(bits),
+            _ => return json_error(stream, 400, "trail_bits must be an integer below 64"),
+        },
+    };
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let objectives = node.objectives();
+    let Some(objective) = objectives.get(id) else {
+        return json_error(stream, 404, "no such objective in this log");
+    };
+    let piecework = objective
+        .piecework
+        .as_ref()
+        .and_then(|block| Piecework::from_value(block).ok());
+    let now = crate::time::unix_seconds();
+    let (reported, declared_trail_bits) = {
+        let board = serving
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (board.report(id, now), board.trail_bits(id))
+    };
+    let trail_bits = query_trail_bits.or(declared_trail_bits);
+    let derived = progress::settled(&node, id, piecework.as_ref(), trail_bits, bins, now);
+    let kind = if objective.piecework.is_some() {
+        "piecework"
+    } else if objective.ratchet.is_some() {
+        "ratchet"
+    } else {
+        "certificate"
+    };
+    let mut fields = vec![
+        ("objective_id", Value::string(id)),
+        ("goal", Value::string(objective.goal.clone())),
+        ("kind", Value::string(kind)),
+        ("generated_at", Value::string(crate::time::timestamp())),
+    ];
+    fields.extend(lifecycle_fields(&node, id, objective));
+    fields.push(("derived", derived));
+    fields.push(("reported", reported));
+    fields.push((
+        "note",
+        Value::string(
+            "`derived` is recomputed from this node's log and is what the search has been \
+             paid for. `reported` is what workers posted to POST /progress: held in memory, \
+             unverified, and never a basis for payment. A page must say which it is showing.",
+        ),
+    ));
+    json(stream, 200, &Value::object(fields))
+}
+
+/// Take a worker's heartbeat. See [`crate::progress`] for what it is and is
+/// not; in one line, it is how an operator sees a worker is alive, and it is
+/// never a record.
+///
+/// Accepted on a read-only node too: nothing here touches the log or the
+/// queue. Refused for an objective this log does not hold, so a stranger
+/// cannot fill the roster with names against ids nobody is working.
+fn heartbeat(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    serving: &Serving,
+    request: &Request,
+) -> io::Result<()> {
+    let value = match read_json_body(reader, request, "/progress") {
+        Ok(value) => value,
+        Err((status, message)) => return json_error(stream, status, &message),
+    };
+    let (heartbeat, ignored) = match Heartbeat::from_value(&value) {
+        Ok(decoded) => decoded,
+        Err(why) => return json_error(stream, 400, &why.to_string()),
+    };
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    if !node.objectives().contains_key(&heartbeat.objective_id) {
+        return json_error(
+            stream,
+            404,
+            "no such objective in this log; a heartbeat names an objective this node holds",
+        );
+    }
+    let now = crate::time::unix_seconds();
+    let objective_id = heartbeat.objective_id.clone();
+    let worker = heartbeat.worker.clone();
+    let outcome = serving
+        .progress
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .record(heartbeat, now);
+    match outcome {
+        Ok(liveness) => json(
+            stream,
+            202,
+            &Value::object([
+                ("recorded", Value::Bool(true)),
+                ("objective_id", Value::string(objective_id)),
+                ("worker", Value::string(worker)),
+                (
+                    "received_at",
+                    Value::string(crate::time::format_iso8601_utc(
+                        i64::try_from(now).unwrap_or(i64::MAX),
+                    )),
+                ),
+                ("status", Value::string(liveness.as_str())),
+                (
+                    "live_within_seconds",
+                    Value::Int(i128::from(progress::LIVE_SECONDS)),
+                ),
+                (
+                    "ignored",
+                    Value::Array(ignored.into_iter().map(Value::string).collect()),
+                ),
+                (
+                    "note",
+                    Value::string(
+                        "Held in this node's memory and shown on GET /progress/{id} under \
+                         `reported`, unverified. Nothing was written to the log. Post again \
+                         within live_within_seconds to stay live; fields named in `ignored` \
+                         were not understood.",
+                    ),
+                ),
+            ]),
+        ),
+        Err(full) => json_error(stream, 429, &full.to_string()),
+    }
+}
+
+/// The MCP `work_assignment` tool over HTTP, so a worker with no MCP client --
+/// a shell loop on a GPU box -- takes its slice from the node it reports to.
+///
+/// The same pure function of the same public inputs: anyone can recompute any
+/// node's slice, which is the whole reason there is no dispatcher. The anchor
+/// is the log head as of the epoch's start, so the answer is fixed for the
+/// epoch however many times it is asked.
+fn work_assignment(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    let Some(objective_id) = request.query.get("objective_id") else {
+        return json_error(stream, 400, "objective_id is required");
+    };
+    let Some(node_id) = request.query.get("node_id") else {
+        return json_error(
+            stream,
+            400,
+            "node_id is required: your pseudonym, the same string you submit claims under",
+        );
+    };
+    if node_id.is_empty() {
+        return json_error(stream, 400, "node_id must not be empty");
+    }
+    let partitions = match request.query.get("partitions") {
+        None => 8u32,
+        Some(text) => match text.parse::<u32>() {
+            Ok(partitions) if partitions > 0 => partitions,
+            _ => return json_error(stream, 400, "partitions must be a positive integer"),
+        },
+    };
+    let now = crate::time::unix_seconds();
+    let length = epoch_seconds();
+    let epoch = match request.query.get("epoch") {
+        None => epoch_of(now, length),
+        Some(text) => match text.parse::<u64>() {
+            Ok(epoch) => epoch,
+            Err(_) => return json_error(stream, 400, "epoch must be a non-negative integer"),
+        },
+    };
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let objectives = node.objectives();
+    let Some(objective) = objectives.get(objective_id) else {
+        return json_error(stream, 404, "no such objective in this log");
+    };
+    let anchor = match node.anchor_of_epoch(epoch) {
+        anchor if anchor.is_empty() => "genesis".to_string(),
+        anchor => anchor,
+    };
+    let assignment = match assignment_for(node_id, objective_id, epoch, &anchor, partitions) {
+        Ok(assignment) => assignment,
+        Err(why) => return json_error(stream, 400, &format!("cannot assign work: {why}")),
+    };
+    let (lo, hi) = assignment.share();
+    let units = objective
+        .piecework
+        .as_ref()
+        .and_then(|block| Piecework::from_value(block).ok())
+        .and_then(|piecework| {
+            let (first, end) = piecework.unit_range((lo, hi))?;
+            Some(Value::object([
+                ("first", Value::Int(i128::from(first))),
+                ("end", Value::Int(i128::from(end))),
+                ("of", Value::Int(i128::from(piecework.units.unwrap_or(0)))),
+                ("unit_price", Value::Int(i128::from(piecework.unit_price))),
+            ]))
+        })
+        .unwrap_or(Value::Null);
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("node_id", Value::string(node_id.clone())),
+            ("objective_id", Value::string(objective_id.clone())),
+            ("epoch", Value::Int(i128::from(epoch))),
+            ("epoch_seconds", Value::Int(i128::from(length))),
+            (
+                "epoch_ends_in_seconds",
+                Value::Int(i128::from(length - now % length)),
+            ),
+            ("anchor", Value::string(anchor)),
+            ("partition", Value::Int(i128::from(assignment.partition))),
+            ("partitions", Value::Int(i128::from(partitions))),
+            (
+                "slice",
+                Value::object([
+                    ("lo", Value::Int(i128::from(lo))),
+                    ("hi", Value::Int(i128::from(hi))),
+                ]),
+            ),
+            ("units", units),
+            (
+                "note",
+                Value::string(
+                    "A pure function of public inputs: anyone can recompute any node's slice, \
+                     and nothing reserves it. Work the unit range when there is one, submit \
+                     one artifact per batch, and ask again when the epoch turns -- the slice \
+                     rotates every epoch so no region can be squatted. Overlap with another \
+                     node costs duplicated compute and nothing else.",
+                ),
+            ),
+        ]),
+    )
 }
 
 /// The whole log, as the JSONL it is on disk.
@@ -2596,5 +2883,415 @@ mod tests {
         assert_eq!(spool.queued(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- progress ------------------------------------------------------------
+
+    fn get_json(addr: std::net::SocketAddr, route: &str) -> (String, Value) {
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        socket
+            .write_all(
+                format!("GET {route} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+            )
+            .expect("write");
+        let mut response = String::new();
+        let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+        let (head, body) = response.split_once("\r\n\r\n").expect("a body");
+        let status = head.lines().next().unwrap_or_default().to_string();
+        (status, Value::from_json(body).unwrap_or(Value::Null))
+    }
+
+    fn at<'a>(value: &'a Value, path: &str) -> &'a Value {
+        let mut at = value;
+        for key in path.split('.') {
+            at = at
+                .get(key)
+                .unwrap_or_else(|| panic!("no {key} in {path}: {}", value.canonical_string()));
+        }
+        at
+    }
+
+    fn int(value: &Value, path: &str) -> i128 {
+        at(value, path)
+            .as_i128()
+            .unwrap_or_else(|| panic!("{path} is not an integer: {}", value.canonical_string()))
+    }
+
+    /// The 21-bit orbit search with a few batches paid, built from the records
+    /// the rules engine writes, so the fixture is the shape the log actually
+    /// has rather than one invented for the test.
+    ///
+    /// alice: one batch of three novel orbits, paid 300, two minutes ago, and
+    /// a second commitment nobody has opened. bob: a batch of two where one
+    /// was a duplicate, paid 100, two hours ago. carol: a rejected claim.
+    fn orbit_search_log(dir: &TempDir) -> (PathBuf, String) {
+        let log = dir.path.join("log.jsonl");
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/certicom-ecdlp/objective-ecc2k-23-orbit-batch.json"
+        ))
+        .expect("the objective ships in the repository");
+        let objective =
+            Objective::from_value(&Value::from_json(&text).expect("json")).expect("objective");
+        let id = objective.id();
+        let now = crate::time::unix_seconds();
+        let at = |ago: u64| crate::time::format_iso8601_utc((now - ago) as i64);
+
+        let element = |x: u64, seed: &str, per_branch: i128| {
+            Value::object([
+                ("x", Value::string(format!("{x:x}"))),
+                ("seed", Value::string(seed)),
+                ("j", Value::Array(vec![Value::Int(per_branch); 8])),
+            ])
+        };
+        let batch = |elements: Vec<Value>| Value::object([("dps", Value::Array(elements))]);
+        let commitment = |who: &str, ts: &str| {
+            Value::object([
+                ("objective_id", Value::string(id.clone())),
+                ("submitter", Value::string(who)),
+                ("hash", Value::string(format!("sha256:{who}"))),
+                ("created_at", Value::string(ts)),
+            ])
+        };
+        let verdict = |claim_id: &str, status: &str| {
+            Value::object([
+                ("claim_id", Value::string(claim_id)),
+                ("objective_id", Value::string(id.clone())),
+                (
+                    "verdict",
+                    Value::object([
+                        ("status", Value::string(status)),
+                        ("detail", Value::string("test")),
+                    ]),
+                ),
+            ])
+        };
+        let settlement = |claim_id: &str, who: &str, reward: i128| {
+            Value::object([
+                ("objective_id", Value::string(id.clone())),
+                ("claim_id", Value::string(claim_id)),
+                ("submitter", Value::string(who)),
+                ("reward", Value::Int(reward)),
+            ])
+        };
+
+        let mut ledger = Ledger::open(&log).expect("ledger");
+        let t0 = at(10_000);
+        ledger
+            .append("objective", objective.to_value(), &t0)
+            .expect("append");
+
+        // Seeds are (unit << 16) | trail: alice walks unit 1, bob units 2 and 3.
+        let alice = Claim::new(
+            &id,
+            "alice",
+            batch(vec![
+                element(0x11, "10000", 10),
+                element(0x12, "10001", 10),
+                element(0x13, "10002", 10),
+            ]),
+            "a1",
+            at(130),
+            vec![],
+        )
+        .expect("claim");
+        let t_alice = at(120);
+        ledger
+            .append("commitment", commitment("alice", &at(1000)), &at(1000))
+            .expect("append");
+        ledger
+            .append("commitment", commitment("alice", &at(900)), &at(900))
+            .expect("append");
+        ledger
+            .append("claim", alice.to_value(), &t_alice)
+            .expect("append");
+        ledger
+            .append("verdict", verdict(&alice.id(), "accept"), &t_alice)
+            .expect("append");
+        ledger
+            .append(
+                "settlement",
+                settlement(&alice.id(), "alice", 300),
+                &t_alice,
+            )
+            .expect("append");
+
+        let bob = Claim::new(
+            &id,
+            "bob",
+            batch(vec![element(0x21, "20000", 5), element(0x11, "30000", 5)]),
+            "b1",
+            at(7300),
+            vec![],
+        )
+        .expect("claim");
+        let t_bob = at(7200);
+        ledger
+            .append("commitment", commitment("bob", &at(8000)), &at(8000))
+            .expect("append");
+        ledger
+            .append("claim", bob.to_value(), &t_bob)
+            .expect("append");
+        ledger
+            .append("verdict", verdict(&bob.id(), "accept"), &t_bob)
+            .expect("append");
+        ledger
+            .append("settlement", settlement(&bob.id(), "bob", 100), &t_bob)
+            .expect("append");
+
+        let carol = Claim::new(
+            &id,
+            "carol",
+            batch(vec![element(0x31, "40000", 1)]),
+            "c1",
+            at(600),
+            vec![],
+        )
+        .expect("claim");
+        let t_carol = at(500);
+        ledger
+            .append("commitment", commitment("carol", &at(700)), &at(700))
+            .expect("append");
+        ledger
+            .append("claim", carol.to_value(), &t_carol)
+            .expect("append");
+        ledger
+            .append("verdict", verdict(&carol.id(), "reject"), &t_carol)
+            .expect("append");
+
+        (log, id)
+    }
+
+    fn serve_orbit_search(dir: &TempDir) -> (std::net::SocketAddr, String) {
+        let (log, id) = orbit_search_log(dir);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // Read-only on purpose: heartbeats must land on a node that accepts no
+        // submissions, since nothing about them is a submission.
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        (addr, id)
+    }
+
+    /// Everything in `derived` is a join over records already in the log:
+    /// settlements to claims to elements. The numbers below are what those
+    /// records say, and a reader with the log would get the same ones.
+    #[test]
+    fn progress_derives_per_worker_totals_from_the_log() {
+        let dir = TempDir::new("progress-derived");
+        let (addr, id) = serve_orbit_search(&dir);
+
+        let (status, body) = get_json(addr, &format!("/progress/{id}"));
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert_eq!(at(&body, "kind").as_str(), Some("piecework"));
+        assert_eq!(at(&body, "open"), &Value::Bool(true));
+        assert_eq!(int(&body, "piecework.unit_price"), 100);
+
+        // Two paid claims carrying five elements, of which four were novel:
+        // alice's three and one of bob's two (100 at 100 a unit).
+        assert_eq!(int(&body, "derived.claims_paid"), 2);
+        assert_eq!(int(&body, "derived.elements"), 5);
+        assert_eq!(int(&body, "derived.units_paid"), 4);
+        assert_eq!(int(&body, "derived.reward"), 400);
+        // Steps are the witness counters summed: alice 3 x 8 x 10, bob 2 x 8 x 5.
+        assert_eq!(int(&body, "derived.steps"), 240 + 80);
+        assert_eq!(int(&body, "derived.claims"), 3);
+        assert_eq!(int(&body, "derived.rejected"), 1);
+        // alice committed twice and revealed once.
+        assert_eq!(int(&body, "derived.in_flight"), 1);
+        assert_eq!(int(&body, "derived.last_hour.units_paid"), 3);
+        assert_eq!(int(&body, "derived.last_day.units_paid"), 4);
+        assert_eq!(
+            at(&body, "derived.hourly").as_array().map(|h| h.len()),
+            Some(2)
+        );
+        // No trail_bits from anyone yet: no coverage, rather than a guess.
+        assert_eq!(at(&body, "derived.coverage"), &Value::Null);
+
+        let workers = at(&body, "derived.workers").as_array().expect("workers");
+        let names: Vec<&str> = workers
+            .iter()
+            .map(|w| w.get("submitter").and_then(Value::as_str).unwrap())
+            .collect();
+        assert_eq!(names, vec!["alice", "bob", "carol"], "most paid first");
+        assert_eq!(int(&workers[0], "units_paid"), 3);
+        assert_eq!(int(&workers[0], "steps"), 240);
+        assert_eq!(int(&workers[0], "in_flight"), 1);
+        assert_eq!(int(&workers[1], "units_paid"), 1);
+        assert_eq!(int(&workers[1], "elements"), 2);
+        assert_eq!(int(&workers[2], "units_paid"), 0);
+        assert_eq!(int(&workers[2], "rejected"), 1);
+        assert_eq!(int(&workers[2], "claims"), 1);
+
+        // Nobody has posted a heartbeat.
+        assert_eq!(int(&body, "reported.live"), 0);
+        assert_eq!(
+            at(&body, "reported.workers").as_array().map(|w| w.len()),
+            Some(0)
+        );
+
+        // With the job's seed layout, paid seeds bin by unit: units 1, 2 and 3
+        // of 4096, all in the first of 128 bins, one count per element.
+        let (status, body) = get_json(addr, &format!("/progress/{id}?trail_bits=16&bins=128"));
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert_eq!(int(&body, "derived.coverage.units"), 4096);
+        assert_eq!(int(&body, "derived.coverage.units_touched"), 3);
+        let counts = at(&body, "derived.coverage.counts")
+            .as_array()
+            .expect("counts");
+        assert_eq!(counts.len(), 128);
+        assert_eq!(counts[0], Value::Int(5));
+        assert!(counts[1..].iter().all(|c| *c == Value::Int(0)));
+
+        let (status, _) = get_json(addr, &format!("/progress/{id}?bins=0"));
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+        let (status, _) = get_json(addr, &format!("/progress/{id}?trail_bits=64"));
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+        let (status, _) = get_json(addr, "/progress/sha256:nope");
+        assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+    }
+
+    /// A heartbeat is held and shown under `reported`, labelled, and touches
+    /// nothing else: the log is the same length afterwards, and the server
+    /// that took it accepts no submissions at all.
+    #[test]
+    fn a_heartbeat_is_held_and_shown_as_reported_not_settled() {
+        let dir = TempDir::new("progress-heartbeat");
+        let (addr, id) = serve_orbit_search(&dir);
+        let before = get_json(addr, "/chain").1;
+
+        let (status, body) = ask_json(
+            addr,
+            "/progress",
+            &format!(
+                r#"{{"objective_id":"{id}","worker":"alice","steps":4096,"units":{{"first":0,"end":512}},
+                    "unit":3,"units_pending":2,"steps_per_second":50,"trail_bits":16,
+                    "client":"test","not_a_field":1}}"#
+            ),
+        );
+        assert!(
+            status.starts_with("HTTP/1.1 202"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert_eq!(at(&body, "status").as_str(), Some("live"));
+        assert_eq!(
+            at(&body, "ignored"),
+            &Value::Array(vec![Value::string("not_a_field")])
+        );
+
+        let (_, body) = get_json(addr, &format!("/progress/{id}"));
+        assert_eq!(int(&body, "reported.live"), 1);
+        assert_eq!(int(&body, "reported.units_pending"), 2);
+        // One sample: no measured rate yet, so the reported one carries the total.
+        assert_eq!(int(&body, "reported.steps_per_second"), 50);
+        let worker = &at(&body, "reported.workers").as_array().unwrap()[0];
+        assert_eq!(at(worker, "worker").as_str(), Some("alice"));
+        assert_eq!(int(worker, "units.end"), 512);
+        assert_eq!(int(worker, "unit"), 3);
+        assert_eq!(at(worker, "measured_steps_per_second"), &Value::Null);
+        // The heartbeat declared the seed layout, so the derived half can bin.
+        assert_eq!(int(&body, "derived.coverage.trail_bits"), 16);
+        // And the settled numbers did not move: a heartbeat pays nobody.
+        assert_eq!(int(&body, "derived.units_paid"), 4);
+        assert_eq!(get_json(addr, "/chain").1, before, "the log is untouched");
+
+        let (status, body) = ask_json(
+            addr,
+            "/progress",
+            r#"{"objective_id":"sha256:nope","worker":"a","steps":1}"#,
+        );
+        assert!(
+            status.starts_with("HTTP/1.1 404"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        let (status, body) = ask_json(
+            addr,
+            "/progress",
+            &format!(r#"{{"objective_id":"{id}","worker":"a"}}"#),
+        );
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert!(
+            at(&body, "error")
+                .as_str()
+                .unwrap_or_default()
+                .contains("steps"),
+            "{}",
+            body.canonical_string()
+        );
+    }
+
+    /// The HTTP route is the MCP tool's function: the same inputs give the
+    /// same slice, the slice maps onto the objective's units, and a node that
+    /// asks twice in one epoch is told the same thing.
+    #[test]
+    fn work_assignment_over_http_is_a_fixed_slice_of_the_unit_space() {
+        let dir = TempDir::new("progress-assignment");
+        let (addr, id) = serve_orbit_search(&dir);
+
+        let route =
+            format!("/work_assignment?objective_id={id}&node_id=gpu-7&partitions=4&epoch=5");
+        let (status, body) = get_json(addr, &route);
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert_eq!(int(&body, "epoch"), 5);
+        assert_eq!(int(&body, "partitions"), 4);
+        let partition = int(&body, "partition");
+        assert!((0..4).contains(&partition), "{partition}");
+        let (lo, hi) = (int(&body, "slice.lo"), int(&body, "slice.hi"));
+        assert!(lo < hi && hi <= 1 << 32, "{lo}..{hi}");
+        let (first, end) = (int(&body, "units.first"), int(&body, "units.end"));
+        assert_eq!(int(&body, "units.of"), 4096);
+        assert_eq!(int(&body, "units.unit_price"), 100);
+        assert!(first < end && end <= 4096, "{first}..{end}");
+        // A quarter of the space, give or take the last partition's remainder.
+        assert!((end - first - 1024).abs() <= 1, "{first}..{end}");
+        assert_eq!(get_json(addr, &route).1, body, "fixed for the epoch");
+
+        // Every expected partition is reached by some node, and the ranges tile.
+        let mut ranges: Vec<(i128, i128)> = (0..64)
+            .map(|n| {
+                let body = get_json(
+                    addr,
+                    &format!(
+                        "/work_assignment?objective_id={id}&node_id=n{n}&partitions=4&epoch=5"
+                    ),
+                )
+                .1;
+                (int(&body, "units.first"), int(&body, "units.end"))
+            })
+            .collect();
+        ranges.sort();
+        ranges.dedup();
+        assert_eq!(ranges.len(), 4, "{ranges:?}");
+        assert_eq!(ranges[0].0, 0);
+        assert_eq!(ranges[3].1, 4096);
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0, "{ranges:?}");
+        }
+
+        let (status, _) = get_json(addr, &format!("/work_assignment?objective_id={id}"));
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+        let (status, _) = get_json(
+            addr,
+            &format!("/work_assignment?objective_id={id}&node_id=a&partitions=0"),
+        );
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+        let (status, _) = get_json(addr, "/work_assignment?objective_id=sha256:nope&node_id=a");
+        assert!(status.starts_with("HTTP/1.1 404"), "{status}");
     }
 }

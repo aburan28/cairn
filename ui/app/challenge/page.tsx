@@ -213,7 +213,19 @@ function Challenge() {
             <p className="text-[14px] leading-relaxed text-ink">{objective.statement}</p>
           </Box>
 
-          <Box title={objective.settled ? "Result" : "Frontier"}>
+          <Box
+            title={objective.piecework ? "Search" : objective.settled ? "Result" : "Frontier"}
+            aside={
+              objective.piecework ? (
+                <Link
+                  href={`/task?id=${encodeURIComponent(objective.id)}`}
+                  className="text-[11.5px] font-normal text-accent hover:underline"
+                >
+                  workers and progress →
+                </Link>
+              ) : undefined
+            }
+          >
             {frontier ? (
               <div className="flex flex-col gap-3">
                 <dl className="kv">
@@ -258,6 +270,44 @@ function Challenge() {
                   <Hash value={objective.settlement.claim_id} chars={10} />
                 </dd>
               </dl>
+            ) : objective.piecework ? (
+              /* A divided search has no frontier to hold and no single
+                 settlement: it pays per novel unit until the pool is dry. The
+                 standing here is the node's; who did the work, how fast, and
+                 how far along the search is are on the task page. */
+              <div className="flex flex-col gap-3">
+                <dl className="kv">
+                  <dt>pays</dt>
+                  <dd className="mono">
+                    {units(objective.piecework.unit_price)} per novel unit
+                    {objective.piecework.units && (
+                      <span className="text-ink-3">
+                        {" "}
+                        · divided into {units(objective.piecework.units)} units
+                      </span>
+                    )}
+                  </dd>
+                  <dt>paid so far</dt>
+                  <dd className="mono font-semibold text-accent">
+                    {units(objective.piecework.paid_total)}
+                  </dd>
+                  <dt>paid claims</dt>
+                  <dd className="mono">{units(objective.piecework.paid_units)}</dd>
+                  <dt>pool left</dt>
+                  <dd className="mono">{units(objective.piecework.pool_remaining)}</dd>
+                </dl>
+                <Progress
+                  value={objective.reward > 0 ? objective.piecework.paid_total / objective.reward : 0}
+                  label="of the funded pool paid out"
+                  tone="warn"
+                />
+                <Link
+                  href={`/task?id=${encodeURIComponent(objective.id)}`}
+                  className="text-[12.5px] text-accent hover:underline"
+                >
+                  Who is working it, how fast, and how far along →
+                </Link>
+              </div>
             ) : (
               <p className="text-[13px] text-ink-2">
                 No claim yet. The first accepted claim takes{" "}

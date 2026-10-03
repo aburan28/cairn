@@ -702,7 +702,14 @@ class Job:
             if (words[i >> 6] >> (i & 63)) & 1:
                 S = self.curve.frob(self.P, i % self.m)
                 if R[0] == S[0]:
+                    # Two summands with one abscissa: the chord has no slope,
+                    # and `add_raw` would divide by zero. Stop here and say
+                    # so; every caller treats a degenerate seed as a trail
+                    # that produced nothing. On the 21-bit twin two of every
+                    # eight thousand seeds land here, and until this `break`
+                    # existed each one crashed the walker outright.
                     degenerate = True
+                    break
                 R = self.curve.add_raw(R, S)
         return R, degenerate
 

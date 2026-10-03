@@ -20,6 +20,7 @@ import { REPO, repoLink } from "@/lib/site";
 export const ROUTES = [
   { href: "/", label: "Overview", hint: "What cairn is, and this node's numbers" },
   { href: "/objectives", label: "Objectives", hint: "What this node will pay for" },
+  { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
   { href: "/submit", label: "Post a challenge", hint: "Fund a question, signed by a wallet" },
   { href: "/chain", label: "Chain", hint: "Epoch links, and whether you have forked" },
   { href: "/log", label: "Log", hint: "Every record, as the node stores it" },
@@ -47,7 +48,7 @@ const NAV: {
         href: "/objectives",
         label: "Objectives",
         icon: <IconTarget />,
-        match: ["/challenge", "/frontier"],
+        match: ["/challenge", "/frontier", "/task"],
       },
       { href: "/chain", label: "Chain", icon: <IconChain /> },
       { href: "/log", label: "Log", icon: <IconList /> },

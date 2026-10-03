@@ -50,6 +50,21 @@ export type Objective = {
   /** "certificate" for pass/fail, "evaluator" for a scored ratchet. */
   verifier_kind: string;
   frontier?: Frontier;
+  /** A divided search paid per novel unit. Published by `lifecycle_fields`
+   *  beside the frontier; absent off piecework. `paid_units` counts
+   *  settlement entries, which for a batch objective is paid *claims* --
+   *  the per-unit figure is on `/progress/{id}`, and `/task?id=` shows it. */
+  piecework?: PieceworkStanding;
+};
+
+export type PieceworkStanding = {
+  unit_price: number;
+  paid_units: number;
+  paid_total: number;
+  pool_remaining: number;
+  units?: number;
+  key?: string | string[];
+  items?: string;
 };
 
 export type Objectives = { objectives: Objective[] };

@@ -9,8 +9,11 @@ A small Next.js app that is two things at once, from one build:
 
 Routes: `/` the landing page, `/how-it-works` the protocol, `/docs` an index of
 the design notes, `/challenge?id=…` one objective, `/frontier?id=…` its move
-history, `/chain` the epoch chain, `/objectives`, `/peers`, `/log`, and
-`/submit` — a form that posts an objective to the node that served the page.
+history, `/chain` the epoch chain, `/objectives`, `/peers`, `/log`, `/task?id=…` — a
+divided search while it runs: what the log has settled per worker beside
+what the workers report over `POST /progress`, kept apart and labelled, with
+the share of the expected Pollard rho cost and an ETA at the reported rate —
+and `/submit` — a form that posts an objective to the node that served the page.
 
 The first three are static prose and read no node; the rest are the reader. Both
 kinds ship in both mounts, which is the same "one app, not two" decision — an

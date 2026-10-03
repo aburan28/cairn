@@ -81,7 +81,10 @@ Challenge…** (⇧⌘N, [below](#new-challenge)), **Tasks…**,
 **Secrets…**, Peers…, **Test Connectivity…** (⇧⌘K, below), Copy Peer Id,
 Show Data Folder and Show Node Log.
 **Tasks…** posts a curated objective (including ECC2K-130 orbit piecework)
-into this node's log in one click. The objectives and the checkers they pin
+into this node's log in one click, and its **Show progress…** opens the
+reader's Objectives page, where every divided search links to its
+dashboard (`/ui/task?id=…`): the orbits the log has paid each worker for,
+beside what the workers report they are walking right now. The objectives and the checkers they pin
 ship inside the app, copied from `examples/` by `build.sh`, which also fails
 if a checker no longer matches its pin; posting puts the checker under the
 node's data folder first, so the node can run it and serve it to peers.
