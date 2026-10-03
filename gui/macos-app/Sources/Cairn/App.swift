@@ -35,6 +35,8 @@ struct CairnApp: App {
                     .disabled(delegate.node.isAttached)
                 Button("Tasks…") { delegate.node.presentTasks = true }
                     .disabled(delegate.node.isAttached)
+                Button("Connect an Agent…") { delegate.node.presentAgents = true }
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Secrets…") { delegate.node.presentSecrets = true }
                 Button("Peers…") { delegate.node.presentPeers = true }
                 Button("Test Connectivity…") { delegate.node.presentConnectivity = true }
@@ -131,6 +133,10 @@ struct ContentView: View {
                         Label("Peers", systemImage: "person.badge.plus")
                     }
                     .help("Announce a peer, manage bootstrap, or copy what to give someone adding this node")
+                    Button { node.presentAgents = true } label: {
+                        Label("Agent", systemImage: "terminal")
+                    }
+                    .help("Point Claude Code, Codex or OpenCode at this node over MCP")
                     Button { browser.reload() } label: { Label("Reload", systemImage: "arrow.clockwise") }
                         .help("Reload the page")
                     Button { NSWorkspace.shared.open(url) } label: { Label("Open in Browser", systemImage: "safari") }
@@ -158,6 +164,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $node.presentConnectivity) {
             ConnectivitySheet(node: node, isPresented: $node.presentConnectivity)
+        }
+        .sheet(isPresented: $node.presentAgents) {
+            AgentsSheet(node: node, isPresented: $node.presentAgents)
         }
     }
 }
