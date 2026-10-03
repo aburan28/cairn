@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.14.0](https://github.com/aburan28/cairn/compare/v1.13.0...v1.14.0) (2026-10-03)
+
+
+### Features
+
+* **progress:** a per-task dashboard for a divided search, from the log and from worker heartbeats ([87e7e82](https://github.com/aburan28/cairn/commit/87e7e82ab70c2f3379496474c01d1f9e01807c3b))
+* **progress:** a per-task dashboard for a divided search, from the log and from worker heartbeats ([335d68e](https://github.com/aburan28/cairn/commit/335d68e459b5f6f05aa8f100cca4cffc85c297dc))
+* **progress:** point the autoresearcher GUI and the MCP tool at the task dashboard ([1d78056](https://github.com/aburan28/cairn/commit/1d780568e6f9342ed3e31de75d9b1c50761d4e4e))
+* **progress:** point the autoresearcher GUI and the MCP tool at the task dashboard ([5706bd0](https://github.com/aburan28/cairn/commit/5706bd021dc48f0099da69837eb2b317554f4c51))
+
 ## [1.13.0](https://github.com/aburan28/cairn/compare/v1.12.0...v1.13.0) (2026-10-03)
 
 
