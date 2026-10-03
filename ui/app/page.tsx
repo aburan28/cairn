@@ -14,7 +14,6 @@ import {
   loadObjectives,
   progress,
   provenance,
-  repoLink,
   short,
   units,
 } from "@/lib/site";
@@ -122,9 +121,7 @@ export default function Page() {
           Linux and macOS, amd64 and arm64. The download&rsquo;s sha256 only catches
           corruption; the check that means something is re-deriving the log, below.
           On a phone, Add to Home Screen, or use the native reader in{" "}
-          <a className="text-accent hover:underline" href={repoLink("gui/ios/")}>
-            gui/ios
-          </a>
+          <span className="mono">gui/ios/</span>
           .
         </p>
       </section>
@@ -290,9 +287,7 @@ cairn --log launch/cairn.jsonl --root . audit`}</pre>
             <pre className="code mt-auto">cairn run</pre>
             <p className="hint">
               One stdio MCP server, live on the network.{" "}
-              <a className="text-accent hover:underline" href={repoLink("docs/agents.md")}>
-                agents.md
-              </a>{" "}
+              <span className="mono">docs/agents.md</span>{" "}
               has the config stanza for each client.
             </p>
           </Card>
@@ -307,13 +302,9 @@ cairn --log launch/cairn.jsonl --root . audit`}</pre>
             <pre className="code mt-auto">cairn run</pre>
             <p className="hint">
               Loopback by default; pass a bootstrap file to join peers.{" "}
-              <a className="text-accent hover:underline" href={repoLink("docs/serving.md")}>
-                serving.md
-              </a>{" "}
+              <span className="mono">docs/serving.md</span>{" "}
               and{" "}
-              <a className="text-accent hover:underline" href={repoLink("docs/p2p.md")}>
-                p2p.md
-              </a>
+              <span className="mono">docs/p2p.md</span>
               .
             </p>
           </Card>
@@ -322,11 +313,9 @@ cairn --log launch/cairn.jsonl --root . audit`}</pre>
 
       <p className="site-only prose-block mt-8 text-[13px]">
         A second implementation in{" "}
-        <a href={repoLink("reference/rust/")}>
-          <code className="mono">reference/rust/</code>
-        </a>{" "}
+        <code className="mono">reference/rust/</code>{" "}
         re-derives the same log independently, and{" "}
-        <a href={repoLink("conformance/README.md")}>448 frozen conformance vectors</a>{" "}
+        448 frozen conformance vectors (<code className="mono">conformance/</code>){" "}
         pin the byte encoding both must agree on. That is what &ldquo;verified&rdquo; is
         doing in the first sentence on this page.
       </p>

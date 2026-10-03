@@ -69,10 +69,15 @@ enum GuiTasks {
         }
     }
 
-    /// The task's documentation on GitHub, at this release's tag when it is one.
+    /// The task's documentation, as a file in the same library as its
+    /// objectives: build.sh copies each `docPath` into the app, and a checkout
+    /// has it already. Nil when the library lacks it. This used to be a link
+    /// into GitHub's web UI at the release's tag; the app opens nothing there
+    /// now, and what it shows is the copy it shipped with.
     static func docURL(_ path: String) -> URL? {
-        let ref = AppVersion.release.map { "v\($0)" } ?? "main"
-        return URL(string: "https://github.com/aburan28/cairn/blob/\(ref)/\(path)")
+        guard let library else { return nil }
+        let url = library.appendingPathComponent(path)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     /// One line on what the task pays, read from its own objective rather

@@ -163,8 +163,8 @@ Everything else is derived from it: the `updates-key` job computes both
 public halves, and `macos-dmg` writes them into the app. Signing and checking
 need OpenSSL 3.5 or newer, the first with ML-DSA, which is why those jobs
 run on a macOS runner with Homebrew's `openssl@3` rather than on the Linux
-image. Without the secret, releases build as before and the menu item opens
-the releases page.
+image. Without the secret, releases build as before and the menu item says
+the build cannot check, naming the installer; it opens no web page.
 
 **Do not lose or replace the key.** Every installed copy trusts exactly the
 keys its release was built with. A new key means each user installs the next

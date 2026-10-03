@@ -148,7 +148,8 @@ About Cairn and Settings also show the `cairn` command's version, from
 
 A build without both keys in its Info.plist (`SUPublicEDKey` and
 `CairnMLDSA87PublicKey`), such as one from `build.sh`, cannot verify an
-update, so it never starts Sparkle and the menu item opens the releases page. [packaging/README.md](../../packaging/README.md#updates-for-cairnapp)
+update, so it never starts Sparkle and the menu item says so, naming the
+installer rather than opening a web page. [packaging/README.md](../../packaging/README.md#updates-for-cairnapp)
 has the release side and the one secret it needs.
 
 ## New challenge

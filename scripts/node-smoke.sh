@@ -185,6 +185,7 @@ case "$UI_CODE" in
     # basePath has to survive the export, or every asset 404s and the page
     # renders unstyled -- the exact symptom ui/README.md warns reads as a CSS bug.
     grep -q '/ui/_next/' "$WORK/ui.body" || fail "/ui/ does not reference /ui/_next assets"
+    grep -q 'href="https://github.com' "$WORK/ui.body" && fail "/ui/ links into GitHub's web UI"
     ASSET=$(grep -o '/ui/_next/static/css/[a-z0-9.]*\.css' "$WORK/ui.body" | head -1)
     [ -n "$ASSET" ] || fail "/ui/ names no stylesheet"
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP$ASSET")
@@ -203,7 +204,11 @@ case "$UI_CODE" in
       [ "$code" = "200" ] || fail "GET $page -> $code"
       grep -q "$sentinel" "$WORK/page.body" \
         || fail "$page is 200 but does not say \"$sentinel\"; the wrong page is under that path"
-      echo "  GET $page -> 200, says \"$sentinel\""
+      # The reader links nowhere on github.com (REPO in ui/lib/site.ts says
+      # why); checked on the served HTML, where a stray anchor would land.
+      grep -q 'href="https://github.com' "$WORK/page.body" \
+        && fail "$page links into GitHub's web UI"
+      echo "  GET $page -> 200, says \"$sentinel\", links nowhere on github.com"
     done <<'PAGES'
 /ui/objectives/|still payable
 /ui/chain/|where they forked

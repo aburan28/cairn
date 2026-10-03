@@ -66,7 +66,10 @@ struct TasksSheet: View {
 
             HStack {
                 if let path = selected.docPath, let url = GuiTasks.docURL(path) {
-                    Link("About this task", destination: url).font(.callout)
+                    // A file the app ships, opened in whatever reads Markdown
+                    // here; not a page on GitHub.
+                    Button("About this task") { NSWorkspace.shared.open(url) }
+                        .font(.callout)
                 }
                 // The dashboard lives in the node's own reader: each divided
                 // search on the Objectives page links to its workers and

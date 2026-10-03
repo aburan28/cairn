@@ -29,10 +29,11 @@ import {
 } from "@/lib/progress";
 import { type SearchJob, expectedSteps, expectedUnits, jobFor, stepsPerUnit } from "@/lib/jobs";
 import { fetchObjective } from "@/lib/frontier";
-import { repoLink, resolveNode } from "@/lib/site";
+import { resolveNode } from "@/lib/site";
 import {
   Badge,
   Box,
+  CopyButton,
   EmptyState,
   Hash,
   NodePicker,
@@ -460,9 +461,7 @@ function Dashboard({
               This reader does not know the job this objective&rsquo;s checker pins, so it cannot
               say how far along the search is. The paid units and steps above are still exact;
               only the denominator is missing. Known jobs are listed in{" "}
-              <a className="text-accent hover:underline" href={repoLink("ui/lib/jobs.ts")}>
-                ui/lib/jobs.ts
-              </a>
+              <span className="mono">ui/lib/jobs.ts</span>
               .
             </p>
           )}
@@ -614,21 +613,20 @@ function Dashboard({
                 </Link>
               </li>
               {job && (
-                <li>
-                  <a className="text-accent hover:underline" href={repoLink(job.path)}>
-                    The job document, {job.name} →
-                  </a>
+                <li className="text-ink-2">
+                  The job document: <span className="mono">{job.path}</span> in a checkout.
                 </li>
               )}
-              <li>
-                <a
-                  className="text-accent hover:underline"
-                  href={repoLink("examples/certicom-ecdlp/tools/orbit_worker.py")}
-                >
-                  Run a worker against this node →
-                </a>
-              </li>
             </ul>
+            <p className="mt-3 text-[12.5px] text-ink-2">
+              Run a worker against this node, from a checkout:
+            </p>
+            <div className="relative mt-1.5">
+              <pre className="code pr-9 text-[11.5px]">{workerCommand(origin, id, job)}</pre>
+              <div className="absolute top-2 right-2">
+                <CopyButton value={workerCommand(origin, id, job)} />
+              </div>
+            </div>
           </Box>
         </div>
       </div>
@@ -800,6 +798,22 @@ function HourlyBars({ hours }: { hours: { hour: string; units_paid: number }[] }
       </p>
     </div>
   );
+}
+
+/**
+ * The command that works this objective from a checkout, with this node and
+ * this objective filled in. The reference worker and the job document are
+ * named by path rather than linked: this page links nowhere off the node it
+ * was served from.
+ */
+function workerCommand(origin: string, id: string, job: SearchJob | null | undefined): string {
+  return [
+    "python3 examples/certicom-ecdlp/tools/orbit_worker.py",
+    `--node ${origin}`,
+    `--job ${job?.path ?? "<job document>"}`,
+    `--objective ${id}`,
+    "--worker <your name>",
+  ].join(" \\\n  ");
 }
 
 function capitalize(word: string): string {

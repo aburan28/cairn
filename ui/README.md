@@ -21,7 +21,9 @@ operator who followed a link to their own node's `/ui/` gets the explanation
 too, and the explanation cannot drift from the reader because there is only one
 of each.
 
-`/docs` links out to the repository rather than rendering `docs/*.md`. A
+`/docs` is an index naming each note by its path, rather than rendering
+`docs/*.md` -- and nothing in the reader links to github.com at all, a node
+serving it stays the only host on the page (`REPO` in `lib/site.ts`). A
 markdown pipeline here would put a *copy* of every design note behind an
 official-looking URL, with no build step anywhere that could notice the copy
 going stale — and it would carry several hundred KB of prose into every node

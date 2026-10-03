@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { REPO, repoLink } from "@/lib/site";
 
 export const metadata: Metadata = {
   title: "docs",
@@ -19,9 +18,11 @@ export const metadata: Metadata = {
  * would also ship several hundred KB of prose inside every node binary, since
  * `build.rs` embeds this app whole.
  *
- * So this page is an index with one honest sentence per document, and every
- * link leaves for the repository. The sentences are the ones README.md already
- * uses, which keeps the two in step by construction.
+ * So this page is an index with one honest sentence per document, each named
+ * by its path in the repository. It used to link every entry into GitHub's web
+ * UI; it links nowhere now, so the reader a node serves stays on the node and
+ * someone with a checkout opens the path. The sentences are the ones README.md
+ * already uses, which keeps the two in step by construction.
  */
 type Entry = { path: string; name: string; blurb: string };
 type Group = { title: string; note: string; entries: Entry[] };
@@ -251,7 +252,7 @@ export default function Page() {
       <h1>docs</h1>
       <p className="lede">
         The design notes live in the repository and this is an index of them —
-        one sentence each, and every link leaves for GitHub. Rendering copies
+        one sentence each, with the path to open in a checkout. Rendering copies
         here would put a second version of each document behind a URL that looks
         official, and the copy is the one that goes stale.
       </p>
@@ -267,9 +268,7 @@ export default function Page() {
           <ul className="plain docList">
             {group.entries.map((entry) => (
               <li key={entry.path}>
-                <a href={repoLink(entry.path)}>
-                  <code>{entry.name}</code>
-                </a>{" "}
+                <code title={entry.path}>{entry.name}</code>{" "}
                 <span className="dim">— {entry.blurb}</span>
               </li>
             ))}
@@ -281,8 +280,8 @@ export default function Page() {
       <p className="lede">
         There is more than fits an index — design notes on FHE compilation,
         embargo release, anchored time, shard assignment and settlement
-        convergence, among others. <a href={repoLink("docs/")}>Browse docs/</a>,
-        or read <a href={REPO}>the repository</a> itself; the module docs in{" "}
+        convergence, among others. Browse <code>docs/</code> in a checkout, or read
+        the repository itself; the module docs in{" "}
         <code>src/</code> carry the constraints that are load-bearing.
       </p>
     </div>
