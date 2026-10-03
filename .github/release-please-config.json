@@ -7,7 +7,7 @@
       "package-name": "cairn",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false,
-      "prerelease": true,
+      "draft": true,
       "changelog-sections": [
         {
           "type": "feat",

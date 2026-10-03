@@ -19,12 +19,19 @@ name: release-please
 # for a repository whose central claim is that results are independently
 # checkable.
 #
-# The release it creates is a *prerelease* (`prerelease` in the config), so
-# GitHub's releases/latest redirect -- which the documented installer and
-# the update feed of older Cairn.app builds resolve through -- keeps pointing
-# at the previous complete release until release.yml has built everything
-# and promotes this one, as its last job. Merging the PR starts a release;
-# it does not publish one.
+# The release it creates is a *draft* (`draft` in the config), and the step
+# below publishes it as a *prerelease* before starting the build. Either way
+# GitHub's releases/latest redirect -- which the documented installer and the
+# update feed of older Cairn.app builds resolve through -- never points at
+# it: it keeps pointing at the previous complete release until release.yml
+# has built everything and promotes this one, as its last job. Merging the
+# PR starts a release; it does not publish one.
+#
+# Draft rather than release-please's own `prerelease` flag, which reads as
+# the obvious tool and is not one: release-please honours it only for a
+# 0.x or a `-beta`-style version (manifest.ts: `config.prerelease &&
+# (version.preRelease || major === 0)`), so on 1.15.3 it did nothing and
+# the redirect moved the moment the release was published, as before.
 #
 # ONE-TIME REPOSITORY SETTING, without which this workflow fails at the last
 # step. The `permissions:` block below is necessary and not sufficient: there
@@ -97,9 +104,18 @@ jobs:
       # that its tag push counts as a person's. That works, and puts a
       # long-lived credential with write access in the repository's secrets to
       # save the six lines below.
-      - name: start the release build on the new tag
+      # Publish the draft as a prerelease -- one PATCH, so there is no moment
+      # at which it is a published, non-pre release that the redirect would
+      # pick up -- which also creates the tag, since GitHub cuts a draft's
+      # tag only on publish. Then start the build on that tag. If the edit
+      # fails, the draft stays a draft with no tag and no build: publish it
+      # as a prerelease by hand and dispatch release.yml on the tag.
+      - name: publish the draft as a prerelease and start the release build
         if: steps.release.outputs.release_created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag_name }}
-        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"

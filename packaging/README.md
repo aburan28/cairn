@@ -131,9 +131,10 @@ notes are up, and overwrites the one on `updates` only then, so a check made
 while a release is still building reads the previous feed and says "up to
 date". (Apps up to 1.14.0 read `releases/latest/download/appcast.xml`, which
 404s in that window; the job still uploads a copy to the versioned release
-for them -- and since every release now starts as a prerelease and is
-promoted to latest only by `release.yml`'s last job, that window no longer
-exists: `releases/latest` moves only once the feed is up.) The feed on
+for them -- and since every release now starts as a draft, is published as
+a prerelease, and is promoted to latest only by `release.yml`'s last job,
+that window no longer exists: `releases/latest` moves only once the feed is
+up.) The feed on
 `updates` only ever moves forward: with several
 releases building at once their runs finish in any order, and a run for an
 older tag leaves a newer feed where it is rather than putting the older
