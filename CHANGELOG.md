@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.1](https://github.com/aburan28/cairn/compare/v1.15.0...v1.15.1) (2026-10-03)
+
+
+### Fixes
+
+* **updates:** read the feed from a fixed release, not releases/latest ([#214](https://github.com/aburan28/cairn/issues/214)) ([38c729d](https://github.com/aburan28/cairn/commit/38c729d4d8f9e21754700fb3a9388764eea5f12e))
+
 ## [1.15.0](https://github.com/aburan28/cairn/compare/v1.14.0...v1.15.0) (2026-10-03)
 
 
