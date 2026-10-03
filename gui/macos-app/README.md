@@ -189,6 +189,14 @@ the bounty, `treasury` by default, unsigned.
 **Keys.** The first time, the sheet asks for one inline; **Settings → AI**
 chooses the provider and model, tests the key, and removes it.
 
+**Models.** Once a key is saved, Settings asks the provider what it serves
+(`GET /models`, with the key, so an account sees its own deployments) and
+lists the answer in a menu beside the model field. Typing narrows the menu.
+A model the provider does not list -- a default that has been renamed, or a
+typo -- is said so on the spot, with the nearest served id offered as a
+one-click fix, rather than failing when a draft is first asked for. The
+field still takes any id, for a model the list is behind on.
+
 | provider | default model | key saved as |
 |---|---|---|
 | Claude (Anthropic) | `claude-opus-5-5` | `ANTHROPIC_API_KEY` |

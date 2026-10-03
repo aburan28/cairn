@@ -122,17 +122,24 @@ struct AIConfig: Equatable {
     /// Why this configuration cannot be used yet, in a sentence, or nil.
     var problem: String? {
         if model.isEmpty { return "Choose a model in Settings → AI." }
+        if let problem = endpointProblem { return problem }
+        // Zen serves GPT models only on its Responses API, which this app
+        // does not speak; asked on /chat/completions it refuses them.
+        if provider == .opencode, model.hasPrefix("gpt-") {
+            return "OpenCode Zen serves GPT models only through the Responses API. Choose a Kimi, GLM, DeepSeek or Claude model."
+        }
+        return nil
+    }
+
+    /// Why the endpoint alone cannot be called, before any model is chosen:
+    /// what listing the models needs.
+    var endpointProblem: String? {
         guard let url = URL(string: baseURL), let scheme = url.scheme?.lowercased(),
               scheme == "https" || (scheme == "http" && Self.isLoopback(url.host)), url.host != nil
         else {
             return baseURL.isEmpty
                 ? "Enter the provider's API address in Settings → AI."
                 : "\(baseURL) is not an https address."
-        }
-        // Zen serves GPT models only on its Responses API, which this app
-        // does not speak; asked on /chat/completions it refuses them.
-        if provider == .opencode, model.hasPrefix("gpt-") {
-            return "OpenCode Zen serves GPT models only through the Responses API. Choose a Kimi, GLM, DeepSeek or Claude model."
         }
         return nil
     }
@@ -272,6 +279,74 @@ struct AIClient {
         guard status == 200 else { throw Self.failure(status: status, body: data, provider: config.provider) }
     }
 
+    // MARK: discovering models
+
+    /// The model ids this provider serves, from the list every one of them
+    /// publishes at `GET /models` (Anthropic's under its own headers, and
+    /// paged, so the largest page is asked for). The key goes along even
+    /// where the list is public, so a provider that filters by account --
+    /// Fireworks shows an account its own deployments -- answers for this
+    /// one. Needs no model chosen: this is how one gets chosen.
+    func models() async throws -> [String] {
+        if let problem = config.endpointProblem { throw AIError(problem) }
+        let base = config.baseURL.hasSuffix("/") ? String(config.baseURL.dropLast()) : config.baseURL
+        var request: URLRequest
+        switch config.provider {
+        case .anthropic:
+            request = URLRequest(url: URL(string: base + "/models?limit=1000")!)
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        default:
+            request = URLRequest(url: URL(string: base + "/models")!)
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else { throw Self.failure(status: status, body: data, provider: config.provider) }
+        return try Self.modelIDs(in: data)
+    }
+
+    /// The ids in a `/models` reply: `data: [{id}]` on every provider here,
+    /// and `models: [{name}]` from an Ollama behind "Other". In the
+    /// provider's order, which is the order its own console lists them.
+    /// A model the provider marks as not for chat (Fireworks' embedders,
+    /// `supports_chat: false`) cannot draft and is left out.
+    static func modelIDs(in data: Data) throws -> [String] {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIError("The provider's model list was not JSON.")
+        }
+        let entries = (json["data"] ?? json["models"]) as? [[String: Any]] ?? []
+        var seen = Set<String>()
+        let ids = entries
+            .filter { ($0["supports_chat"] as? Bool) != false }
+            .compactMap { ($0["id"] ?? $0["name"]) as? String }
+            .filter { seen.insert($0).inserted }
+        guard !ids.isEmpty else { throw AIError("The provider listed no models for this key.") }
+        return ids
+    }
+
+    /// A served id that goes by the chosen id's own name, when the chosen id
+    /// itself is not served: a renamed or re-versioned model, which is the
+    /// usual way a default goes stale. `accounts/fireworks/models/kimi-k3`
+    /// finds `accounts/fireworks/models/kimi-k3-instruct`; `kimi-k3` on
+    /// OpenRouter finds `moonshotai/kimi-k3`. Nil when the chosen id is
+    /// served, or nothing is close.
+    static func nearest(to model: String, in served: [String]) -> String? {
+        let chosen = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !chosen.isEmpty, !served.contains(chosen) else { return nil }
+        let stem = (chosen.split(separator: "/").last.map(String.init) ?? chosen).lowercased()
+        if let match = served.first(where: { $0.lowercased().contains(stem) }) { return match }
+        // Down to the family: `kimi-k3-0905` → `kimi-k3` → `kimi`.
+        var family = stem
+        while let dash = family.lastIndex(of: "-") {
+            family = String(family[..<dash])
+            if family.count < 3 { break }
+            if let match = served.first(where: { $0.lowercased().contains(family) }) { return match }
+        }
+        return nil
+    }
+
     // MARK: reading replies
 
     /// The model's text. A refusal or a reply cut off at the token limit is
@@ -340,7 +415,7 @@ struct AIClient {
         case (_, "MonthlyLimitError"):
             return AIError("\(provider.title) says this account reached its monthly limit\(detail).")
         case (_, "ModelError"), (404, _):
-            return AIError("\(provider.title) does not serve that model\(detail). Check the model in Settings → AI.")
+            return AIError("\(provider.title) does not serve that model\(detail). Settings → AI lists the models it does.")
         case (401, _), (403, _):
             return AIError("\(provider.title) refused the API key\(detail).")
         case (429, _):
