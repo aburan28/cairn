@@ -54,8 +54,10 @@ The six pages a user needs and nothing else in this repository provides.
   statement is untrusted input.
 - [verification.md](verification.md) — the verification ladder, and how to
   author a verifier whose verdict anybody can reproduce.
-- [serving.md](serving.md) — publishing a log over HTTP, the endpoints, and why
-  submissions queue instead of appending.
+- [serving.md](serving.md) — publishing a log over HTTP, the endpoints, why
+  submissions queue instead of appending, and the progress route behind the
+  reader's per-task dashboard: settled work from the log beside unverified
+  worker heartbeats, kept apart.
 - [storage.md](storage.md) — encryption at rest, the data directory, the size
   cap, and sync.
 - [tiers.md](tiers.md) — why a unit earned on a millisecond certificate check

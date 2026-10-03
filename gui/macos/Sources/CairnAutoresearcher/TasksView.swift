@@ -100,6 +100,8 @@ private struct TaskRow: View {
                    model.isPosted(item),
                    let row = model.status?.objectives.first(where: { $0.goal == item.goal }) {
                     Link("Open in reader", destination: model.readerURL(for: row.id))
+                    Link("Progress", destination: model.progressURL(for: row.id))
+                        .help("Workers, paid orbits and the share of the expected cost")
                         .disabled(!model.nodeReachable)
                 }
             }

@@ -405,6 +405,12 @@ final class ResearcherModel: ObservableObject {
         URL(string: "http://\(httpAddress)/ui/challenge/?id=\(objectiveId)")!
     }
 
+    /// The reader's dashboard for a divided search: what the log has paid
+    /// each worker, beside what the workers report they are walking now.
+    func progressURL(for objectiveId: String) -> URL {
+        URL(string: "http://\(httpAddress)/ui/task/?id=\(objectiveId)")!
+    }
+
     static func guessRoot() -> String {
         if let env = ProcessInfo.processInfo.environment["AR_ROOT"] { return env }
         var url = Bundle.main.bundleURL
