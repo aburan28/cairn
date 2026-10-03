@@ -6,7 +6,7 @@ import XCTest
 @testable import Cairn
 
 /// What the app sends to each provider, how it reads what comes back, and the
-/// objective it builds. Running a drafted checker through `cairn propose`
+/// objective it builds. Running a drafted theorem through `cairn propose`
 /// needs a `cairn` binary this job does not build; the verdict parser is
 /// held here to the exact lines that command prints.
 final class DraftingTests: XCTestCase {
@@ -136,37 +136,76 @@ final class DraftingTests: XCTestCase {
     // MARK: the objective
 
     private let draftObject: [String: Any] = [
-        "goal": "GOAL-factor-a-semiprime",
-        "statement": "Find integers p and q above 1 whose product is 1000036000099.",
-        "answer_schema": #"{"type":"object","properties":{"p":{"type":"integer"},"q":{"type":"integer"}},"required":["p","q"],"example":{"p":3,"q":5}}"#,
-        "checker": "def check(artifact):\n    return False, 'stub'",
-        "passing_example": "",
-        "failing_example": #"{"p": 1, "q": 1000036000099}"#,
+        "goal": "GOAL-add-comm-nat",
+        "statement": "Prove that addition of natural numbers is commutative.",
+        "theorem": "theorem pw_add_comm (a b : Nat) : a + b = b + a",
+        "preamble": "",
+        "proof": "",
+        "timeout_seconds": "120",
         "notes": "",
     ]
 
-    func testADraftBecomesAPinnedObjectiveUnderTheRoot() throws {
+    func testADraftBecomesALeanObjectiveUnderTheRoot() throws {
         let draft = try ChallengeWriter.parse(draftObject)
-        XCTAssertNil(draft.passing, "an empty passing example means none is known")
+        XCTAssertNil(draft.proof, "an empty proof means the model knows none")
+        XCTAssertEqual(draft.timeoutSeconds, 120)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("cairn-test-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
 
         let built = try ChallengeBuilder.build(draft, reward: 5000, funder: "treasury", root: root,
                                                now: Date(timeIntervalSince1970: 1_790_000_000))
-        let source = try Data(contentsOf: root.appendingPathComponent(built.checkerPath))
-        XCTAssertEqual(GuiTasks.sha256(source), built.checkerHash)
-        XCTAssertTrue(built.checkerPath.hasPrefix("challenges/factor-a-semiprime-"))
+        XCTAssertTrue(built.directory.path.contains("/challenges/add-comm-nat-"), built.directory.path)
+        XCTAssertEqual(try String(contentsOf: built.leanFile, encoding: .utf8),
+                       "\ntheorem pw_add_comm (a b : Nat) : a + b = b + a := by sorry\n",
+                       "the file a solver starts from: the theorem with a hole")
 
         let objective = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: built.objectiveFile)) as? [String: Any])
         let verifier = try XCTUnwrap(objective["verifier"] as? [String: Any])
-        XCTAssertEqual(verifier["kind"] as? String, "certificate")
-        XCTAssertEqual(verifier["checker"] as? String, built.checkerPath)
-        XCTAssertEqual(verifier["checker_sha256"] as? String, built.checkerHash)
-        XCTAssertEqual(verifier["entrypoint"] as? String, "check")
-        XCTAssertEqual(verifier["timeout_seconds"] as? Int, 60)
+        // The shape of examples/lean/objective.json, which the node settles.
+        XCTAssertEqual(verifier["kind"] as? String, "lean")
+        XCTAssertEqual(verifier["statement"] as? String, "theorem pw_add_comm (a b : Nat) : a + b = b + a")
+        XCTAssertEqual(verifier["preamble"] as? String, "")
+        XCTAssertEqual(verifier["timeout_seconds"] as? Int, 120)
+        XCTAssertNil(verifier["checker"], "a Lean challenge pins no code; the theorem is the pin")
         XCTAssertEqual(objective["reward"] as? Int, 5000)
         XCTAssertEqual(objective["created_at"] as? String, "2026-09-21T14:13:20+00:00")
-        XCTAssertNotNil(objective["artifact_schema"] as? [String: Any])
+        let schema = try XCTUnwrap(objective["artifact_schema"] as? [String: Any])
+        XCTAssertEqual(schema["required"] as? [String], ["proof"])
+    }
+
+    func testTheTheoremIsHeldToLeanShape() throws {
+        func parsed(_ changes: [String: Any]) throws -> ChallengeDraft {
+            try ChallengeWriter.parse(draftObject.merging(changes) { _, new in new })
+        }
+        XCTAssertThrowsError(try parsed(["theorem": "lemma t : True"]), "core Lean has no lemma")
+        XCTAssertThrowsError(try parsed(["theorem": "theorem t : True := trivial"]), "the proof is the solver's")
+        XCTAssertThrowsError(try parsed(["theorem": "theorem t"]), "no proposition")
+        XCTAssertEqual(try parsed(["proof": "by omega"]).proof, ":= by omega", "a proof without := gets one")
+        XCTAssertEqual(try parsed(["proof": ":= Nat.add_comm a b"]).proof, ":= Nat.add_comm a b")
+        XCTAssertEqual(try parsed(["timeout_seconds": "5"]).timeoutSeconds, 30, "clamped up")
+        XCTAssertEqual(try parsed(["timeout_seconds": "99999"]).timeoutSeconds, 3600, "clamped down")
+        XCTAssertEqual(try parsed(["timeout_seconds": "soon"]).timeoutSeconds, 120, "unreadable means the default")
+
+        let draft = try parsed(["preamble": "def double (n : Nat) : Nat := 2 * n"])
+        XCTAssertEqual(draft.source(proof: ":= rfl"),
+                       "def double (n : Nat) : Nat := 2 * n\ntheorem pw_add_comm (a b : Nat) : a + b = b + a := rfl\n",
+                       "assembled exactly as src/verifiers/mod.rs assembles it")
+    }
+
+    func testScreensMatchTheVerifiers() throws {
+        XCTAssertEqual(LeanScreen.hits(in: ":= by sorry"), ["contains `sorry`: an explicit hole, proves nothing"])
+        XCTAssertTrue(LeanScreen.hits(in: "theorem sorrying : True").isEmpty, "whole words, as the verifier matches them")
+        XCTAssertEqual(LeanScreen.hits(in: "@[implemented_by evil] def f := 1").count, 1)
+        XCTAssertEqual(LeanScreen.hits(in: "axiom cheat : False").count, 1)
+        XCTAssertEqual(LeanScreen.hits(in: ":= by native_decide").count, 1)
+        XCTAssertTrue(LeanScreen.hits(in: "theorem t : 1 + 1 = 2 := by decide").isEmpty)
+
+        let clean = try ChallengeWriter.parse(draftObject)
+        XCTAssertTrue(ChallengeWriter.problems(in: clean).isEmpty)
+        var holed = clean
+        holed.preamble = "theorem helper : False := by sorry"
+        XCTAssertEqual(ChallengeWriter.problems(in: holed).count, 1)
+        XCTAssertTrue(ChallengeWriter.problems(in: holed)[0].contains("preamble"))
     }
 
     func testFractionsAreRefusedBeforeTheNodeSeesThem() {
@@ -194,10 +233,24 @@ final class DraftingTests: XCTestCase {
         XCTAssertEqual(ChallengeTest.parse("", err: "refused: objective sha256:ab is not in this log", artifact: "/tmp/x/a.json"),
                        .refused("refused: objective sha256:ab is not in this log"))
 
-        let lax = ChallengeTest.Outcome(passing: .accept("ok"), failing: .accept("ok"))
-        XCTAssertFalse(lax.ok)
+        let lax = ChallengeTest.Outcome(hole: .accept("ok"), statement: .elaborates("Lean 4"), proof: nil)
+        XCTAssertFalse(lax.ok, "a verifier that takes a hole pays for nothing")
         XCTAssertEqual(lax.problems.count, 1)
-        XCTAssertTrue(ChallengeTest.Outcome(passing: nil, failing: .reject("no")).ok)
+        let good = ChallengeTest.Outcome(hole: .reject("contains `sorry`"), statement: .elaborates("Lean 4"), proof: nil)
+        XCTAssertTrue(good.ok, "no proof known is fine; the theorem is what is published")
+        XCTAssertTrue(good.problems.isEmpty)
+        let uncompiled = ChallengeTest.Outcome(hole: .reject("x"), statement: .untested("no Lean here"), proof: nil)
+        XCTAssertFalse(uncompiled.ok, "a theorem nobody compiled is not posted")
+        XCTAssertTrue(uncompiled.problems.isEmpty, "a missing toolchain is not the model's problem")
+        let broken = ChallengeTest.Outcome(hole: .reject("x"), statement: .broken("unknown identifier 'foo'"), proof: nil)
+        XCTAssertFalse(broken.ok)
+        XCTAssertTrue(broken.problems[0].contains("unknown identifier"))
+        let refusedProof = ChallengeTest.Outcome(hole: .reject("x"), statement: .elaborates("Lean 4"), proof: .reject("lean rejected the proof"))
+        XCTAssertFalse(refusedProof.ok)
+        XCTAssertTrue(refusedProof.problems[0].contains("kernel rejected"))
+        let proofUnavailable = ChallengeTest.Outcome(hole: .reject("x"), statement: .elaborates("Lean 4"), proof: .unavailable("no lean"))
+        XCTAssertFalse(proofUnavailable.ok)
+        XCTAssertTrue(proofUnavailable.problems.isEmpty)
     }
 
     // MARK: the reader's page

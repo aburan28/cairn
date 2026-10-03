@@ -39,8 +39,9 @@ import { Badge, Card, CopyButton, Hash, Note, PageHeader, SectionHeading } from 
  *
  * Nobody posting a bounty wants to meet the objective schema, and in the
  * app's window they do not have to: the page is one text box, handed to the
- * app's New Challenge…, which has a model draft the statement, answer format
- * and checker, tests the checker in the network's own sandbox, and posts.
+ * app's New Challenge…, which has a model draft the statement and a Lean
+ * theorem, compiles the theorem, runs the hole through the network's own
+ * verifier, and posts.
  * Why the page cannot do that itself is in `lib/draft.ts`. The form below is
  * still here, folded away, for a scaffolded `objective.json` and for a funder
  * signing with a wallet; in a browser, where there is no app to hand to, it
@@ -291,7 +292,7 @@ export default function Page() {
     <>
       <PageHeader
         title="Post a challenge"
-        subtitle="A question with a pinned checker and a bounty. Once posted the checker decides what passes, and editing it later posts a different objective."
+        subtitle="A theorem to prove, or a question with a pinned checker, and a bounty. Once posted the verifier decides what passes, and editing it later posts a different objective."
       />
 
       {/* -- in Cairn.app: a description, and nothing else ------------------ */}
@@ -320,10 +321,11 @@ export default function Page() {
             placeholder="For example: find a 16-input sorting network with fewer than 60 comparators. Pay whoever finds one."
           />
           <p className="hint">
-            A model you have a key for writes the statement, the answer format and
-            the checker. Cairn tests the checker on a right and a wrong answer in
-            the sandbox the network uses, and shows you all of it before anything
-            is posted. The reward and funder can be changed there.
+            A model you have a key for writes the statement and a Lean 4 theorem.
+            Cairn compiles the theorem, checks that the verifier refuses a hole,
+            tests the model&apos;s proof when it wrote one, and shows you all of it
+            before anything is posted. Whoever submits a proof the Lean kernel
+            accepts is paid. The reward and funder can be changed there.
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <button

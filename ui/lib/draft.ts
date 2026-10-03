@@ -4,12 +4,13 @@
  * # Why the page does not draft it itself
  *
  * Drafting asks a hosted model, over TLS, with the funder's API key, then
- * writes the checker it gets back under the node's root and runs it through
- * the node's own verifier before anything is posted. The node can do none of
- * that for a page. It has no TLS by design (`tests/cipher_policy.rs`). It
- * serves plain HTTP, so a key typed into a page it serves crosses the wire in
- * the clear. And a route that took checker source from a page would let
- * anyone who can reach the node's port plant code it later runs.
+ * writes the theorem it gets back under the node's root, compiles it with the
+ * Lean on that Mac and runs a hole through the node's own verifier before
+ * anything is posted. The node can do none of that for a page. It has no TLS
+ * by design (`tests/cipher_policy.rs`). It serves plain HTTP, so a key typed
+ * into a page it serves crosses the wire in the clear. And a route that took
+ * Lean source from a page would let anyone who can reach the node's port
+ * publish theorems under its funder's name.
  *
  * Cairn.app can do all of it, because it is the process that runs the node and
  * holds the key — and it already does, behind New Challenge…. So in the app's
