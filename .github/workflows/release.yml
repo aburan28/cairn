@@ -805,8 +805,8 @@ jobs:
           path: dist/appcast.xml
 
   # Only now is this the latest release. release-please creates every release
-  # as a prerelease (.github/release-please-config.json), which GitHub's
-  # releases/latest redirect skips, so the two things that resolve through it
+  # as a draft and release-please.yml publishes it as a prerelease, which
+  # GitHub's releases/latest redirect skips, so the two things that resolve through it
   # -- the documented installer, and the update feed of every Cairn.app up to
   # 1.14.0 -- keep pointing at the previous complete release while this one
   # builds. Before this, the redirect moved the moment release-please
