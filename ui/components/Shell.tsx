@@ -15,7 +15,6 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NODE_URL } from "@/lib/objectives";
-import { REPO, repoLink } from "@/lib/site";
 
 export const ROUTES = [
   { href: "/", label: "Overview", hint: "What cairn is, and this node's numbers" },
@@ -427,21 +426,15 @@ function Footer() {
   return (
     <footer className="shell-footer site-only border-t border-edge">
       <div className="shell-gutter flex max-w-[90rem] flex-wrap items-center gap-x-5 gap-y-2 py-5 text-[12.5px] lg:px-8">
-        <a className="text-ink-2 hover:text-accent" href={REPO}>
-          source
-        </a>
-        <a className="text-ink-2 hover:text-accent" href={`${REPO}/releases/latest`}>
-          releases
-        </a>
-        <a className="text-ink-2 hover:text-accent" href={repoLink("gui/ios/")}>
-          iOS
-        </a>
-        <a className="text-ink-2 hover:text-accent" href={repoLink("docs/threat-model.md")}>
-          threat model
-        </a>
-        <a className="text-ink-2 hover:text-accent" href={repoLink("LICENSE")}>
+        <span
+          className="text-ink-2"
+          title="The full accounting, attack by attack, is docs/threat-model.md in the repository."
+        >
+          threat model: <span className="mono">docs/threat-model.md</span>
+        </span>
+        <span className="text-ink-2" title="LICENSE in the repository.">
           Apache-2.0
-        </a>
+        </span>
         <span
           className="text-ink-3 sm:ml-auto"
           title="This page loads no font, script, or image from anywhere but where it was served. The only host it talks to is the node you point it at."

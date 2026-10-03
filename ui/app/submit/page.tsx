@@ -29,7 +29,7 @@ import {
 } from "@/lib/wallet";
 import { type Bridge, appBridge, briefProblem, handOff } from "@/lib/draft";
 import { NODE_URL } from "@/lib/objectives";
-import { repoLink } from "@/lib/site";
+import { } from "@/lib/site";
 import { Badge, Card, CopyButton, Hash, Note, PageHeader, SectionHeading } from "@/components/ui";
 
 /**
@@ -482,12 +482,7 @@ export default function Page() {
                         Open this page in <b>Phantom&rsquo;s in-app browser</b>{" "}
                         — Browse, then this URL — which is the one place on iOS
                         that `signMessage` exists. The native reader in{" "}
-                        <a
-                          className="text-accent hover:underline"
-                          href={repoLink("gui/ios/")}
-                        >
-                          gui/ios
-                        </a>{" "}
+                        <span className="mono">gui/ios/</span>{" "}
                         reads a node; it does not sign.{" "}
                       </>
                     )}{" "}
@@ -998,12 +993,7 @@ export default function Page() {
                   <p className="hint">
                     The smallest move that pays. Set it deliberately: it is currently
                     the only thing bounding how finely a span can be sliced.{" "}
-                    <a
-                      className="text-accent hover:underline"
-                      href={repoLink("docs/threat-model.md")}
-                    >
-                      threat-model.md
-                    </a>
+                    <span className="mono">docs/threat-model.md</span>
                   </p>
                   <Problem of="minImprovement" found={found} touched={touched} />
                 </div>

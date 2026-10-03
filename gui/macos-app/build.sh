@@ -86,6 +86,16 @@ for objective in "$TASKS"/examples/certicom-ecdlp/objective-*.json; do
     [ "$got" = "$pin" ] \
         || { echo "build failed: $checker hashes to $got, but $(basename "$objective") pins $pin" >&2; exit 1; }
 done
+# "About this task" opens the task's docPath from this same copy
+# (GuiTasks.docURL) rather than a page on GitHub, so each one ships too. The
+# list is read off GuiTasks.swift, so a task that names a document it does
+# not have fails the build here rather than showing nothing in the sheet.
+for doc in $(sed -n 's/.*docPath: "\([^"]*\)".*/\1/p' "$HERE/Sources/Cairn/GuiTasks.swift" | sort -u); do
+    [ -f "$HERE/../../$doc" ] \
+        || { echo "build failed: GuiTasks.swift names $doc, which is not in the repository" >&2; exit 1; }
+    mkdir -p "$TASKS/$(dirname "$doc")"
+    cp "$HERE/../../$doc" "$TASKS/$doc"
+done
 
 # The icon is drawn by packaging/macos/icon/make-icon.py and committed as an
 # .icns, so the build needs no renderer. The autoresearcher uses the same one.

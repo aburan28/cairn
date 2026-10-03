@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { REPO, repoLink } from "@/lib/site";
+import { REPO } from "@/lib/site";
 
 export const metadata: Metadata = {
   title: "how it works",
@@ -45,9 +45,7 @@ export default function Page() {
       <h2>an objective is a funded question with its checker pinned to it</h2>
       <p className="lede">
         This is{" "}
-        <a href={repoLink("examples/capset/objective.json")}>
-          examples/capset/objective.json
-        </a>{" "}
+        <code>examples/capset/objective.json</code>{" "}
         verbatim — every value real, so it posts as it stands:
       </p>
       <div className="panel">
@@ -138,7 +136,7 @@ export default function Page() {
         bubblewrap on Linux, a seatbelt profile on macOS — with its hash checked
         first: no network, writes confined to a scratch directory, a wall-clock
         deadline. That is not a VM boundary, and{" "}
-        <a href={repoLink("docs/verification.md")}>verification.md</a> names the
+        <code>docs/verification.md</code> names the
         gaps that remain. The <code>lean</code> verifier rejects{" "}
         <code>sorry</code>, <code>admit</code>, new <code>axiom</code>s and{" "}
         <code>native_decide</code> before Lean ever runs, because each produces a
@@ -222,14 +220,14 @@ cd cairn
         frontier and attribution read <code>cites</code> and none of them read
         those. If declaring &ldquo;X is wrong&rdquo; could shift a payout,
         refutation would be a way to bill X. Relations feed a derived view
-        instead; see <a href={repoLink("docs/knowledge.md")}>knowledge.md</a>.
+        instead; see <code>docs/knowledge.md</code>.
       </p>
 
       <h2>why you need not trust whoever served you this page</h2>
       <p className="lede">
         Every settled result is re-derivable from the log alone. Not &ldquo;by
         anyone running my code&rdquo;, either: a second implementation in{" "}
-        <a href={repoLink("reference/rust/")}>reference/rust/</a> shares no code
+        <code>reference/rust/</code> shares no code
         with the primary one and re-derives the same ids and the same Merkle
         roots, and <b>448 frozen conformance vectors</b> — produced by a Python
         implementation that no longer exists — pin the byte encoding both must
@@ -252,7 +250,7 @@ log verified: chain intact, every settled claim re-verified
         Checking one entry does not need the log at all. <code>cairn prove</code>{" "}
         emits a Merkle inclusion proof and <code>cairn check</code> verifies it
         against a signed checkpoint, opening no log — five hashes for the log in{" "}
-        <a href={repoLink("launch/")}>launch/</a>, fifteen for a log of twenty
+        <code>launch/</code>, fifteen for a log of twenty
         thousand. That is what a light client runs.
       </p>
 
@@ -291,7 +289,7 @@ log verified: chain intact, every settled claim re-verified
       <p className="lede">
         The full accounting, attack by attack and marked{" "}
         <i>handled / partial / not handled / unsolvable</i>, is in{" "}
-        <a href={repoLink("docs/threat-model.md")}>threat-model.md</a>.
+        <code>docs/threat-model.md</code>.
       </p>
 
       <p className="lede">

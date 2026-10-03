@@ -205,27 +205,19 @@ async function discoverNode(): Promise<string> {
 }
 
 /**
- * The repository, which is the only external thing this site links to.
+ * The repository, for the commands this site prints: `git clone` and the
+ * installer's `curl`. It is never an `href`.
  *
- * One constant rather than the string typed into each page: the site links out
- * dozens of times, and a moved repository should be one edit rather than a
- * grep that misses two.
+ * The site used to link into GitHub's web UI from every prose page and from
+ * the footer -- a few dozen anchors through one `repoLink` helper. They
+ * are gone: a node serves this reader itself, and a page that keeps sending
+ * its reader off to a hosting site's web UI is not self-contained, whatever it
+ * says about re-deriving the log. Paths are named in text instead
+ * (`docs/economics.md`), for someone with a checkout, and `site.test.ts`
+ * fails on any page that links to github.com again. One constant rather than
+ * the string typed into each command, so a moved repository is one edit.
  */
 export const REPO = "https://github.com/aburan28/cairn";
-
-/**
- * A path inside the repository, on the default branch.
- *
- * Links rather than copies, and that is the point: every prose page here could
- * restate what `docs/economics.md` says, and the restatement would be wrong
- * within a month. The site is a way in, and the repository stays the source.
- *
- * A trailing slash means a directory, which GitHub serves under `tree` and not
- * `blob`.
- */
-export function repoLink(path: string): string {
-  return `${REPO}/${path.endsWith("/") ? "tree" : "blob"}/main/${path}`;
-}
 
 export type Feed = {
   objectives: Objective[];

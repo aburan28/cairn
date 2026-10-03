@@ -1,3 +1,6 @@
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SNAPSHOT,
@@ -190,5 +193,45 @@ describe("resolveNode", () => {
     const [a, b, c] = await Promise.all([resolveNode(), resolveNode(), resolveNode()]);
     expect([a, b, c]).toEqual(["", "", ""]);
     expect(asked).toEqual(["/health"]);
+  });
+});
+
+describe("the reader links nowhere on github.com", () => {
+  // A node serves this reader itself, and every page used to send its reader
+  // off to GitHub's web UI through a `repoLink(path)` helper: the footer, the
+  // docs index, each prose page. REPO in site.ts says why that stopped. This
+  // reads the sources rather than a render, so a new page with an old habit
+  // fails here before it is built into a binary.
+  function sources(dir: string, out: string[] = []): string[] {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) sources(path, out);
+      else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name)) out.push(path);
+    }
+    return out;
+  }
+
+  it("has no anchor into GitHub's web UI and no helper to make one", () => {
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    const offenders: string[] = [];
+    for (const dir of ["app", "components", "lib"]) {
+      for (const file of sources(join(root, dir))) {
+        const src = readFileSync(file, "utf8");
+        if (
+          /href=\{?["'`]https:\/\/github\.com/.test(src)
+          || /repoLink\(/.test(src)
+          || /href=\{(?:`\$\{)?REPO/.test(src)
+        ) {
+          offenders.push(file.slice(root.length));
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps REPO for the commands it prints, not for links", () => {
+    const site = readFileSync(fileURLToPath(new URL("./site.ts", import.meta.url)), "utf8");
+    expect(site).toMatch(/export const REPO = "https:\/\/github\.com\/aburan28\/cairn";/);
+    expect(site).not.toMatch(/function repoLink/);
   });
 });

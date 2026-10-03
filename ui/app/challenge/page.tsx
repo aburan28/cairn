@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { type Objective, loadObjective, progress, repoLink, short, units } from "@/lib/site";
+import { type Objective, loadObjective, progress, short, units } from "@/lib/site";
 import {
   Badge,
   Box,
@@ -439,9 +439,7 @@ function WorkOnThis({ id, mustCite }: { id: string; mustCite: string | undefined
             <p className="text-[12.5px] text-ink-2">
               Add the stanza to Claude Code, Codex or OpenCode, then run{" "}
               <span className="mono">get_objective → score_candidate → submit_claim</span>.{" "}
-              <a className="text-accent hover:underline" href={repoLink("docs/agents.md")}>
-                agents.md
-              </a>{" "}
+              <span className="mono">docs/agents.md</span>{" "}
               has the other clients&rsquo; spellings.
             </p>
             <CodeBlock value={MCP_STANZA} />

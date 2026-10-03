@@ -24,10 +24,15 @@ import SwiftUI
 ///
 /// A build without both keys -- a checkout's, or a release cut before the
 /// key existed -- has nothing to verify an update against, so it never
-/// starts Sparkle, and Check for Updates… opens the releases page instead.
+/// starts Sparkle, and Check for Updates… says so and names the installer.
+/// It used to open the releases page on GitHub instead: a link out of the
+/// app to a web UI, and a download nothing here would have checked.
 @MainActor
 final class Updates: ObservableObject {
-    static let releasesPage = URL(string: "https://github.com/aburan28/cairn/releases/latest")!
+    /// What to run instead, for a build that cannot check: the same line the
+    /// reader's front page prints.
+    static let installCommand =
+        "curl -fsSL https://github.com/aburan28/cairn/releases/latest/download/install.sh | sh"
 
     private let controller: SPUStandardUpdaterController?
     /// Sparkle holds its delegate weakly; this is the strong reference.
@@ -72,8 +77,21 @@ final class Updates: ObservableObject {
     func check() {
         if let controller {
             controller.checkForUpdates(nil)
-        } else {
-            NSWorkspace.shared.open(Self.releasesPage)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "This build cannot check for updates"
+        alert.informativeText = """
+            It was built without the update-signing keys, so there is nothing to \
+            verify a download against. Install the current release from a terminal:
+
+            \(Self.installCommand)
+            """
+        alert.addButton(withTitle: "Copy Command")
+        alert.addButton(withTitle: "OK")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(Self.installCommand, forType: .string)
         }
     }
 }
@@ -167,7 +185,7 @@ struct UpdatesSection: View {
                 ))
             }
             LabeledContent(version) {
-                Button(updates.isEnabled ? "Check Now" : "Open Releases Page") { updates.check() }
+                Button("Check Now") { updates.check() }
                     .disabled(!updates.canCheck)
             }
             if let nodeVersion {
@@ -187,7 +205,7 @@ struct UpdatesSection: View {
 
     private var footer: String {
         guard updates.isEnabled else {
-            return "This build cannot verify updates, so it does not install them. Download the newest .dmg from the releases page."
+            return "This build cannot verify updates, so it does not install them. Install the current release from a terminal: \(Updates.installCommand)"
         }
         var text = "An update is installed only if its post-quantum (ML-DSA-87) and Ed25519 signatures match this app's keys. It installs the cairn command and this app together, and asks for an administrator password."
         if let last = updates.lastCheck {
