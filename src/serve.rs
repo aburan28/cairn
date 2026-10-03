@@ -619,6 +619,7 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") | ("GET", "/index") => index(stream, serving),
         ("GET", "/health") => respond(stream, 200, "text/plain", b"ok\n"),
+        ("GET", "/verifiers") => verifiers(stream, serving),
         ("GET", "/objectives") => objectives(stream, serving),
         ("GET", "/peers") => peers(stream, serving),
         ("GET", "/log") => log(stream, serving),
@@ -807,6 +808,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /chain"),
                 Value::string("GET /chain.html"),
                 Value::string("GET /health"),
+                Value::string("GET /verifiers"),
                 Value::string("GET /peers"),
                 // Named even when the table behind it is empty, because the
                 // whole point of this list is that a reader who cannot find a
@@ -843,6 +845,25 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             ),
         ),
     ]);
+    json(stream, 200, &body)
+}
+
+/// What this node can verify right now: the kinds, the toolchains behind
+/// them and where each resolved, and the jail. The same registry a request's
+/// node would build, so the answer is about this process and not about a
+/// configuration file.
+///
+/// A report, not a verdict: nothing here reads the log, and a kind listed as
+/// unservable still answers `unavailable` -- never `reject` -- to a claim.
+fn verifiers(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let registry = crate::verifiers::VerifierRegistry::new(&serving.root);
+    let mut body = registry.readiness();
+    if let Value::Object(fields) = &mut body {
+        fields.insert(
+            String::from("generated_at"),
+            Value::string(crate::time::timestamp()),
+        );
+    }
     json(stream, 200, &body)
 }
 
@@ -2883,6 +2904,82 @@ mod tests {
         assert_eq!(spool.queued(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- verifiers -----------------------------------------------------------
+
+    /// The report is about this process: whatever it says about `lean` and
+    /// `python3` has to agree with what the registry would do, and a kind it
+    /// calls unservable has to carry a reason a person can act on.
+    #[test]
+    fn verifiers_reports_what_this_node_can_run() {
+        let dir = TempDir::new("verifiers-route");
+        let (addr, _) = serve_orbit_search(&dir);
+
+        let (status, body) = get_json(addr, "/verifiers");
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        let kinds: Vec<&str> = match at(&body, "kinds") {
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            other => panic!("kinds is not an array: {}", other.canonical_string()),
+        };
+        assert_eq!(kinds, crate::verifiers::VerifierRegistry::kinds().to_vec());
+        assert_eq!(at(&body, "toolchains.lean.binary").as_str(), Some("lean"));
+        assert_eq!(
+            at(&body, "toolchains.python3.binary").as_str(),
+            Some("python3")
+        );
+        let mechanism = at(&body, "sandbox.mechanism").as_str().unwrap_or("");
+        assert!(
+            ["bwrap", "sandbox-exec", "none"].contains(&mechanism),
+            "mechanism {mechanism:?}"
+        );
+        assert!(at(&body, "generated_at").as_str().is_some());
+
+        // Every kind is in exactly one of the two lists, and an unservable
+        // one says why.
+        let servable: Vec<&str> = match at(&body, "servable") {
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            other => panic!("servable is not an array: {}", other.canonical_string()),
+        };
+        let unservable = match at(&body, "unservable") {
+            Value::Object(fields) => fields,
+            other => panic!("unservable is not an object: {}", other.canonical_string()),
+        };
+        for kind in &kinds {
+            let listed = servable.contains(kind);
+            let refused = unservable.contains_key(*kind);
+            assert!(
+                listed != refused,
+                "{kind}: servable={listed} unservable={refused}"
+            );
+            if refused {
+                assert!(
+                    !unservable[*kind].as_str().unwrap_or("").is_empty(),
+                    "{kind} is unservable without a reason"
+                );
+            }
+        }
+        // The lean row and the lean kind tell one story.
+        let lean_available = at(&body, "toolchains.lean.available") == &Value::Bool(true);
+        let lean_required_jail = at(&body, "sandbox.required") == &Value::Bool(true)
+            && at(&body, "sandbox.jail") == &Value::Bool(false);
+        assert_eq!(
+            servable.contains(&"lean"),
+            lean_available && !lean_required_jail,
+            "{}",
+            body.canonical_string()
+        );
+        // It is in the index, so a reader who cannot find it learns it exists.
+        let (_, index) = get_json(addr, "/");
+        let listed = match at(&index, "endpoints") {
+            Value::Array(items) => items.iter().any(|v| v.as_str() == Some("GET /verifiers")),
+            _ => false,
+        };
+        assert!(listed, "GET /verifiers is not in the index");
     }
 
     // -- progress ------------------------------------------------------------

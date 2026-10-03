@@ -205,6 +205,13 @@ fn effective_scrub_env(plan: &Confinement<'_>, required: bool) -> bool {
     plan.scrub_env || required
 }
 
+/// Whether this process was started with [`REQUIRE_ENV`] asking for a
+/// mandatory jail: what `GET /verifiers` reports beside the mechanism, so a
+/// node that answers `Unavailable` to everything can say why.
+pub fn required() -> bool {
+    require_sandbox(std::env::var(REQUIRE_ENV).ok().as_deref())
+}
+
 /// Whether [`REQUIRE_ENV`] asks for a mandatory jail.
 ///
 /// Fails closed. This is a security kill-switch, so `=true`, `=yes`, or a typo

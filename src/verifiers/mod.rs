@@ -456,6 +456,21 @@ const MAX_CAPTURED_BYTES: u64 = 8 * 1024 * 1024;
 /// waits. See [`VerifierRegistry::interactive`].
 pub const INTERACTIVE_TIMEOUT_SECONDS: u64 = 120;
 
+/// The Lean binary, when it is not the `lean` on `PATH`. The same variable
+/// the reference implementation reads. Point it at the toolchain's *real*
+/// binary (`<prefix>/bin/lean`), not elan's `~/.elan/bin/lean` proxy: the
+/// proxy finds the toolchain through `$HOME`, which the jail scrubs.
+pub const LEAN_ENV: &str = "CAIRN_LEAN";
+
+/// A directory the operator grants the Lean jail to read, in full: the
+/// toolchain's installation prefix. Needed when that prefix is under the
+/// operator's home, as every elan install is (`~/.elan/toolchains/...`),
+/// because a runtime root beneath a home directory is deliberately never
+/// allow-listed on its own (`sandbox::narrow_runtime_root`). This is an
+/// explicit operator decision about one directory, made outside any
+/// objective; a record still cannot choose what its own jail binds.
+pub const LEAN_ROOT_ENV: &str = "CAIRN_LEAN_ROOT";
+
 /// A screen applied to submitted Lean proof text before Lean ever runs.
 #[derive(Debug, Clone, Copy)]
 struct Screen {
@@ -710,6 +725,11 @@ pub struct VerifierRegistry {
     root: PathBuf,
     blobs: BlobStore,
     lean_binary: String,
+    /// A directory the operator granted the Lean jail to read, beyond the
+    /// binary's own installation prefix: [`LEAN_ROOT_ENV`]. Operator-declared,
+    /// never objective-declared, which is what keeps "a record cannot choose
+    /// which host paths are bound into its own jail" true.
+    lean_root: Option<PathBuf>,
     python_binary: String,
     /// Ceiling applied to every spec-declared timeout, when set. See
     /// [`VerifierRegistry::interactive`].
@@ -728,7 +748,14 @@ impl VerifierRegistry {
         VerifierRegistry {
             blobs: BlobStore::under(&root),
             root,
-            lean_binary: "lean".to_string(),
+            lean_binary: std::env::var(LEAN_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "lean".to_string()),
+            lean_root: std::env::var_os(LEAN_ROOT_ENV)
+                .map(PathBuf::from)
+                .filter(|path| !path.as_os_str().is_empty()),
             python_binary: "python3".to_string(),
             timeout_ceiling: None,
         }
@@ -784,6 +811,14 @@ impl VerifierRegistry {
         self
     }
 
+    /// Grant the Lean jail one more readable directory: the toolchain's
+    /// installation prefix, when it lives somewhere the jail would otherwise
+    /// refuse. See [`LEAN_ROOT_ENV`].
+    pub fn with_lean_root(mut self, root: Option<PathBuf>) -> VerifierRegistry {
+        self.lean_root = root;
+        self
+    }
+
     /// Override the interpreter that runs pinned checkers and evaluators.
     pub fn with_python_binary(mut self, binary: impl Into<String>) -> VerifierRegistry {
         self.python_binary = binary.into();
@@ -807,6 +842,145 @@ impl VerifierRegistry {
     /// objective whose payout has no machine behind it is an opinion.
     pub fn supports(kind: &str) -> bool {
         Kind::parse(kind).is_some()
+    }
+
+    /// What this node can run *right now*: each kind, the toolchain it
+    /// needs, where that toolchain resolves on this process's `PATH`, and the
+    /// jail. Served as `GET /verifiers` and printed at startup, so an
+    /// operator -- or Cairn.app -- learns "this node has no Lean" from the
+    /// node itself, before a proof comes back `unavailable`.
+    ///
+    /// Resolution is repeated on every call, deliberately: `PATH` is fixed
+    /// for the process's life but what is *on* it is not, and a toolchain
+    /// installed into a directory already on the path is found by the next
+    /// verification, so it should be found by the next report too. Only the
+    /// version string is cached, per resolved binary, since asking for it
+    /// spawns a process.
+    ///
+    /// This is a report about the node, never about any artifact: nothing in
+    /// it settles anything, and a kind listed as unservable here still
+    /// answers `Unavailable` -- not `Reject` -- when asked.
+    pub fn readiness(&self) -> Value {
+        let lean = which(&self.lean_binary);
+        let python = which(&self.python_binary);
+        let mechanism = sandbox::mechanism();
+        let required = sandbox::required();
+        let jailed = mechanism.is_jail();
+
+        let tool = |binary: &str, found: &Option<PathBuf>, serves: &[&str]| {
+            Value::object([
+                ("binary", Value::string(binary)),
+                (
+                    "path",
+                    match found {
+                        Some(path) => Value::string(path.to_string_lossy()),
+                        None => Value::Null,
+                    },
+                ),
+                ("available", Value::Bool(found.is_some())),
+                (
+                    "version",
+                    match found.as_deref().and_then(version_of) {
+                        Some(version) => Value::string(version),
+                        None => Value::Null,
+                    },
+                ),
+                (
+                    "serves",
+                    Value::array(serves.iter().map(|kind| Value::string(*kind))),
+                ),
+            ])
+        };
+
+        // Why a kind cannot run here, in the words its verdict would use.
+        let mut unservable: Vec<(&str, Value)> = Vec::new();
+        let mut servable: Vec<Value> = Vec::new();
+        for kind in Self::kinds() {
+            let reason = if required && !jailed {
+                Some(format!(
+                    "{} is set and no sandbox mechanism is usable here",
+                    sandbox::REQUIRE_ENV
+                ))
+            } else {
+                match *kind {
+                    "certificate" | "evaluator" | "statistical" if python.is_none() => {
+                        Some(format!(
+                            "'{}' not on PATH; install Python 3 to run pinned checkers",
+                            self.python_binary
+                        ))
+                    }
+                    "lean" if lean.is_none() => Some(format!(
+                        "'{}' not on PATH; install a Lean toolchain to verify",
+                        self.lean_binary
+                    )),
+                    _ => None,
+                }
+            };
+            match reason {
+                Some(why) => unservable.push((kind, Value::string(why))),
+                None => servable.push(Value::string(*kind)),
+            }
+        }
+
+        let mut sandbox_fields = vec![
+            ("mechanism", Value::string(mechanism.as_str())),
+            ("jail", Value::Bool(jailed)),
+            ("required", Value::Bool(required)),
+        ];
+        match &mechanism {
+            sandbox::Mechanism::Bubblewrap(path) | sandbox::Mechanism::Seatbelt(path) => {
+                sandbox_fields.push(("path", Value::string(path.to_string_lossy())));
+            }
+            sandbox::Mechanism::None(why) => {
+                sandbox_fields.push(("why", Value::string(*why)));
+            }
+        }
+
+        Value::object([
+            (
+                "kinds",
+                Value::array(Self::kinds().iter().map(|kind| Value::string(*kind))),
+            ),
+            (
+                "toolchains",
+                Value::object([
+                    ("lean", {
+                        let mut row = tool(&self.lean_binary, &lean, &["lean"]);
+                        if let Value::Object(fields) = &mut row {
+                            fields.insert(
+                                String::from("granted_root"),
+                                match &self.lean_root {
+                                    Some(root) => Value::string(root.to_string_lossy()),
+                                    None => Value::Null,
+                                },
+                            );
+                        }
+                        row
+                    }),
+                    (
+                        "python3",
+                        tool(
+                            &self.python_binary,
+                            &python,
+                            &["certificate", "evaluator", "statistical"],
+                        ),
+                    ),
+                ]),
+            ),
+            ("sandbox", Value::object(sandbox_fields)),
+            ("servable", Value::array(servable)),
+            ("unservable", Value::object(unservable)),
+            (
+                "note",
+                Value::string(
+                    "What this node can run now, from its own PATH and jail probe. A kind \
+                     listed under unservable answers `unavailable` to every claim here, which \
+                     settles nothing: another node may verify it. `replay` and `workspace` \
+                     depend on whatever command the objective pins, so they are listed as \
+                     servable whenever the jail permits them.",
+                ),
+            ),
+        ])
     }
 
     /// Run a pinned entrypoint that maps one value to another, under the same
@@ -1241,10 +1415,6 @@ impl VerifierRegistry {
                 return Verdict::unavailable(format!("cannot create a working directory: {error}"))
             }
         };
-        let claim = workdir.path().join("Claim.lean");
-        if let Err(error) = fs::write(&claim, source.as_bytes()) {
-            return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
-        }
 
         let cwd = project_cwd.unwrap_or_else(|| workdir.path().to_path_buf());
 
@@ -1253,9 +1423,102 @@ impl VerifierRegistry {
         // other. A declared project is read-only: verifier execution must not
         // persist generated files or modify code seen by later claims. The
         // scratch directory remains the only writable location.
-        let plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs())
+        let mut plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs())
             .reading(&binary)
             .scrubbed();
+        if let Some(root) = &self.lean_root {
+            plan = plan.reading(root);
+        }
+
+        // Control before belief. Below, a non-zero exit is read as the
+        // kernel's answer about the proof -- which is only true if Lean can
+        // run here at all. A toolchain the jail denies (elan's under `$HOME`,
+        // a `lean` whose libraries it cannot read) also exits non-zero, and
+        // read as a verdict that turns "this node's Lean is broken" into
+        // "your proof is wrong": the exact attack this module exists to
+        // prevent. So the objective's own statement is compiled first with a
+        // hole, text no submitter wrote. If that does not exit 0, nothing
+        // about the proof can be learned here, and the verdict is
+        // Unavailable -- whether the cause is this node's jail or a statement
+        // that does not elaborate, neither of which is the proof's doing.
+        // Remembered per process once it passes, so the cost is one extra
+        // elaboration per objective rather than per claim.
+        let control_key = blobs::address(
+            format!(
+                "{}\n{}\n{}\n{}",
+                binary.display(),
+                cwd.display(),
+                preamble,
+                statement
+            )
+            .as_bytes(),
+        );
+        if !lean_control_passed(&control_key) {
+            let control = workdir.path().join("Control.lean");
+            if let Err(error) = fs::write(
+                &control,
+                format!("{preamble}\n{statement} := by sorry\n").as_bytes(),
+            ) {
+                return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
+            }
+            let jailed =
+                match sandbox::confine(&binary, &sandbox::argv([control.as_os_str()]), &plan) {
+                    Ok(jailed) => jailed,
+                    Err(sandbox::Unavailable(why)) => {
+                        return Verdict::unavailable(format!("cannot jail lean: {why}"))
+                    }
+                };
+            let mut command = jailed.command;
+            let completed =
+                match run_bounded(&mut command, workdir.path(), None, timeout, plan.limits()) {
+                    Ok(completed) => completed,
+                    Err(RunFailure::TimedOut(throttled)) => {
+                        return Verdict::unavailable(format!(
+                            "lean exceeded {}s compiling the objective's statement alone{}; \
+                             timeout is not a refutation",
+                            timeout.as_secs(),
+                            RunFailure::throttle_note(throttled)
+                        ))
+                    }
+                    Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
+                        return Verdict::unavailable(format!("cannot run lean: {error}"))
+                    }
+                };
+            match completed.code {
+                Some(0) => remember_lean_control(&control_key),
+                Some(code) => {
+                    let output = format!("{}{}", completed.stdout, completed.stderr);
+                    return Verdict::new(
+                        Status::Unavailable,
+                        format!(
+                            "lean could not compile the objective's statement on its own \
+                             (exit {code}), so no proof can be judged here: this node's Lean \
+                             does not run under its jail, or the statement does not elaborate. \
+                             That is a fact about this node or the objective, not the proof"
+                        ),
+                        Value::object([
+                            ("control_returncode", Value::Int(i128::from(code))),
+                            (
+                                "control_output_sha256",
+                                Value::string(blobs::address(output.trim().as_bytes())),
+                            ),
+                            ("lean_binary", Value::string(binary.to_string_lossy())),
+                        ]),
+                    );
+                }
+                None => {
+                    return Verdict::unavailable(
+                        "lean was killed by a signal while compiling the objective's statement \
+                         alone; that is a fact about this node, not the proof",
+                    )
+                }
+            }
+        }
+
+        let claim = workdir.path().join("Claim.lean");
+        if let Err(error) = fs::write(&claim, source.as_bytes()) {
+            return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
+        }
         let jailed = match sandbox::confine(&binary, &sandbox::argv([claim.as_os_str()]), &plan) {
             Ok(jailed) => jailed,
             Err(sandbox::Unavailable(why)) => {
@@ -2229,6 +2492,66 @@ fn contained_dir(root: &Path, relative: &str) -> Option<PathBuf> {
 /// anything else is searched for on `PATH`. Returning `None` is what turns a
 /// missing toolchain into `Unavailable` instead of a rejection, so this is a
 /// security-relevant function despite looking like plumbing.
+/// Statements whose hole-compilation control passed in this process, by the
+/// key `verify_lean` builds from the binary, cwd, preamble and statement. A
+/// failed control is never remembered: a toolchain installed, or a jail
+/// fixed, after the first claim is found by the next one.
+fn lean_controls() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+    static CONTROLS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    CONTROLS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+}
+
+fn lean_control_passed(key: &str) -> bool {
+    lean_controls()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(key)
+}
+
+fn remember_lean_control(key: &str) {
+    lean_controls()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key.to_string());
+}
+
+/// `<binary> --version`'s first line, asked once per resolved path for the
+/// life of the process. `None` when the program would not run or printed
+/// nothing. Both `lean` and `python3` answer this flag on stdout in one line.
+fn version_of(binary: &Path) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    static VERSIONS: OnceLock<Mutex<BTreeMap<PathBuf, Option<String>>>> = OnceLock::new();
+    let cache = VERSIONS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(known) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(binary)
+    {
+        return known.clone();
+    }
+    let probed = Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let line = text.lines().next().unwrap_or("").trim().to_string();
+            if line.is_empty() {
+                None
+            } else {
+                Some(line)
+            }
+        });
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(binary.to_path_buf(), probed.clone());
+    probed
+}
+
 fn which(binary: &str) -> Option<PathBuf> {
     if binary.is_empty() {
         return None;
@@ -4413,6 +4736,110 @@ mod tests {
         let artifact = Value::object([("proof", Value::string(":= trivial"))]);
         let verdict = registry.run(&spec, &artifact);
         assert_eq!(verdict.status, Status::Accept, "{}", verdict.detail);
+    }
+
+    /// A `lean` that cannot run here at all -- elan's proxy without its
+    /// `$HOME`, a toolchain the jail denies, a broken install -- exits
+    /// non-zero for *every* file, the objective's own statement included.
+    /// That used to read as the kernel refusing the proof. `sh` stands in for
+    /// Lean: the control file is compiled first, and a stand-in that fails
+    /// it must never produce a settling verdict.
+    #[cfg(unix)]
+    #[test]
+    fn a_lean_that_cannot_compile_the_statement_alone_is_unavailable_not_a_rejection() {
+        use std::os::unix::fs::PermissionsExt;
+        if !have("sh") {
+            return;
+        }
+        let root = tmpdir("proofwork-lean-control");
+        let broken = root.path().join("broken-lean");
+        fs::write(
+            &broken,
+            "#!/bin/sh\necho 'error: no default toolchain' >&2\nexit 1\n",
+        )
+        .expect("write stand-in");
+        fs::set_permissions(&broken, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let registry =
+            VerifierRegistry::new(root.path()).with_lean_binary(broken.to_string_lossy());
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            (
+                "statement",
+                Value::string("theorem t_control_broken : True"),
+            ),
+        ]);
+        let artifact = Value::object([("proof", Value::string(":= trivial"))]);
+        let verdict = registry.run(&spec, &artifact);
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+        assert!(!verdict.status.settles());
+        assert_eq!(
+            verdict
+                .evidence
+                .get("control_returncode")
+                .and_then(Value::as_i64),
+            Some(1)
+        );
+
+        // The converse: a stand-in that compiles the statement alone and then
+        // refuses the proof is the kernel saying no, and that is a verdict.
+        let judging = root.path().join("judging-lean");
+        fs::write(
+            &judging,
+            "#!/bin/sh\ncase \"$1\" in *Control.lean) exit 0;; *) echo 'error: type mismatch' >&2; exit 1;; esac\n",
+        )
+        .expect("write stand-in");
+        fs::set_permissions(&judging, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let registry =
+            VerifierRegistry::new(root.path()).with_lean_binary(judging.to_string_lossy());
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            (
+                "statement",
+                Value::string("theorem t_control_judged : True"),
+            ),
+        ]);
+        let verdict = registry.run(&spec, &artifact);
+        assert_eq!(verdict.status, Status::Reject, "{}", verdict.detail);
+        // Once the control has passed for this statement it is not run
+        // again: the second claim's verdict is the same and the evidence
+        // carries no control fields.
+        let again = registry.run(&spec, &artifact);
+        assert_eq!(again.status, Status::Reject);
+        assert!(again.evidence.get("control_returncode").is_none());
+    }
+
+    #[test]
+    fn the_lean_binary_and_a_granted_root_show_in_the_readiness_report() {
+        let registry = VerifierRegistry::new(".")
+            .with_lean_binary("lean-does-not-exist-xyz")
+            .with_lean_root(Some(PathBuf::from("/opt/lean-toolchain")));
+        let report = registry.readiness();
+        let lean = report
+            .get("toolchains")
+            .and_then(|t| t.get("lean"))
+            .expect("lean row");
+        assert_eq!(
+            lean.get("binary").and_then(Value::as_str),
+            Some("lean-does-not-exist-xyz")
+        );
+        assert_eq!(lean.get("available"), Some(&Value::Bool(false)));
+        assert_eq!(lean.get("path"), Some(&Value::Null));
+        assert_eq!(
+            lean.get("granted_root").and_then(Value::as_str),
+            Some("/opt/lean-toolchain")
+        );
+        // An absent toolchain is an unservable kind with a reason, never a
+        // kind that silently vanished from the list.
+        let unservable = report.get("unservable").expect("unservable");
+        assert!(unservable
+            .get("lean")
+            .and_then(Value::as_str)
+            .is_some_and(|why| why.contains("Lean toolchain")));
+        let kinds: Vec<&str> = match report.get("kinds") {
+            Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        assert!(kinds.contains(&"lean"));
     }
 
     #[test]
