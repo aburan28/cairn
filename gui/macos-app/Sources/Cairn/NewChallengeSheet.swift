@@ -31,10 +31,30 @@ final class ChallengeComposer: ObservableObject {
 
     let node: Node
     private var work: Task<Void, Never>?
+    /// Set when the reader's Post a challenge page handed the description
+    /// over. The person already asked for a draft there, so the sheet starts
+    /// one as soon as it has a key rather than asking a second time.
+    private var handedOver: Bool
 
-    init(node: Node) { self.node = node }
+    init(node: Node, brief: String? = nil) {
+        self.node = node
+        handedOver = brief != nil
+        self.brief = brief ?? ""
+    }
 
     var config: AIConfig { AIConfig.current() }
+
+    var canDraft: Bool {
+        ChallengeWriter.isDraftable(brief) && apiKey != nil && config.problem == nil && !node.isAttached
+    }
+
+    /// Start the draft the page asked for: once, and only from here -- not
+    /// from switching providers in the key box, which is browsing, not asking.
+    func startHandedOver() {
+        guard handedOver, canDraft else { return }
+        handedOver = false
+        draftChallenge()
+    }
 
     func loadKey() async {
         keyChecked = false
@@ -47,7 +67,12 @@ final class ChallengeComposer: ObservableObject {
         guard !key.isEmpty else { return }
         error = nil
         node.setSecret(name: config.provider.secretName, value: key) { [weak self] err in
-            if let err { self?.error = err } else { self?.apiKey = key }
+            if let err {
+                self?.error = err
+            } else {
+                self?.apiKey = key
+                self?.startHandedOver()
+            }
         }
     }
 
@@ -149,7 +174,7 @@ struct NewChallengeSheet: View {
         self.node = node
         self.browser = browser
         self._isPresented = isPresented
-        self._composer = StateObject(wrappedValue: ChallengeComposer(node: node))
+        self._composer = StateObject(wrappedValue: ChallengeComposer(node: node, brief: node.challengeBrief))
     }
 
     var body: some View {
@@ -165,7 +190,10 @@ struct NewChallengeSheet: View {
         }
         .padding(20)
         .frame(width: 640)
-        .task { await composer.loadKey() }
+        .task {
+            await composer.loadKey()
+            composer.startHandedOver()
+        }
         .interactiveDismissDisabled(composer.phase == .posting)
     }
 
@@ -218,8 +246,7 @@ struct NewChallengeSheet: View {
                 Button("Cancel") { isPresented = false }.keyboardShortcut(.cancelAction)
                 Button("Draft Challenge") { composer.draftChallenge() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(composer.brief.trimmingCharacters(in: .whitespacesAndNewlines).count < 10
-                              || composer.apiKey == nil || composer.config.problem != nil || node.isAttached)
+                    .disabled(!composer.canDraft)
             }
         }
     }

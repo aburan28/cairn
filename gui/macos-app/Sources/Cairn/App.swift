@@ -30,7 +30,7 @@ struct CairnApp: App {
                 Button("Restart / Reconnect") { delegate.node.restart() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 Divider()
-                Button("New Challenge…") { delegate.node.presentNewChallenge = true }
+                Button("New Challenge…") { delegate.node.newChallenge() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                     .disabled(delegate.node.isAttached)
                 Button("Tasks…") { delegate.node.presentTasks = true }
@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let updates = Updates()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        browser.onDraftChallenge = { [node] brief in node.draftChallenge(fromPage: brief) }
         node.start()
     }
 
@@ -116,7 +117,7 @@ struct ContentView: View {
                     // full-width strip of prose above the page. The addresses
                     // and the explanation are one click away, in its popover.
                     NodeStatusButton(node: node, url: url)
-                    Button { node.presentNewChallenge = true } label: {
+                    Button { node.newChallenge() } label: {
                         Label("New Challenge", systemImage: "sparkles")
                     }
                     .help("Describe a problem in plain words; Cairn drafts the challenge and tests its checker")
