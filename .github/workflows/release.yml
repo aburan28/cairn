@@ -807,3 +807,48 @@ jobs:
         with:
           name: appcast
           path: dist/appcast.xml
+
+  # Only now is this the latest release. release-please creates every release
+  # as a prerelease (.github/release-please-config.json), which GitHub's
+  # releases/latest redirect skips, so the two things that resolve through it
+  # -- the documented installer, and the update feed of every Cairn.app up to
+  # 1.14.0 -- keep pointing at the previous complete release while this one
+  # builds. Before this, the redirect moved the moment release-please
+  # published: three releases were cut inside ninety minutes one afternoon
+  # with the macOS runners queueing for an hour each, every installed app
+  # read a 404 from the newest release's missing feed the whole time, and
+  # install.sh would have resolved to a release with no binaries in it (as
+  # v1.3.0 once was).
+  #
+  # Complete means: notes written, and the feed up -- or no feed possible for
+  # this build, which is a checkout without the update key. A release whose
+  # .dmg failed stays a prerelease until that job is re-run; it is not
+  # complete, and promoting it would hand the old apps a 404 again.
+  #
+  # `--latest` only when this tag is the newest: runs finish in any order,
+  # and a 1.15.1 run finishing after 1.15.2's must not pull the redirect back.
+  publish:
+    name: make it the latest release
+    needs: [updates-key, notes, appcast]
+    if: >-
+      ${{ !cancelled() && startsWith(github.ref, 'refs/tags/')
+          && needs.notes.result == 'success'
+          && (needs.appcast.result == 'success'
+              || (needs.appcast.result == 'skipped' && needs.updates-key.outputs.public_key == '')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: promote the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          current="$(gh release view --json tagName --jq .tagName --repo "$REPO" 2>/dev/null || true)"
+          newest="$(printf '%s\n%s\n' "${current:-v0.0.0}" "$VERSION" | sort -V | tail -n 1)"
+          if [ "$newest" = "$VERSION" ]; then
+            gh release edit "$VERSION" --prerelease=false --latest --repo "$REPO"
+            echo "$VERSION is the latest release"
+          else
+            gh release edit "$VERSION" --prerelease=false --latest=false --repo "$REPO"
+            echo "$VERSION is complete; $current stays the latest release, being newer"
+          fi

@@ -19,6 +19,13 @@ name: release-please
 # for a repository whose central claim is that results are independently
 # checkable.
 #
+# The release it creates is a *prerelease* (`prerelease` in the config), so
+# GitHub's releases/latest redirect -- which the documented installer and
+# the update feed of older Cairn.app builds resolve through -- keeps pointing
+# at the previous complete release until release.yml has built everything
+# and promotes this one, as its last job. Merging the PR starts a release;
+# it does not publish one.
+#
 # ONE-TIME REPOSITORY SETTING, without which this workflow fails at the last
 # step. The `permissions:` block below is necessary and not sufficient: there
 # is a separate repository-level switch that forbids Actions from opening pull
