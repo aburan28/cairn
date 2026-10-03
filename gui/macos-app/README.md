@@ -133,8 +133,11 @@ on the node's numbers.
 ## Updates
 
 **Cairn → Check for Updates…**, and a check once a day, both by
-[Sparkle](https://sparkle-project.org). The feed is `appcast.xml` on the newest
-GitHub release; an update is that release's .dmg, verified against two keys
+[Sparkle](https://sparkle-project.org). The feed is `appcast.xml` on the fixed
+GitHub release tagged `updates`, which `release.yml` rewrites once a release's
+.dmg is up (so a check made while a new release is still building reads the
+previous feed and says "up to date", rather than the 404 `releases/latest`
+gives in that window); an update is the newest release's .dmg, verified against two keys
 built into the app -- Sparkle's Ed25519 over the image, and the app's own
 post-quantum ML-DSA-87 over the feed item, checked before anything is
 downloaded (`Sources/Cairn/UpdateSignature.swift`) -- and installed by its

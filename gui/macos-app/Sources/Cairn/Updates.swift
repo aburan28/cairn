@@ -5,9 +5,11 @@ import SwiftUI
 
 /// Check for Updates… and the daily check behind it, by Sparkle.
 ///
-/// The feed is `appcast.xml` on the newest GitHub release, written by
-/// release.yml only once that release's .dmg is uploaded, so a check never
-/// offers a version whose image is not there yet. Each item is the release's
+/// The feed is `appcast.xml` on a fixed GitHub release tagged `updates`,
+/// which release.yml overwrites only once a release's .dmg is uploaded, so a
+/// check never offers a version whose image is not there yet, and a check
+/// while that upload is still pending reads the previous feed and says "up to
+/// date" rather than failing (releases/latest would 404). Each item is the release's
 /// .dmg, which holds the same installer a first install runs: Sparkle mounts
 /// it, asks for an administrator password, and runs `Install Cairn.pkg`, which
 /// replaces both the `cairn` command and this app and opens the app again.

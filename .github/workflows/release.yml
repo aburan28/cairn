@@ -718,11 +718,20 @@ jobs:
   # release's .dmg, with an Ed25519 signature over the image for Sparkle and
   # an ML-DSA-87 one over the item for the app (packaging/macos/updates.sh).
   #
-  # After `notes`, so it is the last thing a release gets. The app reads the
-  # feed from releases/latest, so until this upload a check finds no feed and
-  # offers nothing: the app is never pointed at a release whose image is still
-  # uploading, or whose page still lacks its install section. The feed's
-  # release notes are that page, as GitHub renders it.
+  # After `notes`, so it is the last thing a release gets: the app is never
+  # pointed at a release whose image is still uploading, or whose page still
+  # lacks its install section. The feed's release notes are that page, as
+  # GitHub renders it.
+  #
+  # The feed is published twice. Apps built since this change read it from a fixed
+  # release tagged `updates` (SUFeedURL in gui/macos-app/Info.plist), which
+  # this job overwrites and nothing else touches, so between a release going
+  # public and this job finishing -- an hour, when the macOS runners are
+  # busy -- a check reads the previous feed and says "up to date". Earlier
+  # apps read releases/latest/download/appcast.xml, which GitHub points at
+  # the newest release the moment it is published and which 404s until this
+  # upload; they get Sparkle's "error retrieving update information" in that
+  # window (1.14.0 and earlier). The copy on the versioned release keeps them updating at all.
   #
   # A dry run writes and checks the feed against the image it just built and
   # keeps it as an artifact, so the script that runs only at release time has
@@ -762,7 +771,20 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$VERSION" dist/appcast.xml --clobber --repo "${{ github.repository }}"
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          gh release upload "$VERSION" dist/appcast.xml --clobber --repo "$REPO"
+          # The fixed release exists once; a prerelease, and never "latest",
+          # so it stays out of releases/latest and install.sh's way. Its tag
+          # names no version, so neither `push: tags: v*` above nor
+          # release-please reads it as one.
+          if ! gh release view updates --repo "$REPO" >/dev/null 2>&1; then
+            gh release create updates --repo "$REPO" --target "$GITHUB_SHA" \
+              --prerelease --latest=false --title "Update feed" \
+              --notes "Cairn.app's Check for Updates… reads appcast.xml here. release.yml rewrites it for each release once that release's .dmg is up; the file always names the newest release. Nothing else on this page is for installing: see the latest release."
+          fi
+          gh release upload updates dist/appcast.xml --clobber --repo "$REPO"
       - uses: actions/upload-artifact@v7
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
