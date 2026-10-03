@@ -125,9 +125,13 @@ signing and notarization, below.
 ## Updates for Cairn.app
 
 Cairn.app's **Check for Updates…** (and its once-a-day check) is Sparkle,
-reading `appcast.xml` from the newest release. The `appcast` job in
-`release.yml` writes that feed last, after the .dmg and the release notes are
-up. The app installs only an update whose signatures match the keys it was
+reading `appcast.xml` from a fixed release tagged `updates`. The `appcast`
+job in `release.yml` writes that feed last, after the .dmg and the release
+notes are up, and overwrites the one on `updates` only then, so a check made
+while a release is still building reads the previous feed and says "up to
+date". (Apps up to 1.14.0 read `releases/latest/download/appcast.xml`, which
+404s in that window; the job still uploads a copy to the versioned release
+for them.) The app installs only an update whose signatures match the keys it was
 built with, then runs the same `Install Cairn.pkg` a first install does, which
 asks for an administrator password and replaces the command and the app
 together. This works on unsigned releases: the signatures are the app's

@@ -22,15 +22,20 @@
 	<!-- The reader is served by the node over plain HTTP on loopback. -->
 	<key>NSAppTransportSecurity</key>
 	<dict><key>NSAllowsLocalNetworking</key><true/></dict>
-	<!-- Check for Updates… (Sources/Cairn/Updates.swift). The feed is on the
-	     newest release; release.yml adds it once that release's .dmg is up.
+	<!-- Check for Updates… (Sources/Cairn/Updates.swift). The feed is on a
+	     fixed release tagged `updates`, where release.yml overwrites it once
+	     a release's .dmg is up and its feed verifies. Fixed rather than
+	     releases/latest, which moves to a new release the moment it is
+	     published and answers 404 until that release's .dmg job has run;
+	     a check in that window then reads the previous feed and says "up to
+	     date" instead of failing.
 	     SUPublicEDKey (Ed25519, Sparkle's check of the image) and
 	     CairnMLDSA87PublicKey (ML-DSA-87, the app's own post-quantum check of
 	     the feed item) are not here: build-dmg.sh writes them from the
 	     release's signing key, and a build without them does not start the
 	     updater. -->
 	<key>SUFeedURL</key>
-	<string>https://github.com/aburan28/cairn/releases/latest/download/appcast.xml</string>
+	<string>https://github.com/aburan28/cairn/releases/download/updates/appcast.xml</string>
 	<key>SUEnableAutomaticChecks</key><true/>
 	<key>SUScheduledCheckInterval</key><integer>86400</integer>
 	<!-- Asked when P2P is bound past loopback, or when the node looks for
