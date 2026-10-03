@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.15.0](https://github.com/aburan28/cairn/compare/v1.14.0...v1.15.0) (2026-10-03)
+
+
+### Features
+
+* **gui:** discover the models each AI provider serves in Settings → AI ([#212](https://github.com/aburan28/cairn/issues/212)) ([51defca](https://github.com/aburan28/cairn/commit/51defca97bcf04bd34409d87dd9598a960c0f28b))
+
+
+### Fixes
+
+* **ui:** link nowhere on github.com from the reader or Cairn.app ([4f5bd4e](https://github.com/aburan28/cairn/commit/4f5bd4eda010f1c883252296e8386a559ac6c19a))
+* **ui:** link nowhere on github.com from the reader or Cairn.app ([6b95017](https://github.com/aburan28/cairn/commit/6b95017de1b3d68f5587e4ce38e48b312c073be7))
+
 ## [1.14.0](https://github.com/aburan28/cairn/compare/v1.13.0...v1.14.0) (2026-10-03)
 
 
