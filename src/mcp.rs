@@ -1139,7 +1139,11 @@ fn tool_definitions() -> Json {
                 "Which slice of the search space you should work this epoch. Needs no agreement \
                  with anyone: it is a pure function of public inputs, so you compute your own \
                  region and anyone can recompute a peer's. Overlapping another node wastes a \
-                 little compute and clears at the next epoch -- it is not an error.",
+                 little compute and clears at the next epoch -- it is not an error. The same \
+                 answer is served over HTTP at GET /work_assignment, and a worker that posts a \
+                 heartbeat to POST /progress (see docs/serving.md) appears on the node's \
+                 dashboard at /ui/task?id=<objective>; a heartbeat is not a record and pays \
+                 nothing -- the claims you submit are what the dashboard counts as settled.",
             "inputSchema": {
                 "type": "object",
                 "required": ["objective_id", "node_id"],

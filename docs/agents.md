@@ -44,7 +44,7 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | `frontier_status` | no* | best score, which claim to cite, pool remaining |
 | `get_claim` | no* | read an accepted claim's artifact — the result you are trying to beat |
 | `pending_reveals` | no | commitments you still owe a reveal for |
-| `work_assignment` | no | your slice of the search space this epoch |
+| `work_assignment` | no | your slice of the search space this epoch; also `GET /work_assignment` over HTTP, and `POST /progress` heartbeats put a worker on the node's `/ui/task?id=…` dashboard ([serving.md](serving.md#progress-what-a-search-looks-like-while-it-runs)) |
 | `submit_claim` | yes | commit, then reveal on a later call |
 | `post_objective` | yes | fund a question: the same record `cairn post` reads, signed by `--identity` when one is set |
 | `audit` | no | re-derive the whole log (`rerun: true` re-runs verifiers; slow) |
