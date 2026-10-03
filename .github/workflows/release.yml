@@ -298,12 +298,11 @@ jobs:
       # it and nothing about what had changed: the changelog release-please
       # wrote was overwritten by the first target to finish. The `notes` job
       # at the end owns the release text now, once, and appends.
-      - uses: softprops/action-gh-release@v3
+      - name: upload to the release
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
-            cairn-${{ env.VERSION }}-${{ matrix.target }}.tar.gz.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-upload.sh "$VERSION" "cairn-$VERSION-${{ matrix.target }}.tar.gz" "cairn-$VERSION-${{ matrix.target }}.tar.gz.sha256"
 
   # The installer, uploaded under a name with no version in it.
   #
@@ -338,10 +337,11 @@ jobs:
             echo "install.sh accepted a bad --libc" >&2; exit 1
           fi
 
-      - uses: softprops/action-gh-release@v3
+      - name: upload to the release
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: scripts/install.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-upload.sh "$VERSION" scripts/install.sh
 
   # The .deb and the .rpm: the musl binary `build` already tested, wrapped.
   #
@@ -463,14 +463,11 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-      - uses: softprops/action-gh-release@v3
+      - name: upload to the release
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            dist/*.deb
-            dist/*.deb.sha256
-            dist/*.rpm
-            dist/*.rpm.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-upload.sh "$VERSION" dist/*.deb dist/*.deb.sha256 dist/*.rpm dist/*.rpm.sha256
 
   # The public halves of the keys Cairn.app's Check for Updates… trusts, for
   # macos-dmg to build in: Ed25519 for Sparkle, ML-DSA-87 (post-quantum) for
@@ -643,12 +640,11 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-      - uses: softprops/action-gh-release@v3
+      - name: upload to the release
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            dist/cairn-${{ env.VERSION }}-macos-universal.dmg
-            dist/cairn-${{ env.VERSION }}-macos-universal.dmg.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-upload.sh "$VERSION" "dist/cairn-$VERSION-macos-universal.dmg" "dist/cairn-$VERSION-macos-universal.dmg.sha256"
 
   # The release page's text, written once, last, by one job.
   #
