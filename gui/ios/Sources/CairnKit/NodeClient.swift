@@ -76,6 +76,15 @@ public struct NodeClient: Sendable {
         return body.record
     }
 
+    /// `GET /progress/{id}`: what the log has paid for a divided search,
+    /// beside what its workers report. A 404 here is one of two things,
+    /// which the body tells apart and this client does not read: the node
+    /// knows no such objective, or it was built before the route existed
+    /// (1.14.0 added it). The screen says both.
+    public func fetchProgress(at base: String, id: String) async throws -> ProgressResponse {
+        try await get(base, path: "/progress/\(id)")
+    }
+
     public func fetchChain(at base: String) async throws -> Chain {
         try await get(base, path: "/chain")
     }

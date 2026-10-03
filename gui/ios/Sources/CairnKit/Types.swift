@@ -69,9 +69,21 @@ public struct Ratchet: Codable, Hashable, Sendable {
     public var reward: Int
 }
 
+/// The verifier an objective pinned, as its record names it. Only what the
+/// progress screen needs: the checker's hash is the key into `searchJobs`,
+/// which is how the screen knows a search's expected cost. An evaluator
+/// names `evaluator_sha256` instead and has no entry there, as it should.
+public struct VerifierRecord: Codable, Hashable, Sendable {
+    public var kind: String?
+    public var checker: String?
+    public var checker_sha256: String?
+    public var entrypoint: String?
+}
+
 public struct ObjectiveRecord: Codable, Hashable, Sendable {
     public var ratchet: Ratchet?
     public var created_at: String?
+    public var verifier: VerifierRecord?
 }
 
 public struct Objective: Codable, Hashable, Identifiable, Sendable {

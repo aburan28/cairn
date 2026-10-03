@@ -37,7 +37,8 @@ let package = Package(
         ),
         .testTarget(
             name: "CairnKitTests",
-            dependencies: ["CairnKit"]
+            dependencies: ["CairnKit"],
+            resources: [.copy("Fixtures")]
         ),
     ]
 )
