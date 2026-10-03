@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.2](https://github.com/aburan28/cairn/compare/v1.15.1...v1.15.2) (2026-10-03)
+
+
+### Fixes
+
+* **updates:** the fixed feed only ever moves forward ([#216](https://github.com/aburan28/cairn/issues/216)) ([0d505a8](https://github.com/aburan28/cairn/commit/0d505a846df3179e8eced5efe8826a301a02ca9d))
+
 ## [1.15.1](https://github.com/aburan28/cairn/compare/v1.15.0...v1.15.1) (2026-10-03)
 
 
