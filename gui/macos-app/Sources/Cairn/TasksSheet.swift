@@ -68,6 +68,18 @@ struct TasksSheet: View {
                 if let path = selected.docPath, let url = GuiTasks.docURL(path) {
                     Link("About this task", destination: url).font(.callout)
                 }
+                // The dashboard lives in the node's own reader: each divided
+                // search on the Objectives page links to its workers and
+                // progress. Shown here because posting a task is when someone
+                // next wants to watch it, and the sheet is where they are.
+                if case .running(let reader) = node.state,
+                   let objectives = URL(string: "objectives/", relativeTo: reader) {
+                    Button("Show progress…") {
+                        browser.show(objectives)
+                        isPresented = false
+                    }
+                    .font(.callout)
+                }
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
                 Button(info == nil ? "Cancel" : "Done") { isPresented = false }

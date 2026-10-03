@@ -10,6 +10,36 @@ Bailey et al. walk. Submit `{dps: [{x, seed, j}, …]}`; the checker rebuilds
 Design: [`docs/design/orbit-piecework.md`](../../docs/design/orbit-piecework.md).
 Demo: `./scripts/orbit-demo.sh` on the 21-bit twin.
 
+## Watching the paid path: `/ui/task?id=…`
+
+A node's reader has a dashboard per divided search, fed by
+`GET /progress/{id}` (`docs/serving.md`). It shows two kinds of number and
+says which is which:
+
+- **Settled**, recomputed from the log: orbits paid per worker, the group
+  operations those orbits cost (the eight witness counters sum to the trail
+  length, so the step count is in the record), the hour-by-hour history, and
+  which part of the `2^48` seed space the paid orbits came from. Against the
+  job's expected cost -- `sqrt(pi n / (2 * 262))`, about `2^60.81` -- that is
+  the share of the search done and the birthday odds a collision has already
+  happened.
+- **Reported**, posted by workers to `POST /progress` about once a minute:
+  who is live, the unit range each took this epoch, steps and trails this
+  session, orbits waiting for the next batch, and the rate. Held in the
+  node's memory, unverified, never a record; the ETA on the page is computed
+  from it and labelled so.
+
+`tools/orbit_worker.py` is the reference worker loop -- take a slice from
+`GET /work_assignment`, walk it with `orbit_dp.py`, heartbeat, commit and
+reveal batches over `POST /submit` -- and `scripts/progress-demo.sh` runs
+three of them against one node on the 21-bit twin. **The GPU client earns on
+cairn by doing the same four things**: emit the eight counters
+(`CAIRN-WITNESS.md` in `aburan28/crypto`), submit `{dps: [{x, seed, j}]}`
+batches as commit/reveal claims (the `rho-collab` transport there already
+does), and post the heartbeat body `orbit_worker.py` posts, with `worker` set
+to the same pseudonym it submits under so the dashboard puts both halves on
+one row.
+
 ## Campaign path (aburan28/crypto + this script)
 
 The live Certicom search collects `(seed, canon)` records into S3. The

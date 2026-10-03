@@ -65,6 +65,14 @@ export type Objective = {
   open: boolean;
   settlement: Settlement | null;
   frontier?: Frontier;
+  /** A divided search's standing; see `PieceworkStanding` in `objectives.ts`. */
+  piecework?: {
+    unit_price: number;
+    paid_units: number;
+    paid_total: number;
+    pool_remaining: number;
+    units?: number;
+  };
   record?: {
     ratchet?: {
       baseline: number;

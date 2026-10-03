@@ -119,6 +119,14 @@ claim and you hand every submitter a free lottery ticket per restamp.
   actually lives: two nodes disagreeing about whether a record is admissible
   disagree about what was settled, and neither ever errors
 - `./scripts/mcp-smoke.sh` if you touched `src/bin/mcp.rs`
+- `./scripts/progress-demo.sh` if you touched `src/progress.rs`, the `/progress`
+  or `/work_assignment` routes in `src/serve.rs`, or
+  `examples/certicom-ecdlp/tools/orbit_worker.py`. Three workers sharing nothing
+  with the node but an address take their slices, heartbeat, submit and are
+  paid; it is the only check that puts the settled half and the reported half of
+  `GET /progress/{id}` on one objective and requires them to agree about who the
+  workers are and nothing else -- and the only one that runs the walker on
+  thousands of seeds, which is how its degenerate start point was found
 - `./scripts/shard-demo.sh` if you touched `src/shards/`. That module has no
   network caller yet, so this script is its seam: six stores that share nothing,
   one shard each, one of them corrupt. A subsystem exercised only by its own

@@ -33,6 +33,8 @@ record instead.
 | `GET /objectives` | every objective, with its frontier and whether it is still payable |
 | `GET /objective/{id}` | one full record, verifier spec included |
 | `GET /frontier/{id}` | best score, who holds it, what to cite, pool remaining; on a piecework objective, the unit price, units paid and pool remaining instead |
+| `GET /progress/{id}` | one objective's search as a dashboard reads it: `derived` (per-worker paid units, steps from the witness counters, hourly buckets, unit coverage -- all recomputed from the log) beside `reported` (worker heartbeats held in memory, unverified). See [Progress](#progress-what-a-search-looks-like-while-it-runs) |
+| `GET /work_assignment?objective_id=&node_id=` | the MCP `work_assignment` tool over HTTP: this node's slice of the unit space for the epoch, `partitions` and `epoch` optional |
 | `GET /chain` | the epoch chain: `links` and `head` are the chain's, `height` and `ledger_head` are the ledger's — the units a checkpoint signs, and not interchangeable with the first two |
 | `GET /chain.html` | the same, as a page with no build step |
 | `GET /health` | liveness, for whatever is watching the process |
@@ -41,6 +43,7 @@ record instead.
 | `GET /ui/` | the embedded reader, when the binary was built with the `ui` feature |
 | `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type` |
 | `POST /objective/prepare` | canonicalize a draft objective and return the exact bytes its funder must sign — see below |
+| `POST /progress` | a worker's heartbeat: kept in this node's memory for `GET /progress/{id}`, never written to the log, accepted on a read-only node too |
 | `POST /deposit/grant` | issue a short-lived upload grant against a node-local deposit; response never includes cloud keys |
 | `PUT /deposit/upload/{grant_id}` | proxy redemption of a grant (file backend, or curl-to-S3 fallback) |
 
@@ -65,6 +68,57 @@ with most of its pool untouched. `open` is its complement, published rather
 than left for a reader to negate. `settlement` is `{claim_id, submitter,
 reward}` for a settled certificate and `null` otherwise -- a ratchet's payouts
 are many, and `frontier.paid_cumulative` carries them.
+
+## Progress: what a search looks like while it runs
+
+A piecework objective pays for a search that takes a fleet months, and the
+log shows it an epoch late: a claim lands after the work, a settlement after
+the claim, and a trail two hours into its walk has written nothing. The
+reader at `/ui/task?id=…` is the dashboard for that, and `GET /progress/{id}`
+is what it reads. The answer has two halves that are kept apart because they
+are different kinds of fact:
+
+- **`derived`** is recomputed from this node's log on every request and is
+  what the search has actually been paid for. Settlements are joined to the
+  claims they paid and to the elements those claims carry: per submitter,
+  claims paid, units paid (`reward / unit_price`, capped by the batch size,
+  since a duplicate in a batch earns nothing), the steps those units cost,
+  first and last payment; the totals, the last hour and day, hourly buckets,
+  rejected claims and commitments not yet revealed. The step count is **in
+  the record**: an ECC2K-130 element's eight witness counters sum to its
+  trail length, and a version 1 element carries `steps`. Nothing is
+  estimated from a density. With the job's seed layout (`?trail_bits=`, or
+  the latest heartbeat that declared it) the paid seeds are binned by unit
+  into a `coverage` strip of `?bins=` cells; without it the strip is absent
+  rather than guessed. Anyone with the log recomputes all of it.
+- **`reported`** is what workers posted to `POST /progress`: who is live
+  (a heartbeat within 180 s), stale (within 30 min) or gone, the unit range
+  each took this epoch, the unit it is on, steps and trails this session,
+  units found and not yet submitted, the rate it claims and the rate this
+  node measured from its own counter and clock. Held in memory, forgotten
+  after a day, bounded in how much the node will hold, and **never a
+  record**: not appended, not gossiped, not verified, not evidence of work.
+  Anyone can post one under any name. A page shows it as reported, and
+  nothing downstream reads it for money. The liveness thresholds are the
+  ECC2K-130 campaign control plane's, so a worker running both clients is
+  judged the same way by both.
+
+A heartbeat is a JSON object: `objective_id` and `worker` (the same string
+the worker submits claims under, so the two halves land on one row) and
+`steps` are required; `epoch`, `units: {first, end}`, `unit`, `trails`,
+`capped`, `units_pending`, `units_submitted`, `steps_per_second`,
+`trail_bits`, `device`, `lanes` and `client` are optional. Fields the node
+does not know are ignored and named back in the `202` so a misspelling is
+noticed by the client that made it. An objective this log does not hold is
+refused with `404`, which is what stops a stranger filling the roster with
+names against ids nobody is working.
+
+`GET /work_assignment` is the MCP tool over HTTP so a worker with no MCP
+client -- a shell loop on a GPU box, `examples/certicom-ecdlp/tools/orbit_worker.py`
+-- can take its slice from the node it reports to. It is the same pure
+function of the same public inputs, anchored at the log head as of the
+epoch's start, so anyone can recompute any node's slice and the answer does
+not move within an epoch.
 
 ## What a contributor should actually do
 

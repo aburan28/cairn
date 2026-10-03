@@ -47,6 +47,12 @@ jobs:
       # all, and an audit catching a trail whose witness verifies but whose
       # walk nobody else runs.
       - run: ./scripts/orbit-demo.sh
+      # The same search watched from outside: three worker processes take their
+      # slices over HTTP, heartbeat to POST /progress, commit and reveal through
+      # the queue, and GET /progress/{id} must show them paid under `derived`
+      # and live under `reported` -- separately. Runs on a binary without the
+      # embedded reader; the dashboard page itself is covered by `make ui-check`.
+      - run: ./scripts/progress-demo.sh
       # `try` and `scaffold`: the one command that waits on a real epoch
       # boundary, and the generated challenge that has to be postable. Neither
       # can be checked from a fixture timestamp.

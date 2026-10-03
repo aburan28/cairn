@@ -401,6 +401,36 @@ function ObjectiveRow({
           <span className="text-[12px] text-ink-2">
             paid <span className="mono text-ink">{amount(objective.settlement.reward)}</span>
           </span>
+        ) : objective.piecework ? (
+          /* A divided search: the pool drains per novel unit, and what the
+             search has got done lives on its own page. Before this branch a
+             piecework objective with thousands of paid orbits read "no
+             claim yet", because it has no frontier and no single settlement. */
+          <div className="flex flex-col gap-1">
+            <div className="flex items-baseline justify-between text-[12px] text-ink-2">
+              <span>
+                <span className="mono font-semibold text-accent">
+                  {amount(objective.piecework.paid_total)}
+                </span>
+                <span className="text-ink-3"> paid per unit</span>
+              </span>
+              <span className="text-[11px] text-ink-3">
+                {amount(objective.piecework.pool_remaining)} left
+              </span>
+            </div>
+            <Progress
+              value={
+                objective.reward > 0 ? objective.piecework.paid_total / objective.reward : 0
+              }
+              tone="warn"
+            />
+            <Link
+              href={`/task?id=${encodeURIComponent(objective.id)}`}
+              className="text-[11.5px] text-accent hover:underline"
+            >
+              workers and progress →
+            </Link>
+          </div>
         ) : (
           <span className="text-[12px] text-ink-3">no claim yet</span>
         )}

@@ -199,6 +199,31 @@ shape and is not wired into the transport). And the GPU client in
 `aburan28/crypto` would have to carry those eight counters to earn here, which
 costs walk state in a kernel tuned to the byte.
 
+### Running it as a fleet, and watching it
+
+`tools/orbit_worker.py` is one worker of many: it takes its slice of the unit
+space from the node (`GET /work_assignment`, the MCP tool over HTTP), walks it
+with `orbit_dp.py`, posts a heartbeat to `POST /progress` every half minute,
+and commits a batch of orbits in one epoch and reveals it in the next over
+`POST /submit`. It shares nothing with the node but an address, which is the
+arrangement every outside contributor is in.
+
+```sh
+python3 examples/certicom-ecdlp/tools/orbit_worker.py \
+    --node http://127.0.0.1:8080 --job examples/certicom-ecdlp/jobs/ecc2k-23.json \
+    --objective sha256:… --worker alice
+```
+
+The node's reader shows the search at `/ui/task?id=…`: orbits paid per
+worker and the steps they cost, recomputed from the log; beside it, who is
+live, on which units, at what rate, as the workers report it and nobody
+checks. `scripts/progress-demo.sh` runs three workers against one node on the
+21-bit twin and requires both halves to come out right. In CPython this is a
+demonstration of the loop, not of throughput: the client that walks
+ECC2K-130 is the GPU walker in `aburan28/crypto`, and
+[`ECC2K130-CAMPAIGN.md`](ECC2K130-CAMPAIGN.md) says what it posts to appear
+on the same page.
+
 ## What was checked before this shipped
 
 - `tools/selftest.py`: both solved vectors accepted and their `k` confirmed;

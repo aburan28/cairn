@@ -205,8 +205,8 @@ case "$UI_CODE" in
         || fail "$page is 200 but does not say \"$sentinel\"; the wrong page is under that path"
       echo "  GET $page -> 200, says \"$sentinel\""
     done <<'PAGES'
-/ui/objectives/|what remains payable
-/ui/chain/|Nothing here is stored
+/ui/objectives/|still payable
+/ui/chain/|where they forked
 /ui/log/|Every record this node holds
 PAGES
     ;;
