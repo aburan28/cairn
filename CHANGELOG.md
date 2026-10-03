@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.15.3](https://github.com/aburan28/cairn/compare/v1.15.2...v1.15.3) (2026-10-03)
+
+
+### Fixes
+
+* **release:** a release becomes latest only once it is complete ([96b7895](https://github.com/aburan28/cairn/commit/96b789559453c57857824e6f5cd0bd33a0012f11))
+* **release:** a release becomes latest only once it is complete ([ec6cc2b](https://github.com/aburan28/cairn/commit/ec6cc2b6adff6a4040b0853ae7835f8e9331c604))
+* **release:** upload assets with gh release upload, not a release PATCH ([96abb54](https://github.com/aburan28/cairn/commit/96abb543f2c3b2f0fe982f23b961406f8fa82dd7))
+* **release:** upload assets with gh release upload, not a release PATCH ([357a39f](https://github.com/aburan28/cairn/commit/357a39f90b830b454774cb0d9b9b8a9fb4fb1455))
+
 ## [1.15.2](https://github.com/aburan28/cairn/compare/v1.15.1...v1.15.2) (2026-10-03)
 
 
