@@ -54,6 +54,18 @@ states that built it (`buildMoves` — the same join as `/frontier` on the
 site). The one arithmetic check a reader can do for itself: whether paid +
 remaining exceeds the reward.
 
+**Progress.** A divided search's standing, from the node's `/progress`
+route: what the log has paid for (units, the steps their witnesses sum to,
+who was paid, which part of the unit space it came from) beside what the
+workers report over `POST /progress` (who is live, at what rate, since
+when). The two are kept apart on screen the way the site's `/ui/task/` keeps
+them apart: settled figures are recomputed from the log, reported ones are
+what a worker said and nobody checked. The expected cost of the search, and
+so the share done and the collision odds, come from the job table in
+`CairnKit/Jobs.swift`, keyed by the checker's hash; a job the reader does
+not know shows the paid figures without a denominator. Opened from a
+piecework objective. Needs a live node; the snapshot has no progress.
+
 **Chain.** Head, height, ledger head. Walks the links and reports the first
 whose `prev` is not the one before it. A break is shown in red and the head
 is called untrustworthy. Nothing here re-derives the fold.

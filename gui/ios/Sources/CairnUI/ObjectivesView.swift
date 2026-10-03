@@ -62,6 +62,17 @@ public struct ChallengeView: View {
                         StatusBadge(objective.verifier_kind, kind: .info)
                     }
                     UntrustedStatement(objective.statement)
+                    if objective.piecework != nil {
+                        // A divided search: the node's /progress route has what the
+                        // log paid and what the workers report, the same page the
+                        // site shows at /ui/task/.
+                        NavigationLink {
+                            TaskProgressView(id: id)
+                        } label: {
+                            Label("Progress: workers, and what the log has paid", systemImage: "chart.bar.xaxis")
+                                .font(.subheadline)
+                        }
+                    }
                     LabeledContent("pool") { Text(units(objective.reward)).monospaced() }
                     LabeledContent("funder") { HashText(objective.funder) }
                     LabeledContent("id") { HashText(objective.id, chars: 10) }
