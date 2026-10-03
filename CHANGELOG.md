@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.0](https://github.com/aburan28/cairn/compare/v1.12.0...v1.13.0) (2026-10-03)
+
+
+### Features
+
+* **ui:** post a challenge from a plain description in Cairn.app ([#206](https://github.com/aburan28/cairn/issues/206)) ([32f0d13](https://github.com/aburan28/cairn/commit/32f0d13442b64b562f0bb5a4ae9989492962794c))
+
 ## [1.12.0](https://github.com/aburan28/cairn/compare/v1.11.0...v1.12.0) (2026-10-02)
 
 
