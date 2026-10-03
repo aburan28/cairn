@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.0](https://github.com/aburan28/cairn/compare/v1.11.0...v1.12.0) (2026-10-02)
+
+
+### Features
+
+* **macos:** post-quantum (ML-DSA-87) signatures on Cairn.app updates ([#204](https://github.com/aburan28/cairn/issues/204)) ([4025336](https://github.com/aburan28/cairn/commit/4025336c064a816209871ed50671482ea0f3edac))
+
 ## [1.11.0](https://github.com/aburan28/cairn/compare/v1.10.0...v1.11.0) (2026-10-02)
 
 
