@@ -784,7 +784,24 @@ jobs:
               --prerelease --latest=false --title "Update feed" \
               --notes "Cairn.app's Check for Updates… reads appcast.xml here. release.yml rewrites it for each release once that release's .dmg is up; the file always names the newest release. Nothing else on this page is for installing: see the latest release."
           fi
-          gh release upload updates dist/appcast.xml --clobber --repo "$REPO"
+          # Several releases can be in flight at once -- the macOS runners
+          # queue for an hour at times, and release-please cut three tags in
+          # ninety minutes today -- and their runs finish in no particular
+          # order. The fixed feed must only ever move forward: a 1.14.0 run
+          # finishing after 1.15.1's must not put 1.14.0 back in front of
+          # every installed app, where it would sit until the next release.
+          # The versioned copy above is unconditional; this one yields to a
+          # newer feed already there. Same version (a re-run) overwrites.
+          current=""
+          if gh release download updates --pattern appcast.xml --dir current --repo "$REPO" 2>/dev/null; then
+            current="$(sed -n 's/.*<sparkle:version>\([^<]*\)<.*/\1/p' current/appcast.xml | head -n 1)"
+          fi
+          newest="$(printf '%s\n%s\n' "${current:-0}" "${VERSION#v}" | sort -V | tail -n 1)"
+          if [ -n "$current" ] && [ "$newest" != "${VERSION#v}" ]; then
+            echo "the updates feed already names $current, newer than ${VERSION#v}; leaving it"
+          else
+            gh release upload updates dist/appcast.xml --clobber --repo "$REPO"
+          fi
       - uses: actions/upload-artifact@v7
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
