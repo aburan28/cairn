@@ -77,6 +77,38 @@ final class DraftingTests: XCTestCase {
                         "a key is never sent in the clear past this Mac")
     }
 
+    // MARK: served models
+
+    func testModelListsAreReadFromEveryProviderShape() throws {
+        let openai = #"{"object":"list","data":[{"id":"gpt-6.1-sol","object":"model"},{"id":"gpt-6.1-sol"},{"id":"o5"}]}"#
+        XCTAssertEqual(try AIClient.modelIDs(in: Data(openai.utf8)), ["gpt-6.1-sol", "o5"], "in the provider's order, once each")
+        let fireworks = #"{"data":[{"id":"accounts/fireworks/models/kimi-k3","supports_chat":true},{"id":"accounts/fireworks/models/nomic-embed","supports_chat":false}]}"#
+        XCTAssertEqual(try AIClient.modelIDs(in: Data(fireworks.utf8)), ["accounts/fireworks/models/kimi-k3"], "an embedder cannot draft")
+        let anthropic = #"{"data":[{"type":"model","id":"claude-opus-5-5","display_name":"Claude Opus 5.5"}],"has_more":false}"#
+        XCTAssertEqual(try AIClient.modelIDs(in: Data(anthropic.utf8)), ["claude-opus-5-5"])
+        let ollama = #"{"models":[{"name":"qwen3:32b","model":"qwen3:32b"}]}"#
+        XCTAssertEqual(try AIClient.modelIDs(in: Data(ollama.utf8)), ["qwen3:32b"])
+        XCTAssertThrowsError(try AIClient.modelIDs(in: Data(#"{"data":[]}"#.utf8)))
+        XCTAssertThrowsError(try AIClient.modelIDs(in: Data("not json".utf8)))
+    }
+
+    func testListingNeedsAnEndpointButNoModel() throws {
+        XCTAssertNil(AIConfig(provider: .custom, model: "", baseURL: "http://127.0.0.1:11434/v1").endpointProblem,
+                     "listing needs an endpoint, not a model")
+        XCTAssertNotNil(AIConfig(provider: .custom, model: "", baseURL: "").endpointProblem)
+        XCTAssertNotNil(AIConfig(provider: .custom, model: "", baseURL: "http://example.com/v1").endpointProblem)
+    }
+
+    func testStaleDefaultsFindTheirServedName() {
+        let fireworks = ["accounts/fireworks/models/deepseek-v4", "accounts/fireworks/models/kimi-k3-instruct", "accounts/fireworks/models/qwen3-coder"]
+        XCTAssertEqual(AIClient.nearest(to: "accounts/fireworks/models/kimi-k3", in: fireworks), "accounts/fireworks/models/kimi-k3-instruct")
+        XCTAssertNil(AIClient.nearest(to: "accounts/fireworks/models/qwen3-coder", in: fireworks), "served as is: nothing to suggest")
+        XCTAssertEqual(AIClient.nearest(to: "kimi-k3-0905", in: ["moonshotai/kimi-k3"]), "moonshotai/kimi-k3", "a dated id finds its family")
+        XCTAssertEqual(AIClient.nearest(to: "Kimi-K3", in: ["moonshotai/kimi-k3"]), "moonshotai/kimi-k3", "case is the provider's business")
+        XCTAssertNil(AIClient.nearest(to: "gpt-6.1-sol", in: fireworks))
+        XCTAssertNil(AIClient.nearest(to: "", in: fireworks))
+    }
+
     // MARK: replies
 
     func testRepliesAreReadPastFallbackBlocksAndFences() throws {

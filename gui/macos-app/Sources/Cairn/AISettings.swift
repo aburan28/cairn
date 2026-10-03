@@ -17,8 +17,26 @@ struct AISettingsSection: View {
     @State private var hasKey: Bool?
     @State private var status: (ok: Bool, text: String)?
     @State private var busy = false
+    /// What the provider said it serves, once a key is there to ask with.
+    @State private var served: [String] = []
+    @State private var servedProblem: String?
 
     private var provider: AIProvider { AIProvider(rawValue: providerRaw) ?? .anthropic }
+
+    /// The id a draft would use: the field, or the default behind it.
+    private var effectiveModel: String {
+        let typed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return typed.isEmpty ? provider.defaultModel : typed
+    }
+
+    /// The menu's rows: everything served, narrowed by what has been typed
+    /// so far once that stops matching any id outright.
+    private var menuModels: [String] {
+        let typed = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !typed.isEmpty, !served.contains(where: { $0.lowercased() == typed }) else { return served }
+        let narrowed = served.filter { $0.lowercased().contains(typed) }
+        return narrowed.isEmpty ? served : narrowed
+    }
 
     var body: some View {
         Section {
@@ -27,16 +45,61 @@ struct AISettingsSection: View {
             }
             .onChange(of: providerRaw) { _ in reload() }
 
-            TextField("Model", text: $model, prompt: Text(provider.defaultModel.isEmpty ? "model id" : provider.defaultModel))
-                .font(.body.monospaced())
-                .onChange(of: model) { value in
-                    UserDefaults.standard.set(value.trimmingCharacters(in: .whitespacesAndNewlines),
-                                              forKey: AIConfig.Key.model(provider))
+            LabeledContent("Model") {
+                HStack(spacing: 4) {
+                    TextField("Model", text: $model, prompt: Text(provider.defaultModel.isEmpty ? "model id" : provider.defaultModel))
+                        .labelsHidden()
+                        .font(.body.monospaced())
+                        .onChange(of: model) { value in
+                            UserDefaults.standard.set(value.trimmingCharacters(in: .whitespacesAndNewlines),
+                                                      forKey: AIConfig.Key.model(provider))
+                        }
+                    if !served.isEmpty {
+                        Menu {
+                            ForEach(menuModels, id: \.self) { id in
+                                Button(id) { model = id }
+                            }
+                        } label: {
+                            Image(systemName: "chevron.up.chevron.down")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .help("The \(served.count) models \(provider.title) serves this key")
+                        .accessibilityLabel("Served models")
+                    }
                 }
+            }
 
             if provider == .custom {
                 TextField("API address", text: $customBaseURL, prompt: Text("https://host/v1"))
                     .font(.body.monospaced())
+                    .onSubmit { Task { await discover() } }
+            }
+
+            if !served.isEmpty, !served.contains(effectiveModel) {
+                HStack {
+                    Label("\(provider.title) does not serve \(effectiveModel).", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                    Spacer()
+                    if let nearest = AIClient.nearest(to: effectiveModel, in: served) {
+                        Button("Use \(nearest)") { model = nearest }
+                            .font(.callout.monospaced())
+                    } else {
+                        Text("Choose one from the list.").foregroundStyle(.secondary)
+                    }
+                }
+                .font(.callout)
+            } else if let servedProblem {
+                Label(servedProblem, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.callout)
+                    .lineLimit(3)
+            } else if !served.isEmpty {
+                Text("One of \(served.count) models \(provider.title) serves.")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
             }
 
             LabeledContent("API key") {
@@ -87,7 +150,10 @@ struct AISettingsSection: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .task(id: providerRaw) { await checkKey() }
+        .task(id: providerRaw) {
+            await checkKey()
+            if hasKey == true { await discover() }
+        }
         .onAppear { model = UserDefaults.standard.string(forKey: AIConfig.Key.model(provider)) ?? "" }
     }
 
@@ -95,11 +161,30 @@ struct AISettingsSection: View {
         model = UserDefaults.standard.string(forKey: AIConfig.Key.model(provider)) ?? ""
         pasted = ""
         status = nil
+        served = []
+        servedProblem = nil
     }
 
     private func checkKey() async {
         hasKey = nil
         hasKey = await node.secretValue(provider.secretName) != nil
+    }
+
+    /// Ask the provider what it serves, so the model is chosen from that
+    /// rather than typed and found wanting at draft time.
+    private func discover() async {
+        let asked = provider
+        guard let key = await node.secretValue(asked.secretName) else { return }
+        do {
+            let list = try await AIClient(config: AIConfig.current(), apiKey: key).models()
+            guard asked == provider else { return }
+            served = list
+            servedProblem = nil
+        } catch {
+            guard asked == provider else { return }
+            served = []
+            servedProblem = "Could not list models: \(error.localizedDescription)"
+        }
     }
 
     private func save() {
@@ -131,6 +216,7 @@ struct AISettingsSection: View {
             do {
                 try await AIClient(config: AIConfig.current(), apiKey: key).test()
                 status = (true, "\(provider.title) accepted the key.")
+                await discover()
             } catch {
                 status = (false, error.localizedDescription)
             }
@@ -141,7 +227,7 @@ struct AISettingsSection: View {
         busy = true
         node.deleteSecret(name: provider.secretName) { err in
             busy = false
-            if let err { status = (false, err) } else { hasKey = false; status = nil }
+            if let err { status = (false, err) } else { hasKey = false; status = nil; served = []; servedProblem = nil }
         }
     }
 }
