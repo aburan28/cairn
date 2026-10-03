@@ -26,6 +26,16 @@ binary, since `build.rs` embeds this app whole.
 
 ## Posting a challenge, and what a wallet is doing there
 
+**In Cairn.app's window `/submit` is a single text box.** Its *Draft
+challenge* hands the description to the app's New Challenge… sheet, which has
+a model the funder holds a key for draft the statement, answer format and
+checker, tests the checker, and posts. `lib/draft.ts` has the bridge and
+explains why the page cannot draft on its own: the node has no TLS to call a
+model with, a key typed into a page it serves crosses plain HTTP, and there
+is nowhere a page may put a checker. The form described below is folded away
+behind *Fill in every field by hand*. In a browser there is no app to hand
+to, so the form is the page.
+
 `/submit` composes an objective and queues it at `POST /submit?kind=objective`.
 A cairn `funder` is an Ed25519 public key in hex, and `funding_signature` is
 that key's signature over the objective's canonical funding payload — so a

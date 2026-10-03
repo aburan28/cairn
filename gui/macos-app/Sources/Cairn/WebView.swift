@@ -11,6 +11,10 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     /// that host stay here; everything else opens in the system browser.
     private var nodeHost: String?
     private var nodePort: Int?
+    /// What to do when the reader's Post a challenge page hands over a
+    /// description: open New Challenge… with it, or return why not.
+    var onDraftChallenge: (@MainActor (String) -> String?)?
+    private let bridge: PageBridge
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -19,8 +23,11 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         // ui/app/layout.tsx). Appended to WebKit's own user agent, not
         // replacing it, so nothing that sniffs for Safari changes.
         configuration.applicationNameForUserAgent = "CairnApp/1"
+        bridge = PageBridge()
+        configuration.userContentController.addScriptMessageHandler(bridge, contentWorld: .page, name: PageBridge.name)
         view = WKWebView(frame: .zero, configuration: configuration)
         super.init()
+        bridge.browser = self
         view.navigationDelegate = self
         view.uiDelegate = self
         view.allowsBackForwardNavigationGestures = true
@@ -58,6 +65,20 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         return nil
     }
 
+    /// Whether a frame's origin is the node this window opened, over http(s)
+    /// only: `isNode` lets `about:` and `data:` documents load, and neither
+    /// is the reader.
+    fileprivate func isNode(origin: WKSecurityOrigin) -> Bool {
+        guard origin.protocol == "http" || origin.protocol == "https" else { return false }
+        var parts = URLComponents()
+        parts.scheme = origin.protocol
+        parts.host = origin.host
+        // WebKit says 0 for the scheme's default port.
+        if origin.port != 0 { parts.port = origin.port }
+        guard let url = parts.url else { return false }
+        return isNode(url)
+    }
+
     private func isNode(_ url: URL) -> Bool {
         guard let scheme = url.scheme, scheme == "http" || scheme == "https" else {
             return url.scheme == "about" || url.scheme == "blob" || url.scheme == "data"
@@ -73,6 +94,41 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
             return false
         }
         return local.contains(host)
+    }
+}
+
+/// What the reader's pages may ask of the app: today one thing, to open New
+/// Challenge… with a description typed on Post a challenge
+/// (`ui/lib/draft.ts`). The page cannot draft one itself -- the node has no
+/// TLS and must never see the model key -- and the app already can.
+///
+/// Its own object rather than the browser, because the content controller
+/// keeps its handlers for as long as the view lives, and the browser owns
+/// the view.
+@MainActor
+final class PageBridge: NSObject, WKScriptMessageHandlerWithReply {
+    /// `window.webkit.messageHandlers.cairn` on the page.
+    static let name = "cairn"
+    weak var browser: Browser?
+
+    /// The async form, so the reply is the return value rather than a
+    /// closure whose actor and Sendable annotations differ between SDKs.
+    func userContentController(_ controller: WKUserContentController,
+                               didReceive message: WKScriptMessage) async -> (Any?, String?) {
+        // The node's own reader in the window's top frame, and nothing else:
+        // not a frame it embeds, and not a page from elsewhere. Starting a
+        // draft spends the person's model credits.
+        guard let browser, message.frameInfo.isMainFrame,
+              browser.isNode(origin: message.frameInfo.securityOrigin)
+        else { return (nil, "Only this node's own pages can open New Challenge.") }
+        switch PageRequest.parse(message.body) {
+        case .failure(let refusal):
+            return (nil, refusal.message)
+        case .success(.draftChallenge(let brief)):
+            guard let open = browser.onDraftChallenge else { return (nil, "New Challenge is not available.") }
+            if let refusal = open(brief) { return (nil, refusal) }
+            return (true, nil)
+        }
     }
 }
 

@@ -27,12 +27,25 @@ import {
   isMobileBrowser,
   signPayload,
 } from "@/lib/wallet";
+import { type Bridge, appBridge, briefProblem, handOff } from "@/lib/draft";
 import { NODE_URL } from "@/lib/objectives";
 import { repoLink } from "@/lib/site";
 import { Badge, Card, CopyButton, Hash, Note, PageHeader, SectionHeading } from "@/components/ui";
 
 /**
  * Post a challenge, funded by a key a wallet holds.
+ *
+ * # In Cairn.app, a description is enough
+ *
+ * Nobody posting a bounty wants to meet the objective schema, and in the
+ * app's window they do not have to: the page is one text box, handed to the
+ * app's New Challenge…, which has a model draft the statement, answer format
+ * and checker, tests the checker in the network's own sandbox, and posts.
+ * Why the page cannot do that itself is in `lib/draft.ts`. The form below is
+ * still here, folded away, for a scaffolded `objective.json` and for a funder
+ * signing with a wallet; in a browser, where there is no app to hand to, it
+ * is the page. Which of the two shows first is decided by `.in-app`, set
+ * before first paint, so neither flashes in and then vanishes.
  *
  * # Why a browser wallet is the right key here
  *
@@ -100,7 +113,18 @@ export default function Page() {
 
   const canWrite = reachableForWrites();
 
+  const [brief, setBrief] = useState("");
+  // Undefined until mounted: the prerendered page cannot know whose window
+  // it will be in, and a guess would disagree with the one that hydrates.
+  const [bridge, setBridge] = useState<Bridge | null | undefined>(undefined);
+  const [handing, setHanding] = useState(false);
+  const [handError, setHandError] = useState<string | null>(null);
+  // The form, folded away in the app until asked for. In a browser it shows
+  // regardless (`site-only` hides only in the app).
+  const [manual, setManual] = useState(false);
+
   useEffect(() => {
+    setBridge(appBridge());
     setWallets(available());
     setEvmOnly(hasEvmOnly());
     // After mount: a UA read during prerender would disagree with the phone
@@ -146,6 +170,19 @@ export default function Page() {
     },
     [invalidate],
   );
+
+  async function onDraft() {
+    if (!bridge || handing) return;
+    setHanding(true);
+    setHandError(null);
+    try {
+      await handOff(brief, bridge);
+    } catch (cause) {
+      setHandError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setHanding(false);
+    }
+  }
 
   async function onConnect(kind: string) {
     setWalletError(null);
@@ -239,6 +276,7 @@ export default function Page() {
     }
   }
 
+  const folded = manual ? "" : "site-only";
   const needsSignature = isKeyShaped(draft.funder.trim());
   const readyToSubmit = complete && (!needsSignature || Boolean(signature));
   const kind = kindInfo(draft.verifierKind);
@@ -256,8 +294,90 @@ export default function Page() {
         subtitle="A question with a pinned checker and a bounty. Once posted the checker decides what passes, and editing it later posts a different objective."
       />
 
+      {/* -- in Cairn.app: a description, and nothing else ------------------ */}
+      {/* A plain div carries `app-only`: a display utility on the same
+          element would outrank it, and the card would show in a browser. */}
+      <div className="app-only mb-6">
+        <Card className="card-pad">
+          <SectionHeading>Describe it</SectionHeading>
+          <label className="sr-only" htmlFor="brief">
+            The problem, and what counts as a right answer
+          </label>
+          <textarea
+            id="brief"
+            className="field min-h-36 resize-y text-[14px]"
+            value={brief}
+            onChange={(event) => {
+              setBrief(event.target.value);
+              setHandError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                void onDraft();
+              }
+            }}
+            placeholder="For example: find a 16-input sorting network with fewer than 60 comparators. Pay whoever finds one."
+          />
+          <p className="hint">
+            A model you have a key for writes the statement, the answer format and
+            the checker. Cairn tests the checker on a right and a wrong answer in
+            the sandbox the network uses, and shows you all of it before anything
+            is posted. The reward and funder can be changed there.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={!bridge || handing || briefProblem(brief) !== null}
+              onClick={() => void onDraft()}
+              title="⌘↩"
+            >
+              {handing ? "Opening…" : "Draft challenge"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm ml-auto"
+              aria-expanded={manual}
+              onClick={() => setManual((open) => !open)}
+            >
+              {manual ? "Hide the form" : "Fill in every field by hand"}
+            </button>
+          </div>
+          {bridge === null && (
+            <div className="mt-3">
+              <Note tone="warn">
+                This version of Cairn.app cannot take a description from the page.
+                Use <b>New Challenge</b> — the sparkles in the toolbar — or update
+                the app.
+              </Note>
+            </div>
+          )}
+          {handError && (
+            <div className="mt-3">
+              <Note title="not opened" tone="bad">
+                {handError}
+              </Note>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* -- in a browser: where the short way is ---------------------------- */}
+      <div className="site-only mb-6">
+        <Note title="rather describe it in plain words?">
+          Cairn.app&rsquo;s <b>New Challenge</b> takes a description and nothing
+          else: a model you have a key for drafts the statement, the answer format
+          and the checker, and the app tests the checker before you post. A page
+          cannot do that — the node has no TLS to call a model with, and nowhere a
+          page may put a checker — so here it is the form.
+        </Note>
+      </div>
+
+      {/* -- the form: the page in a browser, folded away in the app --------- */}
+      {/* `site-only` is !important, so it does outrank the grid's display. */}
       {!canWrite && (
-        <div className="mb-6">
+        <div className={`mb-6 ${folded}`}>
           <Note title="this page cannot submit from here" tone="warn">
             You are reading this from{" "}
             <span className="mono">{NODE_URL || "another origin"}</span>, and a node
@@ -272,7 +392,7 @@ export default function Page() {
         </div>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_26rem]">
+      <div className={`grid gap-6 lg:grid-cols-[minmax(0,1fr)_26rem] ${folded}`}>
         {/* -- the form ---------------------------------------------------- */}
         <div className="flex flex-col gap-6">
           <Card className="card-pad">

@@ -168,6 +168,32 @@ final class DraftingTests: XCTestCase {
         XCTAssertTrue(ChallengeTest.Outcome(passing: nil, failing: .reject("no")).ok)
     }
 
+    // MARK: the reader's page
+
+    /// The body `handOff` in ui/lib/draft.ts posts, as WebKit hands it over.
+    func testThePagesDescriptionIsReadTrimmed() throws {
+        let body: [String: Any] = ["kind": "draft-challenge", "brief": "  find a 16-input sorting network \n"]
+        guard case .success(let request) = PageRequest.parse(body) else { return XCTFail("refused a well-formed request") }
+        XCTAssertEqual(request, .draftChallenge(brief: "find a 16-input sorting network"))
+    }
+
+    func testThePageIsHeldToTheSheetsOwnLimits() {
+        func refused(_ body: Any) -> Bool {
+            if case .failure = PageRequest.parse(body) { return true }
+            return false
+        }
+        XCTAssertTrue(refused("draft-challenge"))
+        XCTAssertTrue(refused(["kind": "post-objective", "brief": "find a 16-input sorting network"]))
+        XCTAssertTrue(refused(["kind": "draft-challenge"]))
+        XCTAssertTrue(refused(["kind": "draft-challenge", "brief": "  too short  "]))
+        XCTAssertTrue(refused(["kind": "draft-challenge", "brief": String(repeating: "x", count: 20_001)]))
+        XCTAssertFalse(refused(["kind": "draft-challenge", "brief": String(repeating: "x", count: 20_000)]))
+        // Counted as JavaScript counts `length`, so the page and the app
+        // agree at the boundary: five emoji are ten UTF-16 units.
+        XCTAssertTrue(ChallengeWriter.isDraftable(String(repeating: "🧩", count: 5)))
+        XCTAssertFalse(ChallengeWriter.isDraftable(String(repeating: "🧩", count: 4)))
+    }
+
     // MARK: tasks
 
     func testStagingCopiesAPinnedCheckerAndRefusesAWrongOne() throws {

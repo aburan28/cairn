@@ -18,6 +18,16 @@ struct ChallengeDraft: Equatable {
 }
 
 enum ChallengeWriter {
+    /// How long a description may be. Under ten characters there is nothing
+    /// to draft from; over twenty thousand it is a document, and every byte
+    /// goes to the provider. `ui/lib/draft.ts` holds the page to the same
+    /// numbers, counted the way JavaScript counts a string's length.
+    static let briefLength = 10...20_000
+
+    static func isDraftable(_ brief: String) -> Bool {
+        briefLength.contains(brief.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count)
+    }
+
     /// What the model is told. The checker it writes decides who gets paid,
     /// so most of this is about the ways a checker goes wrong in this
     /// network specifically: its source is public, it runs in a jail with no
@@ -141,6 +151,26 @@ enum ChallengeWriter {
         )
         guard !draft.statement.isEmpty else { throw AIError("The model's draft has an empty statement.") }
         return draft
+    }
+}
+
+/// A request from the reader, in the shape `ui/lib/draft.ts` sends it.
+enum PageRequest: Equatable {
+    case draftChallenge(brief: String)
+
+    static func parse(_ body: Any) -> Result<PageRequest, AIError> {
+        guard let object = body as? [String: Any], let kind = object["kind"] as? String else {
+            return .failure(AIError("The page sent something this app does not read."))
+        }
+        guard kind == "draft-challenge" else {
+            return .failure(AIError("This app does not know the request \(kind)."))
+        }
+        guard let brief = (object["brief"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              ChallengeWriter.isDraftable(brief)
+        else {
+            return .failure(AIError("A description is between \(ChallengeWriter.briefLength.lowerBound) and \(ChallengeWriter.briefLength.upperBound) characters."))
+        }
+        return .success(.draftChallenge(brief: brief))
     }
 }
 

@@ -154,6 +154,15 @@ has the release side and the one secret it needs.
 in plain words, set a reward, and post a challenge without meeting the
 objective schema.
 
+The reader's **Post a challenge** page leads to the same place. In this
+window the page is one text box: **Draft challenge** hands the description to
+the sheet through a script message handler (`PageBridge` in `WebView.swift`,
+`ui/lib/draft.ts` on the page's side), and the sheet starts drafting at once
+when a key is saved, or as soon as one is pasted. The full form is still
+there behind *Fill in every field by hand*, for a scaffolded `objective.json`
+or a wallet signature. The handler answers only the top frame of the node
+this app runs, so attach mode refuses it and says why on the page.
+
 1. A model you have a key for drafts the parts that need judgment: the
    statement solvers read, the answer's shape, a Python checker, a correct
    answer when it knows one, and a plausible wrong one.

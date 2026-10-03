@@ -43,6 +43,9 @@ final class Node: ObservableObject {
     @Published var presentSecrets = false
     @Published var presentNewChallenge = false
     @Published var presentConnectivity = false
+    /// What New Challenge… opens with: the description the reader's Post a
+    /// challenge page handed over, or nil from the menu and the toolbar.
+    private(set) var challengeBrief: String?
 
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }
@@ -64,6 +67,30 @@ final class Node: ObservableObject {
     /// The attach-mode probe, so a stop or a second start can cancel it
     /// rather than leave it to set a state nobody asked for.
     private var probe: Task<Void, Never>?
+
+    // MARK: sheets
+
+    /// Open New Challenge…, empty, or with a description to draft from at once.
+    func newChallenge(brief: String? = nil) {
+        challengeBrief = brief
+        presentNewChallenge = true
+    }
+
+    /// The reader's way in: open New Challenge… with the description typed
+    /// on its Post a challenge page, or return why not, in words the page
+    /// shows as they are.
+    func draftChallenge(fromPage brief: String) -> String? {
+        if isAttached {
+            return "This window is showing a node Cairn.app does not run, so there is nowhere here to write its checker. Draft it from the Cairn.app that runs that node."
+        }
+        guard case .running = state else { return "The node is not running." }
+        // SwiftUI shows one sheet at a time; a second is dropped silently.
+        if presentNewChallenge || presentTasks || presentPeers || presentSecrets || presentConnectivity {
+            return "Close the sheet that is open in Cairn.app first."
+        }
+        newChallenge(brief: brief)
+        return nil
+    }
 
     // MARK: finding the binary
 
