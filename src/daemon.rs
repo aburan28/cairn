@@ -809,6 +809,52 @@ pub fn run(config: Config) -> Result<(), String> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .identify(service.identity(), config.listen);
 
+    // Ask the router to forward the p2p port, so a node behind a home router
+    // can be dialled and not only dial. On a thread of its own: every call in
+    // `reach` waits on a gateway that is usually not there, and the decision
+    // not to ask is published too, so a reader sees why rather than a blank.
+    // Off behind a proxy for the reason beacons are, and off on a loopback
+    // listen because nothing outside this host can be forwarded to it.
+    let decision = crate::p2p::reach::decide(
+        std::env::var(crate::p2p::reach::ENV).ok().as_deref(),
+        config.listen.ip(),
+        !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct),
+    );
+    if let Some(note) = &decision.note {
+        log::info!("portmap: {note}");
+    }
+    match decision.mode {
+        crate::p2p::reach::Mode::Off => {
+            sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .set_external(crate::p2p::reach::Report::off(
+                    crate::p2p::reach::Mode::Off,
+                    decision.note.clone().unwrap_or_default(),
+                    crate::time::unix_seconds(),
+                ));
+        }
+        mode => {
+            log::info!(
+                "portmap: {} ({}={}); asking the router to forward port {}",
+                mode.as_str(),
+                crate::p2p::reach::ENV,
+                mode.as_str(),
+                config.listen.port()
+            );
+            let roster = Arc::clone(&sessions);
+            let port = config.listen.port();
+            thread::spawn(move || {
+                crate::p2p::reach::run(mode, port, move |report| {
+                    roster
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .set_external(report);
+                })
+            });
+        }
+    }
+
     // Exclusive, opened above: the daemon appends every record it imports from
     // a peer, so it is a writer and must not share a log with another one.
     // Never `interactive()`, even with MCP on: this registry is the one the

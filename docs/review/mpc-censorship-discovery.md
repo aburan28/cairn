@@ -94,7 +94,9 @@ least `t` but still fail to open is evidence against the dealer. Run
   peer stores (`peers::Hints` vs `swarm::discovery::AddressBook`, with different
   eviction) and the swarm provider store, which nothing outside tests announces
   to. Merge the stores' policy; wire or delete the provider store, and correct
-  `docs/discovery.md`, which calls it built. `p2p/portmap.rs` is not wired.
+  `docs/discovery.md`, which calls it built. `p2p/portmap.rs` is not wired
+  (since addressed: `p2p/reach.rs` calls it from the daemon, NAT-PMP then
+  `p2p/upnp.rs`, and reports the outcome on `GET /sessions`).
 
 ### 6. Censorship: proxy leaks and fingerprints
 

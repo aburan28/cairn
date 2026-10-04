@@ -296,6 +296,21 @@ behaviour ships and is tested, not that TLC has checked it.
       announcement. When there is no gateway the node is where it was — able to
       fetch, unable to seed — but now says so instead of wondering why nobody
       dials it.
+- [x] **NAT traversal, wired, and the half that costs something** (`p2p::reach`,
+      `p2p::upnp`). The line above shipped a library with no caller: the daemon
+      never asked a router anything, so a node behind a home router still could
+      not seed. `reach` is the caller — NAT-PMP first, UPnP IGD second, renewed at
+      half the lease and mapped again when a renewal fails — and the answer is on
+      `GET /sessions` as `this_node.external`. UPnP is paid for after all, as
+      narrowly as it can be: a bounded tag scan rather than an XML parser, one
+      request and one response over a `TcpStream` rather than an HTTP client,
+      because NAT-PMP is the protocol most consumer routers never shipped and a
+      node that can only map through the protocol its router lacks is a node that
+      cannot seed from a home. What the router says is still a claim:
+      `inbound_from_public_at` is the evidence, set only when a peer from outside
+      completed a handshake, and the reader shows the two side by side
+      ([two-nodes.md](two-nodes.md)). STUN and hole punching stay out, for the
+      reason above.
 - [x] **Decided against as written: no `blob` record announcing who holds what.**
       This line contradicted [discovery.md](discovery.md), and the contradiction
       is the answer rather than something to resolve by building. "Who holds
