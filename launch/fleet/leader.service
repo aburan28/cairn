@@ -1,0 +1,62 @@
+# A fleet leader on a Linux host: the node that holds the signing identity the
+# fleet is paid to, serves its workers over HTTP on the private network, and
+# -- its own choice -- peers with the public network or nobody.
+#
+# The Mac in front of you can be the leader instead (Cairn.app, Settings ->
+# Fleet); this unit is for a leader that lives in a rack or a cloud account.
+# docs/fleet.md is the walk-through.
+#
+# Install:
+#
+#   sudo useradd --system --home /var/lib/cairn --create-home cairn
+#   sudo install -m 755 cairn /usr/local/bin/cairn
+#   sudo -u cairn /usr/local/bin/cairn identity --out /var/lib/cairn/leader.identity.json
+#   sudo install -m 644 leader.service /etc/systemd/system/cairn-leader.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now cairn-leader
+#   curl -s http://127.0.0.1:8080/network | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"]["fleet"])'
+#
+# The last line prints the networks this leader signs for and the id it signs
+# as. Workers submit under that id -- `signs_as` -- and are paid to it.
+
+[Unit]
+Description=cairn fleet leader (signs the fleet's records; serves workers on the private network)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cairn
+WorkingDirectory=/var/lib/cairn
+Environment=CAIRN_DATA=/var/lib/cairn
+Environment=CAIRN_LOG_LEVEL=info
+# Whose unsigned records this node signs as itself: the private networks the
+# workers live on. `private` is 10/8, 172.16/12, 192.168/16, loopback and IPv6
+# unique-local; name a tunnel's own range instead when the fleet crosses the
+# internet (WireGuard: the wg0 subnet; SSH -L: `loopback`).
+Environment=CAIRN_FLEET=private
+# The ed25519 identity the fleet is paid to. Kept here, on the leader, and
+# nowhere else: a worker never holds it.
+Environment=CAIRN_FLEET_IDENTITY=/var/lib/cairn/leader.identity.json
+# A fleet is private by default: no public seeds, no LAN beacons, no router
+# port mapping, and p2p only with the peers named in --bootstrap files (none
+# here). Remove these three lines, or set CAIRN_PEERS=open, for a leader that
+# also joins the public network.
+Environment=CAIRN_SEEDS=off
+Environment=CAIRN_BEACON_PORT=off
+Environment=CAIRN_PORTMAP=off
+Environment=CAIRN_ROLES=coordinator,verifier
+# --no-mcp: stdin belongs to systemd. --serve on the wildcard so workers on the
+# private network reach the HTTP side; the firewall or security group decides
+# who else can, and the HTTP side is plaintext by policy, so that must be the
+# private network alone. --listen on loopback: this leader peers with nobody
+# over p2p; bind 0.0.0.0:9000 and add --bootstrap files to peer with a fleet
+# node in another region.
+ExecStart=/usr/local/bin/cairn run --no-mcp \
+    --listen 127.0.0.1:9000 \
+    --serve 0.0.0.0:8080 \
+    --mcp-identity /var/lib/cairn/leader.identity.json
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

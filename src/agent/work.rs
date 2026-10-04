@@ -85,6 +85,9 @@ USAGE
                          the submitter on every record
     --identity FILE      sign commitments and claims with this identity; the
                          submitter becomes its public key (`cairn identity`)
+    --submitter ID       name ID as the submitter instead of --worker, unsigned:
+                         a fleet member names its leader's `signs_as`, and the
+                         leader signs and is paid (docs/fleet.md)
     --partitions N       how many ways the search is split (default 8)
     --rounds N           stop after N solver runs (default: run until stopped)
     --heartbeat SECONDS  how often to report in while the solver runs (default 30)
@@ -111,6 +114,9 @@ pub struct Options {
     pub objective: String,
     pub worker: String,
     pub identity: Option<Identity>,
+    /// Who the records name, when it is neither `worker` nor `identity`'s
+    /// key: a fleet leader's id. The slice and the heartbeat stay `worker`'s.
+    pub submitter: Option<String>,
     pub partitions: u64,
     pub rounds: Option<u64>,
     pub heartbeat: Duration,
@@ -160,6 +166,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     let mut objective = None;
     let mut worker = None;
     let mut identity_path: Option<String> = None;
+    let mut submitter: Option<String> = None;
     let mut partitions = 8u64;
     let mut rounds = None;
     let mut heartbeat = 30u64;
@@ -186,6 +193,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--objective" => objective = Some(value()?.clone()),
             "--worker" => worker = Some(value()?.clone()),
             "--identity" => identity_path = Some(value()?.clone()),
+            "--submitter" => submitter = Some(value()?.clone()),
             "--partitions" => partitions = number(value()?)?,
             "--rounds" => rounds = Some(number(value()?)?),
             "--heartbeat" => heartbeat = number(value()?)?,
@@ -218,12 +226,25 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     if solver.is_empty() {
         return Err("no solver: put the command after `--`".into());
     }
+    if identity_path.is_some() && submitter.is_some() {
+        return Err(
+            "--identity and --submitter both name the submitter; give one \
+             (--identity signs here, --submitter leaves signing to a fleet leader)"
+                .into(),
+        );
+    }
+    if let Some(name) = &submitter {
+        if name.is_empty() || name.contains('|') || name.chars().any(char::is_control) {
+            return Err("--submitter must be printable text without `|`".into());
+        }
+    }
     let identity = identity_path.map(|path| load_identity(&path)).transpose()?;
     Ok(Some(Options {
         node,
         objective,
         worker,
         identity,
+        submitter,
         partitions,
         rounds,
         heartbeat: Duration::from_secs(heartbeat),
@@ -288,9 +309,13 @@ struct Worker {
 
 impl Worker {
     fn new(options: Options) -> Result<Worker, WorkError> {
-        let submitter = match &options.identity {
-            Some(identity) => identity.submitter_id(),
-            None => options.worker.clone(),
+        // The heartbeat and the slice are always `worker`'s: the assignment
+        // is a function of that name, and two fleet members naming one leader
+        // must still take different slices.
+        let submitter = match (&options.identity, &options.submitter) {
+            (Some(identity), _) => identity.submitter_id(),
+            (None, Some(named)) => named.clone(),
+            (None, None) => options.worker.clone(),
         };
         Ok(Worker {
             options,
@@ -311,8 +336,10 @@ impl Worker {
             short(&self.options.objective),
             self.options.node.as_str(),
             self.epoch_seconds,
-            if self.submitter != self.options.worker {
+            if self.options.identity.is_some() {
                 format!(", signing as {}", short(&self.submitter))
+            } else if self.submitter != self.options.worker {
+                format!(", submitting for {}", short(&self.submitter))
             } else {
                 String::new()
             }
@@ -762,6 +789,25 @@ mod tests {
                 .contains("sha256")
         );
         assert!(parse(&args("--help")).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_fleet_member_names_its_leader_but_keeps_its_own_slice() {
+        let leader = "a".repeat(64);
+        let options = parse(&args(&format!(
+            "--node http://h:1 --objective sha256:ab --worker box-1 --submitter {leader} -- x"
+        )))
+        .unwrap()
+        .unwrap();
+        let worker = Worker::new(options).unwrap();
+        assert_eq!(worker.submitter, leader);
+        let body = worker.heartbeat_body(&Value::Null);
+        assert_eq!(body.get("worker").and_then(Value::as_str), Some("box-1"));
+        assert!(parse(&args(
+            "--node http://h:1 --objective sha256:ab --worker w --submitter s --identity f -- x"
+        ))
+        .unwrap_err()
+        .contains("both"));
     }
 
     #[test]

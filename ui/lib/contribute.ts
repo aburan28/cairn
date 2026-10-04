@@ -149,6 +149,9 @@ export function workCommand(options: {
   objective: string | null;
   worker: string;
   solver?: string;
+  /** A fleet leader's `signs_as`: the machine submits under it, the leader
+   *  signs and is paid, and the slice stays the machine's own name's. */
+  leader?: string | null;
 }): string {
   const worker = options.worker.trim().replace(/[|\s]+/g, "-") || "<your-name>";
   return [
@@ -156,6 +159,7 @@ export function workCommand(options: {
     `  --node ${options.node || "<node-url>"}`,
     `  --objective ${options.objective || "<objective-id>"}`,
     `  --worker ${worker}`,
+    ...(options.leader ? [`  --submitter ${options.leader}`] : []),
     `  -- ${options.solver?.trim() || "./your-solver"}`,
   ].join(" \\\n");
 }

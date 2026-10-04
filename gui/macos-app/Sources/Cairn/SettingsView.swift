@@ -14,6 +14,11 @@ struct SettingsView: View {
     @ObservedObject var updates: Updates
 
     @AppStorage(NodeSettings.Key.cpus) private var cpus = 0
+    @AppStorage(NodeSettings.Key.backgroundService) private var background = false
+    @AppStorage(NodeSettings.Key.leadFleet) private var leadFleet = false
+    @AppStorage(NodeSettings.Key.fleetNetworks) private var fleetNetworks = NodeSettings.defaultFleetNetworks
+    @State private var backgroundBusy = false
+    @State private var backgroundError: String?
     @AppStorage(NodeSettings.Key.limitMemory) private var limitMemory = true
     @AppStorage(NodeSettings.Key.memoryGB) private var memoryGB = NodeSettings.defaultMemoryGB
     @AppStorage(NodeSettings.Key.limitStorage) private var limitStorage = false
@@ -53,7 +58,9 @@ struct SettingsView: View {
                     """)
             }
 
-            if !attaching {
+            // Attached to somebody else's node, these do not apply. Attached
+            // to our own launchd agent, they do: the agent is this node.
+            if !attaching || background {
             Section {
                 processor
             } header: {
@@ -118,6 +125,22 @@ struct SettingsView: View {
                     shape, and a placeholder key is warned about at every start until \
                     the real one replaces it. A bootstrap is a dial hint, never a trust \
                     decision — the handshake authenticates the key.
+                    """)
+            }
+
+            Section {
+                fleet
+            } header: {
+                Text("Fleet")
+            } footer: {
+                Caption("""
+                    Lead a fleet and this node serves its HTTP side on every interface, so \
+                    workers and GPU boxes on your network can reach it, and signs the records \
+                    they hand it with an identity kept here and nowhere else — their work is \
+                    paid to this node. Only the networks listed are members; `private` is every \
+                    home and office range. The HTTP side is plaintext, so the list must mean a \
+                    network you run: turn this off before joining one you do not, or lead from \
+                    a Linux host instead. docs/fleet.md has the whole arrangement.
                     """)
             }
 
@@ -202,8 +225,63 @@ struct SettingsView: View {
 
     // MARK: sections
 
+    private var fleet: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Lead a fleet: accept workers from my network and sign their submissions", isOn: $leadFleet)
+            if leadFleet {
+                TextField("Member networks: CIDRs, or private, or loopback", text: $fleetNetworks)
+                    .font(.body.monospaced())
+                if let id = node.leaderId {
+                    HStack(spacing: 8) {
+                        Text("Workers submit as").font(.caption).foregroundStyle(.secondary)
+                        Text(id)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Button("Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(id, forType: .string)
+                        }
+                        .controlSize(.small)
+                    }
+                } else {
+                    Text("The fleet identity is created the next time the node starts. Its id appears here, and as node.fleet.signs_as on GET /network.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
     private var attach: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Toggle("Keep the node running in the background", isOn: Binding(
+                get: { background },
+                set: { on in
+                    backgroundBusy = true
+                    backgroundError = nil
+                    node.setBackground(on) { error in
+                        backgroundBusy = false
+                        backgroundError = error
+                    }
+                }
+            ))
+            .disabled(backgroundBusy)
+            if background || backgroundBusy {
+                Text("""
+                    The node is a launchd agent (\(BackgroundService.label), in ~/Library/LaunchAgents): \
+                    it keeps running when this window closes and starts again when you log in, and this \
+                    window attaches to it. On macOS 15 and later a process that is not an app cannot ask \
+                    for Local Network permission itself, so LAN beacons may be denied silently; bootstrap \
+                    files, seeds and port mapping are unaffected.
+                    """)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let backgroundError {
+                Text(backgroundError).font(.caption).foregroundStyle(.red)
+            }
             Toggle("Attach to an existing node", isOn: Binding(
                 get: { attaching },
                 set: { on in
@@ -216,9 +294,11 @@ struct SettingsView: View {
                     }
                 }
             ))
+            .disabled(background)
             if attaching {
                 TextField("Reader URL", text: $attachURL)
                     .font(.body.monospaced())
+                    .disabled(background)
                 Text("Example: http://192.168.1.10:8080/ui/ — the page this window will show. Nothing is started on this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -273,7 +353,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Toggle("Share this node on my network", isOn: $shareHTTP)
             Text(shareHTTP
-                 ? "Other machines on your network can open this node's pages and join its work with `cairn work --node http://<this Mac>:8080 …` — the Join page shows the exact command. Anyone on the network can read the log and post answers; nobody can change what has settled."
+                 ? "Other machines on your network can open this node's pages and join its work with `cairn work --node http://<this Mac>:8080 …` — the Contribute page shows the exact command. Each machine is paid under its own name; Lead a fleet pays this Mac instead. Anyone on the network can read the log and post answers; nobody can change what has settled."
                  : "Only this Mac can open the node's pages or work on it. Turn this on to add machines on your network as workers.")
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("Offline: no internet peers", isOn: $offline)

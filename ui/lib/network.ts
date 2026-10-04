@@ -236,6 +236,24 @@ export type NodeFacts = {
   runs_p2p: boolean;
   /** Where this node's HTTP side answers. Absent on a node older than it. */
   reach?: { bound: string | null; lan: boolean; urls?: string[] };
+  /**
+   * The fleet this node leads, when it leads one: the networks whose
+   * unsigned records naming `signs_as` the node signs before queuing them.
+   * Absent on a node older than the field; null when it leads none.
+   */
+  fleet?: FleetFacts | null;
+  /** Whom the daemon peers with: `open`, or an allowlist of `allowed` peers. */
+  peers_policy?: PeersPolicy | null;
+};
+
+export type FleetFacts = {
+  sources: string[];
+  signs_as: string;
+};
+
+export type PeersPolicy = {
+  policy: "open" | "allowlist" | string;
+  allowed: number | null;
 };
 
 export type PeersSummary = {

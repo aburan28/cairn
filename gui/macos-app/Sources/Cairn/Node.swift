@@ -214,21 +214,11 @@ final class Node: ObservableObject {
             return
         }
 
-        // The validator role signs and bonds every attestation, so it needs a
-        // key of its own. Made here, once, with the same command a person
-        // would run; never overwritten, because the key is the identity the
-        // log's bonds and slashes name.
-        if settings.validator,
-           !FileManager.default.fileExists(atPath: settings.validatorIdentity.path) {
-            let made = Self.runCairn(binary, ["identity", "--out", settings.validatorIdentity.path])
-            guard made.status == 0 else {
-                state = .failed("""
-                    Could not create the validator's key at \(settings.validatorIdentity.path): \
-                    \(made.err.isEmpty ? "cairn identity exited \(made.status)" : made.err). \
-                    Turn the validator role off in Settings to start without it.
-                    """)
-                return
-            }
+        // Keys the chosen roles sign with, made before the node starts
+        // because it refuses to start naming a key file that is not there.
+        if let failure = Self.prepareIdentities(settings, binary: binary) {
+            state = .failed(failure)
+            return
         }
 
         // A missing bootstrap file is a dial that never happens, and the node
@@ -247,12 +237,12 @@ final class Node: ObservableObject {
         // The command line's defaults when they are free, so a node started
         // here is where the docs say it is; otherwise any free port, so a
         // second node on this Mac does not stop this one starting. The HTTP
-        // half is loopback unless Settings shares the node on the LAN, which
-        // is what lets another machine there run `cairn work` against it;
-        // the window reads 127.0.0.1 either way, since 0.0.0.0 includes it.
-        // The P2P half uses the host Settings chose -- loopback dials out
-        // only; 0.0.0.0 also accepts.
-        let http = Self.freePort(preferring: 8080, on: settings.httpHost)
+        // half is loopback unless Settings shares the node on the LAN or
+        // leads a fleet, which is what lets another machine there run
+        // `cairn work` against it; the window reads 127.0.0.1 either way,
+        // since 0.0.0.0 includes it. The P2P half uses the host Settings
+        // chose -- loopback dials out only; 0.0.0.0 also accepts.
+        let http = Self.freePort(preferring: 8080, on: settings.serveHost)
         let p2p = Self.freePort(preferring: 9000, on: settings.p2pHost)
         guard http != 0, p2p != 0 else {
             state = .failed("Could not find a free port for the node to bind.")
@@ -266,8 +256,8 @@ final class Node: ObservableObject {
         p.arguments = settings.arguments + [
             "run",
             "--listen", "\(settings.p2pHost):\(p2p)",
-            "--serve", "\(settings.httpHost):\(http)",
-        ] + settings.runArguments
+            "--serve", "\(settings.serveHost):\(http)",
+        ] + settings.runArguments + settings.fleetArguments
         p.environment = Self.childEnvironment(settings)
 
         let input = Pipe()
@@ -345,9 +335,138 @@ final class Node: ObservableObject {
     }
 
     func restart() {
+        if runsInBackground {
+            // The service's plist *is* the settings: write it again from what
+            // Settings holds now, then start it, then attach.
+            guard let binary = binary ?? Self.locateBinary() else {
+                state = .failed("No cairn command was found.")
+                return
+            }
+            let settings = NodeSettings.current()
+            stop()
+            state = .starting
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let failure: String?
+                do {
+                    try BackgroundService.stop()
+                    if let missing = Self.prepareIdentities(settings, binary: binary) {
+                        failure = missing
+                    } else {
+                        try BackgroundService.install(settings: settings, binary: binary)
+                        failure = nil
+                    }
+                } catch {
+                    failure = error.localizedDescription
+                }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if let failure { self.state = .failed(failure) } else { self.start() }
+                }
+            }
+            return
+        }
         // The spinner, not a frozen window, while the old node goes.
         if process != nil { state = .starting }
         stop { [weak self] in self?.start() }
+    }
+
+    // MARK: the background service
+
+    /// True when Settings asked for the launchd agent. This window then
+    /// attaches to it and owns no process, so quitting stops nothing.
+    var runsInBackground: Bool { NodeSettings.backgroundService }
+
+    /// The log has one writer. Make way for a CLI command that writes it:
+    /// stop the child, or stop the service and wait for it to let go.
+    private func pauseForWriteLock() {
+        stop()
+        if runsInBackground { try? BackgroundService.stop() }
+    }
+
+    private func resumeAfterWriteLock() {
+        if runsInBackground { try? BackgroundService.start() }
+        start()
+    }
+
+    /// Turn the launchd agent on or off and move this window to the right
+    /// side of it: attached to the service, or running a child again.
+    /// Completion is on the main actor, with an error or nil.
+    func setBackground(_ on: Bool, completion: @escaping (String?) -> Void) {
+        let defaults = UserDefaults.standard
+        if on {
+            guard let binary = binary ?? Self.locateBinary() else {
+                completion("No cairn command was found.")
+                return
+            }
+            let settings = NodeSettings.current()
+            state = .starting
+            stop { [weak self] in
+                guard let self else { return }
+                do {
+                    if let missing = Self.prepareIdentities(settings, binary: binary) {
+                        self.start()
+                        completion(missing)
+                        return
+                    }
+                    try BackgroundService.install(settings: settings, binary: binary)
+                } catch {
+                    self.start()
+                    completion(error.localizedDescription)
+                    return
+                }
+                defaults.set(true, forKey: NodeSettings.Key.backgroundService)
+                defaults.set(BackgroundService.readerURL.absoluteString, forKey: NodeSettings.Key.attachURL)
+                self.start()
+                completion(nil)
+            }
+        } else {
+            defaults.set(false, forKey: NodeSettings.Key.backgroundService)
+            defaults.set("", forKey: NodeSettings.Key.attachURL)
+            stop()
+            state = .starting
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let failure: String?
+                do {
+                    try BackgroundService.uninstall()
+                    failure = nil
+                } catch {
+                    failure = error.localizedDescription
+                }
+                DispatchQueue.main.async {
+                    self?.start()
+                    completion(failure)
+                }
+            }
+        }
+    }
+
+    /// At launch: the service the person asked for is loaded, or loaded again
+    /// if a `launchctl bootout` by hand or a missing plist left it stopped.
+    func ensureBackgroundService() {
+        guard runsInBackground, let binary = binary ?? Self.locateBinary() else { return }
+        if BackgroundService.isInstalled {
+            try? BackgroundService.start()
+        } else {
+            let settings = NodeSettings.current()
+            if Self.prepareIdentities(settings, binary: binary) == nil {
+                try? BackgroundService.install(settings: settings, binary: binary)
+            }
+        }
+        let attach = UserDefaults.standard.string(forKey: NodeSettings.Key.attachURL) ?? ""
+        if attach.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            UserDefaults.standard.set(
+                BackgroundService.readerURL.absoluteString, forKey: NodeSettings.Key.attachURL)
+        }
+    }
+
+    /// The id a fleet is paid to: the public half of the leader identity,
+    /// once the node has made it. Workers submit under this.
+    var leaderId: String? {
+        let path = NodeSettings.current().leaderIdentity
+        guard let data = try? Data(contentsOf: path),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object["public"] as? String
     }
 
     /// The part of a stop that must happen on the main actor: no more probe,
@@ -665,6 +784,31 @@ final class Node: ObservableObject {
         var err: String
     }
 
+    /// Make each key a chosen role signs with, if it is not there yet: the
+    /// fleet leader's (paid for its workers' records) and the validator's
+    /// (bonded behind every attestation). Made with the same `cairn identity`
+    /// a person would run, never overwritten -- each key is the identity the
+    /// log's payments, bonds and slashes name. Called before the child starts
+    /// *and* before the launch agent is written, because launchd would
+    /// otherwise restart a node that refuses to start, forever. Returns what
+    /// to tell the person, or nil.
+    nonisolated static func prepareIdentities(_ settings: NodeSettings, binary: URL) -> String? {
+        let wanted: [(Bool, URL, String, String)] = [
+            (settings.leadFleet, settings.leaderIdentity, "the fleet identity", "Lead a fleet"),
+            (settings.validator, settings.validatorIdentity, "the validator's key", "the validator role"),
+        ]
+        for (on, url, what, setting) in wanted where on {
+            guard !FileManager.default.fileExists(atPath: url.path) else { continue }
+            let made = runCairn(binary, ["identity", "--out", url.path])
+            if made.status != 0 {
+                return "Could not create \(what) at \(url.path): "
+                    + (made.err.isEmpty ? "cairn identity exited \(made.status)" : made.err)
+                    + ". Turn off \(setting) in Settings to start without it."
+            }
+        }
+        return nil
+    }
+
     nonisolated private static func runCairn(_ binary: URL, _ args: [String]) -> CairnRun {
         let p = Process()
         p.executableURL = binary
@@ -723,7 +867,7 @@ final class Node: ObservableObject {
     /// already be under the node's root (`GuiTasks.stage`), or the node admits
     /// an objective it cannot check.
     func postObjectives(at paths: [String], completion: @escaping (String?) -> Void) {
-        guard !isAttached else {
+        guard !isAttached || runsInBackground else {
             completion("This window is attached to another node; it cannot write that log.")
             return
         }
@@ -740,7 +884,7 @@ final class Node: ObservableObject {
             if case .starting = state { return true }
             return false
         }()
-        if wasRunning { stop() }
+        if wasRunning { pauseForWriteLock() }
         let log = dataDir.appendingPathComponent("log/cairn.jsonl")
         let root = dataDir.path
         let posts = paths.map { path in
@@ -768,7 +912,7 @@ final class Node: ObservableObject {
                 }
             }
             DispatchQueue.main.async {
-                if wasRunning { self?.start() }
+                if wasRunning { self?.resumeAfterWriteLock() }
                 completion(lastError)
             }
         }
@@ -777,7 +921,7 @@ final class Node: ObservableObject {
     /// Announce a peer in the log with `cairn peer`. The log has one writer,
     /// so a running node is stopped for the command and started again after.
     func announcePeer(transport: String, addr: String, completion: @escaping (String?) -> Void) {
-        guard !isAttached else {
+        guard !isAttached || runsInBackground else {
             completion("This window is attached to another node; it cannot write that log.")
             return
         }
@@ -794,7 +938,7 @@ final class Node: ObservableObject {
             if case .starting = state { return true }
             return false
         }()
-        if wasRunning { stop() }
+        if wasRunning { pauseForWriteLock() }
         let log = dataDir.appendingPathComponent("log/cairn.jsonl")
         let p = Process()
         p.executableURL = binary
@@ -809,7 +953,7 @@ final class Node: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do { try p.run() } catch {
                 DispatchQueue.main.async {
-                    if wasRunning { self?.start() }
+                    if wasRunning { self?.resumeAfterWriteLock() }
                     completion(error.localizedDescription)
                 }
                 return
@@ -818,7 +962,7 @@ final class Node: ObservableObject {
             let text = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             DispatchQueue.main.async {
-                if wasRunning { self?.start() }
+                if wasRunning { self?.resumeAfterWriteLock() }
                 if p.terminationStatus == 0 {
                     completion(nil)
                 } else {

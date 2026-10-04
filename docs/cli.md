@@ -321,7 +321,10 @@ seconds while it runs, and commits each JSON object the solver prints on
 stdout. Commitments are revealed after their epoch turns, citing the
 objective's frontier when it has one. A solver that exits non-zero has its
 round discarded; three in a row stop the worker. `--identity FILE` signs
-every record and makes the key the submitter; otherwise `--worker` is.
+every record and makes the key the submitter; `--submitter ID` names a fleet
+leader's `signs_as` instead, unsigned, so the leader signs and is paid
+([fleet.md](fleet.md)); otherwise `--worker` is. The slice and the heartbeat
+are always `--worker`'s.
 `--partitions N` (default 8), `--rounds N`, `--device TEXT` for the roster,
 `--margin SECONDS` (default 8) to stay clear of an epoch's end. Any OS: it
 needs nothing from the node but its HTTP address. Exit codes: `0` done, `1`

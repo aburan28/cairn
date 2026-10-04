@@ -57,6 +57,14 @@ describe("workCommand", () => {
     expect(workCommand({ node: "", objective: null, worker: "" })).toContain("<objective-id>");
   });
 
+  it("names a fleet leader as the submitter when the node leads one", () => {
+    const leader = "a".repeat(64);
+    expect(workCommand({ node: "x", objective: "y", worker: "box", leader })).toContain(
+      `--submitter ${leader}`,
+    );
+    expect(workCommand({ node: "x", objective: "y", worker: "box" })).not.toContain("--submitter");
+  });
+
   it("strips the commitment-hash separator from a worker name", () => {
     expect(workCommand({ node: "x", objective: "y", worker: "a|b" })).toContain("--worker a-b");
   });

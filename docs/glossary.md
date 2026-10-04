@@ -197,6 +197,12 @@ Any K of K+M rebuild the file. [shards.md](shards.md).
 **Sealed submission.** An artifact encrypted to a committee drawn by the beacon,
 openable without the submitter. [censorship.md](censorship.md).
 
+**Fleet.** One leader node that holds the signing identity and is paid, and
+the host agents and workers on the operator's own network that hand it their
+records to sign (`CAIRN_FLEET`); optionally a few nodes that peer with each
+other and nobody else (`CAIRN_PEERS`). A worker never holds the key.
+[fleet.md](fleet.md).
+
 **Port mapping.** Asking the router in front of a node to forward its p2p port
 (NAT-PMP, then UPnP IGD; `CAIRN_PORTMAP`). What the router answers is a claim,
 published on `GET /sessions` as `this_node.external`; a peer from outside

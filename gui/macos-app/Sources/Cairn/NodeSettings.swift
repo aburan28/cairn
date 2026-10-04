@@ -32,6 +32,12 @@ struct NodeSettings: Equatable {
         /// and do not spawn `cairn run`. Same idea as the iOS reader's
         /// retargetable node URL.
         static let attachURL = "attachURL"
+        /// The node runs as a launchd agent and this window attaches to it.
+        /// Read by `Node`, never part of the struct: it says who starts the
+        /// node, not how the node runs.
+        static let backgroundService = "backgroundService"
+        static let leadFleet = "leadFleet"
+        static let fleetNetworks = "fleetNetworks"
     }
 
     /// The node's own default cap, 4096 MiB, so a person who never opens
@@ -67,8 +73,10 @@ struct NodeSettings: Equatable {
     var storageGB: Int
     /// Host half of `--listen`. Port is chosen at start.
     var p2pHost: String
-    /// Host half of `--serve`. Loopback unless the node is shared on the LAN.
-    /// Defaulted so code that builds a settings value by hand need not name it.
+    /// Whether *Share this node on my network* asked for the HTTP side on
+    /// every interface. Read through `serveHost`, which leading a fleet also
+    /// opens. Defaulted so code that builds a settings value by hand need not
+    /// name it.
     var httpHost: String = loopbackHost
     /// `CAIRN_SEEDS=off`: no built-in internet seeds.
     var offline: Bool = false
@@ -80,6 +88,38 @@ struct NodeSettings: Equatable {
     var bootstrapFiles: [String]
     /// When set, the app is a window onto this URL and owns no process.
     var attachURL: URL?
+    /// Lead a fleet: serve HTTP on every interface so workers on the network
+    /// can reach it, and sign their records with `leaderIdentity` so their
+    /// work is paid to this node. `docs/fleet.md`.
+    var leadFleet: Bool = false
+    /// `CAIRN_FLEET`: the networks whose unsigned records naming the leader
+    /// are signed. `private` is every RFC 1918 block, loopback and IPv6 ULA.
+    var fleetNetworks: String = NodeSettings.defaultFleetNetworks
+
+    static let defaultFleetNetworks = "private"
+
+    /// Host half of `--serve`: loopback unless the node is shared on the
+    /// network or leads a fleet -- both exist so another machine there can
+    /// reach it; leading also signs that machine's records as this node.
+    var serveHost: String {
+        leadFleet || httpHost == Self.anyHost ? Self.anyHost : Self.loopbackHost
+    }
+
+    /// The ed25519 identity a fleet is paid to, beside the node's other keys.
+    /// Created by the node on first use and never leaves this Mac.
+    var leaderIdentity: URL { dataFolder.appendingPathComponent("leader.identity.json") }
+
+    /// Flags of `run` that make this node a fleet leader; empty otherwise.
+    /// Kept apart from `runArguments`, which the Connect an Agent stanza
+    /// reuses with an identity of its own.
+    var fleetArguments: [String] {
+        leadFleet ? ["--mcp-identity", leaderIdentity.path] : []
+    }
+
+    /// Whether Settings asked for the launchd agent.
+    static var backgroundService: Bool {
+        UserDefaults.standard.bool(forKey: Key.backgroundService)
+    }
 
     var isDefaultFolder: Bool {
         dataFolder.standardizedFileURL.path == Self.defaultDataFolder.standardizedFileURL.path
@@ -111,6 +151,9 @@ struct NodeSettings: Equatable {
             Key.validator: false,
             Key.bootstrap: "",
             Key.attachURL: "",
+            Key.backgroundService: false,
+            Key.leadFleet: false,
+            Key.fleetNetworks: defaultFleetNetworks,
         ]
     }
 
@@ -138,7 +181,13 @@ struct NodeSettings: Equatable {
             offline: defaults.bool(forKey: Key.offline),
             validator: defaults.bool(forKey: Key.validator),
             bootstrapFiles: Self.parseBootstrap(defaults.string(forKey: Key.bootstrap) ?? ""),
-            attachURL: Self.parseAttachURL(attach)
+            attachURL: Self.parseAttachURL(attach),
+            leadFleet: defaults.bool(forKey: Key.leadFleet),
+            fleetNetworks: {
+                let text = (defaults.string(forKey: Key.fleetNetworks) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return text.isEmpty ? defaultFleetNetworks : text
+            }()
         )
     }
 
@@ -213,12 +262,13 @@ struct NodeSettings: Equatable {
         // its own seed list (`CAIRN_SEEDS=path`) keeps it when this is off.
         if offline { env["CAIRN_SEEDS"] = "off" }
         if !declaredRoles.isEmpty { env["CAIRN_ROLES"] = declaredRoles.joined(separator: ",") }
+        if leadFleet { env["CAIRN_FLEET"] = fleetNetworks }
         return env
     }
 
     /// True when another machine on the LAN can reach the node's pages and
     /// its worker routes.
-    var sharesOnNetwork: Bool { httpHost == Self.anyHost }
+    var sharesOnNetwork: Bool { serveHost == Self.anyHost }
 }
 
 /// The data folder as files: what it holds, whether it holds a node, and

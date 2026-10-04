@@ -210,13 +210,14 @@ function AddMachine({
     if (!objective && objectives.length) setObjective(objectives[0].id);
   }, [objectives, objective]);
   const urls = lan.state === "lan" ? lan.urls : [];
+  const leader = network?.node.fleet?.signs_as ?? null;
   useEffect(() => {
     if (!url && urls.length) setUrl(urls[0]);
   }, [urls, url]);
 
   const command = useMemo(
-    () => workCommand({ node: url, objective: objective || null, worker, solver }),
-    [url, objective, worker, solver],
+    () => workCommand({ node: url, objective: objective || null, worker, solver, leader }),
+    [url, objective, worker, solver, leader],
   );
   const working = (network?.compute.workers ?? []).filter((w) => w.status === "live");
 
@@ -322,6 +323,16 @@ function AddMachine({
               candidate answers, one JSON object per line. <code className="mono">cairn work</code>{" "}
               commits them, reveals them after the epoch turns, and reports in so the machine shows
               as <i>working now</i> on the challenge page. The checker decides what is paid.
+              {leader ? (
+                <>
+                  {" "}
+                  This node leads a fleet, so the command names it as the submitter: the node
+                  signs each machine&rsquo;s records and is paid for them, while each machine keeps
+                  its own slice and its own line on the roster.
+                </>
+              ) : (
+                <> Each machine is paid under its own name.</>
+              )}
             </span>
           </li>
         </ol>

@@ -310,6 +310,8 @@ objective's pinned checker, one at a time, in a jail.
 | setting | default | passed to the node as |
 |---|---|---|
 | Attach to URL | off (run a local node) | — (no process; window loads the URL) |
+| Keep the node running in the background | off | — (a launchd agent, `org.cairn.node`, runs `cairn run --no-mcp` with every setting below; the window attaches to it) |
+| Lead a fleet | off | `--serve 0.0.0.0:<port>`, `--mcp-identity <data folder>/leader.identity.json`, `CAIRN_FLEET=<member networks>` |
 | CPU cores | all | `CAIRN_SANDBOX_CPUS` |
 | Memory for each verifier | 4 GB | `CAIRN_SANDBOX_MEMORY_MB` (`0` when switched off) |
 | Share this node on my network | off | `--serve 0.0.0.0:<port>` (else `127.0.0.1`) |
@@ -339,7 +341,9 @@ exactly how each one works. In short:
   LAN can open `http://<this Mac>:<port>/ui/` and join with `cairn work`.
   The reader's Contribute page prints the exact command, with the address
   the node found. Anyone on the network can read the log and post answers
-  and heartbeats; nobody can change what has settled.
+  and heartbeats; nobody can change what has settled. Each machine is paid
+  under its own name; *Lead a fleet* (below) is the same opening with the
+  pay landing on this Mac instead.
 - **Offline** stops the node dialling the built-in internet seeds. LAN
   beacons and bootstrap files still work, so a building with no route out
   runs and settles as a connected one does.
@@ -383,6 +387,33 @@ exactly how each one works. In short:
 
 A change reaches a running node when it restarts. Settings says when the
 running node is still on its old settings, with a Restart Node button.
+
+**Keep the node running in the background** writes
+`~/Library/LaunchAgents/org.cairn.node.plist` -- the same `cairn run` this
+window would have started, with `--no-mcp` because launchd's stdin is
+`/dev/null` -- loads it with `launchctl`, and attaches the window to it at
+`http://127.0.0.1:8080/ui/`. Closing the window then closes the window; the
+node runs on, and runs again at login. Turning it off unloads the agent,
+removes the plist and starts a child node here again. Restart Node, and any
+command that needs the log's one writer (posting a challenge, announcing a
+peer), stop the agent for the moment they need and start it again. The plist
+is a file you can read, and `launchctl print gui/$UID/org.cairn.node` shows
+the agent running. One caveat macOS imposes: from macOS 15 a process that is
+not an app cannot ask for the Local Network permission itself, so the agent's
+LAN beacon may be denied without a prompt; bootstrap files, seeds and port
+mapping do not need it. `BackgroundService.swift`.
+
+**Lead a fleet** is for a Mac that collects the pay while other machines do
+the walking ([docs/fleet.md](../../docs/fleet.md)). It serves the node's HTTP
+side on every interface so workers on your network can reach it, creates
+`leader.identity.json` in the data folder the first time, passes it as
+`--mcp-identity`, and sets `CAIRN_FLEET` to the member networks you list
+(`private` by default: every home and office range). A worker on one of those
+networks submits records naming this node's id -- shown in Settings with a
+Copy button, and as `node.fleet.signs_as` on `GET /network` -- and the node
+signs them on the way in, so the pay lands here and the worker never holds the
+key. The HTTP side is plaintext by design: the list of networks must mean a
+network you run, so turn this off before joining Wi-Fi you do not control.
 
 **Changing the data folder** stops the node. If the old folder holds a node
 and the new one does not, you choose between copying it across, which keeps
