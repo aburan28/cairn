@@ -40,6 +40,13 @@
 //! many are needed; `mechanism::tests` proves the claim about equilibria at any
 //! slash rather than asserting it.
 //!
+//! Canaries police an attestor that answers *without* the answer. They do
+//! nothing to one that copies it: an admitting node writes its verdict to the
+//! log before anybody attests, canaries included, so **echoing the admitter**
+//! passes every canary for free. That third way to attest without looking is
+//! closed only by sealing the verdict until attestations close -- see
+//! [`mechanism::Attest::Echo`] and [`design::minimum_blind_sample`].
+//!
 //! # Where the money comes from
 //!
 //! Not from a new mint. [`docs/economics.md`](https://github.com/aburan28/cairn/blob/main/docs/economics.md)
@@ -53,6 +60,12 @@
 //! proportional to settled value, which is right in the limit and *zero at
 //! launch* -- the bootstrap problem stated exactly rather than assumed away. See
 //! [`design::participation`].
+//!
+//! And a fee paid to attestors buys *attestations*, not checks. On a claim
+//! whose verdict is already in the log, the cheapest correct attestation is a
+//! copy, so the verification share of the fee buys independent verification
+//! only on claims whose verdict is sealed while it is being earned
+//! ([`NodeParams::blind_sample`]).
 //!
 //! # What "evaluate" means
 //!
@@ -139,6 +152,23 @@ pub const MAX_UNITS: u64 = 1 << 40;
 /// together leave room in `i128`.
 pub const MAX_RATE_DEN: i128 = 100_000;
 
+/// Upper bound on the denominator of the two rates only an echoer reads:
+/// [`NodeParams::blind_sample`] and [`NodeParams::admitter_error_rate`].
+///
+/// A hundred times coarser than [`MAX_RATE_DEN`], and the reason is the same
+/// argument one level deeper. The verifier's payoff in a population that
+/// echoes divides by three different head counts -- attesters, verifiers, and
+/// verifiers plus echoers -- and multiplies both of these rates into the
+/// canary product. At the validated extremes with both on the fine grid its
+/// exact value has a denominator past `i128`, so it is not a payoff that could
+/// be computed more carefully: it is one that does not fit.
+/// `saturation_is_unreachable_across_the_validated_space` found it, and
+/// passes with these on a thousandths grid. Nothing is lost by the bound: a
+/// blind share is a protocol rule set in round numbers, and an admitter's error
+/// rate is a guess about a deterministic program that nobody could state to
+/// five places.
+pub const MAX_ECHO_RATE_DEN: i128 = 1_000;
+
 /// A parameter set that cannot be validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParamError {
@@ -148,6 +178,8 @@ pub enum ParamError {
     TooLarge { field: &'static str, value: u64 },
     /// A rate outside `[0, 1]`, or with a denominator above [`MAX_RATE_DEN`].
     BadRate { field: &'static str, value: Rat },
+    /// An echo rate with a denominator above [`MAX_ECHO_RATE_DEN`].
+    TooFine { field: &'static str, value: Rat },
     /// The three service splits sum above one -- the fee pool would pay out more
     /// than it took in.
     SplitsExceedPool { total: Rat },
@@ -172,6 +204,10 @@ impl fmt::Display for ParamError {
             ParamError::BadRate { field, value } => write!(
                 f,
                 "{field} of {value} is not a rate in [0, 1] with denominator at most {MAX_RATE_DEN}"
+            ),
+            ParamError::TooFine { field, value } => write!(
+                f,
+                "{field} of {value} needs a denominator of at most {MAX_ECHO_RATE_DEN}"
             ),
             ParamError::SplitsExceedPool { total } => write!(
                 f,
@@ -285,6 +321,36 @@ pub struct NodeParams {
     /// Paid for catching an invalid artifact, split among the nodes that caught
     /// it.
     pub catch_bounty: u64,
+    /// Fraction of genuinely invalid submissions whose **admitting** node wrote
+    /// `accept` to the log.
+    ///
+    /// Only an echoer ([`mechanism::Attest::Echo`]) reads this. It is the only
+    /// way an echo can be wrong: canaries go through the same admission, so the
+    /// log already carries their correct verdict, and copying it passes every
+    /// one of them. Zero in the reference, and the reason is not optimism: the
+    /// admitter runs the same pinned, deterministic verifier an attestor would,
+    /// so an honest admitter is never wrong, and zero is also the value that
+    /// makes echoing *cheapest*. A model that assumed sloppy admitters would be
+    /// assuming the mechanism a deterrent it has not built.
+    pub admitter_error_rate: Rat,
+    /// Fraction of **paid** attestations made on a claim whose verdict is still
+    /// sealed -- the admitter has published only a commitment to it, and opens
+    /// it after the attestation window closes.
+    ///
+    /// The switch that decides whether [`mechanism::Attest::Echo`] exists. A
+    /// node appends `claim` and then `verdict` at admission, so on an unsealed
+    /// claim an attestor can copy the verdict for nothing and be right exactly
+    /// as often as the admitter was. One means every paid attestation is blind
+    /// and there is nothing to copy; zero is the protocol as built.
+    ///
+    /// The reference is one, and that is a protocol rule rather than a claim
+    /// about anybody's engineering: the protocol knows which claims it sealed,
+    /// so it can decline to pay for the rest. Any value below one leaves paid
+    /// claims an attestor can see the answer to, and it echoes those at *every*
+    /// share below one -- see [`design::EchoFinding`] for why a partial share
+    /// stops only the operator that never checks anything. The report prints the
+    /// unsealed counterfactual on its own line, so nothing is quietly assumed.
+    pub blind_sample: Rat,
 
     // -- availability ------------------------------------------------------
     /// Probability a node is challenged to produce a Merkle proof in an epoch.
@@ -350,6 +416,8 @@ impl NodeParams {
             canary_valid_share: rate(1, 2),
             fraud_rate: rate(1, 1_000),
             catch_bounty: 50_000,
+            admitter_error_rate: Rat::ZERO,
+            blind_sample: Rat::ONE,
 
             audit_rate: rate(1, 10),
 
@@ -379,6 +447,14 @@ impl NodeParams {
         for (field, value) in self.rates() {
             if value.is_negative() || value > Rat::ONE || value.denominator() > MAX_RATE_DEN {
                 return Err(ParamError::BadRate { field, value });
+            }
+        }
+        for (field, value) in [
+            ("admitter_error_rate", self.admitter_error_rate),
+            ("blind_sample", self.blind_sample),
+        ] {
+            if value.denominator() > MAX_ECHO_RATE_DEN {
+                return Err(ParamError::TooFine { field, value });
             }
         }
         let splits = self.verify_split + self.availability_split + self.custody_split;
@@ -432,6 +508,12 @@ impl NodeParams {
         self.canary_rate * (Rat::ONE - self.canary_leak)
     }
 
+    /// Whether some paid attestation lands on a claim whose verdict an attestor
+    /// can already read -- the condition under which echoing is an action at all.
+    pub fn echo_possible(&self) -> bool {
+        self.blind_sample < Rat::ONE
+    }
+
     /// Cost of running a node for an epoch, before any service is performed.
     ///
     /// Sunk with respect to every sub-game: an operator that has already decided
@@ -457,7 +539,7 @@ impl NodeParams {
         ]
     }
 
-    fn rates(&self) -> [(&'static str, Rat); 11] {
+    fn rates(&self) -> [(&'static str, Rat); 13] {
         [
             ("fee", self.fee),
             ("verify_split", self.verify_split),
@@ -469,6 +551,8 @@ impl NodeParams {
             ("canary_leak", self.canary_leak),
             ("canary_valid_share", self.canary_valid_share),
             ("fraud_rate", self.fraud_rate),
+            ("admitter_error_rate", self.admitter_error_rate),
+            ("blind_sample", self.blind_sample),
             ("audit_rate", self.audit_rate),
         ]
     }
@@ -610,6 +694,19 @@ mod tests {
                 nodes: 100
             })
         );
+        // The echo rates have the coarser grid, for the arithmetic's sake.
+        let fine_blind = Rat::rate(1, 1_009).expect("a valid rate");
+        assert_eq!(
+            NodeParams {
+                blind_sample: fine_blind,
+                ..base.clone()
+            }
+            .validate(),
+            Err(ParamError::TooFine {
+                field: "blind_sample",
+                value: fine_blind
+            })
+        );
         // A rate with a denominator past the bound is refused even though it is
         // a perfectly good probability: it is the arithmetic that objects.
         let fine_grained = Rat::rate(1, MAX_RATE_DEN as u32 + 1).expect("a valid rate");
@@ -651,6 +748,14 @@ mod tests {
             canary_valid_share: Rat::rate(1, 99_991).expect("a valid rate"),
             fraud_rate: Rat::rate(1, 100_000).expect("a valid rate"),
             catch_bounty: MAX_UNITS,
+            // Echo is live (a blind share below one) so its payoff is swept too,
+            // and both of its rates get the largest prime their coarser grid
+            // allows: the verifier's payoff among echoers multiplies them into
+            // the canary product, which makes it the deepest denominator here.
+            // On the fine grid that payoff does not fit -- see
+            // `MAX_ECHO_RATE_DEN`.
+            admitter_error_rate: Rat::rate(1, 997).expect("a valid rate"),
+            blind_sample: Rat::rate(1, 991).expect("a valid rate"),
             audit_rate: Rat::rate(99_991, 100_000).expect("a valid rate"),
             committee: 99,
             threshold: 50,
@@ -664,15 +769,30 @@ mod tests {
         let custody = Custody::new(&extreme).expect("validated");
         let availability = Availability::new(&extreme).expect("validated");
         let mut checked = 0;
-        for (verifiers, stampers) in [(0u32, 0u32), (1, 0), (0, 1), (50_000, 49_999)] {
+        assert_eq!(verification.actions(), 5, "echo is an action here");
+        for (verifiers, stampers, echoers) in [
+            (0u32, 0u32, 0u32),
+            (1, 0, 0),
+            (0, 1, 0),
+            (50_000, 49_999, 0),
+            (0, 0, 99_999),
+            (1, 0, 99_998),
+            (49_999, 0, 50_000),
+        ] {
             let others = vec![
                 verifiers,
                 stampers,
-                extreme.nodes - 1 - verifiers - stampers,
+                extreme.nodes - 1 - verifiers - stampers - echoers,
+                0,
+                echoers,
             ];
             for action in 0..verification.actions() {
                 let payoff = verification.payoff(action, &others);
-                assert!(!payoff.is_extreme(), "verification payoff saturated");
+                assert!(
+                    !payoff.is_extreme(),
+                    "verification payoff saturated: {} against {others:?}",
+                    verification.action_name(action)
+                );
                 checked += 1;
             }
         }
@@ -691,7 +811,7 @@ mod tests {
         }
         assert_eq!(
             checked,
-            16 + 15 + 2,
+            35 + 15 + 2,
             "every action at every probe was examined"
         );
     }

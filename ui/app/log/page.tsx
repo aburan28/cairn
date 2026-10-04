@@ -1,24 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  type LogRecord,
-  NODE_URL,
-  fetchLog,
-  kindCounts,
-  pretty,
-  summarize,
-} from "@/lib/log";
-import { Badge, Card, NodePicker, PageHeader, EmptyState, Hash, Note } from "@/components/ui";
-import { resolveNode } from "@/lib/site";
+import { type LogRecord, NODE_URL, fetchLog, kindCounts } from "@/lib/log";
+import { type ObjectiveIndex, indexObjectives, toEvent } from "@/lib/events";
+import { objectiveTitle } from "@/lib/title";
+import { Card, NodePicker, PageHeader, EmptyState, Note } from "@/components/ui";
+import { EventRow } from "@/components/events";
+import { loadObjectives, resolveNode } from "@/lib/site";
 
 /**
- * Every record this node holds, in the order it admitted them.
+ * Every record this node holds, as a feed of what happened.
  *
  * This is the file `cairn audit` reads and every other page here derives its
- * numbers from — the one thing on the site you have to fetch rather than
- * compute. Filtering, search and the `says` column happen in the browser; the
- * record shown on expansion is exactly the line the node wrote.
+ * numbers from. It used to render as a table whose rows expanded into the
+ * pretty-printed payload, which made a person read JSON to learn that alice
+ * was paid. Each record is now a sentence (`lib/events.ts`), newest first,
+ * naming the challenge it belongs to; expanding one shows its fields
+ * labelled, and the exact record the node wrote is one further click.
+ * Filtering and search still run over the records themselves.
  */
 export default function Page() {
   const [base, setBase] = useState(NODE_URL);
@@ -28,17 +27,28 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [expanded, setExpanded] = useState<number | null>(null);
+  const [index, setIndex] = useState<ObjectiveIndex | null>(null);
+  const [titles, setTitles] = useState<Map<string, string>>(new Map());
+  const [now, setNow] = useState(() => Date.now());
 
   const load = useCallback(async (url: string) => {
     setLoading(true);
     setError(null);
     try {
-      const next = await fetchLog(url);
+      const [next, feed] = await Promise.all([
+        fetchLog(url),
+        loadObjectives(url).catch(() => null),
+      ]);
       setRecords(next.records);
       setProblems(next.problems);
       setFilter(null);
-      setExpanded(null);
+      // Titles only from a live answer: the snapshot's objectives are a
+      // different log's, and naming this node's records after them would be
+      // wrong in exactly the cases where the ids happened to collide.
+      const live = feed?.live ? feed.objectives : [];
+      setIndex(indexObjectives(live));
+      setTitles(new Map(live.map((o) => [o.id, objectiveTitle(o)] as const)));
+      setNow(Date.now());
     } catch (cause) {
       setRecords(null);
       setProblems([]);
@@ -72,7 +82,7 @@ export default function Page() {
   const visible = useMemo(() => {
     if (!records) return [];
     const needle = query.trim().toLowerCase();
-    return records.filter((record) => {
+    return [...records].reverse().filter((record) => {
       if (filter && record.kind !== filter) return false;
       if (!needle) return true;
       // The whole record, because the useful search here is "find the line
@@ -89,7 +99,7 @@ export default function Page() {
     <>
       <PageHeader
         title="Log"
-        subtitle="Every record this node holds, in the order it admitted them: the file cairn audit reads. Click a row for the record as written."
+        subtitle="Everything that has happened on this node, newest first. Click an event for its details and the record as written."
         actions={
           <NodePicker
             value={base}
@@ -149,7 +159,7 @@ export default function Page() {
                   className={`btn btn-sm ${filter === kind ? "btn-primary" : ""}`}
                   onClick={() => setFilter(filter === kind ? null : kind)}
                 >
-                  {kind} <span className="mono">{count}</span>
+                  {kind.replace(/_/g, " ")} <span className="mono">{count}</span>
                 </button>
               ))}
               <input
@@ -162,89 +172,34 @@ export default function Page() {
             </div>
 
             <Card className="overflow-hidden">
-              <div className="overflow-x-auto">
-                {/* `min-w-` so the wrapper above scrolls instead of the table
-                    squeezing. Without it a 390px phone gave `says` about sixty
-                    pixels and every row stood five lines tall -- narrower than
-                    the content, which is the one thing a scroll container
-                    exists to avoid. The card around it carries `min-w-0`
-                    (globals.css), which is what lets this overflow the card
-                    rather than the page. */}
-                <table className="w-full min-w-[34rem] border-collapse text-left text-[12.5px]">
-                  <thead>
-                    <tr className="border-b border-edge bg-surface-2">
-                      <th className="px-3 py-2 font-medium text-ink-2">seq</th>
-                      <th className="px-3 py-2 font-medium text-ink-2">kind</th>
-                      <th className="px-3 py-2 font-medium text-ink-2">id</th>
-                      <th className="px-3 py-2 font-medium text-ink-2">says</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-edge-y">
-                    {visible.map((record) => (
-                      <Row
-                        key={record.seq}
-                        record={record}
-                        expanded={expanded === record.seq}
-                        onToggle={() =>
-                          setExpanded(expanded === record.seq ? null : record.seq)
-                        }
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <ul className="divide-edge-y">
+                {visible.map((record) => {
+                  const event = toEvent(record, index);
+                  return (
+                    <EventRow
+                      key={record.seq}
+                      event={event}
+                      record={record}
+                      objectiveTitle={event.objectiveId ? titles.get(event.objectiveId) : null}
+                      now={now}
+                    />
+                  );
+                })}
+              </ul>
               {visible.length === 0 && (
                 <p className="px-4 py-8 text-center text-[13px] text-ink-3">
-                  No record matches.
+                  Nothing matches.
                 </p>
               )}
             </Card>
 
             <p className="text-[12px] text-ink-3">
-              &ldquo;says&rdquo; is this page&rsquo;s own one-line reading of the
-              payload, not a field the node wrote. The record itself is what expands.
+              The sentences are this page&rsquo;s reading of each record, not fields the node
+              wrote. The record itself is under each event.
             </p>
           </>
         )}
       </div>
-    </>
-  );
-}
-
-function Row({
-  record,
-  expanded,
-  onToggle,
-}: {
-  record: LogRecord;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <>
-      <tr
-        onClick={onToggle}
-        aria-expanded={expanded}
-        className={`contain-rows cursor-pointer transition-colors hover:bg-surface-2 ${
-          expanded ? "bg-surface-2" : ""
-        }`}
-      >
-        <td className="mono px-3 py-1.5 text-ink-3">{record.seq}</td>
-        <td className="px-3 py-1.5">
-          <Badge>{record.kind}</Badge>
-        </td>
-        <td className="px-3 py-1.5">
-          <Hash value={record.hash} chars={8} />
-        </td>
-        <td className="px-3 py-1.5 text-ink-2">{summarize(record)}</td>
-      </tr>
-      {expanded && (
-        <tr>
-          <td colSpan={4} className="bg-surface-2 px-3 py-2">
-            <pre className="code max-h-96 overflow-auto">{pretty(record)}</pre>
-          </td>
-        </tr>
-      )}
     </>
   );
 }

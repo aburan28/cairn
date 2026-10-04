@@ -310,6 +310,29 @@ enables and starts it; `uninstall [--purge]` reverses that. Every flag has a
 `3` nothing could be learned (no sandbox, no node answered, no systemd).
 [agent.md](agent.md) has the job format, the receipt and the unit.
 
+### `work --node URL --objective ID --worker NAME [options] -- SOLVER [ARGS]...`
+
+Work one objective from this machine with a solver you supply. Each round
+takes this worker's slice from `GET /work_assignment`, starts the solver with
+the assignment as one line of JSON on stdin (and in `CAIRN_ASSIGNMENT`, beside
+`CAIRN_NODE`, `CAIRN_OBJECTIVE`, `CAIRN_WORKER`, `CAIRN_EPOCH` and
+`CAIRN_EPOCH_ENDS_IN`), heartbeats to `POST /progress` every `--heartbeat`
+seconds while it runs, and commits each JSON object the solver prints on
+stdout. Commitments are revealed after their epoch turns, citing the
+objective's frontier when it has one. A solver that exits non-zero has its
+round discarded; three in a row stop the worker. `--identity FILE` signs
+every record and makes the key the submitter; `--submitter ID` names a fleet
+leader's `signs_as` instead, unsigned, so the leader signs and is paid
+([fleet.md](fleet.md)); otherwise `--worker` is. The slice and the heartbeat
+are always `--worker`'s.
+`--partitions N` (default 8), `--rounds N`, `--device TEXT` for the roster,
+`--margin SECONDS` (default 8) to stay clear of an epoch's end. Any OS: it
+needs nothing from the node but its HTTP address. Exit codes: `0` done, `1`
+the solver kept failing, `2` usage, `3` the node could not be reached.
+`scripts/work-demo.sh` runs it against a real node;
+[design/roles-and-rewards.md](design/roles-and-rewards.md) says why compute is
+paid for output and not for time.
+
 ### `drain --queue DIR [--dry-run]`
 
 Admit records a server queued, re-checking every rule against the whole log.

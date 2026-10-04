@@ -214,6 +214,13 @@ final class Node: ObservableObject {
             return
         }
 
+        // Keys the chosen roles sign with, made before the node starts
+        // because it refuses to start naming a key file that is not there.
+        if let failure = Self.prepareIdentities(settings, binary: binary) {
+            state = .failed(failure)
+            return
+        }
+
         // A missing bootstrap file is a dial that never happens, and the node
         // would say so once per file after starting. Refusing here keeps the
         // reason next to the setting that named the path.
@@ -230,9 +237,11 @@ final class Node: ObservableObject {
         // The command line's defaults when they are free, so a node started
         // here is where the docs say it is; otherwise any free port, so a
         // second node on this Mac does not stop this one starting. The HTTP
-        // half stays on loopback: the window is the reader, and serving it
-        // past this Mac is a different product. The P2P half uses the host
-        // Settings chose -- loopback dials out only; 0.0.0.0 also accepts.
+        // half is loopback unless Settings shares the node on the LAN or
+        // leads a fleet, which is what lets another machine there run
+        // `cairn work` against it; the window reads 127.0.0.1 either way,
+        // since 0.0.0.0 includes it. The P2P half uses the host Settings
+        // chose -- loopback dials out only; 0.0.0.0 also accepts.
         let http = Self.freePort(preferring: 8080, on: settings.serveHost)
         let p2p = Self.freePort(preferring: 9000, on: settings.p2pHost)
         guard http != 0, p2p != 0 else {
@@ -240,20 +249,6 @@ final class Node: ObservableObject {
             return
         }
         listenAddress = "\(settings.p2pHost):\(p2p)"
-
-        // A fleet leader signs with an identity of its own, made once here
-        // and kept beside the node's other keys. Made before the node starts,
-        // because the node refuses to start naming a key file that is not
-        // there -- and said in the app's terms when it cannot be made.
-        if settings.leadFleet, !FileManager.default.fileExists(atPath: settings.leaderIdentity.path) {
-            let made = Self.runCairn(binary, ["identity", "--out", settings.leaderIdentity.path])
-            if made.status != 0 {
-                state = .failed(
-                    "Could not create the fleet identity at \(settings.leaderIdentity.path): "
-                        + (made.err.isEmpty ? "cairn identity exited \(made.status)" : made.err))
-                return
-            }
-        }
 
         let p = Process()
         p.executableURL = binary
@@ -354,8 +349,12 @@ final class Node: ObservableObject {
                 let failure: String?
                 do {
                     try BackgroundService.stop()
-                    try BackgroundService.install(settings: settings, binary: binary)
-                    failure = nil
+                    if let missing = Self.prepareIdentities(settings, binary: binary) {
+                        failure = missing
+                    } else {
+                        try BackgroundService.install(settings: settings, binary: binary)
+                        failure = nil
+                    }
                 } catch {
                     failure = error.localizedDescription
                 }
@@ -404,6 +403,11 @@ final class Node: ObservableObject {
             stop { [weak self] in
                 guard let self else { return }
                 do {
+                    if let missing = Self.prepareIdentities(settings, binary: binary) {
+                        self.start()
+                        completion(missing)
+                        return
+                    }
                     try BackgroundService.install(settings: settings, binary: binary)
                 } catch {
                     self.start()
@@ -443,7 +447,10 @@ final class Node: ObservableObject {
         if BackgroundService.isInstalled {
             try? BackgroundService.start()
         } else {
-            try? BackgroundService.install(settings: NodeSettings.current(), binary: binary)
+            let settings = NodeSettings.current()
+            if Self.prepareIdentities(settings, binary: binary) == nil {
+                try? BackgroundService.install(settings: settings, binary: binary)
+            }
         }
         let attach = UserDefaults.standard.string(forKey: NodeSettings.Key.attachURL) ?? ""
         if attach.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -775,6 +782,31 @@ final class Node: ObservableObject {
         var status: Int32
         var out: String
         var err: String
+    }
+
+    /// Make each key a chosen role signs with, if it is not there yet: the
+    /// fleet leader's (paid for its workers' records) and the validator's
+    /// (bonded behind every attestation). Made with the same `cairn identity`
+    /// a person would run, never overwritten -- each key is the identity the
+    /// log's payments, bonds and slashes name. Called before the child starts
+    /// *and* before the launch agent is written, because launchd would
+    /// otherwise restart a node that refuses to start, forever. Returns what
+    /// to tell the person, or nil.
+    nonisolated static func prepareIdentities(_ settings: NodeSettings, binary: URL) -> String? {
+        let wanted: [(Bool, URL, String, String)] = [
+            (settings.leadFleet, settings.leaderIdentity, "the fleet identity", "Lead a fleet"),
+            (settings.validator, settings.validatorIdentity, "the validator's key", "the validator role"),
+        ]
+        for (on, url, what, setting) in wanted where on {
+            guard !FileManager.default.fileExists(atPath: url.path) else { continue }
+            let made = runCairn(binary, ["identity", "--out", url.path])
+            if made.status != 0 {
+                return "Could not create \(what) at \(url.path): "
+                    + (made.err.isEmpty ? "cairn identity exited \(made.status)" : made.err)
+                    + ". Turn off \(setting) in Settings to start without it."
+            }
+        }
+        return nil
     }
 
     nonisolated private static func runCairn(_ binary: URL, _ args: [String]) -> CairnRun {

@@ -67,8 +67,9 @@ explicit grant ([Verifiers](#verifiers) below).
   dials in, which is enough to sync from a bootstrap peer, a compiled-in
   seed (`launch/seeds.json`), or a LAN beacon, and not enough to be one.
   Settings can bind `0.0.0.0` instead, and the toolbar's status button says
-  which. The HTTP reader stays on loopback either way — this window is for
-  you, not for the network. A seed that does not answer is named in
+  which. The HTTP side stays on loopback unless Settings shares the node on
+  your network, which is what lets another machine there run `cairn work`
+  against it; the window reads it on `127.0.0.1` either way. A seed that does not answer is named in
   `node.log` once a minute. Launching with `open --env CAIRN_SEEDS=<file>`
   points the node at another list and `CAIRN_SEEDS=off` at none.
 - **Bootstrap** files are optional dial hints, chosen in Settings. Without
@@ -336,6 +337,10 @@ objective's pinned checker, one at a time, in a jail.
 | Lead a fleet | off | `--serve 0.0.0.0:<port>`, `--mcp-identity <data folder>/leader.identity.json`, `CAIRN_FLEET=<member networks>` |
 | CPU cores | all | `CAIRN_SANDBOX_CPUS` |
 | Memory for each verifier | 4 GB | `CAIRN_SANDBOX_MEMORY_MB` (`0` when switched off) |
+| Share this node on my network | off | `--serve 0.0.0.0:<port>` (else `127.0.0.1`) |
+| Offline: no internet peers | off | `CAIRN_SEEDS=off` |
+| Roles ▸ Validator | off | `--attest-identity <data>/validator.identity.json`, created on first start |
+| Roles (each one on) | none | `CAIRN_ROLES` — `executor` when shared, `verifier`, `relay` when P2P accepts inbound |
 | P2P listen | this Mac only (`127.0.0.1`) | `--listen <host>:<port>` |
 | Bootstrap files | none | `--bootstrap <file>` (repeatable) |
 | Data folder | `~/Library/Application Support/Cairn` | `--data-dir` and `--root` |
@@ -354,6 +359,26 @@ exactly how each one works. In short:
 - **Memory** covers each pinned checker's whole process tree. macOS has no
   `RLIMIT_AS`, so the node measures the tree's footprint and stops it past
   the cap. Replay commands and Lean proofs have never had a memory cap.
+- **Share on my network**: binds the node's HTTP side -- the reader, the log
+  and the routes a worker calls -- to every interface, so a machine on the
+  LAN can open `http://<this Mac>:<port>/ui/` and join with `cairn work`.
+  The reader's Contribute page prints the exact command, with the address
+  the node found. Anyone on the network can read the log and post answers
+  and heartbeats; nobody can change what has settled. Each machine is paid
+  under its own name; *Lead a fleet* (below) is the same opening with the
+  pay landing on this Mac instead.
+- **Offline** stops the node dialling the built-in internet seeds. LAN
+  beacons and bootstrap files still work, so a building with no route out
+  runs and settles as a connected one does.
+- **Roles** are the three switches that give a node a duty, each bound to
+  the setting that does it: *Validator* runs the attestation loop (each
+  attestation bonds 50,000 units and is not paid; see
+  [bonded-verification.md](../../docs/bonded-verification.md)), *Worker host*
+  is Share on my network, *Relay* is P2P listen on any interface. The node
+  declares whichever are on as `CAIRN_ROLES`, which `GET /network` publishes
+  as declared, never as evidence.
+  [roles-and-rewards.md](../../docs/design/roles-and-rewards.md) says what
+  each role is paid and why.
 - **P2P listen**: loopback means dial-out only. `0.0.0.0` accepts inbound on
   every interface; the address you hand someone else is this Mac's LAN or
   public address, written into *their* bootstrap file, never into the listen

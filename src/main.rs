@@ -821,6 +821,12 @@ enum Command {
     Agent {
         args: Vec<String>,
     },
+    /// Work one objective over HTTP with an operator-supplied solver: the
+    /// assignment, the heartbeat, commit and reveal. Parses its own tail; see
+    /// `src/agent/work.rs`.
+    Work {
+        args: Vec<String>,
+    },
     /// Score candidate artifacts locally and submit only the ones that already
     /// pass. The proposer loop.
     Propose {
@@ -1493,6 +1499,9 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "agent" => Command::Agent {
             args: cursor.rest(),
         },
+        "work" => Command::Work {
+            args: cursor.rest(),
+        },
         "canon" => {
             let mut input: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1629,6 +1638,7 @@ fn reads_legacy_log_as_a_level(command: &Command) -> bool {
             | Command::Seeds { .. }
             | Command::Arena { .. }
             | Command::Agent { .. }
+            | Command::Work { .. }
     )
 }
 
@@ -3951,6 +3961,18 @@ fn print_help(out: &mut dyn Write) {
         "      messages, and runs in gVisor sandboxes; never touches the log",
     );
     say(out, "      (`cairn lab help` lists its commands)");
+    say(
+        out,
+        "  work --node URL --objective ID --worker NAME -- SOLVER [ARGS]...",
+    );
+    say(
+        out,
+        "      work one objective from this machine with your own solver: takes its",
+    );
+    say(
+        out,
+        "      slice, heartbeats, commits and reveals what the solver prints; any OS",
+    );
     say(out, "  agent <command> ...");
     say(
         out,
@@ -9884,6 +9906,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Arena { args } => Ok(cairn::cli::arena(args.clone())),
         Command::Lab { args } => Ok(cairn::lab::cli::main(args.clone())),
         Command::Agent { args } => Ok(cairn::agent::cli::main(args.clone())),
+        Command::Work { args } => Ok(cairn::agent::work::main(args.clone())),
         Command::Propose {
             objective,
             artifacts,

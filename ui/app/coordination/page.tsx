@@ -448,7 +448,7 @@ function Dashboard({
         {readAt && <> at {readAt.toLocaleTimeString()}</>}, again every {REFRESH_SECONDS} s while this
         tab is visible. The <span className="text-accent">assignment</span> is arithmetic anyone can
         recompute; <span className="text-warn">reported</span> ranges and{" "}
-        <span className="text-violet">leases</span> are what workers said, held in memory and checked by
+        <span className="text-info">leases</span> are what workers said, held in memory and checked by
         nobody.
         {stale && <span className="text-bad"> The last re-read failed: {stale}</span>}
       </p>
@@ -459,13 +459,11 @@ function Dashboard({
           label="Epoch"
           value={String(assignment.epoch)}
           from={`${formatDuration(assignment.epoch_seconds)} each, from the record's own timestamp`}
-          tone="accent"
         />
         <Stat
           label="Turns in"
           value={formatDuration(assignment.epoch_ends_in_seconds)}
           from="every slice rotates at the turn; ask again then"
-          tone="accent"
         />
         <Stat
           label="Partitions covered"
@@ -475,7 +473,7 @@ function Dashboard({
               ? `${coverage.uncovered} nobody reports · ${coverage.contested} more than one does`
               : "no unit space on this objective"
           }
-          tone={coverage.uncovered === 0 && units ? "accent" : "warn"}
+          tone={coverage.uncovered === 0 && units ? "neutral" : "warn"}
         />
         <Stat
           label="Leases held"
@@ -487,7 +485,6 @@ function Dashboard({
                 ? "this node predates leases"
                 : "reading…"
           }
-          tone="violet"
         />
         <Stat
           label="Units"
@@ -718,7 +715,7 @@ function PartitionStrip({ cells, partitions }: { cells: PartitionCell[]; partiti
               : cell.holders.length === 1
                 ? "bg-accent/70"
                 : "bg-warn/80";
-          const ring = cell.leased.length > 0 ? "ring-2 ring-inset ring-violet" : "";
+          const ring = cell.leased.length > 0 ? "ring-2 ring-inset ring-info" : "";
           const title = [
             `partition ${cell.index}: units [${cell.first.toLocaleString("en-US")}, ${cell.end.toLocaleString("en-US")})`,
             cell.holders.length > 0 ? `reported by ${cell.holders.join(", ")}` : "nobody reports holding it",
@@ -732,7 +729,7 @@ function PartitionStrip({ cells, partitions }: { cells: PartitionCell[]; partiti
       <p className="text-[11px] text-ink-3">
         <span className="text-accent">Green</span>: one live worker reports a range here.{" "}
         <span className="text-warn">Amber</span>: more than one does, which wastes a little compute and
-        nothing else. Grey: nobody does. <span className="text-violet">Violet ring</span>: a live lease
+        nothing else. Grey: nobody does. <span className="text-info">Blue ring</span>: a live lease
         covers it. Hover a cell for the unit range and the names.
       </p>
     </div>

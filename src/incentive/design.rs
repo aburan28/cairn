@@ -163,6 +163,100 @@ pub fn minimum_canary_rate(params: &NodeParams) -> Result<Option<Rat>, DesignErr
     })
 }
 
+/// Smallest blind share at which an operator that never runs the checker loses
+/// to one that always does.
+///
+/// The [`minimum_canary_rate`] of [`Attest::Echo`], and it has the same two
+/// constraints for the same reason. Write `b` for the share of paid claims whose
+/// verdict is sealed while they are attested, `A = beta/n + S'`, `e` for the
+/// admitter's error on fraud, and `F`, `F0` for the best blind move on a sealed
+/// claim -- stamp, reject or abstain -- with others checking and with nobody
+/// checking.
+///
+/// **The honest profile must be stable.** Everyone verifies; one operator
+/// considers echoing instead. On a shown claim it saves `c` and risks only the
+/// admitter's mistakes; on a sealed one it is reduced to `F`:
+///
+/// ```text
+/// (1-b) * (c - p*e*A)  <  b * (V - F)        V = R/n - c + (D + p)*beta/n
+/// ```
+///
+/// **The echo trap must not be.** Everyone echoes; one considers verifying. On
+/// a shown claim it pays `c` and earns only what overturning the admitter pays,
+/// `p*e*beta`; on a sealed one it is the only checker in a room of stampers:
+///
+/// ```text
+/// (1-b) * (c - p*e*beta)  <  b * (R/n - c + (D + p)*beta - F0)
+/// ```
+///
+/// Both are linear in `b`, so each gives `b > gain / (gain + loss)` and the
+/// answer is the larger. Read off the second what a canary cannot do: the left
+/// side has no `D` and no `S'` in it. The canary rate and the bond appear only
+/// on the sealed side, so they matter only in proportion to how much of the
+/// sample is sealed.
+///
+/// `Some(0)` when echoing does not pay even on a fully shown sample (`c` below
+/// what catching the admitter is worth). `None` when no share below one works,
+/// which means the four-action game itself is failing on sealed claims -- a
+/// verifier does not beat a stamper there either, and that is
+/// [`minimum_canary_rate`]'s problem rather than this one's.
+///
+/// # What it does not buy
+///
+/// This is the share that stops the operator that never checks anything. It
+/// does **not** buy a check of the `1 - b` claims whose verdict is shown: an
+/// operator that conditions on what it can see verifies the sealed claims and
+/// echoes the rest, and gains [`Verification::selective_echo_gain`] at every
+/// share below one. A network that wants a shown claim independently checked
+/// cannot get it by paying for attestations on it. The answer is to pay only
+/// for the sealed ones, which is `b = 1`, and is what the reference does.
+pub fn minimum_blind_sample(params: &NodeParams) -> Result<Option<Rat>, DesignError> {
+    params.validate()?;
+    let nodes = params.nodes;
+    let cost = Rat::units(params.verify_cost);
+    let slash = params.slash();
+    let bounty = Rat::units(params.catch_bounty);
+    let fraud = params.fraud_rate;
+    let error = params.admitter_error_rate;
+    let effective = params.effective_canary_rate();
+    let deterrent = effective * (Rat::ONE - params.canary_valid_share);
+    let pool = params.verify_pool().share(nodes).unwrap_or(Rat::ZERO);
+    let shared_bounty = bounty.share(nodes).unwrap_or(Rat::ZERO);
+
+    // Re-derived from the algebra rather than read off `Verification`, so the
+    // solver test below compares two derivations instead of one with itself.
+    let reject =
+        pool - slash * (effective * params.canary_valid_share + (Rat::ONE - effective - fraud));
+    let blind_move = |stamp: Rat| stamp.max(reject).max(Rat::ZERO);
+
+    // Stability of the honest profile against one echoer.
+    let honest_gain = cost - fraud * error * (shared_bounty + slash);
+    let verify = pool - cost + (deterrent + fraud) * shared_bounty;
+    let honest_loss = verify - blind_move(pool - slash * (deterrent + fraud));
+
+    // Instability of the echo trap against one verifier.
+    let trap_gain = cost - fraud * error * bounty;
+    let trap_loss =
+        pool - cost + (deterrent + fraud) * bounty - blind_move(pool - slash * deterrent);
+
+    let need = |gain: Rat, loss: Rat| -> Option<Rat> {
+        if !gain.is_positive() {
+            // Echoing a shown claim already loses: no share needs to be sealed.
+            Some(Rat::ZERO)
+        } else if !loss.is_positive() {
+            None
+        } else {
+            Some(gain / (gain + loss))
+        }
+    };
+    Ok(
+        match (need(honest_gain, honest_loss), need(trap_gain, trap_loss)) {
+            (Some(honest), Some(trap)) => Some(honest.max(trap)),
+            _ => None,
+        },
+    )
+}
+
 /// Smallest availability challenge rate at which storing beats freeloading.
 ///
 /// ```text
@@ -494,12 +588,107 @@ impl ServiceFinding {
     }
 }
 
+/// Whether attestors copy the admitter instead of checking.
+///
+/// Its own finding rather than a fifth action in the verification
+/// [`ServiceFinding`], for a reason of arithmetic: enumerating five actions at a
+/// hundred nodes is `C(104, 4)` = 4.6 million profiles, past the solver's
+/// budget. Every check here is instead run against the one profile it
+/// threatens -- the honest one for the lone echoer, the echo trap for the lone
+/// verifier -- through the same [`Verification`] payoffs the solver uses, which
+/// is cheap and exact. What it does not do is find a rival equilibrium that
+/// *mixes* echoers with the other four actions; the verification finding covers
+/// the profiles in which nobody echoes, and this one the two that matter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EchoFinding {
+    /// Share of paid claims whose verdict is sealed while they are attested.
+    pub blind_sample: Rat,
+    /// What one operator that never checks gains over verifying, in an
+    /// otherwise honest network. `None` when nothing is shown, so there is
+    /// nothing to copy and the action does not exist.
+    pub gain: Option<Rat>,
+    /// What one operator that checks only the sealed claims and copies the rest
+    /// gains over verifying everything. Positive at every share below one
+    /// whenever a copy is cheaper than a check; `None` when nothing is shown.
+    pub selective_gain: Option<Rat>,
+    /// How firmly universal echo holds, if it is an action at all.
+    pub trap: Option<Stability>,
+    /// What a lone echoer gains with *every* verdict shown -- the protocol as
+    /// built, where the admitter's verdict is in the log before anybody attests.
+    /// Printed whatever the configured share, so a report run at the reference
+    /// cannot hide what the reference had to assume.
+    pub shown_gain: Rat,
+    /// Universal echo with every verdict shown.
+    pub shown_trap: Option<Stability>,
+    /// [`minimum_blind_sample`] at these parameters.
+    pub minimum: Option<Rat>,
+    /// False if any payoff examined reached the arithmetic bound.
+    pub exact: bool,
+}
+
+impl EchoFinding {
+    /// Analyse echo at `params`, and at `params` with every verdict shown.
+    pub fn of(params: &NodeParams) -> Result<EchoFinding, DesignError> {
+        params.validate()?;
+        let shown_params = NodeParams {
+            blind_sample: Rat::ZERO,
+            ..params.clone()
+        };
+        let here = lone_echo(params)?;
+        let shown = lone_echo(&shown_params)?.unwrap_or((Rat::ZERO, None, true));
+        let selective = Verification::new(params)?.selective_echo_gain();
+        let (gain, trap, exact) = match here {
+            Some((gain, trap, exact)) => (Some(gain), trap, exact),
+            None => (None, None, true),
+        };
+        Ok(EchoFinding {
+            blind_sample: params.blind_sample,
+            gain,
+            selective_gain: gain.map(|_| selective),
+            trap,
+            shown_gain: shown.0,
+            shown_trap: shown.1,
+            minimum: minimum_blind_sample(params)?,
+            exact: exact && shown.2 && !selective.is_extreme(),
+        })
+    }
+
+    /// Nobody gains by copying, by either policy, and universal copying is not
+    /// a resting place. Trivially true when there is nothing to copy.
+    pub fn closed(&self) -> bool {
+        let loses = |gain: Option<Rat>| gain.is_none_or(|gain| gain.is_negative());
+        self.exact && loses(self.gain) && loses(self.selective_gain) && self.trap.is_none()
+    }
+}
+
+/// The lone echoer's gain over verifying in the honest profile, how firmly the
+/// echo trap holds, and whether neither saturated. `None` when echo is not an
+/// action at these parameters.
+fn lone_echo(params: &NodeParams) -> Result<Option<(Rat, Option<Stability>, bool)>, DesignError> {
+    let game = Verification::new(params)?;
+    if !game.echo_available() {
+        return Ok(None);
+    }
+    let verify = Attest::Verify.index();
+    let echo = Attest::Echo.index();
+    let mut others = everyone(&game, verify);
+    others[verify] = others[verify].saturating_sub(1);
+    let echoing = game.payoff(echo, &others);
+    let verifying = game.payoff(verify, &others);
+    let trap = super::game::symmetric_stability(&game, &everyone(&game, echo))?;
+    let exact = !echoing.is_extreme() && !verifying.is_extreme();
+    Ok(Some((echoing - verifying, trap, exact)))
+}
+
 /// Everything the harness can say about a parameter set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub params: NodeParams,
     pub participation: Participation,
     pub services: Vec<ServiceFinding>,
+    /// The fifth way to attest, which the verification finding's enumeration
+    /// cannot afford to include. Counts towards [`Report::passes`].
+    pub echo: EchoFinding,
     /// Identity count an operator would choose under each reward rule, and what
     /// splitting buys. Only the rule in [`NodeParams::reward_rule`] counts
     /// towards the verdict; the other is shown so the cost of choosing it is
@@ -513,7 +702,9 @@ impl Report {
     /// Analyse a parameter set from every angle the harness has.
     pub fn of(params: &NodeParams) -> Result<Report, DesignError> {
         params.validate()?;
-        let verification = Verification::new(params)?;
+        // The four-action game, whatever the blind share: echo is judged
+        // separately in `EchoFinding`, because enumerating it is out of budget.
+        let verification = Verification::blind(params)?;
         let availability = Availability::new(params)?;
         let custody = Custody::new(params)?;
 
@@ -582,6 +773,7 @@ impl Report {
             params: params.clone(),
             participation: participation(params)?,
             services,
+            echo: EchoFinding::of(params)?,
             sybil,
             committee_window: committee_window(params)?,
         })
@@ -598,6 +790,7 @@ impl Report {
         !self.participation.net.is_negative()
             && sybil_proof
             && self.services.iter().all(ServiceFinding::passes)
+            && self.echo.closed()
     }
 }
 
@@ -678,6 +871,80 @@ fn describe(stability: Option<Stability>) -> &'static str {
         Some(Stability::Weak) => "weak Nash",
         None => "none",
     }
+}
+
+/// A gain per attested claim, signed, so a reader sees which way it points.
+fn per_claim(gain: Rat) -> String {
+    let sign = if gain.is_negative() { "" } else { "+" };
+    format!("{sign}{}/claim", gain.to_decimal(2))
+}
+
+/// The echo lines of the verification section.
+///
+/// The counterfactual -- every verdict shown, which is the protocol as built --
+/// is printed whatever the configured share and marked `note` rather than
+/// `FAIL`, the way the sybil section prints the reward rule it rejected: it is
+/// not the mechanism being judged, and it is the thing the mechanism had to
+/// assume away.
+fn write_echo(f: &mut fmt::Formatter<'_>, echo: &EchoFinding) -> fmt::Result {
+    row(
+        f,
+        "blind share of paid claims",
+        echo.blind_sample.to_string(),
+        mark(echo.closed()),
+    )?;
+    match (echo.gain, echo.selective_gain) {
+        (Some(gain), Some(selective)) => {
+            row(
+                f,
+                "echo, never checking",
+                per_claim(gain),
+                mark(gain.is_negative()),
+            )?;
+            row(
+                f,
+                "echo where verdicts show",
+                per_claim(selective),
+                mark(selective.is_negative()),
+            )?;
+            row(
+                f,
+                "echo trap",
+                describe(echo.trap).to_string(),
+                mark(echo.trap.is_none()),
+            )?;
+        }
+        _ => row(f, "echo the admitter", "nothing to copy".to_string(), "ok")?,
+    }
+    let note = |closed: bool| if closed { "ok" } else { "note" };
+    row(
+        f,
+        "echo, all verdicts shown",
+        per_claim(echo.shown_gain),
+        note(echo.shown_gain.is_negative()),
+    )?;
+    row(
+        f,
+        "echo trap, all shown",
+        describe(echo.shown_trap).to_string(),
+        note(echo.shown_trap.is_none()),
+    )?;
+    match echo.minimum {
+        Some(share) => writeln!(
+            f,
+            "  {:<26}{share} stops a node that never checks; below 1, shown claims are copied",
+            "blind share needed"
+        )?,
+        None => writeln!(
+            f,
+            "  {:<26}none: a verifier loses on sealed claims too",
+            "blind share needed"
+        )?,
+    }
+    if !echo.exact {
+        row(f, "arithmetic", "saturated".to_string(), "FAIL")?;
+    }
+    Ok(())
 }
 
 impl fmt::Display for Report {
@@ -768,6 +1035,9 @@ impl fmt::Display for Report {
             }
             if let Some(binding) = &service.binding {
                 writeln!(f, "  {:<26}{binding}", "binding constraint")?;
+            }
+            if service.service == "verification" {
+                write_echo(f, &self.echo)?;
             }
         }
 
@@ -1001,6 +1271,206 @@ mod tests {
             symmetric_stability(&game, &everyone(&game, Attest::Stamp.index()))
                 .expect("valid counts"),
             None
+        );
+    }
+
+    // -- echo -----------------------------------------------------------------
+
+    /// The echo rates' grid: [`MAX_ECHO_RATE_DEN`](super::super::MAX_ECHO_RATE_DEN).
+    const ECHO_GRID: i128 = 1_000;
+
+    fn on_echo_grid(rate: Rat, step: i128) -> Rat {
+        let scaled = rate * Rat::new(ECHO_GRID, 1).expect("nonzero denominator");
+        let floor = scaled.floor();
+        let exact = scaled == Rat::new(floor, 1).expect("nonzero denominator");
+        let point = match (step, exact) {
+            (1, _) => floor + 1,
+            (_, true) => floor - 1,
+            (_, false) => floor,
+        };
+        Rat::new(point, ECHO_GRID).expect("nonzero denominator")
+    }
+
+    /// A report row as [`row`] lays it out, so a test can ask for a whole line
+    /// without counting spaces.
+    fn printed_row(label: &str, value: &str, verdict: &str) -> String {
+        format!("  {label:<26}{value:>16}  {verdict}\n")
+    }
+
+    fn with_blind(params: &NodeParams, blind_sample: Rat) -> NodeParams {
+        NodeParams {
+            blind_sample,
+            ..params.clone()
+        }
+    }
+
+    /// Is the honest profile strict in the five-action game?
+    fn honest_against_echo(params: &NodeParams) -> Option<Stability> {
+        let game = Verification::new(params).expect("validated");
+        symmetric_stability(&game, &everyone(&game, Attest::Verify.index())).expect("valid counts")
+    }
+
+    /// Is the echo trap standing?
+    fn echo_trap(params: &NodeParams) -> Option<Stability> {
+        let game = Verification::new(params).expect("validated");
+        symmetric_stability(&game, &everyone(&game, Attest::Echo.index())).expect("valid counts")
+    }
+
+    #[test]
+    fn the_blind_share_closed_form_agrees_with_the_solver() {
+        // As for canaries: the formula is derived by hand, the solver runs the
+        // real payoffs, and they must agree at the boundary. Above it the honest
+        // profile is strict in the five-action game *and* the echo trap is gone;
+        // below it something fails. At the reference canary rate.
+        let base = reference();
+        let threshold = minimum_blind_sample(&base)
+            .expect("validated")
+            .expect("a share exists");
+
+        // The number, re-derived in the open. At the reference stamping is the
+        // better blind move on a sealed claim (2,500 of pool against 2,300 of
+        // expected slash with others checking, 1,900 with nobody), so the pool
+        // cancels out of both constraints:
+        //   honest  c / ((D + p) * (beta/n + S'))          = 200 / 2302.875
+        //   trap    c / ((D + p) * beta + D * S')           = 200 / 2187.5
+        let verification = Verification::new(&base).expect("validated");
+        let deterrent = verification.stamp_deterrent();
+        let cost = Rat::units(base.verify_cost);
+        let bounty = Rat::units(base.catch_bounty);
+        let honest = cost
+            / ((deterrent + base.fraud_rate)
+                * (bounty.share(base.nodes).expect("nodes") + base.slash()));
+        let trap = cost / ((deterrent + base.fraud_rate) * bounty + deterrent * base.slash());
+        assert_eq!(honest, Rat::new(1_600, 18_423).expect("valid rational"));
+        assert_eq!(trap, Rat::new(16, 175).expect("valid rational"));
+        assert_eq!(
+            threshold,
+            honest.max(trap),
+            "the trap binds, as for canaries"
+        );
+
+        let above = with_blind(&base, on_echo_grid(threshold, 1));
+        assert_eq!(honest_against_echo(&above), Some(Stability::Strict));
+        assert_eq!(
+            echo_trap(&above),
+            None,
+            "the trap must be gone, not merely worse"
+        );
+
+        let below = with_blind(&base, on_echo_grid(threshold, -1));
+        let both =
+            honest_against_echo(&below) == Some(Stability::Strict) && echo_trap(&below).is_none();
+        assert!(!both, "below the threshold something must fail");
+
+        // And the pool cancels out of it, as long as stamping stays the better
+        // blind move -- which a bigger pool only makes more true.
+        let rich = NodeParams {
+            settled_value: base.settled_value * 40,
+            ..base.clone()
+        };
+        assert_eq!(
+            minimum_blind_sample(&rich).expect("validated"),
+            Some(threshold)
+        );
+    }
+
+    #[test]
+    fn at_the_blind_threshold_the_echo_trap_is_still_standing() {
+        // The infimum of a strict inequality, so exactly at it a lone verifier
+        // among copiers neither gains nor loses. 16/175 is on the echo grid, so
+        // this is a share the protocol could actually be set to.
+        let base = reference();
+        let threshold = minimum_blind_sample(&base)
+            .expect("validated")
+            .expect("a share exists");
+        assert_eq!(
+            echo_trap(&with_blind(&base, threshold)),
+            Some(Stability::Weak)
+        );
+    }
+
+    #[test]
+    fn a_sloppy_admitter_needs_no_sealing_to_stay_honest_but_the_trap_still_does() {
+        // A careless enough admitter makes a copy wrong often enough that, with
+        // others checking, copying loses -- but a lone verifier among copiers is
+        // only paid for overturning it, `p * beta`, which never covers `c` here.
+        // So the honest profile needs no sealing and the trap still does.
+        let sloppy = NodeParams {
+            admitter_error_rate: Rat::ONE,
+            ..reference()
+        };
+        let threshold = minimum_blind_sample(&sloppy)
+            .expect("validated")
+            .expect("a share exists");
+        assert!(threshold.is_positive(), "the trap still needs sealing");
+        assert_eq!(
+            honest_against_echo(&with_blind(&sloppy, Rat::ZERO)),
+            Some(Stability::Strict)
+        );
+        // With no canaries and no stake there is nothing on the sealed side to
+        // lose, and no share works.
+        let toothless = NodeParams {
+            canary_rate: Rat::ZERO,
+            stake: 0,
+            ..reference()
+        };
+        assert_eq!(minimum_blind_sample(&toothless).expect("validated"), None);
+    }
+
+    #[test]
+    fn the_reference_report_prints_what_echo_would_take_with_verdicts_shown() {
+        let report = Report::of(&reference()).expect("validated");
+        assert!(report.echo.closed(), "nothing to copy at the reference");
+        assert_eq!(report.echo.gain, None);
+        assert_eq!(report.echo.shown_gain, Rat::units(200));
+        assert_eq!(report.echo.shown_trap, Some(Stability::Strict));
+        assert_eq!(
+            report.echo.minimum,
+            Some(Rat::new(16, 175).expect("valid rational"))
+        );
+        let printed = report.to_string();
+        for line in [
+            printed_row("echo the admitter", "nothing to copy", "ok"),
+            printed_row("echo, all verdicts shown", "+200.00/claim", "note"),
+            printed_row("echo trap, all shown", "strict Nash", "note"),
+            "16/175 stops a node that never checks".to_string(),
+        ] {
+            assert!(
+                printed.contains(line.as_str()),
+                "report omitted {line:?}:\n{printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_report_fails_on_any_readable_paid_claim() {
+        // Shown verdicts: the copier wins outright. Half sealed: the operator
+        // that never checks now loses, and the report says so -- but one that
+        // checks the sealed half and copies the rest still wins, so the verdict
+        // is still FAIL. Only a share of one passes.
+        let shown = Report::of(&with_blind(&reference(), Rat::ZERO)).expect("validated");
+        assert!(!shown.passes());
+        assert_eq!(shown.echo.gain, Some(Rat::units(200)));
+        assert!(shown
+            .to_string()
+            .contains(&printed_row("echo trap", "strict Nash", "FAIL")));
+
+        let half = Rat::rate(1, 2).expect("a valid rate");
+        let report = Report::of(&with_blind(&reference(), half)).expect("validated");
+        assert!(report.echo.gain.is_some_and(|gain| gain.is_negative()));
+        assert_eq!(report.echo.trap, None);
+        assert_eq!(report.echo.selective_gain, Some(Rat::units(100)));
+        assert!(!report.passes());
+        let printed = report.to_string();
+        assert!(printed.contains(&printed_row(
+            "echo where verdicts show",
+            "+100.00/claim",
+            "FAIL"
+        )));
+        // The four-action finding is untouched by any of it.
+        assert_eq!(
+            report.services[0],
+            Report::of(&reference()).expect("validated").services[0]
         );
     }
 

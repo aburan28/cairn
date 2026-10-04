@@ -17,7 +17,13 @@ import {
   short,
   units,
 } from "@/lib/site";
+import { type LogRecord, fetchLog } from "@/lib/log";
+import { type LogEvent, eventsFor, indexObjectives } from "@/lib/events";
+import { following, onFollowingChange } from "@/lib/follow";
+import { goalSlug, objectiveTitle } from "@/lib/title";
+import { EventRow } from "@/components/events";
 import {
+  Badge,
   Box,
   Card,
   CopyButton,
@@ -48,6 +54,8 @@ export default function Page() {
   const [feed, setFeed] = useState<Feed | null>(null);
   const [chain, setChain] = useState<Sourced<ChainFacts> | null>(null);
   const [checkpoint, setCheckpoint] = useState<Sourced<CheckpointFacts> | null>(null);
+  const [followed, setFollowed] = useState<string[]>([]);
+  const [records, setRecords] = useState<LogRecord[] | null>(null);
 
   useEffect(() => {
     // Independently, so a slow `/log`-sized answer on one does not hold the
@@ -55,7 +63,16 @@ export default function Page() {
     void loadObjectives().then(setFeed);
     void loadChain().then(setChain);
     void loadCheckpoint().then(setCheckpoint);
+    setFollowed(following());
+    return onFollowingChange(() => setFollowed(following()));
   }, []);
+
+  // The log only when somebody follows something: it is the one fetch here
+  // whose size grows with the network's history.
+  useEffect(() => {
+    if (!feed?.live || followed.length === 0) return;
+    void fetchLog().then((log) => setRecords(log.records)).catch(() => setRecords(null));
+  }, [feed, followed.length]);
 
   const objectives = feed?.objectives ?? SNAPSHOT.objectives;
   // `open` is the node's field, not `!settled` computed here: the node is the
@@ -80,6 +97,18 @@ export default function Page() {
   const checkpointFrom = checkpoint ? provenance(checkpoint) : "reading…";
   const links = chain?.value.links ?? SNAPSHOT.chain.links;
   const signed = checkpoint?.value ?? SNAPSHOT.checkpoint;
+
+  const followedObjectives = feed?.live ? objectives.filter((o) => followed.includes(o.id)) : [];
+  const followIndex = indexObjectives(followedObjectives);
+  const recent: Array<{ event: LogEvent; title: string }> = records
+    ? followedObjectives
+        .flatMap((o) =>
+          eventsFor(records, o.id, followIndex).map((event) => ({ event, title: objectiveTitle(o) })),
+        )
+        .sort((a, b) => b.event.seq - a.event.seq)
+        .slice(0, 6)
+    : [];
+  const now = Date.now();
 
   const notes = [feed?.warning, chain?.note, checkpoint?.note].filter(
     (note): note is string => typeof note === "string",
@@ -130,17 +159,16 @@ export default function Page() {
         <PageHeader title="Overview" subtitle={objectivesFrom} />
       </div>
 
-      <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
         <Stat label="Objectives" value={String(objectives.length)} from={objectivesFrom} />
         <Stat
           label="Open"
           value={String(open.length)}
           from={open.length ? "worth working on" : "all settled"}
-          tone={open.length ? "accent" : "neutral"}
         />
-        <Stat label="Pool" value={units(pool)} from="funded, all time" tone="violet" />
-        <Stat label="Paid out" value={units(paid)} from="to accepted claims" tone="info" />
-        <Stat label="Chain links" value={String(links)} from={chainFrom} tone="warn" />
+        <Stat label="Pool" value={units(pool)} from="funded, all time" />
+        <Stat label="Paid out" value={units(paid)} from="to accepted claims" />
+        <Stat label="Chain links" value={String(links)} from={chainFrom} />
       </div>
 
       {/* A node that answered in a shape this page does not read, or that
@@ -155,6 +183,30 @@ export default function Page() {
             ))}
           </Note>
         </div>
+      )}
+
+      {followedObjectives.length > 0 && (
+        <Box
+          className="mb-4"
+          title={
+            <>
+              Following{" "}
+              <span className="mono ml-1 font-normal text-ink-3">{followedObjectives.length}</span>
+            </>
+          }
+          aside={<span className="text-[11px] font-normal text-ink-3">latest on the challenges you follow</span>}
+          flush
+        >
+          {recent.length === 0 ? (
+            <p className="px-4 py-4 text-[13px] text-ink-2">Nothing has happened on them yet.</p>
+          ) : (
+            <ul className="divide-edge-y">
+              {recent.map(({ event, title }) => (
+                <EventRow key={event.seq} event={event} objectiveTitle={title} now={now} />
+              ))}
+            </ul>
+          )}
+        </Box>
       )}
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
@@ -182,39 +234,41 @@ export default function Page() {
                   <li key={o.id}>
                     <Link
                       href={`/challenge?id=${encodeURIComponent(o.id)}`}
-                      className="group flex items-center gap-4 px-4 py-3 transition-colors hover:bg-surface-2"
+                      className="group flex items-start gap-4 px-4 py-3 transition-colors hover:bg-surface-2"
+                      title={`Funder's statement, not checked: ${o.statement}`}
                     >
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate font-semibold text-ink group-hover:text-accent">
-                            {o.goal || short(o.id)}
-                          </span>
-                          <StatusPill settled={o.settled} />
+                        {/* The title is the statement's first sentence: the
+                            funder's words, which the challenge page labels as
+                            unchecked. The slug stays beside it as an id. */}
+                        <div className="line-clamp-2 font-medium text-ink [overflow-wrap:anywhere] group-hover:underline">
+                          {objectiveTitle(o)}
                         </div>
-                        {/* Quoted and dimmed: the funder wrote it, and the
-                            objective's own page carries it under its
-                            "not checked" label. */}
-                        <p
-                          className="mt-0.5 truncate text-[12.5px] text-ink-3"
-                          title={`Funder's statement, not checked: ${o.statement}`}
-                        >
-                          &ldquo;{o.statement}&rdquo;
-                        </p>
-                      </div>
-                      <div className="hidden w-32 shrink-0 sm:block">
-                        {pct !== null ? (
-                          <Progress value={pct / 100} />
-                        ) : (
-                          <span className="text-[12px] text-ink-3">
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-ink-3">
+                          <StatusPill settled={o.settled} />
+                          {goalSlug(o.goal) && <span className="mono">{goalSlug(o.goal)}</span>}
+                          <span aria-hidden>·</span>
+                          <span>
                             {o.frontier
                               ? `best ${o.frontier.score}`
                               : o.settlement
                                 ? `paid to ${o.settlement.submitter}`
-                                : "no claim yet"}
+                                : o.piecework
+                                  ? `${units(o.piecework.paid_units)} claims paid`
+                                  : "no answer yet"}
                           </span>
+                          {followed.includes(o.id) && <Badge>following</Badge>}
+                        </div>
+                        {pct !== null && (
+                          <div className="mt-2 max-w-64">
+                            <Progress value={pct / 100} />
+                          </div>
                         )}
                       </div>
-                      <span className="mono w-24 shrink-0 text-right text-ink">{units(o.reward)}</span>
+                      <div className="shrink-0 text-right">
+                        <div className="mono text-ink">{units(o.reward)}</div>
+                        <div className="text-[11px] text-ink-3">bounty</div>
+                      </div>
                     </Link>
                   </li>
                 );

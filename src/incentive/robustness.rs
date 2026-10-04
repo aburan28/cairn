@@ -148,6 +148,15 @@ impl Knob {
 /// played rather than how expensive it is -- so it belongs to
 /// [`super::design::committee_window`], which sweeps it exhaustively and reports
 /// the whole safe set instead of a distance to the nearest edge.
+///
+/// Nor `blind_sample` or `admitter_error_rate`. The blind share is a protocol
+/// rule -- which claims the fee pays attestations on -- rather than a
+/// measurement anybody could have wrong, and its margin is not a distance at
+/// all: below one, an attestor copies the shown claims at *every* share, so
+/// the first rung down breaks it and the ladder would report a tolerance of
+/// zero for a reason [`super::design::EchoFinding`] already states. The
+/// admitter's error rate is read only by an echoer, so at a blind share of one
+/// every rung of it is the same report, re-solved at a second apiece.
 fn knobs() -> Vec<Knob> {
     vec![
         Knob {

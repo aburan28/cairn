@@ -53,6 +53,11 @@ jobs:
       # and live under `reported` -- separately. Runs on a binary without the
       # embedded reader; the dashboard page itself is covered by `make ui-check`.
       - run: ./scripts/progress-demo.sh
+      # `cairn work`: a worker sharing nothing with the node but its HTTP
+      # address takes an assignment, heartbeats onto the roster, commits,
+      # reveals after the epoch turns, and is paid by the node's verifier.
+      # The only check of the generic worker against a real node.
+      - run: ./scripts/work-demo.sh
       # `try` and `scaffold`: the one command that waits on a real epoch
       # boundary, and the generated challenge that has to be postable. Neither
       # can be checked from a fixture timestamp.

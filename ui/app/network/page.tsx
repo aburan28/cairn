@@ -275,7 +275,6 @@ function Dashboard({
               ? `${peers.recent} recent · ${peers.lost} lost · ${peers.unreached} never reached`
               : "this process runs no p2p service"
           }
-          tone={peers.available && peers.reached > 0 ? "accent" : "neutral"}
         />
         <Stat
           label="Address book"
@@ -293,19 +292,16 @@ function Dashboard({
           from={`${totals.stale} stale · ${compute.gone} gone · ${compute.objectives.length} objective${
             compute.objectives.length === 1 ? "" : "s"
           }`}
-          tone={totals.live > 0 ? "accent" : "neutral"}
         />
         <Stat
           label="Compute, reported"
           value={formatRate(totals.live > 0 ? totals.steps_per_second : null)}
           from="summed over live workers; measured by the node where it could"
-          tone="warn"
         />
         <Stat
           label="Lanes, reported"
           value={totals.live > 0 ? formatMagnitude(totals.lanes) : "—"}
           from="threads or SIMD lanes the live workers say they run"
-          tone="warn"
         />
       </div>
 

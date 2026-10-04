@@ -17,6 +17,16 @@ struct NodeSettings: Equatable {
         static let limitStorage = "limitStorage"
         static let storageGB = "storageLimitGB"
         static let p2pHost = "p2pHost"
+        /// Serve the node's HTTP side -- its pages and the routes a worker
+        /// calls -- on every interface, so another machine on the LAN can
+        /// join with `cairn work`. Off by default, like inbound P2P.
+        static let shareHTTP = "shareHTTP"
+        /// Dial no internet seeds: a node for one building's machines, which
+        /// still finds the others by the LAN beacon and any bootstrap file.
+        static let offline = "offline"
+        /// Run the validator loop: re-run each claim's pinned verifier here
+        /// and stand behind what it said, under bond (`--attest-identity`).
+        static let validator = "validatorRole"
         static let bootstrap = "bootstrap"
         /// Empty = this app runs the node. Non-empty = open that reader's URL
         /// and do not spawn `cairn run`. Same idea as the iOS reader's
@@ -63,6 +73,16 @@ struct NodeSettings: Equatable {
     var storageGB: Int
     /// Host half of `--listen`. Port is chosen at start.
     var p2pHost: String
+    /// Whether *Share this node on my network* asked for the HTTP side on
+    /// every interface. Read through `serveHost`, which leading a fleet also
+    /// opens. Defaulted so code that builds a settings value by hand need not
+    /// name it.
+    var httpHost: String = loopbackHost
+    /// `CAIRN_SEEDS=off`: no built-in internet seeds.
+    var offline: Bool = false
+    /// Attest to every claim this node can verify, under the identity in
+    /// `validatorIdentity`. Off by default: each attestation stakes a bond.
+    var validator: Bool = false
     /// `--bootstrap` files, in the order given. Dial hints only; the handshake
     /// authenticates the key, not the socket that answered.
     var bootstrapFiles: [String]
@@ -78,9 +98,12 @@ struct NodeSettings: Equatable {
 
     static let defaultFleetNetworks = "private"
 
-    /// Host half of `--serve`: loopback unless this node leads a fleet, whose
-    /// workers reach it over the network.
-    var serveHost: String { leadFleet ? Self.anyHost : Self.loopbackHost }
+    /// Host half of `--serve`: loopback unless the node is shared on the
+    /// network or leads a fleet -- both exist so another machine there can
+    /// reach it; leading also signs that machine's records as this node.
+    var serveHost: String {
+        leadFleet || httpHost == Self.anyHost ? Self.anyHost : Self.loopbackHost
+    }
 
     /// The ed25519 identity a fleet is paid to, beside the node's other keys.
     /// Created by the node on first use and never leaves this Mac.
@@ -123,6 +146,9 @@ struct NodeSettings: Equatable {
             Key.limitStorage: false,
             Key.storageGB: defaultStorageGB,
             Key.p2pHost: loopbackHost,
+            Key.shareHTTP: false,
+            Key.offline: false,
+            Key.validator: false,
             Key.bootstrap: "",
             Key.attachURL: "",
             Key.backgroundService: false,
@@ -151,6 +177,9 @@ struct NodeSettings: Equatable {
             // to bind at start with a message most people would not expect
             // from typing an address into Settings.
             p2pHost: host == anyHost ? anyHost : loopbackHost,
+            httpHost: defaults.bool(forKey: Key.shareHTTP) ? anyHost : loopbackHost,
+            offline: defaults.bool(forKey: Key.offline),
+            validator: defaults.bool(forKey: Key.validator),
             bootstrapFiles: Self.parseBootstrap(defaults.string(forKey: Key.bootstrap) ?? ""),
             attachURL: Self.parseAttachURL(attach),
             leadFleet: defaults.bool(forKey: Key.leadFleet),
@@ -201,16 +230,45 @@ struct NodeSettings: Equatable {
     /// `run` it reads as a command named "--bootstrap" and the node never
     /// starts.
     var runArguments: [String] {
-        bootstrapFiles.flatMap { ["--bootstrap", $0] }
+        var args = bootstrapFiles.flatMap { ["--bootstrap", $0] }
+        if validator { args += ["--attest-identity", validatorIdentity.path] }
+        return args
+    }
+
+    /// The key the validator loop signs and bonds under. Kept in the data
+    /// folder, beside the node's own identity, so moving the folder moves
+    /// the validator with it; created on first start with the role on.
+    var validatorIdentity: URL {
+        dataFolder.appendingPathComponent("validator.identity.json")
+    }
+
+    /// The roles this node declares (`CAIRN_ROLES`), read off the settings
+    /// that actually give each one a duty, so a declaration here can never
+    /// name a role the node is not set up to do. `GET /network` publishes
+    /// them as declared -- a hint to readers, never a permission.
+    var declaredRoles: [String] {
+        var roles: [String] = []
+        if sharesOnNetwork { roles.append("executor") }
+        if validator { roles.append("verifier") }
+        if !listensLocallyOnly { roles.append("relay") }
+        return roles
     }
 
     /// Both always set, so the value chosen here is the one that applies and
     /// not one inherited from whatever launched the app.
     var environment: [String: String] {
         var env = ["CAIRN_SANDBOX_CPUS": String(cpus), "CAIRN_SANDBOX_MEMORY_MB": String(memoryMB)]
+        // Set only when chosen: a launcher that already pointed the node at
+        // its own seed list (`CAIRN_SEEDS=path`) keeps it when this is off.
+        if offline { env["CAIRN_SEEDS"] = "off" }
+        if !declaredRoles.isEmpty { env["CAIRN_ROLES"] = declaredRoles.joined(separator: ",") }
         if leadFleet { env["CAIRN_FLEET"] = fleetNetworks }
         return env
     }
+
+    /// True when another machine on the LAN can reach the node's pages and
+    /// its worker routes.
+    var sharesOnNetwork: Bool { serveHost == Self.anyHost }
 }
 
 /// The data folder as files: what it holds, whether it holds a node, and

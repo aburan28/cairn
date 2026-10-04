@@ -466,8 +466,116 @@ fn capped(mut rows: Vec<Value>) -> Value {
     ])
 }
 
+/// Where this node's HTTP side can be reached from, for `GET /network`.
+///
+/// The page that tells somebody how to add a second machine needs an address
+/// that machine can dial, and the node is the only party that knows what it
+/// bound. Three answers, and the reader shows each differently:
+///
+/// - bound to loopback: nothing on the LAN can reach it, and the page says
+///   how to change that instead of printing a URL that will not connect;
+/// - bound to a specific address: that address;
+/// - bound to `0.0.0.0` / `::`: every address this host has on a local
+///   network, from [`local_addresses`].
+///
+/// Advice to a reader, like everything else under `node`: nothing that
+/// settles reads it.
+pub fn reach(bound: Option<std::net::SocketAddr>) -> Value {
+    let Some(bound) = bound else {
+        return Value::object([("bound", Value::Null), ("lan", Value::Bool(false))]);
+    };
+    let ip = bound.ip();
+    let addresses: Vec<std::net::IpAddr> = if ip.is_loopback() {
+        Vec::new()
+    } else if ip.is_unspecified() {
+        local_addresses()
+    } else {
+        vec![ip]
+    };
+    let urls = addresses.iter().map(|address| {
+        Value::string(match address {
+            std::net::IpAddr::V4(v4) => format!("http://{v4}:{}", bound.port()),
+            std::net::IpAddr::V6(v6) => format!("http://[{v6}]:{}", bound.port()),
+        })
+    });
+    Value::object([
+        ("bound", Value::string(bound.to_string())),
+        ("lan", Value::Bool(!ip.is_loopback())),
+        ("urls", Value::array(urls)),
+    ])
+}
+
+/// This host's addresses on its local networks, best first, without asking
+/// the operating system for its interface list.
+///
+/// A UDP `connect` sends nothing; it only asks the kernel which source
+/// address it would route from. Asking once toward each private range and
+/// once toward a documentation address therefore names the interface each
+/// would use -- the LAN one on a home network, the right one of several on a
+/// multi-homed box -- with no packet leaving and no `getifaddrs` binding to
+/// write. A host with no route to a range simply contributes nothing for it,
+/// which is how this still answers on a LAN with no internet at all.
+pub fn local_addresses() -> Vec<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+    const PROBES: [Ipv4Addr; 4] = [
+        Ipv4Addr::new(192, 0, 2, 1), // TEST-NET-1: the default route, if any
+        Ipv4Addr::new(192, 168, 255, 254), // the home-router ranges
+        Ipv4Addr::new(10, 255, 255, 254),
+        Ipv4Addr::new(172, 31, 255, 254),
+    ];
+    let mut found: Vec<IpAddr> = Vec::new();
+    for probe in PROBES {
+        let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+            continue;
+        };
+        if socket.connect((probe, 9)).is_err() {
+            continue;
+        }
+        if let Ok(local) = socket.local_addr() {
+            let ip = local.ip();
+            let usable = match ip {
+                IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_unspecified() && !v4.is_link_local(),
+                IpAddr::V6(_) => false,
+            };
+            if usable && !found.contains(&ip) {
+                found.push(ip);
+            }
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_loopback_bind_offers_no_lan_url() {
+        let value = reach(Some("127.0.0.1:8080".parse().unwrap()));
+        assert_eq!(value.get("lan").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            value
+                .get("urls")
+                .and_then(Value::as_array)
+                .map(<[Value]>::len),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn a_specific_bind_is_its_own_url() {
+        let value = reach(Some("192.168.7.9:8081".parse().unwrap()));
+        assert_eq!(value.get("lan").and_then(Value::as_bool), Some(true));
+        let urls = value.get("urls").and_then(Value::as_array).unwrap();
+        assert_eq!(urls[0].as_str(), Some("http://192.168.7.9:8081"));
+    }
+
+    #[test]
+    fn local_addresses_never_include_loopback_or_unspecified() {
+        for ip in local_addresses() {
+            assert!(!ip.is_loopback() && !ip.is_unspecified(), "{ip}");
+        }
+    }
+
     use super::*;
 
     #[test]

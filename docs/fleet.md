@@ -70,6 +70,17 @@ python3 examples/certicom-ecdlp/tools/orbit_worker.py \
   --worker gpu-box-1 --submitter $(curl -s http://10.0.0.5:8080/network | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"]["fleet"]["signs_as"])')
 ```
 
+Any other search takes the same two names through `cairn work`, which wraps a
+solver you supply in the assignment, heartbeat and commit/reveal clock:
+
+```sh
+cairn work --node http://10.0.0.5:8080 --objective sha256:… \
+  --worker gpu-box-1 --submitter <signs_as> -- ./my-solver
+```
+
+The reader's Contribute page prints that line with `signs_as` already filled
+in when the node it reads leads a fleet.
+
 Heartbeats carry the worker's name, so the Network page shows eight workers;
 the pay shows one submitter.
 
