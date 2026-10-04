@@ -40,6 +40,13 @@ final class ChallengeComposer: ObservableObject {
     /// Bumped when a key is saved here, so the model picker asks the
     /// provider again.
     @Published var keyEpoch = 0
+    /// Goals the node says the description names, asked as the person types
+    /// (`GET /goals?q=`), so a second spelling of ECC2K-130 is caught before
+    /// it is drafted. docs/goals.md.
+    @Published private(set) var goalMatches: [GoalMatch] = []
+    /// The goal the person chose to post this challenge as a new angle on.
+    @Published var angleOn: GoalMatch?
+    private var lookup: Task<Void, Never>?
 
     let node: Node
     private var work: Task<Void, Never>?
@@ -98,6 +105,28 @@ final class ChallengeComposer: ObservableObject {
         }
     }
 
+    /// Ask the node which goals the description names. Debounced: a lookup
+    /// per keystroke would be a request per keystroke.
+    func lookUpGoals() {
+        lookup?.cancel()
+        let text = brief.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count >= 3, case .running(let reader) = node.state else {
+            goalMatches = []
+            return
+        }
+        lookup = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            if Task.isCancelled { return }
+            let found = await GoalLookup.find(text, reader: reader)
+            if Task.isCancelled { return }
+            guard let self else { return }
+            self.goalMatches = found
+            if let chosen = self.angleOn, !found.contains(where: { $0.key == chosen.key }) {
+                self.angleOn = nil
+            }
+        }
+    }
+
     /// Ask the model, then test what it wrote. A redraft passes the earlier
     /// draft and everything wrong with it: failed tests, screened tokens,
     /// and whatever the person typed.
@@ -111,7 +140,8 @@ final class ChallengeComposer: ObservableObject {
         progress = DraftProgress()
         phase = .drafting
         let config = self.config
-        let request = ChallengeWriter.request(describing: brief, previous: previous, problems: problems)
+        let request = ChallengeWriter.request(describing: brief, previous: previous, problems: problems,
+                                              angleOn: angleOn?.handle)
         work = Task {
             do {
                 let object = try await AIClient(config: config, apiKey: key).complete(
@@ -229,6 +259,8 @@ struct NewChallengeSheet: View {
     @ObservedObject var browser: Browser
     @Binding var isPresented: Bool
     @StateObject private var composer: ChallengeComposer
+    @StateObject private var dictation = Dictation()
+    @StateObject private var speaker = Speaker()
     @State private var installingLean = false
 
     init(node: Node, browser: Browser, isPresented: Binding<Bool>) {
@@ -292,6 +324,14 @@ struct NewChallengeSheet: View {
                         .allowsHitTesting(false)
                 }
             }
+            .onChange(of: composer.brief) { _ in composer.lookUpGoals() }
+
+            // Say it instead: what is heard lands in the description above.
+            DictationButton(dictation: dictation) { spoken in
+                composer.brief = Dictation.merge(composer.brief, spoken)
+            }
+
+            if !composer.goalMatches.isEmpty { goalMatches }
 
             terms
             drafter
@@ -306,6 +346,43 @@ struct NewChallengeSheet: View {
                     .disabled(!composer.canDraft)
             }
         }
+    }
+
+    /// What the node's goal catalog made of the description: the goals it
+    /// names, and the choice to post this as a new angle on one of them.
+    private var goalMatches: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(composer.goalMatches) { match in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "scope").foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(match.summaryLine).font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let summary = match.summary, !summary.isEmpty {
+                            Text(summary).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer()
+                    Toggle("Post as an angle on it", isOn: Binding(
+                        get: { composer.angleOn?.key == match.key },
+                        set: { on in composer.angleOn = on ? match : nil }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .font(.callout)
+                }
+            }
+            Text(verbatim: """
+                Asked of this node's goal catalog as you type. A match is a suggestion: choose it and the \
+                model names the challenge \(composer.angleOn?.handle ?? "GOAL-<key>")/<angle>, one goal \
+                with one more angle; leave it and the goal is whatever the model writes.
+                """)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .background(Color.accentColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private var terms: some View {
@@ -463,7 +540,20 @@ struct NewChallengeSheet: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("What solvers see").font(.subheadline.bold())
+                            HStack {
+                                Text("What solvers see").font(.subheadline.bold())
+                                Spacer()
+                                // Heard as a solver would read it, which catches
+                                // the sentence that scans and does not parse.
+                                Button {
+                                    speaker.toggle(draft.statement)
+                                } label: {
+                                    Label(speaker.speaking ? "Stop" : "Read aloud",
+                                          systemImage: speaker.speaking ? "stop.fill" : "speaker.wave.2")
+                                }
+                                .controlSize(.small)
+                                .disabled(draft.statement.isEmpty)
+                            }
                             TextField("Goal", text: binding(\.goal))
                                 .font(.callout.monospaced())
                             TextEditor(text: binding(\.statement))
@@ -505,8 +595,13 @@ struct NewChallengeSheet: View {
             environment
             problem
 
-            TextField("What should change? Optional, sent with Redraft.", text: $composer.feedback)
-                .font(.callout)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                TextField("What should change? Optional, sent with Redraft.", text: $composer.feedback)
+                    .font(.callout)
+                DictationButton(dictation: dictation) { spoken in
+                    composer.feedback = Dictation.merge(composer.feedback, spoken)
+                }
+            }
 
             HStack {
                 Button("Back") { composer.phase = .compose }

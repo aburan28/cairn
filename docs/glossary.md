@@ -17,6 +17,13 @@ outputs are cheap to check.
 Every one of these is a line in the log. They are listed in `src/records.rs` and
 the admission rules for each are in `src/node.rs`.
 
+**Goal.** The problem an objective attacks, named by the `GOAL-<key>` handle
+every objective carries: ECC2K-130 is a goal, and the four objectives paying
+for different ways at it share it. **Angle.** The approach, as a path on the
+handle: `GOAL-certicom-ecc2k130/rho/gpu-kernel`. Neither is a record; the node
+groups objectives by them on request and an alias catalog joins the spellings
+people type. [goals.md](goals.md).
+
 **Objective.** A funded, checkable question: a statement, a reward, and a
 *pinned* verifier. Not admissible until the verifier is written, pinned by hash,
 and runnable by any contributor **before** they start work. An objective's

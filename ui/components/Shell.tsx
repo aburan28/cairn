@@ -19,6 +19,7 @@ import { NODE_URL } from "@/lib/objectives";
 export const ROUTES = [
   { href: "/", label: "Overview", hint: "What cairn is, and this node's numbers" },
   { href: "/objectives", label: "Objectives", hint: "What this node will pay for" },
+  { href: "/goals", label: "Goals", hint: "What the network is trying to beat, and from which angles" },
   { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
   { href: "/submit", label: "Post a challenge", hint: "Fund a question, signed by a wallet" },
   { href: "/chain", label: "Chain", hint: "Epoch links, and whether you have forked" },
@@ -51,6 +52,7 @@ const NAV: {
         icon: <IconTarget />,
         match: ["/challenge", "/frontier", "/task"],
       },
+      { href: "/goals", label: "Goals", icon: <IconTarget /> },
       { href: "/chain", label: "Chain", icon: <IconChain /> },
       { href: "/log", label: "Log", icon: <IconList /> },
       { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers"] },

@@ -128,6 +128,11 @@ const GROUPS: Group[] = [
           "a leader that signs and is paid, workers on your own network, a tunnel across regions",
       },
       {
+        path: "docs/goals.md",
+        name: "goals.md",
+        blurb: "goals and angles: one problem, many approaches, and the catalog that joins two spellings of it",
+      },
+      {
         path: "docs/storage.md",
         name: "storage.md",
         blurb: "encryption at rest, the data directory, the size cap, sync",
