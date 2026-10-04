@@ -197,6 +197,12 @@ Any K of K+M rebuild the file. [shards.md](shards.md).
 **Sealed submission.** An artifact encrypted to a committee drawn by the beacon,
 openable without the submitter. [censorship.md](censorship.md).
 
+**Port mapping.** Asking the router in front of a node to forward its p2p port
+(NAT-PMP, then UPnP IGD; `CAIRN_PORTMAP`). What the router answers is a claim,
+published on `GET /sessions` as `this_node.external`; a peer from outside
+completing a handshake inbound is the evidence, recorded beside it as
+`inbound_from_public_at`. [two-nodes.md](two-nodes.md).
+
 **Spool / queue.** Where `POST /submit` lands. A submission does not enter the
 log there: the operator's own node admits it, re-checking every rule.
 

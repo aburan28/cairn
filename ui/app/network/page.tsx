@@ -10,6 +10,7 @@ import {
   NODE_URL,
   RouteMissing,
   classLabel,
+  describeReachability,
   fetchNetwork,
   fetchSessions,
   fleetTotals,
@@ -225,6 +226,7 @@ function Dashboard({
   const classes = useMemo(() => sumByClass(shown), [shown]);
   const book = peers.address_book ?? sessions?.address_book ?? null;
   const self = peers.this_node ?? sessions?.this_node ?? null;
+  const reach = useMemo(() => describeReachability(self), [self]);
 
   return (
     <>
@@ -341,6 +343,15 @@ function Dashboard({
                 <dd className="mono">{self.listen ?? "—"}</dd>
                 <dt>up for</dt>
                 <dd className="mono">{formatUptime(self.uptime_seconds)}</dd>
+                <dt>from outside</dt>
+                <dd>
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <Badge tone={reach.tone} title="the router's claim and the roster's evidence, read together">
+                      {reach.label}
+                    </Badge>
+                    {reach.detail && <span className="text-[12px] text-ink-2">{reach.detail}</span>}
+                  </div>
+                </dd>
               </>
             )}
             <dt>machine</dt>

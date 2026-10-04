@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  type External,
   type FleetWorker,
+  type ThisNode,
   classLabel,
+  describeReachability,
   fleetTotals,
   formatMemory,
   formatUptime,
@@ -119,5 +122,83 @@ describe("formatting", () => {
     expect(share(500, 200)).toBe(1);
     expect(share(null, 200)).toBe(0);
     expect(share(5, 0)).toBe(0);
+  });
+});
+
+describe("describeReachability", () => {
+  const now = Date.parse("2026-10-04T12:00:00Z");
+  const node = (external: External | null | undefined, inbound: string | null = null): ThisNode => ({
+    peer_id: "ab".repeat(32),
+    listen: "0.0.0.0:9000",
+    started_at: "2026-10-04T11:00:00Z",
+    uptime_seconds: 3600,
+    ...(external === undefined ? {} : { external }),
+    inbound_from_public_at: inbound,
+  });
+  const external = (over: Partial<External>): External => ({
+    status: "mapped",
+    mode: "auto",
+    method: "upnp",
+    gateway: "192.168.1.1",
+    address: "203.0.113.7:9000",
+    public: true,
+    lease_seconds: 3600,
+    detail: null,
+    since: "2026-10-04T11:00:05Z",
+    renewed_at: null,
+    retry_in_seconds: null,
+    attempts: 1,
+    ...over,
+  });
+
+  it("says an older node reported nothing, and that nobody has decided yet", () => {
+    expect(describeReachability(null, now).status).toBe("unknown");
+    expect(describeReachability(node(undefined), now)).toMatchObject({ status: "unknown", tone: "neutral" });
+    expect(describeReachability(node(null), now)).toMatchObject({ status: "unknown", label: "unknown" });
+  });
+
+  it("treats a mapping as a claim until a peer from outside dialled in", () => {
+    const claim = describeReachability(node(external({})), now);
+    expect(claim).toMatchObject({ status: "mapped", tone: "warn", label: "mapped to 203.0.113.7:9000" });
+    expect(claim.detail).toContain("UPnP");
+    expect(claim.detail).toContain("claim");
+
+    const verified = describeReachability(node(external({ method: "natpmp" }), "2026-10-04T11:57:00Z"), now);
+    expect(verified).toMatchObject({ status: "verified", tone: "accent", label: "reachable at 203.0.113.7:9000" });
+    expect(verified.detail).toContain("NAT-PMP");
+    expect(verified.detail).toContain("3m ago");
+  });
+
+  it("calls a private external address what it is, whatever the router said", () => {
+    const doubled = describeReachability(
+      node(external({ address: "100.64.3.9:9000", public: false, detail: "carrier-grade NAT" })),
+      now,
+    );
+    expect(doubled).toMatchObject({ status: "double_nat", tone: "bad", detail: "carrier-grade NAT" });
+    expect(doubled.label).toContain("100.64.3.9:9000 is not public");
+  });
+
+  it("reads off, searching and failed, and lets evidence override a failure", () => {
+    const off = describeReachability(node(external({ status: "off", method: null, address: null, detail: "off (CAIRN_PORTMAP)" })), now);
+    expect(off).toMatchObject({ status: "off", tone: "neutral", detail: "off (CAIRN_PORTMAP)" });
+
+    const searching = describeReachability(node(external({ status: "searching", method: null, address: null, attempts: 2 })), now);
+    expect(searching).toMatchObject({ status: "searching", tone: "warn" });
+    expect(searching.detail).toContain("attempt 2");
+
+    const failed = describeReachability(
+      node(external({ status: "failed", method: null, address: null, detail: "no gateway answered", retry_in_seconds: 300 })),
+      now,
+    );
+    expect(failed).toMatchObject({ status: "failed", tone: "bad" });
+    expect(failed.detail).toBe("no gateway answered; asking again in 5m");
+
+    const forwarded = describeReachability(
+      node(external({ status: "failed", method: null, address: null, detail: "no gateway answered" }), "2026-10-04T11:59:20Z"),
+      now,
+    );
+    expect(forwarded).toMatchObject({ status: "verified", tone: "accent" });
+    expect(forwarded.detail).toContain("40s ago");
+    expect(forwarded.detail).toContain("by hand");
   });
 });

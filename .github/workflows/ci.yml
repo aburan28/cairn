@@ -368,6 +368,10 @@ jobs:
       # proved -- a checkpoint compared in the wrong units passed both.
       - run: npm test
         working-directory: ui
+      # No reader links to github.com -- the native apps as well as ui/,
+      # which site.test.ts covers alone. Here rather than in gui-macos
+      # because it is about every reader and needs no Swift to read one.
+      - run: ./scripts/no-github-links.sh
       - run: npm run build
         working-directory: ui
       # The iOS reader ships the same fallback the site does. A copy that

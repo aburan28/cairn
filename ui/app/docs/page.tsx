@@ -116,6 +116,12 @@ const GROUPS: Group[] = [
         blurb: "removing the operator: what needs agreement, and the McEliece handshake",
       },
       {
+        path: "docs/two-nodes.md",
+        name: "two-nodes.md",
+        blurb:
+          "two machines behind two routers: port mapping, the seed, and how to read whether it worked",
+      },
+      {
         path: "docs/storage.md",
         name: "storage.md",
         blurb: "encryption at rest, the data directory, the size cap, sync",

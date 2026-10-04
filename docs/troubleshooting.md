@@ -225,6 +225,15 @@ also time out at 15 seconds.
   itself when the real public key is pasted in.
 - The defaults bind loopback (`127.0.0.1:9000`). A node meant to be reachable
   needs `--listen 0.0.0.0:9000` and a path through whatever is in front of it.
+- Behind a home router, the node asks it to forward the p2p port (NAT-PMP,
+  then UPnP) and says so in one `portmap:` log line; `GET /sessions` carries
+  the same under `this_node.external`. `failed` with *no gateway answered*
+  means the router speaks neither protocol or has both switched off — forward
+  the port by hand. `mapped` with `public: false` means a second router or a
+  carrier-grade NAT is in front, and no mapping here can open it. A mapping is
+  a claim: `inbound_from_public_at` is the evidence, set only when a peer from
+  outside completed a handshake. [two-nodes.md](two-nodes.md) walks through
+  both machines.
 - LAN discovery uses a multicast beacon on port 47396, which many networks drop.
   `CAIRN_BEACON_PORT=off` disables it if it is noisy.
 - Behind a censor, `cairn p2p --proxy socks5://127.0.0.1:9050` routes dials

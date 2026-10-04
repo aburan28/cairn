@@ -51,11 +51,37 @@ export type AddressBook = {
   noted_at: string | null;
 };
 
+/**
+ * What the daemon's port-mapping thread last said, mirrored from
+ * `src/p2p/reach.rs::Report::to_value`. Every field is present in every
+ * status; `address` is where a peer outside would dial, and it is a router's
+ * claim until `ThisNode.inbound_from_public_at` says somebody did.
+ */
+export type External = {
+  status: "off" | "searching" | "mapped" | "failed";
+  mode: string;
+  method: "natpmp" | "upnp" | null;
+  gateway: string | null;
+  address: string | null;
+  /** False when the router's own address is private: a second router or a carrier NAT. */
+  public: boolean | null;
+  lease_seconds: number | null;
+  detail: string | null;
+  since: string;
+  renewed_at: string | null;
+  retry_in_seconds: number | null;
+  attempts: number;
+};
+
 export type ThisNode = {
   peer_id: string | null;
   listen: string | null;
   started_at: string;
   uptime_seconds: number;
+  /** Absent on a node older than the report; null until the daemon has decided. */
+  external?: External | null;
+  /** The last inbound session from an address outside every private range. */
+  inbound_from_public_at?: string | null;
 };
 
 export type SessionsResponse = {
@@ -262,6 +288,104 @@ export function reachTone(status: Reach): Tone {
       return "neutral";
     case "unreached":
       return "bad";
+  }
+}
+
+/** One line about whether a stranger can dial this node, and on what evidence. */
+export type Reachability = {
+  status: "unknown" | "off" | "searching" | "mapped" | "verified" | "double_nat" | "failed";
+  label: string;
+  detail: string | null;
+  tone: Tone;
+};
+
+/**
+ * Read `this_node.external` and `inbound_from_public_at` together, which is
+ * the only honest way to read either: a mapping is a router's claim, an
+ * inbound session from outside is the evidence, and each can exist without
+ * the other (a port forwarded by hand verifies with no mapping at all).
+ * `nowMs` is a parameter so the ages are testable.
+ */
+export function describeReachability(self: ThisNode | null, nowMs: number = Date.now()): Reachability {
+  const inboundAt = self?.inbound_from_public_at ?? null;
+  const inboundAgo = inboundAt === null ? null : Math.max(0, Math.floor((nowMs - Date.parse(inboundAt)) / 1000));
+  const evidence =
+    inboundAgo === null || !Number.isFinite(inboundAgo)
+      ? null
+      : `a peer from outside reached this node ${formatUptime(inboundAgo)} ago`;
+  const external = self?.external;
+  if (external === undefined) {
+    return {
+      status: "unknown",
+      label: "not reported",
+      detail: evidence ?? "this node predates the port-mapping report",
+      tone: evidence ? "accent" : "neutral",
+    };
+  }
+  if (external === null) {
+    return {
+      status: evidence ? "verified" : "unknown",
+      label: evidence ? "reachable" : "unknown",
+      detail: evidence ?? "the daemon has not yet said whether it asked its router",
+      tone: evidence ? "accent" : "neutral",
+    };
+  }
+  const by = external.method ? `by ${external.method === "natpmp" ? "NAT-PMP" : "UPnP"}` : "";
+  const via = external.gateway ? ` via ${external.gateway}` : "";
+  switch (external.status) {
+    case "off":
+      return evidence
+        ? { status: "verified", label: "reachable", detail: `${evidence}; port mapping is off`, tone: "accent" }
+        : { status: "off", label: "not asked", detail: external.detail, tone: "neutral" };
+    case "searching":
+      return {
+        status: "searching",
+        label: "asking the router…",
+        detail: `attempt ${external.attempts}, ${external.mode}`,
+        tone: "warn",
+      };
+    case "mapped": {
+      const address = external.address ?? "?";
+      if (external.public === false) {
+        return {
+          status: "double_nat",
+          label: `mapped ${by}, but ${address} is not public`,
+          detail: external.detail,
+          tone: "bad",
+        };
+      }
+      if (evidence) {
+        return {
+          status: "verified",
+          label: `reachable at ${address}`,
+          detail: `mapped ${by}${via}; ${evidence}`,
+          tone: "accent",
+        };
+      }
+      return {
+        status: "mapped",
+        label: `mapped to ${address}`,
+        detail: `${by}${via}; a claim until a peer outside dials in`,
+        tone: "warn",
+      };
+    }
+    case "failed":
+      if (evidence) {
+        return {
+          status: "verified",
+          label: "reachable without a mapping",
+          detail: `${evidence}; the router granted nothing — a port forwarded by hand, probably`,
+          tone: "accent",
+        };
+      }
+      return {
+        status: "failed",
+        label: "not reachable from outside",
+        detail:
+          (external.detail ?? "no gateway granted a mapping") +
+          (external.retry_in_seconds ? `; asking again in ${formatUptime(external.retry_in_seconds)}` : ""),
+        tone: "bad",
+      };
   }
 }
 

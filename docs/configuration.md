@@ -29,6 +29,7 @@ and they are not conveniences.
 | `CAIRN_REQUIRE_BEACON` | unset | `1` refuses a log whose epochs settled without a recorded beacon |
 | `CAIRN_BEACON_PORT` | `47396` | moves the LAN discovery beacon port; `off` or `0` disables beacons |
 | `CAIRN_SEEDS` | built-in list | a seed list in the `launch/seeds.json` shape for `run`, `p2p` and `serve --p2p-listen` to dial; `off` or `0` dials no seeds. Unset or empty uses the list compiled into the binary |
+| `CAIRN_PORTMAP` | `auto` | asks the router in front of the node to forward the p2p port, so peers outside can dial in: `auto` tries NAT-PMP, then UPnP IGD; `natpmp` or `upnp` tries one; `off` asks nothing. Off regardless on a loopback listen (nothing outside the host can be forwarded to it) and, unless set, when dials go through `--proxy`. What the router said is on `GET /sessions` as `this_node.external` — a claim until a peer from outside dials in. [two-nodes.md](two-nodes.md) |
 | `CAIRN_LEDGER_FSYNC` | unset | `1` calls `fsync` after every append |
 | `CAIRN_LAB` | `./.cairn-lab` | the lab directory for `cairn lab`, when `--lab` is not given |
 | `CAIRN_LAB_IDENTITY` | — | the ed25519 identity file `cairn lab` signs ops with, when `--identity` is not given |
@@ -198,6 +199,7 @@ hashes and the same Merkle root. See [storage.md](storage.md).
 | P2P | `127.0.0.1:9000` | `--listen` (`run`, `p2p`), `--p2p-listen` (`serve`) |
 | LAN discovery beacon | multicast | `CAIRN_BEACON_PORT`, or `off` |
 | Seeds dialled at start | `launch/seeds.json`, compiled in | `CAIRN_SEEDS=<file>`, or `off` |
+| Router port mapping | NAT-PMP, then UPnP IGD, for the P2P port | `CAIRN_PORTMAP=off`, `natpmp` or `upnp` |
 | MCP | none — stdio | — |
 
 The defaults bind loopback, so a first `cairn run` exposes nothing. Binding

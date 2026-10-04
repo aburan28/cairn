@@ -35,6 +35,15 @@ NAT'd to it and appears on no local interface — and publishes the public addre
 or, better, the public DNS name, which survives a restart that moves the IP.
 See [docs/p2p.md](../../docs/p2p.md), *Running a seed on a public host*.
 
+## Keeping the seed up
+
+A seed that is down costs every new node its first peer, and the site's
+`/node/` mirror (`.github/workflows/node-sync.yml`) goes red on the same
+minute. [`../seed.service`](../seed.service) is the systemd unit that keeps
+one up across reboots and crashes; [docs/two-nodes.md](../../docs/two-nodes.md)
+says how to check it from outside and what the daemon publishes about its own
+reachability.
+
 ## Why the keys are not in `seeds.json`
 
 522 KB each. `ui/lib/seeds.ts` fetches the list from the browser on every page

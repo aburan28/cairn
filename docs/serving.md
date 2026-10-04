@@ -145,7 +145,9 @@ failed to dial it. Each row carries the address of the last session, which
 way it ran, how many sessions succeeded in each direction, the last error,
 and this node's ledger length afterwards. Beside the rows: `address_book`
 (endpoints this node could dial now, and signed hints it has learned),
-`this_node` (its transport id, listen address and uptime), and
+`this_node` (its transport id, listen address and uptime, with `external` —
+what its router said about forwarding the p2p port, a claim — and
+`inbound_from_public_at`, the evidence: see [two-nodes.md](two-nodes.md)), and
 `anonymous_inbound_failures` -- handshakes that failed before authenticating
 anyone, counted and never attributed, because attributing them would let a
 stranger write any id onto this roster with one garbage frame.

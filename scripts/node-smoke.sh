@@ -171,6 +171,19 @@ for path in /health /objectives /chain /chain.html /checkpoint "/objective/$OID"
   echo "  GET $path -> 200"
 done
 
+rule "the node says why it asked no router to forward a loopback port"
+# `this_node.external` is the port-mapping report. On a loopback listen the
+# daemon decides `off` before its first tick and says why, which is what a
+# reader needs to see in place of a blank.
+EXTERNAL=$(curl -s "http://127.0.0.1:$HTTP/sessions" | python3 -c '
+import json, sys
+e = json.load(sys.stdin)["this_node"]["external"]
+print(e["status"], "--", e["detail"])')
+case "$EXTERNAL" in
+  "off -- off: listening on 127.0.0.1"*) echo "  $EXTERNAL" ;;
+  *) fail "expected port mapping off on a loopback listen, got: $EXTERNAL" ;;
+esac
+
 rule "the embedded reader is routed, whether or not it was built in"
 # Both outcomes are correct and which one you get is a build flag, so this
 # checks the *routing* rather than the feature. What it refuses is the third

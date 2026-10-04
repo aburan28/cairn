@@ -701,6 +701,30 @@ in the same round can still be scored. A candidate for an objective this node
 has never seen is refused, and reappears on a later tick once the objective
 does.
 
+### Running a node behind a home router
+
+The daemon asks the router in front of it to forward the p2p port — NAT-PMP
+first, because it costs one datagram, then UPnP IGD, which is what a home
+router actually has switched on (`src/p2p/reach.rs`, `CAIRN_PORTMAP`). It
+renews the mapping at half its lease for as long as it runs and maps again
+when a renewal fails, because a router that rebooted forgot the mapping and
+the node is the last to notice. One `portmap:` log line says what happened,
+and `GET /sessions` carries the same as `this_node.external`.
+
+Everything the router says is a claim. The external address it reports stays
+unverified until a peer from outside the LAN completes a handshake inbound,
+which the roster records as `inbound_from_public_at`; the reader's Network
+page reads the two together and says *mapped* until it can say *reachable*.
+A mapping whose external address is itself private is reported as mapped and
+not public — a second router or a carrier-grade NAT stands in front, and
+nothing this node can ask will open it. With both protocols off, forward the
+port by hand on the router; the evidence field still says whether it worked.
+The two-machine walk-through is [two-nodes.md](two-nodes.md).
+
+Off on a loopback listen, because nothing outside the host can be forwarded
+to it, and off by default behind `--proxy`, for the reason beacons are: a node
+hiding from its segment does not ask its router to advertise it.
+
 ## Still open
 
 - **Sybil-resistant peer identity.** The signed, size-capped peer-list exchange
