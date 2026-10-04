@@ -339,6 +339,29 @@ function Dashboard({
             <dd className="mono">{node.accepts_submissions ? "yes (--queue)" : "no: read-only"}</dd>
             <dt>reconciles</dt>
             <dd className="mono">{node.runs_p2p ? "yes: a p2p service runs here" : "no: a plain publisher"}</dd>
+            {node.fleet && (
+              <>
+                <dt>leads a fleet</dt>
+                <dd>
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <span className="mono">{node.fleet.sources.join(", ")}</span>
+                    <span className="text-[12px] text-ink-2">
+                      unsigned records from these networks that name this node are signed here, as
+                    </span>
+                    <Hash value={node.fleet.signs_as} chars={12} />
+                  </div>
+                </dd>
+              </>
+            )}
+            {node.peers_policy && node.peers_policy.policy !== "open" && (
+              <>
+                <dt>peers with</dt>
+                <dd className="mono">
+                  {node.peers_policy.allowed ?? "?"} allowed peer{node.peers_policy.allowed === 1 ? "" : "s"} only
+                  (CAIRN_PEERS); strangers are refused after the handshake
+                </dd>
+              </>
+            )}
             {self && (
               <>
                 <dt>listens</dt>

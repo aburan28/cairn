@@ -285,7 +285,11 @@ sandbox you need as unusable and says why.
 (`tests/cipher_policy.rs` keeps TLS out of the tree), so `--node` is a
 loopback, a LAN, a WireGuard or SSH tunnel -- never the open internet in the
 clear. Several `--node`s register with each; a node that is down is retried
-every interval and logged once when it changes state.
+every interval and logged once when it changes state. In a fleet the node is
+the leader, and the box beside this agent usually runs a worker too:
+[fleet.md](fleet.md) joins the parts, and
+[`launch/fleet/worker@.service`](../launch/fleet/worker@.service) is the
+worker's unit.
 
 ## Checking it
 

@@ -152,6 +152,12 @@ OID=$("$RUST" --log "$LOG" --root . post examples/capset_progressive/objective.j
   | head -1 | awk '{print $2}')
 echo "  $OID"
 
+# This node also leads a fleet of one network -- loopback, which is where the
+# smoke's requests come from -- signing with an identity made here. Checked
+# below, after the routes; it changes nothing about the rest of the run.
+"$RUST" identity --out "$A/leader.json" >/dev/null
+LEADER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["public"])' "$A/leader.json")
+CAIRN_FLEET=loopback CAIRN_FLEET_IDENTITY="$A/leader.json" \
 "$RUST" --log "$LOG" --root . p2p \
   --identity "$A/id.json" --root-key "$A/rk.json" --checkpoint "$A/cp.json" \
   --listen "127.0.0.1:$P2P_PORT" \
@@ -170,6 +176,24 @@ for path in /health /objectives /chain /chain.html /checkpoint "/objective/$OID"
   [ "$code" = "200" ] || fail "GET $path -> $code"
   echo "  GET $path -> 200"
 done
+
+rule "a fleet leader signs its workers' records and declares it"
+SIGNS_AS=$(curl -s "http://127.0.0.1:$HTTP/network" | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["node"]["fleet"]["signs_as"])')
+[ "$SIGNS_AS" = "$LEADER" ] || fail "GET /network says the leader signs as $SIGNS_AS, not $LEADER"
+echo "  node.fleet.signs_as is the identity made for it"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+SIGNED=$(curl -s -H 'content-type: application/json' \
+  -d "{\"type\":\"commitment\",\"objective_id\":\"$OID\",\"submitter\":\"$LEADER\",\"hash\":\"sha256:0000000000000000000000000000000000000000000000000000000000000002\",\"created_at\":\"$NOW\"}" \
+  "http://127.0.0.1:$HTTP/submit?kind=commitment" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("signed_as"))')
+[ "$SIGNED" = "$LEADER" ] || fail "an unsigned commitment naming the leader was not signed (signed_as=$SIGNED)"
+echo "  POST /submit from the fleet network -> signed_as the leader"
+PLAIN=$(curl -s -H 'content-type: application/json' \
+  -d "{\"type\":\"commitment\",\"objective_id\":\"$OID\",\"submitter\":\"smoke-worker\",\"hash\":\"sha256:0000000000000000000000000000000000000000000000000000000000000003\",\"created_at\":\"$NOW\"}" \
+  "http://127.0.0.1:$HTTP/submit?kind=commitment" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("signed_as"))')
+[ "$PLAIN" = "None" ] || fail "a worker's own nickname was signed as $PLAIN"
+echo "  a worker's own name is left alone"
 
 rule "the node says why it asked no router to forward a loopback port"
 # `this_node.external` is the port-mapping report. On a loopback listen the

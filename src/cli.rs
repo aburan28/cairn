@@ -355,6 +355,16 @@ pub fn serve(args: Vec<String>, globals: Globals) -> i32 {
     if let Some(dir) = queue {
         serving = serving.accepting_into(dir).with_max_queued(max_queue);
     }
+    // A publisher can lead a fleet too: `CAIRN_FLEET` with `CAIRN_FLEET_IDENTITY`
+    // signs the records its workers queue here. No default identity on this
+    // path, since `serve` holds no signing key of its own.
+    serving = match serving.fleet_from_env(None) {
+        Ok(serving) => serving,
+        Err(error) => {
+            eprintln!("cairn serve: {error}");
+            return 1;
+        }
+    };
     if let Some(path) = checkpoint {
         serving = serving.with_checkpoint(path);
     }

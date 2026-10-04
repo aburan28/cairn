@@ -198,8 +198,12 @@ else
     UPDATES="none: no CAIRN_UPDATES_PUBLIC_KEY, so Check for Updates… opens the releases page"
 fi
 # Signed after the stamp, since the signature seals Info.plist. The hardened
-# runtime needs no entitlements here: the app starts a process and loads
-# pages from loopback, and neither is something the runtime restricts.
+# runtime restricts almost nothing the app does -- it starts a process and
+# loads pages from loopback -- except the microphone, which dictation in New
+# Challenge… uses, so the signed app carries the one entitlement in
+# Cairn.entitlements beside this script.
+ENTITLEMENTS="$HERE/Cairn.entitlements"
+[ -f "$ENTITLEMENTS" ] || die "missing $ENTITLEMENTS"
 if [ "$SIGNED" -eq 1 ]; then
     # Sparkle arrives signed by its own developers. Under the hardened runtime
     # the app may load only code signed by its own team, so each piece of the
@@ -214,9 +218,10 @@ if [ "$SIGNED" -eq 1 ]; then
         codesign --force --options runtime --timestamp --preserve-metadata=entitlements \
             --sign "$APP_ID" "$part"
     done
-    codesign --force --options runtime --timestamp --sign "$APP_ID" "$APP_ROOT"
+    codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \
+        --sign "$APP_ID" "$APP_ROOT"
 else
-    codesign --force --sign - "$APP_ROOT"
+    codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP_ROOT"
 fi
 codesign --verify --strict --deep "$APP_ROOT" \
     || die "Cairn.app does not verify after signing"

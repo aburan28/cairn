@@ -36,7 +36,7 @@
 //! before the loop starts turns that into a startup refusal with the address in
 //! it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -572,6 +572,7 @@ fn persist(state: &State, checkpoint: &Path, key: &RootKey, population: Option<&
 fn bind_http(
     config: &Config,
     sessions: Arc<Mutex<Sessions>>,
+    peers: (&str, Option<usize>),
 ) -> Result<Option<(TcpListener, serve::Serving)>, String> {
     let Some(addr) = &config.serve else {
         return Ok(None);
@@ -590,6 +591,12 @@ fn bind_http(
     // this process has reached rather than repeating the log's address book
     // under a disclaimer.
     serving = serving.with_sessions(sessions);
+    // A fleet leader signs the records its workers hand it over HTTP, with
+    // the ed25519 identity MCP submissions are signed with unless
+    // `CAIRN_FLEET_IDENTITY` names another. Refused at startup when the
+    // networks are mistyped or there is no key to sign with.
+    serving = serving.fleet_from_env(config.mcp_identity.as_deref())?;
+    serving = serving.with_peer_policy(peers.0, peers.1);
     if let Some(queue) = &config.queue {
         serving = serving
             .accepting_into(queue)
@@ -666,6 +673,22 @@ pub fn run(config: Config) -> Result<(), String> {
         peer_id_string(&identity.to_public().id())
     );
     let mut service = Service::with_proxy(Arc::clone(&identity), proxy);
+    // Whom this node will peer with. Read before the bootstrap files so a
+    // `bootstrap` policy can take their ids as they load; refused at startup
+    // when mistyped, like the proxy, rather than silently open.
+    let peer_policy = crate::fleet::PeerPolicy::from_env()
+        .map_err(|e| format!("{}: {e}", crate::fleet::PEERS_ENV))?;
+    let mut allowed_peers: BTreeSet<crate::p2p::handshake::PeerId> = match &peer_policy {
+        crate::fleet::PeerPolicy::Open => BTreeSet::new(),
+        crate::fleet::PeerPolicy::Allow { ids, .. } => ids.clone(),
+    };
+    let allow_bootstrap = matches!(
+        &peer_policy,
+        crate::fleet::PeerPolicy::Allow {
+            bootstrap: true,
+            ..
+        }
+    );
     for path in &config.bootstrap {
         let (endpoint, placeholder) = load_endpoint(path, service.proxy())
             .map_err(|e| format!("bootstrap {}: {e}", path.display()))?;
@@ -687,7 +710,25 @@ pub fn run(config: Config) -> Result<(), String> {
                 endpoint.addr
             );
         }
+        if allow_bootstrap {
+            allowed_peers.insert(endpoint.peer.id());
+        }
         service.add_bootstrap(endpoint);
+    }
+    if !peer_policy.is_open() {
+        if allowed_peers.is_empty() {
+            return Err(format!(
+                "{}={:?} names no peer at all: `bootstrap` needs at least one --bootstrap file, or list the peer ids to allow",
+                crate::fleet::PEERS_ENV,
+                std::env::var(crate::fleet::PEERS_ENV).unwrap_or_default()
+            ));
+        }
+        log::info!(
+            "peers: allowlist of {} ({}); every other peer is refused after the handshake, and nothing is learned from beacons, seeds or hints about anyone else",
+            allowed_peers.len(),
+            crate::fleet::PEERS_ENV
+        );
+        service.restrict_peers(allowed_peers);
     }
 
     // The seed list: built in, named by `CAIRN_SEEDS`, or off. Before this a
@@ -728,7 +769,11 @@ pub fn run(config: Config) -> Result<(), String> {
     // before the listener is bound so the roster exists however the start
     // fails after this point, and shared with every loop that runs a session.
     let sessions = Arc::new(Mutex::new(Sessions::new(crate::time::unix_seconds())));
-    let http = bind_http(&config, Arc::clone(&sessions))?;
+    let http = bind_http(
+        &config,
+        Arc::clone(&sessions),
+        (peer_policy.as_str(), service.allowed_peers()),
+    )?;
 
     // Zero-configuration discovery on the local segment. Optional by design:
     // a host with no multicast route is a node without LAN discovery, not a
@@ -1434,6 +1479,11 @@ fn report_seed(seed: &Seed, outcome: &SeedOutcome) {
             seed.name,
             seed.addr,
             KEY_FETCH_BACKOFF.as_secs()
+        ),
+        SeedOutcome::Excluded => log::debug!(
+            "seeds: {} is outside this node's allowlist ({}); not asked",
+            seed.name,
+            crate::fleet::PEERS_ENV
         ),
         SeedOutcome::Dialable | SeedOutcome::Waiting | SeedOutcome::Ourselves => {}
     }

@@ -52,7 +52,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::canonical::{digest_bytes, Value};
+use crate::crypto::identity::Identity;
 use crate::deposit::{self, DepositDir, DepositError, MAX_PROXY_BYTES};
+use crate::fleet::{self, Fleet};
 use crate::hosts;
 use crate::lease::{self, Leases};
 use crate::ledger::{Codec, Ledger};
@@ -416,6 +418,20 @@ pub struct Serving {
     roles: Result<Roles, network::RolesError>,
     /// This machine, probed once. A request handler does not read `/proc`.
     hardware: Hardware,
+    /// The fleet this node leads, when it leads one: the networks whose
+    /// unsigned records naming this node's identity are signed here before
+    /// they are queued. See [`crate::fleet`].
+    fleet: Option<FleetSigner>,
+    /// Whom the daemon beside this server will peer with, for `GET /network`:
+    /// the policy's name and how many peers it allows. `None` on a plain
+    /// publisher, which peers with nobody.
+    peers_policy: Option<(String, Option<usize>)>,
+}
+
+/// A fleet and the identity that signs for it.
+struct FleetSigner {
+    sources: Fleet,
+    identity: Identity,
 }
 
 /// How this server obtains the at-rest key, when the log is sealed.
@@ -445,6 +461,128 @@ impl Serving {
             sessions: None,
             roles: Roles::from_env(),
             hardware: Hardware::probe(),
+            fleet: None,
+            peers_policy: None,
+        }
+    }
+
+    /// Lead a fleet: sign, with `identity`, every unsigned commitment or claim
+    /// that names `identity` and arrives from one of `fleet`'s networks.
+    pub fn with_fleet(mut self, fleet: Fleet, identity: Identity) -> Serving {
+        self.fleet = Some(FleetSigner {
+            sources: fleet,
+            identity,
+        });
+        self
+    }
+
+    /// [`Serving::with_fleet`] from `CAIRN_FLEET` and `CAIRN_FLEET_IDENTITY`,
+    /// falling back to `default_identity` (the daemon's `--mcp-identity`) for
+    /// the key. Unset is not a fleet; set without a key is a refusal, said
+    /// here rather than as a 403 to the first worker.
+    pub fn fleet_from_env(self, default_identity: Option<&Path>) -> Result<Serving, String> {
+        let Some(sources) = Fleet::from_env().map_err(|e| format!("{}: {e}", fleet::ENV))? else {
+            return Ok(self);
+        };
+        let path = match std::env::var(fleet::IDENTITY_ENV) {
+            Ok(named) if !named.trim().is_empty() => PathBuf::from(named.trim()),
+            _ => match default_identity {
+                Some(path) => path.to_path_buf(),
+                None => {
+                    return Err(format!(
+                        "{} is set but there is no identity to sign with: set {} to an ed25519 identity file (`cairn identity --out FILE`), or pass --mcp-identity",
+                        fleet::ENV,
+                        fleet::IDENTITY_ENV
+                    ))
+                }
+            },
+        };
+        let identity = crate::mcp::load_identity(&path)?;
+        let networks: Vec<String> = sources.sources.iter().map(|c| c.to_string()).collect();
+        log::info!(
+            "fleet: unsigned records from {} that name {} are signed here with {}; workers submit under that id and are paid to it",
+            networks.join(", "),
+            identity.submitter_id(),
+            path.display()
+        );
+        Ok(self.with_fleet(sources, identity))
+    }
+
+    /// What the daemon's peer policy is, for the Network page: its name and
+    /// how many peers it allows.
+    pub fn with_peer_policy(mut self, policy: &str, allowed: Option<usize>) -> Serving {
+        self.peers_policy = Some((policy.to_string(), allowed));
+        self
+    }
+
+    /// The identity this node signs fleet records with, if it leads one.
+    pub fn fleet_signs_as(&self) -> Option<String> {
+        self.fleet.as_ref().map(|f| f.identity.submitter_id())
+    }
+
+    /// Sign a fleet member's record, or say why not.
+    ///
+    /// Only a commitment or claim whose `submitter` is this node's own
+    /// identity and which carries no signature is touched: from a fleet
+    /// network it is signed and returned with the id it was signed as; from
+    /// anywhere else it is refused with `403`, because queued it would only
+    /// fail at drain time where the sender never hears why. Every other
+    /// record passes through untouched -- a member's own nickname, a member's
+    /// own key, another node's key -- and meets the rules it always met.
+    fn fleet_sign(
+        &self,
+        kind: &str,
+        value: Value,
+        remote: Option<std::net::IpAddr>,
+    ) -> Result<(Value, Option<String>), (u16, String)> {
+        let Some(signer) = &self.fleet else {
+            return Ok((value, None));
+        };
+        let me = signer.identity.submitter_id();
+        let admitted = || remote.is_some_and(|ip| signer.sources.admits(ip));
+        let refused = |remote: Option<std::net::IpAddr>| {
+            let networks: Vec<String> = signer
+                .sources
+                .sources
+                .iter()
+                .map(|c| c.to_string())
+                .collect();
+            (
+                403,
+                format!(
+                    "this record names this node's identity {me} and carries no signature. Only a fleet member ({}) may hand such a record over for signing, and {} is not one. Submit under your own name, or sign it yourself",
+                    networks.join(", "),
+                    remote.map(|ip| ip.to_string()).unwrap_or_else(|| "an unknown address".into())
+                ),
+            )
+        };
+        match kind {
+            "commitment" => {
+                let commitment = Commitment::from_value(&value)
+                    .map_err(|e| (400, format!("record is malformed: {e}")))?;
+                if commitment.submitter != me || commitment.signature.is_some() {
+                    return Ok((value, None));
+                }
+                if !admitted() {
+                    return Err(refused(remote));
+                }
+                Ok((
+                    commitment.signed_with(&signer.identity).to_value(),
+                    Some(me),
+                ))
+            }
+            "claim" => {
+                let claim = Claim::from_value(&value)
+                    .map_err(|e| (400, format!("record is malformed: {e}")))?;
+                if claim.submitter != me || claim.signature.is_some() {
+                    return Ok((value, None));
+                }
+                if !admitted() {
+                    return Err(refused(remote));
+                }
+                Ok((claim.signed_with(&signer.identity).to_value(), Some(me)))
+            }
+            _ => Ok((value, None)),
         }
     }
 
@@ -655,6 +793,9 @@ pub fn serve_on(listener: TcpListener, serving: Serving) -> io::Result<()> {
 fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+    // Who is asking, as the socket knows it. Read by `/submit` alone, to tell
+    // a fleet member from a stranger; nothing else here is addressed.
+    let remote = stream.peer_addr().ok().map(|addr| addr.ip());
     let mut reader = BufReader::new(stream.try_clone()?);
     let request = match read_request(&mut reader) {
         Ok(request) => request,
@@ -695,7 +836,7 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             leases_of(stream, serving, &path["/leases/".len()..])
         }
         ("GET", path) if path == "/ui" || path.starts_with("/ui/") => ui_asset(stream, path),
-        ("POST", "/submit") => submit(stream, &mut reader, serving, &request),
+        ("POST", "/submit") => submit(stream, &mut reader, serving, &request, remote),
         ("POST", "/progress") => heartbeat(stream, &mut reader, serving, &request),
         ("POST", "/hosts") => host_register(stream, &mut reader, serving, &request),
         ("POST", "/lease") => lease_claim(stream, &mut reader, serving, &request),
@@ -1413,6 +1554,36 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                         Value::Bool(facts.accepts_submissions),
                     ),
                     ("runs_p2p", Value::Bool(facts.runs_p2p)),
+                    // The fleet this node leads and whom it peers with: two
+                    // declarations, like the roles above, and like them a
+                    // fact about this process's configuration and nothing a
+                    // reader can check against the log.
+                    (
+                        "fleet",
+                        match &serving.fleet {
+                            Some(signer) => Value::object([
+                                ("sources", signer.sources.to_value()),
+                                ("signs_as", Value::string(signer.identity.submitter_id())),
+                            ]),
+                            None => Value::Null,
+                        },
+                    ),
+                    (
+                        "peers_policy",
+                        match &serving.peers_policy {
+                            Some((policy, allowed)) => Value::object([
+                                ("policy", Value::string(policy.clone())),
+                                (
+                                    "allowed",
+                                    match allowed {
+                                        Some(n) => Value::Int(*n as i128),
+                                        None => Value::Null,
+                                    },
+                                ),
+                            ]),
+                            None => Value::Null,
+                        },
+                    ),
                 ]),
             ),
             ("peers", peers),
@@ -2576,6 +2747,7 @@ fn submit(
     reader: &mut BufReader<TcpStream>,
     serving: &Serving,
     request: &Request,
+    remote: Option<std::net::IpAddr>,
 ) -> io::Result<()> {
     let Some(spool) = &serving.spool else {
         return json_error(
@@ -2634,6 +2806,13 @@ fn submit(
         return json_error(stream, 400, &format!("record is malformed: {why}"));
     }
 
+    // A fleet leader signs its workers' records here, before the gate and the
+    // queue, so what is queued is exactly what will be admitted.
+    let (value, signed_as) = match serving.fleet_sign(&kind, value, remote) {
+        Ok(signed) => signed,
+        Err((status, why)) => return json_error(stream, status, &why),
+    };
+
     // Schema-gate it here as well as at drain time. Both implementations
     // interpret spec/*.json, so a record refused here is refused everywhere,
     // and telling the submitter now beats telling them after a queue delay.
@@ -2656,6 +2835,13 @@ fn submit(
             &Value::object([
                 ("queued", Value::string(id)),
                 ("kind", Value::string(kind)),
+                (
+                    "signed_as",
+                    match signed_as {
+                        Some(id) => Value::string(id),
+                        None => Value::Null,
+                    },
+                ),
                 (
                     "note",
                     Value::string(
@@ -4652,5 +4838,110 @@ mod tests {
         let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
             .with_roles(Roles::parse("relay").expect("roles"));
         serving.check_startup().expect("a known role starts");
+    }
+
+    /// A fleet leader signs what its workers hand it, and only that: an
+    /// unsigned record naming the leader from inside the fleet is queued
+    /// signed; the same record from outside is refused with 403 rather than
+    /// queued to fail at drain; a worker's own nickname and anybody's
+    /// already-signed record pass through untouched.
+    #[test]
+    fn a_fleet_leader_signs_its_workers_records_and_refuses_strangers() {
+        let dir = TempDir::new("fleet-signing");
+        let (log, objective_id) = orbit_search_log(&dir);
+        let identity = Identity::from_secret_bytes([7u8; 32]);
+        let me = identity.submitter_id();
+        let now = crate::time::format_iso8601_utc(crate::time::unix_seconds() as i64);
+        let commitment = |who: &str| {
+            Value::object([
+                ("type", Value::string("commitment")),
+                ("objective_id", Value::string(objective_id.clone())),
+                ("submitter", Value::string(who)),
+                (
+                    "hash",
+                    Value::string(
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+                    ),
+                ),
+                ("created_at", Value::string(now.clone())),
+            ])
+            .canonical_string()
+        };
+
+        // Inside the fleet: loopback is the test's own address.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+            .accepting_into(dir.path.join("queue"))
+            .with_fleet(Fleet::parse("loopback").unwrap(), identity.clone());
+        assert_eq!(serving.fleet_signs_as(), Some(me.clone()));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let (status, body) = ask_json(addr, "/submit?kind=commitment", &commitment(&me));
+        assert!(status.contains("202"), "{status} {body:?}");
+        assert_eq!(body.get("signed_as").unwrap().as_str(), Some(me.as_str()));
+        assert!(body.get("queued").unwrap().as_str().is_some());
+        // What was queued is the signed record, found by its content rather
+        // than by a file name this test has no business knowing.
+        let record = std::fs::read_dir(dir.path.join("queue"))
+            .expect("queue")
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .filter_map(|text| Value::from_json(&text).ok())
+            // The spool wraps each record as `{"kind", "record"}`.
+            .filter_map(|value| value.get("record").cloned())
+            .filter_map(|value| Commitment::from_value(&value).ok())
+            .find(|record| record.submitter == me)
+            .expect("the leader's commitment is in the queue");
+        assert!(record.signature.is_some(), "the leader signed it");
+        record.verify_signature().expect("the signature verifies");
+
+        // A worker's own name is left alone, and says so.
+        let (status, body) = ask_json(addr, "/submit?kind=commitment", &commitment("gpu-box-1"));
+        assert!(status.contains("202"), "{status}");
+        assert_eq!(body.get("signed_as").unwrap(), &Value::Null);
+
+        // Another key, unsigned, is not this node's to sign: queued as before,
+        // to meet the signature rule at drain time.
+        let other = Identity::from_secret_bytes([9u8; 32]).submitter_id();
+        let (status, body) = ask_json(addr, "/submit?kind=commitment", &commitment(&other));
+        assert!(status.contains("202"), "{status}");
+        assert_eq!(body.get("signed_as").unwrap(), &Value::Null);
+
+        // Outside the fleet: a fleet of a network this test is not on.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let outside = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+            .accepting_into(dir.path.join("queue-outside"))
+            .with_fleet(Fleet::parse("10.0.0.0/8").unwrap(), identity);
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let (status, body) = ask_json(outside, "/submit?kind=commitment", &commitment(&me));
+        assert!(status.contains("403"), "{status} {body:?}");
+        assert!(body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("fleet member"));
+        // The nickname path is unaffected by being outside.
+        let (status, _) = ask_json(outside, "/submit?kind=commitment", &commitment("gpu-box-1"));
+        assert!(status.contains("202"), "{status}");
+
+        // And a node that leads no fleet declares none.
+        let (_, network) = get_json(addr, "/network");
+        assert_eq!(
+            network
+                .get("node")
+                .unwrap()
+                .get("fleet")
+                .unwrap()
+                .get("signs_as")
+                .unwrap()
+                .as_str(),
+            Some(me.as_str())
+        );
     }
 }

@@ -177,6 +177,16 @@ otool -l "$APP/Contents/MacOS/Cairn" | grep -q '@executable_path/../Frameworks' 
     || fail "Cairn.app's binary does not look in Contents/Frameworks for Sparkle"
 plutil -extract SUFeedURL raw -o - "$plist" | grep -q '^https://' \
     || fail "Cairn.app has no https SUFeedURL"
+# Dictation and LAN discovery ask macOS for things it prompts about. The
+# prompt shows these strings, and a bundle without them is denied without one.
+for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription NSLocalNetworkUsageDescription; do
+    [ -n "$(plutil -extract "$key" raw -o - "$plist" 2>/dev/null)" ] \
+        || fail "Cairn.app's Info.plist has no $key"
+done
+# The microphone needs the audio-input entitlement under the hardened runtime,
+# and the entitlement is in the signature, so read it back off the bundle.
+codesign -d --entitlements :- "$APP" 2>/dev/null | grep -q 'com.apple.security.device.audio-input' \
+    || fail "Cairn.app is not entitled to the microphone; dictation would be refused"
 # Set by release.yml when the update key exists: the app must trust those
 # keys and no others, or every update it is offered is refused.
 if [ -n "${CAIRN_UPDATES_PUBLIC_KEY:-}" ]; then

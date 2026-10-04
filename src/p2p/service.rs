@@ -43,6 +43,10 @@ pub enum ServiceError {
     Transport(TransportError),
     Session(SessionError),
     UnknownPeer(PeerId),
+    /// The handshake named a peer this node's `CAIRN_PEERS` policy excludes.
+    /// Refused after authentication and before any record moves, so a
+    /// stranger learns that this node exists and nothing else.
+    NotAllowed(PeerId),
 }
 
 impl fmt::Display for ServiceError {
@@ -51,6 +55,12 @@ impl fmt::Display for ServiceError {
             ServiceError::Transport(e) => write!(f, "{e}"),
             ServiceError::Session(e) => write!(f, "{e}"),
             ServiceError::UnknownPeer(id) => write!(f, "unknown peer {:02x?}", &id[..4]),
+            ServiceError::NotAllowed(id) => write!(
+                f,
+                "peer {} is not in this node's allowlist ({}); refused after the handshake",
+                peer_id_hex(id),
+                crate::fleet::PEERS_ENV
+            ),
         }
     }
 }
@@ -85,6 +95,9 @@ pub enum SeedOutcome {
     /// node will not resolve itself: the lookup would leak the seed it is
     /// about to reach. List the seed by address to use it behind a proxy.
     Proxied,
+    /// The entry names a peer outside this node's allowlist (`CAIRN_PEERS`),
+    /// so it was not asked for anything.
+    Excluded,
 }
 
 /// Owns the local identity, the non-consensus address book, and the DHT view.
@@ -100,6 +113,11 @@ pub struct Service {
     /// dials are proxied: inbound accepts are for a public seed, which is not
     /// the censored party. Immutable after construction, so no lock.
     proxy: Proxy,
+    /// Whom this node will peer with at all. `None` is the open network;
+    /// `Some` is a fleet: every dial, key request and accepted session is
+    /// checked against it, and a peer outside it is refused the moment the
+    /// handshake has named it. Fixed at startup, like the proxy, so no lock.
+    allowed: Option<BTreeSet<PeerId>>,
     /// Whom this node can dial, and the public key needed to do it.
     ///
     /// Behind a `Mutex` for the same reason the directory is: a DHT round can
@@ -158,6 +176,7 @@ impl Service {
         Service {
             identity,
             proxy,
+            allowed: None,
             book: Mutex::new(AddressBook::new()),
             key_fetches: Mutex::new(BTreeMap::new()),
             peer_hints: Mutex::new(peers::Hints::new()),
@@ -170,6 +189,27 @@ impl Service {
     /// How outbound dials leave this node.
     pub fn proxy(&self) -> &Proxy {
         &self.proxy
+    }
+
+    /// Peer only with `peers`, from now on. Bootstrap peers added before this
+    /// call stay dialable only if they are in the set, so a daemon building
+    /// a `bootstrap` policy adds them to the set first.
+    pub fn restrict_peers(&mut self, peers: BTreeSet<PeerId>) {
+        self.allowed = Some(peers);
+    }
+
+    /// Whether this node will talk to `peer` at all. Always true on the
+    /// open network.
+    pub fn allows(&self, peer: &PeerId) -> bool {
+        match &self.allowed {
+            None => true,
+            Some(set) => set.contains(peer),
+        }
+    }
+
+    /// How many peers the allowlist names, or `None` on the open network.
+    pub fn allowed_peers(&self) -> Option<usize> {
+        self.allowed.as_ref().map(BTreeSet::len)
     }
 
     pub fn identity(&self) -> PeerId {
@@ -296,6 +336,15 @@ impl Service {
     ///
     /// [`DhtMessage::GetKey`]: super::dht::DhtMessage::GetKey
     pub fn peers_for(&self, needs: &BTreeSet<String>, fanout: usize) -> Vec<Endpoint> {
+        let mut chosen = self.peers_for_unfiltered(needs, fanout);
+        // After selection rather than inside it, so the allowlist is one
+        // rule in one place: a candidate the directory, a hint or the book
+        // produced is dropped here if this node will not talk to it.
+        chosen.retain(|endpoint| self.allows(&endpoint.peer.id()));
+        chosen
+    }
+
+    fn peers_for_unfiltered(&self, needs: &BTreeSet<String>, fanout: usize) -> Vec<Endpoint> {
         if needs.is_empty() {
             return self.sample_peers(fanout);
         }
@@ -571,7 +620,7 @@ impl Service {
         let mut taken = 0;
         let mut keyless = Vec::new();
         for (peer, addr) in responder.poll(limit) {
-            if peer == self.identity.id() {
+            if peer == self.identity.id() || !self.allows(&peer) {
                 continue;
             }
             self.note_contact(peer, addr);
@@ -609,7 +658,9 @@ impl Service {
             if asked >= limit {
                 break;
             }
-            if *peer == self.identity.id() || self.with_book(|book| !book.for_peer(peer).is_empty())
+            if *peer == self.identity.id()
+                || !self.allows(peer)
+                || self.with_book(|book| !book.for_peer(peer).is_empty())
             {
                 continue;
             }
@@ -717,6 +768,9 @@ impl Service {
         if seed.transport == self.identity.id() {
             return SeedOutcome::Ourselves;
         }
+        if !self.allows(&seed.transport) {
+            return SeedOutcome::Excluded;
+        }
         if self.with_book(|book| !book.for_peer(&seed.transport).is_empty()) {
             return SeedOutcome::Dialable;
         }
@@ -822,7 +876,19 @@ impl Service {
     /// front of. See [`AddressBook::sample`] for what this does *not* defend
     /// against — a forged majority of the book itself.
     pub fn sample_peers(&self, fanout: usize) -> Vec<Endpoint> {
-        self.with_book(|book| book.sample(fanout, &mut OsRng))
+        match &self.allowed {
+            None => self.with_book(|book| book.sample(fanout, &mut OsRng)),
+            // A fleet is small and named, so there is nothing to sample: the
+            // allowed peers this node holds a key for, in order, up to the
+            // fanout. A stranger in the book is never drawn.
+            Some(allowed) => self.with_book(|book| {
+                allowed
+                    .iter()
+                    .filter_map(|peer| book.for_peer(peer).first().cloned())
+                    .take(fanout)
+                    .collect()
+            }),
+        }
     }
 
     /// Dial one endpoint and reconcile records, then verifier code, then the
@@ -968,6 +1034,9 @@ impl Service {
     ) -> Result<PeerId, ServiceError> {
         let mut connection = inbound.complete(&self.identity)?;
         let remote = connection.remote();
+        if !self.allows(&remote) {
+            return Err(ServiceError::NotAllowed(remote));
+        }
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
         self.exchange_peer_hints_round(&mut connection, node)?;
@@ -1006,6 +1075,9 @@ impl Service {
     {
         let mut connection = inbound.complete(&self.identity)?;
         let remote = connection.remote();
+        if !self.allows(&remote) {
+            return Err(ServiceError::NotAllowed(remote));
+        }
         let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
         self.exchange_peer_hints_round(&mut connection, node)?;
