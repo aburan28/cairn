@@ -121,13 +121,13 @@ struct StatusFooter: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Divider()
-            dot(model.isLive ? .green : (model.isBuilding ? .orange : .gray),
+            dot(model.isLive ? .green : (model.isBuilding ? .gray : .gray),
                 model.foreignPid != nil ? "researcher running elsewhere"
                     : (model.isRunning ? "researcher running" : (model.isBuilding ? "building" : "researcher stopped")))
             dot(model.nodeReachable ? .green : .gray,
                 model.nodeReachable ? "node on \(model.httpAddress)" : "no node on \(model.httpAddress)")
             if let s = model.mySpendable {
-                dot(.teal, "\(s.formatted()) spendable")
+                dot(.green, "\(s.formatted()) spendable")
             }
         }
         .padding(.horizontal, 12).padding(.bottom, 10)
@@ -198,8 +198,8 @@ extension ObjectiveRow {
     var color: Color {
         switch status {
         case "solved": return .green
-        case "unreachable": return .orange
-        case "committed": return .blue
+        case "unreachable": return .gray
+        case "committed": return .green
         default: return .secondary
         }
     }

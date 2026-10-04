@@ -62,7 +62,7 @@ struct CatalogView: View {
                                     items.forEach { model.selectedObjectives.insert($0.path) }
                                 }
                             }
-                            .buttonStyle(.plain).foregroundStyle(.blue).font(.caption)
+                            .buttonStyle(.plain).foregroundStyle(.green).font(.caption)
                             .disabled(model.isLive)
                         }
                     }
@@ -125,7 +125,7 @@ struct CatalogRow: View {
                 .font(.caption).foregroundStyle(.green)
         case "decline":
             Label("\(p.strategy ?? "") declines: \(p.reason ?? "")", systemImage: "hand.raised")
-                .font(.caption).foregroundStyle(.orange).lineLimit(2).help(p.reason ?? "")
+                .font(.caption).foregroundStyle(.gray).lineLimit(2).help(p.reason ?? "")
         case "none":
             Label("no strategy in the repertoire", systemImage: "questionmark.circle")
                 .font(.caption).foregroundStyle(.secondary)

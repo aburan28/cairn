@@ -17,14 +17,13 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-type Tone = "neutral" | "accent" | "warn" | "bad" | "info";
+type Tone = "neutral" | "accent" | "warn" | "bad";
 
 const TONE: Record<Tone, string> = {
   neutral: "badge",
   accent: "badge badge-accent",
   warn: "badge badge-warn",
   bad: "badge badge-bad",
-  info: "badge badge-info",
 };
 
 export function Badge({
@@ -103,7 +102,7 @@ export function Stat({
   value: string;
   from?: string;
   hint?: string;
-  tone?: "neutral" | "warn" | "bad";
+  tone?: "neutral" | "accent" | "warn" | "bad";
 }) {
   return (
     <div className={`tile tile-${tone} flex-1`}>

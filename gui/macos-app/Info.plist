@@ -43,16 +43,17 @@
 	     multicast beacon and the node looks isolated for no visible reason. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Cairn finds other nodes on this network and, when you allow inbound connections, answers their dials.</string>
-	<!-- Dictation in New Challenge… (Sources/Cairn/Dictation.swift): the
+	<!-- Dictation in the challenge form and New Challenge sheet
+	     (Sources/Cairn/PageDictation.swift and Dictation.swift): the
 	     microphone, and speech recognition on this Mac where macOS offers it.
 	     Asked the first time the microphone button is pressed, never before.
 	     The signed build also carries the audio-input entitlement
 	     (packaging/macos/Cairn.entitlements), which the hardened runtime
 	     requires for the microphone at all. -->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Cairn listens while you dictate a challenge description in New Challenge, and at no other time.</string>
+	<string>Cairn records your voice only while you dictate a challenge description.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Cairn turns what you dictate into the text of a challenge description. Recognition runs on this Mac when macOS supports it for your language.</string>
+	<string>Cairn turns speech into editable challenge text. Apple may process speech when on-device recognition is unavailable.</string>
 	<!-- A data folder or bootstrap file chosen outside the app's own folder.
 	     macOS asks before the node reads these places; the reason it shows is
 	     one of these, and a bundle without them is refused without a word. -->

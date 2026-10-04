@@ -918,7 +918,7 @@ mod tests {
     /// build them: `shown/bin/<name>`, inside a directory the jail is to show,
     /// is an absolute link to `alternatives/<name>`, outside everything it
     /// shows, which is an absolute link to `file`. Returns `(shown, program)`.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn alternatives(base: &Path, name: &str, file: &Path) -> (PathBuf, PathBuf) {
         let shown = base.join("shown");
         std::fs::create_dir_all(shown.join("bin")).expect("shown/bin");

@@ -439,7 +439,7 @@ struct NewChallengeSheet: View {
                 HStack(alignment: .firstTextBaseline) {
                     Label(report.leanProblem ?? "No Lean toolchain was found.", systemImage: "exclamationmark.triangle")
                         .font(.callout)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.gray)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     Button("Install Lean…") { installingLean = true }.font(.callout)
@@ -663,7 +663,7 @@ struct NewChallengeSheet: View {
             switch tone {
             case .good: Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.green)
             case .bad: Image(systemName: "xmark.octagon.fill").foregroundStyle(Color.red)
-            case .warn: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.orange)
+            case .warn: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.gray)
             }
         }
         .font(.callout)
@@ -713,7 +713,7 @@ struct NewChallengeSheet: View {
         } else if let problem = composer.config.problem {
             Label(problem, systemImage: "exclamationmark.triangle")
                 .font(.callout)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.gray)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

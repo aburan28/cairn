@@ -153,7 +153,7 @@ private struct TaskRow: View {
                 if !available {
                     Text("Not included in this build of Cairn.")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.gray)
                 } else if let payout {
                     Text(payout)
                         .font(.caption)

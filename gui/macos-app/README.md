@@ -175,7 +175,10 @@ pays for is a proof the Lean kernel accepts: the node's `lean` verifier
 (`docs/verification.md`, tier V1), with no Python checker and no judgment
 call anywhere in the loop.
 
-The reader's **Post a challenge** page leads to the same place. In this
+The reader's **Post a challenge** page leads to the same place. Its microphone
+button requires on-device recognition. The New Challenge sheet uses on-device
+recognition where available and Apple's recognizer otherwise. Both leave the
+description editable before drafting or posting. In this
 window the page is one text box: **Draft challenge** hands the description to
 the sheet through a script message handler (`PageBridge` in `WebView.swift`,
 `ui/lib/draft.ts` on the page's side), and the sheet starts drafting at once

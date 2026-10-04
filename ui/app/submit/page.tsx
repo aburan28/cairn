@@ -29,8 +29,8 @@ import {
 } from "@/lib/wallet";
 import { type Bridge, appBridge, briefProblem, handOff } from "@/lib/draft";
 import { NODE_URL } from "@/lib/objectives";
-import { } from "@/lib/site";
 import { Badge, Card, CopyButton, Hash, Note, PageHeader, SectionHeading } from "@/components/ui";
+import { VoiceInput } from "@/components/VoiceInput";
 
 /**
  * Post a challenge, funded by a key a wallet holds.
@@ -320,6 +320,13 @@ export default function Page() {
             }}
             placeholder="For example: find a 16-input sorting network with fewer than 60 comparators. Pay whoever finds one."
           />
+          <VoiceInput
+            bridge={bridge}
+            onText={(text) => {
+              setBrief((current) => [current.trim(), text].filter(Boolean).join(" "));
+              setHandError(null);
+            }}
+          />
           <p className="hint">
             A model you have a key for writes the statement and a Lean 4 theorem.
             Cairn compiles the theorem, checks that the verifier refuses a hole,
@@ -484,8 +491,7 @@ export default function Page() {
                         Open this page in <b>Phantom&rsquo;s in-app browser</b>{" "}
                         — Browse, then this URL — which is the one place on iOS
                         that `signMessage` exists. The native reader in{" "}
-                        <span className="mono">gui/ios/</span>{" "}
-                        reads a node; it does not sign.{" "}
+                        native reader reads a node; it does not sign.{" "}
                       </>
                     )}{" "}
                     Phantom, Solflare and Backpack all work on a desktop. Or fund
@@ -567,6 +573,17 @@ export default function Page() {
                   value={draft.statement}
                   onChange={(event) => set("statement", event.target.value)}
                   placeholder="What must a solver produce, and what counts as better?"
+                />
+                <VoiceInput
+                  bridge={bridge}
+                  onText={(text) => {
+                    setDraft((current) => ({
+                      ...current,
+                      statement: [current.statement.trim(), text].filter(Boolean).join(" "),
+                    }));
+                    setTouched((current) => ({ ...current, statement: true }));
+                    invalidate();
+                  }}
                 />
                 <p className="hint">
                   Prose, and <b>the network treats it as untrusted</b> — every page
@@ -994,8 +1011,7 @@ export default function Page() {
                   />
                   <p className="hint">
                     The smallest move that pays. Set it deliberately: it is currently
-                    the only thing bounding how finely a span can be sliced.{" "}
-                    <span className="mono">docs/threat-model.md</span>
+                    the only thing bounding how finely a span can be sliced.
                   </p>
                   <Problem of="minImprovement" found={found} touched={touched} />
                 </div>

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { REPO } from "@/lib/site";
 
 export const metadata: Metadata = {
   title: "how it works",
@@ -44,33 +43,14 @@ export default function Page() {
 
       <h2>an objective is a funded question with its checker pinned to it</h2>
       <p className="lede">
-        This is{" "}
-        <code>examples/capset/objective.json</code>{" "}
-        verbatim — every value real, so it posts as it stands:
+        A funder states the problem, chooses how answers will be checked, and
+        sets a bounty. The checker's identity is pinned when the challenge is
+        posted, so every contributor is measured against the same rules.
       </p>
-      <div className="panel">
-        <pre>{`{
-  "goal": "GOAL-capset-lower-bounds",
-  "statement": "Exhibit a cap set in F_3^4 of size at least 20 …",
-  "verifier": {
-    "kind": "evaluator",
-    "evaluator": "examples/capset/evaluators/cap_set.py",
-    "evaluator_sha256": "05ad14fa…0aa271c4",
-    "entrypoint": "score",
-    "threshold": 20,
-    "direction": "maximize"
-  },
-  "reward": 250000,
-  "funder": "treasury",
-  "created_at": "2026-07-28T00:00:00+00:00"
-}`}</pre>
-      </div>
       <p className="lede">
-        An objective&apos;s id <b>is</b> the hash of that whole record, verifier
-        included. So there is no operation that changes the rules of a funded
-        bounty: editing the evaluator produces a <i>different</i> objective, and
-        the claims against the original stop resolving. Mid-bounty rule changes
-        are not guarded against here — they are unrepresentable.
+        A challenge's identity covers its full contents, including the checker.
+        Changing the checker creates a different challenge. Work submitted
+        against the original keeps its original rules.
       </p>
 
       <h2>five verifiers, five trust assumptions</h2>
@@ -136,8 +116,7 @@ export default function Page() {
         bubblewrap on Linux, a seatbelt profile on macOS — with its hash checked
         first: no network, writes confined to a scratch directory, a wall-clock
         deadline. That is not a VM boundary, and{" "}
-        <code>docs/verification.md</code> names the
-        gaps that remain. The <code>lean</code> verifier rejects{" "}
+        the sandbox still has limits. The <code>lean</code> verifier rejects{" "}
         <code>sorry</code>, <code>admit</code>, new <code>axiom</code>s and{" "}
         <code>native_decide</code> before Lean ever runs, because each produces a
         file the kernel accepts while proving nothing.
@@ -150,8 +129,7 @@ export default function Page() {
       <ol className="chain">
         <Step n="post" first>
           A funder appends the objective: the question, the bounty, and the
-          verifier pinned by hash. <code>cairn scaffold</code> writes the files a
-          new one starts from.
+          verifier pinned by hash.
         </Step>
         <Step n="score">
           <code>score_candidate</code> runs the objective&apos;s pinned verifier
@@ -191,17 +169,6 @@ export default function Page() {
           result you beat keeps earning from the work built on top of it.
         </Step>
       </ol>
-      <div className="panel">
-        <b>one round, one command</b>
-        <pre>{`git clone ${REPO}
-cd cairn
-./scripts/try-demo.sh`}</pre>
-        <div className="meta dim">
-          Posts an objective, submits against it, waits out the epoch between
-          commit and reveal, and audits the result. <code>cairn try</code> is the
-          same three steps for an objective of your own.
-        </div>
-      </div>
 
       <h2>publishing beats hoarding, and that is arithmetic</h2>
       <p className="lede">
@@ -219,38 +186,28 @@ cd cairn
         <code>supersedes</code>, <code>retracts</code> — and settlement, the
         frontier and attribution read <code>cites</code> and none of them read
         those. If declaring &ldquo;X is wrong&rdquo; could shift a payout,
-        refutation would be a way to bill X. Relations feed a derived view
-        instead; see <code>docs/knowledge.md</code>.
+        refutation would be a way to bill X. Relations feed a derived view instead.
       </p>
 
       <h2>why you need not trust whoever served you this page</h2>
       <p className="lede">
         Every settled result is re-derivable from the log alone. Not &ldquo;by
-        anyone running my code&rdquo;, either: a second implementation in{" "}
-        <code>reference/rust/</code> shares no code
+        anyone running my code&rdquo;, either: a second implementation shares no code
         with the primary one and re-derives the same ids and the same Merkle
         roots, and <b>448 frozen conformance vectors</b> — produced by a Python
         implementation that no longer exists — pin the byte encoding both must
         agree on.
       </p>
       <div className="panel">
-        <b>each implementation audits the other&apos;s log</b>
-        <pre>{`$ ./scripts/interop.sh
-
-== the reference implementation audits the primary log
-log verified: chain intact, every settled claim re-verified
-
-== the primary implementation audits the reference log
-log verified: chain intact, every settled claim re-verified
-
-== Merkle roots agree across implementations
-  sha256:f0398c1a…b331a168  (identical in both)`}</pre>
+        <b>Independent checks</b>
+        <p>Each implementation audits the other's log and arrives at the same
+        settled claims and Merkle roots.</p>
       </div>
       <p className="lede">
         Checking one entry does not need the log at all. <code>cairn prove</code>{" "}
         emits a Merkle inclusion proof and <code>cairn check</code> verifies it
-        against a signed checkpoint, opening no log — five hashes for the log in{" "}
-        <code>launch/</code>, fifteen for a log of twenty
+        against a signed checkpoint, opening no log — five hashes for a small log,
+        fifteen for a log of twenty
         thousand. That is what a light client runs.
       </p>
 
@@ -287,15 +244,8 @@ log verified: chain intact, every settled claim re-verified
         </li>
       </ul>
       <p className="lede">
-        The full accounting, attack by attack and marked{" "}
-        <i>handled / partial / not handled / unsolvable</i>, is in{" "}
-        <code>docs/threat-model.md</code>.
-      </p>
-
-      <p className="lede">
-        Next: <Link href="/docs">the design notes</Link>, or the{" "}
-        <Link href="/objectives">objectives</Link> a node is currently paying
-        for.
+        Next: explore the <Link href="/network">network</Link> or the{" "}
+        <Link href="/objectives">challenges</Link> a node is currently paying for.
       </p>
     </div>
   );

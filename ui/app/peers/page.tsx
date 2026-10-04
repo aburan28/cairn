@@ -83,7 +83,7 @@ export default function Page() {
     <>
       <PageHeader
         title="Peers"
-        subtitle="Who has announced that they answer. An announcement is not a connection: read this as who this node could try, not who it is talking to."
+        subtitle="Addresses announced in this node's log. For active connections and node types, open Network."
         actions={
           <NodePicker
             value={base}
@@ -135,24 +135,12 @@ export default function Page() {
         )}
 
         {peers && peers.length === 0 && (
-          <>
-            <EmptyState title="This node's log names no peers." />
-            {/* The likeliest reason by far, and worth saying, because an empty
-                list reads as a broken page. Nothing writes a peer record
-                automatically: the daemon syncs them when they arrive but never
-                announces itself, so a log only has them if somebody ran the
-                command. */}
-            <Note title="that is the normal state, not a fault">
-              No peer record is written automatically — the daemon reconciles them when
-              they arrive but never announces itself. A node appears in an address book
-              only once somebody runs{" "}
-              <code className="mono">
-                cairn peer --identity &lt;file&gt; --transport &lt;peer-id&gt; --addr
-                &lt;host:port&gt;
-              </code>
-              .
-            </Note>
-          </>
+          <EmptyState title="No peer announcements in this log">
+            That can be normal. A peer can reach this node without an announcement here.{" "}
+            <Link href="/network" className="text-accent hover:underline">
+              View live topology and node roles →
+            </Link>
+          </EmptyState>
         )}
 
         {peers && peers.length > 0 && (
