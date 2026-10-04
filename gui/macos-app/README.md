@@ -41,10 +41,19 @@ open --env CAIRN_BINARY="$PWD/bin/cairn" gui/macos-app/build/Cairn.app
 
 ```
 CAIRN_SANDBOX_CPUS=<cores> CAIRN_SANDBOX_MEMORY_MB=<MiB> \
+[CAIRN_LEAN=<prefix>/bin/lean CAIRN_LEAN_ROOT=<prefix>] \
 cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
       [--bootstrap <file> ...] \
       run --listen <p2p-host>:<p2p> --serve 127.0.0.1:<http>
 ```
+
+The node's `PATH` is `~/.elan/bin`, `/opt/homebrew/bin`, `/usr/local/bin`
+and the system's, so the verifiers find `lean` and `python3` where people
+install them. When a Lean toolchain is found, the two `CAIRN_LEAN` variables
+name its real binary and prefix: elan's `~/.elan/bin/lean` is a proxy that
+finds the toolchain through `$HOME`, which the node's jail scrubs, and a
+toolchain under the home directory is one the jail allow-lists only on an
+explicit grant ([Verifiers](#verifiers) below).
 
 - **Data** lives in `~/Library/Application Support/Cairn` unless Settings
   names another folder, because an app has no directory a person started it
@@ -77,9 +86,10 @@ cairn --data-dir <folder> --root <folder> [--max-size <n>GB] \
 - **Links** to anywhere but the node open in your browser.
 
 The **Node** menu has Open in Browser, Restart / Reconnect, **New
-Challenge…** (⇧⌘N, [below](#new-challenge)), **Tasks…**,
-**Secrets…**, Peers…, **Test Connectivity…** (⇧⌘K, below), Copy Peer Id,
-Show Data Folder and Show Node Log.
+Challenge…** (⇧⌘N, [below](#new-challenge)), **Tasks…**, **Connect an
+Agent…** (⇧⌘A, [below](#connect-an-agent)), **Secrets…**, Peers…, **Test
+Connectivity…** (⇧⌘K, below), Copy Peer Id, Show Data Folder and Show Node
+Log.
 **Tasks…** posts a curated objective (including ECC2K-130 orbit piecework)
 into this node's log in one click, and its **Show progress…** opens the
 reader's Objectives page, where every divided search links to its
@@ -159,7 +169,10 @@ has the release side and the one secret it needs.
 
 **Node → New Challenge…**, or the sparkles in the toolbar: describe a problem
 in plain words, set a reward, and post a challenge without meeting the
-objective schema.
+objective schema. **A drafted challenge is a Lean 4 theorem**, and what it
+pays for is a proof the Lean kernel accepts: the node's `lean` verifier
+(`docs/verification.md`, tier V1), with no Python checker and no judgment
+call anywhere in the loop.
 
 The reader's **Post a challenge** page leads to the same place. In this
 window the page is one text box: **Draft challenge** hands the description to
@@ -171,34 +184,71 @@ or a wallet signature. The handler answers only the top frame of the node
 this app runs, so attach mode refuses it and says why on the page.
 
 1. A model you have a key for drafts the parts that need judgment: the
-   statement solvers read, the answer's shape, a Python checker, a correct
-   answer when it knows one, and a plausible wrong one.
-2. The app adds the parts that need none. It writes the checker under the
-   node's data folder (`challenges/<goal>-<hash>/checker.py`), pins it by its
-   SHA-256, caps it at 60 seconds, and writes `objective.json` beside it.
-3. It **tests the checker through the node's own verifier**, in the same
-   jail settlement uses. It posts the draft into a throwaway log and runs
-   `cairn propose --dry-run` on both answers; the real log is never touched.
-   **Post Challenge** stays disabled until the wrong answer is rejected and
-   the right one, if there is one, accepted. The review shows both verdicts
-   and the checker's code, because that code decides who gets paid.
+   statement solvers read, the **theorem** as one Lean 4 declaration header
+   (`theorem name (x : T) : P`, no proof), a **preamble** of definitions and
+   fully proved lemmas when the theorem needs them, a proof when it is sure
+   of one (usually it is not, and that is normal), how long the kernel may
+   take on one proof, and a note on how it formalised the problem. Core Lean
+   and `Std` only: the verifier runs plain `lean` on one file with no project,
+   so there is no Mathlib.
+2. The app adds the parts that need none. It writes `objective.json` under
+   the node's data folder (`challenges/<goal>-<hash>/`) with the verifier
+   `{"kind": "lean", "statement": <theorem>, "preamble": …, "timeout_seconds": …}`
+   -- the shape of `examples/lean/objective.json` -- and `Challenge.lean`
+   beside it, the theorem with a hole, for a person to open in a Lean editor.
+   The theorem itself is the pin: the verifier appends the submitted proof to
+   it, so a solver cannot prove something easier.
+3. It **tests the theorem** three ways before anything is posted. Through the
+   node's own verifier, in the same jail settlement uses, it posts the draft
+   into a throwaway log and runs `cairn propose --dry-run`: a proof that is
+   only a hole (`:= by sorry`) must come back `reject`, and the model's own
+   proof, when it wrote one, must come back `accept` from the kernel. And
+   with the Lean on this Mac it compiles the preamble and theorem with the
+   hole, because a theorem that does not elaborate is a challenge nobody can
+   ever win, and the node cannot make that check (its screen refuses the hole
+   before Lean runs). The real log is never touched. **Post Challenge** stays
+   disabled until all three pass; the review shows each verdict, the
+   theorem, the preamble and the model's proof, because the theorem decides
+   who gets paid. The five tokens the verifier refuses -- `sorry`, `admit`,
+   `axiom`, `@[implemented_by]`, `native_decide` -- are screened in the
+   model's preamble and theorem too, in the verifier's words, since a hole
+   or an assumption there would pay for nothing.
 4. **Redraft** sends the earlier attempt back with whatever failed and
    whatever you typed in *What should change?*.
 
-The statement, goal, reward and funder can be edited in review; the checker
-cannot, so what was tested is what is posted. The funder is a name shown on
-the bounty, `treasury` by default, unsigned.
+The statement, goal, reward and funder can be edited in review; the theorem
+and preamble cannot, so what was tested is what is posted. The funder is a
+name shown on the bounty, `treasury` by default, unsigned.
 
-**Keys.** The first time, the sheet asks for one inline; **Settings → AI**
-chooses the provider and model, tests the key, and removes it.
+**Progress.** The reply streams in, so while the model works the sheet shows
+a checklist of the stages (reaching the provider, the model writing, reading
+the draft, writing the files, posting into the throwaway log, refusing the
+hole, compiling the theorem, checking the proof), the one under way, how many
+characters the model has written and reasoned so far, the last stretch of
+what it is writing, and the elapsed time. Every number is measured; the
+bar's advance within the model's stage is an estimate against a typical
+draft and says so. Streaming is also why a slow model no longer ends in "The
+network connection was lost": bytes keep moving, so nothing between this Mac
+and the provider sees an idle connection to drop.
 
-**Models.** Once a key is saved, Settings asks the provider what it serves
-(`GET /models`, with the key, so an account sees its own deployments) and
-lists the answer in a menu beside the model field. Typing narrows the menu.
-A model the provider does not list -- a default that has been renamed, or a
-typo -- is said so on the spot, with the nearest served id offered as a
-one-click fix, rather than failing when a draft is first asked for. The
-field still takes any id, for a model the list is behind on.
+**Keys and models.** The first time, the sheet asks for a key inline. The
+provider and model are chosen **in the sheet**, from a menu of what the
+provider serves this key (`GET /models`, with the key, so an account sees its
+own deployments); the same picker is in **Settings → AI**, where the key is
+tested and removed. Typing narrows the menu. A model the provider does not
+list -- a default that has been renamed, or a typo -- is said so on the spot,
+with the nearest served id offered as a one-click fix, rather than failing
+when a draft is first asked for. The field still takes any id, for a model
+the list is behind on.
+
+**Lean.** The sheet says whether a Lean toolchain was found where the node
+looks, and offers **Install Lean…** when none is: Lean's own installer,
+elan, run as the command it shows (`curl … elan-init.sh | sh -s -- -y
+--default-toolchain stable`), into `~/.elan` for your user and with no
+administrator password, its output shown as it runs. Homebrew's `brew install
+lean` works too. Without a toolchain a Lean challenge cannot be posted from
+this Mac, since the theorem cannot be compiled first, and the node would
+answer every proof with `unavailable`.
 
 | provider | default model | key saved as |
 |---|---|---|
@@ -220,6 +270,36 @@ the request opts into server-side refusal fallbacks (`fallbacks: "default"`).
 What this does and does not protect is in
 [docs/threat-model.md](../../docs/threat-model.md#agents-as-authors).
 
+## Connect an agent
+
+**Node → Connect an Agent…** (⇧⌘A), or **Agent** in the toolbar: the MCP
+stanza that points Claude Code, Codex or OpenCode at cairn, with this Mac's
+real paths and this window's settings in it, and a copy button. The shapes
+are the ones `scripts/mcp-config.sh` writes and
+[docs/agents.md](../../docs/agents.md#wiring) shows, so nothing here drifts
+from the flags the server takes.
+
+Two arrangements, because a log has one writer:
+
+- **The agent runs this node.** The client launches `cairn run` on this
+  node's data folder, with the CPU and memory limits from Settings in its
+  environment, and becomes the node's supervisor: one process owns the log,
+  syncs with peers, serves the reader on `127.0.0.1:8080` and answers the
+  agent over MCP, so what the agent does reaches the network live. **Hand
+  the Node to the Agent** stops this app's node and switches the window to
+  attach mode on that reader URL; the page comes back once the client has
+  started the node. Settings → Window switches back.
+- **A log of its own, offline.** The client launches `cairn mcp` on
+  `<data folder>/agents/<client>.jsonl`, beside the node this app keeps
+  running. Nothing it writes reaches peers while the client runs, and it
+  sees only objectives in that log.
+
+**Create Identity** runs `cairn identity --out <data folder>/agent.identity.json`;
+the stanza then names it (`--mcp-identity`, or `--identity`), so the agent's
+submissions are signed and its public key is the submitter name nobody else
+can claim. For Claude Code the sheet also shows the `claude mcp add` command
+that writes the stanza itself.
+
 ## Settings
 
 ⌘, or the gear in the toolbar. How much of this Mac the node's work may take,
@@ -235,6 +315,7 @@ objective's pinned checker, one at a time, in a jail.
 | Bootstrap files | none | `--bootstrap <file>` (repeatable) |
 | Data folder | `~/Library/Application Support/Cairn` | `--data-dir` and `--root` |
 | Storage limit | off | `--max-size <n>GB` |
+| Verifiers | — | `PATH`, and `CAIRN_LEAN` / `CAIRN_LEAN_ROOT` when a Lean toolchain is found (below) |
 | AI provider, model and key | Claude, `claude-opus-5-5`, no key | — (the app's own; see [New challenge](#new-challenge)) |
 
 The app enforces none of these itself. Each is a setting any `cairn run`
@@ -262,6 +343,20 @@ exactly how each one works. In short:
 - **GPU**: there is no setting. The node does not use the graphics
   processor, and macOS offers no way to cap one process's use of it. A
   verifier paused for CPU cannot submit GPU work while it is paused either.
+- **Verifiers**: what the node can check, found on the `PATH` the node is
+  given -- Lean 4 (version and the toolchain's real binary), Python 3 (with a
+  warning for a pyenv/asdf shim, which the jail cannot follow), and the
+  sandbox (`sandbox-exec`) -- beside what the running node itself reports
+  from `GET /verifiers`: the kinds it can serve and why not, when it cannot.
+  **Check Again** looks again; **Install Lean…** runs elan as in
+  [New challenge](#new-challenge). An elan toolchain lives under `~/.elan`,
+  and the node's jail never allow-lists a runtime root under the home
+  directory on its own, so the app hands the node `CAIRN_LEAN` (the
+  toolchain's own `bin/lean`, not elan's proxy, which needs the `$HOME` the
+  jail scrubs) and `CAIRN_LEAN_ROOT` (its prefix, an explicit grant of one
+  directory). Both show in the section. The node compiles each objective's
+  statement with a hole before judging any proof, so a toolchain the jail
+  cannot run comes back `unavailable`, never as a rejected proof.
 
 A change reaches a running node when it restarts. Settings says when the
 running node is still on its old settings, with a Restart Node button.

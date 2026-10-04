@@ -821,6 +821,13 @@ pub fn run(config: Config) -> Result<(), String> {
     let servable = node.publish_local_code();
     let missing = node.missing_code().len();
     log::info!("verifier code: {servable} servable, {missing} unmet");
+    // The toolchains behind the kinds, as `GET /verifiers` reports them, so
+    // a node that will answer `unavailable` to every Lean proof says so in
+    // its first lines rather than at the first claim.
+    log::info!(
+        "verifiers: {}",
+        describe_readiness(&node.registry().readiness())
+    );
 
     let registry = node.registry().clone();
     let state = Arc::new(Mutex::new(State {
@@ -1264,6 +1271,36 @@ fn hold_under_cap(store: &crate::store::Store) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// One line from [`VerifierRegistry::readiness`] for the startup log:
+/// `lean at /path (Lean (version 4.x)), python3 at /path, sandbox sandbox-exec,
+/// unservable: lean`.
+fn describe_readiness(report: &Value) -> String {
+    let tool = |name: &str| -> String {
+        let row = report.get("toolchains").and_then(|t| t.get(name));
+        match row.and_then(|r| r.get("path")).and_then(Value::as_str) {
+            Some(path) => match row.and_then(|r| r.get("version")).and_then(Value::as_str) {
+                Some(version) => format!("{name} at {path} ({version})"),
+                None => format!("{name} at {path}"),
+            },
+            None => format!("{name} missing"),
+        }
+    };
+    let sandbox = report
+        .get("sandbox")
+        .and_then(|s| s.get("mechanism"))
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let unservable: Vec<&str> = match report.get("unservable") {
+        Some(Value::Object(fields)) => fields.keys().map(String::as_str).collect(),
+        _ => Vec::new(),
+    };
+    let mut line = format!("{}, {}, sandbox {sandbox}", tool("lean"), tool("python3"));
+    if !unservable.is_empty() {
+        line.push_str(&format!("; unservable: {}", unservable.join(", ")));
+    }
+    line
 }
 
 #[cfg(test)]

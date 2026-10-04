@@ -174,6 +174,14 @@ Note that the client spawns its own copy of the server, so do not also run
 `make mcp` against the same log -- both take the ledger's exclusive lock and
 whichever starts second refuses.
 
+On a Mac running Cairn.app, **Node → Connect an Agent…** (⇧⌘A) shows these
+stanzas with that Mac's real `cairn` path, data folder and resource limits
+filled in, for either arrangement below (the agent's client supervising
+`cairn run` on the app's node, with the app attached to its reader; or a log
+of the agent's own), with a copy button and an identity the agent can sign
+with. [gui/macos-app/README.md](../gui/macos-app/README.md#connect-an-agent)
+has the details.
+
 The stanzas below are the same thing by hand. The server takes the same
 `--log` and `--root` as the CLI — as global flags before `mcp`, or after it;
 both spellings mean the same thing. Use absolute paths: agents launch

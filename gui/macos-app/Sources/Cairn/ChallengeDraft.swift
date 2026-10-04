@@ -2,19 +2,75 @@ import Foundation
 
 /// A challenge as a model drafted it from a person's description: the parts
 /// of an objective that need judgment, before this app adds the parts that
-/// need none (the pin, the timestamp, the record's shape).
+/// need none (the timestamp, the record's shape, the verifier's fixed
+/// fields).
+///
+/// A drafted challenge is a **Lean 4 theorem**. What is paid for is a proof
+/// the Lean kernel accepts, and nothing else: no Python checker, no judgment
+/// call, no float. The model writes the theorem and the person reads it,
+/// because the theorem is what decides who gets paid.
 struct ChallengeDraft: Equatable {
     var goal: String
+    /// What solvers read: prose.
     var statement: String
-    /// A JSON Schema for the answer, as JSON text.
-    var answerSchema: String
-    var checker: String
-    /// A correct answer, as JSON text, or nil when the model knows none --
-    /// which is normal for a problem worth paying for.
-    var passing: String?
-    /// A plausible wrong answer, as JSON text.
-    var failing: String
+    /// The theorem a proof must close, as one Lean 4 declaration header with
+    /// no proof: `theorem name (x : T) : P`. Pinned by the objective; the
+    /// verifier appends the submitted proof to it, so a solver cannot prove
+    /// something easier.
+    var theorem: String
+    /// Lean source placed before the theorem: definitions, notation, lemmas
+    /// with complete proofs. Empty when the theorem needs none.
+    var preamble: String
+    /// A complete proof, starting with `:=`, when the model is sure of one;
+    /// nil otherwise, which is normal for a problem worth paying for.
+    var proof: String?
+    /// Seconds the kernel may spend on one proof, as the objective pins it.
+    var timeoutSeconds: Int
     var notes: String
+
+    /// The proof text every Lean challenge is tested against first: a hole,
+    /// which the verifier screens before any toolchain is looked for.
+    static let hole = ":= by sorry"
+
+    /// The file as the verifier assembles it: preamble, then the theorem
+    /// with a proof text appended.
+    func source(proof: String) -> String {
+        "\(preamble)\n\(theorem) \(proof)\n"
+    }
+}
+
+/// The escape hatches the node's `lean` verifier screens for before Lean
+/// ever runs (`src/verifiers/mod.rs`, `FORBIDDEN` and `NATIVE_DECIDE`),
+/// applied here to what the model wrote. The verifier screens only the
+/// submitted proof -- the preamble is the objective's own -- so a `sorry`'d
+/// lemma or an `axiom` in a drafted preamble would let a one-line proof
+/// collect the reward. Caught before anything is tested, in the verifier's
+/// words.
+enum LeanScreen {
+    struct Rule: Equatable {
+        let token: String
+        let wholeWord: Bool
+        let why: String
+    }
+
+    static let rules: [Rule] = [
+        Rule(token: "sorry", wholeWord: true, why: "contains `sorry`: an explicit hole, proves nothing"),
+        Rule(token: "admit", wholeWord: true, why: "contains `admit`: an explicit hole, proves nothing"),
+        Rule(token: "axiom", wholeWord: true, why: "declares an axiom: adds a trusted assumption"),
+        Rule(token: "@[implemented_by", wholeWord: false, why: "replaces an implementation outside the kernel"),
+        Rule(token: "native_decide", wholeWord: true, why: "uses `native_decide`: trusts the compiler, not the kernel"),
+    ]
+
+    /// The reasons the verifier would give for this text; empty when it passes.
+    static func hits(in text: String) -> [String] {
+        rules.compactMap { rule in matches(text, rule) ? rule.why : nil }
+    }
+
+    static func matches(_ text: String, _ rule: Rule) -> Bool {
+        guard rule.wholeWord else { return text.contains(rule.token) }
+        let pattern = "\\b" + NSRegularExpression.escapedPattern(for: rule.token) + "\\b"
+        return text.range(of: pattern, options: .regularExpression) != nil
+    }
 }
 
 enum ChallengeWriter {
@@ -28,76 +84,88 @@ enum ChallengeWriter {
         briefLength.contains(brief.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count)
     }
 
-    /// What the model is told. The checker it writes decides who gets paid,
-    /// so most of this is about the ways a checker goes wrong in this
-    /// network specifically: its source is public, it runs in a jail with no
-    /// network, its input never holds a float, and an exception means
-    /// "could not check", never "wrong".
+    /// Seconds the kernel may spend on one proof when the model asks for
+    /// nothing else: the verifier's own default.
+    static let defaultTimeout = 120
+    /// What a draft may ask for. Below it a kernel check of anything real
+    /// times out; above it one objective holds a verifier for an hour.
+    static let timeoutRange = 30...3600
+
+    /// What the model is told. The theorem it writes decides who gets paid,
+    /// so most of this is about the ways a formalisation goes wrong in this
+    /// network specifically: the proof is checked by plain `lean` on one
+    /// file with no project, the preamble is public and part of the
+    /// objective, and five tokens are refused outright.
     static let system = """
         You turn a plain-language description of a problem into a challenge for cairn, \
-        a network that pays for verified answers. A solver submits an answer as a JSON \
-        object; a Python checker you write decides, alone and automatically, whether it \
-        is correct, and a correct answer is paid. Write for a stranger who will only \
-        ever see the statement and the checker.
+        a network that pays for machine-checked proofs. You write the challenge as a \
+        Lean 4 theorem. A solver submits a proof of exactly that theorem; the Lean \
+        kernel decides, alone and automatically, whether it is a proof, and a proof is \
+        paid. Write for a stranger who will only ever see the prose statement, the \
+        preamble and the theorem.
 
-        Return one JSON object with exactly these fields:
+        Return one JSON object with exactly these fields, every one a string:
         - goal: a short handle, "GOAL-" followed by two to six lowercase words joined \
-        by hyphens, e.g. "GOAL-sorting-network-16".
-        - statement: what a solver must find, in plain prose, precise enough to work \
-        on: the exact property a correct answer has, and the exact shape of the answer \
-        object, with field names and types. Do not describe the checker's code.
-        - answer_schema: a JSON Schema for the answer object, as a JSON string: \
-        "type": "object", "properties", "required", and an "example" holding one \
-        well-formed (not necessarily correct) answer.
-        - checker: the complete source of one Python 3 file that defines \
-        check(artifact: dict) -> tuple[bool, str].
-        - passing_example: a correct answer as a JSON string, so the checker can be \
-        tested; or an empty string if you cannot produce one with certainty. Never \
-        guess.
-        - failing_example: a plausible but wrong answer as a JSON string, which the \
-        checker must reject.
-        - notes: one or two sentences for the person paying: assumptions you made, \
-        a way the problem might be easier or harder than it sounds. Empty if none.
+        by hyphens, e.g. "GOAL-add-comm-nat".
+        - statement: what a solver must prove, in plain prose, precise enough to work \
+        on, and what makes it worth proving. Do not restate the Lean source.
+        - theorem: one Lean 4 declaration header with no proof: "theorem <name> \
+        <binders> : <proposition>". No ":=", no "by", nothing after the proposition. \
+        The name is lowercase_with_underscores.
+        - preamble: Lean 4 source placed before the theorem: definitions, notation, \
+        auxiliary lemmas with complete proofs, open namespaces. An empty string when \
+        the theorem needs none.
+        - proof: a complete proof of the theorem, starting with ":=", as text appended \
+        to the theorem, e.g. ":= by omega" or ":= Nat.add_comm a b"; or an empty \
+        string if you cannot write one you are confident the kernel accepts. Never \
+        guess. A challenge worth paying for usually has no known proof; that is fine.
+        - timeout_seconds: seconds the kernel may spend checking one proof, as a \
+        decimal integer between 30 and 3600; "120" unless the proposition is \
+        decided by heavy computation.
+        - notes: one or two sentences for the person paying: how you formalised it, \
+        what the theorem does and does not capture, an assumption you made. Empty if \
+        none.
 
-        Rules for the checker. It runs in a sandbox and the network pays on its verdict:
-        - One self-contained file using only the Python standard library. No network, \
-        no subprocesses, no files: it cannot read anything but its own source.
-        - The answer arrives as a dict parsed from JSON and holds only integers, \
-        strings, booleans, null, lists and dicts, never floating-point numbers. If a \
-        quantity is fractional, ask for it as a decimal string or as an integer \
-        numerator and denominator.
-        - Return (True, detail) only when the answer verifiably has the property; \
-        otherwise (False, reason). Check every field's presence, type and range first, \
-        and return False for anything malformed. Never raise: an exception means the \
-        checker crashed, which pays nobody and rejects nobody.
-        - Re-derive correctness from the answer itself. Never compare it with a \
-        hard-coded solution, secret or list of answers: the checker's source is \
-        public, so anything in it is given away to every solver.
-        - Checking must be far cheaper than solving and finish within a few seconds; \
-        it is stopped after 60 seconds.
-        - The detail string is public. Print nothing.
+        Rules. The file checked is the preamble, a blank line, then the theorem with \
+        the solver's proof text appended, compiled by plain `lean` with no project:
+        - Core Lean 4 and Std only. No Mathlib, no lake project, no import other than \
+        Std. Every name must resolve from the preamble and the core library alone.
+        - The verifier rejects any proof containing sorry, admit, axiom, \
+        @[implemented_by] or native_decide. Never use those words in the preamble or \
+        the theorem either, not even in a comment: an axiom or a sorry'd lemma in the \
+        preamble would let a one-line proof collect the reward, and the words alone \
+        fail the screen.
+        - The theorem must mean what the description asks. For a search problem, state \
+        the search space and the property as computable definitions in the preamble \
+        and make the theorem an existential, so a found witness is proved by giving it \
+        and deciding the property (`⟨w, by decide⟩`, `rfl`). For a claim about all \
+        inputs, a universal. Where the problem is finite, make the proposition \
+        decidable.
+        - Never make the theorem trivially true or vacuous, and never hide the hard \
+        part in a definition that assumes the answer.
+        - The preamble and the theorem are published with the challenge. Everything \
+        in them is given to every solver.
 
-        If the description asks for something code cannot judge (an opinion, an essay, \
-        "the best" with no measure), choose a precise criterion code can check, use it, \
-        and say so in notes. No floating-point numbers anywhere: not in the schema, \
-        not in the examples.
+        If the description asks for something a theorem cannot capture (an opinion, \
+        "the best" with no measure), choose a precise proposition that captures the \
+        checkable part, use it, and say so in notes.
         """
 
     /// The reply's shape. Every field is a string so one schema works under
     /// the strictest structured-output rules (every object closed, every
-    /// field required), and the JSON-valued fields are parsed afterwards.
+    /// field required); the number is parsed afterwards.
     static let schema: [String: Any] = [
         "type": "object",
         "properties": [
             "goal": ["type": "string"],
             "statement": ["type": "string"],
-            "answer_schema": ["type": "string"],
-            "checker": ["type": "string"],
-            "passing_example": ["type": "string"],
-            "failing_example": ["type": "string"],
+            "theorem": ["type": "string"],
+            "preamble": ["type": "string"],
+            "proof": ["type": "string"],
+            "timeout_seconds": ["type": "string"],
             "notes": ["type": "string"],
         ],
-        "required": ["goal", "statement", "answer_schema", "checker", "passing_example", "failing_example", "notes"],
+        "required": ["goal", "statement", "theorem", "preamble", "proof", "timeout_seconds", "notes"],
         "additionalProperties": false,
     ]
 
@@ -112,12 +180,15 @@ enum ChallengeWriter {
                 An earlier draft of this challenge had problems. Fix them and return the \
                 whole challenge again.
 
-                Earlier checker:
-                ```python
-                \(previous.checker)
+                Earlier preamble:
+                ```lean
+                \(previous.preamble)
                 ```
-                Earlier passing example: \(previous.passing ?? "(none)")
-                Earlier failing example: \(previous.failing)
+                Earlier theorem:
+                ```lean
+                \(previous.theorem)
+                ```
+                Earlier proof: \(previous.proof ?? "(none)")
 
                 Problems:
 
@@ -135,22 +206,40 @@ enum ChallengeWriter {
             }
             return value.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        let checker = try field("checker")
-        guard checker.contains("def check") else {
-            throw AIError("The model's checker defines no check function.")
+        let theorem = try field("theorem")
+        guard theorem.hasPrefix("theorem ") else {
+            throw AIError("The model's theorem does not start with `theorem`.")
         }
-        let passing = try field("passing_example")
+        guard !theorem.contains(":=") else {
+            throw AIError("The model put a proof inside the theorem; the theorem is pinned and the proof is what solvers submit.")
+        }
+        guard theorem.contains(":") else {
+            throw AIError("The model's theorem states no proposition.")
+        }
+        var proof = try field("proof")
+        if !proof.isEmpty, !proof.hasPrefix(":=") { proof = ":= " + proof }
+        let timeoutText = try field("timeout_seconds")
+        let timeout = Int(timeoutText) ?? defaultTimeout
         let draft = ChallengeDraft(
             goal: try field("goal"),
             statement: try field("statement"),
-            answerSchema: try field("answer_schema"),
-            checker: checker + "\n",
-            passing: passing.isEmpty ? nil : passing,
-            failing: try field("failing_example"),
+            theorem: theorem,
+            preamble: try field("preamble"),
+            proof: proof.isEmpty ? nil : proof,
+            timeoutSeconds: min(max(timeout, timeoutRange.lowerBound), timeoutRange.upperBound),
             notes: try field("notes")
         )
         guard !draft.statement.isEmpty else { throw AIError("The model's draft has an empty statement.") }
         return draft
+    }
+
+    /// What is wrong with a draft before anything is run: a screened token
+    /// in the theorem or the preamble, which the verifier would never see
+    /// (it screens proofs) and which would make the challenge worthless. Sent
+    /// back to the model as problems, the way failed tests are.
+    static func problems(in draft: ChallengeDraft) -> [String] {
+        LeanScreen.hits(in: draft.theorem).map { "The theorem \($0); the verifier refuses that token everywhere." }
+            + LeanScreen.hits(in: draft.preamble).map { "The preamble \($0); a hole or an assumption there would pay for nothing." }
     }
 }
 
@@ -174,55 +263,65 @@ enum PageRequest: Equatable {
     }
 }
 
-/// A draft turned into files a node can post: the checker under the node's
-/// root, pinned by its hash, and the objective beside it.
+/// A draft turned into files a node can post: the objective, which carries
+/// the theorem and preamble itself, and the Lean file beside it for a person
+/// to open.
 struct BuiltChallenge {
-    /// The checker's path relative to the root, as the objective pins it.
-    let checkerPath: String
-    let checkerHash: String
+    /// SHA-256 of the preamble and theorem: what names the folder, so a
+    /// redraft never overwrites a challenge already posted.
+    let theoremHash: String
     let objectiveFile: URL
+    /// `Challenge.lean`: the preamble and theorem with a hole, as a solver
+    /// would start from it. Not pinned -- the objective holds the text.
+    let leanFile: URL
     let directory: URL
 }
 
 enum ChallengeBuilder {
-    /// A checker that has not finished in a minute is not a cheap check,
-    /// and the default would let one hold a verifier for five.
-    static let timeoutSeconds = 60
+    /// What a solver submits: the proof text, and nothing else.
+    static let artifactSchema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "proof": [
+                "type": "string",
+                "description": "Lean 4 proof text appended to the pinned theorem, starting with :=",
+            ],
+        ],
+        "required": ["proof"],
+        "example": ["proof": ":= by decide"],
+    ]
 
     static func build(_ draft: ChallengeDraft, reward: UInt64, funder: String,
                       root: URL, now: Date = Date()) throws -> BuiltChallenge {
-        let schema = try jsonObject(draft.answerSchema, what: "The answer format")
-        try requireIntegers(schema, what: "The answer format")
-
-        let source = Data(draft.checker.utf8)
-        let hash = GuiTasks.sha256(source)
-        // The hash in the folder name, so a redraft never overwrites a
-        // checker that an objective already posted still pins.
+        let theorem = draft.theorem.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !theorem.isEmpty else { throw AIError("The draft has no theorem.") }
+        let hash = GuiTasks.sha256(Data("\(draft.preamble)\n\(theorem)\n".utf8))
         let folder = "challenges/\(slug(draft.goal))-\(hash.prefix(8))"
-        let checkerPath = "\(folder)/checker.py"
         let directory = root.appendingPathComponent(folder, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try source.write(to: root.appendingPathComponent(checkerPath), options: .atomic)
+        let leanFile = directory.appendingPathComponent("Challenge.lean")
+        try Data(draft.source(proof: ChallengeDraft.hole).utf8).write(to: leanFile, options: .atomic)
 
+        let verifier: [String: Any] = [
+            "kind": "lean",
+            "statement": theorem,
+            "preamble": draft.preamble,
+            "timeout_seconds": min(max(draft.timeoutSeconds, ChallengeWriter.timeoutRange.lowerBound),
+                                   ChallengeWriter.timeoutRange.upperBound),
+        ]
         let objective: [String: Any] = [
             "goal": draft.goal.isEmpty ? "GOAL-\(slug(draft.statement))" : draft.goal,
             "statement": draft.statement,
             "reward": reward,
             "funder": funder,
             "created_at": timestamp(now),
-            "verifier": [
-                "kind": "certificate",
-                "checker": checkerPath,
-                "checker_sha256": hash,
-                "entrypoint": "check",
-                "timeout_seconds": timeoutSeconds,
-            ],
-            "artifact_schema": schema,
+            "verifier": verifier,
+            "artifact_schema": artifactSchema,
         ]
         let data = try JSONSerialization.data(withJSONObject: objective, options: [.prettyPrinted, .sortedKeys])
         let file = directory.appendingPathComponent("objective.json")
         try data.write(to: file, options: .atomic)
-        return BuiltChallenge(checkerPath: checkerPath, checkerHash: hash, objectiveFile: file, directory: directory)
+        return BuiltChallenge(theoremHash: hash, objectiveFile: file, leanFile: leanFile, directory: directory)
     }
 
     /// RFC 3339 with an explicit offset, the shape the crate writes itself.
@@ -250,9 +349,9 @@ enum ChallengeBuilder {
         return object
     }
 
-    /// Fractional numbers are refused anywhere in a record, and in an
-    /// answer: `canonical::Value` has no float. Caught here, with the value,
-    /// rather than as a schema refusal from `cairn post`.
+    /// Fractional numbers are refused anywhere in a record: `canonical::Value`
+    /// has no float. Caught here, with the value, rather than as a schema
+    /// refusal from `cairn post`.
     static func requireIntegers(_ value: Any, what: String) throws {
         switch value {
         case let dict as [String: Any]:
@@ -271,19 +370,30 @@ enum ChallengeBuilder {
     }
 }
 
-/// The checker run against both example answers before anything is posted,
-/// through the node's own verifier -- the same jail, interpreter and
-/// verdict rules settlement uses -- rather than a Python harness of this
-/// app's that could disagree with it.
+/// The theorem tested before anything is posted, through the node's own
+/// verifier -- the same jail, toolchain and verdict rules settlement uses --
+/// rather than a Lean harness of this app's that could disagree with it.
 ///
-/// No command runs a pinned verifier for an objective that is not in a log,
-/// so the objective goes into a throwaway log first and `propose --dry-run`
-/// runs against that. The real log is never touched.
+/// Three checks, in the order the verifier itself would meet them:
+///
+/// 1. **The hole is rejected.** `:= by sorry` must come back `reject` from the
+///    verifier's screen. Needs no toolchain, so it runs on every Mac.
+/// 2. **The theorem compiles on its own.** The preamble and theorem with the
+///    hole, compiled by the Lean on this Mac. The node cannot make this check
+///    for us (its screen refuses the hole before Lean runs), and a theorem
+///    that does not elaborate is a challenge nobody can ever win.
+/// 3. **The model's proof, if it wrote one, is accepted** by the node's
+///    verifier. Without a toolchain the node answers `unavailable`, which is
+///    reported as exactly that.
+///
+/// No command runs a verifier for an objective that is not in a log, so the
+/// objective goes into a throwaway log first and `propose --dry-run` runs
+/// against that. The real log is never touched.
 enum ChallengeTest {
     enum Verdict: Equatable {
         case accept(String)
         case reject(String)
-        /// The checker crashed, timed out, or could not run.
+        /// The verifier could not run: no toolchain, a timeout, a crash.
         case unavailable(String)
         /// The node refused the objective, or the answer, before any check.
         case refused(String)
@@ -292,22 +402,42 @@ enum ChallengeTest {
         var rejected: Bool { if case .reject = self { return true }; return false }
     }
 
+    /// Whether the theorem itself compiles, with a hole for its proof.
+    enum Statement: Equatable {
+        /// It does; the detail names the Lean that said so.
+        case elaborates(String)
+        /// Lean's first error lines.
+        case broken(String)
+        /// Not checked, and why: no toolchain here, or it took too long.
+        case untested(String)
+
+        var ok: Bool { if case .elaborates = self { return true }; return false }
+    }
+
+    /// Which check is running, for the sheet's checklist.
+    enum Step: Equatable, Sendable { case posting, hole, statement, proof }
+
     struct Outcome: Equatable {
-        var passing: Verdict?
-        var failing: Verdict
+        var hole: Verdict
+        var statement: Statement
+        var proof: Verdict?
 
-        /// Good enough to post: the wrong answer rejected, and the right one,
-        /// when there is one, accepted.
-        var ok: Bool { failing.rejected && (passing?.accepted ?? true) }
+        /// Good enough to post: the hole rejected, the theorem compiling, and
+        /// the model's proof, when there is one, accepted by the kernel.
+        var ok: Bool { hole.rejected && statement.ok && (proof?.accepted ?? true) }
 
-        /// What to tell the model when asking it to fix the draft.
+        /// What to tell the model when asking it to fix the draft. A missing
+        /// toolchain is not the model's problem and is not sent.
         var problems: [String] {
             var out: [String] = []
-            if let passing, !passing.accepted {
-                out.append("The checker did not accept the passing example: \(Self.describe(passing))")
+            if !hole.rejected {
+                out.append("The verifier did not reject a proof that was only a hole: \(Self.describe(hole))")
             }
-            if !failing.rejected {
-                out.append("The checker did not reject the failing example: \(Self.describe(failing))")
+            if case .broken(let detail) = statement {
+                out.append("The preamble and theorem do not compile on their own. Lean said:\n\(detail)")
+            }
+            if let proof, case .reject(let detail) = proof {
+                out.append("The kernel rejected the proof you wrote: \(detail)")
             }
             return out
         }
@@ -316,22 +446,18 @@ enum ChallengeTest {
             switch v {
             case .accept(let d): return "accepted (\(d))"
             case .reject(let d): return "rejected (\(d))"
-            case .unavailable(let d): return "the checker could not run: \(d)"
+            case .unavailable(let d): return "the verifier could not run: \(d)"
             case .refused(let d): return "refused before checking: \(d)"
             }
         }
     }
 
-    /// Off the main thread: two checker runs can take a while.
+    /// Off the main thread: the kernel can take a while. `progress` is
+    /// called off it too, before each step.
     static func run(_ built: BuiltChallenge, draft: ChallengeDraft, binary: URL, root: URL,
-                    environment: [String: String]) async throws -> Outcome {
+                    environment: [String: String],
+                    progress: @escaping @Sendable (Step) -> Void = { _ in }) async throws -> Outcome {
         try await Task.detached(priority: .userInitiated) {
-            let examples: [(String, String?)] = [("passing", draft.passing), ("failing", draft.failing)]
-            for (label, text) in examples {
-                guard let text else { continue }
-                let answer = try ChallengeBuilder.jsonObject(text, what: "The \(label) example")
-                try ChallengeBuilder.requireIntegers(answer, what: "The \(label) example")
-            }
             let scratch = FileManager.default.temporaryDirectory
                 .appendingPathComponent("cairn-challenge-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
@@ -343,22 +469,63 @@ enum ChallengeTest {
                 "--root", root.path,
                 "--key-file", scratch.appendingPathComponent("no-key").path,
             ]
+            progress(.posting)
             let posted = run(binary, global + ["post", built.objectiveFile.path], in: scratch, environment: environment)
             guard posted.status == 0 else {
                 let why = posted.err.isEmpty ? "cairn post exited \(posted.status)" : posted.err
-                return Outcome(passing: nil, failing: .refused(why))
+                return Outcome(hole: .refused(why), statement: .untested("the objective was refused"), proof: nil)
             }
-            func verdict(_ text: String, named name: String) throws -> Verdict {
+            func verdict(_ proof: String, named name: String, timeout: TimeInterval) throws -> Verdict {
                 let file = scratch.appendingPathComponent("\(name).json")
-                try Data(text.utf8).write(to: file)
+                try JSONSerialization.data(withJSONObject: ["proof": proof]).write(to: file)
                 let r = run(binary, global + ["propose", built.objectiveFile.path, "--artifact", file.path, "--dry-run"],
-                            in: scratch, environment: environment)
+                            in: scratch, environment: environment, timeout: timeout)
+                if r.status == Ran.timedOut {
+                    return .unavailable("cairn propose did not finish within \(Int(timeout)) seconds")
+                }
                 return parse(r.out, err: r.err, artifact: file.path)
             }
-            let failing = try verdict(draft.failing, named: "failing")
-            let passing = try draft.passing.map { try verdict($0, named: "passing") }
-            return Outcome(passing: passing, failing: failing)
+            progress(.hole)
+            let hole = try verdict(ChallengeDraft.hole, named: "hole", timeout: 60)
+            progress(.statement)
+            let statement = compile(draft, in: scratch, environment: environment)
+            var proof: Verdict?
+            if let text = draft.proof {
+                progress(.proof)
+                // The verifier's own bound, plus room for the jail and the control run it makes first.
+                proof = try verdict(text, named: "proof", timeout: TimeInterval(draft.timeoutSeconds * 2 + 30))
+            }
+            return Outcome(hole: hole, statement: statement, proof: proof)
         }.value
+    }
+
+    /// The preamble and theorem with the hole, compiled by the Lean this Mac
+    /// gives the node. Unjailed: the text is the model's, written for the
+    /// person reading it, and it is what they are about to publish.
+    static func compile(_ draft: ChallengeDraft, in scratch: URL, environment: [String: String]) -> Statement {
+        let (toolchain, problem) = Toolchains.lean(environment: environment)
+        guard let toolchain else {
+            return .untested(problem ?? "No Lean toolchain was found on this Mac.")
+        }
+        let file = scratch.appendingPathComponent("Statement.lean")
+        do {
+            try Data(draft.source(proof: ChallengeDraft.hole).utf8).write(to: file)
+        } catch {
+            return .untested(error.localizedDescription)
+        }
+        let timeout = TimeInterval(max(60, draft.timeoutSeconds))
+        let r = run(toolchain.binary, [file.path], in: scratch, environment: environment, timeout: timeout)
+        if r.status == Ran.timedOut {
+            return .untested("Lean took longer than \(Int(timeout)) seconds on the theorem alone.")
+        }
+        if r.status == 0 {
+            return .elaborates(toolchain.version ?? toolchain.binary.path)
+        }
+        let lines = (r.out + "\n" + r.err)
+            .split(separator: "\n")
+            .map { $0.replacingOccurrences(of: file.path, with: "Challenge.lean") }
+            .filter { !$0.isEmpty && !$0.contains("declaration uses 'sorry'") }
+        return .broken(lines.prefix(8).joined(separator: "\n"))
     }
 
     /// `propose` prints one line per artifact, `  <path>: <verdict>  (detail)`
@@ -384,12 +551,20 @@ enum ChallengeTest {
     }
 
     struct Ran {
+        /// The status a run that outlived its deadline reports.
+        static let timedOut: Int32 = -2
         var status: Int32
         var out: String
         var err: String
     }
 
-    static func run(_ binary: URL, _ args: [String], in directory: URL, environment: [String: String]) -> Ran {
+    /// A box the watchdog can mark from another queue.
+    private final class Flag: @unchecked Sendable {
+        var raised = false
+    }
+
+    static func run(_ binary: URL, _ args: [String], in directory: URL, environment: [String: String],
+                    timeout: TimeInterval? = nil) -> Ran {
         let p = Process()
         p.executableURL = binary
         p.arguments = args
@@ -408,11 +583,24 @@ enum ChallengeTest {
         p.standardError = err
         p.standardInput = FileHandle.nullDevice
         do { try p.run() } catch { return Ran(status: -1, out: "", err: error.localizedDescription) }
+        let expired = Flag()
+        var watchdog: DispatchWorkItem?
+        if let timeout {
+            let item = DispatchWorkItem {
+                if p.isRunning {
+                    expired.raised = true
+                    p.terminate()
+                }
+            }
+            watchdog = item
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: item)
+        }
         let errData = err.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        watchdog?.cancel()
         try? out.close()
         let outData = (try? Data(contentsOf: outFile)) ?? Data()
-        return Ran(status: p.terminationStatus,
+        return Ran(status: expired.raised ? Ran.timedOut : p.terminationStatus,
                    out: String(decoding: outData, as: UTF8.self),
                    err: String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
     }

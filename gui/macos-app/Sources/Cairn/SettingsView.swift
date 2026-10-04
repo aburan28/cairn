@@ -133,6 +133,10 @@ struct SettingsView: View {
 
             UpdatesSection(updates: updates, nodeVersion: node.binaryVersion)
 
+            if !attaching {
+                VerifiersSection(node: node)
+            }
+
             AISettingsSection(node: node)
 
             if needsRestart {
@@ -554,7 +558,7 @@ private struct LabeledSlider: View {
     }
 }
 
-private struct Caption: View {
+struct Caption: View {
     let text: String
     init(_ text: String) { self.text = text }
 

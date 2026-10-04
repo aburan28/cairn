@@ -22,6 +22,8 @@ and they are not conveniences.
 | `CAIRN_REQUIRE_SANDBOX` | unset | `1` refuses to run objective code at all without a working jail |
 | `CAIRN_SANDBOX_MEMORY_MB` | `4096` (MiB) | memory cap for pinned pure functions: `RLIMIT_AS` on Linux, the process tree's measured footprint on macOS; `0` disables it |
 | `CAIRN_SANDBOX_CPUS` | unset (no cap) | cores one verifier's process tree may keep busy, on average; enforced by pausing it |
+| `CAIRN_LEAN` | `lean` on `PATH` | the Lean binary the `lean` verifier runs. Name the toolchain's real binary (`<prefix>/bin/lean`), not elan's `~/.elan/bin/lean` proxy, which finds its toolchain through `$HOME` and the jail scrubs `$HOME`. The reference implementation reads the same variable |
+| `CAIRN_LEAN_ROOT` | unset | one directory the Lean jail may read in full: the toolchain's installation prefix. Needed for a toolchain under your home directory (every elan install), which the jail otherwise refuses to allow-list. An operator decision about one directory; an objective still cannot choose what its own jail binds. Cairn.app sets both from the toolchain it finds |
 | `CAIRN_EPOCH_SECONDS` | `600` | **consensus-critical.** Epoch length, in seconds |
 | `CAIRN_FINALITY_EPOCHS` | `1` | **consensus-critical.** Closed epochs that must pass before an epoch may settle |
 | `CAIRN_REQUIRE_BEACON` | unset | `1` refuses a log whose epochs settled without a recorded beacon |

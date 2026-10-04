@@ -43,6 +43,7 @@ final class Node: ObservableObject {
     @Published var presentSecrets = false
     @Published var presentNewChallenge = false
     @Published var presentConnectivity = false
+    @Published var presentAgents = false
     /// What New Challenge… opens with: the description the reader's Post a
     /// challenge page handed over, or nil from the menu and the toolbar.
     private(set) var challengeBrief: String?
@@ -85,7 +86,7 @@ final class Node: ObservableObject {
         }
         guard case .running = state else { return "The node is not running." }
         // SwiftUI shows one sheet at a time; a second is dropped silently.
-        if presentNewChallenge || presentTasks || presentPeers || presentSecrets || presentConnectivity {
+        if presentNewChallenge || presentTasks || presentPeers || presentSecrets || presentConnectivity || presentAgents {
             return "Close the sheet that is open in Cairn.app first."
         }
         newChallenge(brief: brief)
@@ -365,10 +366,36 @@ final class Node: ObservableObject {
     /// it after.
     nonisolated static func childEnvironment(_ settings: NodeSettings) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = ["/opt/homebrew/bin", "/usr/local/bin", env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"]
-            .joined(separator: ":")
+        env["PATH"] = [
+            "\(NSHomeDirectory())/.elan/bin", "/opt/homebrew/bin", "/usr/local/bin",
+            env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+        ].joined(separator: ":")
         env.merge(settings.environment) { _, chosen in chosen }
+        // Lean, named the way the node's jail needs it: the toolchain's own
+        // binary and its prefix (CAIRN_LEAN, CAIRN_LEAN_ROOT), since elan's
+        // proxy and a home-directory toolchain both fail inside the jail.
+        // A launcher that set them already (`open --env`) is left alone.
+        if env["CAIRN_LEAN"] == nil {
+            let (lean, _) = Toolchains.lean(environment: env)
+            env.merge(Toolchains.leanEnvironment(lean)) { current, _ in current }
+        }
         return env
+    }
+
+    /// `cairn identity --out`: an ed25519 keypair whose public half is the
+    /// submitter name, for an agent to sign with. Refuses to overwrite.
+    /// Completion is on the main actor.
+    func createAgentIdentity(at path: String, completion: @escaping (String?) -> Void) {
+        guard let binary = binary ?? Self.locateBinary() else {
+            completion("No cairn command was found.")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let run = Self.runCairn(binary, ["identity", "--out", path])
+            DispatchQueue.main.async {
+                completion(run.status == 0 ? nil : (run.err.isEmpty ? "cairn identity exited \(run.status)" : run.err))
+            }
+        }
     }
 
     // MARK: internals

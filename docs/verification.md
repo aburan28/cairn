@@ -304,6 +304,26 @@ kernel's answer, a signal kill is not, and a clean exit that warns about `sorry`
 is still a rejection — are tested against a stand-in binary, because what needs
 checking is how an exit code maps to a verdict, and that does not need a kernel.
 
+**The exit code is the kernel's answer only if the kernel ran.** A `lean`
+that cannot start under the jail exits non-zero too — elan's `~/.elan/bin/lean`
+is a proxy that finds its toolchain through `$HOME`, which the jail scrubs, and
+the toolchain itself sits under the home directory, which the jail never
+allow-lists on its own — and read as a verdict that turned "this node's Lean is
+broken" into "your proof is wrong", on every claim, which is the verifier-offline
+attack in its purest form. So before any proof is judged the verifier compiles
+the **objective's own statement with a hole** (`:= by sorry`, text no submitter
+wrote) under the same jail. If that does not exit 0, the verdict is
+`Unavailable` with the control's exit code in its evidence, whether the cause is
+this node's toolchain or a statement that does not elaborate; neither is the
+proof's doing. A passed control is remembered for the process, so the cost is
+one extra elaboration per objective, not per claim.
+`a_lean_that_cannot_compile_the_statement_alone_is_unavailable_not_a_rejection`
+pins both halves with stand-ins. To run an elan toolchain under the jail, point
+`CAIRN_LEAN` at the real binary (`<prefix>/bin/lean`, where `lean --print-prefix`
+names the prefix) and `CAIRN_LEAN_ROOT` at that prefix: an explicit operator
+grant of one directory, which Cairn.app makes for the toolchain it finds, and
+which `GET /verifiers` reports.
+
 ## What an audit actually re-derives
 
 `cairn audit --rerun` prints one line — *chain intact, every settled claim

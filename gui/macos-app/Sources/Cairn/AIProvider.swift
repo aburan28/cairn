@@ -160,7 +160,9 @@ struct AIError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// One request in, one JSON object out.
+/// One request in, one JSON object out -- streamed in, so a person watching
+/// can see it arrive, and so the connection never sits idle long enough for
+/// something between here and the provider to drop it.
 struct AIClient {
     let config: AIConfig
     let apiKey: String
@@ -183,17 +185,70 @@ struct AIClient {
     /// Models the server-side refusal fallback serves, on Anthropic's own API.
     static let fallbackModels: Set<String> = ["claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"]
 
-    func complete(system: String, user: String, schema: [String: Any], schemaName: String) async throws -> [String: Any] {
+    #if canImport(Darwin)
+    /// Ask, and read the answer as it streams. `progress` is called off the
+    /// main thread with every stretch of the answer that arrives; the reply
+    /// is the one JSON object the whole answer parses to, exactly as before.
+    ///
+    /// A provider that ignores `stream` and answers with one object is read
+    /// the old way, so nothing depends on streaming being honoured.
+    func complete(system: String, user: String, schema: [String: Any], schemaName: String,
+                  progress: (@Sendable (AIProgress) -> Void)? = nil) async throws -> [String: Any] {
+        if let problem = config.problem { throw AIError(problem) }
+        let request = try makeRequest(system: system, user: user, schema: schema, schemaName: schemaName, stream: true)
+        let (bytes, response) = try await session.bytes(for: request)
+        let http = response as? HTTPURLResponse
+        let status = http?.statusCode ?? 0
+        guard status == 200 else {
+            let body = try await Self.collect(bytes, upTo: 1 << 20)
+            throw Self.failure(status: status, body: body, provider: config.provider)
+        }
+        let contentType = (http?.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        guard contentType.contains("text/event-stream") else {
+            let body = try await Self.collect(bytes, upTo: 64 << 20)
+            return try Self.jsonObject(in: try Self.text(from: body, wire: config.wire))
+        }
+        var parser = SSEParser()
+        var reader = AIStreamReader(wire: config.wire)
+        var state = AIProgress()
+        progress?(state)
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            guard let event = parser.feed(line) else { continue }
+            if try reader.take(event, into: &state) { progress?(state) }
+            if reader.finished { break }
+        }
+        if !reader.finished, let event = parser.flush() {
+            _ = try reader.take(event, into: &state)
+        }
+        return try Self.jsonObject(in: try reader.reply())
+    }
+
+    /// The rest of a response body, bounded.
+    private static func collect(_ bytes: URLSession.AsyncBytes, upTo limit: Int) async throws -> Data {
+        var data = Data()
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count >= limit { break }
+        }
+        return data
+    }
+    #else
+    /// A Foundation without `URLSession.bytes` reads the reply whole; the
+    /// one-shot readers below understand it. Only the macOS app ships.
+    func complete(system: String, user: String, schema: [String: Any], schemaName: String,
+                  progress: (@Sendable (AIProgress) -> Void)? = nil) async throws -> [String: Any] {
         if let problem = config.problem { throw AIError(problem) }
         let request = try makeRequest(system: system, user: user, schema: schema, schemaName: schemaName)
         let (data, response) = try await session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw Self.failure(status: status, body: data, provider: config.provider) }
-        let text = try Self.text(from: data, wire: config.wire)
-        return try Self.jsonObject(in: text)
+        return try Self.jsonObject(in: try Self.text(from: data, wire: config.wire))
     }
+    #endif
 
-    func makeRequest(system: String, user: String, schema: [String: Any], schemaName: String) throws -> URLRequest {
+    func makeRequest(system: String, user: String, schema: [String: Any], schemaName: String,
+                     stream: Bool = false) throws -> URLRequest {
         let base = config.baseURL.hasSuffix("/") ? String(config.baseURL.dropLast()) : config.baseURL
         var body: [String: Any]
         var request: URLRequest
@@ -238,6 +293,7 @@ struct AIClient {
             body[openai ? "max_completion_tokens" : "max_tokens"] = 16000
             if openai, config.model.hasPrefix("gpt-6") { body["reasoning_effort"] = "high" }
         }
+        if stream { body["stream"] = true }
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -423,5 +479,210 @@ struct AIClient {
         default:
             return AIError("\(provider.title) answered HTTP \(status)\(detail).")
         }
+    }
+}
+
+// MARK: streaming
+
+/// What a streamed answer has produced so far: the numbers a person waiting
+/// on a slow model can watch move, which the one-shot request could not give
+/// because nothing arrived until everything had.
+struct AIProgress: Equatable, Sendable {
+    enum Stage: Equatable, Sendable {
+        /// The request is out and nothing has come back yet.
+        case connecting
+        /// The provider has answered; the model is working but has written
+        /// none of the answer -- its reasoning, where a model streams that.
+        case thinking
+        /// The answer is arriving.
+        case writing
+    }
+
+    var stage: Stage = .connecting
+    /// Characters of the answer so far.
+    var written = 0
+    /// Characters of reasoning so far, on models that stream it.
+    var reasoned = 0
+    /// The answer's last stretch, for a live glimpse of what is being written.
+    var tail = ""
+}
+
+/// One server-sent event: the optional `event:` name and the `data:` lines,
+/// joined as the format says.
+struct SSEEvent: Equatable {
+    var event: String?
+    var data: String
+}
+
+/// The text/event-stream framing, fed one line at a time without its line
+/// ending: fields accumulate until a blank line dispatches them. Comments
+/// (`: keep-alive`) and fields this app has no use for are skipped. Both
+/// wires use the framing; what is inside `data:` differs, and
+/// `AIStreamReader` reads that.
+struct SSEParser {
+    private var event: String?
+    private var data: [String] = []
+
+    mutating func feed(_ line: String) -> SSEEvent? {
+        if line.isEmpty { return flush() }
+        if line.hasPrefix(":") { return nil }
+        let field: Substring
+        var value: Substring
+        if let colon = line.firstIndex(of: ":") {
+            field = line[..<colon]
+            value = line[line.index(after: colon)...]
+            if value.hasPrefix(" ") { value = value.dropFirst() }
+        } else {
+            field = Substring(line)
+            value = ""
+        }
+        if field == "event" {
+            event = String(value)
+        } else if field == "data" {
+            data.append(String(value))
+        }
+        return nil
+    }
+
+    /// Whatever is pending, for a stream that ended without a final blank line.
+    mutating func flush() -> SSEEvent? {
+        let pending = data.isEmpty ? nil : SSEEvent(event: event, data: data.joined(separator: "\n"))
+        event = nil
+        data = []
+        return pending
+    }
+}
+
+/// Folds a provider's stream into the reply, raising the same errors the
+/// one-shot reader raises for a refusal or an answer cut off at the token
+/// limit. Each wire's chunk shape is read here and nowhere else.
+struct AIStreamReader {
+    let wire: AIWire
+    private(set) var text = ""
+    private(set) var reasoned = 0
+    /// The provider said the message is over.
+    private(set) var finished = false
+
+    init(wire: AIWire) { self.wire = wire }
+
+    /// Apply one event. True when `progress` changed in a way worth showing.
+    mutating func take(_ event: SSEEvent, into progress: inout AIProgress) throws -> Bool {
+        if event.data == "[DONE]" {
+            finished = true
+            return false
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: Data(event.data.utf8)) as? [String: Any] else {
+            return false
+        }
+        switch wire {
+        case .messages: return try takeMessages(json, named: event.event, into: &progress)
+        case .chatCompletions: return try takeChat(json, into: &progress)
+        }
+    }
+
+    /// The whole reply, once the stream has ended.
+    func reply() throws -> String {
+        guard !text.isEmpty else { throw AIError("The model's reply had no text in it.") }
+        return text
+    }
+
+    private mutating func wrote(_ piece: String, into progress: inout AIProgress) {
+        text += piece
+        progress.stage = .writing
+        progress.written = text.count
+        progress.tail = String(text.suffix(160))
+    }
+
+    private mutating func thought(_ piece: String, into progress: inout AIProgress) {
+        reasoned += piece.count
+        progress.reasoned = reasoned
+        if progress.stage == .connecting { progress.stage = .thinking }
+    }
+
+    /// Anthropic Messages: typed events, the text in `content_block_delta`,
+    /// the stop reason in `message_delta`.
+    private mutating func takeMessages(_ json: [String: Any], named name: String?,
+                                       into progress: inout AIProgress) throws -> Bool {
+        switch (json["type"] as? String) ?? name ?? "" {
+        case "error":
+            let message = (json["error"] as? [String: Any])?["message"] as? String
+            throw AIError(message ?? "The provider reported an error mid-stream.")
+        case "message_start", "content_block_start":
+            guard progress.stage == .connecting else { return false }
+            progress.stage = .thinking
+            return true
+        case "content_block_delta":
+            guard let delta = json["delta"] as? [String: Any] else { return false }
+            switch delta["type"] as? String {
+            case "text_delta":
+                guard let piece = delta["text"] as? String, !piece.isEmpty else { return false }
+                wrote(piece, into: &progress)
+                return true
+            case "thinking_delta":
+                guard let piece = delta["thinking"] as? String, !piece.isEmpty else { return false }
+                thought(piece, into: &progress)
+                return true
+            default:
+                return false
+            }
+        case "message_delta":
+            guard let delta = json["delta"] as? [String: Any],
+                  let reason = delta["stop_reason"] as? String else { return false }
+            switch reason {
+            case "refusal":
+                let why = (delta["stop_details"] as? [String: Any])?["explanation"] as? String
+                throw AIError("The model declined this request" + (why.map { ": \($0)" } ?? "."))
+            case "max_tokens":
+                throw AIError("The model ran out of room before finishing. Try a narrower description.")
+            default:
+                return false
+            }
+        case "message_stop":
+            finished = true
+            return false
+        default:
+            return false
+        }
+    }
+
+    /// OpenAI Chat Completions and everything that imitates it: one
+    /// `choices[0].delta` per chunk, `finish_reason` on the last.
+    private mutating func takeChat(_ json: [String: Any], into progress: inout AIProgress) throws -> Bool {
+        if let error = json["error"] as? [String: Any] {
+            throw AIError((error["message"] as? String) ?? "The provider reported an error mid-stream.")
+        }
+        guard let choice = (json["choices"] as? [[String: Any]])?.first else { return false }
+        var changed = false
+        if progress.stage == .connecting {
+            progress.stage = .thinking
+            changed = true
+        }
+        if let delta = choice["delta"] as? [String: Any] {
+            if let refusal = delta["refusal"] as? String, !refusal.isEmpty {
+                throw AIError("The model declined this request: \(refusal)")
+            }
+            // Fireworks and DeepSeek stream reasoning as reasoning_content;
+            // OpenRouter as reasoning.
+            if let piece = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String),
+               !piece.isEmpty {
+                thought(piece, into: &progress)
+                changed = true
+            }
+            if let piece = delta["content"] as? String, !piece.isEmpty {
+                wrote(piece, into: &progress)
+                changed = true
+            }
+        }
+        if let reason = choice["finish_reason"] as? String {
+            switch reason {
+            case "length":
+                throw AIError("The model ran out of room before finishing. Try a narrower description.")
+            case "content_filter":
+                throw AIError("The model declined this request.")
+            default:
+                finished = true
+            }
+        }
+        return changed
     }
 }
