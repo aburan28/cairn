@@ -303,6 +303,138 @@ bounty, and the submitter — unlike every other party — is strictly motivated
 re-run the verifier and dispute it. **False rejections police themselves. False
 acceptances do not.** Everything above is downstream of that.
 
+### A third way to attest without looking: echo the admitter
+
+Both blind strategies above answer *without* the answer. There is a third that
+copies it, and it was missing from the model because it was missing from the
+question: what can an attestor read before it attests?
+
+The verdict. A node appends `claim` and then, immediately, `verdict` — the
+admitting node ran the pinned verifier and wrote down what it said. Attestations
+([bonded-verification.md](bonded-verification.md)) come after. A canary is
+admitted like any other claim, so the log already carries its correct verdict
+too. An attestor that copies the log's verdict therefore passes **every**
+canary, known-good and known-bad, without running anything.
+
+Write `e` for the share of genuinely invalid submissions the admitter accepted,
+`h` for the number of nodes echoing, and `v` for the number verifying. On a
+claim whose verdict is readable:
+
+```
+verify   R/k − c + (D + p(1−e))·β/(v+h) + p·e·β/v
+echo     R/k     + (D + p(1−e))·β/(v+h) − S'·p·e·[v > 0]
+```
+
+Two things in that pair are load-bearing.
+
+**No canary term in the echo row.** A copy is wrong only when the admitter was,
+and that is caught exactly like a stamper's fraud: only if somebody else
+verified, `[v > 0]`. The echo row has the indicator that ruins `stamp` and none
+of the unconditional term that rescues it.
+
+**The bounty on a correct verdict is shared.** A verifier that rejects a canary
+the admitter already rejected is paid for a signed `reject`, and the echoer
+signed the same `reject`. The protocol cannot pay one and not the other, for the
+same reason it cannot pay `R/k` to a verifier and not to a stamper. Only a
+verdict that *overturns* the admitter, `p·e`, is the verifier's alone.
+
+Subtract, for one operator in an honest network:
+
+```
+echo − verify  =  c − p·e·(β/n + S')
+```
+
+The pool cancels, as it always does. So does the canary rate. At an honest
+admitter (`e = 0`) the slash cancels too, and what is left is the cost of one
+check. In the reference network with every verdict readable that is **+200 per
+claim**, exactly `verify_cost`, and the harness agrees to the unit. Universal
+echo is a strict equilibrium at any canary rate up to the whole sample and any
+bond up to the modelling bound at a 100% slash —
+`everybody_echoing_is_an_equilibrium_at_any_canary_rate_and_any_slash`, the
+same sweep that shows the rubber-stamp trap standing, except that turning
+canaries on no longer helps. A lone verifier among echoers earns `p·e·β − c`:
+even an admitter that waves through *every* fraud (`e = 1`) pays it 50 against a
+cost of 200, so the trap stands however careless the admitter is
+(`a_sloppy_admitter_deters_echo_only_while_somebody_else_checks`).
+
+#### Sealing the verdict
+
+The fix is to take away the thing being copied. For a beacon-drawn sample of
+claims the admitter publishes only a commitment to its verdict and opens it after
+the attestation window closes. On such a claim there is nothing to echo, and the
+echoer is back to the blind moves — stamp, reject or abstain — which canaries
+do police. Write `b` for the share of paid claims sealed this way. Two
+constraints, the same two as for canaries:
+
+```
+honest profile stable   (1−b)·(c − p·e·A)  <  b·(V − F)        A = β/n + S'
+echo trap destroyed     (1−b)·(c − p·e·β)  <  b·(R/n − c + (D + p)·β − F₀)
+```
+
+where `V` is the honest payoff and `F`, `F₀` the best blind move on a sealed
+claim with others checking and with nobody checking. Both are linear in `b`.
+`design::minimum_blind_sample` returns the larger root, and
+`the_blind_share_closed_form_agrees_with_the_solver` checks it against the
+solver on both sides. For the reference network:
+
+```
+honest   200 / 2302.875   =  1600/18423  ≈ 8.7%
+trap     200 / 2187.5     =  16/175      ≈ 9.1%    ← binds
+```
+
+At exactly 16/175 the echo trap is a *weak* equilibrium, as at the canary
+threshold. The pool cancels out of both, because at the reference stamping is
+the better blind move — 2,500 of pool share against 2,300 of expected slash with
+others checking — and a richer pool only makes that more true.
+
+#### What a blind share does not buy
+
+That 16/175 stops an operator that **never** runs a checker. It does not stop
+one that runs it only where it has to. An attestor can see which claims are
+sealed, so it can verify those and copy the rest, and because every term above
+lives within one claim, that beats always verifying by `(1 − b)·c` — positive at
+*every* share below one. At half sealed the harness reports the never-checker
+losing 951 per claim and the selective copier gaining 100:
+
+```
+  blind share of paid claims             1/2  FAIL
+  echo, never checking         -951.43/claim  ok
+  echo where verdicts show     +100.00/claim  FAIL
+  echo trap                             none  ok
+```
+
+`an_attestor_that_can_see_which_claims_are_sealed_copies_the_rest_at_any_share`
+pins this, including at 999/1000 sealed, where the five-action game calls the
+honest profile strict and is wrong — none of its five actions is this one. So
+the share is the wrong knob. **A paid attestation on a claim whose verdict is
+readable buys a copy**, and the only fix is not to pay for those: the
+verification pool pays attestations on sealed claims only. That is
+`blind_sample = 1` *over paid attestations* — a rule the protocol can enforce,
+because it knows which claims it sealed — and it is what the reference
+parameters assume. How *many* claims are sealed is then a question of coverage
+and settlement latency (a sealed claim waits out the window), not of incentive.
+
+The report says so whatever share it is given, printing the readable-verdict
+case beside the verdict the way the sybil section prints the rule it rejected:
+
+```
+  blind share of paid claims               1  ok
+  echo the admitter          nothing to copy  ok
+  echo, all verdicts shown     +200.00/claim  note
+  echo trap, all shown           strict Nash  note
+  blind share needed        16/175 stops a node that never checks; below 1, shown claims are copied
+```
+
+Three assumptions in this, stated so they can be argued with. `e` defaults to
+zero: an honest admitter running a deterministic verifier is never wrong, and
+zero is also the value that makes echoing *cheapest*. On a sealed claim the
+echoer is counted as attesting either way for everybody else's pool share,
+which overstates how stable the echo trap is when abstaining is its better
+blind move — the safe direction for a threshold. And echo is judged against the
+two profiles it threatens rather than enumerated: five actions at a hundred
+nodes is 4.6 million profiles, past the solver's budget, so a rival equilibrium
+that *mixes* echoers with the other four actions is not searched for.
+
 ## The generator
 
 `src/canary.rs` is the pipeline the numbers above assume. Everything in this
@@ -426,6 +558,13 @@ second case is buying nothing, and
 `the_pool_share_cancels_out_of_the_honest_versus_lazy_comparison` holds it to
 that at a fortyfold change in pool size.
 
+It cancels against an echoer too, and that is the bad news rather than the
+good: with the pool gone, what separates echoing from verifying is the cost of
+a check, and neither the slash nor the canary rate appears in the difference at
+all. `the_pool_cancels_against_echo_too_and_what_is_left_is_the_cost_of_a_check`
+holds that across the same fortyfold change, a twentyfold canary rate, and the
+largest bond the model admits.
+
 ## Where the money comes from
 
 Not from a new mint. [economics.md](economics.md) argues that issuance not gated
@@ -437,6 +576,15 @@ That choice has a cost and the harness reports it rather than burying it:
 security spend is proportional to settled value, which is right in the limit and
 **zero at launch**. `cairn incentives --settled 0` prints `fee pool supports
 no nodes`. The bootstrap problem is stated, not solved.
+
+And what the verification share of that fee buys depends on when it is earned.
+Paid to attestors on claims whose verdict is already in the log, it buys
+**echo, not verification**: participation, signatures, bonds at risk for the
+admitter's mistakes — and not one independent run of a checker, because a copy
+earns the same fee for 200 less. The section above has the algebra. The fee buys
+checks only on claims whose verdict is sealed until attestations close, so the
+fee should be paid on those and on nothing else. Today the admitter's verdict is
+published at admission, which is the `+200.00/claim` case.
 
 ## The committee sits in a vice
 
@@ -494,7 +642,7 @@ sybil resistance -- identities one operator would run
 
 ## What the harness actually is
 
-`src/incentive/` — about 5,200 lines, 95 tests.
+`src/incentive/` — about 9,300 lines, 133 tests.
 
 | module | what it does |
 |---|---|
@@ -627,7 +775,7 @@ More specifically:
   every service finding carries an `exact` flag and a report says so when the
   arithmetic ran out of room.
 
-## Status
+## Status: committee sizing
 
 The committee sizing this section argues for is **built**: `COMMITTEE_SIZE` is
 a floor, and `Node::committee_size_at` adds seats while the drawn members'
@@ -654,3 +802,10 @@ building the harness first is that the parameters it demands (a committee that
 scales with sealed value, a bond in the millions, a canary rate a real pipeline
 has to sustain) are the kind of thing that is very expensive to discover
 afterwards.
+
+Add one to that list, found by asking the model what an attestor can read: **no
+verdict is sealed.** The admitter's verdict is in the log at admission, so the
+reference's `blind_sample = 1` — pay attestations only on claims whose verdict
+is still a commitment — is a rule the protocol does not have yet. Until it does,
+a verification fee paid to attestors buys echo, and the report's
+`echo, all verdicts shown` line is the number for the protocol as built.

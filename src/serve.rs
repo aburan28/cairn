@@ -416,6 +416,10 @@ pub struct Serving {
     roles: Result<Roles, network::RolesError>,
     /// This machine, probed once. A request handler does not read `/proc`.
     hardware: Hardware,
+    /// The address the listener actually bound, set by [`serve_on`]. What
+    /// `GET /network` reports as `node.reach`, so the reader can tell an
+    /// operator whether a second machine can dial this one at all.
+    bound: Option<std::net::SocketAddr>,
 }
 
 /// How this server obtains the at-rest key, when the log is sealed.
@@ -445,6 +449,7 @@ impl Serving {
             sessions: None,
             roles: Roles::from_env(),
             hardware: Hardware::probe(),
+            bound: None,
         }
     }
 
@@ -619,7 +624,8 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
 
 /// [`listen`], on a listener the caller already bound. Tests use this to get
 /// an ephemeral port without racing for one.
-pub fn serve_on(listener: TcpListener, serving: Serving) -> io::Result<()> {
+pub fn serve_on(listener: TcpListener, mut serving: Serving) -> io::Result<()> {
+    serving.bound = listener.local_addr().ok();
     let serving = Arc::new(serving);
     let live = Arc::new(AtomicU64::new(0));
     for stream in listener.incoming() {
@@ -1413,6 +1419,7 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                         Value::Bool(facts.accepts_submissions),
                     ),
                     ("runs_p2p", Value::Bool(facts.runs_p2p)),
+                    ("reach", network::reach(serving.bound)),
                 ]),
             ),
             ("peers", peers),

@@ -1,5 +1,6 @@
 "use client";
 
+import { goalSlug, objectiveTitle } from "@/lib/title";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -125,7 +126,7 @@ export default function Page() {
     }
     const ranked = [...rows];
     ranked.sort((a, b) => {
-      if (sort === "goal") return a.goal.localeCompare(b.goal);
+      if (sort === "goal") return objectiveTitle(a).localeCompare(objectiveTitle(b));
       if (sort === "reward") return b.reward - a.reward;
       // "progress": how much of the pool is still payable, largest first —
       // which is the ordering somebody deciding what to work on wants.
@@ -177,10 +178,9 @@ export default function Page() {
             label="Open"
             value={String(openCount)}
             from={openCount ? "worth working on" : "all settled"}
-            tone={openCount ? "accent" : "neutral"}
           />
-          <Stat label="Still payable" value={amount(remaining)} from={`of ${amount(pool)} funded`} tone="violet" />
-          <Stat label="Paid out" value={amount(paidOut)} tone="info" />
+          <Stat label="Still payable" value={amount(remaining)} from={`of ${amount(pool)} funded`} />
+          <Stat label="Paid out" value={amount(paidOut)} />
         </div>
       )}
 
@@ -200,7 +200,7 @@ export default function Page() {
             className="field max-w-sm min-w-52 flex-1 py-1.5"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search goal, statement, funder or id"
+            placeholder="Search name, statement, funder or id"
           />
           <select
             id="kind"
@@ -225,7 +225,7 @@ export default function Page() {
           >
             <option value="reward">Largest bounty</option>
             <option value="progress">Most left to earn</option>
-            <option value="goal">Goal, A–Z</option>
+            <option value="goal">Name, A–Z</option>
           </select>
           <label className="flex cursor-pointer items-center gap-2 px-1 text-[13px] text-ink-2">
             <input
@@ -302,8 +302,11 @@ function ObjectiveTable({
     <section className="mb-6">
       <SectionHeading count={rows.length}>{title}</SectionHeading>
       <div className="box overflow-x-auto">
-        {/* Fixed layout, so Open and Settled line up column for column. */}
-        <table className="w-full min-w-[46rem] table-fixed border-collapse text-left text-[13px]">
+        {/* Fixed layout, so Open and Settled line up column for column. The
+            other five columns take 40rem, so the minimum is what leaves the
+            title column room: at 46rem it got 6rem, and every name read as
+            "GOAL-e…". Narrower than this, the box scrolls. */}
+        <table className="w-full min-w-[58rem] table-fixed border-collapse text-left text-[13px]">
           <colgroup>
             <col />
             <col className="w-28" />
@@ -356,21 +359,20 @@ function ObjectiveRow({
   return (
     <tr className="group align-top transition-colors hover:bg-surface-2">
       <td className="px-4 py-3">
+        {/* The title is the statement's first sentence -- the funder's words,
+            attacker-supplied text in src/mcp.rs's terms. React escapes it;
+            the objective's own page carries it in full under its "not
+            checked" label. The goal slug sits under it as the id it is. */}
         <Link
           href={href}
-          className="block truncate font-semibold text-ink group-hover:text-accent"
-        >
-          {objective.goal || short(objective.id)}
-        </Link>
-        {/* The funder's words, quoted and dimmed: attacker-supplied text in
-            src/mcp.rs's terms. React escapes it; the objective's own page
-            carries it in full under its "not checked" label. */}
-        <p
-          className="mt-0.5 line-clamp-1 text-[12.5px] text-ink-3"
+          className="line-clamp-2 font-medium text-ink [overflow-wrap:anywhere] group-hover:underline"
           title={`Funder's statement, not checked: ${objective.statement}`}
         >
-          &ldquo;{objective.statement}&rdquo;
-        </p>
+          {objectiveTitle(objective)}
+        </Link>
+        {goalSlug(objective.goal) && (
+          <p className="mono mt-0.5 text-[11.5px] text-ink-3">{goalSlug(objective.goal)}</p>
+        )}
         {suspect && (
           <p className="mt-1 text-[12px] text-bad">
             Paid plus remaining exceeds what was funded. Audit this node before trusting it.
@@ -378,7 +380,7 @@ function ObjectiveRow({
         )}
       </td>
       <td className="px-3 py-3">
-        <Badge tone="info">{objective.verifier_kind}</Badge>
+        <Badge>{objective.verifier_kind}</Badge>
       </td>
       <td className="mono px-3 py-3 text-right text-ink">{amount(objective.reward)}</td>
       <td className="px-3 py-3">

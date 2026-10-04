@@ -17,6 +17,14 @@
 //! therefore an answer to "nobody is running nodes" and never an answer to
 //! "nobody is checking anything", and a design that reaches for it in the second
 //! case is buying nothing.
+//!
+//! One lazy strategy escapes even those three knobs. An attestor that copies the
+//! verdict the admitting node already logged collects the pool share too, passes
+//! every canary, and is slashed only when the admitter was wrong *and* somebody
+//! else looked. Against it the slash and the canary rate cancel as well, and
+//! what is left is the cost of a check -- so a pool paid for attestations on
+//! claims whose verdict is readable buys copies. Only sealing the verdict until
+//! attestations close moves that comparison. See [`Attest::Echo`].
 
 use super::exact::Rat;
 use super::game::{Sybil, Symmetric};
@@ -28,9 +36,12 @@ use super::{NodeParams, ParamError};
 
 /// What an operator does with an artifact it has been sampled to check.
 ///
-/// Four actions, not two. The two-action version -- check or do not check --
-/// hides the attack that matters: there are *two* ways to attest without
+/// Five actions, not two. The two-action version -- check or do not check --
+/// hides the attacks that matter: there are *three* ways to attest without
 /// looking, and they need different defences.
+///
+/// `Echo` is appended rather than slotted in beside `Stamp` so every index a
+/// report, a sweep or a pinned test already uses keeps its meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Attest {
     /// Re-run the pinned verifier and report what it said.
@@ -44,10 +55,30 @@ pub enum Attest {
     Reject,
     /// Run a node, but attest to nothing.
     Abstain,
+    /// Attest whatever the admitting node already wrote to the log, and stamp
+    /// where there is nothing to copy.
+    ///
+    /// Not a lie at all, which is what makes it the hard one. A node appends
+    /// `claim` and then `verdict` at admission, and attestations come after, so
+    /// a copied verdict is right exactly as often as the admitter was -- on
+    /// canaries too, because a canary is admitted like anything else. It is
+    /// only an action while some paid claim's verdict is readable: see
+    /// [`NodeParams::blind_sample`].
+    Echo,
 }
 
 impl Attest {
-    pub const ALL: [Attest; 4] = [
+    pub const ALL: [Attest; 5] = [
+        Attest::Verify,
+        Attest::Stamp,
+        Attest::Reject,
+        Attest::Abstain,
+        Attest::Echo,
+    ];
+
+    /// The four actions that need no verdict to copy: the whole game when every
+    /// paid claim is sealed, and the original one.
+    pub const BLIND: [Attest; 4] = [
         Attest::Verify,
         Attest::Stamp,
         Attest::Reject,
@@ -60,6 +91,7 @@ impl Attest {
             Attest::Stamp => 1,
             Attest::Reject => 2,
             Attest::Abstain => 3,
+            Attest::Echo => 4,
         }
     }
 
@@ -73,6 +105,7 @@ impl Attest {
             Attest::Stamp => "rubber-stamp",
             Attest::Reject => "reject-blind",
             Attest::Abstain => "abstain",
+            Attest::Echo => "echo-admitter",
         }
     }
 }
@@ -122,6 +155,73 @@ impl Attest {
 /// themselves; false acceptances do not. Every mechanism here is downstream of
 /// that asymmetry.
 ///
+/// # The fifth row: echo the admitter
+///
+/// Write `b` for the share of paid claims whose verdict is sealed while they
+/// are attested ([`NodeParams::blind_sample`]), `e` for the share of genuinely
+/// invalid submissions the admitter accepted
+/// ([`NodeParams::admitter_error_rate`]) and `h` for the number echoing. On a
+/// claim whose verdict is shown, and with `D = q(1-g)`:
+///
+/// ```text
+/// verify   R/k - cost + (D + p(1-e)) * beta/(v+h) + p*e * beta/v
+/// echo     R/k        + (D + p(1-e)) * beta/(v+h) - S' * p*e * [v > 0]
+/// ```
+///
+/// and on a sealed claim the echoer has nothing to copy and plays the better of
+/// stamp, reject and abstain, while every other row is the table above. Each
+/// row's payoff is `(1-b)` times its shown-claim value plus `b` times its
+/// sealed one.
+///
+/// **There is no canary term in the echo row.** The log already carries every
+/// canary's correct verdict, written by the admitter, so a copy passes all of
+/// them, known-good and known-bad alike. The only way an echo is wrong is that
+/// the admitter was, and that is caught exactly like a stamper's fraud -- only
+/// if somebody else verified, `[v > 0]` -- with the admitter's error in place
+/// of fraud. So the echo row has Stamp's fatal indicator and none of the term
+/// that rescues Stamp.
+///
+/// **The catch bounty on a correct verdict is shared with the echoers.** The
+/// bounty a verifier earns for rejecting a canary or a fraud the admitter also
+/// rejected is earned by a signed `reject` on that claim, and an echoer signed
+/// the same `reject`. The protocol cannot pay one and not the other, for the
+/// same reason it cannot pay `R/k` to a verifier and not to a stamper. Only a
+/// verdict that *overturns* the admitter -- `p * e` -- distinguishes a node
+/// that looked, and only that term is the verifier's alone. Giving the
+/// verifier the whole bounty here would let the model pay it for catching
+/// artifacts the admitter had already caught, which is paying for nothing the
+/// mechanism can observe.
+///
+/// **So `cost` is the whole comparison.** Echo against verify, one deviator in
+/// an honest network, is `cost - p*e*(beta/n + S')`: the pool cancels, the
+/// canary rate cancels, and at an honest admitter (`e = 0`) the slash cancels
+/// too. Universal echo is a strict Nash equilibrium at any canary rate and any
+/// slash, and no amount of either changes it -- a lone verifier among echoers
+/// gains `p*e*beta - cost`, which is negative whenever catching the admitter's
+/// mistakes pays less than checking. `tests` pins both.
+///
+/// **The sealed fallback is the better of the three blind moves, not a fixed
+/// one.** Stamping a sealed claim keeps the pool share and risks the canary
+/// slash; abstaining forfeits both. Which wins depends on whether `R/k` covers
+/// `S' * (q(1-g) + p[v>0])` -- at the reference it does, by 2,500 to 2,300 --
+/// and a model that fixed either would understate the echoer whenever the
+/// other was better, which is the direction a threshold must never err in.
+/// For the *other* players' counts an echoer is counted as attesting on sealed
+/// claims either way. That is exact when stamping is its better fallback; when
+/// abstaining is, it understates what a verifier earns on the sealed claims
+/// the echoers left, which makes universal echo look *more* stable than it is
+/// -- the safe direction for [`super::design::minimum_blind_sample`].
+///
+/// **What the five-action game cannot see.** A real attestor knows which claims
+/// are sealed, so it need not commit to one policy across both kinds: it can
+/// verify the sealed claims and echo the rest. Payoffs are additive across
+/// claims and every interaction term above is within one claim, so that
+/// policy beats always verifying by `(1-b)` times the shown-claim gain, which
+/// is positive at *every* `b < 1`. The game's `Echo` is the operator that never
+/// runs a checker; [`Verification::selective_echo_gain`] is the one that runs
+/// it only where it must. A blind share stops the first. Only declining to pay
+/// for shown claims stops the second.
+///
 /// # What the model leaves out
 ///
 /// Every node is sampled onto the same artifact, so "somebody else verified"
@@ -131,16 +231,50 @@ impl Attest {
 /// therefore the conservative choice.
 pub struct Verification<'a> {
     params: &'a NodeParams,
+    /// Whether [`Attest::Echo`] is an action: false when every paid claim is
+    /// sealed, and false for [`Verification::blind`] whatever the parameters say.
+    echo: bool,
 }
 
 impl<'a> Verification<'a> {
+    /// The game these parameters describe: five actions if some paid claim's
+    /// verdict is readable, the original four if none is.
+    ///
+    /// Four rather than five-with-an-inert-echo when nothing is readable,
+    /// because an echoer with nothing to copy *is* a stamper, and a duplicate
+    /// action would demote every strict equilibrium containing stampers to a
+    /// weak one for a reason that is a property of the encoding, not of the
+    /// mechanism.
     pub fn new(params: &'a NodeParams) -> Result<Verification<'a>, ParamError> {
         params.validate()?;
-        Ok(Verification { params })
+        Ok(Verification {
+            params,
+            echo: params.echo_possible(),
+        })
+    }
+
+    /// The four-action game, whatever [`NodeParams::blind_sample`] says: the
+    /// game on a sealed claim, and the profiles in which nobody echoes.
+    ///
+    /// What [`super::design::Report`] enumerates. Five actions at a hundred
+    /// nodes is `C(104, 4)` = 4.6 million profiles, past the solver's budget,
+    /// so the echo deviations are checked directly against the profiles they
+    /// threaten instead -- see [`super::design::EchoFinding`].
+    pub fn blind(params: &'a NodeParams) -> Result<Verification<'a>, ParamError> {
+        params.validate()?;
+        Ok(Verification {
+            params,
+            echo: false,
+        })
     }
 
     pub fn params(&self) -> &NodeParams {
         self.params
+    }
+
+    /// Whether [`Attest::Echo`] is one of this game's actions.
+    pub fn echo_available(&self) -> bool {
+        self.echo
     }
 
     /// Rate at which a rubber-stamper meets an artifact the protocol *knows* is
@@ -171,6 +305,35 @@ impl<'a> Verification<'a> {
                     .unwrap_or(Rat::ZERO)
     }
 
+    /// Payoff to a node that verifies when `echoers` of the attesters copy the
+    /// admitter instead.
+    ///
+    /// With no echoers this *is* [`Verification::verify_payoff`] -- returned by
+    /// that function rather than re-derived, so the four-action results cannot
+    /// move by so much as a denominator when echo is merely possible.
+    pub fn verify_payoff_among(&self, attesters: u32, verifiers: u32, echoers: u32) -> Rat {
+        if echoers == 0 {
+            return self.verify_payoff(attesters, verifiers);
+        }
+        let params = self.params;
+        let bounty = Rat::units(params.catch_bounty);
+        let shown = Rat::ONE - params.blind_sample;
+        let alone = bounty.share(verifiers).unwrap_or(Rat::ZERO);
+        let shared = bounty
+            .share(verifiers.saturating_add(echoers))
+            .unwrap_or(Rat::ZERO);
+        let overturned = params.fraud_rate * params.admitter_error_rate;
+        // On a shown claim the bounty for agreeing with a correct admitter is
+        // split with everybody who signed the same verdict; only overturning a
+        // wrong one is this node's alone. On a sealed claim the echoers are
+        // stamping, so the old split among verifiers stands.
+        let on_shown = (self.agreed_rate() * shared) + overturned * alone;
+        let on_sealed = (self.stamp_deterrent() + params.fraud_rate) * alone;
+        self.pool_share(attesters) - Rat::units(params.verify_cost)
+            + shown * on_shown
+            + params.blind_sample * on_sealed
+    }
+
     /// Payoff to a node that accepts without checking.
     ///
     /// `others_verifying` is deliberately the count *excluding* this node: the
@@ -194,6 +357,78 @@ impl<'a> Verification<'a> {
         self.pool_share(attesters) - self.params.slash() * caught
     }
 
+    /// Payoff to a node that copies the admitter's verdict where it can read it
+    /// and makes the best blind move where it cannot.
+    ///
+    /// `others_verifying` excludes this node, as for
+    /// [`Verification::stamp_payoff`]; `echoers` *includes* it, because it is a
+    /// divisor of a bounty this node shares in.
+    pub fn echo_payoff(&self, attesters: u32, others_verifying: u32, echoers: u32) -> Rat {
+        let shown = Rat::ONE - self.params.blind_sample;
+        let on_shown = self.echo_shown_payoff(attesters, others_verifying, echoers);
+        let on_sealed = self.blind_fallback(attesters, others_verifying);
+        shown * on_shown + self.params.blind_sample * on_sealed
+    }
+
+    /// What an echoer earns on a claim whose verdict it can read.
+    fn echo_shown_payoff(&self, attesters: u32, others_verifying: u32, echoers: u32) -> Rat {
+        let params = self.params;
+        let shared = Rat::units(params.catch_bounty)
+            .share(others_verifying.saturating_add(echoers))
+            .unwrap_or(Rat::ZERO);
+        // No canary term: the admitter already wrote every canary's right
+        // answer. The only wrong copy is of a wrong admitter, and that needs
+        // somebody else to have looked -- Stamp's indicator, without Stamp's
+        // unconditional half.
+        let caught = if others_verifying > 0 {
+            params.fraud_rate * params.admitter_error_rate
+        } else {
+            Rat::ZERO
+        };
+        self.pool_share(attesters) + self.agreed_rate() * shared - params.slash() * caught
+    }
+
+    /// The best an operator that does not run the checker can do on a sealed
+    /// claim: stamp, reject or abstain, whichever pays.
+    fn blind_fallback(&self, attesters: u32, others_verifying: u32) -> Rat {
+        self.stamp_payoff(attesters, others_verifying)
+            .max(self.reject_payoff(attesters))
+            .max(Rat::ZERO)
+    }
+
+    /// What one operator gains over always verifying, in an otherwise honest
+    /// network, by verifying the sealed claims and echoing the shown ones.
+    ///
+    /// The deviation the five-action game cannot express, because its actions
+    /// are policies over the whole sample and this one conditions on what the
+    /// attestor can see. Payoffs are additive across claims and every term is
+    /// within one claim, so it is exactly `(1-b)` times what echoing a shown
+    /// claim gains over verifying it -- positive at every `b < 1` whenever an
+    /// echo is cheaper than a check. Zero when nothing is shown.
+    pub fn selective_echo_gain(&self) -> Rat {
+        let params = self.params;
+        let shown = Rat::ONE - params.blind_sample;
+        if shown.is_zero() {
+            return Rat::ZERO;
+        }
+        let nodes = params.nodes;
+        let others = nodes.saturating_sub(1);
+        let verify_shown = self.pool_share(nodes) - Rat::units(params.verify_cost)
+            + (self.stamp_deterrent() + params.fraud_rate)
+                * Rat::units(params.catch_bounty)
+                    .share(nodes)
+                    .unwrap_or(Rat::ZERO);
+        shown * (self.echo_shown_payoff(nodes, others, 1) - verify_shown)
+    }
+
+    /// Rate of invalid artifacts the admitter itself rejected: invalid canaries
+    /// and the fraud it caught. The bounty on these goes to everybody who signed
+    /// `reject`, looking or not.
+    fn agreed_rate(&self) -> Rat {
+        self.stamp_deterrent()
+            + self.params.fraud_rate * (Rat::ONE - self.params.admitter_error_rate)
+    }
+
     fn pool_share(&self, attesters: u32) -> Rat {
         self.params
             .verify_pool()
@@ -204,7 +439,11 @@ impl<'a> Verification<'a> {
 
 impl Symmetric for Verification<'_> {
     fn actions(&self) -> usize {
-        Attest::ALL.len()
+        if self.echo {
+            Attest::ALL.len()
+        } else {
+            Attest::BLIND.len()
+        }
     }
 
     fn population(&self) -> u32 {
@@ -213,22 +452,28 @@ impl Symmetric for Verification<'_> {
 
     fn payoff(&self, own: usize, others: &[u32]) -> Rat {
         let own = match Attest::from_index(own) {
-            Some(action) => action,
+            // An index past `actions()` -- Echo in the four-action game -- is
+            // refused like any other out-of-range index.
+            Some(action) if own < self.actions() => action,
             // Unreachable through the solvers, which only pass indices they got
             // from `actions()`. Abstention is the payoff-zero answer, which is
             // the one that cannot mislead a report.
-            None => return Rat::ZERO,
+            _ => return Rat::ZERO,
         };
-        let others_verifying = others.get(Attest::Verify.index()).copied().unwrap_or(0);
-        let others_attesting = others_verifying
-            + others.get(Attest::Stamp.index()).copied().unwrap_or(0)
-            + others.get(Attest::Reject.index()).copied().unwrap_or(0);
+        let count = |action: Attest| others.get(action.index()).copied().unwrap_or(0);
+        let others_verifying = count(Attest::Verify);
+        let others_echoing = count(Attest::Echo);
+        let others_attesting =
+            others_verifying + count(Attest::Stamp) + count(Attest::Reject) + others_echoing;
         let attesting = others_attesting + if own == Attest::Abstain { 0 } else { 1 };
         match own {
-            Attest::Verify => self.verify_payoff(attesting, others_verifying + 1),
+            Attest::Verify => {
+                self.verify_payoff_among(attesting, others_verifying + 1, others_echoing)
+            }
             Attest::Stamp => self.stamp_payoff(attesting, others_verifying),
             Attest::Reject => self.reject_payoff(attesting),
             Attest::Abstain => Rat::ZERO,
+            Attest::Echo => self.echo_payoff(attesting, others_verifying, others_echoing + 1),
         }
     }
 
@@ -774,6 +1019,268 @@ mod tests {
                 .all(|(counts, _)| counts[Attest::Verify.index()] < params.nodes),
             "an unfunded network does not verify"
         );
+    }
+
+    // -- echo -----------------------------------------------------------------
+
+    /// The protocol as built: the admitter's verdict is in the log before
+    /// anybody attests, on every claim.
+    fn shown() -> NodeParams {
+        NodeParams {
+            blind_sample: Rat::ZERO,
+            ..reference()
+        }
+    }
+
+    /// Echo minus verify for one operator in an otherwise honest network.
+    fn lone_echo_gain(game: &Verification) -> Rat {
+        let mut others = everyone(game, Attest::Verify.index());
+        others[Attest::Verify.index()] -= 1;
+        game.payoff(Attest::Echo.index(), &others) - game.payoff(Attest::Verify.index(), &others)
+    }
+
+    #[test]
+    fn with_verdicts_shown_echoing_beats_verifying_by_exactly_the_cost_of_a_check() {
+        // An honest admitter is never wrong, so a copy is never caught, and
+        // everything else -- the pool share, the bounty on the canaries the
+        // admitter already rejected -- is paid to a copy and a check alike. What
+        // is left is the check.
+        let params = shown();
+        let game = Verification::new(&params).expect("validated");
+        assert_eq!(game.actions(), Attest::ALL.len());
+        assert_eq!(lone_echo_gain(&game), Rat::units(params.verify_cost));
+        assert_eq!(
+            symmetric_stability(&game, &everyone(&game, Attest::Verify.index()))
+                .expect("valid counts"),
+            None,
+            "the reference network's honest profile does not survive a readable verdict"
+        );
+        let found = invasion(
+            &game,
+            Attest::Verify.index(),
+            params.nodes,
+            Invades::StrictlyBetter,
+        )
+        .expect("valid resident")
+        .expect("somebody defects");
+        assert_eq!(found.mutant, Attest::Echo.index());
+        assert_eq!(found.mutants, 1, "one copier is enough");
+    }
+
+    #[test]
+    fn everybody_echoing_is_an_equilibrium_at_any_canary_rate_and_any_slash() {
+        // The echo row has Stamp's conditional slash and none of the canary
+        // term that rescues Stamp, so the knobs that close the rubber-stamp trap
+        // do not touch this one. Canary rates run to the top of what the sample
+        // admits (canary plus fraud at most one), stakes to the modelling bound,
+        // at a 100% slash.
+        for canary_rate in [
+            Rat::ZERO,
+            Rat::rate(1, 100).expect("a valid rate"),
+            Rat::rate(1, 2).expect("a valid rate"),
+            Rat::rate(999, 1_000).expect("a valid rate"),
+        ] {
+            for stake in [1_000u64, 1_000_000, 1_000_000_000, MAX_UNITS] {
+                let params = NodeParams {
+                    canary_rate,
+                    stake,
+                    slash_rate: Rat::ONE,
+                    ..shown()
+                };
+                let game = Verification::new(&params).expect("validated");
+                assert_eq!(
+                    symmetric_stability(&game, &everyone(&game, Attest::Echo.index()))
+                        .expect("valid counts"),
+                    Some(Stability::Strict),
+                    "universal echo survives canary rate {canary_rate} and a slash of {stake}"
+                );
+            }
+        }
+        // The contrast: the same canary rate that ends the rubber-stamp trap.
+        let params = shown();
+        let game = Verification::new(&params).expect("validated");
+        assert_eq!(
+            symmetric_stability(&game, &everyone(&game, Attest::Stamp.index()))
+                .expect("valid counts"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_sloppy_admitter_deters_echo_only_while_somebody_else_checks() {
+        // An admitter that waves through every fraud makes a copy wrong at the
+        // fraud rate, and with others checking that costs `p * (beta/n + S')`,
+        // which here is more than the check saves. But the penalty needs a
+        // verifier, so in a network of copiers it never fires: a lone verifier
+        // earns only `p * beta` for overturning the admitter, less than it pays.
+        let params = NodeParams {
+            admitter_error_rate: Rat::ONE,
+            ..shown()
+        };
+        let game = Verification::new(&params).expect("validated");
+        let shared = Rat::units(params.catch_bounty)
+            .share(params.nodes)
+            .expect("nodes");
+        assert_eq!(
+            lone_echo_gain(&game),
+            Rat::units(params.verify_cost) - params.fraud_rate * (shared + params.slash())
+        );
+        assert!(lone_echo_gain(&game).is_negative());
+        assert_eq!(
+            symmetric_stability(&game, &everyone(&game, Attest::Echo.index()))
+                .expect("valid counts"),
+            Some(Stability::Strict),
+            "the trap stands however wrong the admitter is"
+        );
+    }
+
+    #[test]
+    fn the_pool_cancels_against_echo_too_and_what_is_left_is_the_cost_of_a_check() {
+        // The module's claim, extended to the fifth row. Multiply the pool by
+        // forty: echo against stamp does not move, as before. Echo against
+        // verify does not move either -- and what it equals is the cost of one
+        // check, with no canary term and no slash in it. So the two knobs that
+        // decide honest-versus-lazy for a stamper decide nothing for a copier.
+        let small = shown();
+        let large = NodeParams {
+            settled_value: small.settled_value * 40,
+            ..small.clone()
+        };
+        let gaps = |params: &NodeParams| {
+            let game = Verification::new(params).expect("validated");
+            let mut others = everyone(&game, Attest::Verify.index());
+            others[Attest::Verify.index()] -= 1;
+            let echo = game.payoff(Attest::Echo.index(), &others);
+            (
+                echo - game.payoff(Attest::Stamp.index(), &others),
+                echo - game.payoff(Attest::Verify.index(), &others),
+            )
+        };
+        assert!(large.verify_pool() > small.verify_pool());
+        assert_eq!(gaps(&small), gaps(&large));
+        let cost = Rat::units(small.verify_cost);
+        assert_eq!(gaps(&small).1, cost);
+        // And neither of the stamper's knobs reaches it.
+        for knobbed in [
+            NodeParams {
+                canary_rate: Rat::rate(1, 5).expect("a valid rate"),
+                ..small.clone()
+            },
+            NodeParams {
+                stake: MAX_UNITS,
+                slash_rate: Rat::ONE,
+                ..small.clone()
+            },
+        ] {
+            assert_eq!(gaps(&knobbed).1, cost);
+        }
+    }
+
+    #[test]
+    fn with_every_paid_claim_sealed_the_four_action_game_is_unchanged() {
+        // Echo is not an action when there is nothing to copy, and nothing it
+        // added leaks into the other four. Two checks, because they fail
+        // differently: the reference game must still *be* the four-action game,
+        // and in the five-action game every profile with nobody echoing must pay
+        // the four old actions exactly what the four-action game pays them.
+        let params = reference();
+        assert_eq!(params.blind_sample, Rat::ONE);
+        let game = Verification::new(&params).expect("validated");
+        assert!(!game.echo_available());
+        assert_eq!(game.actions(), Attest::BLIND.len());
+        assert_eq!(game.payoff(Attest::Echo.index(), &[99, 0, 0, 0]), Rat::ZERO);
+
+        for base in [
+            reference(),
+            NodeParams {
+                canary_rate: Rat::ZERO,
+                ..reference()
+            },
+            NodeParams {
+                stake: 1_000,
+                ..reference()
+            },
+            NodeParams {
+                settled_value: 0,
+                ..reference()
+            },
+        ] {
+            let small = NodeParams {
+                nodes: 12,
+                committee: 7,
+                threshold: 4,
+                ..base
+            };
+            let sealed = Verification::new(&small).expect("validated");
+            for blind_sample in [Rat::ZERO, Rat::rate(1, 2).expect("a valid rate")] {
+                let open = NodeParams {
+                    blind_sample,
+                    ..small.clone()
+                };
+                let five = Verification::new(&open).expect("validated");
+                let four = Verification::blind(&open).expect("validated");
+                assert_eq!(five.actions(), 5);
+                assert_eq!(
+                    symmetric_equilibria(&four).expect("small"),
+                    symmetric_equilibria(&sealed).expect("small"),
+                    "the blind share moved a four-action result"
+                );
+                for verifiers in 0..small.nodes {
+                    for stampers in 0..small.nodes - verifiers {
+                        let rest = small.nodes - 1 - verifiers - stampers;
+                        let old = [verifiers, stampers, rest, 0];
+                        let new = [verifiers, stampers, rest, 0, 0];
+                        for action in Attest::BLIND {
+                            assert_eq!(
+                                five.payoff(action.index(), &new),
+                                sealed.payoff(action.index(), &old),
+                                "{} moved with nobody echoing",
+                                action.name()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_attestor_that_can_see_which_claims_are_sealed_copies_the_rest_at_any_share() {
+        // The limit of the five-action game, pinned so nobody reads more into a
+        // blind share than it buys. Its `Echo` never checks; a real attestor
+        // knows which claims are sealed and can check exactly those. That beats
+        // always checking by the shown share times the cost of a check, at every
+        // share below one -- including shares where the five-action game's
+        // honest profile is strict, because none of its actions is this one.
+        let cost = Rat::units(reference().verify_cost);
+        for (num, den) in [(0u32, 1u32), (1, 10), (1, 2), (999, 1_000)] {
+            let blind_sample = Rat::rate(num, den).expect("a valid rate");
+            let params = NodeParams {
+                blind_sample,
+                ..reference()
+            };
+            let game = Verification::new(&params).expect("validated");
+            assert_eq!(
+                game.selective_echo_gain(),
+                (Rat::ONE - blind_sample) * cost,
+                "at blind share {blind_sample}"
+            );
+        }
+        let mostly_sealed = NodeParams {
+            blind_sample: Rat::rate(999, 1_000).expect("a valid rate"),
+            ..reference()
+        };
+        let game = Verification::new(&mostly_sealed).expect("validated");
+        assert_eq!(
+            symmetric_stability(&game, &everyone(&game, Attest::Verify.index()))
+                .expect("valid counts"),
+            Some(Stability::Strict),
+            "the game says honest"
+        );
+        assert!(game.selective_echo_gain().is_positive(), "and it is wrong");
+        let all_sealed = reference();
+        let sealed = Verification::new(&all_sealed).expect("validated");
+        assert_eq!(sealed.selective_echo_gain(), Rat::ZERO);
     }
 
     // -- availability -------------------------------------------------------

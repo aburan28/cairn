@@ -578,6 +578,13 @@ fn row_for(axes: &[Axis], assignment: &[Point], params: &NodeParams) -> Row {
                     service.binding.clone().unwrap_or_default(),
                 ));
             }
+            // The unsealed counterfactual beside the verdict, as in the report:
+            // a sweep over the reference's other knobs never moves the blind
+            // share, so without it a grid could not show where copying pays.
+            let echo = &report.echo;
+            cells.push(("echo_closed".into(), mark(echo.closed())));
+            cells.push(("echo_shown_gain".into(), echo.shown_gain.to_decimal(2)));
+            cells.push(("blind_share_needed".into(), option_or(echo.minimum, "none")));
             cells.push(("error".into(), String::new()));
         }
         // Not a failure of the sweep: a grid runs through parameter

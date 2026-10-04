@@ -18,7 +18,10 @@ workers hold, and the advisory task leases over them — `/log`, `/task?id=…` 
 divided search while it runs: what the log has settled per worker beside
 what the workers report over `POST /progress`, kept apart and labelled, with
 the share of the expected Pollard rho cost and an ETA at the reported rate —
-and `/submit` — a form that posts an objective to the node that served the page.
+`/contribute` — the ways to take part, what each is paid today, and the exact
+`cairn work` line for adding a machine on this node's network, from the
+`node.reach` it publishes on `GET /network` — and `/submit` — a form that posts
+an objective to the node that served the page.
 
 The first three are static prose and read no node; the rest are the reader. Both
 kinds ship in both mounts, which is the same "one app, not two" decision — an

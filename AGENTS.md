@@ -127,6 +127,13 @@ claim and you hand every submitter a free lottery ticket per restamp.
   `GET /progress/{id}` on one objective and requires them to agree about who the
   workers are and nothing else -- and the only one that runs the walker on
   thousands of seeds, which is how its degenerate start point was found
+- `./scripts/work-demo.sh` if you touched `src/agent/work.rs` (`cairn work`) or
+  the routes it calls: `/work_assignment`, `/progress`, `/frontier/{id}`,
+  `POST /submit`. A worker with nothing but the node's address and a solver
+  command joins, shows up live, commits, reveals and is paid. On a Mac whose
+  `python3` is a pyenv shim the checker cannot run inside the verifier
+  sandbox and the payment step fails as `unavailable`; run it with
+  `PATH=/usr/bin:$PATH`
 - `./scripts/shard-demo.sh` if you touched `src/shards/`. That module has no
   network caller yet, so this script is its seam: six stores that share nothing,
   one shard each, one of them corrupt. A subsystem exercised only by its own

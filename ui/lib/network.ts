@@ -234,6 +234,8 @@ export type NodeFacts = {
   };
   accepts_submissions: boolean;
   runs_p2p: boolean;
+  /** Where this node's HTTP side answers. Absent on a node older than it. */
+  reach?: { bound: string | null; lan: boolean; urls?: string[] };
 };
 
 export type PeersSummary = {

@@ -103,7 +103,7 @@ export function Stat({
   value: string;
   from?: string;
   hint?: string;
-  tone?: "neutral" | "accent" | "warn" | "info" | "violet" | "bad";
+  tone?: "neutral" | "warn" | "bad";
 }) {
   return (
     <div className={`tile tile-${tone} flex-1`}>

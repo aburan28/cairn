@@ -21,6 +21,7 @@ export const ROUTES = [
   { href: "/objectives", label: "Objectives", hint: "What this node will pay for" },
   { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
   { href: "/submit", label: "Post a challenge", hint: "Fund a question, signed by a wallet" },
+  { href: "/contribute", label: "Contribute", hint: "Ways to take part, what each pays, and adding machines on your network" },
   { href: "/chain", label: "Chain", hint: "Epoch links, and whether you have forked" },
   { href: "/log", label: "Log", hint: "Every record, as the node stores it" },
   { href: "/network", label: "Network", hint: "Peers reached, hardware heartbeating, roles declared and evidenced" },
@@ -58,8 +59,11 @@ const NAV: {
     ],
   },
   {
-    group: "Fund",
-    items: [{ href: "/submit", label: "Post a challenge", icon: <IconPlus /> }],
+    group: "Take part",
+    items: [
+      { href: "/contribute", label: "Contribute", icon: <IconNetwork /> },
+      { href: "/submit", label: "Post a challenge", icon: <IconPlus /> },
+    ],
   },
   {
     group: "Learn",

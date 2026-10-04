@@ -59,6 +59,7 @@ pub mod job;
 pub mod probe;
 pub mod sandbox;
 pub mod service;
+pub mod work;
 
 use std::fmt;
 

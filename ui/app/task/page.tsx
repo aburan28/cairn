@@ -367,7 +367,6 @@ function Dashboard({
               ? `of about ${formatMagnitude(unitsExpected)} ${unitWord}s the whole search needs`
               : `${amount(derived.claims_paid)} paid claims, from the log`
           }
-          tone="accent"
         />
         <Stat
           label="Group operations walked"
@@ -378,19 +377,16 @@ function Dashboard({
               : "from the paid witnesses"
           }
           hint={derived.steps_method}
-          tone="info"
         />
         <Stat
           label="Share of expected work"
           value={formatPercent(share)}
           from={expected ? `expected ${formatLog2(expected)} ops for ${job?.name}` : "job unknown to this reader"}
-          tone="violet"
         />
         <Stat
           label="Workers live"
           value={String(reported.live)}
           from={`${reported.stale} stale · ${reported.gone} gone · ${derived.workers.length} ever paid`}
-          tone={reported.live > 0 ? "accent" : "neutral"}
         />
       </div>
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -422,7 +418,6 @@ function Dashboard({
           label="Odds a collision happened"
           value={formatPercent(odds)}
           from={odds !== null ? "birthday bound on the settled work" : "needs a known job"}
-          tone="violet"
         />
         <Stat
           label="Pool"
@@ -432,7 +427,6 @@ function Dashboard({
               ? `left of ${amount(reward)}; ${amount(piecework.unit_price)} per ${unitWord}`
               : "not piecework"
           }
-          tone={piecework && piecework.pool_remaining > 0 ? "accent" : "neutral"}
         />
       </div>
 

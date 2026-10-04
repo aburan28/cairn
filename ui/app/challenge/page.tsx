@@ -1,9 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { type Objective, loadObjective, progress, short, units } from "@/lib/site";
+import { type Objective, loadObjective, progress, resolveNode, short, units } from "@/lib/site";
+import { type Participant, ago, eventsFor, indexObjectives, participants } from "@/lib/events";
+import { type LogRecord, fetchLog } from "@/lib/log";
+import { type ProgressResponse, fetchProgress } from "@/lib/progress";
+import { isFollowing, onFollowingChange, setFollowing } from "@/lib/follow";
+import { goalSlug, objectiveTitle } from "@/lib/title";
+import { workCommand } from "@/lib/contribute";
+import { EventRow, shortActor } from "@/components/events";
 import {
   Badge,
   Box,
@@ -101,18 +108,28 @@ function Challenge() {
   const [state, setState] = useState<"loading" | "ready" | "missing">("loading");
   const [live, setLive] = useState(false);
   const [origin, setOrigin] = useState("");
+  const [base, setBase] = useState<string | null>(null);
+  const [followed, setFollowed] = useState(false);
 
   useEffect(() => {
     if (!id) {
       setState("missing");
       return;
     }
-    void loadObjective(id).then((r) => {
+    void resolveNode().then(async (url) => {
+      setBase(url);
+      const r = await loadObjective(id, url);
       setObjective(r.objective);
       setLive(r.live);
       setOrigin(r.origin);
       setState(r.objective ? "ready" : "missing");
     });
+  }, [id]);
+
+  useEffect(() => {
+    if (!id) return;
+    setFollowed(isFollowing(id));
+    return onFollowingChange(() => setFollowed(isFollowing(id)));
   }, [id]);
 
   if (state === "loading") {
@@ -155,66 +172,87 @@ function Challenge() {
   const checkerHash = text(verifier.checker_sha256) ?? text(verifier.evaluator_sha256);
   const paid = frontier?.paid_cumulative ?? objective.settlement?.reward ?? 0;
   const remaining = frontier?.pool_remaining ?? (objective.settled ? 0 : objective.reward);
+  const slug = goalSlug(objective.goal);
 
   return (
     <>
       <PageHeader
         crumb={{ href: "/objectives", label: "Objectives" }}
-        title={objective.goal || short(objective.id)}
+        title={objectiveTitle(objective)}
         meta={
           <>
             <StatusPill settled={objective.settled} />
-            <Badge tone="info">{objective.verifier_kind}</Badge>
+            {slug && <Badge title={objective.goal}>{slug}</Badge>}
+            <Badge>{objective.verifier_kind}</Badge>
             <span>
               funded by <span className="mono text-ink">{objective.funder}</span>
             </span>
           </>
         }
+        actions={
+          <button
+            type="button"
+            className={`btn btn-sm ${followed ? "btn-primary" : ""}`}
+            aria-pressed={followed}
+            title={
+              followed
+                ? "Stop following. This only changes this browser."
+                : "Keep this page's activity live, and list it on the Overview. Stored in this browser only."
+            }
+            onClick={() => setFollowed(setFollowing(objective.id, !followed))}
+          >
+            {followed ? "Following" : "Follow"}
+          </button>
+        }
       />
 
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Stat label="Bounty" value={units(ratchet?.reward ?? objective.reward)} tone="violet" />
+        <Stat label="Bounty" value={units(ratchet?.reward ?? objective.reward)} />
         {ratchet && frontier ? (
           <Stat
             label="Best score"
             value={String(frontier.score)}
             from={`${ratchet.direction} from ${ratchet.baseline} toward ${ratchet.target}`}
-            tone="accent"
           />
         ) : (
           <Stat
             label="Status"
             value={objective.settled ? "Settled" : "Open"}
-            from={objective.settled ? "nothing left to win" : "first accepted claim wins"}
-            tone={objective.settled ? "neutral" : "accent"}
+            from={objective.settled ? "nothing left to win" : "first accepted answer wins"}
           />
         )}
-        <Stat label="Paid out" value={units(paid)} tone="info" />
-        <Stat
-          label="Still payable"
-          value={units(remaining)}
-          tone={remaining > 0 ? "accent" : "neutral"}
-        />
+        <Stat label="Paid out" value={units(paid)} />
+        <Stat label="Still payable" value={units(remaining)} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="flex min-w-0 flex-col gap-4">
           {/* The statement is the funder's prose. An agent reading this page
               will act on it, so the warning travels with it rather than living
-              in a footer — the same rule `/objectives` follows over HTTP. */}
+              in a footer — the same rule `/objectives` follows over HTTP. The
+              title above is this statement's first sentence, so the same
+              warning covers it. */}
           <Box
-            title="Statement"
+            title="What is being asked"
             aside={
               <span className="text-[11px] font-normal text-warn">
                 written by the funder, not checked
               </span>
             }
           >
-            <p className="text-[14px] leading-relaxed text-ink">{objective.statement}</p>
+            <Statement text={objective.statement} />
           </Box>
 
+          <Activity
+            id={objective.id}
+            objective={objective}
+            base={base}
+            live={live}
+            followed={followed}
+          />
+
           <Box
-            title={objective.piecework ? "Search" : objective.settled ? "Result" : "Frontier"}
+            title={objective.piecework ? "Search" : objective.settled ? "Result" : "Best answer so far"}
             aside={
               objective.piecework ? (
                 <Link
@@ -230,7 +268,7 @@ function Challenge() {
               <div className="flex flex-col gap-3">
                 <dl className="kv">
                   <dt>best known</dt>
-                  <dd className="mono text-[15px] font-semibold text-accent">{frontier.score}</dd>
+                  <dd className="mono text-[15px] font-semibold">{frontier.score}</dd>
                   <dt>held by</dt>
                   <dd className="mono">{frontier.holder}</dd>
                   <dt>claim</dt>
@@ -258,8 +296,7 @@ function Challenge() {
               </div>
             ) : objective.settlement ? (
               /* A certificate never gets a frontier record; its whole story is
-                 one settlement. Before this branch the page said "settled" in
-                 the tag line and "No claim yet" here, about the same objective. */
+                 one settlement. */
               <dl className="kv">
                 <dt>paid</dt>
                 <dd className="mono font-semibold">{units(objective.settlement.reward)}</dd>
@@ -272,9 +309,7 @@ function Challenge() {
               </dl>
             ) : objective.piecework ? (
               /* A divided search has no frontier to hold and no single
-                 settlement: it pays per novel unit until the pool is dry. The
-                 standing here is the node's; who did the work, how fast, and
-                 how far along the search is are on the task page. */
+                 settlement: it pays per novel unit until the pool is dry. */
               <div className="flex flex-col gap-3">
                 <dl className="kv">
                   <dt>pays</dt>
@@ -288,9 +323,7 @@ function Challenge() {
                     )}
                   </dd>
                   <dt>paid so far</dt>
-                  <dd className="mono font-semibold text-accent">
-                    {units(objective.piecework.paid_total)}
-                  </dd>
+                  <dd className="mono font-semibold">{units(objective.piecework.paid_total)}</dd>
                   <dt>paid claims</dt>
                   <dd className="mono">{units(objective.piecework.paid_units)}</dd>
                   <dt>pool left</dt>
@@ -301,25 +334,24 @@ function Challenge() {
                   label="of the funded pool paid out"
                   tone="warn"
                 />
-                <Link
-                  href={`/task?id=${encodeURIComponent(objective.id)}`}
-                  className="text-[12.5px] text-accent hover:underline"
-                >
-                  Who is working it, how fast, and how far along →
-                </Link>
               </div>
             ) : (
               <p className="text-[13px] text-ink-2">
-                No claim yet. The first accepted claim takes{" "}
-                {ratchet ? "the first slice of the pool" : "the bounty"}.
+                No accepted answer yet. The first one takes{" "}
+                {ratchet ? "the first slice of the pool" : "the whole bounty"}.
               </p>
             )}
           </Box>
 
-          {/* Only while there is something to win. A settled certificate used
-              to keep a full-width "Work on this" section, two config files
-              and three commands deep, for a prize that was already paid. */}
-          {!objective.settled && <WorkOnThis id={objective.id} mustCite={frontier?.must_cite} />}
+          {/* Only while there is something to win. */}
+          {!objective.settled && (
+            <WorkOnThis
+              id={objective.id}
+              mustCite={frontier?.must_cite}
+              piecework={Boolean(objective.piecework)}
+              base={base}
+            />
+          )}
         </div>
 
         <aside className="flex min-w-0 flex-col gap-4">
@@ -329,6 +361,12 @@ function Challenge() {
               <dd>
                 <Hash value={objective.id} chars={10} />
               </dd>
+              {objective.goal && (
+                <>
+                  <dt>goal</dt>
+                  <dd className="mono text-[12px]">{objective.goal}</dd>
+                </>
+              )}
               <dt>verifier</dt>
               <dd className="mono">{objective.verifier_kind}</dd>
               {checker && (
@@ -380,6 +418,314 @@ function Challenge() {
   );
 }
 
+/**
+ * The statement, folded to its first lines when it is long. A full statement
+ * runs to a screen of curve parameters, and above the roster it pushed the
+ * part of the page people come here for below the fold.
+ */
+function Statement({ text: body }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = body.length > 360;
+  return (
+    <div>
+      <p
+        className={`text-[14px] leading-relaxed text-ink [overflow-wrap:anywhere] ${
+          long && !open ? "line-clamp-4" : ""
+        }`}
+      >
+        {body}
+      </p>
+      {long && (
+        <button
+          type="button"
+          className="mt-2 text-[12px] text-accent hover:underline"
+          onClick={() => setOpen(!open)}
+        >
+          {open ? "Show less" : "Read the whole statement"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** How often a followed challenge re-reads the node. */
+const FOLLOW_REFRESH_MS = 15_000;
+
+/**
+ * Who is on this challenge, and what has happened on it.
+ *
+ * Two sources, kept apart the way `/task` keeps them: the log says who
+ * committed, answered and was paid -- recomputable by anyone -- and
+ * `/progress` says which workers are heartbeating right now, which is what
+ * they claim about themselves and is checked by nobody. A worker is "working
+ * now" only on the second; everything else on the row is the first.
+ *
+ * The whole log is fetched and filtered here because the node has no
+ * per-objective event route. On a large log that is the expensive part, which
+ * is why it refreshes on its own only for a challenge somebody follows.
+ */
+function Activity({
+  id,
+  objective,
+  base,
+  live,
+  followed,
+}: {
+  id: string;
+  objective: Objective;
+  base: string | null;
+  live: boolean;
+  followed: boolean;
+}) {
+  const [records, setRecords] = useState<LogRecord[] | null>(null);
+  const [work, setWork] = useState<ProgressResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [all, setAll] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
+  const refresh = useCallback(async () => {
+    if (base === null) return;
+    try {
+      const log = await fetchLog(base);
+      setRecords(log.records);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+    // A node older than `/progress` still has a log; the roster just has no
+    // "working now" column then.
+    setWork(await fetchProgress(id, base).catch(() => null));
+    setNow(Date.now());
+  }, [base, id]);
+
+  useEffect(() => {
+    if (!live) return;
+    void refresh();
+    if (!followed) return;
+    const timer = setInterval(() => void refresh(), FOLLOW_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [live, followed, refresh]);
+
+  const index = useMemo(() => indexObjectives([objective]), [objective]);
+  const events = useMemo(
+    () => (records ? eventsFor(records, id, index) : []),
+    [records, id, index],
+  );
+  const byPerson = useMemo(() => participants(events), [events]);
+  const roster = useMemo(() => mergeRoster(byPerson, work), [byPerson, work]);
+  const recordBySeq = useMemo(
+    () => new Map((records ?? []).map((r) => [r.seq, r] as const)),
+    [records],
+  );
+  const newest = [...events].reverse();
+  const shown = all ? newest : newest.slice(0, 8);
+  const workingNow = roster.filter((r) => r.status === "working").length;
+
+  if (!live) {
+    return (
+      <Box title="Who is working on this">
+        <p className="text-[13px] text-ink-2">
+          No node answered, so there is nobody to show. Who is working on a challenge and
+          what has happened on it come from a live node&rsquo;s log.
+        </p>
+      </Box>
+    );
+  }
+
+  return (
+    <>
+      <Box
+        title={
+          <>
+            Who is working on this{" "}
+            <span className="mono ml-1 font-normal text-ink-3">{roster.length}</span>
+          </>
+        }
+        aside={
+          <span className="text-[11px] font-normal text-ink-3">
+            {workingNow > 0 ? `${workingNow} working now` : "nobody heartbeating right now"}
+          </span>
+        }
+        flush
+      >
+        {roster.length === 0 ? (
+          <p className="px-4 py-6 text-[13px] text-ink-2">
+            Nobody has committed an answer yet.{" "}
+            {objective.settled ? null : <>Be the first: see <b>Join this challenge</b> below.</>}
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[24rem] border-collapse text-left text-[12.5px]">
+              <thead>
+                <tr className="border-b border-edge bg-surface-2 text-ink-2">
+                  <th className="px-4 py-2 font-medium">Who</th>
+                  <th className="px-3 py-2 font-medium">Answers</th>
+                  <th className="px-3 py-2 text-right font-medium">Paid</th>
+                  <th className="px-4 py-2 text-right font-medium">Last active</th>
+                </tr>
+              </thead>
+              <tbody className="divide-edge-y">
+                {roster.map((row) => (
+                  <tr key={row.name}>
+                    <td className="px-4 py-2">
+                      <span className="mono font-medium text-ink" title={row.name}>
+                        {shortActor(row.name)}
+                      </span>
+                      <span className="ml-2 inline-flex flex-wrap gap-1 align-middle">
+                        {row.leads && <Badge tone="accent">leading</Badge>}
+                        <RosterStatus status={row.status} />
+                      </span>
+                      {row.device && (
+                        <div className="text-[11px] text-ink-3">{row.device}</div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-ink-2">
+                      {row.person ? (
+                        <>
+                          <span className="mono">{row.person.revealed}</span> sent
+                          {row.person.accepted > 0 && (
+                            <span className="text-accent"> · {row.person.accepted} accepted</span>
+                          )}
+                          {row.person.rejected > 0 && (
+                            <span className="text-bad"> · {row.person.rejected} rejected</span>
+                          )}
+                          {row.person.committed > row.person.revealed && (
+                            <span className="text-ink-3">
+                              {" "}
+                              · {row.person.committed - row.person.revealed} sealed
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-ink-3">none in the log yet</span>
+                      )}
+                    </td>
+                    <td className="mono px-3 py-2 text-right whitespace-nowrap text-ink">
+                      {row.person && row.person.paid > 0 ? units(row.person.paid) : "—"}
+                    </td>
+                    <td className="px-4 py-2 text-right text-ink-3 whitespace-nowrap">
+                      {row.lastSeen ? ago(row.lastSeen, now) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Box>
+
+      <Box
+        title={
+          <>
+            Activity <span className="mono ml-1 font-normal text-ink-3">{events.length}</span>
+          </>
+        }
+        aside={
+          <span className="text-[11px] font-normal text-ink-3">
+            {followed ? "following · refreshes every 15 s" : "follow to keep this live"}
+          </span>
+        }
+        flush
+      >
+        {error ? (
+          <p className="px-4 py-6 text-[13px] text-bad">{error}</p>
+        ) : records === null ? (
+          <div className="flex flex-col gap-2 px-4 py-4">
+            <Skeleton className="h-4 w-3/4" />
+            <Skeleton className="h-4 w-1/2" />
+          </div>
+        ) : events.length === 0 ? (
+          <p className="px-4 py-6 text-[13px] text-ink-2">Nothing has happened here yet.</p>
+        ) : (
+          <>
+            <ul className="divide-edge-y">
+              {shown.map((event) => (
+                <EventRow
+                  key={event.seq}
+                  event={event}
+                  record={recordBySeq.get(event.seq)}
+                  now={now}
+                />
+              ))}
+            </ul>
+            {newest.length > shown.length || all ? (
+              <div className="border-t border-edge px-4 py-2">
+                <button
+                  type="button"
+                  className="text-[12px] text-accent hover:underline"
+                  onClick={() => setAll(!all)}
+                >
+                  {all ? "Show the latest only" : `Show all ${newest.length} events`}
+                </button>
+              </div>
+            ) : null}
+          </>
+        )}
+      </Box>
+    </>
+  );
+}
+
+type RosterRow = {
+  name: string;
+  status: "working" | "quiet" | "left" | "log";
+  person: Participant | null;
+  device: string | null;
+  leads: boolean;
+  lastSeen: string | null;
+};
+
+/** The log's participants and the node's live heartbeats, joined on name. */
+function mergeRoster(people: Participant[], work: ProgressResponse | null): RosterRow[] {
+  const rows = new Map<string, RosterRow>();
+  for (const person of people) {
+    rows.set(person.name, {
+      name: person.name,
+      status: "log",
+      person,
+      device: null,
+      leads: person.leads,
+      lastSeen: person.lastSeen,
+    });
+  }
+  for (const worker of work?.reported.workers ?? []) {
+    const status = worker.status === "live" ? "working" : worker.status === "stale" ? "quiet" : "left";
+    const row = rows.get(worker.worker);
+    if (row) {
+      row.status = status;
+      row.device = worker.device;
+      if (!row.lastSeen || worker.received_at > row.lastSeen) row.lastSeen = worker.received_at;
+    } else {
+      rows.set(worker.worker, {
+        name: worker.worker,
+        status,
+        person: null,
+        device: worker.device,
+        leads: false,
+        lastSeen: worker.received_at,
+      });
+    }
+  }
+  const rank = { working: 0, quiet: 1, log: 2, left: 3 };
+  return [...rows.values()].sort(
+    (a, b) => rank[a.status] - rank[b.status] || (b.lastSeen ?? "").localeCompare(a.lastSeen ?? ""),
+  );
+}
+
+function RosterStatus({ status }: { status: RosterRow["status"] }) {
+  switch (status) {
+    case "working":
+      return <Badge tone="accent" title="Heartbeating to this node now. Self-reported.">working now</Badge>;
+    case "quiet":
+      return <Badge tone="warn" title="Has not heartbeated for a few minutes.">quiet</Badge>;
+    case "left":
+      return <Badge title="Stopped heartbeating.">stopped</Badge>;
+    default:
+      // Known only from the log: nothing to add beside the name.
+      return null;
+  }
+}
+
 /** A verifier field, if it is a string. The record's shape is the funder's. */
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
@@ -390,22 +736,56 @@ function text(value: unknown): string | undefined {
  *
  * The terminal comes first: it is the one that needs nothing configured.
  */
-function WorkOnThis({ id, mustCite }: { id: string; mustCite: string | undefined }) {
-  const [tab, setTab] = useState<"cli" | "mcp">("cli");
+function WorkOnThis({
+  id,
+  mustCite,
+  piecework,
+  base,
+}: {
+  id: string;
+  mustCite: string | undefined;
+  piecework: boolean;
+  base: string | null;
+}) {
+  const [tab, setTab] = useState<"worker" | "cli" | "mcp">(piecework ? "worker" : "cli");
+  const node = base || (typeof window !== "undefined" ? window.location.origin : "");
   const cli = cliCalls(id, mustCite);
   const calls = mcpCalls(id, mustCite);
 
   return (
     <Box
-      title="Submit a claim"
+      title="Join this challenge"
       aside={
         <span className="hidden text-[11px] font-normal text-ink-3 sm:inline">
-          score locally first; it is free and it is the same checker
+          nobody assigns you: anyone may work it, and the checker decides who is paid
         </span>
       }
       flush
     >
+      <ol className="flex flex-col gap-1 border-b border-edge px-4 py-3 text-[12.5px] text-ink-2">
+        <li>
+          <b className="text-ink">1. Score it locally.</b> Free, records nothing, and runs the
+          same checker that decides payment.
+        </li>
+        <li>
+          <b className="text-ink">2. Commit.</b> Seals your answer in this epoch so nobody can
+          copy it before you reveal.
+        </li>
+        <li>
+          <b className="text-ink">3. Reveal.</b> After the epoch turns. You are paid when that
+          epoch settles.
+        </li>
+      </ol>
       <div className="tabs" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "worker"}
+          className="tab"
+          onClick={() => setTab("worker")}
+        >
+          Run a machine
+        </button>
         <button
           type="button"
           role="tab"
@@ -426,7 +806,32 @@ function WorkOnThis({ id, mustCite }: { id: string; mustCite: string | undefined
         </button>
       </div>
       <div className="box-body flex flex-col gap-3">
-        {tab === "cli" ? (
+        {tab === "worker" ? (
+          <>
+            <p className="text-[12.5px] text-ink-2">
+              Put a machine on this challenge with your own solver. Each round it gets its slice
+              of the work on stdin and prints candidate answers, one JSON object per line;{" "}
+              <span className="mono">cairn work</span> commits them, reveals them after the epoch
+              turns, cites the best answer when there is one, and reports in so the machine shows
+              above as <i>working now</i>. Run one per machine, each with its own name.
+              {piecework && (
+                <>
+                  {" "}
+                  This is a divided search, so machines with different names take different
+                  slices.
+                </>
+              )}
+            </p>
+            <CodeBlock value={workCommand({ node, objective: id, worker: "" })} />
+            <p className="text-[12px] text-ink-3">
+              Another machine on your network needs this node shared there first:{" "}
+              <Link href="/contribute" className="text-accent hover:underline">
+                Contribute
+              </Link>{" "}
+              has the address and the steps.
+            </p>
+          </>
+        ) : tab === "cli" ? (
           <>
             <p className="text-[12.5px] text-ink-2">
               <span className="mono">try</span> scores without touching the log. Then commit,

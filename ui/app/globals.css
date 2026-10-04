@@ -62,8 +62,6 @@
   --color-bad-soft: var(--bad-soft);
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
-  --color-violet: var(--violet);
-  --color-violet-soft: var(--violet-soft);
 
   --radius-card: 0.75rem;
 
@@ -94,8 +92,6 @@
   --bad-soft: #b3261e0f;
   --info: #1c5fb8;
   --info-soft: #1c5fb80f;
-  --violet: #7c3aed;
-  --violet-soft: #7c3aed0f;
 
   --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
@@ -128,8 +124,6 @@
     --bad-soft: #f2827a14;
     --info: #6aa8f5;
     --info-soft: #6aa8f514;
-    --violet: #c084fc;
-    --violet-soft: #c084fc14;
   }
 }
 
@@ -158,8 +152,6 @@
   --bad-soft: #f2827a14;
   --info: #6aa8f5;
   --info-soft: #6aa8f514;
-  --violet: #c084fc;
-  --violet-soft: #c084fc14;
 }
 
 @layer base {
@@ -473,22 +465,16 @@
     @apply m-0 min-w-0 text-ink;
   }
 
-  /* A stat tile, tinted by what it counts. */
+  /* A stat tile. Plain surface, plain ink: a row of five tiles each tinted a
+     different colour read as a toy rather than a readout, and the colour was
+     carrying nothing the label beside it did not already say. Only the two
+     tones that mean "look at this" -- a warning and a fault -- colour the
+     number, and neither tints the tile. */
   .tile {
-    @apply min-w-0 rounded-[var(--radius-card)] border px-4 py-3;
+    @apply min-w-0 rounded-[var(--radius-card)] border border-edge bg-surface px-4 py-3;
   }
 
-  .tile-neutral { @apply border-edge bg-surface; }
-  .tile-accent { @apply border-accent-line bg-accent-soft; }
-  .tile-warn { @apply border-warn/25 bg-warn-soft; }
-  .tile-info { @apply border-info/25 bg-info-soft; }
-  .tile-violet { @apply border-violet/25 bg-violet-soft; }
-  .tile-bad { @apply border-bad/25 bg-bad-soft; }
-
-  .tile-accent .tile-value { @apply text-accent; }
   .tile-warn .tile-value { @apply text-warn; }
-  .tile-info .tile-value { @apply text-info; }
-  .tile-violet .tile-value { @apply text-violet; }
   .tile-bad .tile-value { @apply text-bad; }
 
   .pill {

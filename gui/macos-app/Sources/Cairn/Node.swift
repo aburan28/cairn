@@ -214,6 +214,23 @@ final class Node: ObservableObject {
             return
         }
 
+        // The validator role signs and bonds every attestation, so it needs a
+        // key of its own. Made here, once, with the same command a person
+        // would run; never overwritten, because the key is the identity the
+        // log's bonds and slashes name.
+        if settings.validator,
+           !FileManager.default.fileExists(atPath: settings.validatorIdentity.path) {
+            let made = Self.runCairn(binary, ["identity", "--out", settings.validatorIdentity.path])
+            guard made.status == 0 else {
+                state = .failed("""
+                    Could not create the validator's key at \(settings.validatorIdentity.path): \
+                    \(made.err.isEmpty ? "cairn identity exited \(made.status)" : made.err). \
+                    Turn the validator role off in Settings to start without it.
+                    """)
+                return
+            }
+        }
+
         // A missing bootstrap file is a dial that never happens, and the node
         // would say so once per file after starting. Refusing here keeps the
         // reason next to the setting that named the path.
@@ -230,10 +247,12 @@ final class Node: ObservableObject {
         // The command line's defaults when they are free, so a node started
         // here is where the docs say it is; otherwise any free port, so a
         // second node on this Mac does not stop this one starting. The HTTP
-        // half stays on loopback: the window is the reader, and serving it
-        // past this Mac is a different product. The P2P half uses the host
-        // Settings chose -- loopback dials out only; 0.0.0.0 also accepts.
-        let http = Self.freePort(preferring: 8080, on: NodeSettings.loopbackHost)
+        // half is loopback unless Settings shares the node on the LAN, which
+        // is what lets another machine there run `cairn work` against it;
+        // the window reads 127.0.0.1 either way, since 0.0.0.0 includes it.
+        // The P2P half uses the host Settings chose -- loopback dials out
+        // only; 0.0.0.0 also accepts.
+        let http = Self.freePort(preferring: 8080, on: settings.httpHost)
         let p2p = Self.freePort(preferring: 9000, on: settings.p2pHost)
         guard http != 0, p2p != 0 else {
             state = .failed("Could not find a free port for the node to bind.")
@@ -247,7 +266,7 @@ final class Node: ObservableObject {
         p.arguments = settings.arguments + [
             "run",
             "--listen", "\(settings.p2pHost):\(p2p)",
-            "--serve", "\(NodeSettings.loopbackHost):\(http)",
+            "--serve", "\(settings.httpHost):\(http)",
         ] + settings.runArguments
         p.environment = Self.childEnvironment(settings)
 

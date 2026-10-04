@@ -20,6 +20,9 @@ struct SettingsView: View {
     @AppStorage(NodeSettings.Key.storageGB) private var storageGB = NodeSettings.defaultStorageGB
     @AppStorage(NodeSettings.Key.dataFolder) private var dataFolder = ""
     @AppStorage(NodeSettings.Key.p2pHost) private var p2pHost = NodeSettings.loopbackHost
+    @AppStorage(NodeSettings.Key.shareHTTP) private var shareHTTP = false
+    @AppStorage(NodeSettings.Key.offline) private var offline = false
+    @AppStorage(NodeSettings.Key.validator) private var validator = false
     @AppStorage(NodeSettings.Key.bootstrap) private var bootstrap = ""
     @AppStorage(NodeSettings.Key.attachURL) private var attachURL = ""
 
@@ -88,12 +91,28 @@ struct SettingsView: View {
             }
 
             Section {
+                roles
+            } header: {
+                Text("Roles")
+            } footer: {
+                Caption("""
+                    Each role is something this node does, and a declaration other \
+                    readers see on the Network page. None of them gives this node a say \
+                    over what is paid: only an objective's pinned checker decides that. \
+                    Solving challenges is done by you or your agent — Node ▸ Connect an \
+                    Agent… — and is paid when an answer is accepted. The Contribute page \
+                    in the window explains every role and how each one is paid.
+                    """)
+            }
+
+            Section {
                 network
             } header: {
                 Text("Network")
             } footer: {
                 Caption("""
-                    The reader stays on this Mac. Peers on the local segment find each \
+                    The reader stays on this Mac unless the node is shared on your \
+                    network above. Peers on the local segment find each \
                     other without a file. A peer elsewhere needs a bootstrap file with \
                     its address and real transport key; `cairn gen-bootstrap` writes the \
                     shape, and a placeholder key is warned about at every start until \
@@ -220,8 +239,51 @@ struct SettingsView: View {
         )
     }
 
+    /// Each role bound to the setting that gives it its duty, so turning a
+    /// role on here and turning on its setting in Network are the same act.
+    private var roles: some View {
+        let relay = Binding<Bool>(
+            get: { p2pHost == NodeSettings.anyHost },
+            set: { p2pHost = $0 ? NodeSettings.anyHost : NodeSettings.loopbackHost }
+        )
+        return VStack(alignment: .leading, spacing: 10) {
+            Toggle("Validator — re-check other people's answers", isOn: $validator)
+            Caption("""
+                Re-runs each claim's checker on this Mac and signs what it found. Every \
+                attestation stakes 50,000 units, returned after six epochs and lost if \
+                a canary shows it was wrong. Not paid yet: a correct check earns nothing \
+                today, so this is for people who want results checked. Its key is \
+                validator.identity.json in the data folder.
+                """)
+            Toggle("Worker host — let machines on my network work for this node", isOn: $shareHTTP)
+            Caption("""
+                Same as "Share this node on my network" below. Each machine runs \
+                `cairn work` with its own solver and is paid for what the checker \
+                accepts, like any solver.
+                """)
+            Toggle("Relay — let other nodes connect to this one", isOn: relay)
+            Caption("""
+                Same as P2P listen on any interface below. Helps the network stay \
+                connected. Not paid: nothing in the log can show a relay did its job.
+                """)
+        }
+    }
+
     private var network: some View {
         VStack(alignment: .leading, spacing: 12) {
+            Toggle("Share this node on my network", isOn: $shareHTTP)
+            Text(shareHTTP
+                 ? "Other machines on your network can open this node's pages and join its work with `cairn work --node http://<this Mac>:8080 …` — the Join page shows the exact command. Anyone on the network can read the log and post answers; nobody can change what has settled."
+                 : "Only this Mac can open the node's pages or work on it. Turn this on to add machines on your network as workers.")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Offline: no internet peers", isOn: $offline)
+            Text(offline
+                 ? "The node dials no built-in seeds. It still finds nodes on this network by their LAN beacon, and any bootstrap file below."
+                 : "The node may dial the built-in internet seeds to sync.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            Divider()
+
             Picker("P2P listen", selection: $p2pHost) {
                 Text("This Mac only").tag(NodeSettings.loopbackHost)
                 Text("Any interface (accept inbound)").tag(NodeSettings.anyHost)
