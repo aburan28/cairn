@@ -391,6 +391,27 @@ retried: nearly every refusal is permanent — a stale epoch, a citation that is
 not an accepted claim — and a queue that retries a permanent failure never
 empties.
 
+## Fleet: signing for your own workers
+
+A record is paid to the `submitter` it names, and a key-shaped submitter must
+be signed by that key. A worker on an operator's own box should not hold the
+operator's key. So a node started with `CAIRN_FLEET=<networks>` and an
+identity (`--mcp-identity FILE`, or `CAIRN_FLEET_IDENTITY=FILE`) **signs**
+every unsigned commitment and claim that names its identity and arrives from
+one of those networks, before queuing it, and the `202` says so:
+`"signed_as": "<the id>"`. The same record from anywhere else is refused with
+`403` naming the networks and the address it came from, rather than queued to
+fail at drain time where the sender would never hear why. A worker's own
+nickname, a worker's own key, anybody's already-signed record: untouched.
+
+`GET /network` publishes the arrangement under `node.fleet` (`sources`, the
+networks; `signs_as`, the id to submit under) and the daemon's peer policy
+under `node.peers_policy` (`open`, or an `allowlist` with how many it names,
+from `CAIRN_PEERS`). Both are declarations about this process, like roles:
+nothing a reader can check against the log. The whole arrangement -- a Mac
+that leads, Linux boxes that walk, a tunnel between regions, and what none
+of it does with money -- is [fleet.md](fleet.md).
+
 ## What this is not
 
 **Bounded.** The queue refuses submissions past `--max-queue` undrained

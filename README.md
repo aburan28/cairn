@@ -181,7 +181,10 @@ cairn run \
 Two machines in two homes, each behind its own router, is
 [docs/two-nodes.md](docs/two-nodes.md): the daemon asks the router to forward
 the p2p port (`CAIRN_PORTMAP`), and `GET /sessions` says whether anyone outside
-has actually reached it.
+has actually reached it. One leader that is paid, with workers and GPU boxes
+on your own network that nobody else can reach, is
+[docs/fleet.md](docs/fleet.md): the leader signs the fleet's records
+(`CAIRN_FLEET`), and `CAIRN_PEERS` keeps a fleet of nodes to itself.
 
 Working from a source checkout, build with the `ui` feature first (see
 *Install* above — `make ui-build`, then `./target/release/cairn run`); the

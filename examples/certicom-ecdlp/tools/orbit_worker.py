@@ -137,6 +137,9 @@ class Worker:
         self.node = node
         self.objective_id = args.objective
         self.name = args.worker
+        # Whom the records name. A fleet worker names the leader, which signs
+        # them on the way in; a lone worker names itself.
+        self.submitter = args.submitter or args.worker
         self.started = time.time()
         self.steps = 0
         self.trails = 0
@@ -266,8 +269,8 @@ class Worker:
         record = {
             "type": "commitment",
             "objective_id": self.objective_id,
-            "submitter": self.name,
-            "hash": commitment_hash(self.objective_id, self.name, artifact, nonce),
+            "submitter": self.submitter,
+            "hash": commitment_hash(self.objective_id, self.submitter, artifact, nonce),
             "created_at": utc(now),
         }
         status, answer = self.node.submit("commitment", record)
@@ -297,7 +300,7 @@ class Worker:
             record = {
                 "type": "claim",
                 "objective_id": self.objective_id,
-                "submitter": self.name,
+                "submitter": self.submitter,
                 "artifact": artifact,
                 "nonce": nonce,
                 "created_at": utc(now),
@@ -439,7 +442,13 @@ def main(argv):
     parser.add_argument("--node", required=True, help="the node's HTTP address, e.g. http://127.0.0.1:8080")
     parser.add_argument("--job", required=True, help="the version 2 search job document")
     parser.add_argument("--objective", required=True, help="the piecework objective id (sha256:...)")
-    parser.add_argument("--worker", required=True, help="your pseudonym: the submitter on every record")
+    parser.add_argument("--worker", required=True,
+                        help="your pseudonym: the node_id your work slice is drawn from, and the submitter "
+                             "on every record unless --submitter says otherwise")
+    parser.add_argument("--submitter", default=None,
+                        help="submit under this name instead of --worker. In a fleet this is the leader's "
+                             "`signs_as` id from GET /network: the leader signs the record and is paid for it, "
+                             "while --worker stays this worker's own so each walks its own slice")
     parser.add_argument("--partitions", type=int, default=8, help="how many ways the space is split (default 8)")
     parser.add_argument("--batch", type=int, default=0, help="orbits per claim (default: the job's max_batch)")
     parser.add_argument("--heartbeat", type=float, default=30.0, help="seconds between heartbeats (default 30)")
@@ -454,8 +463,8 @@ def main(argv):
     parser.add_argument("--device", default=None, help="what this worker runs on, for the roster")
     args = parser.parse_args(argv)
 
-    if "|" in args.worker:
-        raise SystemExit("a worker name may not contain `|`: the commitment hash uses it as a separator")
+    if "|" in args.worker or "|" in (args.submitter or ""):
+        raise SystemExit("a worker or submitter name may not contain `|`: the commitment hash uses it as a separator")
     job = O.Job(O.load_job(args.job))
     say(f"{args.worker} on {job.job['name']} (job {job.id[:16]}…), batches of {args.batch or job.max_batch}, "
         f"node {args.node}")

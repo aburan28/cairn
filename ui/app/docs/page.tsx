@@ -122,6 +122,12 @@ const GROUPS: Group[] = [
           "two machines behind two routers: port mapping, the seed, and how to read whether it worked",
       },
       {
+        path: "docs/fleet.md",
+        name: "fleet.md",
+        blurb:
+          "a leader that signs and is paid, workers on your own network, a tunnel across regions",
+      },
+      {
         path: "docs/storage.md",
         name: "storage.md",
         blurb: "encryption at rest, the data directory, the size cap, sync",

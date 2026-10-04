@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Entitlements for the signed Cairn.app (packaging/macos/build-dmg.sh).
+     The hardened runtime restricts almost nothing this app does: it starts a
+     process, loads pages from loopback, writes a launchd plist in the user's
+     own Library and reads folders the person chose through a panel. The one
+     thing it does gate is the microphone, which dictation in New Challenge…
+     uses, so that is the one entitlement. No App Sandbox: the app spawns
+     `cairn`, reads `~/.elan`, and writes `~/Library/LaunchAgents`, none of
+     which a sandboxed app may do. -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

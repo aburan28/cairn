@@ -22,6 +22,12 @@ struct NodeSettings: Equatable {
         /// and do not spawn `cairn run`. Same idea as the iOS reader's
         /// retargetable node URL.
         static let attachURL = "attachURL"
+        /// The node runs as a launchd agent and this window attaches to it.
+        /// Read by `Node`, never part of the struct: it says who starts the
+        /// node, not how the node runs.
+        static let backgroundService = "backgroundService"
+        static let leadFleet = "leadFleet"
+        static let fleetNetworks = "fleetNetworks"
     }
 
     /// The node's own default cap, 4096 MiB, so a person who never opens
@@ -62,6 +68,35 @@ struct NodeSettings: Equatable {
     var bootstrapFiles: [String]
     /// When set, the app is a window onto this URL and owns no process.
     var attachURL: URL?
+    /// Lead a fleet: serve HTTP on every interface so workers on the network
+    /// can reach it, and sign their records with `leaderIdentity` so their
+    /// work is paid to this node. `docs/fleet.md`.
+    var leadFleet: Bool = false
+    /// `CAIRN_FLEET`: the networks whose unsigned records naming the leader
+    /// are signed. `private` is every RFC 1918 block, loopback and IPv6 ULA.
+    var fleetNetworks: String = NodeSettings.defaultFleetNetworks
+
+    static let defaultFleetNetworks = "private"
+
+    /// Host half of `--serve`: loopback unless this node leads a fleet, whose
+    /// workers reach it over the network.
+    var serveHost: String { leadFleet ? Self.anyHost : Self.loopbackHost }
+
+    /// The ed25519 identity a fleet is paid to, beside the node's other keys.
+    /// Created by the node on first use and never leaves this Mac.
+    var leaderIdentity: URL { dataFolder.appendingPathComponent("leader.identity.json") }
+
+    /// Flags of `run` that make this node a fleet leader; empty otherwise.
+    /// Kept apart from `runArguments`, which the Connect an Agent stanza
+    /// reuses with an identity of its own.
+    var fleetArguments: [String] {
+        leadFleet ? ["--mcp-identity", leaderIdentity.path] : []
+    }
+
+    /// Whether Settings asked for the launchd agent.
+    static var backgroundService: Bool {
+        UserDefaults.standard.bool(forKey: Key.backgroundService)
+    }
 
     var isDefaultFolder: Bool {
         dataFolder.standardizedFileURL.path == Self.defaultDataFolder.standardizedFileURL.path
@@ -90,6 +125,9 @@ struct NodeSettings: Equatable {
             Key.p2pHost: loopbackHost,
             Key.bootstrap: "",
             Key.attachURL: "",
+            Key.backgroundService: false,
+            Key.leadFleet: false,
+            Key.fleetNetworks: defaultFleetNetworks,
         ]
     }
 
@@ -114,7 +152,13 @@ struct NodeSettings: Equatable {
             // from typing an address into Settings.
             p2pHost: host == anyHost ? anyHost : loopbackHost,
             bootstrapFiles: Self.parseBootstrap(defaults.string(forKey: Key.bootstrap) ?? ""),
-            attachURL: Self.parseAttachURL(attach)
+            attachURL: Self.parseAttachURL(attach),
+            leadFleet: defaults.bool(forKey: Key.leadFleet),
+            fleetNetworks: {
+                let text = (defaults.string(forKey: Key.fleetNetworks) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return text.isEmpty ? defaultFleetNetworks : text
+            }()
         )
     }
 
@@ -163,7 +207,9 @@ struct NodeSettings: Equatable {
     /// Both always set, so the value chosen here is the one that applies and
     /// not one inherited from whatever launched the app.
     var environment: [String: String] {
-        ["CAIRN_SANDBOX_CPUS": String(cpus), "CAIRN_SANDBOX_MEMORY_MB": String(memoryMB)]
+        var env = ["CAIRN_SANDBOX_CPUS": String(cpus), "CAIRN_SANDBOX_MEMORY_MB": String(memoryMB)]
+        if leadFleet { env["CAIRN_FLEET"] = fleetNetworks }
+        return env
     }
 }
 

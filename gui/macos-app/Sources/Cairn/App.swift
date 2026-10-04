@@ -69,11 +69,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         browser.onDraftChallenge = { [node] brief in node.draftChallenge(fromPage: brief) }
+        // A node the person asked to keep running is a launchd agent; make
+        // sure it is loaded, then attach to it instead of spawning one.
+        node.ensureBackgroundService()
         node.start()
     }
 
     // Closing the window is closing the node: nothing keeps running where
-    // nobody can see it. Attach mode has no process; still quit with the window.
+    // nobody can see it -- unless Settings asked for the launchd agent, in
+    // which case the window was only attached and the agent carries on.
+    // Attach mode has no process; still quit with the window.
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {

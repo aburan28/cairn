@@ -34,9 +34,14 @@ pinned code. Where those three live is the operator's decision, and a package
 that guessed would be guessing about where your identity key goes. Removing a
 package therefore removes the program and none of your data.
 
-If you do want a node under systemd or launchd, run `cairn p2p --serve`, not
-`cairn run`: `run` also speaks MCP on stdin and stops when stdin closes, which
-under a service manager is immediately.
+If you do want a node under systemd or launchd, run `cairn run --no-mcp` (or
+`cairn p2p --serve`): plain `run` also speaks MCP on stdin and stops when stdin
+closes, which under a service manager is immediately. Units that do it are in
+[`launch/`](../launch/): `seed.service` for a public seed, and
+[`fleet/`](../launch/fleet/) for a leader and its workers
+([fleet.md](fleet.md)). On a Mac, Cairn.app installs a per-user launchd agent
+when you ask it to (Settings → *Keep the node running in the background*) and
+removes it when you ask again; nothing installs one behind your back.
 
 The one exception is explicit and yours to invoke: `sudo cairn agent install
 --node http://node:8080` writes a systemd unit for the **host agent** -- the

@@ -34,6 +34,7 @@ pub mod daemon;
 pub mod deposit;
 pub mod dht;
 pub mod drand;
+pub mod fleet;
 pub mod frontier;
 pub mod gossip;
 pub mod hex;
