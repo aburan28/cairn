@@ -248,6 +248,7 @@ a binary that says so rather than starting without the reader.
 | `--mcp-identity FILE` | unsigned MCP submissions |
 | `--committee-identity FILE` | `--mcp-identity`; with neither, the node opens sealed submissions but serves no committee seat |
 | `--no-mcp` | when stdin belongs to something else, such as a service manager |
+| `--attest-identity FILE` | run the validator loop under this signing identity: every tick, re-verify claims it has not stood behind and attest what this node finds, under bond. Also `CAIRN_ATTEST_IDENTITY`; `CAIRN_ATTEST_LIMIT` bounds verifier runs per tick |
 | `--bootstrap FILE` | repeatable dial hint |
 | `--population FILE` | gossip population file |
 | `--fanout N` | 3 |
@@ -263,8 +264,9 @@ over HTTP from the same process, which is what lets it admit what it queues — 
 log has one writer.
 
 Also takes `--bootstrap FILE` (repeatable), `--population FILE`, `--queue DIR`,
-`--fanout N`, `--max-queue N`, `--key-file FILE`, and `--proxy URL` to route
-every dial through a SOCKS5 proxy (a Tor client or obfs4 bridge).
+`--fanout N`, `--max-queue N`, `--key-file FILE`, `--proxy URL` to route
+every dial through a SOCKS5 proxy (a Tor client or obfs4 bridge), and
+`--attest-identity FILE` to run the validator loop (see `run`).
 
 ### `serve [--listen ADDR] [--queue DIR] [--max-queue N] [--checkpoint FILE] [--key-file FILE]`
 
@@ -391,6 +393,19 @@ question is asked once, by whoever brings evidence.
 Take the bond of somebody who stood behind a verdict the pinned verifier
 contradicts. Exactly one of `--attestation` or `--docket`. A verifier that
 cannot run takes nothing.
+
+### `attest serve --identity FILE [--limit N] [--watch SECONDS]`
+
+The validator loop, one pass at a time: every claim this identity has not
+stood behind, newest first and at most `--limit` per pass (default 8), has
+its pinned verifier run **here**, and an attestation saying what this node
+found is posted under the identity's signature and bond. A verdict that does
+not settle (`unavailable`, `invalid_spec`) is set aside, never attested, and
+retried later. Prints one line per claim and a tally per pass; `--watch`
+repeats every so many seconds, taking the log's write lock per pass and
+releasing it between. Refuses, naming the alternative, if a daemon holds the
+lock: a running node runs the same loop with `--attest-identity FILE` (or
+`CAIRN_ATTEST_IDENTITY`). [bonded-verification.md](bonded-verification.md#the-validator-loop-attest-serve-and---attest-identity).
 
 ### `attest list`
 

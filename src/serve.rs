@@ -686,6 +686,10 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", "/sessions") => sessions(stream, serving),
         ("GET", "/network") => network(stream, serving),
         ("GET", "/hosts") => hosts_index(stream, serving),
+        ("GET", "/knowledge") => knowledge_index(stream, serving, &request),
+        ("GET", path) if path.starts_with("/knowledge/") => {
+            knowledge_of(stream, serving, &path["/knowledge/".len()..], &request)
+        }
         ("GET", "/leases") => leases_index(stream, serving),
         ("GET", path) if path.starts_with("/leases/") => {
             leases_of(stream, serving, &path["/leases/".len()..])
@@ -863,6 +867,8 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /leases"),
                 Value::string("GET /leases/{id}"),
                 Value::string("GET /hosts"),
+                Value::string("GET /knowledge"),
+                Value::string("GET /knowledge/{claim_id}"),
                 Value::string("GET /log"),
                 Value::string("GET /checkpoint"),
                 Value::string("GET /chain"),
@@ -1639,6 +1645,204 @@ fn compute_value(
 
 /// Which objectives have any lease on this roster. No log read: the roster
 /// is the answer.
+/// At most this many claims on `GET /knowledge`. A log with ten thousand
+/// claims is a fact worth one number; the per-claim route has the rest.
+const MAX_KNOWLEDGE_ROWS: usize = 256;
+
+/// The reader's policy, from the query string: `?policy=demanding` or the
+/// default. The number is published beside the policy that produced it,
+/// never alone -- there is no network-agreed confidence and a route that
+/// handed one out would become the thing `docs/knowledge.md` refuses to be.
+fn knowledge_policy(request: &Request) -> (crate::knowledge::ConfidencePolicy, &'static str) {
+    match request.query.get("policy").map(String::as_str) {
+        Some("demanding") => (crate::knowledge::ConfidencePolicy::demanding(), "demanding"),
+        _ => (crate::knowledge::ConfidencePolicy::default(), "default"),
+    }
+}
+
+/// Who stood behind a claim's verdict under bond, and how it went for them.
+///
+/// Derived from the log on every request like `roles.evidenced`: every
+/// attestation names its attestor and its status, every slash names its
+/// attestation. Reported beside -- never folded into -- the standing, which
+/// is computed from verdicts and relations and does not know attestations
+/// exist. A reader who wants to weigh a verdict by who was answerable for it
+/// has the rows; the standing stays what the verifier and the relations say.
+fn attestation_summary(node: &Node, claim_id: &str) -> Value {
+    let slashed = node.slashed_attestations();
+    let (mut accept, mut reject, mut slashed_count) = (0i128, 0i128, 0i128);
+    let mut rows = Vec::new();
+    for (id, attestation) in node.attestations() {
+        if attestation.claim_id != claim_id {
+            continue;
+        }
+        let was_slashed = slashed.contains(&id);
+        match attestation.status.as_str() {
+            "accept" => accept += 1,
+            "reject" => reject += 1,
+            _ => {}
+        }
+        if was_slashed {
+            slashed_count += 1;
+        }
+        rows.push(Value::object([
+            ("attestation_id", Value::string(id)),
+            ("attestor", Value::string(attestation.attestor.clone())),
+            ("status", Value::string(attestation.status.clone())),
+            ("created_at", Value::string(attestation.created_at.clone())),
+            ("slashed", Value::Bool(was_slashed)),
+        ]));
+    }
+    Value::object([
+        ("accept", Value::Int(accept)),
+        ("reject", Value::Int(reject)),
+        ("slashed", Value::Int(slashed_count)),
+        (
+            "bond_each",
+            Value::Int(i128::from(crate::node::VERIFICATION_BOND)),
+        ),
+        ("attestations", Value::Array(rows)),
+    ])
+}
+
+fn knowledge_of(
+    stream: &mut TcpStream,
+    serving: &Serving,
+    id: &str,
+    request: &Request,
+) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let (policy, policy_name) = knowledge_policy(request);
+    let as_of = crate::partition::epoch_of(
+        crate::time::unix_seconds(),
+        crate::partition::epoch_seconds(),
+    );
+    let claims = node.all_claims();
+    let Some(state) = node.knowledge_graph(&claims).state(id, &policy, as_of) else {
+        return json_error(stream, 404, "no such claim in this log");
+    };
+    let claim = &claims[id];
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("claim_id", Value::string(id)),
+            ("objective_id", Value::string(claim.objective_id.clone())),
+            ("submitter", Value::string(claim.submitter.clone())),
+            ("state", state.to_value()),
+            ("attestations", attestation_summary(&node, id)),
+            (
+                "policy",
+                Value::object([
+                    ("name", Value::string(policy_name)),
+                    ("parameters", policy.to_value()),
+                ]),
+            ),
+            ("as_of_epoch", Value::Int(i128::from(as_of))),
+            (
+                "note",
+                Value::string(
+                    "`state` is derived from the log by this node and recomputable by anyone \
+                     with it: standing from the pinned verdict and the relations verified claims \
+                     asserted, counts of independent parties, and a confidence under the named \
+                     policy -- the reader's policy, not the network's. `attestations` is who stood \
+                     behind the verdict under bond and whether a docket caught them; it is kept \
+                     beside the standing, not inside it. Nothing here moves money.",
+                ),
+            ),
+        ]),
+    )
+}
+
+fn knowledge_index(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let (policy, policy_name) = knowledge_policy(request);
+    let as_of = crate::partition::epoch_of(
+        crate::time::unix_seconds(),
+        crate::partition::epoch_seconds(),
+    );
+    let claims = node.all_claims();
+    let graph = node.knowledge_graph(&claims);
+    // Newest first, so the page a reader lands on is the recent frontier.
+    let mut ordered: Vec<(&String, &crate::records::Claim)> = claims.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.1.created_at
+            .cmp(&a.1.created_at)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    let total = ordered.len();
+    let mut by_standing: BTreeMap<&'static str, i128> = BTreeMap::new();
+    let mut rows = Vec::new();
+    for (id, claim) in ordered {
+        let Some(state) = graph.state(id, &policy, as_of) else {
+            continue;
+        };
+        *by_standing.entry(state.standing.as_str()).or_default() += 1;
+        if rows.len() < MAX_KNOWLEDGE_ROWS {
+            let mut fields = match state.to_value() {
+                Value::Object(fields) => fields,
+                _ => BTreeMap::new(),
+            };
+            // The relations are the per-claim route's; the index is a table.
+            fields.remove("assertions");
+            fields.insert(
+                "objective_id".to_string(),
+                Value::string(claim.objective_id.clone()),
+            );
+            fields.insert(
+                "submitter".to_string(),
+                Value::string(claim.submitter.clone()),
+            );
+            fields.insert(
+                "created_at".to_string(),
+                Value::string(claim.created_at.clone()),
+            );
+            rows.push(Value::Object(fields));
+        }
+    }
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("claims", Value::Array(rows)),
+            ("total", Value::Int(total as i128)),
+            ("shown", Value::Int(total.min(MAX_KNOWLEDGE_ROWS) as i128)),
+            (
+                "by_standing",
+                Value::object(
+                    by_standing
+                        .into_iter()
+                        .map(|(standing, count)| (standing, Value::Int(count)))
+                        .collect::<Vec<_>>(),
+                ),
+            ),
+            (
+                "policy",
+                Value::object([
+                    ("name", Value::string(policy_name)),
+                    ("parameters", policy.to_value()),
+                ]),
+            ),
+            ("as_of_epoch", Value::Int(i128::from(as_of))),
+            (
+                "note",
+                Value::string(
+                    "Every claim's standing as this node derives it from the log, newest first and \
+                     capped; GET /knowledge/{claim_id} has one claim's relations and who stood \
+                     behind its verdict. `?policy=demanding` applies the stricter built-in \
+                     confidence policy. Standing is derived, not written, and moves no money.",
+                ),
+            ),
+        ]),
+    )
+}
+
 fn hosts_index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let now = crate::time::unix_seconds();
     let summary = serving
@@ -4356,6 +4560,83 @@ mod tests {
         let endpoints = index.get("endpoints").unwrap().as_array().unwrap();
         assert!(endpoints.contains(&Value::string("POST /hosts")));
         assert!(endpoints.contains(&Value::string("GET /hosts")));
+    }
+
+    #[test]
+    fn knowledge_is_served_per_claim_and_as_an_index_with_attestations_beside_standing() {
+        let dir = TempDir::new("knowledge-route");
+        let (log, objective_id) = orbit_search_log(&dir);
+        // One attestation on an accepted claim, so the route has something
+        // to report beside the standing.
+        let (accepted_claim, attestor) = {
+            let ledger = Ledger::open(&log).expect("open");
+            let mut node = Node::new(ledger, concat!(env!("CARGO_MANIFEST_DIR")));
+            let accepted = node.accepted_claims();
+            let claim_id = accepted.keys().next().expect("an accepted claim").clone();
+            let who = crate::crypto::identity::Identity::from_secret_bytes([9u8; 32]);
+            let ts = crate::time::timestamp();
+            let record =
+                crate::records::Attestation::new(&claim_id, "", "accept", &ts).signed_with(&who);
+            node.post_attestation(&record, &ts).expect("attested");
+            (claim_id, who.submitter_id())
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let (status, body) = get_json(addr, &format!("/knowledge/{accepted_claim}"));
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert_eq!(
+            body.get("objective_id").unwrap().as_str(),
+            Some(objective_id.as_str())
+        );
+        assert_eq!(at(&body, "state.standing").as_str(), Some("accepted"));
+        assert_eq!(at(&body, "state.verdict").as_str(), Some("accept"));
+        assert!(int(&body, "state.confidence_per_mille") > 0);
+        assert_eq!(at(&body, "policy.name").as_str(), Some("default"));
+        assert_eq!(int(&body, "attestations.accept"), 1);
+        assert_eq!(int(&body, "attestations.reject"), 0);
+        assert_eq!(int(&body, "attestations.slashed"), 0);
+        let rows = at(&body, "attestations.attestations").as_array().unwrap();
+        assert_eq!(
+            rows[0].get("attestor").unwrap().as_str(),
+            Some(attestor.as_str())
+        );
+
+        // The stricter policy is named back and lowers nothing below zero.
+        let (_, demanding) = get_json(
+            addr,
+            &format!("/knowledge/{accepted_claim}?policy=demanding"),
+        );
+        assert_eq!(at(&demanding, "policy.name").as_str(), Some("demanding"));
+        assert!(
+            int(&demanding, "state.confidence_per_mille")
+                <= int(&body, "state.confidence_per_mille")
+        );
+
+        // The index: every claim, a tally by standing, no relation rows.
+        let (status, index) = get_json(addr, "/knowledge");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert_eq!(int(&index, "total"), 3, "{}", index.canonical_string());
+        assert_eq!(int(&index, "shown"), 3);
+        assert_eq!(int(&index, "by_standing.accepted"), 2);
+        assert_eq!(int(&index, "by_standing.refuted"), 1);
+        let claims = index.get("claims").unwrap().as_array().unwrap();
+        assert!(claims.iter().all(|row| row.get("assertions").is_none()));
+        assert!(claims.iter().all(|row| row.get("standing").is_some()));
+
+        let (status, _) = get_json(addr, "/knowledge/sha256:nope");
+        assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+        let (_, routes) = get_json(addr, "/");
+        let endpoints = routes.get("endpoints").unwrap().as_array().unwrap();
+        assert!(endpoints.contains(&Value::string("GET /knowledge/{claim_id}")));
     }
 
     #[test]

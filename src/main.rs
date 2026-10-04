@@ -931,6 +931,7 @@ struct RunRequest {
     max_queue: Option<usize>,
     mcp_identity: Option<String>,
     committee_identity: Option<String>,
+    attest_identity: Option<String>,
     no_mcp: bool,
 }
 
@@ -1123,6 +1124,14 @@ enum AttestAction {
     },
     /// Who has stood behind what, and whose bond is still live.
     List,
+    /// The validator loop, one pass at a time: re-verify every claim this
+    /// identity has not stood behind and attest what this node finds.
+    Serve {
+        identity: String,
+        limit: Option<usize>,
+        /// Seconds between passes; `None` runs one pass and exits.
+        watch: Option<u64>,
+    },
 }
 
 /// One minting run's settings, in a struct so the command takes one argument.
@@ -1644,6 +1653,7 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
         max_queue: None,
         mcp_identity: None,
         committee_identity: None,
+        attest_identity: None,
         no_mcp: false,
     };
 
@@ -1689,6 +1699,9 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
             "--mcp-identity" => request.mcp_identity = Some(cursor.value("run: --mcp-identity")?),
             "--committee-identity" => {
                 request.committee_identity = Some(cursor.value("run: --committee-identity")?)
+            }
+            "--attest-identity" => {
+                request.attest_identity = Some(cursor.value("run: --attest-identity")?)
             }
             "--no-mcp" => request.no_mcp = true,
             "--help" | "-h" => return Ok(Command::Help),
@@ -2286,6 +2299,8 @@ fn parse_attest(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut attestation: Option<String> = None;
     let mut docket: Option<String> = None;
     let mut catcher: Option<String> = None;
+    let mut limit: Option<usize> = None;
+    let mut watch: Option<u64> = None;
     while let Some(token) = cursor.take() {
         match token.as_str() {
             "--claim" => claim = Some(cursor.value("--claim")?),
@@ -2294,6 +2309,25 @@ fn parse_attest(cursor: &mut Cursor) -> Result<Command, CliError> {
             "--attestation" => attestation = Some(cursor.value("--attestation")?),
             "--docket" => docket = Some(cursor.value("--docket")?),
             "--catcher" => catcher = Some(cursor.value("--catcher")?),
+            "--limit" => {
+                let text = cursor.value("--limit")?;
+                limit = Some(
+                    text.parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| {
+                            CliError::Usage(format!(
+                                "attest serve: --limit needs a positive integer, not {text:?}"
+                            ))
+                        })?,
+                );
+            }
+            "--watch" => {
+                let text = cursor.value("--watch")?;
+                watch = Some(text.parse::<u64>().ok().filter(|n| *n > 0).ok_or_else(|| {
+                    CliError::Usage(format!("attest serve: --watch needs seconds, not {text:?}"))
+                })?);
+            }
             other => {
                 return Err(CliError::Usage(format!(
                     "attest {verb}: unknown option {other:?}"
@@ -2320,9 +2354,14 @@ fn parse_attest(cursor: &mut Cursor) -> Result<Command, CliError> {
             }
         }
         "list" => AttestAction::List,
+        "serve" => AttestAction::Serve {
+            identity: require(identity, "attest serve", "--identity")?,
+            limit,
+            watch,
+        },
         other => {
             return Err(CliError::Usage(format!(
-                "attest: unknown action {other:?} (stand, slash, list)"
+                "attest: unknown action {other:?} (stand, slash, list, serve)"
             )))
         }
     };
@@ -3791,6 +3830,26 @@ fn print_help(out: &mut dyn Write) {
     say(out, "  attest list");
     say(
         out,
+        "  attest serve --identity FILE [--limit N] [--watch SECONDS]",
+    );
+    say(
+        out,
+        "      the validator loop: re-run the pinned verifier of every claim this",
+    );
+    say(
+        out,
+        "      identity has not stood behind and attest what THIS node found, under",
+    );
+    say(
+        out,
+        "      bond. One pass, or every --watch seconds. A daemon runs the same",
+    );
+    say(
+        out,
+        "      loop with --attest-identity, under the lock it already holds",
+    );
+    say(
+        out,
         "      who has stood behind what, and whose bond is still live",
     );
     say(
@@ -4405,6 +4464,7 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
     config.mcp = !request.no_mcp;
     config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
     config.committee_identity = request.committee_identity.as_ref().map(PathBuf::from);
+    config.attest_identity = request.attest_identity.as_ref().map(PathBuf::from);
     config.store = store.limit().is_some().then(|| store.clone());
     if !request.no_queue {
         config.queue = Some(
@@ -6006,6 +6066,56 @@ fn cmd_attest(
                     cairn::node::VERIFICATION_BOND
                 ),
             );
+            Ok(0)
+        }
+        AttestAction::Serve {
+            identity,
+            limit,
+            watch,
+        } => {
+            let who = load_identity(Some(identity))?.ok_or_else(|| {
+                CliError::Usage(String::from("attest serve: --identity is required"))
+            })?;
+            let mut attestor = cairn::attestor::Attestor::new(who);
+            if let Some(limit) = limit {
+                attestor.limit_per_tick = *limit;
+            }
+            say(
+                out,
+                format!(
+                    "attesting as {} ({} verifier run(s) per pass)",
+                    cairn::canonical::short(&attestor.attestor_id()),
+                    attestor.limit_per_tick
+                ),
+            );
+            loop {
+                // The lock is taken per pass and released between them, so a
+                // sync the operator runs in the gap (`cairn drain`, a lab pull,
+                // a bundle) can append; a daemon that holds it permanently is
+                // the place to run this loop instead, with --attest-identity.
+                let (tally, outcomes) = {
+                    let mut node = open_node_for_writing(options).map_err(|error| match error {
+                        CliError::Ledger(cairn::ledger::LedgerError::Locked { .. }) => {
+                            CliError::Usage(String::from(
+                                "attest serve: a daemon holds this log's write lock; run the \
+                                 loop inside it with --attest-identity instead",
+                            ))
+                        }
+                        other => other,
+                    })?;
+                    attestor.tick(&mut node, &timestamp())
+                };
+                for outcome in &outcomes {
+                    say(out, format!("  {outcome}"));
+                }
+                say(out, format!("pass: {tally}"));
+                match watch {
+                    Some(seconds) if !tally.stopped_for_bond => {
+                        std::thread::sleep(std::time::Duration::from_secs(*seconds));
+                    }
+                    _ => break,
+                }
+            }
             Ok(0)
         }
         AttestAction::Slash {

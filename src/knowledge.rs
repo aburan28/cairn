@@ -65,6 +65,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::canonical::Value;
 use crate::records::{Claim, Relation};
 use crate::verifiers::Status;
 
@@ -305,6 +306,45 @@ pub struct ConfidencePolicy {
     pub independence_depth: u32,
 }
 
+impl ConfidencePolicy {
+    /// The policy as a reader sees it beside the number it produced.
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("verified", Value::Int(i128::from(self.verified))),
+            (
+                "per_corroboration",
+                Value::Int(i128::from(self.per_corroboration)),
+            ),
+            (
+                "max_corroboration",
+                Value::Int(i128::from(self.max_corroboration)),
+            ),
+            (
+                "per_refutation",
+                Value::Int(i128::from(self.per_refutation)),
+            ),
+            ("per_dispute", Value::Int(i128::from(self.per_dispute))),
+            (
+                "superseded_weight",
+                Value::Int(i128::from(self.superseded_weight)),
+            ),
+            (
+                "unreproducible_weight",
+                Value::Int(i128::from(self.unreproducible_weight)),
+            ),
+            ("decay_period", Value::Int(i128::from(self.decay_period))),
+            (
+                "decay_retention",
+                Value::Int(i128::from(self.decay_retention)),
+            ),
+            (
+                "independence_depth",
+                Value::Int(i128::from(self.independence_depth)),
+            ),
+        ])
+    }
+}
+
 impl Default for ConfidencePolicy {
     fn default() -> ConfidencePolicy {
         ConfidencePolicy {
@@ -415,6 +455,61 @@ impl KnowledgeState {
     /// digits.
     pub fn confidence_percent(&self) -> u32 {
         self.confidence / 10
+    }
+
+    /// The state as `GET /knowledge/{id}` publishes it. Every count is a
+    /// count of independent parties, and `confidence` is labelled with the
+    /// policy it was computed under by the caller -- a number without its
+    /// policy is the network-agreed score this layer refuses to have.
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("claim_id", Value::string(self.claim_id.clone())),
+            ("standing", Value::string(self.standing.as_str())),
+            (
+                "verdict",
+                match self.verdict {
+                    Some(status) => Value::string(status.as_str()),
+                    None => Value::Null,
+                },
+            ),
+            ("reproducible", Value::string(self.reproducible.as_str())),
+            (
+                "corroborations",
+                Value::Int(i128::from(self.corroborations)),
+            ),
+            ("refutations", Value::Int(i128::from(self.refutations))),
+            ("disputes", Value::Int(i128::from(self.disputes))),
+            (
+                "superseded_by",
+                Value::array(
+                    self.superseded_by
+                        .iter()
+                        .map(|id| Value::string(id.clone())),
+                ),
+            ),
+            (
+                "retracted_by",
+                match &self.retracted_by {
+                    Some(id) => Value::string(id.clone()),
+                    None => Value::Null,
+                },
+            ),
+            (
+                "assertions",
+                Value::array(self.assertions.iter().map(|assertion| {
+                    Value::object([
+                        ("by", Value::string(assertion.by.clone())),
+                        ("relation", Value::string(assertion.kind.to_string())),
+                        ("grounded", Value::Bool(assertion.grounded)),
+                        ("class", Value::Int(assertion.class as i128)),
+                    ])
+                })),
+            ),
+            (
+                "confidence_per_mille",
+                Value::Int(i128::from(self.confidence)),
+            ),
+        ])
     }
 }
 

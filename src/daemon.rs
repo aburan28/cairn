@@ -171,6 +171,14 @@ pub struct Config {
     /// [`crate::store`]: "a cap smaller than your log stops your node; it does
     /// not prune your log". `None`, or a store with no limit, checks nothing.
     pub store: Option<crate::store::Store>,
+    /// Run the validator loop under this signing identity: every tick,
+    /// re-verify claims it has not stood behind and post attestations under
+    /// bond. `None` runs no loop. Falls back to [`crate::attestor::IDENTITY_ENV`].
+    /// See [`crate::attestor`].
+    pub attest_identity: Option<PathBuf>,
+    /// Verifier runs per tick for that loop. Falls back to
+    /// [`crate::attestor::LIMIT_ENV`], then [`crate::attestor::DEFAULT_LIMIT_PER_TICK`].
+    pub attest_limit: Option<usize>,
 }
 
 impl Config {
@@ -202,6 +210,8 @@ impl Config {
             mcp_identity: None,
             committee_identity: None,
             store: None,
+            attest_identity: None,
+            attest_limit: None,
         }
     }
 
@@ -1135,6 +1145,40 @@ pub fn run(config: Config) -> Result<(), String> {
         ),
     }
 
+    // The validator loop, when this node has an identity to attest under.
+    // Off by default: standing behind a verdict stakes a bond, and a node
+    // that did that without being asked would be spending its operator's
+    // units on a role they never declared.
+    let attest_path = config.attest_identity.clone().or_else(|| {
+        std::env::var_os(crate::attestor::IDENTITY_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    let mut attestor = match attest_path {
+        Some(path) => {
+            let identity =
+                crate::mcp::load_identity(&path).map_err(|error| format!("attest: {error}"))?;
+            let mut attestor = crate::attestor::Attestor::new(identity);
+            let limit = config.attest_limit.or_else(|| {
+                std::env::var(crate::attestor::LIMIT_ENV)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<usize>().ok())
+                    .filter(|limit| *limit > 0)
+            });
+            if let Some(limit) = limit {
+                attestor.limit_per_tick = limit;
+            }
+            log::info!(
+                "attest: standing behind what this node verifies, as {} ({} verifier run(s) per tick, {} units bonded each)",
+                short(&attestor.attestor_id()),
+                attestor.limit_per_tick,
+                crate::node::VERIFICATION_BOND
+            );
+            Some(attestor)
+        }
+        None => None,
+    };
+
     let mut ticks: u64 = 0;
     loop {
         if let Some(store) = config.store.as_ref() {
@@ -1207,6 +1251,25 @@ pub fn run(config: Config) -> Result<(), String> {
             // See `settle_tick` for what happened when this waited on a drain.
             changed |= committee_tick(&mut guard.node, &mut committee, &now);
             changed |= settle_tick(&mut guard.node, &now);
+            // The validator loop, after settlement so a claim settled this
+            // tick is attested this tick, and under the same lock because an
+            // attestation is a record and this process holds the pen.
+            if let Some(attestor) = attestor.as_mut() {
+                let (tally, outcomes) = attestor.tick(&mut guard.node, &now);
+                changed |= tally.posted > 0;
+                for outcome in &outcomes {
+                    if outcome.disagrees() {
+                        log::warn!("attest: {outcome}");
+                    } else if outcome.posted() {
+                        log::info!("attest: {outcome}");
+                    } else {
+                        log::debug!("attest: {outcome}");
+                    }
+                }
+                if tally.considered > 0 {
+                    log::info!("attest: {tally}");
+                }
+            }
             if changed {
                 persist(
                     &guard,

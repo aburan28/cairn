@@ -45,6 +45,8 @@ record instead.
 | `GET /network` | one answer for the reader's Network page: this node's declared roles (`CAIRN_ROLES`) and hardware, the sessions summary, every worker heartbeating to it on any objective summed by device and class, the registered hosts under `compute.hosts`, and the roles the log evidences identities playing — see [Roles](#roles-what-a-node-says-it-is-for) |
 | `GET /leases` | objectives with an advisory lease held in this node's memory |
 | `GET /leases/{id}` | one objective's task leases: who holds each task, who contended for it, what was released and how — see [Leases](#leases-saying-what-you-are-about-to-work) |
+| `GET /knowledge` | every claim's standing as this node derives it from the log -- accepted, corroborated, contested, superseded, withdrawn, refuted, unverified -- newest first and capped, with a tally by standing; `?policy=demanding` applies the stricter built-in confidence policy. See [Knowledge](#knowledge-what-is-believed-and-who-stood-behind-it) |
+| `GET /knowledge/{claim_id}` | one claim: its standing and confidence under the named policy, every relation asserted about it and whether it was heard, and who stood behind its verdict under bond with each attestation's status and whether a docket caught it |
 | `GET /hosts` | machines that registered with `cairn agent`: each host's CPUs, memory, GPUs and the sandboxes it can run jobs under, as it described itself, with the live ones summed — see [Hosts](#hosts-what-machines-are-on-the-network) |
 | `GET /ui/` | the embedded reader, when the binary was built with the `ui` feature |
 | `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type` |
@@ -201,6 +203,42 @@ lab's words -- `task`, `holder`, `ttl`, `held`, `contended`, the three
 outcomes -- so a reader who knows one knows the other.
 `docs/design/network-coordination.md` has the design, and the reader's
 `/ui/coordination?id=…` draws the roster over the epoch's work assignment.
+
+## Knowledge: what is believed, and who stood behind it
+
+`cairn knowledge` derives a claim's **standing** from the log -- the pinned
+verdict first, then the relations that verified claims asserted about it,
+collapsed to independent parties -- and a **confidence** under a policy the
+reader chooses ([knowledge.md](knowledge.md)). Until now that was a CLI on a
+local log. `GET /knowledge/{claim_id}` is the same derivation over HTTP, so
+an agent asking "is this still believed?" gets the same answer as an
+operator with the file:
+
+```sh
+curl -s http://node:8080/knowledge/sha256:…
+# -> {"claim_id": …, "objective_id": …, "submitter": …,
+#     "state": {"standing": "corroborated", "verdict": "accept", "reproducible": "yes",
+#               "corroborations": 2, "refutations": 0, "disputes": 0,
+#               "superseded_by": [], "retracted_by": null,
+#               "assertions": [{"by": "sha256:…", "relation": "replicates", "grounded": true, "class": 0}, …],
+#               "confidence_per_mille": 840},
+#     "attestations": {"accept": 2, "reject": 0, "slashed": 0, "bond_each": 50000,
+#                      "attestations": [{"attestation_id": …, "attestor": "<hex key>", "status": "accept", "created_at": …, "slashed": false}, …]},
+#     "policy": {"name": "default", "parameters": {…}}, "as_of_epoch": 12345, "note": …}
+curl -s 'http://node:8080/knowledge?policy=demanding'
+# -> {"claims": [...], "total": 412, "shown": 256, "by_standing": {"accepted": 380, "refuted": 20, …}, …}
+```
+
+Two things are published side by side and never added. `state` is what
+`src/knowledge.rs` computes: anyone with the log recomputes it, and the
+confidence is labelled with the policy that produced it because there is no
+network-agreed number and a route that handed one out would become the
+thing the knowledge layer refuses to be. `attestations` is who stood behind
+the verdict under bond (`docs/bonded-verification.md`) and how it went for
+them. Standing does not know attestations exist, by design: a verdict is the
+verifier's and a relation is a verified claim's, and a bonded opinion is a
+third kind of fact a reader may weigh and the derivation does not. Nothing
+on either route is written to the log and nothing moves money.
 
 ## Hosts: what machines are on the network
 

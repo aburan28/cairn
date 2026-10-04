@@ -229,6 +229,16 @@ which `get_claim` never returns. Closing it needs a provenance channel for
 non-accepted claims. Until then the write path is the CLI, where a human chose
 the target.
 
+### Over the wire
+
+`GET /knowledge/{claim_id}` and `GET /knowledge` on a serving node publish
+the same derivation ([serving.md](serving.md#knowledge-what-is-believed-and-who-stood-behind-it)),
+with `?policy=demanding` for the stricter built-in policy, and beside the
+state the attestations posted on the claim under bond -- kept outside the
+standing, since a bonded opinion is neither a verdict nor a relation. The
+MCP `get_claim` tool carries the standing lines for an agent that is about
+to cite.
+
 ## What this does not do
 
 - **It does not decide truth.** It reports who with standing said what, and

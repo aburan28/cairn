@@ -74,6 +74,13 @@ jobs:
       # the only place the free half and the expensive half of the mechanism sit
       # on one log with the money visible between them.
       - run: ./scripts/attestation-demo.sh
+      # The validator loop around the binary: `attest serve` stands behind
+      # every claim this host can check with the status its own verifier
+      # returned, sets aside the one it cannot run, attests nothing twice,
+      # survives `audit --rerun`, and the result is readable at
+      # GET /knowledge beside the standing. Also the only place the `replay`
+      # example is admitted end to end.
+      - run: ./scripts/validator-demo.sh
       # Adversarial strategies played for money against the real rules engine.
       # The verdicts are asserted in `tests/arena.rs`; this run is the readable
       # payoff table, and it exits non-zero if an attack that should be closed
