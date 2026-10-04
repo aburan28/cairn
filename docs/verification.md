@@ -227,16 +227,28 @@ decide what to be.
 
 **`python3` must resolve to a real interpreter, not a version-manager shim.**
 The jail allow-lists the interpreter binary and its runtime root — the
-installation prefix two levels above `bin/`, which covers Homebrew, rustup and
-similar layouts. A pyenv/asdf/mise shim re-execs through the manager binary
-and a version directory under `$HOME`, and home-directory roots are
-deliberately never allow-listed, so the re-exec is denied and the shim exits
-126. The verdict is `Unavailable` for every pinned check, which is the honest
-answer — but on a host where `which python3` hits a shim first, *everything*
-is unavailable, which reads as a broken node rather than a broken check. Put a
-directly-installed `python3` (e.g. `/opt/homebrew/bin`) first on `PATH` before
-running the test suite, the demo scripts, or a node. `the_shipped_artifacts_verify`
-failing with "pinned checker exited 126" is this, not a checker bug.
+installation prefix two levels above `bin/`, which covers Homebrew and system
+layouts. A pyenv/asdf shim is a script, and a mise shim a link to the `mise`
+binary; each re-execs through the manager and a version directory under
+`$HOME`, and home-directory roots are deliberately never allow-listed — widening
+the profile to the home directory would hand objective code the operator's keys.
+Run in the jail, the shim exited 126 (127 under bubblewrap) on every pinned check, with
+nothing in the verdict to say the interpreter was the cause.
+
+So the node now looks before it runs. Under a jail, a `python3` that is a shim,
+or a real interpreter under a home directory that no grant covers, is refused
+before anything spawns: the verdict is `Unavailable`, never `Reject`, its detail
+names the shim and the fix, and `GET /verifiers` lists `certificate`,
+`evaluator` and `statistical` as unservable with the same reason (and a
+`problem` field on the `python3` row). The fix is the Lean one: point
+`CAIRN_PYTHON` at the real interpreter (`pyenv which python3`) and, when it is
+under your home, `CAIRN_PYTHON_ROOT` at its prefix (`pyenv prefix`) — an explicit
+grant of one directory, reported by `GET /verifiers` as `granted_root`. Or put a
+directly installed `python3` (`/opt/homebrew/bin`, `/usr/bin`) first on `PATH`.
+Unconfined (no jail mechanism, and `CAIRN_REQUIRE_SANDBOX` unset) a shim finds
+its manager, so nothing is refused there. The test suite and the demo scripts
+use `python3` from `PATH` too: `the_shipped_examples_verify` failing on a shim is
+this, not a checker bug.
 
 Two gaps remain real and neither is hypothetical:
 

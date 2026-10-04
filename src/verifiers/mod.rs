@@ -471,6 +471,21 @@ pub const LEAN_ENV: &str = "CAIRN_LEAN";
 /// objective; a record still cannot choose what its own jail binds.
 pub const LEAN_ROOT_ENV: &str = "CAIRN_LEAN_ROOT";
 
+/// The interpreter pinned checkers, evaluators and statistics run under, when
+/// it is not the `python3` on `PATH`. Name the interpreter itself, not a
+/// version manager's shim (`~/.pyenv/shims/python3`, asdf's, mise's): a shim
+/// re-execs through the manager's files under the operator's home, which the
+/// jail never shows, so it is refused before it runs. `pyenv which python3`,
+/// `asdf which python3` and `mise which python3` each print the real one.
+pub const PYTHON_ENV: &str = "CAIRN_PYTHON";
+
+/// A directory the operator grants the pinned-code jail to read, in full: the
+/// Python interpreter's installation prefix (`pyenv prefix`). Needed when that
+/// prefix is under the operator's home, for the same reason as
+/// [`LEAN_ROOT_ENV`] and with the same limit: an operator decision about one
+/// directory, never something an objective can ask for.
+pub const PYTHON_ROOT_ENV: &str = "CAIRN_PYTHON_ROOT";
+
 /// A screen applied to submitted Lean proof text before Lean ever runs.
 #[derive(Debug, Clone, Copy)]
 struct Screen {
@@ -731,6 +746,8 @@ pub struct VerifierRegistry {
     /// which host paths are bound into its own jail" true.
     lean_root: Option<PathBuf>,
     python_binary: String,
+    /// The Python counterpart of `lean_root`: [`PYTHON_ROOT_ENV`].
+    python_root: Option<PathBuf>,
     /// Ceiling applied to every spec-declared timeout, when set. See
     /// [`VerifierRegistry::interactive`].
     timeout_ceiling: Option<Duration>,
@@ -756,7 +773,14 @@ impl VerifierRegistry {
             lean_root: std::env::var_os(LEAN_ROOT_ENV)
                 .map(PathBuf::from)
                 .filter(|path| !path.as_os_str().is_empty()),
-            python_binary: "python3".to_string(),
+            python_binary: std::env::var(PYTHON_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "python3".to_string()),
+            python_root: std::env::var_os(PYTHON_ROOT_ENV)
+                .map(PathBuf::from)
+                .filter(|path| !path.as_os_str().is_empty()),
             timeout_ceiling: None,
         }
     }
@@ -825,6 +849,50 @@ impl VerifierRegistry {
         self
     }
 
+    /// Grant the pinned-code jail the interpreter's installation prefix. See
+    /// [`PYTHON_ROOT_ENV`].
+    pub fn with_python_root(mut self, root: Option<PathBuf>) -> VerifierRegistry {
+        self.python_root = root;
+        self
+    }
+
+    /// Why the interpreter found at `found` cannot run under a jail, in the
+    /// words a verdict and `GET /verifiers` both use, or `None` when it can.
+    ///
+    /// Only asked when there is a jail: unconfined, a shim finds its manager
+    /// and a home-directory interpreter its library, and refusing them there
+    /// would turn a node that works into one that does not.
+    fn python_refusal(&self, found: &Path, jailed: bool) -> Option<String> {
+        if !jailed {
+            return None;
+        }
+        let problem = sandbox::interpreter_problem(found, self.python_root.as_deref())?;
+        Some(match problem {
+            sandbox::Unjailable::Shim { found, what } => format!(
+                "'{}' is a version-manager shim ({what}) that re-execs through files under \
+                 the home directory, which the jail does not show; every pinned check would \
+                 be unavailable. Set {PYTHON_ENV} to the interpreter it runs (`pyenv which \
+                 python3`, `asdf which python3`, `mise which python3`) and \
+                 {PYTHON_ROOT_ENV} to that interpreter's prefix (`pyenv prefix`), or put a \
+                 directly installed python3 first on PATH",
+                found.display()
+            ),
+            sandbox::Unjailable::UnderHome {
+                interpreter,
+                prefix,
+            } => format!(
+                "'{}' is under a home directory, which the jail never allow-lists on its \
+                 own, so it would run without its standard library. Set {PYTHON_ROOT_ENV}={} \
+                 to grant its prefix, or use a python3 installed outside the home directory",
+                interpreter.display(),
+                match &prefix {
+                    Some(prefix) => prefix.display().to_string(),
+                    None => "<its installation prefix>".to_string(),
+                }
+            ),
+        })
+    }
+
     /// Every kind this build can answer to, in sorted order.
     pub fn kinds() -> &'static [&'static str] {
         &[
@@ -861,11 +929,18 @@ impl VerifierRegistry {
     /// it settles anything, and a kind listed as unservable here still
     /// answers `Unavailable` -- not `Reject` -- when asked.
     pub fn readiness(&self) -> Value {
+        self.readiness_under(sandbox::mechanism(), sandbox::required())
+    }
+
+    /// [`VerifierRegistry::readiness`] for a given jail, so a test can ask
+    /// what a seatbelt host would report from a host without one.
+    fn readiness_under(&self, mechanism: sandbox::Mechanism, required: bool) -> Value {
         let lean = which(&self.lean_binary);
         let python = which(&self.python_binary);
-        let mechanism = sandbox::mechanism();
-        let required = sandbox::required();
         let jailed = mechanism.is_jail();
+        let python_problem = python
+            .as_deref()
+            .and_then(|found| self.python_refusal(found, jailed));
 
         let tool = |binary: &str, found: &Option<PathBuf>, serves: &[&str]| {
             Value::object([
@@ -908,6 +983,9 @@ impl VerifierRegistry {
                             "'{}' not on PATH; install Python 3 to run pinned checkers",
                             self.python_binary
                         ))
+                    }
+                    "certificate" | "evaluator" | "statistical" if python_problem.is_some() => {
+                        python_problem.clone()
                     }
                     "lean" if lean.is_none() => Some(format!(
                         "'{}' not on PATH; install a Lean toolchain to verify",
@@ -957,14 +1035,32 @@ impl VerifierRegistry {
                         }
                         row
                     }),
-                    (
-                        "python3",
-                        tool(
+                    ("python3", {
+                        let mut row = tool(
                             &self.python_binary,
                             &python,
                             &["certificate", "evaluator", "statistical"],
-                        ),
-                    ),
+                        );
+                        if let Value::Object(fields) = &mut row {
+                            fields.insert(
+                                String::from("granted_root"),
+                                match &self.python_root {
+                                    Some(root) => Value::string(root.to_string_lossy()),
+                                    None => Value::Null,
+                                },
+                            );
+                            // Found is not the same as runnable: a shim is
+                            // found and cannot run in the jail. Why, or null.
+                            fields.insert(
+                                String::from("problem"),
+                                match &python_problem {
+                                    Some(why) => Value::string(why.as_str()),
+                                    None => Value::Null,
+                                },
+                            );
+                        }
+                        row
+                    }),
                 ]),
             ),
             ("sandbox", Value::object(sandbox_fields)),
@@ -2013,6 +2109,35 @@ impl VerifierRegistry {
         self.blobs.put(declared, bytes).map(|_| ())
     }
 
+    /// The interpreter a pinned `role` runs under, or the `Unavailable`
+    /// verdict that says why there is none here.
+    ///
+    /// A shim on `PATH` used to be found, jailed, and run, and to exit 126
+    /// (127 under bubblewrap) on every pinned check, with nothing in the
+    /// verdict to say the interpreter was the problem. It is refused here instead, before
+    /// anything is spawned, with the fix in the detail. Still `Unavailable`:
+    /// which `python3` this node has is a fact about the node.
+    fn pinned_interpreter(
+        &self,
+        role: &str,
+        mechanism: sandbox::Mechanism,
+    ) -> Result<PathBuf, Verdict> {
+        let Some(interpreter) = which(&self.python_binary) else {
+            return Err(Verdict::unavailable(format!(
+                "'{}' not on PATH; the pinned {role} cannot be run here",
+                self.python_binary
+            )));
+        };
+        match self.python_refusal(&interpreter, mechanism.is_jail()) {
+            None => Ok(interpreter),
+            Some(why) => Err(Verdict::new(
+                Status::Unavailable,
+                format!("cannot jail the pinned {role}: {why}"),
+                Value::object([("sandbox", Value::string(mechanism.as_str()))]),
+            )),
+        }
+    }
+
     /// Run pinned code in a jailed child process and collect its single JSON
     /// result.
     ///
@@ -2035,15 +2160,7 @@ impl VerifierRegistry {
         timeout: Duration,
         seed: Option<i64>,
     ) -> Result<Harvest, Verdict> {
-        let interpreter = match which(&self.python_binary) {
-            Some(interpreter) => interpreter,
-            None => {
-                return Err(Verdict::unavailable(format!(
-                    "'{}' not on PATH; the pinned {role} cannot be run here",
-                    self.python_binary
-                )))
-            }
-        };
+        let interpreter = self.pinned_interpreter(role, sandbox::mechanism())?;
         let workdir = match TempDir::new("proofwork-pinned") {
             Ok(workdir) => workdir,
             Err(error) => {
@@ -2064,11 +2181,14 @@ impl VerifierRegistry {
         // interpreter, its own source, and nothing else. This is the one spawn
         // path where the full jail costs nothing, so it gets all of it --
         // scrubbed environment and an address-space cap included.
-        let plan = Confinement::new(workdir.path(), workdir.path(), timeout.as_secs())
+        let mut plan = Confinement::new(workdir.path(), workdir.path(), timeout.as_secs())
             .reading(&interpreter)
             .reading(path)
             .scrubbed()
             .capped_memory();
+        if let Some(root) = &self.python_root {
+            plan = plan.reading(root);
+        }
         let jailed = match sandbox::confine(&interpreter, &args, &plan) {
             Ok(jailed) => jailed,
             Err(sandbox::Unavailable(why)) => {
@@ -4840,6 +4960,125 @@ mod tests {
             _ => Vec::new(),
         };
         assert!(kinds.contains(&"lean"));
+    }
+
+    /// pyenv's `~/.pyenv/shims/python3`, as far as the jail is concerned: a
+    /// script that execs something the jail does not show, and exits 126.
+    #[cfg(unix)]
+    fn pyenv_shim(dir: &TempDir) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let shims = dir.path().join("shims");
+        fs::create_dir_all(&shims).expect("shims dir");
+        let shim = shims.join("python3");
+        fs::write(
+            &shim,
+            "#!/bin/sh\nexec /nonexistent/.pyenv/libexec/pyenv exec python3 \"$@\"\n",
+        )
+        .expect("write shim");
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod shim");
+        shim
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shim_python_is_refused_up_front_as_unavailable_with_the_fix() {
+        let root = tmpdir("proofwork-shim-python");
+        let shim = pyenv_shim(&root);
+        let registry =
+            VerifierRegistry::new(root.path()).with_python_binary(shim.to_string_lossy());
+
+        // Under a jail: refused before anything spawns, as Unavailable, with
+        // the variables that fix it named and the mechanism in evidence.
+        let seatbelt = sandbox::Mechanism::Seatbelt(PathBuf::from("/usr/bin/sandbox-exec"));
+        let verdict = registry
+            .pinned_interpreter("checker", seatbelt)
+            .expect_err("a shim under a jail must be refused");
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+        assert!(
+            verdict.detail.contains("version-manager shim"),
+            "{}",
+            verdict.detail
+        );
+        assert!(verdict.detail.contains(PYTHON_ENV), "{}", verdict.detail);
+        assert!(
+            verdict.detail.contains(PYTHON_ROOT_ENV),
+            "{}",
+            verdict.detail
+        );
+        assert_eq!(
+            verdict.evidence.get("sandbox").and_then(Value::as_str),
+            Some("sandbox-exec")
+        );
+
+        // Unconfined a shim finds its manager, so it is not refused there.
+        assert_eq!(
+            registry.pinned_interpreter("checker", sandbox::Mechanism::None("test")),
+            Ok(shim.clone())
+        );
+
+        // End to end on this host, whatever its jail: never a rejection.
+        let sha = write_pinned(&root, "checker.py", CHECKER);
+        let spec = Value::object([
+            ("kind", Value::string("certificate")),
+            ("checker", Value::string("checker.py")),
+            ("checker_sha256", Value::string(sha)),
+            ("entrypoint", Value::string("check")),
+        ]);
+        let verdict = registry.run(&spec, &Value::object([("n", Value::Int(42))]));
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+        if sandbox::mechanism().is_jail() {
+            assert!(verdict.detail.contains(PYTHON_ENV), "{}", verdict.detail);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shim_python_is_reported_unservable_by_the_readiness_report() {
+        let root = tmpdir("proofwork-shim-readiness");
+        let shim = pyenv_shim(&root);
+        let registry = VerifierRegistry::new(root.path())
+            .with_python_binary(shim.to_string_lossy())
+            .with_python_root(Some(PathBuf::from("/opt/python-prefix")));
+        let seatbelt = sandbox::Mechanism::Seatbelt(PathBuf::from("/usr/bin/sandbox-exec"));
+        let report = registry.readiness_under(seatbelt, false);
+
+        let python = report
+            .get("toolchains")
+            .and_then(|t| t.get("python3"))
+            .expect("python3 row");
+        // Found, and still not runnable: both are said.
+        assert_eq!(python.get("available"), Some(&Value::Bool(true)));
+        assert!(python
+            .get("problem")
+            .and_then(Value::as_str)
+            .is_some_and(|why| why.contains(PYTHON_ENV)));
+        assert_eq!(
+            python.get("granted_root").and_then(Value::as_str),
+            Some("/opt/python-prefix")
+        );
+        let unservable = report.get("unservable").expect("unservable");
+        let servable: Vec<&str> = match report.get("servable") {
+            Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        for kind in ["certificate", "evaluator", "statistical"] {
+            assert!(
+                unservable
+                    .get(kind)
+                    .and_then(Value::as_str)
+                    .is_some_and(|why| why.contains("version-manager shim")),
+                "{kind} should be unservable behind a shim"
+            );
+            assert!(!servable.contains(&kind));
+        }
+
+        // Without a jail there is nothing to refuse.
+        let unjailed = registry.readiness_under(sandbox::Mechanism::None("test"), false);
+        let python = unjailed
+            .get("toolchains")
+            .and_then(|t| t.get("python3"))
+            .expect("python3 row");
+        assert_eq!(python.get("problem"), Some(&Value::Null));
     }
 
     #[test]
