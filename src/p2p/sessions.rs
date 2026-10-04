@@ -56,6 +56,7 @@ use std::fmt;
 use std::net::SocketAddr;
 
 use super::handshake::{peer_id_hex, PeerId};
+use super::reach;
 use crate::canonical::Value;
 use crate::time::format_iso8601_utc;
 
@@ -200,6 +201,14 @@ pub struct Sessions {
     /// Inbound handshakes that failed before naming anyone. See the module
     /// docs for why these are counted and never attributed.
     anonymous_inbound_failures: u64,
+    /// What the port-mapping thread last said about this node's reachability
+    /// from outside its router. `None` until the daemon decides whether to
+    /// ask; a plain publisher never sets it. See [`reach`].
+    external: Option<reach::Report>,
+    /// The last successful inbound session from an address outside every
+    /// private range: the one piece of evidence that a stranger can dial
+    /// this node, as opposed to a router's claim that one could.
+    inbound_from_public_at: Option<u64>,
 }
 
 impl Sessions {
@@ -210,12 +219,29 @@ impl Sessions {
             this: None,
             book: BookSizes::default(),
             anonymous_inbound_failures: 0,
+            external: None,
+            inbound_from_public_at: None,
         }
     }
 
     /// Who this node is on the wire, once the listener is bound.
     pub fn identify(&mut self, peer: PeerId, listen: SocketAddr) {
         self.this = Some((peer, listen));
+    }
+
+    /// What the port-mapping thread last reported. See [`reach`].
+    pub fn set_external(&mut self, report: reach::Report) {
+        self.external = Some(report);
+    }
+
+    pub fn external(&self) -> Option<&reach::Report> {
+        self.external.as_ref()
+    }
+
+    /// When a peer from outside every private range last reached this node
+    /// inbound, if ever.
+    pub fn inbound_from_public_at(&self) -> Option<u64> {
+        self.inbound_from_public_at
     }
 
     /// A session with `peer` completed. `entries` is this node's ledger
@@ -234,6 +260,13 @@ impl Sessions {
         match direction {
             Direction::Inbound => standing.inbound_ok += 1,
             Direction::Outbound => standing.outbound_ok += 1,
+        }
+        // The evidence a port mapping lacks. A LAN peer dialling in says
+        // nothing about the router, and dialling *out* to a public address
+        // says nothing about inbound; only a public address that reached
+        // this node does, and `addr` is the accepted socket's remote end.
+        if direction == Direction::Inbound && addr.is_some_and(|addr| reach::is_public(addr.ip())) {
+            self.inbound_from_public_at = Some(now);
         }
         Ok(Reach::Reached)
     }
@@ -424,6 +457,20 @@ impl Sessions {
             (
                 "uptime_seconds",
                 Value::Int(i128::from(now.saturating_sub(self.started_at))),
+            ),
+            (
+                "external",
+                match &self.external {
+                    Some(report) => report.to_value(),
+                    None => Value::Null,
+                },
+            ),
+            (
+                "inbound_from_public_at",
+                match self.inbound_from_public_at {
+                    Some(at) => Value::string(iso(at)),
+                    None => Value::Null,
+                },
             ),
         ])
     }
@@ -647,5 +694,52 @@ mod tests {
         );
         assert_eq!(this.get("listen").unwrap().as_str(), Some("10.0.0.1:9000"));
         assert_eq!(this.get("uptime_seconds").unwrap(), &Value::Int(60));
+    }
+
+    #[test]
+    fn an_inbound_session_from_outside_is_the_evidence_a_mapping_lacks() {
+        let mut sessions = Sessions::new(100);
+        let private: SocketAddr = "192.168.1.20:50000".parse().unwrap();
+        let public: SocketAddr = "203.0.113.7:50000".parse().unwrap();
+        // Nothing yet, and the roster says so in both fields.
+        let summary = sessions.summary(100);
+        let this = summary.get("this_node").unwrap();
+        assert_eq!(this.get("external").unwrap(), &Value::Null);
+        assert_eq!(this.get("inbound_from_public_at").unwrap(), &Value::Null);
+        // A LAN peer dialling in proves nothing about the router.
+        sessions
+            .succeeded(id(1), Some(private), Direction::Inbound, 1, 110)
+            .unwrap();
+        assert_eq!(sessions.inbound_from_public_at(), None);
+        // Dialling out to a public address proves nothing about inbound.
+        sessions
+            .succeeded(id(2), Some(public), Direction::Outbound, 1, 120)
+            .unwrap();
+        assert_eq!(sessions.inbound_from_public_at(), None);
+        // A public address dialling in is the evidence.
+        sessions
+            .succeeded(id(3), Some(public), Direction::Inbound, 1, 130)
+            .unwrap();
+        assert_eq!(sessions.inbound_from_public_at(), Some(130));
+
+        sessions.set_external(reach::Report::off(
+            reach::Mode::Off,
+            "off (CAIRN_PORTMAP)".into(),
+            100,
+        ));
+        let report = sessions.report(140);
+        let this = report.get("this_node").unwrap();
+        assert_eq!(
+            this.get("external")
+                .unwrap()
+                .get("status")
+                .unwrap()
+                .as_str(),
+            Some("off")
+        );
+        assert_eq!(
+            this.get("inbound_from_public_at").unwrap().as_str(),
+            Some("1970-01-01T00:02:10+00:00")
+        );
     }
 }

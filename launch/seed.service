@@ -1,0 +1,65 @@
+# The published seed, as a service that stays up.
+#
+# A seed that is down costs every new node its first peer: the node dials it,
+# waits out the dial timeout, and says `seeds: us-west at ... did not hand over
+# its key` once a minute. The site's /node/ mirror (.github/workflows/
+# node-sync.yml) goes red on the same minute. A seed is therefore a unit with
+# Restart=always, not a binary in a tmux window.
+#
+# On the seed host, with a release binary (it has the `ui` feature `run` needs):
+#
+#   sudo useradd --system --home /var/lib/cairn --create-home cairn
+#   sudo install -m 755 cairn /usr/local/bin/cairn
+#   sudo install -m 644 seed.service /etc/systemd/system/cairn-seed.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cairn-seed
+#
+# then open 9000/tcp (p2p) and 8080/tcp (HTTP) inbound in the security group --
+# a group that does not admit them *drops* rather than refuses, so a closed
+# port looks like silence from everywhere else -- and check from somewhere that
+# is not the host:
+#
+#   nc -vz <public ip> 9000
+#   curl -fsS http://<public ip>:8080/health
+#
+# Publishing the key so every build finds this seed is `cairn seeds publish
+# --identity /var/lib/cairn/node.identity.json --out launch/seeds/` and a pull
+# request: launch/seeds/README.md.
+
+[Unit]
+Description=cairn seed node
+Documentation=https://aburan28.github.io/cairn/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cairn
+WorkingDirectory=/var/lib/cairn
+# The identity, root key, checkpoint and queue live here; the log is
+# cairn.jsonl in the working directory.
+Environment=CAIRN_DATA=/var/lib/cairn
+Environment=CAIRN_LOG_LEVEL=info
+# Off while this is the only published seed: a seed dialling itself is one
+# timeout a minute for nothing. Remove when a second seed is published.
+Environment=CAIRN_SEEDS=off
+# A cloud segment drops multicast, and the daemon would say so every start.
+Environment=CAIRN_BEACON_PORT=off
+# A cloud instance has no NAT-PMP or UPnP gateway; its public address is the
+# security group's business. Off, so the daemon does not ask every five minutes.
+Environment=CAIRN_PORTMAP=off
+# What this node is for, on GET /network: it holds and serves the log.
+Environment=CAIRN_ROLES=relay
+# --no-mcp: stdin belongs to systemd, and closing MCP's stdin stops the node.
+# The wildcard binds are the point of a seed; the HTTP half is public by design
+# and node-sync.yml reads it at port 8080.
+ExecStart=/usr/local/bin/cairn run --no-mcp \
+    --listen 0.0.0.0:9000 \
+    --serve 0.0.0.0:8080
+Restart=always
+RestartSec=5
+# The log is append-only and the node checkpoints after every round that
+# changed anything, so a hard stop loses nothing it had settled.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

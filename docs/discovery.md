@@ -251,7 +251,12 @@ is a DHT or similar to announce *into*.
 
 **NAT traversal** — hole punching, circuit relay, AutoNAT. Not discovery, and
 routinely confused with it: knowing an address does not mean you can reach it.
-Unaddressed here, and the reason a node behind a home router cannot yet seed.
+Addressed in the one form that needs no third party: a node asks its own router
+to forward its port (`src/p2p/reach.rs` — NAT-PMP, then UPnP IGD) and publishes
+what the router said as a claim, verified only when a peer from outside
+completes a handshake inbound. A router with both off, or a carrier-grade NAT,
+still needs a port forwarded by hand or a seed on a public host; hole punching
+and relays remain unbuilt. [two-nodes.md](two-nodes.md) is the walk-through.
 
 ## What is built
 
@@ -355,8 +360,11 @@ to whoever you happen to be talking to.
   `make seeds` still writes. So is every seed for a node whose dials go through
   `--proxy`, because a key request is a direct dial; that node says so at
   start.
-- **No NAT traversal.** A node behind a home router can fetch and cannot seed,
-  which quietly makes the network more centralised than the protocol suggests.
+- **NAT traversal is port mapping only.** A node behind a home router asks the
+  router to forward its port (`CAIRN_PORTMAP`) and can seed when the router
+  agrees. Behind a router that refuses, or a carrier-grade NAT, it can fetch
+  and cannot seed, which quietly makes the network more centralised than the
+  protocol suggests. No hole punching, no relay.
 - **`seq` is wall-clock seconds.** It only has to increase, and a clock that goes
   backwards costs that node announcements until it catches up. Cheap failure,
   deliberately not engineered around.

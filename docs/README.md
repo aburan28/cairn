@@ -18,6 +18,7 @@ below is either reference (what a command, a setting, or a word does) or design
 | point an agent at open objectives and get paid | [agents.md](agents.md) |
 | write an objective other people can solve | [verification.md](verification.md) |
 | run a node strangers submit to | [serving.md](serving.md), then [storage.md](storage.md) |
+| connect two nodes in two places, each behind its own router | [two-nodes.md](two-nodes.md) |
 | know what a command does | [cli.md](cli.md) |
 | know what a setting does | [configuration.md](configuration.md) |
 | know what a word means | [glossary.md](glossary.md) |
@@ -92,6 +93,8 @@ The six pages a user needs and nothing else in this repository provides.
 - [p2p.md](p2p.md) — removing the operator: what needs agreement, and the
   McEliece handshake.
 - [discovery.md](discovery.md) — peer discovery without a name anybody owns.
+- [two-nodes.md](two-nodes.md) — two machines behind two routers: port
+  mapping, the seed, and reading whether it worked.
 - [shards.md](shards.md) — erasure coding, and why per-chunk commitments are
   what make it safe rather than merely cheap.
 - [censorship.md](censorship.md) — confidentiality, unlinkability, sealed

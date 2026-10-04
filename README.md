@@ -178,6 +178,11 @@ cairn run \
   --bootstrap .local/seed.json
 ```
 
+Two machines in two homes, each behind its own router, is
+[docs/two-nodes.md](docs/two-nodes.md): the daemon asks the router to forward
+the p2p port (`CAIRN_PORTMAP`), and `GET /sessions` says whether anyone outside
+has actually reached it.
+
 Working from a source checkout, build with the `ui` feature first (see
 *Install* above — `make ui-build`, then `./target/release/cairn run`); the
 default `cargo build` does not embed the reader and `cairn run` says so.
