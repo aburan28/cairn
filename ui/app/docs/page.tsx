@@ -76,6 +76,12 @@ const GROUPS: Group[] = [
         blurb: "the hoarding trap, the ratchet, CRDT gossip",
       },
       {
+        path: "docs/design/network-coordination.md",
+        name: "design/network-coordination.md",
+        blurb:
+          "live sessions, the compute roster, advisory leases and declared roles: what is a hint, what is checkable",
+      },
+      {
         path: "docs/node-incentives.md",
         name: "node-incentives.md",
         blurb: "why anyone runs a node, and the game-theoretic evaluation",
@@ -148,6 +154,11 @@ const GROUPS: Group[] = [
         name: "gui/macos/",
         blurb:
           "macOS control surface for the crypto autoresearcher — the thing that writes",
+      },
+      {
+        path: "docs/review/gui-assessment.md",
+        name: "review/gui-assessment.md",
+        blurb: "the four readers reviewed as one system: what each shows, what none could, what landed",
       },
     ],
   },

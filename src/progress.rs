@@ -517,6 +517,119 @@ fn iso(unix: u64) -> String {
     format_iso8601_utc(i64::try_from(unix).unwrap_or(i64::MAX))
 }
 
+// -- the fleet, across objectives -------------------------------------------------
+
+/// One live or stale worker as the network page lists it, whichever objective
+/// it is on. The per-objective view is [`Board::report`]; this is the roster
+/// read sideways, for "what hardware is on this network right now".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetWorker {
+    pub objective_id: String,
+    pub worker: String,
+    pub status: Liveness,
+    pub age_seconds: u64,
+    pub device: Option<String>,
+    pub lanes: Option<u64>,
+    pub client: Option<String>,
+    /// The node's measured rate when it has one, else what the worker said.
+    pub steps_per_second: Option<u64>,
+    pub epoch: Option<u64>,
+    pub units: Option<(u64, u64)>,
+}
+
+/// A coarse class for a worker's self-described `device`, so a page can sum
+/// a fleet by kind without every reader inventing its own regex.
+///
+/// Workers name their hardware freely (`--device` on the reference worker),
+/// so this is a heuristic over tokens and it says so in its own name: a
+/// worker that calls its box `rig-3` is `other`, and that is the right
+/// answer. Apple silicon is its own class because its GPU is on the die and
+/// a token like `gpu` beside `apple` means the same chip, not a card.
+pub fn device_class(device: &str) -> &'static str {
+    let lower = device.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let has = |needles: &[&str]| tokens.iter().any(|token| needles.contains(token));
+    let starts = |prefixes: &[&str]| {
+        tokens
+            .iter()
+            .any(|token| prefixes.iter().any(|prefix| token.starts_with(prefix)))
+    };
+    let apple_chip = starts(&["m1", "m2", "m3", "m4", "m5"]) && has(&["max", "pro", "ultra"]);
+    if has(&["apple", "metal"]) || apple_chip {
+        return "apple";
+    }
+    if has(&["fpga", "xilinx", "alveo", "stratix", "arria", "versal"]) {
+        return "fpga";
+    }
+    if has(&[
+        "gpu", "nvidia", "geforce", "rtx", "gtx", "tesla", "cuda", "radeon", "instinct", "rocm",
+        "a100", "h100", "h200", "b200", "l40", "l40s", "a10", "a30", "a40", "t4", "v100", "p100",
+        "mi300", "mi300x", "mi250", "mi250x", "arc",
+    ]) {
+        return "gpu";
+    }
+    if has(&[
+        "cpu",
+        "xeon",
+        "epyc",
+        "ryzen",
+        "threadripper",
+        "core",
+        "i3",
+        "i5",
+        "i7",
+        "i9",
+        "graviton",
+        "ampere",
+        "altra",
+        "neoverse",
+        "arm64",
+        "aarch64",
+        "x86",
+        "x86_64",
+        "amd64",
+        "avx2",
+        "avx512",
+        "cores",
+        "vcpu",
+        "vcpus",
+    ]) {
+        return "cpu";
+    }
+    "other"
+}
+
+impl Board {
+    /// Every worker on every objective, with its standing at `now`. Gone
+    /// workers are included with their status so a page can say "and 12 that
+    /// stopped reporting" rather than silently shrinking the fleet.
+    pub fn fleet(&self, now: u64) -> Vec<FleetWorker> {
+        let mut fleet = Vec::new();
+        for (objective_id, roster) in &self.objectives {
+            for seen in roster.values() {
+                let age = now.saturating_sub(seen.received_at);
+                let hb = &seen.heartbeat;
+                fleet.push(FleetWorker {
+                    objective_id: objective_id.clone(),
+                    worker: hb.worker.clone(),
+                    status: Liveness::of_age(age),
+                    age_seconds: age,
+                    device: hb.device.clone(),
+                    lanes: hb.lanes,
+                    client: hb.client.clone(),
+                    steps_per_second: seen.measured_rate(now).or(hb.steps_per_second),
+                    epoch: hb.epoch,
+                    units: hb.units,
+                });
+            }
+        }
+        fleet
+    }
+}
+
 // -- settled -----------------------------------------------------------------
 
 /// Per-worker totals derived from the log.
@@ -856,6 +969,49 @@ pub fn settled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_class_is_a_heuristic_over_tokens_and_says_other_when_unsure() {
+        assert_eq!(device_class("NVIDIA GeForce RTX 4090"), "gpu");
+        assert_eq!(device_class("8x H100 SXM"), "gpu");
+        assert_eq!(device_class("AMD Instinct MI300X"), "gpu");
+        assert_eq!(device_class("Apple M3 Max"), "apple");
+        assert_eq!(device_class("apple-m2-gpu"), "apple");
+        assert_eq!(device_class("Xilinx Alveo U250"), "fpga");
+        assert_eq!(device_class("AMD EPYC 9654 96-Core"), "cpu");
+        assert_eq!(device_class("Intel Core i9-13900K"), "cpu");
+        assert_eq!(device_class("64 vCPU"), "cpu");
+        assert_eq!(device_class("rig-3"), "other");
+        assert_eq!(device_class("m2"), "other", "a bare token is not a chip");
+    }
+
+    #[test]
+    fn the_fleet_reads_the_roster_sideways_across_objectives() {
+        let mut board = Board::default();
+        let mut a = hb("gpu-7", 1000);
+        a.device = Some("NVIDIA RTX 4090".into());
+        a.lanes = Some(128);
+        board.record(a, 1_000).unwrap();
+        let mut b = hb("cpu-1", 10);
+        b.objective_id = "sha256:p".into();
+        b.device = Some("EPYC".into());
+        board.record(b, 1_000).unwrap();
+        let fleet = board.fleet(1_000 + LIVE_SECONDS + 1);
+        assert_eq!(fleet.len(), 2);
+        let gpu = fleet.iter().find(|w| w.worker == "gpu-7").unwrap();
+        assert_eq!(gpu.objective_id, "sha256:o");
+        assert_eq!(gpu.status, Liveness::Stale);
+        assert_eq!(gpu.lanes, Some(128));
+        assert_eq!(
+            gpu.steps_per_second,
+            Some(1000),
+            "one sample measures nothing, so the reported rate stands in"
+        );
+        assert_eq!(gpu.device.as_deref().map(device_class), Some("gpu"));
+        let cpu = fleet.iter().find(|w| w.worker == "cpu-1").unwrap();
+        assert_eq!(cpu.objective_id, "sha256:p");
+        assert_eq!(cpu.device.as_deref().map(device_class), Some("cpu"));
+    }
 
     fn hb(worker: &str, steps: u64) -> Heartbeat {
         Heartbeat {

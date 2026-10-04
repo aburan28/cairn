@@ -41,10 +41,16 @@ record instead.
 | `GET /verifiers` | what this node can verify right now: every kind, the toolchain behind it (`lean`, `python3`) with where each resolved on this process's `PATH` and its version, the jail mechanism and whether `CAIRN_REQUIRE_SANDBOX` is set, and the kinds split into `servable` and `unservable` with a reason for each of the latter. A report about the node, never about an artifact: an unservable kind still answers `unavailable`, not `reject`. Cairn.app's Settings reads it |
 | `GET /` (and `/index`) | what this node is and every route it answers, including the ones it has disabled |
 | `GET /peers` | the `peer` records in this log — **known** peers, not open connections |
+| `GET /sessions` | the peer sessions this process has run, from its own memory: `reached` within two minutes, `recent` within thirty, `lost` after — see [Sessions](#sessions-whom-this-process-has-reached). `available: false` on a plain `cairn serve`, which reconciles with nobody |
+| `GET /network` | one answer for the reader's Network page: this node's declared roles (`CAIRN_ROLES`) and hardware, the sessions summary, every worker heartbeating to it on any objective summed by device and class, and the roles the log evidences identities playing — see [Roles](#roles-what-a-node-says-it-is-for) |
+| `GET /leases` | objectives with an advisory lease held in this node's memory |
+| `GET /leases/{id}` | one objective's task leases: who holds each task, who contended for it, what was released and how — see [Leases](#leases-saying-what-you-are-about-to-work) |
 | `GET /ui/` | the embedded reader, when the binary was built with the `ui` feature |
 | `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type` |
 | `POST /objective/prepare` | canonicalize a draft objective and return the exact bytes its funder must sign — see below |
 | `POST /progress` | a worker's heartbeat: kept in this node's memory for `GET /progress/{id}`, never written to the log, accepted on a read-only node too |
+| `POST /lease` | take or renew an advisory lease on a task of an objective this log holds: held in memory like a heartbeat, never written, never a lock |
+| `POST /lease/release` | end a lease you hold, as `completed`, `failed` or `abandoned` |
 | `POST /deposit/grant` | issue a short-lived upload grant against a node-local deposit; response never includes cloud keys |
 | `PUT /deposit/upload/{grant_id}` | proxy redemption of a grant (file backend, or curl-to-S3 fallback) |
 
@@ -56,8 +62,10 @@ node was started read-only or built without the reader — so a 404 or a refusal
 is explained before you hit it.
 
 `GET /peers` answers from the log, so a peer listed there may be long gone: the
-log is append-only and nothing retracts a record. Live session state lives in the
-p2p service, which serves no HTTP at all.
+log is append-only and nothing retracts a record. Whom this process has actually
+reached is `GET /sessions`, from the daemon's own memory, and the two are
+different facts: an announcement is an address somebody vouched for, a session
+is a handshake that completed.
 
 Both objective views carry the same three lifecycle fields. `settled` means *no
 longer payable* -- for a certificate, that a settlement exists; for a ratchet,
@@ -120,6 +128,96 @@ client -- a shell loop on a GPU box, `examples/certicom-ecdlp/tools/orbit_worker
 function of the same public inputs, anchored at the log head as of the
 epoch's start, so anyone can recompute any node's slice and the answer does
 not move within an epoch.
+
+## Sessions: whom this process has reached
+
+For as long as this server has existed the sentence above about `/peers` ended
+*"live session state lives in the p2p service, which serves no HTTP"*, and
+every reader rendered the address book under a disclaimer. The daemon now
+hands its HTTP half a roster (`src/p2p/sessions.rs`) and `GET /sessions`
+answers from it.
+
+A cairn session is one exchange -- dial or accept, handshake, reconcile,
+close -- not a held connection, so "connected" is a window: a peer is
+`reached` when a session with it succeeded within two minutes, `recent`
+within thirty, `lost` after that, and `unreached` if this node has only ever
+failed to dial it. Each row carries the address of the last session, which
+way it ran, how many sessions succeeded in each direction, the last error,
+and this node's ledger length afterwards. Beside the rows: `address_book`
+(endpoints this node could dial now, and signed hints it has learned),
+`this_node` (its transport id, listen address and uptime), and
+`anonymous_inbound_failures` -- handshakes that failed before authenticating
+anyone, counted and never attributed, because attributing them would let a
+stranger write any id onto this roster with one garbage frame.
+
+Like a heartbeat it is memory, not a record: forgotten on restart, never
+gossiped, read by nothing that pays. A reached peer proved it holds the key
+its id names and nothing else. A plain `cairn serve` runs no p2p service and
+answers `available: false` rather than publishing an empty mesh.
+
+## Leases: saying what you are about to work
+
+`work_assignment` divides a search with no messages at all, and that stays
+how work is assigned. What it cannot say is what is happening *now*: a slice
+assigned to a worker that went home is a hole nobody sees until the epoch
+turns, a straggler cannot tell which unworked unit is safe to pick up, and
+two workers that chose the same unit find out when the second artifact
+verifies fine and mints nothing. A lease lets a worker announce a task
+before starting it and read back whether somebody else announced it first.
+
+```sh
+curl -s -H 'content-type: application/json' http://node:8080/lease -d '{
+  "objective_id": "sha256:…", "task": "unit:4017", "holder": "gpu-7",
+  "ttl_seconds": 600, "units": {"first": 4017, "end": 4018}, "epoch": 12}'
+# -> 202 {"held": true, "held_by": "gpu-7", "expires_at": "…", "contended_with": []}
+#    or   {"held": false, "held_by": "gpu-3", …}: somebody is on it; work something else
+curl -s -H 'content-type: application/json' http://node:8080/lease/release -d '{
+  "objective_id": "sha256:…", "task": "unit:4017", "holder": "gpu-7", "outcome": "completed"}'
+```
+
+The earliest live claim on a task holds it, by arrival at this node. Posting
+again before `expires_at` renews; a holder that lapses and comes back is
+behind whoever claimed meanwhile. A release ends the lease once, by its own
+holder only: `completed` closes the task on this roster (a later claim is
+answered `409`), `failed` and `abandoned` leave it open. TTLs run from one
+second to a day, default one epoch. The roster is capped per objective, per
+task and overall and answers `429` past a cap rather than evicting; an
+objective this log does not hold is refused with `404`; everything released
+or expired is forgotten after a day. Fields the node does not know are named
+back in `ignored`, as a heartbeat's are.
+
+**A lease is not a lock, a record or evidence.** The rules engine never reads
+the roster, a claim on a leased unit pays exactly as it would otherwise, and
+`held: false` is advice. Anyone can lease anything under any name; the worst a
+false lease does is send a worker who trusts the roster to a different unit,
+on the node the liar posted to. The lab (`docs/lab.md`) has the same idea for
+agents sharing a space, as signed CRDT ops that merge across machines; this is
+the worker-facing version for a fleet reporting to one node, and it uses the
+lab's words -- `task`, `holder`, `ttl`, `held`, `contended`, the three
+outcomes -- so a reader who knows one knows the other.
+`docs/design/network-coordination.md` has the design, and the reader's
+`/ui/coordination?id=…` draws the roster over the epoch's work assignment.
+
+## Roles: what a node says it is for
+
+`CAIRN_ROLES=coordinator,verifier` declares what the operator intends a node
+for -- `coordinator` (posts and funds objectives, accepts submissions, hands
+out assignments, keeps the lease roster), `executor` (runs the workers that
+report here), `verifier` (runs pinned verifiers and stands behind verdicts
+under bond), `relay` (holds and serves the log, reconciles, nothing else).
+An unknown name refuses to start. `GET /network` publishes the declaration
+under `node.roles`, beside `node.warnings` where the configuration
+contradicts it (a coordinator with no `--queue`, a verifier that can serve no
+kind, a relay in a process with no p2p service), and beside `roles` --
+recomputed from the log: who funded objectives, whose claims were accepted,
+who attested and how often they were slashed.
+
+A declared role is a hint about intent, exactly as a worker's capability
+advertisement is (`src/compute.rs`). It is never a permission: the only
+authority on this network is the pinned verifier's verdict, and a node that
+says `coordinator` gets no say over what settles. What a declaration buys is
+legibility -- a reader sees what a node is for and can check it against what
+the node can do and what the log shows it doing.
 
 ## What a contributor should actually do
 

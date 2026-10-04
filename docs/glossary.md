@@ -203,6 +203,24 @@ log there: the operator's own node admits it, re-checking every rule.
 **Sequencer.** The single writer. A log has one, which is why a publisher alone
 can only ever queue.
 
+**Session.** One exchange between two nodes -- handshake, reconcile, close --
+not a held connection. `GET /sessions` lists the ones this process ran, as
+*reached*, *recent* or *lost* by how long ago the last one succeeded. Memory,
+never a record; a reached peer proved it holds the key its id names and
+nothing else (`src/p2p/sessions.rs`).
+
+**Lease.** A worker's announcement that it is on a task for the next so many
+seconds, held in a node's memory and shown to other workers so they pick
+something else. Never a lock, never a record, never evidence: the partition
+function still assigns every unit and nothing that pays reads a lease. The lab
+has the same idea as signed CRDT ops (`src/lease.rs`; `src/lab/`).
+
+**Role.** What an operator declares a node for -- `coordinator`, `executor`,
+`verifier`, `relay` -- with `CAIRN_ROLES`, shown on `GET /network` beside what
+the node can actually do and what the log shows identities doing. A hint about
+intent, never a permission: the only authority here is a pinned verifier's
+verdict (`src/network.rs`).
+
 ## Project vocabulary
 
 **Stage 0.** Where the project is: one operator, no token, no consensus. The

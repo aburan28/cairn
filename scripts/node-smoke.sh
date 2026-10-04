@@ -164,7 +164,8 @@ await_log "$A/node.log" "publishing over HTTP from this process" \
 echo "  one PID, p2p on $P2P_PORT and HTTP on $HTTP"
 
 rule "every read route answers, from the same process holding the write lock"
-for path in /health /objectives /chain /chain.html /checkpoint "/objective/$OID"; do
+for path in /health /objectives /chain /chain.html /checkpoint "/objective/$OID" \
+            /peers /sessions /network /leases "/leases/$OID" /verifiers; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP$path")
   [ "$code" = "200" ] || fail "GET $path -> $code"
   echo "  GET $path -> 200"
@@ -213,6 +214,8 @@ case "$UI_CODE" in
 /ui/objectives/|still payable
 /ui/chain/|where they forked
 /ui/log/|Every record this node holds
+/ui/network/|Whom this node has reached
+/ui/coordination/|How a divided search is coordinated
 PAGES
     ;;
   404)
