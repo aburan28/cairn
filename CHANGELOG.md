@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.16.0](https://github.com/aburan28/cairn/compare/v1.15.3...v1.16.0) (2026-10-04)
+
+
+### Features
+
+* **agent:** the host agent -- hardware registration and gVisor/Kata executor jobs under systemd ([d22f080](https://github.com/aburan28/cairn/commit/d22f0807f606ab0d270141e1a952be8be1df5fc1))
+* **agent:** the host agent -- hardware registration and gVisor/Kata executor jobs under systemd ([879185e](https://github.com/aburan28/cairn/commit/879185e8179b9e24026a2555474c803b39f5dae6))
+* **attest:** the validator loop, knowledge over HTTP, and the first replay example ([#228](https://github.com/aburan28/cairn/issues/228)) ([9bb6daf](https://github.com/aburan28/cairn/commit/9bb6daf08dcc324dc5e056c6bf839fadadbe4fba))
+* **fleet:** a leader that signs and is paid, workers on your own network, a private peer allowlist, Linux units, and the Mac node as an opt-in launchd agent ([9d82f66](https://github.com/aburan28/cairn/commit/9d82f66877109f76bfe6f0ec45e1890448ea987b))
+* **fleet:** a leader that signs and is paid, workers on your own network, a private peer allowlist, Linux units, and the Mac node as an opt-in launchd agent ([809e659](https://github.com/aburan28/cairn/commit/809e659d3d8c917d4bc1d76c1ecb081514ecfa57))
+* **ios:** a Task progress screen, from the node's /progress route ([#222](https://github.com/aburan28/cairn/issues/222)) ([f6332cd](https://github.com/aburan28/cairn/commit/f6332cd4fcbdb03f780e5982746917a49a53eec1))
+* **macos:** drafted challenges are Lean theorems, with real progress and the toolchain found ([08930a9](https://github.com/aburan28/cairn/commit/08930a9b912e67b8ff8066c4e998e20d7d52866f))
+* **macos:** Lean-only drafting with streamed progress, the toolchain found and handed to the node, and Connect an Agent ([bf48468](https://github.com/aburan28/cairn/commit/bf48468f30d964c8b2d076b4aae8298ff12b55ed))
+* **macos:** Lean-only drafting with streamed progress, the toolchain found and handed to the node, and Connect an Agent ([#224](https://github.com/aburan28/cairn/issues/224)) ([bf48468](https://github.com/aburan28/cairn/commit/bf48468f30d964c8b2d076b4aae8298ff12b55ed))
+* **macos:** Node → Connect an Agent…, the MCP stanza with this Mac's paths in it ([08fc9a9](https://github.com/aburan28/cairn/commit/08fc9a97caa706b428ced1be39b1494a8fc7877d))
+* **network:** live sessions, the compute roster, advisory leases and declared roles, with Network and Coordination pages ([d8c935e](https://github.com/aburan28/cairn/commit/d8c935eed30b86a49e7e628bf384cebc7e57f31f))
+* **network:** live sessions, the compute roster, advisory leases and declared roles, with Network and Coordination pages ([d6da24f](https://github.com/aburan28/cairn/commit/d6da24fb9143f2af41d996c9d40ce591a7d9ccda))
+* **p2p:** port mapping wired into the daemon -- NAT-PMP, then UPnP IGD -- reported as a claim beside the evidence, with a two-node runbook and a no-GitHub-links guard ([e00cc03](https://github.com/aburan28/cairn/commit/e00cc0309042dbe58434379e25fa1113e107baa7))
+* **p2p:** port mapping wired into the daemon (NAT-PMP, then UPnP), reported as a claim beside the evidence; a two-node runbook; no reader links to github.com ([6d7d128](https://github.com/aburan28/cairn/commit/6d7d12861ef3907ffd5cbdbfaaad7c4ad225b6ac))
+* **verifiers:** GET /verifiers, a Lean control run, and CAIRN_LEAN / CAIRN_LEAN_ROOT ([a166899](https://github.com/aburan28/cairn/commit/a1668994a9bb95fc30a327a07785298c288a6ddd))
+
+
+### Fixes
+
+* **release:** create releases as drafts; publish as prereleases before building ([#221](https://github.com/aburan28/cairn/issues/221)) ([8d20043](https://github.com/aburan28/cairn/commit/8d20043801a99e9dcddc316d2dc6fab3f0264092))
+
 ## [1.15.3](https://github.com/aburan28/cairn/compare/v1.15.2...v1.15.3) (2026-10-03)
 
 
