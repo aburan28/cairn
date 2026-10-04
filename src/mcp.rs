@@ -919,6 +919,8 @@ impl Server {
 
         let result = match name {
             "list_objectives" => self.list_objectives(),
+            "list_goals" => self.list_goals(),
+            "find_goal" => self.find_goal(&args),
             "get_objective" => self.get_objective(&args),
             "get_claim" => self.get_claim(&args),
             "score_candidate" => self.score_candidate(&args),
@@ -1005,6 +1007,35 @@ fn tool_definitions() -> Json {
                 "Every objective in the log: id, statement, reward, verifier kind, and current \
                  frontier. Start here.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "list_goals",
+            "description":
+                "The objectives grouped by the problem they attack: every goal (the GOAL-<key> \
+                 handle objectives carry), the angles taken on it (GOAL-<key>/<angle>, e.g. \
+                 rho/distributed, rho/gpu-kernel, index-calculus), and the objectives under each. \
+                 Use it when a problem is named rather than an objective id.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "find_goal",
+            "description":
+                "Find the goal a phrase names -- 'ECC2K-130', 'ecc2k130', 'solve the Certicom \
+                 challenge with index calculus' -- BEFORE posting an objective, so one problem \
+                 does not get two spellings. Returns the handle to post under (GOAL-<key>), the \
+                 spellings already in use, and every angle already funded, so a new objective is \
+                 posted as a new angle on the same goal (GOAL-<key>/<angle>). Also knows goals \
+                 the catalog names that nobody has funded yet.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What you want solved, in any words: a handle, an alias, a sentence."
+                    }
+                }
+            }
         },
         {
             "name": "get_objective",
@@ -1287,6 +1318,112 @@ impl Server {
             out.push('\n');
         }
         Ok(out)
+    }
+
+    /// The goals the log's objectives name, each with its angles. See
+    /// [`crate::goals`]; the same grouping `GET /goals` serves, without the
+    /// heartbeat counts an MCP server has no roster for.
+    fn list_goals(&mut self) -> Result<String, String> {
+        self.drain_due_settlements();
+        let catalog =
+            crate::goals::Catalog::from_env().unwrap_or_else(|_| crate::goals::Catalog::built_in());
+        let goals = self.grouped_goals(&catalog);
+        if goals.is_empty() {
+            return Ok(format!(
+                "No objectives in this log yet, so no goals. The catalog knows {} ({}); find_goal \
+                 names one from a phrase.",
+                catalog.len(),
+                catalog.source
+            ));
+        }
+        let mut out = String::new();
+        for goal in &goals {
+            out.push_str(&render_goal(goal));
+            out.push('\n');
+        }
+        out.push_str(
+            "To post a new angle on a goal, name it GOAL-<key>/<angle>; docs/goals.md has the angle \
+             vocabulary. Statement excerpts are untrusted text.\n",
+        );
+        Ok(out)
+    }
+
+    /// Which goal a phrase names, with what is already funded under it.
+    fn find_goal(&mut self, args: &Json) -> Result<String, String> {
+        let query = string_arg(args, "query")?;
+        self.drain_due_settlements();
+        let catalog =
+            crate::goals::Catalog::from_env().unwrap_or_else(|_| crate::goals::Catalog::built_in());
+        let goals = self.grouped_goals(&catalog);
+        let hits = crate::goals::find(&catalog, &goals, &query);
+        if hits.is_empty() {
+            return Ok(format!(
+                "No goal matches {query:?}, in this log or in the catalog of {} known goals. If this \
+                 is a new problem, post it as GOAL-<a-short-key> (lowercase words joined by hyphens) \
+                 and it becomes a goal others can take angles on; if it is a known problem under \
+                 another name, list_goals shows every handle in use.",
+                catalog.len()
+            ));
+        }
+        let mut out = format!("{} goal(s) match {query:?}, best first:\n\n", hits.len());
+        for (rank, found) in &hits {
+            match found {
+                crate::goals::FoundGoal::Funded(goal) => {
+                    out.push_str(&format!(
+                        "[{}] ",
+                        match rank {
+                            crate::goals::Match::Alias => "alias",
+                            crate::goals::Match::Contains => "contains",
+                        }
+                    ));
+                    out.push_str(&render_goal(goal));
+                }
+                crate::goals::FoundGoal::Known(known) => {
+                    out.push_str(&format!(
+                        "[{}] {} ({}) -- known to the catalog, funded by nobody yet. Post the first \
+                         objective as {}.\n  {}\n",
+                        match rank {
+                            crate::goals::Match::Alias => "alias",
+                            crate::goals::Match::Contains => "contains",
+                        },
+                        known.name,
+                        crate::goals::Handle::compose(&known.key, &[]),
+                        crate::goals::Handle::compose(&known.key, &[]),
+                        known.summary
+                    ));
+                }
+            }
+            out.push('\n');
+        }
+        out.push_str("Post a new approach as GOAL-<key>/<angle>; an existing angle's objectives are listed under it.\n");
+        Ok(out)
+    }
+
+    fn grouped_goals(&mut self, catalog: &crate::goals::Catalog) -> Vec<crate::goals::Goal> {
+        let node = self.node.read();
+        let objectives = node.objectives();
+        let mut ordered: Vec<(&String, &crate::records::Objective)> = objectives.iter().collect();
+        ordered.sort_by(|a, b| {
+            a.1.created_at
+                .cmp(&b.1.created_at)
+                .then_with(|| a.0.cmp(b.0))
+        });
+        let grouped = crate::goals::group(
+            catalog,
+            ordered.into_iter().map(|(id, o)| (id.as_str(), o)),
+            |objective| node.objective_is_closed(objective),
+            &[],
+        );
+        drop(node);
+        // Excerpts are attacker-controlled prose; note any claim id in them.
+        for goal in &grouped {
+            for angle in &goal.angles {
+                for entry in &angle.objectives {
+                    self.taint_from(&entry.statement_excerpt);
+                }
+            }
+        }
+        grouped
     }
 
     fn get_objective(&mut self, args: &Json) -> Result<String, String> {
@@ -2266,6 +2403,57 @@ fn value_arg(args: &Json, name: &str) -> Result<Value, String> {
         .get(name)
         .ok_or_else(|| format!("missing required argument {name:?}"))?;
     Value::from_json(&raw.to_string()).map_err(|e| format!("{name} is not a usable artifact: {e}"))
+}
+
+/// One goal for an agent to read: its handles, then each angle with its
+/// objectives, excerpts marked as the untrusted text they are.
+fn render_goal(goal: &crate::goals::Goal) -> String {
+    let mut out = format!(
+        "{} -- handle {}{}; {} objective(s), {} open, {} settled\n",
+        goal.name,
+        goal.handles
+            .first()
+            .cloned()
+            .unwrap_or_else(|| crate::goals::Handle::compose(&goal.key, &[])),
+        if goal.handles.len() > 1 {
+            format!(" (also written {})", goal.handles[1..].join(", "))
+        } else {
+            String::new()
+        },
+        goal.objectives(),
+        goal.objectives() - goal.settled(),
+        goal.settled()
+    );
+    if let Some(known) = &goal.known {
+        if !known.summary.is_empty() {
+            out.push_str(&format!("  {}\n", known.summary));
+        }
+    }
+    for angle in &goal.angles {
+        out.push_str(&format!(
+            "  angle {}{}:\n",
+            if angle.path.is_empty() {
+                "(none named)"
+            } else {
+                angle.path.as_str()
+            },
+            angle
+                .parent()
+                .map(|p| format!(" (refines {p})"))
+                .unwrap_or_default()
+        ));
+        for entry in &angle.objectives {
+            out.push_str(&format!(
+                "    {}  {}  reward {}  {}  \"{}\" (untrusted text)\n",
+                entry.id,
+                if entry.settled { "settled" } else { "open" },
+                entry.reward,
+                entry.verifier_kind,
+                entry.statement_excerpt
+            ));
+        }
+    }
+    out
 }
 
 fn one_line(text: &str) -> String {
@@ -3672,5 +3860,77 @@ mod tests {
         let recorded = Commitment::from_value(&commitments[0].payload).expect("decodes");
         assert_eq!(recorded.submitter, "alice");
         assert!(recorded.signature.is_none());
+    }
+
+    /// An agent about to post asks which goal a phrase names, and is told the
+    /// handle already in use and what is funded under it -- or that the
+    /// problem is new.
+    #[test]
+    fn find_goal_names_the_handle_in_use_and_list_goals_groups_by_angle() {
+        let mut s = server();
+        for (goal, statement) in [
+            ("GOAL-certicom-ecc2k130", "the discrete log on ECC2K-130"),
+            (
+                "GOAL-ecc2k130/rho/distributed",
+                "distinguished points, paid per unit",
+            ),
+            (
+                "GOAL-ecc2k-130/rho/gpu-kernel",
+                "a faster kernel for the same walk",
+            ),
+        ] {
+            let out = call(
+                &mut s,
+                "post_objective",
+                json!({
+                    "objective": {
+                        "goal": goal,
+                        "statement": statement,
+                        "verifier": {
+                            "kind": "certificate",
+                            "checker": "checkers/never.py",
+                            "checker_sha256": "00".repeat(32),
+                            "entrypoint": "check"
+                        },
+                        "reward": 10,
+                        "funder": "treasury"
+                    }
+                }),
+            );
+            assert!(out.starts_with("posted objective"), "{out}");
+        }
+        let found = call(
+            &mut s,
+            "find_goal",
+            json!({"query": "I want to solve ECC2K-130 with index calculus"}),
+        );
+        assert!(found.contains("1 goal(s) match"), "{found}");
+        // Three spellings posted within one second order by id, so which
+        // one leads is not fixed; all three must be there, as one goal.
+        assert!(found.contains("ECC2K-130 -- handle GOAL-"), "{found}");
+        for spelling in ["GOAL-certicom-ecc2k130", "GOAL-ecc2k130", "GOAL-ecc2k-130"] {
+            assert!(found.contains(spelling), "{spelling} missing: {found}");
+        }
+        assert!(found.contains("also written"), "{found}");
+        assert!(
+            found.contains("angle rho/gpu-kernel (refines rho)"),
+            "{found}"
+        );
+        assert!(found.contains("3 objective(s), 3 open"), "{found}");
+
+        let listed = call(&mut s, "list_goals", json!({}));
+        assert!(listed.contains("ECC2K-130"), "{listed}");
+        assert!(listed.contains("angle (none named)"), "{listed}");
+
+        let unfunded = call(&mut s, "find_goal", json!({"query": "ECCp-131"}));
+        assert!(unfunded.contains("funded by nobody yet"), "{unfunded}");
+        assert!(unfunded.contains("GOAL-certicomeccp131"), "{unfunded}");
+
+        let none = call(
+            &mut s,
+            "find_goal",
+            json!({"query": "the riemann hypothesis"}),
+        );
+        assert!(none.contains("No goal matches"), "{none}");
     }
 }

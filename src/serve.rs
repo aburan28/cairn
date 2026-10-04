@@ -55,6 +55,7 @@ use crate::canonical::{digest_bytes, Value};
 use crate::crypto::identity::Identity;
 use crate::deposit::{self, DepositDir, DepositError, MAX_PROXY_BYTES};
 use crate::fleet::{self, Fleet};
+use crate::goals;
 use crate::hosts;
 use crate::lease::{self, Leases};
 use crate::ledger::{Codec, Ledger};
@@ -426,6 +427,10 @@ pub struct Serving {
     /// the policy's name and how many peers it allows. `None` on a plain
     /// publisher, which peers with nobody.
     peers_policy: Option<(String, Option<usize>)>,
+    /// The goal catalog (`launch/goals.json`, or `CAIRN_GOALS`), read once.
+    /// `Err` is a named file that would not read, refused by
+    /// [`Serving::check_startup`] before the first request.
+    goals: Result<goals::Catalog, String>,
 }
 
 /// A fleet and the identity that signs for it.
@@ -463,6 +468,7 @@ impl Serving {
             hardware: Hardware::probe(),
             fleet: None,
             peers_policy: None,
+            goals: goals::Catalog::from_env(),
         }
     }
 
@@ -674,6 +680,11 @@ impl Serving {
         if let Err(error) = &self.roles {
             return Err(io::Error::other(error.to_string()));
         }
+        // Same rule for the goal catalog: a named file that does not read is a
+        // typo, not a node that quietly knows no goals.
+        if let Err(error) = &self.goals {
+            return Err(io::Error::other(error.clone()));
+        }
         let Some(key) = &self.key else {
             // A sealed log with no key named at all: the common case, and the
             // one worth naming precisely, since the CLI seals by default
@@ -824,6 +835,10 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             progress_of(stream, serving, &path["/progress/".len()..], &request)
         }
         ("GET", "/work_assignment") => work_assignment(stream, serving, &request),
+        ("GET", "/goals") => goals_index(stream, serving, &request),
+        ("GET", path) if path.starts_with("/goals/") => {
+            goal_of(stream, serving, &path["/goals/".len()..])
+        }
         ("GET", "/sessions") => sessions(stream, serving),
         ("GET", "/network") => network(stream, serving),
         ("GET", "/hosts") => hosts_index(stream, serving),
@@ -1002,6 +1017,9 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             Value::array([
                 Value::string("GET /objectives"),
                 Value::string("GET /objective/{id}"),
+                Value::string("GET /goals"),
+                Value::string("GET /goals?q={what you want solved}"),
+                Value::string("GET /goals/{key}"),
                 Value::string("GET /frontier/{id}"),
                 Value::string("GET /progress/{id}"),
                 Value::string("GET /work_assignment?objective_id=&node_id="),
@@ -1133,6 +1151,132 @@ fn peers(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 ),
             ),
         ]),
+    )
+}
+
+/// The objectives grouped by the goal handle each carries, and by the angle
+/// path on it: what the network is trying to beat, from which directions.
+/// See [`crate::goals`]. `?q=` asks instead which goal a phrase names, so a
+/// tool about to post can find the handle already in use.
+fn goals_index(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    let catalog = match &serving.goals {
+        Ok(catalog) => catalog,
+        Err(why) => return json_error(stream, 500, why),
+    };
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let grouped = grouped_goals(&node, catalog, serving);
+    match request.query.get("q") {
+        Some(query) => {
+            let hits = goals::find(catalog, &grouped, query);
+            json(
+                stream,
+                200,
+                &Value::object([
+                    ("query", Value::string(query.clone())),
+                    (
+                        "matches",
+                        Value::Array(
+                            hits.iter()
+                                .map(|(rank, found)| goals::found_value(*rank, found))
+                                .collect(),
+                        ),
+                    ),
+                    ("total", Value::Int(hits.len() as i128)),
+                    (
+                        "note",
+                        Value::string(
+                            "Goals a phrase names, best match first: those with objectives in this                              log, and those the catalog knows with nothing funded yet. To post on                              one, use its `handle`, with an angle: GOAL-<key>/<angle>. A match is a                              suggestion from an alias list, never a rule.",
+                        ),
+                    ),
+                ]),
+            )
+        }
+        None => json(
+            stream,
+            200,
+            &Value::object([
+                (
+                    "goals",
+                    Value::Array(grouped.iter().map(goals::goal_value).collect()),
+                ),
+                ("total", Value::Int(grouped.len() as i128)),
+                (
+                    "catalog",
+                    Value::object([
+                        ("known", Value::Int(catalog.len() as i128)),
+                        ("source", Value::string(catalog.source.clone())),
+                    ]),
+                ),
+                (
+                    "handle",
+                    Value::string("GOAL-<key>[/<angle>[/<angle>...]]: the key names the problem, the angle path the approach"),
+                ),
+                (
+                    "note",
+                    Value::string(
+                        "Derived on request from the `goal` handle every objective carries: the key                          names the problem, the angle path names the approach, and the catalog joins                          the spellings people use (ECC2K-130, ecc2k130) to one key. Nothing here is                          a record or a rule; `live_workers` are heartbeats, held in memory and                          verified by nobody. Statement excerpts were written by whoever posted them.",
+                    ),
+                ),
+            ]),
+        ),
+    }
+}
+
+/// One goal by key or alias, with every angle and objective under it.
+fn goal_of(stream: &mut TcpStream, serving: &Serving, key: &str) -> io::Result<()> {
+    let catalog = match &serving.goals {
+        Ok(catalog) => catalog,
+        Err(why) => return json_error(stream, 500, why),
+    };
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let wanted = catalog.canonical(&goals::normalize(key));
+    let grouped = grouped_goals(&node, catalog, serving);
+    if let Some(goal) = grouped.iter().find(|g| g.key == wanted) {
+        return json(stream, 200, &goals::goal_value(goal));
+    }
+    match catalog.lookup(&wanted) {
+        Some(known) => json(stream, 200, &goals::known_value(known)),
+        None => json_error(
+            stream,
+            404,
+            &format!(
+                "no objective in this log names the goal {key:?}, and the catalog does not know it"
+            ),
+        ),
+    }
+}
+
+/// Objectives in the order they were posted, grouped by goal and angle, with
+/// the live heartbeat count of each.
+fn grouped_goals(node: &Node, catalog: &goals::Catalog, serving: &Serving) -> Vec<goals::Goal> {
+    let now = crate::time::unix_seconds();
+    let fleet = serving
+        .progress
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .fleet(now);
+    let objectives = node.objectives();
+    // Posting order, so a goal's first handle and first angle are the ones
+    // that came first, rather than whichever id sorts lowest.
+    let mut ordered: Vec<(&String, &Objective)> = objectives.iter().collect();
+    ordered.sort_by(|a, b| {
+        a.1.created_at
+            .cmp(&b.1.created_at)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    goals::group(
+        catalog,
+        ordered
+            .into_iter()
+            .map(|(id, objective)| (id.as_str(), objective)),
+        |objective| node.objective_is_closed(objective),
+        &fleet,
     )
 }
 
@@ -4943,5 +5087,74 @@ mod tests {
                 .as_str(),
             Some(me.as_str())
         );
+    }
+
+    /// `GET /goals` groups the log's objectives by goal and angle; `?q=` finds
+    /// a goal from the words a person would type; `/goals/{key}` answers by
+    /// key or alias, and knows a catalog goal nobody funded yet.
+    #[test]
+    fn goals_are_grouped_found_and_fetched_by_alias() {
+        let dir = TempDir::new("goals-route");
+        let (log, objective_id) = orbit_search_log(&dir);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let (status, body) = get_json(addr, "/goals");
+        assert!(status.contains("200"), "{status}");
+        let goals = body.get("goals").unwrap().as_array().unwrap();
+        assert_eq!(goals.len(), 1, "one objective, one goal: {body:?}");
+        let goal = &goals[0];
+        // examples/certicom-ecdlp/objective-ecc2k-23-orbit-batch.json carries GOAL-ecc2k-23.
+        assert_eq!(goal.get("key").unwrap().as_str(), Some("ecc2k23"));
+        assert_eq!(
+            goal.get("name").unwrap().as_str(),
+            Some("ECC2K-23"),
+            "the catalog names it"
+        );
+        assert_eq!(goal.get("handle").unwrap().as_str(), Some("GOAL-ecc2k-23"));
+        assert_eq!(goal.get("objectives").unwrap(), &Value::Int(1));
+        let angles = goal.get("angles").unwrap().as_array().unwrap();
+        assert_eq!(angles.len(), 1);
+        assert_eq!(
+            angles[0].get("path").unwrap().as_str(),
+            Some(""),
+            "no angle named"
+        );
+        let entries = angles[0].get("objectives").unwrap().as_array().unwrap();
+        assert_eq!(
+            entries[0].get("id").unwrap().as_str(),
+            Some(objective_id.as_str())
+        );
+        assert!(
+            body.get("catalog")
+                .unwrap()
+                .get("known")
+                .unwrap()
+                .as_i64()
+                .unwrap_or(0)
+                >= 5
+        );
+
+        let (status, found) = get_json(addr, "/goals?q=let%20us%20solve%20ecc2k-23%20with%20rho");
+        assert!(status.contains("200"), "{status}");
+        let matches = found.get("matches").unwrap().as_array().unwrap();
+        assert_eq!(matches.len(), 1, "{found:?}");
+        assert_eq!(matches[0].get("key").unwrap().as_str(), Some("ecc2k23"));
+        assert_eq!(matches[0].get("match").unwrap().as_str(), Some("alias"));
+
+        // By alias, and a known goal nobody funded, and one nobody knows.
+        let (status, one) = get_json(addr, "/goals/ECC2K-23");
+        assert!(status.contains("200"), "{status}");
+        assert_eq!(one.get("objectives").unwrap(), &Value::Int(1));
+        let (status, unfunded) = get_json(addr, "/goals/eccp131");
+        assert!(status.contains("200"), "{status}");
+        assert_eq!(unfunded.get("objectives").unwrap(), &Value::Int(0));
+        assert_eq!(unfunded.get("known").unwrap(), &Value::Bool(true));
+        let (status, _) = get_json(addr, "/goals/nothing-of-the-sort");
+        assert!(status.contains("404"), "{status}");
     }
 }

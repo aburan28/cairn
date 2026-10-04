@@ -184,7 +184,11 @@ the p2p port (`CAIRN_PORTMAP`), and `GET /sessions` says whether anyone outside
 has actually reached it. One leader that is paid, with workers and GPU boxes
 on your own network that nobody else can reach, is
 [docs/fleet.md](docs/fleet.md): the leader signs the fleet's records
-(`CAIRN_FLEET`), and `CAIRN_PEERS` keeps a fleet of nodes to itself.
+(`CAIRN_FLEET`), and `CAIRN_PEERS` keeps a fleet of nodes to itself. What the
+network is trying to beat, and from which angles, is `GET /goals` and the
+reader's Goals page ([docs/goals.md](docs/goals.md)): one problem, many
+approaches, and a catalog that keeps ECC2K-130 from being funded under two
+names.
 
 Working from a source checkout, build with the `ui` feature first (see
 *Install* above — `make ui-build`, then `./target/release/cairn run`); the

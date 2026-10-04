@@ -36,6 +36,7 @@ pub mod dht;
 pub mod drand;
 pub mod fleet;
 pub mod frontier;
+pub mod goals;
 pub mod gossip;
 pub mod hex;
 pub mod hosts;

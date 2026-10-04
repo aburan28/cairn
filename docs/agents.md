@@ -39,6 +39,8 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | tool | writes to the log | what it is for |
 |---|---|---|
 | `list_objectives` | no* | what is open, and where each frontier stands |
+| `list_goals` | no* | the same objectives grouped by the problem they attack and the angle taken on it (`GOAL-<key>/<angle>`) — [goals.md](goals.md) |
+| `find_goal` | no* | which goal a phrase names (`ECC2K-130`, `ecc2k130`, a sentence), the handle already in use and what is funded under it; call it before `post_objective` so one problem does not get two spellings |
 | `get_objective` | no* | full record, verifier spec |
 | `score_candidate` | **no** | run the pinned verifier; the tight loop |
 | `frontier_status` | no* | best score, which claim to cite, pool remaining |
@@ -250,7 +252,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | ./target/release/cairn --log /tmp/pw.jsonl --root . mcp
 ```
 
-Nine tool names come back: `score_candidate`, `list_objectives`,
+Fifteen tool names come back -- among them `score_candidate`, `list_objectives`, `list_goals`, `find_goal`,
 `get_objective`, `get_claim`, `frontier_status`, `submit_claim`,
 `pending_reveals`, `work_assignment`, `audit`. If that works and the client
 still shows nothing, the problem is the client's config, not the server.

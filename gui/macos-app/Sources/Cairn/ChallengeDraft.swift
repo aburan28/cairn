@@ -172,8 +172,22 @@ enum ChallengeWriter {
     /// The person's description, and on a redraft the previous attempt and
     /// what was wrong with it, as one message: a fresh request rather than a
     /// conversation, so nothing about earlier turns has to be replayed.
-    static func request(describing description: String, previous: ChallengeDraft? = nil, problems: [String] = []) -> String {
+    static func request(describing description: String, previous: ChallengeDraft? = nil, problems: [String] = [],
+                        angleOn: String? = nil) -> String {
         var text = "Problem to pose, as its funder described it:\n\n\(description.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+        if let angleOn {
+            // Deduplication, from the node's goal catalog (docs/goals.md): the
+            // person chose to post this as a new angle on a goal that exists,
+            // so the model is told the handle instead of inventing one.
+            text += """
+
+                This challenge is a new ANGLE on an existing goal, \(angleOn). Set "goal" to \
+                "\(angleOn)/<angle>", where <angle> is one or two lowercase hyphenated words naming \
+                the approach this challenge takes (for example rho/gpu-kernel, index-calculus, \
+                formal, theory). Do not invent a different goal name.
+
+                """
+        }
         if let previous {
             text += """
 

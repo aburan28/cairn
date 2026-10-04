@@ -270,6 +270,29 @@ the request opts into server-side refusal fallbacks (`fallbacks: "default"`).
 What this does and does not protect is in
 [docs/threat-model.md](../../docs/threat-model.md#agents-as-authors).
 
+### Saying it, and not funding it twice
+
+Two things sit under the description box. **Dictate** listens while you talk
+the problem through and adds what it heard to the description; press it again
+to stop. Recognition runs on this Mac when macOS has an on-device model for
+your language (`requiresOnDeviceRecognition`), so the description does not
+leave the machine before you have read it, and the first press asks for the
+microphone and for speech recognition -- a refusal is shown beside the button
+with where to change it. In the review step **Read aloud** speaks the drafted
+statement, which catches the sentence that scans and does not parse. The
+signed build carries the `audio-input` entitlement the hardened runtime
+requires (`packaging/macos/Cairn.entitlements`); `Dictation.swift`.
+
+As you type, the sheet asks the node which **goal** the description names
+(`GET /goals?q=`, [docs/goals.md](../../docs/goals.md)): if ECC2K-130 already
+has four challenges under `GOAL-certicom-ecc2k130`, a line under the box says
+so, lists the angles already taken (`rho/distributed`, `rho/gpu-kernel`, …),
+and offers **Post as an angle on it**. Choose it and the model is told to
+name the challenge `GOAL-certicom-ecc2k130/<angle>` rather than invent a
+second spelling of the goal; leave it and the goal is whatever the model
+writes. A match is a suggestion from the node's alias catalog, never a rule.
+`GoalMatch.swift`.
+
 ## Connect an agent
 
 **Node → Connect an Agent…** (⇧⌘A), or **Agent** in the toolbar: the MCP

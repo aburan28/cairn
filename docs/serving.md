@@ -32,6 +32,8 @@ record instead.
 | `GET /checkpoint` | the signed `(root, height, signature)`, if you publish one |
 | `GET /objectives` | every objective, with its frontier and whether it is still payable |
 | `GET /objective/{id}` | one full record, verifier spec included |
+| `GET /goals` | the objectives grouped by the problem they attack and the angle taken on it, read off the `GOAL-<key>/<angle>` handle each carries; `?q=<words>` finds the goal a phrase names, in this log or in the catalog, so a new objective is posted as an angle on an existing goal rather than a second spelling of it — see [goals.md](goals.md) |
+| `GET /goals/{key}` | one goal by key or alias, with every angle and objective under it; a catalog goal nobody funded answers with nothing funded rather than 404 |
 | `GET /frontier/{id}` | best score, who holds it, what to cite, pool remaining; on a piecework objective, the unit price, units paid and pool remaining instead |
 | `GET /progress/{id}` | one objective's search as a dashboard reads it: `derived` (per-worker paid units, steps from the witness counters, hourly buckets, unit coverage -- all recomputed from the log) beside `reported` (worker heartbeats held in memory, unverified). See [Progress](#progress-what-a-search-looks-like-while-it-runs) |
 | `GET /work_assignment?objective_id=&node_id=` | the MCP `work_assignment` tool over HTTP: this node's slice of the unit space for the epoch, `partitions` and `epoch` optional |

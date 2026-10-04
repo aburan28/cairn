@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "note": "Names for the things the network is trying to beat, so that two people funding work on the same problem land on the same goal instead of two spellings of it. A goal is the `goal` handle objectives already carry (`GOAL-certicom-ecc2k130`); this file adds the aliases a person types (`ECC2K-130`, `ecc2k130`) and a line about what the problem is. It decides nothing: an objective's goal is whatever its funder wrote, and this list only helps a reader, a drafting tool or `GET /goals?q=` find it. Compiled into the binary by src/goals.rs; `CAIRN_GOALS=<file>` reads another list.",
+  "handle": "GOAL-<key>[/<angle>[/<angle>...]]: the key names the problem, the angle path names the approach -- `GOAL-certicom-ecc2k130/rho/gpu-kernel`. docs/goals.md has the angle vocabulary.",
+  "goals": [
+    {
+      "key": "certicom-ecc2k130",
+      "name": "ECC2K-130",
+      "aliases": ["ecc2k-130", "ecc2k130", "certicom ecc2k-130", "certicom-ecc2k-130", "koblitz-131"],
+      "family": "certicom",
+      "summary": "The Certicom ECC2K-130 challenge: the discrete logarithm on a Koblitz curve over GF(2^131). The smallest Certicom challenge still standing when this list was written, and the one most distributed Pollard rho efforts have aimed at."
+    },
+    {
+      "key": "certicom-eccp131",
+      "name": "ECCp-131",
+      "aliases": ["eccp-131", "eccp131", "certicom eccp-131", "certicom-eccp-131"],
+      "family": "certicom",
+      "summary": "The Certicom ECCp-131 challenge: the discrete logarithm on a random curve over a 131-bit prime field."
+    },
+    {
+      "key": "certicom-ecc2-131",
+      "name": "ECC2-131",
+      "aliases": ["ecc2-131", "ecc2131", "certicom ecc2-131"],
+      "family": "certicom",
+      "summary": "The Certicom ECC2-131 challenge: a random (non-Koblitz) binary curve over GF(2^131), without the Frobenius speed-up ECC2K-130 allows."
+    },
+    {
+      "key": "certicom-ecc2k163",
+      "name": "ECC2K-163",
+      "aliases": ["ecc2k-163", "ecc2k163", "certicom ecc2k-163"],
+      "family": "certicom",
+      "summary": "The Certicom ECC2K-163 challenge: a Koblitz curve over GF(2^163), the next size up from ECC2K-130."
+    },
+    {
+      "key": "certicom-eccp163",
+      "name": "ECCp-163",
+      "aliases": ["eccp-163", "eccp163", "certicom eccp-163"],
+      "family": "certicom",
+      "summary": "The Certicom ECCp-163 challenge: a random curve over a 163-bit prime field."
+    },
+    {
+      "key": "ecdlp-nums-50",
+      "name": "NUMS-50",
+      "aliases": ["nums-50", "nums50", "nums 50"],
+      "family": "ecdlp-practice",
+      "summary": "A 50-bit discrete logarithm on a NUMS-style curve: small enough to finish, large enough to measure a method against. examples/certicom-ecdlp/objective-nums-50-rho-batch.json."
+    },
+    {
+      "key": "ecc2k-23",
+      "name": "ECC2K-23",
+      "aliases": ["ecc2k23", "ecc2k-23 toy"],
+      "family": "ecdlp-practice",
+      "summary": "A 23-bit Koblitz-curve toy with the same record shapes as ECC2K-130, so a worker, a verifier and a reader can be exercised end to end in seconds. examples/certicom-ecdlp/objective-ecc2k-23*.json."
+    }
+  ]
+}

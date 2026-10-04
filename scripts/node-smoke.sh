@@ -171,7 +171,7 @@ echo "  one PID, p2p on $P2P_PORT and HTTP on $HTTP"
 
 rule "every read route answers, from the same process holding the write lock"
 for path in /health /objectives /chain /chain.html /checkpoint "/objective/$OID" \
-            /peers /sessions /network /leases "/leases/$OID" /verifiers; do
+            /peers /sessions /network /leases "/leases/$OID" /verifiers /goals "/goals?q=capset"; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP$path")
   [ "$code" = "200" ] || fail "GET $path -> $code"
   echo "  GET $path -> 200"

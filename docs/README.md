@@ -20,6 +20,7 @@ below is either reference (what a command, a setting, or a word does) or design
 | run a node strangers submit to | [serving.md](serving.md), then [storage.md](storage.md) |
 | connect two nodes in two places, each behind its own router | [two-nodes.md](two-nodes.md) |
 | run a leader that is paid and workers on your own machines that nobody else can reach | [fleet.md](fleet.md) |
+| see what the network is trying to beat, and post on a problem without inventing a second name for it | [goals.md](goals.md) |
 | know what a command does | [cli.md](cli.md) |
 | know what a setting does | [configuration.md](configuration.md) |
 | know what a word means | [glossary.md](glossary.md) |
@@ -99,6 +100,9 @@ The six pages a user needs and nothing else in this repository provides.
 - [fleet.md](fleet.md) — one leader that signs and is paid, host agents and
   workers on your own network, a tunnel across regions, and what no part of
   it does with money.
+- [goals.md](goals.md) — goals and angles: one problem, many approaches, read
+  off the handle every objective already carries; the alias catalog that
+  joins two spellings; the `find_goal` tool a drafting agent calls first.
 - [shards.md](shards.md) — erasure coding, and why per-chunk commitments are
   what make it safe rather than merely cheap.
 - [censorship.md](censorship.md) — confidentiality, unlinkability, sealed
