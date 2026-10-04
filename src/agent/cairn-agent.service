@@ -1,0 +1,44 @@
+# cairn-agent: puts this machine on a cairn network as a place executor jobs
+# can run. Written by `cairn agent install`; edit the environment file it
+# names rather than this unit, and `systemctl daemon-reload` after either.
+#
+# The hardening below is what a process that only talks to a container engine
+# and reads /proc and /sys can live inside. It is NOT the job's sandbox -- that
+# is gVisor or Kata, chosen per job -- it is the agent's own.
+
+[Unit]
+Description=cairn host agent (hardware registration and sandboxed executor jobs)
+Documentation=https://github.com/aburan28/cairn/blob/main/docs/agent.md
+After=network-online.target docker.service containerd.service podman.socket
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{GROUP}}
+SupplementaryGroups={{GROUPS}}
+EnvironmentFile=-{{ENV_FILE}}
+ExecStart={{EXEC}} agent run
+WorkingDirectory={{DATA}}
+Restart=on-failure
+RestartSec=5s
+# A job in flight is given this long to finish after a stop is asked for;
+# past it systemd kills the whole control group, container client included.
+TimeoutStopSec=120s
+KillMode=mixed
+LimitNOFILE=65536
+
+# The agent needs: its data directory, the engine's socket, /dev/kvm when Kata
+# runs here, and the rest of the filesystem read-only.
+NoNewPrivileges={{NO_NEW_PRIVILEGES}}
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths={{DATA}}
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

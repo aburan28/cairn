@@ -121,6 +121,13 @@ jobs:
       # `exec` must refuse (exit 3), and an explicitly unconfined run must say
       # so in its receipt.
       - run: ./scripts/lab-demo.sh
+      # The host agent against a node it shares nothing with: a probe of the
+      # runner, a registration read back off GET /hosts and GET /network, a
+      # queued job and an `exec` job with receipts naming their jail, and the
+      # systemd unit rendered without being written. A runner without gVisor
+      # or bubblewrap takes the other branch: the `auto` job must be refused
+      # with a receipt saying why, and only the job that asked for `none` runs.
+      - run: ./scripts/agent-demo.sh
       # The binary and every subcommand answer `--help` with 0 and misuse with 2.
       #
       # Two of them exited 2 for `--help`, which tells somebody who asked a

@@ -38,6 +38,14 @@ If you do want a node under systemd or launchd, run `cairn p2p --serve`, not
 `cairn run`: `run` also speaks MCP on stdin and stops when stdin closes, which
 under a service manager is immediately.
 
+The one exception is explicit and yours to invoke: `sudo cairn agent install
+--node http://node:8080` writes a systemd unit for the **host agent** -- the
+process that registers this machine's CPUs, memory and GPUs with a node and
+runs executor jobs under gVisor or Kata -- together with its environment file,
+a system user and a data directory, and enables it. No package does that;
+the command does, after you ran it, and `--print` shows the unit first.
+[agent.md](agent.md).
+
 ## macOS: the disk image
 
 Download `cairn-<version>-macos-universal.dmg`, open it, and run

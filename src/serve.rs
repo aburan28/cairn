@@ -53,6 +53,7 @@ use std::time::Duration;
 
 use crate::canonical::{digest_bytes, Value};
 use crate::deposit::{self, DepositDir, DepositError, MAX_PROXY_BYTES};
+use crate::hosts;
 use crate::lease::{self, Leases};
 use crate::ledger::{Codec, Ledger};
 use crate::network::{self, Hardware, NodeFacts, Roles};
@@ -400,6 +401,9 @@ pub struct Serving {
     /// Advisory task leases, held exactly as heartbeats are and for the same
     /// reasons. See [`crate::lease`].
     leases: Mutex<Leases>,
+    /// Hosts that registered their hardware, held exactly as heartbeats are.
+    /// See [`crate::hosts`].
+    hosts: Mutex<hosts::Roster>,
     /// The daemon's session roster, when this server runs inside a daemon.
     ///
     /// `None` on a plain `cairn serve`, which runs no p2p service and says so
@@ -437,6 +441,7 @@ impl Serving {
             key: None,
             progress: Mutex::new(Board::default()),
             leases: Mutex::new(Leases::default()),
+            hosts: Mutex::new(hosts::Roster::default()),
             sessions: None,
             roles: Roles::from_env(),
             hardware: Hardware::probe(),
@@ -680,6 +685,7 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", "/work_assignment") => work_assignment(stream, serving, &request),
         ("GET", "/sessions") => sessions(stream, serving),
         ("GET", "/network") => network(stream, serving),
+        ("GET", "/hosts") => hosts_index(stream, serving),
         ("GET", "/leases") => leases_index(stream, serving),
         ("GET", path) if path.starts_with("/leases/") => {
             leases_of(stream, serving, &path["/leases/".len()..])
@@ -687,6 +693,7 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", path) if path == "/ui" || path.starts_with("/ui/") => ui_asset(stream, path),
         ("POST", "/submit") => submit(stream, &mut reader, serving, &request),
         ("POST", "/progress") => heartbeat(stream, &mut reader, serving, &request),
+        ("POST", "/hosts") => host_register(stream, &mut reader, serving, &request),
         ("POST", "/lease") => lease_claim(stream, &mut reader, serving, &request),
         ("POST", "/lease/release") => lease_release(stream, &mut reader, serving, &request),
         ("POST", "/objective/prepare") => prepare_objective(stream, &mut reader, &request),
@@ -855,6 +862,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /work_assignment?objective_id=&node_id="),
                 Value::string("GET /leases"),
                 Value::string("GET /leases/{id}"),
+                Value::string("GET /hosts"),
                 Value::string("GET /log"),
                 Value::string("GET /checkpoint"),
                 Value::string("GET /chain"),
@@ -881,6 +889,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 }),
                 Value::string("POST /objective/prepare"),
                 Value::string("POST /progress"),
+                Value::string("POST /hosts"),
                 Value::string("POST /lease"),
                 Value::string("POST /lease/release"),
                 // Always listed: a node with no deposits configured still
@@ -1364,6 +1373,11 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .fleet(now);
+    let registered = serving
+        .hosts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .summary(now);
     let pick = |key: &str| readiness.get(key).cloned().unwrap_or(Value::Null);
     json(
         stream,
@@ -1396,7 +1410,7 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 ]),
             ),
             ("peers", peers),
-            ("compute", compute_value(&fleet, &objectives)),
+            ("compute", compute_value(&fleet, &objectives, &registered)),
             ("roles", network::evidenced(&node)),
             (
                 "note",
@@ -1418,6 +1432,7 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
 fn compute_value(
     fleet: &[progress::FleetWorker],
     objectives: &BTreeMap<String, Objective>,
+    hosts: &Value,
 ) -> Value {
     use progress::Liveness;
 
@@ -1596,6 +1611,11 @@ fn compute_value(
                 Value::object(fields)
             })),
         ),
+        // Registered machines beside heartbeating workers, as two tables a
+        // reader must not add: a host is where workers run, a worker is a
+        // process on one, and a box with eight GPUs and no worker yet is a
+        // fact about capacity, not about work.
+        ("hosts", hosts.clone()),
         (
             "live_within_seconds",
             Value::Int(i128::from(progress::LIVE_SECONDS)),
@@ -1619,6 +1639,77 @@ fn compute_value(
 
 /// Which objectives have any lease on this roster. No log read: the roster
 /// is the answer.
+fn hosts_index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let now = crate::time::unix_seconds();
+    let summary = serving
+        .hosts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .summary(now);
+    json(stream, 200, &summary)
+}
+
+fn host_register(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    serving: &Serving,
+    request: &Request,
+) -> io::Result<()> {
+    let value = match read_json_body(reader, request, "/hosts") {
+        Ok(value) => value,
+        Err((status, message)) => return json_error(stream, status, &message),
+    };
+    let (registration, ignored) = match hosts::Registration::from_value(&value) {
+        Ok(decoded) => decoded,
+        Err(why) => return json_error(stream, 400, &why.to_string()),
+    };
+    // Unlike a heartbeat, a registration names no objective: a machine is on
+    // the network before anybody has posted work for it. What bounds a
+    // stranger here is the roster's own cap and the size cap on each entry.
+    let now = crate::time::unix_seconds();
+    let host = registration.host.clone();
+    let outcome = serving
+        .hosts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .record(registration, now);
+    match outcome {
+        Ok(liveness) => json(
+            stream,
+            202,
+            &Value::object([
+                ("recorded", Value::Bool(true)),
+                ("host", Value::string(host)),
+                (
+                    "received_at",
+                    Value::string(crate::time::format_iso8601_utc(
+                        i64::try_from(now).unwrap_or(i64::MAX),
+                    )),
+                ),
+                ("status", Value::string(liveness.as_str())),
+                (
+                    "live_within_seconds",
+                    Value::Int(i128::from(progress::LIVE_SECONDS)),
+                ),
+                (
+                    "ignored",
+                    Value::Array(ignored.into_iter().map(Value::string).collect()),
+                ),
+                (
+                    "note",
+                    Value::string(
+                        "Held in this node's memory and shown on GET /hosts and under \
+                         `compute.hosts` on GET /network, unverified. Nothing was written to \
+                         the log. Post again within live_within_seconds to stay live; fields \
+                         named in `ignored` were not understood.",
+                    ),
+                ),
+            ]),
+        ),
+        Err(full) => json_error(stream, 429, &full.to_string()),
+    }
+}
+
 fn leases_index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let objectives: Vec<Value> = serving
         .leases
@@ -4183,6 +4274,88 @@ mod tests {
         assert!(int(&body, "roles.coordinators.total") >= 1);
         assert_eq!(int(&body, "roles.executors.total"), 2);
         assert_eq!(int(&body, "roles.verifiers.total"), 0);
+    }
+
+    #[test]
+    fn hosts_register_over_http_are_summed_on_the_network_page_and_never_touch_the_log() {
+        let dir = TempDir::new("hosts-route");
+        let (log, _) = orbit_search_log(&dir);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let before = get_json(addr, "/chain").1;
+
+        let registration = r#"{"host":"gpu-box-1","agent":"cairn-agent/test","roles":["executor"],
+            "hardware":{"cpus":64,"memory_mb":515000,"gpus":[{"index":0,"vendor":"nvidia","model":"NVIDIA A100-SXM4-80GB","memory_mb":81920},{"index":1,"vendor":"nvidia","model":"NVIDIA A100-SXM4-80GB","memory_mb":81920}]},
+            "sandboxes":{"kata":{"usable":true,"via":["docker:kata"],"gpu":true},"runsc":{"usable":true,"via":["native","docker:runsc"]},"bwrap":{"usable":false,"why":"no bwrap"}},
+            "jobs":{"running":1,"capacity":2,"completed":7,"failed":1},"objectives":["sha256:o"],"colour":"blue"}"#;
+        let (status, body) = ask_json(addr, "/hosts", registration);
+        assert!(
+            status.starts_with("HTTP/1.1 202"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert_eq!(body.get("host").unwrap().as_str(), Some("gpu-box-1"));
+        assert_eq!(
+            body.get("ignored").unwrap().as_array().unwrap(),
+            &[Value::string("colour")]
+        );
+        // A second host, no GPUs, no sandboxes it can use.
+        let (status, _) = ask_json(
+            addr,
+            "/hosts",
+            r#"{"host":"cpu-box","hardware":{"cpus":8,"memory_mb":32000,"gpus":[]},"sandboxes":{"runsc":{"usable":false}}}"#,
+        );
+        assert!(status.starts_with("HTTP/1.1 202"), "{status}");
+
+        let (status, body) = get_json(addr, "/hosts");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert_eq!(int(&body, "live"), 2);
+        assert_eq!(int(&body, "cpus"), 72);
+        assert_eq!(int(&body, "memory_mb"), 547_000);
+        assert_eq!(int(&body, "gpus"), 2);
+        assert_eq!(int(&body, "jobs.running"), 1);
+        assert_eq!(int(&body, "jobs.capacity"), 2);
+        let sandboxes = at(&body, "sandboxes").as_array().unwrap();
+        assert_eq!(sandboxes.len(), 2, "{sandboxes:?}");
+        assert_eq!(sandboxes[0].get("sandbox").unwrap().as_str(), Some("kata"));
+        assert_eq!(sandboxes[1].get("sandbox").unwrap().as_str(), Some("runsc"));
+        let hosts = at(&body, "hosts").as_array().unwrap();
+        assert_eq!(hosts[0].get("host").unwrap().as_str(), Some("cpu-box"));
+        assert_eq!(hosts[1].get("host").unwrap().as_str(), Some("gpu-box-1"));
+        assert_eq!(
+            hosts[1]
+                .get("usable_sandboxes")
+                .unwrap()
+                .as_array()
+                .unwrap(),
+            &[Value::string("kata"), Value::string("runsc")]
+        );
+        // The registration's own shape travels through untouched.
+        assert_eq!(at(&hosts[1], "hardware.gpus").as_array().unwrap().len(), 2);
+
+        // The same table under the network page's `compute`.
+        let (_, network) = get_json(addr, "/network");
+        assert_eq!(int(&network, "compute.hosts.live"), 2);
+        assert_eq!(int(&network, "compute.hosts.gpus"), 2);
+        assert_eq!(int(&network, "compute.live"), 0, "a host is not a worker");
+
+        // Refusals: no host name, a non-object, a stranger's media type.
+        let (status, _) = ask_json(addr, "/hosts", r#"{"hardware":{}}"#);
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+        let (status, _) = ask_json(addr, "/hosts", r#"[1,2]"#);
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+        let (status, _) = ask_json(addr, "/hosts", r#"{"host":"x","hardware":"lots"}"#);
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+
+        assert_eq!(get_json(addr, "/chain").1, before, "the log is untouched");
+        let (_, index) = get_json(addr, "/");
+        let endpoints = index.get("endpoints").unwrap().as_array().unwrap();
+        assert!(endpoints.contains(&Value::string("POST /hosts")));
+        assert!(endpoints.contains(&Value::string("GET /hosts")));
     }
 
     #[test]

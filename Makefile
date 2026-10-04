@@ -91,7 +91,7 @@ CLIENT ?= claude
 # `ui/node_modules` is deliberately absent: it is a real directory whose
 # freshness against the lockfile is the whole point of the rule.
 .PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui mac-app ios-check ios-app \
-	interop differential fuzz mcp-smoke serve-smoke node-smoke canary dispute attest arena blob rekey p2p-demo try examples \
+	interop differential fuzz mcp-smoke serve-smoke node-smoke agent-demo canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
 	test-reference fmt clippy docs tla check \
 	dmg deb rpm musl-build packaging-check
@@ -373,6 +373,11 @@ serve-smoke: build
 # separate command, which is the topology this replaces.
 node-smoke: build
 	RUST_BIN="$(abspath $(CLI))" ./scripts/node-smoke.sh
+
+# The host agent end to end: probe, register with a served node, run a queued
+# job and an `exec` job, render the systemd unit. See docs/agent.md.
+agent-demo: build
+	RUST_BIN="$(abspath $(CLI))" ./scripts/agent-demo.sh
 
 # Publish this node's log over HTTP. Read-only unless QUEUE is set, because
 # publishing is safe for anyone and accepting is a decision.

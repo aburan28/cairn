@@ -25,6 +25,7 @@ below is either reference (what a command, a setting, or a word does) or design
 | fix something that is not working | [troubleshooting.md](troubleshooting.md) |
 | understand the whole design | [architecture.md](architecture.md), then [diagrams.md](diagrams.md) |
 | keep a research program's shared state without git, and run its experiments in sandboxes | [lab.md](lab.md) |
+| put a Linux box with GPUs on the network as a place executor jobs run, under systemd | [agent.md](agent.md) |
 | attack it | [threat-model.md](threat-model.md) |
 | work on this repository | [../AGENTS.md](../AGENTS.md), [../CONTRIBUTING.md](../CONTRIBUTING.md) |
 
@@ -55,6 +56,10 @@ The six pages a user needs and nothing else in this repository provides.
   statement is untrusted input.
 - [verification.md](verification.md) — the verification ladder, and how to
   author a verifier whose verdict anybody can reproduce.
+- [agent.md](agent.md) — `cairn agent`: the host agent that probes a
+  machine's CPUs, memory and GPUs, registers them with a node over
+  `POST /hosts`, runs executor jobs under gVisor or Kata Containers with a
+  receipt naming the jail, and installs itself as a hardened systemd unit.
 - [serving.md](serving.md) — publishing a log over HTTP, the endpoints, why
   submissions queue instead of appending, and the progress route behind the
   reader's per-task dashboard: settled work from the log beside unverified
