@@ -165,7 +165,13 @@ Work through, in order:
    not here, nothing can run it. `cairn blob publish` copies pins the bundle
    has into the store; `cairn blob fetch --identity … --peer …` gets the rest
    from a peer that is serving them.
-2. The toolchain the verifier needs — `python3`, `lean` — on `PATH`.
+2. The toolchain the verifier needs — `python3`, `lean` — on `PATH`. A
+   version-manager shim (`~/.pyenv/shims/python3`, asdf's, mise's) is found
+   and still cannot run in the jail; the verdict says "version-manager shim"
+   and `GET /verifiers` lists the pinned kinds as unservable. Set
+   `CAIRN_PYTHON="$(pyenv which python3)"` and
+   `CAIRN_PYTHON_ROOT="$(pyenv prefix)"`, or put `/usr/bin` or
+   `/opt/homebrew/bin` first on `PATH`. See [configuration.md](configuration.md).
 3. The sandbox. With `CAIRN_REQUIRE_SANDBOX=1` set and no jail mechanism
    installed, *every* verdict is `unavailable` by design. That is the switch
    working: install bubblewrap (Linux) or run on macOS, which has seatbelt.

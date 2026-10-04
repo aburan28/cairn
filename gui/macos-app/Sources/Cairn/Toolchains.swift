@@ -148,11 +148,21 @@ enum Toolchains {
 
     static func report(environment: [String: String]) -> ToolchainReport {
         let (lean, leanProblem) = self.lean(environment: environment)
-        let python = locate("python3", in: searchPath(environment))
+        // CAIRN_PYTHON is what the node runs when it is set, so it is what
+        // is checked; an operator who set it has already chosen past the shim.
+        let configured = environment["CAIRN_PYTHON"].map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        let python: URL?
+        if configured.isEmpty {
+            python = locate("python3", in: searchPath(environment))
+        } else if configured.contains("/") {
+            python = FileManager.default.isExecutableFile(atPath: configured) ? URL(fileURLWithPath: configured) : nil
+        } else {
+            python = locate(configured, in: searchPath(environment))
+        }
         let pythonVersion = python.flatMap { version(of: $0, environment) }
         let pythonProblem = python.flatMap { url -> String? in
-            isShim(url)
-                ? "\(url.path) is a version-manager shim, which the node's jail cannot follow; every pinned checker would be unavailable. Put a directly installed python3 (Homebrew's, or python.org's) first."
+            configured.isEmpty && isShim(url)
+                ? "\(url.path) is a version-manager shim, which the node's jail cannot follow; the node refuses it and every pinned checker is unavailable. Put a directly installed python3 (Homebrew's, or python.org's) first, or set CAIRN_PYTHON to the real interpreter (pyenv which python3) and CAIRN_PYTHON_ROOT to its prefix (pyenv prefix) when launching the app (open --env)."
                 : nil
         }
         let sandbox = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
