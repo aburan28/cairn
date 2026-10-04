@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.16.0](https://github.com/aburan28/cairn/compare/v1.15.3...v1.16.0) (2026-10-04)
+
+
+### Features
+
+* **ios:** a Task progress screen, from the node's /progress route ([#222](https://github.com/aburan28/cairn/issues/222)) ([f6332cd](https://github.com/aburan28/cairn/commit/f6332cd4fcbdb03f780e5982746917a49a53eec1))
+* **macos:** drafted challenges are Lean theorems, with real progress and the toolchain found ([08930a9](https://github.com/aburan28/cairn/commit/08930a9b912e67b8ff8066c4e998e20d7d52866f))
+* **macos:** Lean-only drafting with streamed progress, the toolchain found and handed to the node, and Connect an Agent ([bf48468](https://github.com/aburan28/cairn/commit/bf48468f30d964c8b2d076b4aae8298ff12b55ed))
+* **macos:** Lean-only drafting with streamed progress, the toolchain found and handed to the node, and Connect an Agent ([#224](https://github.com/aburan28/cairn/issues/224)) ([bf48468](https://github.com/aburan28/cairn/commit/bf48468f30d964c8b2d076b4aae8298ff12b55ed))
+* **macos:** Node → Connect an Agent…, the MCP stanza with this Mac's paths in it ([08fc9a9](https://github.com/aburan28/cairn/commit/08fc9a97caa706b428ced1be39b1494a8fc7877d))
+* **verifiers:** GET /verifiers, a Lean control run, and CAIRN_LEAN / CAIRN_LEAN_ROOT ([a166899](https://github.com/aburan28/cairn/commit/a1668994a9bb95fc30a327a07785298c288a6ddd))
+
+
+### Fixes
+
+* **release:** create releases as drafts; publish as prereleases before building ([#221](https://github.com/aburan28/cairn/issues/221)) ([8d20043](https://github.com/aburan28/cairn/commit/8d20043801a99e9dcddc316d2dc6fab3f0264092))
+
 ## [1.15.3](https://github.com/aburan28/cairn/compare/v1.15.2...v1.15.3) (2026-10-03)
 
 
