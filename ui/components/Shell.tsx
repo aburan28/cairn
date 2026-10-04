@@ -23,7 +23,9 @@ export const ROUTES = [
   { href: "/submit", label: "Post a challenge", hint: "Fund a question, signed by a wallet" },
   { href: "/chain", label: "Chain", hint: "Epoch links, and whether you have forked" },
   { href: "/log", label: "Log", hint: "Every record, as the node stores it" },
-  { href: "/peers", label: "Peers", hint: "Who this node reconciles with" },
+  { href: "/network", label: "Network", hint: "Peers reached, hardware heartbeating, roles declared and evidenced" },
+  { href: "/coordination", label: "Coordination", hint: "A divided search's epoch, who holds which slice, and the task leases" },
+  { href: "/peers", label: "Peers", hint: "The log's address book: who announced an address" },
   { href: "/how-it-works", label: "How it works", hint: "The protocol, in order" },
   { href: "/docs", label: "Docs", hint: "The design notes" },
 ] as const;
@@ -51,7 +53,8 @@ const NAV: {
       },
       { href: "/chain", label: "Chain", icon: <IconChain /> },
       { href: "/log", label: "Log", icon: <IconList /> },
-      { href: "/peers", label: "Peers", icon: <IconPeers /> },
+      { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers"] },
+      { href: "/coordination", label: "Coordination", icon: <IconCoordination /> },
     ],
   },
   {
@@ -555,11 +558,24 @@ function IconList() {
   );
 }
 
-function IconPeers() {
+function IconNetwork() {
   return (
     <Icon>
-      <circle cx="6" cy="5.5" r="2" />
-      <path d="M2.5 13a3.5 3.5 0 0 1 7 0M10.5 3.8a2 2 0 0 1 0 3.4M11.5 9.6A3.5 3.5 0 0 1 13.5 13" />
+      <circle cx="8" cy="3.5" r="1.8" />
+      <circle cx="3.5" cy="12" r="1.8" />
+      <circle cx="12.5" cy="12" r="1.8" />
+      <path d="M7 5l-2.5 5.3M9 5l2.5 5.3M5.3 12h5.4" />
+    </Icon>
+  );
+}
+
+function IconCoordination() {
+  return (
+    <Icon>
+      <rect x="2" y="4" width="12" height="3.5" rx="0.8" />
+      <path d="M5.5 4v3.5M9 4v3.5" />
+      <rect x="2" y="9.5" width="7" height="3" rx="0.8" />
+      <rect x="10.5" y="9.5" width="3.5" height="3" rx="0.8" />
     </Icon>
   );
 }

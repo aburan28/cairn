@@ -610,6 +610,19 @@ cannot be replaced — and runs experiments in content-addressed root filesystem
 (SageMath, PARI/GP, msolve) under gVisor, recording each run's receipt and
 outputs as one op. It settles nothing; see [docs/lab.md](docs/lab.md).
 
+What all of this looks like while it runs is the reader's **Network** and
+**Coordination** pages (`/ui/network`, `/ui/coordination?id=…`): whom this
+node has actually reached (`GET /sessions`, from the daemon's own memory rather
+than the log's address book), what hardware is heartbeating to it and at what
+summed rate, who holds which slice of a divided search this epoch, and the
+advisory **leases** workers post to say what they are about to work
+(`POST /lease`). A lease is not a lock — the partition function still assigns
+every unit and nothing that pays reads one — and a node's declared **roles**
+(`CAIRN_ROLES`: coordinator, executor, verifier, relay) are a hint about intent
+shown beside what the log shows identities doing, never a permission. The
+design, and what it deliberately leaves out of consensus, is
+[docs/design/network-coordination.md](docs/design/network-coordination.md).
+
 ### Dividing a problem: piecework
 
 The ratchet pays for moving a score. Some problems have no score to move —

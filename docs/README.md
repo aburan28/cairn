@@ -128,6 +128,10 @@ The six pages a user needs and nothing else in this repository provides.
 - [roadmap.md](roadmap.md) — what Stage 1–3 add, in the order worth doing.
 - [design-stage0-completion.md](design-stage0-completion.md) — what "Stage 0 is
   done" was defined to mean.
+- [review/gui-assessment.md](review/gui-assessment.md) — the four readers (the
+  embedded site, Cairn.app, the autoresearcher control surface, the iPhone)
+  reviewed as one system: what each could show, what none could, what landed
+  with the review and what is still only on paper.
 - [launch-review.md](launch-review.md) — the pre-launch pass: what was fixed,
   and the gaps that remain, in priority order.
 - [../conformance/README.md](../conformance/README.md) — the cross-implementation
@@ -158,6 +162,7 @@ lines; that is the authority, and this table is the index to it.
 | [workspace-benchmarks.md](design/workspace-benchmarks.md) — repository-shaped benchmarks | **verifier built**, in both implementations; `cairn bench` and MCP notes are not |
 | [rho-piecework.md](design/rho-piecework.md) — distributed Pollard rho as piecework | **Stages A and B built** (`src/piecework.rs`); Stage C is not |
 | [orbit-piecework.md](design/orbit-piecework.md) — ECC2K-130: paying per orbit, and the witness that makes one checkable | **built**, with no consensus change; the corpus still does not fit a log |
+| [network-coordination.md](design/network-coordination.md) — live sessions over HTTP, the compute roster, advisory task leases, declared roles | **built** in the node and the reader (`src/p2p/sessions.rs`, `src/lease.rs`, `src/network.rs`); nothing in consensus, by design; gossiped leases and signed heartbeats are not |
 | [index-calculus-p224.md](design/index-calculus-p224.md) — index calculus as piecework | proposal; nothing here is built |
 | [swarm-targeting.md](design/swarm-targeting.md) — aiming a swarm at one problem, and what ecdsa.fail's nonce grinding teaches | proposal; nothing here is built |
 

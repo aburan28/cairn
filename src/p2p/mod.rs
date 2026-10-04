@@ -38,6 +38,7 @@ pub mod proxy;
 pub mod seeds;
 pub mod service;
 pub mod session;
+pub mod sessions;
 pub mod swarm;
 pub mod sync;
 pub mod transport;

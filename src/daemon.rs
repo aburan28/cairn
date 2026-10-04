@@ -60,6 +60,7 @@ pub const BEACON_PORT_ENV: &str = "CAIRN_BEACON_PORT";
 use crate::p2p::pop::PopLimits;
 use crate::p2p::seeds::{self, Seed};
 use crate::p2p::service::{SeedOutcome, Service, KEY_FETCH_BACKOFF};
+use crate::p2p::sessions::{Direction, Sessions};
 use crate::p2p::transport;
 use crate::records::Objective;
 use crate::serve;
@@ -558,7 +559,10 @@ fn persist(state: &State, checkpoint: &Path, key: &RootKey, population: Option<&
 ///
 /// Separated from the spawn so the bind failure is the caller's to report,
 /// before anything else starts. See the module docs.
-fn bind_http(config: &Config) -> Result<Option<(TcpListener, serve::Serving)>, String> {
+fn bind_http(
+    config: &Config,
+    sessions: Arc<Mutex<Sessions>>,
+) -> Result<Option<(TcpListener, serve::Serving)>, String> {
     let Some(addr) = &config.serve else {
         return Ok(None);
     };
@@ -572,6 +576,10 @@ fn bind_http(config: &Config) -> Result<Option<(TcpListener, serve::Serving)>, S
     // The checkpoint this daemon writes is the one it publishes. Two paths for
     // one file would be a way to serve a checkpoint nobody is updating.
     serving = serving.with_checkpoint(&config.checkpoint);
+    // The roster the p2p loops write into, so `GET /sessions` can say whom
+    // this process has reached rather than repeating the log's address book
+    // under a disclaimer.
+    serving = serving.with_sessions(sessions);
     if let Some(queue) = &config.queue {
         serving = serving
             .accepting_into(queue)
@@ -706,7 +714,11 @@ pub fn run(config: Config) -> Result<(), String> {
 
     // Bound before either loop starts, so a node that cannot publish refuses at
     // startup rather than looking healthy while serving nothing.
-    let http = bind_http(&config)?;
+    // Who this node has spoken to, for the HTTP half to publish. Created
+    // before the listener is bound so the roster exists however the start
+    // fails after this point, and shared with every loop that runs a session.
+    let sessions = Arc::new(Mutex::new(Sessions::new(crate::time::unix_seconds())));
+    let http = bind_http(&config, Arc::clone(&sessions))?;
 
     // Zero-configuration discovery on the local segment. Optional by design:
     // a host with no multicast route is a node without LAN discovery, not a
@@ -792,6 +804,10 @@ pub fn run(config: Config) -> Result<(), String> {
         }
     })?;
     log::info!("listening on {}", config.listen);
+    sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .identify(service.identity(), config.listen);
 
     // Exclusive, opened above: the daemon appends every record it imports from
     // a peer, so it is a writer and must not share a log with another one.
@@ -828,6 +844,24 @@ pub fn run(config: Config) -> Result<(), String> {
         "verifiers: {}",
         describe_readiness(&node.registry().readiness())
     );
+    // What the operator declared this node for, said once at startup like
+    // the verifiers are. The HTTP half refuses an unknown role before this
+    // point; a node with no HTTP half only ever publishes roles to its log.
+    match crate::network::Roles::from_env() {
+        Ok(roles) if roles.is_empty() => log::info!(
+            "roles: none declared ({} is unset); GET /network says so",
+            crate::network::ROLES_ENV
+        ),
+        Ok(roles) => log::info!(
+            "roles: declared {}",
+            roles
+                .iter()
+                .map(|role| role.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(error) => log::warn!("roles: {error}"),
+    }
 
     let registry = node.registry().clone();
     let state = Arc::new(Mutex::new(State {
@@ -892,6 +926,7 @@ pub fn run(config: Config) -> Result<(), String> {
     }
 
     let accept_service = Arc::clone(&service);
+    let accept_sessions = Arc::clone(&sessions);
     let accept_state = Arc::clone(&state);
     let accept_root_key = Arc::clone(&root_key);
     let accept_checkpoint = config.checkpoint.clone();
@@ -910,8 +945,8 @@ pub fn run(config: Config) -> Result<(), String> {
         // verifier code, no draining of the submission queue. It looked healthy
         // because that single startup pass is enough to sync from a bootstrap
         // peer, which is exactly what a two-node test exercises.
-        let stream = match listener.accept() {
-            Ok((stream, _)) => stream,
+        let (stream, remote_addr) = match listener.accept() {
+            Ok(accepted) => accepted,
             Err(error) => {
                 log::warn!("accept: {error}");
                 continue;
@@ -931,6 +966,7 @@ pub fn run(config: Config) -> Result<(), String> {
         }
         let in_flight = Arc::clone(&in_flight);
         let accept_service = Arc::clone(&accept_service);
+        let accept_sessions = Arc::clone(&accept_sessions);
         let accept_state = Arc::clone(&accept_state);
         let accept_root_key = Arc::clone(&accept_root_key);
         let accept_checkpoint = accept_checkpoint.clone();
@@ -948,6 +984,11 @@ pub fn run(config: Config) -> Result<(), String> {
                 Ok(inbound) => inbound,
                 Err(error) => {
                     log::warn!("inbound session: {error}");
+                    // Counted and not attributed: nobody was authenticated.
+                    accept_sessions
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .inbound_failed();
                     return;
                 }
             };
@@ -992,6 +1033,16 @@ pub fn run(config: Config) -> Result<(), String> {
                         peer_id_string(&remote),
                         node.ledger().len()
                     );
+                    let _ = accept_sessions
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .succeeded(
+                            remote,
+                            Some(remote_addr),
+                            Direction::Inbound,
+                            node.ledger().len(),
+                            crate::time::unix_seconds(),
+                        );
                     persist(
                         &guard,
                         &accept_checkpoint,
@@ -999,7 +1050,16 @@ pub fn run(config: Config) -> Result<(), String> {
                         accept_population.as_ref(),
                     );
                 }
-                Err(error) => log::warn!("inbound session: {error}"),
+                Err(error) => {
+                    log::warn!("inbound session: {error}");
+                    // The handshake may have named the remote, but a session
+                    // that failed is not one to attribute to a peer this
+                    // node has not finished authenticating.
+                    accept_sessions
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .inbound_failed();
+                }
             }
         });
     });
@@ -1137,6 +1197,14 @@ pub fn run(config: Config) -> Result<(), String> {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             service.seed_from_log(&guard.node);
             service.expire(crate::time::unix_seconds());
+            sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .note_book(
+                    service.known_peers(),
+                    service.known_hints(),
+                    crate::time::unix_seconds(),
+                );
             guard.node.missing_code()
         };
         for endpoint in service.peers_for(&needs, config.fanout) {
@@ -1168,6 +1236,16 @@ pub fn run(config: Config) -> Result<(), String> {
                         peer_id_string(&endpoint.peer.id()),
                         node.ledger().len()
                     );
+                    let _ = sessions
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .succeeded(
+                            endpoint.peer.id(),
+                            Some(endpoint.addr),
+                            Direction::Outbound,
+                            node.ledger().len(),
+                            crate::time::unix_seconds(),
+                        );
                     persist(
                         &guard,
                         &config.checkpoint,
@@ -1197,6 +1275,16 @@ pub fn run(config: Config) -> Result<(), String> {
                     // lookup in flight and expects exactly one answer per
                     // contact; this is the failure half.
                     service.unreachable(endpoint.peer.id());
+                    let _ = sessions
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .failed(
+                            endpoint.peer.id(),
+                            Some(endpoint.addr),
+                            Direction::Outbound,
+                            &error.to_string(),
+                            crate::time::unix_seconds(),
+                        );
                 }
             }
         }

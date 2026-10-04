@@ -9,7 +9,12 @@ A small Next.js app that is two things at once, from one build:
 
 Routes: `/` the landing page, `/how-it-works` the protocol, `/docs` an index of
 the design notes, `/challenge?id=…` one objective, `/frontier?id=…` its move
-history, `/chain` the epoch chain, `/objectives`, `/peers`, `/log`, `/task?id=…` — a
+history, `/chain` the epoch chain, `/objectives`, `/peers` (the log's address
+book), `/network` — the peers this node has actually reached, every worker
+heartbeating to it summed by device and class, its declared roles and hardware,
+and the roles the log evidences, kept apart as three kinds of fact —
+`/coordination?id=…` — one divided search's epoch clock, which slices the live
+workers hold, and the advisory task leases over them — `/log`, `/task?id=…` — a
 divided search while it runs: what the log has settled per worker beside
 what the workers report over `POST /progress`, kept apart and labelled, with
 the share of the expected Pollard rho cost and an ETA at the reported rate —

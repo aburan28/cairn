@@ -424,12 +424,22 @@ function ObjectiveRow({
               }
               tone="warn"
             />
-            <Link
-              href={`/task?id=${encodeURIComponent(objective.id)}`}
-              className="text-[11.5px] text-accent hover:underline"
-            >
-              workers and progress →
-            </Link>
+            {/* Two dashboards, side by side: what the log has paid for, and
+                how the search is being divided this epoch. */}
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+              <Link
+                href={`/task?id=${encodeURIComponent(objective.id)}`}
+                className="text-[11.5px] text-accent hover:underline"
+              >
+                workers and progress →
+              </Link>
+              <Link
+                href={`/coordination?id=${encodeURIComponent(objective.id)}`}
+                className="text-[11.5px] text-accent hover:underline"
+              >
+                who holds which slice →
+              </Link>
+            </div>
           </div>
         ) : (
           <span className="text-[12px] text-ink-3">no claim yet</span>

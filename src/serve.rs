@@ -53,8 +53,11 @@ use std::time::Duration;
 
 use crate::canonical::{digest_bytes, Value};
 use crate::deposit::{self, DepositDir, DepositError, MAX_PROXY_BYTES};
+use crate::lease::{self, Leases};
 use crate::ledger::{Codec, Ledger};
+use crate::network::{self, Hardware, NodeFacts, Roles};
 use crate::node::Node;
+use crate::p2p::sessions::Sessions;
 use crate::partition::{assignment_for, epoch_of, epoch_seconds};
 use crate::piecework::Piecework;
 use crate::progress::{self, Board, Heartbeat};
@@ -394,6 +397,21 @@ pub struct Serving {
     /// minute. The mutex is held for the few microseconds a lookup or an
     /// insert takes, never across a read of the log.
     progress: Mutex<Board>,
+    /// Advisory task leases, held exactly as heartbeats are and for the same
+    /// reasons. See [`crate::lease`].
+    leases: Mutex<Leases>,
+    /// The daemon's session roster, when this server runs inside a daemon.
+    ///
+    /// `None` on a plain `cairn serve`, which runs no p2p service and says so
+    /// at `GET /sessions` rather than publishing an empty mesh as if it were
+    /// a lonely one.
+    sessions: Option<Arc<Mutex<Sessions>>>,
+    /// What the operator declared this node for, from `CAIRN_ROLES`. Parsed
+    /// at construction so [`Serving::check_startup`] can refuse a role nobody
+    /// has heard of before the first request.
+    roles: Result<Roles, network::RolesError>,
+    /// This machine, probed once. A request handler does not read `/proc`.
+    hardware: Hardware,
 }
 
 /// How this server obtains the at-rest key, when the log is sealed.
@@ -418,7 +436,26 @@ impl Serving {
             deposits,
             key: None,
             progress: Mutex::new(Board::default()),
+            leases: Mutex::new(Leases::default()),
+            sessions: None,
+            roles: Roles::from_env(),
+            hardware: Hardware::probe(),
         }
+    }
+
+    /// Share the daemon's session roster, so `GET /sessions` and `GET /network`
+    /// can say whom this process has actually reached.
+    pub fn with_sessions(mut self, sessions: Arc<Mutex<Sessions>>) -> Serving {
+        self.sessions = Some(sessions);
+        self
+    }
+
+    /// Declare roles directly rather than from the environment. For callers
+    /// that parsed their own configuration, and for tests, which must not
+    /// set a process-wide variable under each other.
+    pub fn with_roles(mut self, roles: Roles) -> Serving {
+        self.roles = Ok(roles);
+        self
     }
 
     /// Override where deposit configs and grants live.
@@ -489,6 +526,11 @@ impl Serving {
     /// wants an unattended key should hold an unwrapped one with file
     /// permissions, which is what `cairn store keygen` writes by default.
     pub fn check_startup(&self) -> io::Result<()> {
+        // A role nobody has heard of is a typo, and a node that quietly dropped
+        // it would look exactly like one never meant to play it.
+        if let Err(error) = &self.roles {
+            return Err(io::Error::other(error.to_string()));
+        }
         let Some(key) = &self.key else {
             // A sealed log with no key named at all: the common case, and the
             // one worth naming precisely, since the CLI seals by default
@@ -636,9 +678,17 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             progress_of(stream, serving, &path["/progress/".len()..], &request)
         }
         ("GET", "/work_assignment") => work_assignment(stream, serving, &request),
+        ("GET", "/sessions") => sessions(stream, serving),
+        ("GET", "/network") => network(stream, serving),
+        ("GET", "/leases") => leases_index(stream, serving),
+        ("GET", path) if path.starts_with("/leases/") => {
+            leases_of(stream, serving, &path["/leases/".len()..])
+        }
         ("GET", path) if path == "/ui" || path.starts_with("/ui/") => ui_asset(stream, path),
         ("POST", "/submit") => submit(stream, &mut reader, serving, &request),
         ("POST", "/progress") => heartbeat(stream, &mut reader, serving, &request),
+        ("POST", "/lease") => lease_claim(stream, &mut reader, serving, &request),
+        ("POST", "/lease/release") => lease_release(stream, &mut reader, serving, &request),
         ("POST", "/objective/prepare") => prepare_objective(stream, &mut reader, &request),
         ("POST", "/deposit/grant") => deposit_grant(stream, &mut reader, serving, &request),
         ("PUT", path) if path.starts_with("/deposit/upload/") => deposit_upload(
@@ -803,6 +853,8 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /frontier/{id}"),
                 Value::string("GET /progress/{id}"),
                 Value::string("GET /work_assignment?objective_id=&node_id="),
+                Value::string("GET /leases"),
+                Value::string("GET /leases/{id}"),
                 Value::string("GET /log"),
                 Value::string("GET /checkpoint"),
                 Value::string("GET /chain"),
@@ -810,6 +862,8 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /health"),
                 Value::string("GET /verifiers"),
                 Value::string("GET /peers"),
+                Value::string("GET /sessions"),
+                Value::string("GET /network"),
                 // Named even when the table behind it is empty, because the
                 // whole point of this list is that a reader who cannot find a
                 // route learns why. A binary built without the `ui` feature
@@ -827,6 +881,8 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 }),
                 Value::string("POST /objective/prepare"),
                 Value::string("POST /progress"),
+                Value::string("POST /lease"),
+                Value::string("POST /lease/release"),
                 // Always listed: a node with no deposits configured still
                 // answers these, with unavailable / missing rather than 404,
                 // so a contributor learns "this node has no deposit" instead
@@ -1207,6 +1263,552 @@ fn progress_of(
         ),
     ));
     json(stream, 200, &Value::object(fields))
+}
+
+/// The peer sessions this process has run. See [`crate::p2p::sessions`].
+///
+/// Answered on a plain `cairn serve` too, as `available: false`: that
+/// process runs no p2p service, and a page should say so rather than draw a
+/// mesh of nobody.
+fn sessions(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let now = crate::time::unix_seconds();
+    match &serving.sessions {
+        Some(sessions) => {
+            let report = sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .report(now);
+            json(stream, 200, &report)
+        }
+        None => json(stream, 200, &no_sessions()),
+    }
+}
+
+/// What a publisher that reconciles with nobody says about its sessions.
+fn no_sessions() -> Value {
+    Value::object([
+        ("available", Value::Bool(false)),
+        ("peers", Value::Array(Vec::new())),
+        ("reached", Value::Int(0)),
+        ("recent", Value::Int(0)),
+        ("lost", Value::Int(0)),
+        ("unreached", Value::Int(0)),
+        (
+            "note",
+            Value::string(
+                "This process runs no p2p service: it is a plain `cairn serve`, publishing a \
+                 log another process writes. Sessions live in the process that reconciles -- \
+                 `cairn run`, or `cairn p2p --serve` -- and its /sessions answers them.",
+            ),
+        ),
+    ])
+}
+
+/// What this node is on the network: its declared roles and hardware, the
+/// peers it has reached, every worker heartbeating to it on any objective,
+/// and the roles the log shows identities playing. One route, because the
+/// reader's Network page is one page; three trust stories, kept in three
+/// fields -- see [`crate::network`].
+fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let now = crate::time::unix_seconds();
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let readiness = crate::verifiers::VerifierRegistry::new(&serving.root).readiness();
+    let servable: Vec<String> = readiness
+        .get("servable")
+        .and_then(Value::as_array)
+        .map(|kinds| {
+            kinds
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    // `check_startup` refused the `Err` case before the first request; an
+    // empty declaration is what an undeclared node is.
+    let roles = serving.roles.clone().unwrap_or_default();
+    let facts = NodeFacts {
+        accepts_submissions: serving.spool.is_some(),
+        runs_p2p: serving.sessions.is_some(),
+        servable_kinds: servable,
+    };
+    let warnings = roles.warnings(&facts);
+    let mut peers = match &serving.sessions {
+        Some(sessions) => sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .summary(now),
+        None => Value::object([
+            ("available", Value::Bool(false)),
+            ("reached", Value::Int(0)),
+            ("recent", Value::Int(0)),
+            ("lost", Value::Int(0)),
+            ("unreached", Value::Int(0)),
+        ]),
+    };
+    if let Value::Object(fields) = &mut peers {
+        // The log's address book beside the process's sessions, as two
+        // numbers that a reader must not add: an announcement is not a
+        // session.
+        fields.insert(
+            String::from("announced"),
+            Value::Int(node.peers().len() as i128),
+        );
+    }
+    let objectives = node.objectives();
+    let fleet = serving
+        .progress
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .fleet(now);
+    let pick = |key: &str| readiness.get(key).cloned().unwrap_or(Value::Null);
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("generated_at", Value::string(crate::time::timestamp())),
+            ("version", Value::string(env!("CARGO_PKG_VERSION"))),
+            (
+                "node",
+                Value::object([
+                    ("roles", roles.to_value()),
+                    (
+                        "warnings",
+                        Value::array(warnings.into_iter().map(Value::string)),
+                    ),
+                    ("hardware", serving.hardware.to_value()),
+                    (
+                        "verifiers",
+                        Value::object([
+                            ("servable", pick("servable")),
+                            ("unservable", pick("unservable")),
+                            ("sandbox", pick("sandbox")),
+                        ]),
+                    ),
+                    (
+                        "accepts_submissions",
+                        Value::Bool(facts.accepts_submissions),
+                    ),
+                    ("runs_p2p", Value::Bool(facts.runs_p2p)),
+                ]),
+            ),
+            ("peers", peers),
+            ("compute", compute_value(&fleet, &objectives)),
+            ("roles", network::evidenced(&node)),
+            (
+                "note",
+                Value::string(
+                    "Three kinds of fact, kept apart: `node` is what this process declares and \
+                     can see of its own machine; `peers.reached` and `compute` are what peers \
+                     and workers did and said recently, held in this process's memory and \
+                     verified by nobody; `roles.evidenced` is recomputed from the log. Only the \
+                     last is something a reader can check.",
+                ),
+            ),
+        ]),
+    )
+}
+
+/// The fleet summed by device, by device class and by objective, with the
+/// workers underneath. Rates are summed over live workers only: a stale
+/// worker's last rate is a number about the past.
+fn compute_value(
+    fleet: &[progress::FleetWorker],
+    objectives: &BTreeMap<String, Objective>,
+) -> Value {
+    use progress::Liveness;
+
+    #[derive(Default)]
+    struct Sum {
+        workers: i128,
+        live: i128,
+        steps_per_second: u128,
+        lanes: u128,
+    }
+    impl Sum {
+        fn add(&mut self, worker: &progress::FleetWorker) {
+            self.workers += 1;
+            if worker.status == Liveness::Live {
+                self.live += 1;
+                self.steps_per_second += u128::from(worker.steps_per_second.unwrap_or(0));
+                self.lanes += u128::from(worker.lanes.unwrap_or(0));
+            }
+        }
+        fn fields(&self) -> [(&'static str, Value); 4] {
+            [
+                ("workers", Value::Int(self.workers)),
+                ("live", Value::Int(self.live)),
+                (
+                    "steps_per_second",
+                    Value::Int(self.steps_per_second as i128),
+                ),
+                ("lanes", Value::Int(self.lanes as i128)),
+            ]
+        }
+    }
+
+    let mut total = Sum::default();
+    let (mut stale, mut gone) = (0i128, 0i128);
+    let mut by_device: BTreeMap<(String, &'static str), Sum> = BTreeMap::new();
+    let mut by_class: BTreeMap<&'static str, Sum> = BTreeMap::new();
+    let mut by_objective: BTreeMap<String, Sum> = BTreeMap::new();
+    let mut rows: Vec<&progress::FleetWorker> = fleet.iter().collect();
+    // Live first, then the fastest, then by name: the order a reader scans a
+    // fleet in.
+    rows.sort_by(|a, b| {
+        let rank = |status: Liveness| match status {
+            Liveness::Live => 0,
+            Liveness::Stale => 1,
+            Liveness::Gone => 2,
+        };
+        rank(a.status)
+            .cmp(&rank(b.status))
+            .then_with(|| b.steps_per_second.cmp(&a.steps_per_second))
+            .then_with(|| a.worker.cmp(&b.worker))
+    });
+    let mut workers = Vec::new();
+    for worker in rows {
+        let class = worker
+            .device
+            .as_deref()
+            .map(progress::device_class)
+            .unwrap_or("unreported");
+        let device = worker
+            .device
+            .clone()
+            .unwrap_or_else(|| String::from("unreported"));
+        total.add(worker);
+        match worker.status {
+            Liveness::Live => {}
+            Liveness::Stale => stale += 1,
+            Liveness::Gone => gone += 1,
+        }
+        by_device
+            .entry((device.clone(), class))
+            .or_default()
+            .add(worker);
+        by_class.entry(class).or_default().add(worker);
+        by_objective
+            .entry(worker.objective_id.clone())
+            .or_default()
+            .add(worker);
+        let opt_int = |value: Option<u64>| match value {
+            Some(v) => Value::Int(i128::from(v)),
+            None => Value::Null,
+        };
+        workers.push(Value::object([
+            ("worker", Value::string(worker.worker.clone())),
+            ("objective_id", Value::string(worker.objective_id.clone())),
+            (
+                "goal",
+                match objectives.get(&worker.objective_id) {
+                    Some(objective) => Value::string(objective.goal.clone()),
+                    None => Value::Null,
+                },
+            ),
+            ("status", Value::string(worker.status.as_str())),
+            ("age_seconds", Value::Int(i128::from(worker.age_seconds))),
+            ("device", Value::string(device)),
+            ("class", Value::string(class)),
+            ("lanes", opt_int(worker.lanes)),
+            (
+                "client",
+                match &worker.client {
+                    Some(client) => Value::string(client.clone()),
+                    None => Value::Null,
+                },
+            ),
+            ("steps_per_second", opt_int(worker.steps_per_second)),
+            ("epoch", opt_int(worker.epoch)),
+            (
+                "units",
+                match worker.units {
+                    Some((first, end)) => Value::object([
+                        ("first", Value::Int(i128::from(first))),
+                        ("end", Value::Int(i128::from(end))),
+                    ]),
+                    None => Value::Null,
+                },
+            ),
+        ]));
+    }
+    let mut devices: Vec<((String, &str), Sum)> = by_device.into_iter().collect();
+    devices.sort_by(|a, b| {
+        b.1.steps_per_second
+            .cmp(&a.1.steps_per_second)
+            .then_with(|| b.1.live.cmp(&a.1.live))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let mut classes: Vec<(&str, Sum)> = by_class.into_iter().collect();
+    classes.sort_by(|a, b| {
+        b.1.steps_per_second
+            .cmp(&a.1.steps_per_second)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    let mut per_objective: Vec<(String, Sum)> = by_objective.into_iter().collect();
+    per_objective.sort_by(|a, b| b.1.live.cmp(&a.1.live).then_with(|| a.0.cmp(&b.0)));
+    Value::object([
+        ("workers", Value::Array(workers)),
+        ("live", Value::Int(total.live)),
+        ("stale", Value::Int(stale)),
+        ("gone", Value::Int(gone)),
+        (
+            "steps_per_second",
+            Value::Int(total.steps_per_second as i128),
+        ),
+        ("lanes", Value::Int(total.lanes as i128)),
+        (
+            "devices",
+            Value::array(devices.into_iter().map(|((device, class), sum)| {
+                let mut fields = vec![
+                    ("device", Value::string(device)),
+                    ("class", Value::string(class)),
+                ];
+                fields.extend(sum.fields());
+                Value::object(fields)
+            })),
+        ),
+        (
+            "classes",
+            Value::array(classes.into_iter().map(|(class, sum)| {
+                let mut fields = vec![("class", Value::string(class))];
+                fields.extend(sum.fields());
+                Value::object(fields)
+            })),
+        ),
+        (
+            "objectives",
+            Value::array(per_objective.into_iter().map(|(id, sum)| {
+                let mut fields = vec![
+                    ("objective_id", Value::string(id.clone())),
+                    (
+                        "goal",
+                        match objectives.get(&id) {
+                            Some(objective) => Value::string(objective.goal.clone()),
+                            None => Value::Null,
+                        },
+                    ),
+                ];
+                fields.extend(sum.fields());
+                Value::object(fields)
+            })),
+        ),
+        (
+            "live_within_seconds",
+            Value::Int(i128::from(progress::LIVE_SECONDS)),
+        ),
+        (
+            "stale_within_seconds",
+            Value::Int(i128::from(progress::STALE_SECONDS)),
+        ),
+        (
+            "note",
+            Value::string(
+                "Every worker that has heartbeated to this node on any objective, from its own \
+                 reports: the device is what the worker called itself, the class a heuristic \
+                 over that name, and the rate the node's own measurement where it has one. \
+                 Summed over live workers. Not a record, not verified, and not what anyone is \
+                 paid for -- that is under `derived` on GET /progress/{id}.",
+            ),
+        ),
+    ])
+}
+
+/// Which objectives have any lease on this roster. No log read: the roster
+/// is the answer.
+fn leases_index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let objectives: Vec<Value> = serving
+        .leases
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .objectives()
+        .map(|id| Value::string(id.clone()))
+        .collect();
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("objectives", Value::Array(objectives)),
+            (
+                "note",
+                Value::string(
+                    "Objectives with at least one lease held in this node's memory; \
+                     GET /leases/{id} has the tasks. See POST /lease.",
+                ),
+            ),
+        ]),
+    )
+}
+
+/// Every task of one objective with a lease on it. See [`crate::lease`].
+fn leases_of(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    if !node.objectives().contains_key(id) {
+        return json_error(stream, 404, "no such objective in this log");
+    }
+    let now = crate::time::unix_seconds();
+    let report = serving
+        .leases
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .report(id, now);
+    json(stream, 200, &report)
+}
+
+/// Take or renew an advisory lease. See [`crate::lease`] for what that is and
+/// is not; in one line, a worker announcing a task before it starts, so that
+/// another worker can see it and work something else.
+///
+/// Refused for an objective this log does not hold, like a heartbeat, so a
+/// stranger cannot fill the roster with tasks against ids nobody is working.
+/// Accepted on a read-only node: nothing here touches the log or the queue.
+fn lease_claim(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    serving: &Serving,
+    request: &Request,
+) -> io::Result<()> {
+    let value = match read_json_body(reader, request, "/lease") {
+        Ok(value) => value,
+        Err((status, message)) => return json_error(stream, status, &message),
+    };
+    let (claim, ignored) = match lease::Claim::from_value(&value) {
+        Ok(decoded) => decoded,
+        Err(why) => return json_error(stream, 400, &why.to_string()),
+    };
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    if !node.objectives().contains_key(&claim.objective_id) {
+        return json_error(
+            stream,
+            404,
+            "no such objective in this log; a lease names an objective this node holds",
+        );
+    }
+    let now = crate::time::unix_seconds();
+    let (objective_id, task, holder) = (
+        claim.objective_id.clone(),
+        claim.task.clone(),
+        claim.holder.clone(),
+    );
+    let outcome = serving
+        .leases
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .claim(claim, now);
+    match outcome {
+        Ok(standing) => json(
+            stream,
+            202,
+            &Value::object([
+                ("recorded", Value::Bool(true)),
+                ("objective_id", Value::string(objective_id)),
+                ("task", Value::string(task)),
+                ("holder", Value::string(holder)),
+                ("held", Value::Bool(standing.held)),
+                ("renewed", Value::Bool(standing.renewed)),
+                ("held_by", Value::string(standing.holder)),
+                (
+                    "expires_at",
+                    Value::string(crate::time::format_iso8601_utc(
+                        i64::try_from(standing.expires_at).unwrap_or(i64::MAX),
+                    )),
+                ),
+                (
+                    "expires_in_seconds",
+                    Value::Int(i128::from(standing.expires_at.saturating_sub(now))),
+                ),
+                (
+                    "contended_with",
+                    Value::array(standing.contended_with.into_iter().map(Value::string)),
+                ),
+                (
+                    "ignored",
+                    Value::Array(ignored.into_iter().map(Value::string).collect()),
+                ),
+                (
+                    "note",
+                    Value::string(
+                        "Held in this node's memory and shown on GET /leases/{objective_id}. \
+                         `held: false` means somebody claimed this task first and is still on \
+                         it -- advice to work something else, not a refusal: nothing here \
+                         reserves work or reads into payment. Post again before expires_at to \
+                         keep it; release it when you are done.",
+                    ),
+                ),
+            ]),
+        ),
+        Err(lease::Refusal::Full(full)) => json_error(stream, 429, &full.to_string()),
+        Err(refusal @ lease::Refusal::AlreadyCompleted { .. }) => {
+            json_error(stream, 409, &refusal.to_string())
+        }
+        Err(refusal) => json_error(stream, 404, &refusal.to_string()),
+    }
+}
+
+/// End a lease the caller holds. See [`crate::lease::Outcome`] for the three
+/// ways a task ends and what each tells the next worker.
+fn lease_release(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    serving: &Serving,
+    request: &Request,
+) -> io::Result<()> {
+    let value = match read_json_body(reader, request, "/lease/release") {
+        Ok(value) => value,
+        Err((status, message)) => return json_error(stream, status, &message),
+    };
+    let (release, ignored) = match lease::Release::from_value(&value) {
+        Ok(decoded) => decoded,
+        Err(why) => return json_error(stream, 400, &why.to_string()),
+    };
+    let now = crate::time::unix_seconds();
+    let (objective_id, task, holder, outcome) = (
+        release.objective_id.clone(),
+        release.task.clone(),
+        release.holder.clone(),
+        release.outcome,
+    );
+    let result = serving
+        .leases
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .release(release, now);
+    match result {
+        Ok(()) => json(
+            stream,
+            202,
+            &Value::object([
+                ("released", Value::Bool(true)),
+                ("objective_id", Value::string(objective_id)),
+                ("task", Value::string(task)),
+                ("holder", Value::string(holder)),
+                ("outcome", Value::string(outcome.as_str())),
+                (
+                    "ignored",
+                    Value::Array(ignored.into_iter().map(Value::string).collect()),
+                ),
+                (
+                    "note",
+                    Value::string(
+                        "The lease is over as far as this node knows. `completed` closes the \
+                         task on this roster; `failed` and `abandoned` leave it open for the \
+                         next claimant. Nothing was written to the log.",
+                    ),
+                ),
+            ]),
+        ),
+        Err(lease::Refusal::Full(full)) => json_error(stream, 429, &full.to_string()),
+        Err(refusal) => json_error(stream, 404, &refusal.to_string()),
+    }
 }
 
 /// Take a worker's heartbeat. See [`crate::progress`] for what it is and is
@@ -3390,5 +3992,211 @@ mod tests {
         assert!(status.starts_with("HTTP/1.1 400"), "{status}");
         let (status, _) = get_json(addr, "/work_assignment?objective_id=sha256:nope&node_id=a");
         assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+    }
+
+    #[test]
+    fn sessions_are_unavailable_on_a_plain_publisher_and_reported_inside_a_daemon() {
+        use crate::p2p::sessions::Direction;
+
+        let dir = TempDir::new("sessions-route");
+        let (log, _) = orbit_search_log(&dir);
+        // A publisher alone runs no p2p service and says so.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let (status, body) = get_json(addr, "/sessions");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert_eq!(at(&body, "available"), &Value::Bool(false));
+        assert!(at(&body, "peers").as_array().unwrap().is_empty());
+
+        // Inside a daemon, the roster the loops write into is what answers.
+        let now = crate::time::unix_seconds();
+        let roster = Arc::new(Mutex::new(Sessions::new(now)));
+        {
+            let mut guard = roster.lock().unwrap();
+            guard
+                .succeeded(
+                    [7u8; 32],
+                    "10.1.2.3:9000".parse().ok(),
+                    Direction::Outbound,
+                    25,
+                    now,
+                )
+                .expect("kept");
+            guard.note_book(2, 9, now);
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+            .with_sessions(Arc::clone(&roster));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let (status, body) = get_json(addr, "/sessions");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert_eq!(at(&body, "available"), &Value::Bool(true));
+        assert_eq!(int(&body, "reached"), 1);
+        let peers = at(&body, "peers").as_array().unwrap();
+        assert_eq!(peers[0].get("status").unwrap().as_str(), Some("reached"));
+        assert_eq!(
+            peers[0].get("addr").unwrap().as_str(),
+            Some("10.1.2.3:9000")
+        );
+        assert_eq!(peers[0].get("entries_after"), Some(&Value::Int(25)));
+        assert_eq!(int(&body, "address_book.endpoints"), 2);
+        assert_eq!(int(&body, "address_book.hints"), 9);
+    }
+
+    #[test]
+    fn leases_are_held_contended_and_released_over_http_and_never_touch_the_log() {
+        let dir = TempDir::new("leases-route");
+        let (addr, id) = serve_orbit_search(&dir);
+        let before = get_json(addr, "/chain").1;
+
+        let claim = |holder: &str, task: &str| {
+            format!(
+                r#"{{"objective_id":"{id}","task":"{task}","holder":"{holder}","ttl_seconds":120,"units":{{"first":0,"end":64}},"epoch":3,"colour":"blue"}}"#
+            )
+        };
+        let (status, body) = ask_json(addr, "/lease", &claim("alice", "unit:7"));
+        assert!(
+            status.starts_with("HTTP/1.1 202"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert_eq!(at(&body, "held"), &Value::Bool(true));
+        assert_eq!(at(&body, "held_by").as_str(), Some("alice"));
+        assert_eq!(
+            at(&body, "ignored").as_array().unwrap(),
+            &[Value::string("colour")]
+        );
+
+        let (status, body) = ask_json(addr, "/lease", &claim("bob", "unit:7"));
+        assert!(status.starts_with("HTTP/1.1 202"), "{status}");
+        assert_eq!(at(&body, "held"), &Value::Bool(false));
+        assert_eq!(at(&body, "held_by").as_str(), Some("alice"));
+        assert_eq!(
+            at(&body, "contended_with").as_array().unwrap(),
+            &[Value::string("alice")]
+        );
+
+        let (status, body) = get_json(addr, &format!("/leases/{id}"));
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert_eq!(int(&body, "held"), 1);
+        assert_eq!(int(&body, "contended"), 1);
+        let tasks = at(&body, "tasks").as_array().unwrap();
+        assert_eq!(tasks[0].get("holder").unwrap().as_str(), Some("alice"));
+        let (_, index) = get_json(addr, "/leases");
+        assert_eq!(
+            at(&index, "objectives").as_array().unwrap(),
+            &[Value::string(id.clone())]
+        );
+
+        let release = |holder: &str, outcome: &str| {
+            format!(
+                r#"{{"objective_id":"{id}","task":"unit:7","holder":"{holder}","outcome":"{outcome}"}}"#
+            )
+        };
+        let (status, _) = ask_json(addr, "/lease/release", &release("mallory", "completed"));
+        assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+        let (status, body) = ask_json(addr, "/lease/release", &release("alice", "completed"));
+        assert!(status.starts_with("HTTP/1.1 202"), "{status}");
+        assert_eq!(at(&body, "outcome").as_str(), Some("completed"));
+        let (status, _) = ask_json(addr, "/lease", &claim("carol", "unit:7"));
+        assert!(status.starts_with("HTTP/1.1 409"), "{status}");
+
+        // An objective this log does not hold, a body that is not a lease,
+        // and a roster question about an objective nobody has.
+        let stranger = r#"{"objective_id":"sha256:nope","task":"t","holder":"h"}"#;
+        let (status, _) = ask_json(addr, "/lease", stranger);
+        assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+        let (status, _) = ask_json(addr, "/lease", r#"{"objective_id":"x"}"#);
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+        let (status, _) = get_json(addr, "/leases/sha256:nope");
+        assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+
+        assert_eq!(get_json(addr, "/chain").1, before, "the log is untouched");
+    }
+
+    #[test]
+    fn network_reports_declared_roles_the_fleet_and_what_the_log_evidences() {
+        let dir = TempDir::new("network-route");
+        let (log, id) = orbit_search_log(&dir);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+            .with_roles(Roles::parse("coordinator,verifier").expect("roles"));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let heartbeat = format!(
+            r#"{{"objective_id":"{id}","worker":"gpu-7","steps":1000,"steps_per_second":5000,"device":"NVIDIA RTX 4090","lanes":128,"client":"test"}}"#
+        );
+        let (status, _) = ask_json(addr, "/progress", &heartbeat);
+        assert!(status.starts_with("HTTP/1.1 202"), "{status}");
+        let heartbeat = format!(
+            r#"{{"objective_id":"{id}","worker":"mac-1","steps":10,"steps_per_second":40,"device":"Apple M3 Max","lanes":16}}"#
+        );
+        let (status, _) = ask_json(addr, "/progress", &heartbeat);
+        assert!(status.starts_with("HTTP/1.1 202"), "{status}");
+
+        let (status, body) = get_json(addr, "/network");
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert_eq!(
+            at(&body, "node.roles.declared").as_array().unwrap(),
+            &[Value::string("coordinator"), Value::string("verifier")]
+        );
+        // Read-only, so the coordinator declaration is contradicted and said so.
+        let warnings = at(&body, "node.warnings").as_array().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("coordinator")),
+            "{warnings:?}"
+        );
+        assert_eq!(at(&body, "node.accepts_submissions"), &Value::Bool(false));
+        assert_eq!(at(&body, "node.runs_p2p"), &Value::Bool(false));
+        assert!(at(&body, "node.hardware.os").as_str().is_some());
+        assert_eq!(at(&body, "peers.available"), &Value::Bool(false));
+        assert_eq!(int(&body, "peers.announced"), 0);
+
+        assert_eq!(int(&body, "compute.live"), 2);
+        assert_eq!(int(&body, "compute.steps_per_second"), 5040);
+        assert_eq!(int(&body, "compute.lanes"), 144);
+        let classes = at(&body, "compute.classes").as_array().unwrap();
+        assert_eq!(classes[0].get("class").unwrap().as_str(), Some("gpu"));
+        assert_eq!(classes[1].get("class").unwrap().as_str(), Some("apple"));
+        let workers = at(&body, "compute.workers").as_array().unwrap();
+        assert_eq!(workers[0].get("worker").unwrap().as_str(), Some("gpu-7"));
+        assert!(workers[0].get("goal").unwrap().as_str().is_some());
+
+        // The fixture's objective was funded, and two claims were paid: one
+        // coordinator and two executors the log evidences, and no attestor.
+        assert!(int(&body, "roles.coordinators.total") >= 1);
+        assert_eq!(int(&body, "roles.executors.total"), 2);
+        assert_eq!(int(&body, "roles.verifiers.total"), 0);
+    }
+
+    #[test]
+    fn an_unknown_role_is_refused_at_startup() {
+        let dir = TempDir::new("roles-startup");
+        let (log, _) = orbit_search_log(&dir);
+        let mut serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")));
+        serving.roles = Err(network::RolesError {
+            unknown: "verifer".into(),
+        });
+        let error = serving.check_startup().expect_err("refused");
+        assert!(error.to_string().contains("verifer"), "{error}");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+            .with_roles(Roles::parse("relay").expect("roles"));
+        serving.check_startup().expect("a known role starts");
     }
 }

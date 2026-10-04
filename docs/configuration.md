@@ -33,6 +33,7 @@ and they are not conveniences.
 | `CAIRN_LAB` | `./.cairn-lab` | the lab directory for `cairn lab`, when `--lab` is not given |
 | `CAIRN_LAB_IDENTITY` | — | the ed25519 identity file `cairn lab` signs ops with, when `--identity` is not given |
 | `CAIRN_LAB_SANDBOX` | `auto` | backend for `cairn lab exec` and the lab's MCP `lab_exec`: `auto` (gVisor, else bubblewrap, else refuse), `runsc`, `bwrap`, or `none` (unconfined; the receipt says so). The only way an MCP agent's runs can be unconfined |
+| `CAIRN_ROLES` | unset | comma-separated roles this node declares on `GET /network` and the reader's Network page: `coordinator`, `executor`, `verifier`, `relay`. A hint about what the operator intends the node for, never a permission; an unknown name refuses to start. [serving.md](serving.md#roles-what-a-node-says-it-is-for) |
 
 `RUST_LOG` is **not** read. This is not `env_logger`, and pretending otherwise
 would promise a directive syntax (`p2p=debug,swarm=trace`) that does not work.
