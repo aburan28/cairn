@@ -1,0 +1,25 @@
+{
+  "created_at": "2026-10-04T00:00:00+00:00",
+  "funder": "cairn-examples",
+  "goal": "Reproduce the point count of a toy curve",
+  "statement": "A replay objective: the claim is not a witness but a set of exact figures a pinned command recomputes. Submit {\"results\": {...}} naming group_order, affine_points, generator_order and two_torsion_points for y^2 = x^3 + 2x + 3 over F_97. The verifier runs replay/reproduce.py in a jail and accepts only if every declared field comes out identical. This is the shape an experiment's run record takes on the network: the claim is what the run printed, and the proof is that the run prints it again for a stranger.",
+  "reward": 10000,
+  "verifier": {
+    "kind": "replay",
+    "command": ["python3", "replay/reproduce.py"],
+    "cwd": "examples/replay-reproduction",
+    "reproducible_fields": ["group_order", "affine_points", "generator_order", "two_torsion_points"],
+    "timeout_seconds": 60
+  },
+  "artifact_schema": {
+    "type": "object",
+    "required": ["results"],
+    "properties": {
+      "results": {
+        "type": "object",
+        "description": "Exactly the JSON object the pinned command prints on stdout, or a superset of it; every field in reproducible_fields must be present and equal."
+      }
+    },
+    "example": {"results": {"group_order": 100, "affine_points": 99, "generator_order": 5, "two_torsion_points": 3}}
+  }
+}

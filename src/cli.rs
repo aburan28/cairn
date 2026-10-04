@@ -94,7 +94,9 @@ fn p2p_usage(code: i32) -> ! {
          --max-queue   refuse submissions past this many undrained records\n\
          --key-file    at-rest key for a sealed log (default: the CLI's own)\n\
          --proxy       route every dial through a SOCKS5 proxy, e.g.\n              \
-         socks5://127.0.0.1:9050 for a Tor client or obfs4 bridge\n\n\
+         socks5://127.0.0.1:9050 for a Tor client or obfs4 bridge\n\
+         --attest-identity FILE  run the validator loop: re-verify every claim\n              \
+         and stand behind what this node finds, under this key's bond\n\n\
          With --serve this is a whole node in one process: it holds the log's\n\
          write lock, so it is the only thing that *can* admit what it queues.\n\
          The complete node with MCP and the embedded reader is `cairn run`.",
@@ -119,6 +121,7 @@ pub fn p2p(args: Vec<String>, globals: Globals) -> i32 {
     let mut max_queue = None;
     let mut key_file = globals.key_file.map(|p| p.display().to_string());
     let mut proxy = None;
+    let mut attest_identity = None;
     let mut bootstrap = Vec::new();
 
     let mut args = args.into_iter();
@@ -137,6 +140,7 @@ pub fn p2p(args: Vec<String>, globals: Globals) -> i32 {
             "--max-queue" => &mut max_queue,
             "--key-file" => &mut key_file,
             "--proxy" => &mut proxy,
+            "--attest-identity" => &mut attest_identity,
             "--bootstrap" => {
                 bootstrap.push(args.next().unwrap_or_else(|| p2p_usage(2)));
                 continue;
@@ -165,6 +169,7 @@ pub fn p2p(args: Vec<String>, globals: Globals) -> i32 {
     config.serve = serve;
     config.key_file = key_file.map(PathBuf::from);
     config.proxy = proxy;
+    config.attest_identity = attest_identity.map(PathBuf::from);
     if let Some(text) = fanout {
         config.fanout = text.parse().unwrap_or_else(|_| p2p_usage(2));
     }

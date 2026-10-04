@@ -35,6 +35,8 @@ and they are not conveniences.
 | `CAIRN_LAB_IDENTITY` | — | the ed25519 identity file `cairn lab` signs ops with, when `--identity` is not given |
 | `CAIRN_LAB_SANDBOX` | `auto` | backend for `cairn lab exec` and the lab's MCP `lab_exec`: `auto` (gVisor, else bubblewrap, else refuse), `runsc`, `bwrap`, or `none` (unconfined; the receipt says so). The only way an MCP agent's runs can be unconfined |
 | `CAIRN_ROLES` | unset | comma-separated roles this node declares on `GET /network` and the reader's Network page: `coordinator`, `executor`, `verifier`, `relay`. A hint about what the operator intends the node for, never a permission; an unknown name refuses to start. [serving.md](serving.md#roles-what-a-node-says-it-is-for) |
+| `CAIRN_ATTEST_IDENTITY` | unset | a signing identity file (`cairn identity --out`): set, a daemon (`run`, `p2p`, `serve --p2p-listen`) runs the validator loop under it, re-verifying every claim it has not stood behind each tick and attesting what it finds under bond. The flag `--attest-identity` wins. [bonded-verification.md](bonded-verification.md#the-validator-loop-attest-serve-and---attest-identity) |
+| `CAIRN_ATTEST_LIMIT` | `8` | verifier runs per tick for that loop |
 | `CAIRN_AGENT_NODES` | — | comma-separated node URLs `cairn agent run` and `install` register with, when `--node` is not given; `http://` only, since a node's HTTP side is plaintext and belongs behind a tunnel |
 | `CAIRN_AGENT_NAME` | the hostname | the name the agent registers under and leases tasks as |
 | `CAIRN_AGENT_ROLES` | `executor` | roles the registration declares: the same words as `CAIRN_ROLES`, the same hint-not-permission rule |

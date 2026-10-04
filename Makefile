@@ -91,7 +91,7 @@ CLIENT ?= claude
 # `ui/node_modules` is deliberately absent: it is a real directory whose
 # freshness against the lockfile is the whole point of the rule.
 .PHONY: help build debug cli mcp mcp-setup p2p seed seeds serve node ui ui-check ui-build site-snapshot install demo ratchet shard-demo identity autoresearch autoresearch-gui mac-app ios-check ios-app \
-	interop differential fuzz mcp-smoke serve-smoke node-smoke agent-demo canary dispute attest arena blob rekey p2p-demo try examples \
+	interop differential fuzz mcp-smoke serve-smoke node-smoke agent-demo validator-demo canary dispute attest arena blob rekey p2p-demo try examples \
 	test test-rust \
 	test-reference fmt clippy docs tla check \
 	dmg deb rpm musl-build packaging-check
@@ -299,6 +299,11 @@ dispute: build
 
 attest: build
 	./scripts/attestation-demo.sh
+
+# The validator loop end to end: attest serve, a second pass that posts
+# nothing, audit --rerun, GET /knowledge. See docs/bonded-verification.md.
+validator-demo: build
+	./scripts/validator-demo.sh
 
 arena: build
 	"$(CLI)" arena

@@ -20,6 +20,7 @@
 
 pub mod agent;
 pub mod arena;
+pub mod attestor;
 pub mod attribution;
 pub mod blobs;
 pub mod canary;

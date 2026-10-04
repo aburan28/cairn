@@ -21,7 +21,8 @@ Every directory under `examples/` is listed; the table was regenerated from
 the tree on 2026-08-25 (19 directories, 32 objective files), and the *status*
 column for every committed artifact is what `cairn try` reported on that date.
 `hash-differential` was added on 2026-08-29, taking the tree to 20 directories
-and 40 objective files; its own row was measured then.
+and 40 objective files; its own row was measured then. `replay-reproduction`
+was added on 2026-10-04 (21 directories, 41 objective files).
 
 | example | verifier | reward | status | needs | worked artifact |
 |---|---|---|---|---|---|
@@ -39,6 +40,7 @@ and 40 objective files; its own row was measured then.
 | [`ramsey`](ramsey/) | certificate | 250000 | worked — a witness to a known bound, `R(4,4) = 18` | python3 | `artifacts/paley-17.json` |
 | [`attested-fact`](attested-fact/) | certificate | 100000 | worked — verifies **provenance, not truth**; read its README | python3 | `artifacts/sourced.json`; `misquoted`, `one-source` and `tampered-source` are there to be refused |
 | [`programbench-vetted`](programbench-vetted/) | evaluator (maximize) + ratchet | 1000000 | worked — a held-out benchmark task graded on a log | python3 | `artifacts/resolved.json`; `partial`, `almost`, `cheating`, `hanging` score lower or are refused, by design |
+| [`replay-reproduction`](replay-reproduction/) | replay | 10000 | worked — the one `replay` example: exact integers a pinned command prints again | python3 | `artifact.json` |
 | [`lean`](lean/) | lean | 50000 | worked, if you have Lean — `unavailable` on a node without it | a Lean 4 toolchain on PATH | `artifact.json`; `hole.json` is the `sorry` the verifier refuses |
 | [`elliptic-rank`](elliptic-rank/) | certificate + exact evaluator | 20000000 – 64000000 | **4 open rank-record bounties** | python3 | `artifacts/rank-30-record.json` — a baseline, rejected by the rank-31 objective |
 | [`certicom-ecdlp`](certicom-ecdlp/) | certificate | 120000 / 400000 / 2000000 | **open bounty** ×3 — two solvable NUMS rungs (50 and 60 bits) and Certicom's ECCp-131, posted as a frontier and not expected to settle | python3 | none |

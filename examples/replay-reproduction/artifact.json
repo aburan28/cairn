@@ -1,0 +1,8 @@
+{
+  "results": {
+    "affine_points": 99,
+    "generator_order": 5,
+    "group_order": 100,
+    "two_torsion_points": 3
+  }
+}

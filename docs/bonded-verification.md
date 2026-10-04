@@ -165,6 +165,68 @@ that blindly accepts.
 `Docket::mix` existed and said so; nothing was asking it. The scenario now
 asserts both halves are present before it measures anything.
 
+## The validator loop: `attest serve` and `--attest-identity`
+
+Everything above priced *lying*. It left standing behind a verdict a thing
+an operator did by hand, one claim at a time, which is why a node that
+declared `CAIRN_ROLES=verifier` had a role and no duty. The loop is the
+duty, in `src/attestor.rs`:
+
+```sh
+# inside the daemon, under the write lock it already holds
+cairn run --attest-identity validator.json
+CAIRN_ATTEST_IDENTITY=validator.json cairn p2p --serve 0.0.0.0:8080 ...
+# or one pass at a time, for a log no daemon is writing
+cairn attest serve --identity validator.json [--limit N] [--watch SECONDS]
+```
+
+Every tick (every pass), it takes the claims this identity has not stood
+behind, newest first and at most `--limit` of them (`CAIRN_ATTEST_LIMIT`,
+default 8), runs each one's pinned verifier **on this node**, and posts an
+attestation saying what this node found, signed and bonded. Three rules fall
+out of what an attestation is:
+
+- **It attests what it found, never what the log says.** The recorded
+  verdict is the admitting node's; this is a second machine's. Where they
+  differ the loop logs a warning naming both and still posts its own,
+  because an attestation that copied the record would be the rubber-stamper
+  the canary docket exists to catch. A disagreement is exactly what a docket
+  should look at next.
+- **It never attests a verdict that does not settle.** `unavailable` and
+  `invalid_spec` blame this host or the objective, not the artifact, and the
+  record refuses them anyway. Such a claim is set aside and tried again after
+  a cooldown -- a toolchain may be installed, a blob may arrive -- and is
+  counted as *unavailable here* in the pass's tally, a fact about the host.
+- **It stops when it cannot cover a bond.** On a log that declares a supply
+  each attestation stakes `VERIFICATION_BOND`; the first refusal for want of
+  units ends the pass and says so, rather than grinding through refusals.
+  The claim stays a candidate for when units arrive.
+
+Why it is in the daemon's tick rather than a route: an attestation is a
+record, and a record is appended by whoever holds the log's write lock.
+`POST /submit` takes objectives, commitments and claims and nothing else,
+and the p2p layer does not exchange attestations at all, so a validator is
+not a stranger posting over HTTP -- it is a node, with the log, holding the
+lock. `attest serve` is the same loop for a validator that runs no daemon
+(a log that arrives by `cairn lab`, by bundle, or by a sync the operator
+runs between passes); it takes the lock for exactly one pass and releases
+it, and refuses with a pointer to `--attest-identity` if a daemon has it.
+
+What a reader gets: `GET /knowledge/{claim_id}` publishes who stood behind
+a claim's verdict under bond, with each attestation's status and whether a
+docket caught it, *beside* the standing and not inside it
+([serving.md](serving.md#knowledge-what-is-believed-and-who-stood-behind-it)).
+`scripts/validator-demo.sh` runs the loop across real epochs and checks
+every property in this section against the binary.
+
+**Still open, and now sharper.** The loop makes verification *routine*; it
+does not make it *paid*. An attestation that was right earns nothing, so the
+only reason to run the loop is the one a research program has for wanting
+its results checked -- and a network of strangers will need the per-epoch
+verifier payment this document's residual already names. And an attestation
+posted on one node stays on that node: until `p2p::sync` carries the record
+kind, a validator's work is visible only to readers of its own log.
+
 ## Residual
 
 **Nothing requires an attestation.** An operator that stands behind nothing
