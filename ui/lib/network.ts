@@ -20,6 +20,8 @@
  * node published, for a view the page filters on the client.
  */
 
+import type { Liveness } from "./progress";
+
 import { expectFields } from "./shape";
 
 export type Reach = "reached" | "recent" | "lost" | "unreached";
@@ -106,6 +108,64 @@ export type DeviceRow = Sum & { device: string; class: DeviceClass };
 export type ClassRow = Sum & { class: DeviceClass };
 export type ObjectiveRow = Sum & { objective_id: string; goal: string | null };
 
+/** One accelerator as a host's agent described it. */
+export type HostGpu = {
+  index: number;
+  vendor: string;
+  model: string | null;
+  memory_mb: number | null;
+  bus: string | null;
+  driver: string | null;
+};
+
+/** A machine that registered with `cairn agent` over `POST /hosts`. */
+export type HostRow = {
+  host: string;
+  agent: string | null;
+  status: Liveness;
+  age_seconds: number;
+  first_seen: string;
+  received_at: string;
+  posts: number;
+  roles: string[];
+  hardware: {
+    cpus?: number | null;
+    cpu_model?: string | null;
+    memory_mb?: number | null;
+    gpus?: HostGpu[];
+    os?: string;
+    arch?: string;
+    kernel?: string | null;
+    kvm?: boolean;
+  };
+  sandboxes: Record<string, { usable?: boolean; via?: string[]; gpu?: boolean; why?: string | null }>;
+  usable_sandboxes: string[];
+  jobs: { running?: number; capacity?: number; completed?: number; failed?: number };
+  objectives: string[];
+};
+
+/**
+ * The host roster: registered machines beside heartbeating workers, and the
+ * two are never added. A host is where workers run; a box with eight GPUs
+ * and no worker yet is capacity, not work.
+ */
+export type Hosts = {
+  hosts: HostRow[];
+  registered: number;
+  live: number;
+  stale: number;
+  gone: number;
+  /** Summed over live hosts only. */
+  cpus: number;
+  memory_mb: number;
+  gpus: number;
+  jobs: { running: number; capacity: number };
+  sandboxes: { sandbox: string; hosts: number }[];
+  live_within_seconds: number;
+  stale_within_seconds: number;
+  note: string;
+};
+
 export type Compute = {
   workers: FleetWorker[];
   live: number;
@@ -116,6 +176,8 @@ export type Compute = {
   devices: DeviceRow[];
   classes: ClassRow[];
   objectives: ObjectiveRow[];
+  /** Absent on a node that predates `POST /hosts`. */
+  hosts?: Hosts;
   live_within_seconds: number;
   stale_within_seconds: number;
   note: string;
@@ -345,4 +407,28 @@ export function share(part: number | null, total: number): number {
  */
 export function roleWarning(role: RoleName, warnings: string[]): string | null {
   return warnings.find((warning) => warning.startsWith(`declares ${role}`)) ?? null;
+}
+
+/**
+ * One line for a registered host: its CPUs, memory and GPUs as it described
+ * them, with absent numbers shown as absent rather than as zero. A host
+ * that reported no `hardware` block at all is "unreported".
+ */
+export function describeHost(row: Pick<HostRow, "hardware">): string {
+  const hw = row.hardware ?? {};
+  const parts: string[] = [];
+  if (typeof hw.cpus === "number") parts.push(`${hw.cpus} cpus`);
+  if (typeof hw.memory_mb === "number") parts.push(formatMemory(hw.memory_mb));
+  const gpus = hw.gpus ?? [];
+  if (gpus.length > 0) {
+    const models = new Map<string, number>();
+    for (const gpu of gpus) {
+      const name = gpu.model ?? gpu.vendor;
+      models.set(name, (models.get(name) ?? 0) + 1);
+    }
+    parts.push(
+      [...models.entries()].map(([name, count]) => (count > 1 ? `${count}× ${name}` : name)).join(", "),
+    );
+  }
+  return parts.length === 0 ? "unreported" : parts.join(" · ");
 }

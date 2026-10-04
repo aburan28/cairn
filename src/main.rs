@@ -816,6 +816,11 @@ enum Command {
     Lab {
         args: Vec<String>,
     },
+    /// The host agent: hardware registration and sandboxed executor jobs
+    /// under systemd. Parses its own tail; see `src/agent/cli.rs`.
+    Agent {
+        args: Vec<String>,
+    },
     /// Score candidate artifacts locally and submit only the ones that already
     /// pass. The proposer loop.
     Propose {
@@ -1476,6 +1481,9 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "lab" => Command::Lab {
             args: cursor.rest(),
         },
+        "agent" => Command::Agent {
+            args: cursor.rest(),
+        },
         "canon" => {
             let mut input: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1611,6 +1619,7 @@ fn reads_legacy_log_as_a_level(command: &Command) -> bool {
             | Command::GenBootstrap { .. }
             | Command::Seeds { .. }
             | Command::Arena { .. }
+            | Command::Agent { .. }
     )
 }
 
@@ -3883,6 +3892,16 @@ fn print_help(out: &mut dyn Write) {
         "      messages, and runs in gVisor sandboxes; never touches the log",
     );
     say(out, "      (`cairn lab help` lists its commands)");
+    say(out, "  agent <command> ...");
+    say(
+        out,
+        "      the host agent: register this machine's CPUs, memory and GPUs with",
+    );
+    say(
+        out,
+        "      a node and run executor jobs under gVisor or Kata, as a systemd",
+    );
+    say(out, "      service (`cairn agent help` lists its commands)");
     say(out, "  blob [ls|need|publish|gc]");
     say(
         out,
@@ -9754,6 +9773,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Seeds { args } => Ok(cairn::cli::seeds(args.clone())),
         Command::Arena { args } => Ok(cairn::cli::arena(args.clone())),
         Command::Lab { args } => Ok(cairn::lab::cli::main(args.clone())),
+        Command::Agent { args } => Ok(cairn::agent::cli::main(args.clone())),
         Command::Propose {
             objective,
             artifacts,
@@ -12348,6 +12368,7 @@ mod tests {
             "deposit",
             "store",
             "sync",
+            "agent",
             "log",
             "help",
             "version",

@@ -290,6 +290,24 @@ should work on a log deliberately offline from the network; `cairn run` serves
 the same protocol from the daemon's process. Tools are listed in
 [agents.md](agents.md).
 
+### `agent <command>`
+
+The host agent: put a Linux machine on the network as a place executor jobs
+run. `probe` prints the machine (CPUs, memory, NUMA, GPUs, cgroup caps) and
+which sandboxes work here; `run --node URL …` is the loop a service runs,
+registering with each node every `--interval` seconds (default 60) over
+`POST /hosts` and running job specs dropped into `<data>/jobs/queue`, each
+under gVisor or Kata (`--sandbox auto|strongest|kata|runsc|bwrap|none`,
+`--parallel N`, `--once` to register and drain the queue then exit);
+`exec (--image I | --rootfs DIR) [limits] -- CMD` runs one job now and prints
+its receipt; `submit FILE` validates and queues a spec; `jobs` lists them;
+`install --node URL … [--user U] [--print] [--no-start]` writes
+`cairn-agent.service` and `/etc/cairn-agent/agent.env`, creates the user,
+enables and starts it; `uninstall [--purge]` reverses that. Every flag has a
+`CAIRN_AGENT_*` variable. Exit codes: `0` done, `1` a job failed, `2` usage,
+`3` nothing could be learned (no sandbox, no node answered, no systemd).
+[agent.md](agent.md) has the job format, the receipt and the unit.
+
 ### `drain --queue DIR [--dry-run]`
 
 Admit records a server queued, re-checking every rule against the whole log.

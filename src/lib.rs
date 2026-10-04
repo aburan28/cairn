@@ -18,6 +18,7 @@
 //! 3. **Money arithmetic is checked.** Overflow returns an error rather than
 //!    wrapping, in debug and release alike.
 
+pub mod agent;
 pub mod arena;
 pub mod attribution;
 pub mod blobs;
@@ -35,6 +36,7 @@ pub mod drand;
 pub mod frontier;
 pub mod gossip;
 pub mod hex;
+pub mod hosts;
 pub mod incentive;
 pub mod knowledge;
 pub mod lab;

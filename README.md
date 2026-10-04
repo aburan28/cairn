@@ -142,6 +142,12 @@ as its command with `run` as its only argument. Operational messages stay on
 stderr and stdout contains JSON-RPC only. Closing MCP stdin stops the combined
 node; an interactive operator can stop it with Ctrl-C.
 
+A machine that should *work* for the network rather than hold its log -- a
+GPU box, a cluster node -- runs the host agent instead: `sudo cairn agent
+install --node http://node:8080` registers its CPUs, memory and GPUs with a
+node every minute and runs executor jobs under gVisor or Kata Containers, as a
+systemd service. [docs/agent.md](docs/agent.md).
+
 For example, a project-local Claude Code configuration can launch the complete
 node instead of the standalone `cairn mcp` server (once a separate `cairn-mcp`
 binary):

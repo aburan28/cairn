@@ -4,12 +4,14 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type FleetWorker,
+  type HostRow,
   type NetworkResponse,
   type Session,
   type SessionsResponse,
   NODE_URL,
   RouteMissing,
   classLabel,
+  describeHost,
   fetchNetwork,
   fetchSessions,
   fleetTotals,
@@ -418,6 +420,79 @@ function Dashboard({
       </SectionHeading>
       <SessionsTable sessions={sessions} announced={peers.announced} />
 
+      {/* -- registered hosts -------------------------------------------- */}
+      <SectionHeading
+        count={compute.hosts?.registered ?? 0}
+        aside={
+          <span className="text-[11px] text-warn">
+            reported by <span className="mono">cairn agent</span>; never added to the workers below
+          </span>
+        }
+      >
+        Registered hosts
+      </SectionHeading>
+      {!compute.hosts ? (
+        <EmptyState title="This node predates host registrations">
+          A node built with <span className="mono">POST /hosts</span> lists the machines whose{" "}
+          <span className="mono">cairn agent</span> registered their CPUs, memory, GPUs and sandboxes
+          here.
+        </EmptyState>
+      ) : compute.hosts.hosts.length === 0 ? (
+        <EmptyState title="No host has registered with this node">
+          <span className="mono">cairn agent install --node …</span> on a machine puts it here within a
+          minute: what it is, which jails it can run a job in, and what it is running.
+        </EmptyState>
+      ) : (
+        <div className="mb-5 grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
+          <Box title="Live capacity" aside={<span className="text-[11px] font-normal text-warn">reported</span>}>
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[12.5px]">
+              <dt className="text-ink-3">hosts</dt>
+              <dd className="mono text-ink">
+                {compute.hosts.live} live · {compute.hosts.stale} stale · {compute.hosts.gone} gone
+              </dd>
+              <dt className="text-ink-3">cpus</dt>
+              <dd className="mono text-ink">{compute.hosts.cpus}</dd>
+              <dt className="text-ink-3">memory</dt>
+              <dd className="mono text-ink">{formatMemory(compute.hosts.memory_mb)}</dd>
+              <dt className="text-ink-3">gpus</dt>
+              <dd className="mono text-ink">{compute.hosts.gpus}</dd>
+              <dt className="text-ink-3">jobs</dt>
+              <dd className="mono text-ink">
+                {compute.hosts.jobs.running} running of {compute.hosts.jobs.capacity}
+              </dd>
+              <dt className="text-ink-3">sandboxes</dt>
+              <dd className="mono text-ink">
+                {compute.hosts.sandboxes.length === 0
+                  ? "none usable"
+                  : compute.hosts.sandboxes.map((row) => `${row.sandbox} ×${row.hosts}`).join(" · ")}
+              </dd>
+            </dl>
+            <p className="hint mt-3">{compute.hosts.note}</p>
+          </Box>
+          <Box title="By host" flush>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[40rem] border-collapse text-left text-[12.5px]">
+                <thead>
+                  <tr className="border-b border-edge text-[11px] text-ink-3">
+                    <th className="px-4 py-2 font-medium">Host</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                    <th className="px-3 py-2 font-medium">Hardware</th>
+                    <th className="px-3 py-2 font-medium">Sandboxes</th>
+                    <th className="px-3 py-2 text-right font-medium">Jobs</th>
+                    <th className="px-4 py-2 font-medium">Last seen</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-edge-y">
+                  {compute.hosts.hosts.map((row) => (
+                    <HostLine key={row.host} row={row} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Box>
+        </div>
+      )}
+
       {/* -- hardware ---------------------------------------------------- */}
       <SectionHeading
         count={compute.devices.length}
@@ -811,6 +886,41 @@ function WorkerLine({ worker }: { worker: FleetWorker }) {
         )}
       </td>
       <td className="mono px-4 py-2.5 text-[12px] text-ink-3">{formatAge(worker.age_seconds)}</td>
+    </tr>
+  );
+}
+
+function HostLine({ row }: { row: HostRow }) {
+  const tone = row.status === "live" ? "accent" : row.status === "stale" ? "warn" : "bad";
+  const jobs = row.jobs ?? {};
+  return (
+    <tr className="align-top hover:bg-surface-2">
+      <td className="mono px-4 py-2.5 text-ink">
+        {row.host}
+        <div className="text-[11px] text-ink-3">
+          {row.roles.length > 0 ? row.roles.join(", ") : "no role declared"}
+          {row.agent ? ` · ${row.agent}` : ""}
+        </div>
+      </td>
+      <td className="px-3 py-2.5">
+        <Badge tone={tone}>{row.status}</Badge>
+      </td>
+      <td className="px-3 py-2.5 text-ink">
+        {describeHost(row)}
+        {row.hardware?.cpu_model && <div className="text-[11px] text-ink-3">{row.hardware.cpu_model}</div>}
+      </td>
+      <td className="mono px-3 py-2.5 text-ink-2">
+        {row.usable_sandboxes.length > 0 ? row.usable_sandboxes.join(", ") : <span className="text-bad">none</span>}
+      </td>
+      <td className="mono px-3 py-2.5 text-right text-ink-2">
+        {jobs.running ?? 0}/{jobs.capacity ?? 0}
+        {typeof jobs.completed === "number" && (
+          <div className="text-[11px] text-ink-3">
+            {jobs.completed} done · {jobs.failed ?? 0} failed
+          </div>
+        )}
+      </td>
+      <td className="mono px-4 py-2.5 text-[12px] text-ink-3">{formatAge(row.age_seconds)}</td>
     </tr>
   );
 }

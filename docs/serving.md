@@ -42,15 +42,17 @@ record instead.
 | `GET /` (and `/index`) | what this node is and every route it answers, including the ones it has disabled |
 | `GET /peers` | the `peer` records in this log — **known** peers, not open connections |
 | `GET /sessions` | the peer sessions this process has run, from its own memory: `reached` within two minutes, `recent` within thirty, `lost` after — see [Sessions](#sessions-whom-this-process-has-reached). `available: false` on a plain `cairn serve`, which reconciles with nobody |
-| `GET /network` | one answer for the reader's Network page: this node's declared roles (`CAIRN_ROLES`) and hardware, the sessions summary, every worker heartbeating to it on any objective summed by device and class, and the roles the log evidences identities playing — see [Roles](#roles-what-a-node-says-it-is-for) |
+| `GET /network` | one answer for the reader's Network page: this node's declared roles (`CAIRN_ROLES`) and hardware, the sessions summary, every worker heartbeating to it on any objective summed by device and class, the registered hosts under `compute.hosts`, and the roles the log evidences identities playing — see [Roles](#roles-what-a-node-says-it-is-for) |
 | `GET /leases` | objectives with an advisory lease held in this node's memory |
 | `GET /leases/{id}` | one objective's task leases: who holds each task, who contended for it, what was released and how — see [Leases](#leases-saying-what-you-are-about-to-work) |
+| `GET /hosts` | machines that registered with `cairn agent`: each host's CPUs, memory, GPUs and the sandboxes it can run jobs under, as it described itself, with the live ones summed — see [Hosts](#hosts-what-machines-are-on-the-network) |
 | `GET /ui/` | the embedded reader, when the binary was built with the `ui` feature |
 | `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type` |
 | `POST /objective/prepare` | canonicalize a draft objective and return the exact bytes its funder must sign — see below |
 | `POST /progress` | a worker's heartbeat: kept in this node's memory for `GET /progress/{id}`, never written to the log, accepted on a read-only node too |
 | `POST /lease` | take or renew an advisory lease on a task of an objective this log holds: held in memory like a heartbeat, never written, never a lock |
 | `POST /lease/release` | end a lease you hold, as `completed`, `failed` or `abandoned` |
+| `POST /hosts` | a host agent's registration: its hardware and sandboxes, kept in this node's memory for `GET /hosts` and `GET /network`, never written to the log, accepted on a read-only node too |
 | `POST /deposit/grant` | issue a short-lived upload grant against a node-local deposit; response never includes cloud keys |
 | `PUT /deposit/upload/{grant_id}` | proxy redemption of a grant (file backend, or curl-to-S3 fallback) |
 
@@ -197,6 +199,48 @@ lab's words -- `task`, `holder`, `ttl`, `held`, `contended`, the three
 outcomes -- so a reader who knows one knows the other.
 `docs/design/network-coordination.md` has the design, and the reader's
 `/ui/coordination?id=…` draws the roster over the epoch's work assignment.
+
+## Hosts: what machines are on the network
+
+A worker heartbeat says what one process is doing on one objective. A host
+registration says what a machine *is*. `cairn agent run` posts one to
+`POST /hosts` every minute -- the machine's name and declared roles, its
+CPUs, memory, NUMA layout and every GPU, which sandboxes it can run a job
+under (`kata`, `runsc`, `bwrap`, each with how it is driven and whether an
+engine will pass it a GPU), and how many jobs it is running against its
+capacity. `GET /hosts` lists every host with its standing (`live` within
+180 s, `stale` within 30 min, `gone` after, forgotten after a day) and sums
+the live ones; `GET /network` carries the same table under `compute.hosts`,
+beside the heartbeating workers and never added to them: a host is where
+workers run, a worker is a process on one, and a box with eight GPUs and no
+worker yet is capacity, not work.
+
+```sh
+curl -s -H 'content-type: application/json' http://node:8080/hosts -d '{
+  "host": "gpu-box-1", "roles": ["executor"],
+  "hardware": {"cpus": 128, "memory_mb": 515821, "gpus": [{"vendor": "nvidia", "model": "NVIDIA A100-SXM4-80GB", "memory_mb": 81920}]},
+  "sandboxes": {"kata": {"usable": true, "via": ["docker:kata"], "gpu": true}},
+  "jobs": {"running": 1, "capacity": 2}}'
+# -> 202 {"recorded": true, "host": "gpu-box-1", "status": "live", "ignored": []}
+curl -s http://node:8080/hosts
+# -> {"hosts": [...], "live": 1, "cpus": 128, "memory_mb": 515821, "gpus": 1,
+#     "jobs": {"running": 1, "capacity": 2}, "sandboxes": [{"sandbox": "kata", "hosts": 1}], ...}
+```
+
+The `hardware`, `sandboxes` and `jobs` blocks travel through **opaque**: the
+node caps the encoded registration at 16 KiB, lifts out the few integers it
+sums, and hands the rest back as posted, so the agent and the page agree on
+the shape and the node in between is a bounded mailbox. Unlike a heartbeat a
+registration names no objective -- a machine is on the network before anyone
+has posted work for it -- so what bounds a stranger is the roster's cap (4096
+hosts, `429` past it rather than eviction) and the size cap on each entry.
+`host` must be printable and short; unknown top-level fields are named back
+in `ignored`.
+
+**A registration is not a record, not evidence, and not trusted**, for every
+reason a heartbeat is not: never appended, never gossiped, never verified,
+read by nothing that moves money. [agent.md](agent.md) is the agent's side:
+the probe, the sandboxes, the jobs and the systemd unit.
 
 ## Roles: what a node says it is for
 

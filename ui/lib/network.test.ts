@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type FleetWorker,
   classLabel,
+  describeHost,
   fleetTotals,
   formatMemory,
   formatUptime,
@@ -119,5 +120,28 @@ describe("formatting", () => {
     expect(share(500, 200)).toBe(1);
     expect(share(null, 200)).toBe(0);
     expect(share(5, 0)).toBe(0);
+  });
+});
+
+describe("describeHost", () => {
+  it("names cpus, memory and gpus as the host reported them, grouping identical cards", () => {
+    expect(
+      describeHost({
+        hardware: {
+          cpus: 128,
+          memory_mb: 515821,
+          gpus: [
+            { index: 0, vendor: "nvidia", model: "NVIDIA A100-SXM4-80GB", memory_mb: 81920, bus: null, driver: null },
+            { index: 1, vendor: "nvidia", model: "NVIDIA A100-SXM4-80GB", memory_mb: 81920, bus: null, driver: null },
+            { index: 2, vendor: "amd", model: null, memory_mb: null, bus: null, driver: null },
+          ],
+        },
+      }),
+    ).toBe("128 cpus · 504 GiB · 2× NVIDIA A100-SXM4-80GB, amd");
+  });
+
+  it("leaves out what the host did not say rather than printing zero", () => {
+    expect(describeHost({ hardware: { cpus: 4 } })).toBe("4 cpus");
+    expect(describeHost({ hardware: {} })).toBe("unreported");
   });
 });
