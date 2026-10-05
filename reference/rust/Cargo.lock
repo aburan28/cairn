@@ -107,6 +107,7 @@ name = "cairn-reference"
 version = "0.2.0"
 dependencies = [
  "bls12_381_plus",
+ "curve25519-dalek",
  "ed25519-dalek",
  "num-bigint",
  "sha2 0.11.0",

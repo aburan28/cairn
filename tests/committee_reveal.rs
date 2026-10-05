@@ -31,14 +31,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 
+use std::collections::BTreeMap;
+
 use cairn::canonical::Value;
-use cairn::crypto::envelope::CommitteeKey;
+use cairn::crypto::envelope::{CommitteeKey, DealerSecret};
 use cairn::crypto::identity::Identity;
 use cairn::crypto::CommitteeMember;
 use cairn::ledger::Ledger;
 use cairn::node::{CommitteeSeat, Node, RuleViolation};
 use cairn::partition::{COMMITTEE_SIZE, COMMITTEE_THRESHOLD};
-use cairn::records::{Claim, Commitment, CommitteeShare, Objective, PeerRecord};
+use cairn::records::{
+    Claim, Commitment, CommitteeShare, Objective, PeerRecord, ShareAnswer, ShareComplaint,
+};
 use cairn::sealed::SealedSubmission;
 use cairn::verifiers::{Status, VerifierRegistry};
 
@@ -48,7 +52,11 @@ const NO_LEAN: &str = "cairn-committee-definitely-no-such-lean-binary";
 /// Epoch boundaries. `EPOCH_SECONDS` is 600, so these are three whole epochs
 /// apart and every "strictly later" rule below is unambiguous.
 const COMMIT_AT: &str = "2026-07-28T00:00:00+00:00";
+/// The epoch after the commitment's: still inside the complaint window.
+const NEXT_AT: &str = "2026-07-28T00:10:00+00:00";
 const REVEAL_AT: &str = "2026-07-28T00:20:00+00:00";
+/// The first epoch past the answer window.
+const ANSWERS_CLOSED_AT: &str = "2026-07-28T00:30:00+00:00";
 const LATER_AT: &str = "2026-07-28T00:40:00+00:00";
 
 const CHECKER: &str = r#"
@@ -102,7 +110,13 @@ struct Member {
 impl Member {
     fn new(seed: u8) -> Member {
         Member {
-            committee: CommitteeKey::generate(&mut OsRng),
+            // McEliece alone, as `commit --sealed` seals to: the bundle a seat
+            // publishes in the field. The three-suite combiner has its own
+            // tests in `crypto`.
+            committee: CommitteeKey::generate_over(
+                &[cairn::crypto::kem::Suite::McEliece],
+                &mut OsRng,
+            ),
             identity: Identity::from_secret_bytes([seed; 32]),
         }
     }
@@ -223,6 +237,48 @@ fn commit_sealed_with(
     threshold: u8,
     rewrite: impl FnOnce(Value) -> Value,
 ) -> String {
+    let (commitment, _dealer, _claim) = seal_commitment(
+        node, objective, members, submitter, artifact, threshold, rewrite,
+    );
+    node.commit(&commitment, COMMIT_AT).expect("commit")
+}
+
+/// [`commit_sealed_with`], keeping what the dealer needs to answer a
+/// complaint.
+fn commit_sealed_dealing(
+    node: &mut Node,
+    objective: &Objective,
+    members: &[Member],
+    submitter: &Identity,
+    rewrite: impl FnOnce(Value) -> Value,
+) -> (String, DealerSecret, Claim) {
+    let (commitment, dealer, claim) = seal_commitment(
+        node,
+        objective,
+        members,
+        submitter,
+        n(42),
+        COMMITTEE_THRESHOLD,
+        rewrite,
+    );
+    (
+        node.commit(&commitment, COMMIT_AT).expect("commit"),
+        dealer,
+        claim,
+    )
+}
+
+/// The commitment a submitter would post, with the dealer's secret and the
+/// signed claim it seals -- not yet committed.
+fn seal_commitment(
+    node: &Node,
+    objective: &Objective,
+    members: &[Member],
+    submitter: &Identity,
+    artifact: Value,
+    threshold: u8,
+    rewrite: impl FnOnce(Value) -> Value,
+) -> (Commitment, DealerSecret, Claim) {
     let seats = node
         .committee_for(epoch_of(COMMIT_AT), node.ledger().len())
         .expect("enough peers are registered");
@@ -246,7 +302,7 @@ fn commit_sealed_with(
     .expect("valid claim")
     .signed_with(submitter);
 
-    let submission = SealedSubmission::seal_claim(
+    let (submission, dealer) = SealedSubmission::seal_claim_dealing(
         &claim,
         epoch_of(COMMIT_AT),
         COMMIT_AT,
@@ -268,8 +324,38 @@ fn commit_sealed_with(
     )
     .sealed_with(envelope)
     .signed_with(submitter);
+    (commitment, dealer, claim)
+}
 
-    node.commit(&commitment, COMMIT_AT).expect("commit")
+/// Flip a byte of the sealed share addressed to `seat`: the dealer sealing
+/// that seat something that is not its share.
+fn garble_seat(envelope: Value, seat: u8) -> Value {
+    let mut map = envelope.as_object().expect("an object").clone();
+    let shares = map
+        .get("sealed_shares")
+        .and_then(Value::as_array)
+        .expect("sealed shares")
+        .iter()
+        .map(|share| {
+            if share.get("index").and_then(Value::as_i128) != Some(i128::from(seat)) {
+                return share.clone();
+            }
+            let mut fields = share.as_object().expect("an object").clone();
+            let text = fields
+                .get("ciphertext")
+                .and_then(Value::as_str)
+                .expect("ciphertext")
+                .to_string();
+            let flipped = if text.starts_with('0') { "1" } else { "0" };
+            fields.insert(
+                "ciphertext".into(),
+                Value::string(format!("{flipped}{}", &text[1..])),
+            );
+            Value::Object(fields)
+        })
+        .collect();
+    map.insert("sealed_shares".into(), Value::Array(shares));
+    Value::Object(map)
 }
 
 fn epoch_of(ts: &str) -> u64 {
@@ -579,10 +665,10 @@ fn only_the_drawn_identity_can_publish_its_seat() {
     // seat, one share, or a member could search for a subset that opens.
     let first = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
     node.post_committee_share(&first, REVEAL_AT).expect("first");
-    let again = CommitteeShare::new(&real.commitment, real.seat, real.x, "00", REVEAL_AT)
+    let again = CommitteeShare::new(&real.commitment, real.seat, real.x, real.share, LATER_AT)
         .signed_with(&holder(&members, &seats[0]).identity);
     let error = node
-        .post_committee_share(&again, REVEAL_AT)
+        .post_committee_share(&again, LATER_AT)
         .expect_err("one seat, one share");
     assert!(
         matches!(error, RuleViolation::SeatAlreadyPublished { .. }),
@@ -631,15 +717,13 @@ fn a_peer_outside_the_committee_has_no_seat_to_publish() {
 
 // -- liveness under a dishonest member -------------------------------------
 
-/// A member who publishes a share that is not theirs cannot stall the reveal.
+/// A member who publishes a share that is not theirs is refused at the door.
 ///
-/// Shamir cannot say *which* share was wrong — the AEAD tag reports only that
-/// the set was — and verifiable secret sharing, which would attribute it, needs
-/// a group where discrete log is hard and is therefore unavailable to a
-/// post-quantum scheme. So the answer is a bounded subset search: with four
-/// shares published and one of them a lie, some three of them still open it.
+/// The envelope commits to the sharing (`crate::crypto::vss`), so a share is
+/// checkable on its own: one that is not on the committed polynomials is not
+/// a share, whoever signed it, and it never reaches the reveal to stall it.
 #[test]
-fn a_member_who_publishes_garbage_does_not_stop_the_reveal() {
+fn a_member_who_publishes_garbage_is_refused_at_the_door() {
     let (_dir, mut node, objective, members) = network("liar");
     let submitter = Identity::from_secret_bytes([204u8; 32]);
     let commitment_id = commit_sealed(
@@ -656,31 +740,47 @@ fn a_member_who_publishes_garbage_does_not_stop_the_reveal() {
 
     // Seat 1 lies: a well-formed share of the right length that is not its own.
     let real = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
-    let mut bytes = cairn::hex::encode(&[0xa5u8; 32]);
-    bytes.truncate(real.share.len());
-    let lie = CommitteeShare::new(&commitment_id, seats[0].seat, real.x, bytes, REVEAL_AT)
-        .signed_with(&holder(&members, &seats[0]).identity);
-    node.post_committee_share(&lie, REVEAL_AT)
-        .expect("nothing about a single share is checkable, so it is admitted");
+    let lie = CommitteeShare::new(
+        &commitment_id,
+        seats[0].seat,
+        real.x,
+        cairn::hex::encode(&[0x05u8; 64]),
+        REVEAL_AT,
+    )
+    .signed_with(&holder(&members, &seats[0]).identity);
+    let refused = node.post_committee_share(&lie, REVEAL_AT);
+    assert!(
+        matches!(refused, Err(RuleViolation::ShareFailsCommitments { .. })),
+        "{refused:?}"
+    );
+    // Its real share, published at another seat's abscissa, is refused too.
+    let shifted = CommitteeShare::new(
+        &commitment_id,
+        seats[0].seat,
+        real.x + 1,
+        real.share.clone(),
+        REVEAL_AT,
+    )
+    .signed_with(&holder(&members, &seats[0]).identity);
+    assert!(matches!(
+        node.post_committee_share(&shifted, REVEAL_AT),
+        Err(RuleViolation::ShareAbscissaNotSeat { .. })
+    ));
 
-    // Three honest members publish.
+    // Three honest members publish, and the reveal does not notice the liar.
     for seat in seats.iter().skip(1).take(usize::from(COMMITTEE_THRESHOLD)) {
         let share = share_for(&node, &members, &commitment_id, seat, REVEAL_AT);
         node.post_committee_share(&share, REVEAL_AT)
             .expect("honest member publishes");
     }
-
-    let outcome = node
-        .open_sealed(&commitment_id, REVEAL_AT)
-        .expect("some honest subset opens it");
+    let outcome = node.open_sealed(&commitment_id, REVEAL_AT).expect("opens");
     assert_eq!(outcome.verdict.status, Status::Accept);
+    assert!(node.audit(false).is_empty(), "{:?}", node.audit(false));
 }
 
 /// A share that carries its key is checked against the sealed share it claims
-/// to be, so a liar who also publishes a key -- its own real one, or any other
-/// -- is refused at the door instead of being tried at reveal time. And
-/// verified shares are tried first, so an unverified liar posted before them
-/// costs nothing.
+/// to be, as well as against the commitments, so a liar who also publishes a
+/// key -- its own real one, or any other -- is refused at the door.
 #[test]
 fn a_share_whose_key_does_not_open_its_sealed_share_is_refused() {
     let (_dir, mut node, objective, members) = network("keyed-liar");
@@ -744,14 +844,19 @@ fn a_share_whose_key_does_not_open_its_sealed_share_is_refused() {
         Err(RuleViolation::ShareKeyDoesNotOpen { .. })
     ));
 
-    // Without a key, garbage is admitted -- it cannot be checked -- but it is
-    // tried after every verified share, so it costs the reveal nothing.
-    let mut bytes = cairn::hex::encode(&[0xa5u8; 32]);
-    bytes.truncate(real.share.len());
-    let unkeyed = CommitteeShare::new(&commitment_id, seats[0].seat, real.x, bytes, REVEAL_AT)
-        .signed_with(liar);
-    node.post_committee_share(&unkeyed, REVEAL_AT)
-        .expect("an unkeyed share is admitted, as before");
+    // Without a key, garbage is no longer admitted: the commitments check it.
+    let unkeyed = CommitteeShare::new(
+        &commitment_id,
+        seats[0].seat,
+        real.x,
+        cairn::hex::encode(&[0x05u8; 64]),
+        REVEAL_AT,
+    )
+    .signed_with(liar);
+    assert!(matches!(
+        node.post_committee_share(&unkeyed, REVEAL_AT),
+        Err(RuleViolation::ShareFailsCommitments { .. })
+    ));
     for seat in seats.iter().skip(1).take(usize::from(COMMITTEE_THRESHOLD)) {
         let share = share_for(&node, &members, &commitment_id, seat, REVEAL_AT);
         node.post_committee_share(&share, REVEAL_AT)
@@ -764,10 +869,11 @@ fn a_share_whose_key_does_not_open_its_sealed_share_is_refused() {
     assert!(node.audit(false).is_empty(), "{:?}", node.audit(false));
 }
 
-/// With only the liar and two honest members, no subset of three opens it, and
-/// the failure says so rather than naming a culprit it cannot identify.
+/// With the liar refused and only two honest members published, the reveal
+/// is one share short, and says so: there is no subset to search, because
+/// every share on the log checks.
 #[test]
-fn a_share_set_with_no_working_subset_fails_without_accusing_anyone() {
+fn two_checked_shares_of_three_are_reported_as_exactly_that() {
     let (_dir, mut node, objective, members) = network("no-subset");
     let submitter = Identity::from_secret_bytes([205u8; 32]);
     let commitment_id = commit_sealed(
@@ -781,26 +887,326 @@ fn a_share_set_with_no_working_subset_fails_without_accusing_anyone() {
     let seats = node
         .committee_of_commitment(&commitment_id)
         .expect("committee");
-
-    let real = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
-    let mut bytes = cairn::hex::encode(&[0x5au8; 32]);
-    bytes.truncate(real.share.len());
-    let lie = CommitteeShare::new(&commitment_id, seats[0].seat, real.x, bytes, REVEAL_AT)
-        .signed_with(&holder(&members, &seats[0]).identity);
-    node.post_committee_share(&lie, REVEAL_AT)
-        .expect("admitted");
     for seat in seats.iter().skip(1).take(2) {
         let share = share_for(&node, &members, &commitment_id, seat, REVEAL_AT);
         node.post_committee_share(&share, REVEAL_AT)
             .expect("honest");
     }
-
     let error = node
         .open_sealed(&commitment_id, REVEAL_AT)
         .expect_err("two honest shares are one short");
     assert!(
-        matches!(error, RuleViolation::SealedOpenFailed { tried: 3, .. }),
+        matches!(
+            error,
+            RuleViolation::NotEnoughShares {
+                have: 2,
+                need: 3,
+                ..
+            }
+        ),
         "got {error:?}"
+    );
+}
+
+// -- dealer accountability -------------------------------------------------
+
+/// A seat whose share does not open complains, the dealer answers with that
+/// seat's share in the clear, anyone checks it against the envelope, and the
+/// reveal goes ahead with it counted -- in the epoch after the commitment,
+/// because every seat is then accounted for.
+#[test]
+fn a_complaint_answered_with_the_seats_share_restores_the_seat() {
+    let (_dir, mut node, objective, members) = network("answered");
+    let submitter = Identity::from_secret_bytes([210u8; 32]);
+    let (commitment_id, dealer, _claim) =
+        commit_sealed_dealing(&mut node, &objective, &members, &submitter, |envelope| {
+            garble_seat(envelope, 1)
+        });
+    let seats = node
+        .committee_of_commitment(&commitment_id)
+        .expect("committee");
+    let commit_epoch = epoch_of(COMMIT_AT);
+
+    // The seat's own duty finds the garbage and complains; no other seat does.
+    for seat in &seats {
+        let member = holder(&members, seat);
+        let posted =
+            node.post_owed_complaints(&member.committee, &member.identity, commit_epoch, COMMIT_AT);
+        if seat.seat == 1 {
+            assert_eq!(posted.len(), 1, "{posted:?}");
+            assert!(posted[0].1.is_ok(), "{posted:?}");
+        } else {
+            assert!(
+                posted.is_empty(),
+                "seat {} complained: {posted:?}",
+                seat.seat
+            );
+        }
+    }
+
+    // Every other seat publishes in the next epoch; the reveal waits on the
+    // dealer.
+    for seat in seats.iter().skip(1) {
+        let share = share_for(&node, &members, &commitment_id, seat, NEXT_AT);
+        node.post_committee_share(&share, NEXT_AT)
+            .expect("publishes");
+    }
+    let waiting = node
+        .open_sealed(&commitment_id, NEXT_AT)
+        .expect_err("a complaint is unanswered");
+    assert!(
+        matches!(waiting, RuleViolation::AwaitingDealerAnswer { ref seats, .. } if seats == &vec![1]),
+        "{waiting:?}"
+    );
+
+    // The dealer answers from its seed, and the seat counts.
+    let dealt = BTreeMap::from([(commitment_id.clone(), dealer)]);
+    let answers = node.post_owed_answers(&dealt, epoch_of(NEXT_AT), NEXT_AT);
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    assert!(answers[0].1.is_ok(), "{answers:?}");
+    assert!(
+        node.post_owed_answers(&dealt, epoch_of(NEXT_AT), NEXT_AT)
+            .is_empty(),
+        "answered once"
+    );
+    let outcome = node
+        .open_sealed(&commitment_id, NEXT_AT)
+        .expect("every seat is accounted for");
+    assert_eq!(outcome.verdict.status, Status::Accept);
+    assert!(node.audit(false).is_empty(), "{:?}", node.audit(false));
+}
+
+/// A dealer who leaves a complaint unanswered past the window is disqualified:
+/// neither the committee nor the submitter can ever reveal the submission, and
+/// an answer that does not check, or comes late, changes nothing.
+#[test]
+fn a_dealer_who_does_not_answer_is_disqualified_for_good() {
+    let (_dir, mut node, objective, members) = network("disqualified");
+    let submitter = Identity::from_secret_bytes([211u8; 32]);
+    let (commitment_id, dealer, claim) =
+        commit_sealed_dealing(&mut node, &objective, &members, &submitter, |envelope| {
+            garble_seat(envelope, 1)
+        });
+    let seats = node
+        .committee_of_commitment(&commitment_id)
+        .expect("committee");
+    let first = holder(&members, &seats[0]);
+    let complaint = ShareComplaint::new(&commitment_id, 1, COMMIT_AT).signed_with(&first.identity);
+    node.post_share_complaint(&complaint, COMMIT_AT)
+        .expect("the seat complains");
+
+    // An answer that is not the seat's share is refused; so is one for a seat
+    // nobody complained about, even though it is a real share.
+    let bogus = ShareAnswer::new(&commitment_id, 1, &[0x07u8; 64], NEXT_AT);
+    assert!(matches!(
+        node.post_share_answer(&bogus, NEXT_AT),
+        Err(RuleViolation::ShareFailsCommitments { .. })
+    ));
+    let unasked = dealer.share(2).expect("seat 2");
+    let unasked = ShareAnswer::new(&commitment_id, 2, &unasked.data, NEXT_AT);
+    assert!(matches!(
+        node.post_share_answer(&unasked, NEXT_AT),
+        Err(RuleViolation::AnswerWithoutComplaint { .. })
+    ));
+
+    for seat in seats.iter().skip(1) {
+        let share = share_for(&node, &members, &commitment_id, seat, NEXT_AT);
+        node.post_committee_share(&share, NEXT_AT)
+            .expect("publishes");
+    }
+    // Inside the answer window: pending.
+    assert!(matches!(
+        node.open_sealed(&commitment_id, REVEAL_AT),
+        Err(RuleViolation::AwaitingDealerAnswer { .. })
+    ));
+    // Past it: final, on the committee's path and on the submitter's.
+    let refused = node
+        .open_sealed(&commitment_id, ANSWERS_CLOSED_AT)
+        .expect_err("disqualified");
+    assert!(
+        matches!(refused, RuleViolation::DealerDisqualified { ref seats, .. } if seats == &vec![1]),
+        "{refused:?}"
+    );
+    assert!(matches!(
+        node.reveal(&claim, ANSWERS_CLOSED_AT),
+        Err(RuleViolation::DealerDisqualified { .. })
+    ));
+    // The real answer, too late, is refused.
+    let late = dealer.share(1).expect("seat 1");
+    let late = ShareAnswer::new(&commitment_id, 1, &late.data, ANSWERS_CLOSED_AT);
+    assert!(matches!(
+        node.post_share_answer(&late, ANSWERS_CLOSED_AT),
+        Err(RuleViolation::OutsideDealingWindow { .. })
+    ));
+    assert!(node.audit(false).is_empty(), "{:?}", node.audit(false));
+}
+
+/// The reveal gate is a reader's rule too: a claim written past an unanswered
+/// complaint -- by a tool that skipped the rule, or by hand -- is reported by
+/// the audit, because it pays a dealer who kept the choice of whether to open.
+#[test]
+fn the_audit_reports_a_claim_revealed_past_an_unanswered_complaint() {
+    let (dir, mut node, objective, members) = network("gate-audit");
+    let submitter = Identity::from_secret_bytes([215u8; 32]);
+    let (commitment_id, _dealer, claim) =
+        commit_sealed_dealing(&mut node, &objective, &members, &submitter, |envelope| {
+            garble_seat(envelope, 1)
+        });
+    let seats = node
+        .committee_of_commitment(&commitment_id)
+        .expect("committee");
+    let complaint = ShareComplaint::new(&commitment_id, 1, COMMIT_AT)
+        .signed_with(&holder(&members, &seats[0]).identity);
+    node.post_share_complaint(&complaint, COMMIT_AT)
+        .expect("the seat complains");
+    assert!(node.audit(false).is_empty(), "{:?}", node.audit(false));
+    drop(node);
+
+    // Appended beneath the rules engine, as a log assembled elsewhere might be.
+    let mut ledger = Ledger::open(dir.file("log.jsonl")).expect("reopen");
+    ledger
+        .append("claim", claim.to_value(), ANSWERS_CLOSED_AT)
+        .expect("raw append");
+    let node = Node::with_registry(
+        ledger,
+        VerifierRegistry::new(&dir.path).with_lean_binary(NO_LEAN),
+    );
+    let problems = node.audit(false);
+    assert!(
+        problems.iter().any(
+            |problem| problem.starts_with("claim at entry") && problem.contains("disqualified")
+        ),
+        "{problems:?}"
+    );
+}
+
+/// Only a seat's holder complains for it, inside its window, once, and only
+/// while its share is not already on the log. A false complaint costs an
+/// honest dealer one answer.
+#[test]
+fn only_a_seat_complains_for_itself_inside_its_window() {
+    let (_dir, mut node, objective, members) = network("complaints");
+    let submitter = Identity::from_secret_bytes([212u8; 32]);
+    let (commitment_id, dealer, _claim) =
+        commit_sealed_dealing(&mut node, &objective, &members, &submitter, |envelope| {
+            envelope
+        });
+    let seats = node
+        .committee_of_commitment(&commitment_id)
+        .expect("committee");
+    let first = holder(&members, &seats[0]);
+    let second = holder(&members, &seats[1]);
+
+    let impostor = ShareComplaint::new(&commitment_id, 1, COMMIT_AT).signed_with(&second.identity);
+    assert!(matches!(
+        node.post_share_complaint(&impostor, COMMIT_AT),
+        Err(RuleViolation::SeatImpostor { .. })
+    ));
+    let unsigned = ShareComplaint::new(&commitment_id, 1, COMMIT_AT);
+    assert!(node.post_share_complaint(&unsigned, COMMIT_AT).is_err());
+    let late = ShareComplaint::new(&commitment_id, 1, REVEAL_AT).signed_with(&first.identity);
+    assert!(matches!(
+        node.post_share_complaint(&late, REVEAL_AT),
+        Err(RuleViolation::OutsideDealingWindow { .. })
+    ));
+
+    // Seat 1 publishes its share; it has nothing left to complain about.
+    let share = share_for(&node, &members, &commitment_id, &seats[0], NEXT_AT);
+    node.post_committee_share(&share, NEXT_AT)
+        .expect("publishes");
+    let moot = ShareComplaint::new(&commitment_id, 1, NEXT_AT).signed_with(&first.identity);
+    assert!(matches!(
+        node.post_share_complaint(&moot, NEXT_AT),
+        Err(RuleViolation::SeatAlreadyAccounted { .. })
+    ));
+
+    // Seat 2 complains falsely; once is admitted, twice is not.
+    let false_complaint =
+        ShareComplaint::new(&commitment_id, 2, COMMIT_AT).signed_with(&second.identity);
+    node.post_share_complaint(&false_complaint, COMMIT_AT)
+        .expect("admitted: a complaint is not checkable");
+    let again = ShareComplaint::new(&commitment_id, 2, NEXT_AT).signed_with(&second.identity);
+    assert!(matches!(
+        node.post_share_complaint(&again, NEXT_AT),
+        Err(RuleViolation::DuplicateDealingRecord { .. })
+    ));
+    // The honest dealer answers it; a second answer is refused.
+    let dealt = BTreeMap::from([(commitment_id.clone(), dealer)]);
+    let answers = node.post_owed_answers(&dealt, epoch_of(NEXT_AT), NEXT_AT);
+    assert!(
+        answers.iter().all(|(_, result)| result.is_ok()),
+        "{answers:?}"
+    );
+    let share = dealt[&commitment_id].share(2).expect("seat 2");
+    let twice = ShareAnswer::new(&commitment_id, 2, &share.data, REVEAL_AT);
+    assert!(matches!(
+        node.post_share_answer(&twice, REVEAL_AT),
+        Err(RuleViolation::DuplicateDealingRecord { .. })
+    ));
+    assert!(node.audit(false).is_empty(), "{:?}", node.audit(false));
+}
+
+/// Inside the complaint window a reveal waits until every seat is accounted
+/// for, because a seat that has said nothing might still complain. After it,
+/// `t` shares are enough.
+#[test]
+fn a_reveal_waits_for_every_seat_or_for_the_complaint_window() {
+    let (_dir, mut node, objective, members) = network("window");
+    let submitter = Identity::from_secret_bytes([213u8; 32]);
+    let commitment_id = commit_sealed(
+        &mut node,
+        &objective,
+        &members,
+        &submitter,
+        n(42),
+        COMMITTEE_THRESHOLD,
+    );
+    let seats = node
+        .committee_of_commitment(&commitment_id)
+        .expect("committee");
+    for seat in seats.iter().take(usize::from(COMMITTEE_THRESHOLD)) {
+        let share = share_for(&node, &members, &commitment_id, seat, NEXT_AT);
+        node.post_committee_share(&share, NEXT_AT)
+            .expect("publishes");
+    }
+    assert!(matches!(
+        node.open_sealed(&commitment_id, NEXT_AT),
+        Err(RuleViolation::AwaitingComplaints { .. })
+    ));
+    let outcome = node
+        .open_sealed(&commitment_id, REVEAL_AT)
+        .expect("the window has closed");
+    assert_eq!(outcome.verdict.status, Status::Accept);
+}
+
+/// A sealed commitment must commit to its sharing: an envelope that does not
+/// (version 2, plain Shamir) is refused, because nothing in it would let a
+/// share be checked or the dealer be held to one.
+#[test]
+fn a_sealed_commitment_must_commit_to_its_sharing() {
+    let (_dir, mut node, objective, members) = network("unverifiable");
+    let submitter = Identity::from_secret_bytes([214u8; 32]);
+    let (commitment, _dealer, _claim) = seal_commitment(
+        &node,
+        &objective,
+        &members,
+        &submitter,
+        n(42),
+        COMMITTEE_THRESHOLD,
+        |envelope| {
+            let mut map = envelope.as_object().expect("object").clone();
+            map.remove("commitments");
+            map.insert("version".into(), Value::Int(2));
+            Value::Object(map)
+        },
+    );
+    let refused = node.commit(&commitment, COMMIT_AT);
+    assert!(
+        matches!(
+            refused,
+            Err(RuleViolation::UnverifiableEnvelope { version: 2 })
+        ),
+        "{refused:?}"
     );
 }
 
@@ -1304,4 +1710,261 @@ fn shares_replayed_from_a_peer_open_the_submission_there() {
     let opened = reader.open_due_sealed(epoch_of(REVEAL_AT), REVEAL_AT, |_, _| false);
     assert_eq!(opened.len(), 1);
     opened[0].2.as_ref().expect("replayed shares open it");
+}
+
+// -- cross-implementation fixtures -----------------------------------------
+
+/// What `conformance/sealed/` holds: logs written by this implementation that
+/// the reference must audit to the same verdicts. A clean log must audit clean
+/// in both; a log with one record appended beneath the rules must be flagged
+/// at that entry by both.
+fn sealed_fixtures() -> Vec<(&'static str, Option<u64>, PathBuf, TempDir)> {
+    let mut out = Vec::new();
+    let raw = |dir: &TempDir, kind: &str, payload: Value, ts: &str| -> u64 {
+        let mut ledger = Ledger::open(dir.file("log.jsonl")).expect("reopen");
+        let seq = ledger.len() as u64;
+        ledger.append(kind, payload, ts).expect("raw append");
+        seq
+    };
+
+    // An answered complaint, revealed in the next epoch: clean.
+    {
+        let (dir, mut node, objective, members) = network("fixture-answered");
+        let submitter = Identity::from_secret_bytes([220u8; 32]);
+        let (id, dealer, _) =
+            commit_sealed_dealing(&mut node, &objective, &members, &submitter, |e| {
+                garble_seat(e, 1)
+            });
+        let seats = node.committee_of_commitment(&id).expect("committee");
+        let first = holder(&members, &seats[0]);
+        node.post_owed_complaints(
+            &first.committee,
+            &first.identity,
+            epoch_of(COMMIT_AT),
+            COMMIT_AT,
+        );
+        for seat in seats.iter().skip(1) {
+            let share = share_for(&node, &members, &id, seat, NEXT_AT);
+            node.post_committee_share(&share, NEXT_AT)
+                .expect("publishes");
+        }
+        let dealt = BTreeMap::from([(id.clone(), dealer)]);
+        node.post_owed_answers(&dealt, epoch_of(NEXT_AT), NEXT_AT);
+        node.open_sealed(&id, NEXT_AT).expect("opens");
+        assert!(node.audit(false).is_empty(), "{:?}", node.audit(false));
+        drop(node);
+        out.push(("answered", None, dir.file("log.jsonl"), dir));
+    }
+    // Every seat published in the next epoch, revealed then: clean.
+    {
+        let (dir, mut node, objective, members) = network("fixture-prompt");
+        let submitter = Identity::from_secret_bytes([221u8; 32]);
+        let id = commit_sealed(
+            &mut node,
+            &objective,
+            &members,
+            &submitter,
+            n(42),
+            COMMITTEE_THRESHOLD,
+        );
+        let seats = node.committee_of_commitment(&id).expect("committee");
+        for seat in &seats {
+            let share = share_for(&node, &members, &id, seat, NEXT_AT);
+            node.post_committee_share(&share, NEXT_AT)
+                .expect("publishes");
+        }
+        node.open_sealed(&id, NEXT_AT).expect("opens");
+        drop(node);
+        out.push(("prompt", None, dir.file("log.jsonl"), dir));
+    }
+    // A claim revealed past an unanswered complaint.
+    {
+        let (dir, mut node, objective, members) = network("fixture-disqualified");
+        let submitter = Identity::from_secret_bytes([222u8; 32]);
+        let (id, _, claim) =
+            commit_sealed_dealing(&mut node, &objective, &members, &submitter, |e| {
+                garble_seat(e, 1)
+            });
+        let seats = node.committee_of_commitment(&id).expect("committee");
+        let complaint = ShareComplaint::new(&id, 1, COMMIT_AT)
+            .signed_with(&holder(&members, &seats[0]).identity);
+        node.post_share_complaint(&complaint, COMMIT_AT)
+            .expect("complains");
+        drop(node);
+        let at = raw(&dir, "claim", claim.to_value(), ANSWERS_CLOSED_AT);
+        out.push(("disqualified", Some(at), dir.file("log.jsonl"), dir));
+    }
+    // A claim revealed inside the complaint window with seats unaccounted.
+    {
+        let (dir, mut node, objective, members) = network("fixture-early");
+        let submitter = Identity::from_secret_bytes([223u8; 32]);
+        let (id, _, claim) =
+            commit_sealed_dealing(&mut node, &objective, &members, &submitter, |e| e);
+        let seats = node.committee_of_commitment(&id).expect("committee");
+        for seat in seats.iter().take(usize::from(COMMITTEE_THRESHOLD)) {
+            let share = share_for(&node, &members, &id, seat, NEXT_AT);
+            node.post_committee_share(&share, NEXT_AT)
+                .expect("publishes");
+        }
+        drop(node);
+        let at = raw(&dir, "claim", claim.to_value(), NEXT_AT);
+        out.push(("early", Some(at), dir.file("log.jsonl"), dir));
+    }
+    // An answer that is not the seat's share.
+    {
+        let (dir, mut node, objective, members) = network("fixture-bad-answer");
+        let submitter = Identity::from_secret_bytes([224u8; 32]);
+        let (id, _, _) = commit_sealed_dealing(&mut node, &objective, &members, &submitter, |e| e);
+        let seats = node.committee_of_commitment(&id).expect("committee");
+        let complaint = ShareComplaint::new(&id, 2, COMMIT_AT)
+            .signed_with(&holder(&members, &seats[1]).identity);
+        node.post_share_complaint(&complaint, COMMIT_AT)
+            .expect("complains");
+        drop(node);
+        let answer = ShareAnswer::new(&id, 2, &[0x07u8; 64], NEXT_AT);
+        let at = raw(&dir, "share_answer", answer.to_value(), NEXT_AT);
+        out.push(("bad-answer", Some(at), dir.file("log.jsonl"), dir));
+    }
+    // An answer nobody asked for.
+    {
+        let (dir, node, objective, members) = network("fixture-unasked");
+        let submitter = Identity::from_secret_bytes([225u8; 32]);
+        let mut node = node;
+        let (id, dealer, _) =
+            commit_sealed_dealing(&mut node, &objective, &members, &submitter, |e| e);
+        drop(node);
+        let share = dealer.share(3).expect("seat 3");
+        let answer = ShareAnswer::new(&id, 3, &share.data, NEXT_AT);
+        let at = raw(&dir, "share_answer", answer.to_value(), NEXT_AT);
+        out.push(("unasked-answer", Some(at), dir.file("log.jsonl"), dir));
+    }
+    // A complaint for a seat its signer does not hold, and one too late.
+    for (label, seat_holder, ts) in [
+        ("impostor-complaint", 1usize, COMMIT_AT),
+        ("late-complaint", 0, REVEAL_AT),
+    ] {
+        let (dir, mut node, objective, members) = network(&format!("fixture-{label}"));
+        let submitter = Identity::from_secret_bytes([226u8; 32]);
+        let (id, _, _) = commit_sealed_dealing(&mut node, &objective, &members, &submitter, |e| e);
+        let seats = node.committee_of_commitment(&id).expect("committee");
+        drop(node);
+        let complaint = ShareComplaint::new(&id, 1, ts)
+            .signed_with(&holder(&members, &seats[seat_holder]).identity);
+        let at = raw(&dir, "share_complaint", complaint.to_value(), ts);
+        out.push((label, Some(at), dir.file("log.jsonl"), dir));
+    }
+    // A committee share that does not check, signed by the seat's holder.
+    {
+        let (dir, mut node, objective, members) = network("fixture-garbage-share");
+        let submitter = Identity::from_secret_bytes([227u8; 32]);
+        let id = commit_sealed(
+            &mut node,
+            &objective,
+            &members,
+            &submitter,
+            n(42),
+            COMMITTEE_THRESHOLD,
+        );
+        let seats = node.committee_of_commitment(&id).expect("committee");
+        drop(node);
+        let share = CommitteeShare::new(
+            &id,
+            seats[0].seat,
+            seats[0].seat,
+            cairn::hex::encode(&[0x05u8; 64]),
+            REVEAL_AT,
+        )
+        .signed_with(&holder(&members, &seats[0]).identity);
+        let at = raw(&dir, "committee_share", share.to_value(), REVEAL_AT);
+        out.push(("garbage-share", Some(at), dir.file("log.jsonl"), dir));
+    }
+    // A sealed commitment whose envelope commits to nothing.
+    {
+        let (dir, node, objective, members) = network("fixture-unverifiable");
+        let submitter = Identity::from_secret_bytes([228u8; 32]);
+        let (commitment, _, _) = seal_commitment(
+            &node,
+            &objective,
+            &members,
+            &submitter,
+            n(42),
+            COMMITTEE_THRESHOLD,
+            |envelope| {
+                let mut map = envelope.as_object().expect("object").clone();
+                map.remove("commitments");
+                map.insert("version".into(), Value::Int(2));
+                Value::Object(map)
+            },
+        );
+        drop(node);
+        let at = raw(&dir, "commitment", commitment.to_value(), COMMIT_AT);
+        out.push(("unverifiable", Some(at), dir.file("log.jsonl"), dir));
+    }
+    out
+}
+
+/// Where the fixtures live.
+fn fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/sealed")
+}
+
+/// Rewrites `conformance/sealed/` when `CAIRN_WRITE_SEALED_FIXTURES` is set.
+/// Otherwise does nothing: the fixtures are committed, and regenerating them
+/// draws fresh keys and so new bytes.
+#[test]
+fn write_the_sealed_fixtures_when_asked() {
+    if std::env::var_os("CAIRN_WRITE_SEALED_FIXTURES").is_none() {
+        return;
+    }
+    let dir = fixture_dir();
+    fs::create_dir_all(&dir).expect("fixture dir");
+    let mut manifest = Vec::new();
+    for (name, flagged, log, _keep) in sealed_fixtures() {
+        let file = format!("{name}.jsonl");
+        fs::copy(&log, dir.join(&file)).expect("copy fixture");
+        manifest.push(Value::object([
+            ("log", Value::string(file)),
+            (
+                "flagged_entry",
+                flagged.map_or(Value::Null, |seq| Value::Int(i128::from(seq))),
+            ),
+        ]));
+    }
+    fs::write(
+        dir.join("manifest.json"),
+        Value::Array(manifest).canonical_string(),
+    )
+    .expect("manifest");
+}
+
+/// This implementation's verdict on every committed fixture: clean where the
+/// manifest says clean, flagged at the named entry otherwise. The reference
+/// runs the same check over the same files.
+#[test]
+fn the_sealed_fixtures_audit_as_their_manifest_says() {
+    let dir = fixture_dir();
+    let Ok(text) = fs::read_to_string(dir.join("manifest.json")) else {
+        panic!("conformance/sealed/manifest.json is missing; write it with CAIRN_WRITE_SEALED_FIXTURES=1");
+    };
+    let manifest = Value::from_json(&text).expect("manifest parses");
+    let cases = manifest.as_array().expect("an array");
+    assert!(cases.len() >= 10, "{} cases", cases.len());
+    for case in cases {
+        let file = case.get("log").and_then(Value::as_str).expect("log");
+        let ledger = Ledger::open(dir.join(file)).expect("opens");
+        let node = Node::with_registry(
+            ledger,
+            VerifierRegistry::new(&dir).with_lean_binary(NO_LEAN),
+        );
+        let problems = node.audit(false);
+        match case.get("flagged_entry").and_then(Value::as_i128) {
+            None => assert!(problems.is_empty(), "{file}: {problems:?}"),
+            Some(seq) => assert!(
+                problems
+                    .iter()
+                    .any(|problem| problem.contains(&format!("entry {seq}:"))),
+                "{file}: entry {seq} not flagged in {problems:?}"
+            ),
+        }
+    }
 }

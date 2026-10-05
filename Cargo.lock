@@ -86,6 +86,7 @@ dependencies = [
  "bls12_381",
  "chacha20poly1305",
  "classic-mceliece-rust",
+ "curve25519-dalek",
  "ed25519-dalek",
  "hmac",
  "hqc-kem",

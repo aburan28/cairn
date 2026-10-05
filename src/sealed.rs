@@ -73,7 +73,7 @@ use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
 use crate::canonical::{CanonicalError, Value};
-use crate::crypto::envelope::{CommitteeMember, EnvelopeError, SealedEnvelope};
+use crate::crypto::envelope::{CommitteeMember, DealerSecret, EnvelopeError, SealedEnvelope};
 use crate::crypto::shamir::Share;
 use crate::records::commitment_hash;
 
@@ -385,6 +385,25 @@ impl SealedSubmission {
         threshold: u8,
         rng: &mut R,
     ) -> Result<SealedSubmission, SealedError> {
+        SealedSubmission::seal_claim_dealing(claim, epoch, created_at, committee, threshold, rng)
+            .map(|(submission, _dealer)| submission)
+    }
+
+    /// [`SealedSubmission::seal_claim`], keeping the dealer's secret.
+    ///
+    /// What a submitter needs to answer a complaint from a seat whose share
+    /// did not open (see [`crate::records::ShareComplaint`]): the share for
+    /// that seat, which [`DealerSecret::share`] produces again from 32 bytes.
+    /// As sensitive as the content key, and needed only until the answer
+    /// window closes ([`crate::node::ANSWER_EPOCHS`]).
+    pub fn seal_claim_dealing<R: RngCore + CryptoRng>(
+        claim: &crate::records::Claim,
+        epoch: u64,
+        created_at: &str,
+        committee: &[CommitteeMember],
+        threshold: u8,
+        rng: &mut R,
+    ) -> Result<(SealedSubmission, DealerSecret), SealedError> {
         if claim.artifact.as_object().is_none() {
             return Err(SealedError::ArtifactNotAnObject);
         }
@@ -401,17 +420,25 @@ impl SealedSubmission {
             &claim.cites,
             claim.signature.as_deref(),
         );
-        let envelope =
-            SealedEnvelope::seal(payload.as_slice(), &commitment, committee, threshold, rng)?;
+        let (envelope, dealer) = SealedEnvelope::seal_dealing(
+            payload.as_slice(),
+            &commitment,
+            committee,
+            threshold,
+            rng,
+        )?;
 
-        Ok(SealedSubmission {
-            objective_id: claim.objective_id.clone(),
-            submitter: claim.submitter.clone(),
-            commitment,
-            envelope,
-            epoch,
-            created_at: created_at.to_string(),
-        })
+        Ok((
+            SealedSubmission {
+                objective_id: claim.objective_id.clone(),
+                submitter: claim.submitter.clone(),
+                commitment,
+                envelope,
+                epoch,
+                created_at: created_at.to_string(),
+            },
+            dealer,
+        ))
     }
 
     /// Content address of the submission as it appears on the wire.
@@ -773,6 +800,155 @@ fn field_string(value: &Value, field: &'static str) -> Result<String, SealedErro
 
 // -- tests -----------------------------------------------------------------
 
+/// Where a submitter's node keeps what it needs to answer complaints.
+///
+/// A complaint about a seat's share obliges the dealer to publish that share
+/// (see [`crate::records::ShareComplaint`]), and the share is produced again
+/// from the [`DealerSecret`]'s 32-byte seed. That seed determines the content
+/// key, so it is exactly as sensitive as the artifact is before its epoch: it
+/// is written owner-only, beside the log, and kept only until the answer
+/// window closes ([`crate::node::ANSWER_EPOCHS`]), after which nothing can use
+/// it and the daemon deletes it.
+pub mod dealings {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use crate::canonical::Value;
+    use crate::crypto::envelope::DealerSecret;
+
+    /// `<log>.dealings`, beside the log.
+    pub fn dir_for(log: &Path) -> PathBuf {
+        let mut name = log.file_name().unwrap_or_default().to_os_string();
+        name.push(".dealings");
+        log.with_file_name(name)
+    }
+
+    /// The file a commitment's dealing lives in: its id's hex, so one id has
+    /// one file and nothing in the name is attacker-chosen.
+    fn path_for(dir: &Path, commitment_id: &str) -> Option<PathBuf> {
+        let hex = commitment_id.strip_prefix(crate::canonical::DIGEST_PREFIX)?;
+        (hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+        .then(|| dir.join(hex))
+    }
+
+    /// Keep `dealer` for `commitment_id`. Owner-only, and never overwrites:
+    /// a commitment is sealed once.
+    pub fn store(dir: &Path, commitment_id: &str, dealer: &DealerSecret) -> io::Result<PathBuf> {
+        let path = path_for(dir, commitment_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a commitment id"))?;
+        create_private_dir(dir)?;
+        let body = Value::object([
+            ("commitment", Value::string(commitment_id)),
+            ("seed", Value::string(crate::hex::encode(dealer.seed()))),
+            ("threshold", Value::Int(i128::from(dealer.threshold()))),
+        ]);
+        crate::secret_file::write_new(&path, body.canonical_string().as_bytes())?;
+        Ok(path)
+    }
+
+    /// Every dealing kept in `dir`, by commitment id. A file that does not
+    /// read as one is skipped: it is not this module's to delete.
+    pub fn load(dir: &Path) -> BTreeMap<String, DealerSecret> {
+        let mut out = BTreeMap::new();
+        let Ok(entries) = fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let Ok(text) = fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let Ok(value) = Value::from_json(&text) else {
+                continue;
+            };
+            let (Some(commitment), Some(seed), Some(threshold)) = (
+                value.get("commitment").and_then(Value::as_str),
+                value
+                    .get("seed")
+                    .and_then(Value::as_str)
+                    .and_then(crate::hex::decode)
+                    .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()),
+                value
+                    .get("threshold")
+                    .and_then(Value::as_i128)
+                    .and_then(|t| u8::try_from(t).ok()),
+            ) else {
+                continue;
+            };
+            if path_for(dir, commitment).as_deref() == Some(entry.path().as_path()) {
+                out.insert(
+                    commitment.to_string(),
+                    DealerSecret::from_seed(seed, threshold),
+                );
+            }
+        }
+        out
+    }
+
+    /// Delete the dealing for `commitment_id`, once nothing can use it.
+    pub fn forget(dir: &Path, commitment_id: &str) -> io::Result<()> {
+        match path_for(dir, commitment_id) {
+            Some(path) => match fs::remove_file(path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            },
+            None => Ok(()),
+        }
+    }
+
+    fn create_private_dir(dir: &Path) -> io::Result<()> {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_dealing_is_kept_owner_only_and_read_back_by_its_commitment() {
+            let dir = std::env::temp_dir().join(format!(
+                "cairn-dealings-{}-{}",
+                std::process::id(),
+                crate::hex::encode(
+                    &rand_core::RngCore::next_u64(&mut rand_core::OsRng).to_be_bytes()
+                )
+            ));
+            let dealings = dir_for(&dir.join("cairn.jsonl"));
+            assert_eq!(dealings.file_name().unwrap(), "cairn.jsonl.dealings");
+            let id = format!("sha256:{}", "ab".repeat(32));
+            let dealer = DealerSecret::from_seed([9u8; 32], 3);
+            let path = store(&dealings, &id, &dealer).expect("stored");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600);
+            }
+            assert!(store(&dealings, &id, &dealer).is_err(), "never overwritten");
+            let loaded = load(&dealings);
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[&id].seed(), &[9u8; 32]);
+            assert_eq!(loaded[&id].threshold(), 3);
+            assert!(store(&dealings, "sha256:../../x", &dealer).is_err());
+            forget(&dealings, &id).expect("forgotten");
+            assert!(load(&dealings).is_empty());
+            forget(&dealings, &id).expect("forgetting twice is fine");
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,7 +1158,7 @@ mod tests {
 
         let two: Vec<Share> = shares.iter().take(2).map(clone_share).collect();
         match open(&submission, &two) {
-            Err(SealedError::Envelope(EnvelopeError::Authentication { .. })) => {}
+            Err(SealedError::Envelope(EnvelopeError::NotEnoughValidShares { .. })) => {}
             other => panic!("t-1 shares must not open: {other:?}"),
         }
     }
@@ -1015,9 +1191,13 @@ mod tests {
         )
         .expect("seal succeeds");
 
+        // Foreign shares are points on another dealing's polynomials: none
+        // checks against `b`'s commitments.
         let shares_a = open_all(&keys_a, &a.envelope);
         match open(&b, &shares_a) {
-            Err(SealedError::Envelope(EnvelopeError::Authentication { .. })) => {}
+            Err(SealedError::Envelope(EnvelopeError::NotEnoughValidShares {
+                valid: 0, ..
+            })) => {}
             other => panic!("foreign shares must not open: {other:?}"),
         }
     }

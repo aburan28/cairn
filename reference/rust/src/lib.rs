@@ -28,4 +28,5 @@ pub mod sig;
 pub mod time;
 pub mod vdf;
 pub mod verifiers;
+pub mod vss;
 pub mod workspace;

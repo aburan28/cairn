@@ -168,6 +168,15 @@ fetches through a SOCKS5 proxy, as `cairn-p2p --proxy` does for a node; a seat
 whose record names a host rather than an address is then refused rather than
 resolved locally. See `docs/censorship.md` §2.
 
+The envelope commits to its sharing (Pedersen VSS, `docs/censorship.md` §2), so
+every share is checked against it, and a seat whose share does not open can
+complain. A complaint must be answered with that seat's share within two epochs
+of the commitment's, or the submission can never be revealed. So `--sealed`
+keeps the dealer's 32-byte seed — as sensitive as the artifact until it is
+revealed — owner-only in `<log>.dealings/`. `cairn run` answers from it every
+round and deletes it when the window closes; without a daemon, run
+`cairn answer`. Nothing is kept past the window.
+
 ### `reveal <objective-id> --submitter S --artifact FILE --nonce N [--cites ID ...] [--relates KIND:CLAIM-ID ...] [--identity FILE]`
 
 Reveal a committed artifact and verify it. **Must land in a strictly later epoch
@@ -185,6 +194,15 @@ Exits 3 on `unavailable` or `invalid_spec`; see *Exit codes*.
 Pay out every reveal epoch that has closed and cleared the finality delay.
 Ordering inside a batch comes from the epoch beacon, so nobody chooses who is
 paid first.
+
+### `answer`
+
+Answer every complaint about a sealed submission this log's owner dealt, with
+the complained-of seat's share in the clear, from the dealings `commit --sealed`
+kept in `<log>.dealings/`. Anyone checks an answer against the envelope's
+commitments, so it is the seat's share or it is refused. Deletes dealings whose
+answer window has closed. `cairn run` does the same every round; this is for a
+submitter who runs no daemon. Exits 1 if an answer was refused.
 
 ### `try <objective-id|objective.json> (--submitter WHO | --identity FILE) --artifact FILE [--nonce N] [--cites ID ...] [--settle]`
 

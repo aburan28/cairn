@@ -61,6 +61,8 @@ pub enum RecordKind {
     Undertaking,
     Availability,
     CommitteeShare,
+    ShareComplaint,
+    ShareAnswer,
 }
 
 impl RecordKind {
@@ -73,6 +75,8 @@ impl RecordKind {
             RecordKind::Undertaking => "undertaking",
             RecordKind::Availability => "availability",
             RecordKind::CommitteeShare => "committee_share",
+            RecordKind::ShareComplaint => "share_complaint",
+            RecordKind::ShareAnswer => "share_answer",
         }
     }
 }
@@ -1438,6 +1442,263 @@ impl CommitteeShare {
             share_key: optional_string(object, RECORD, "share_key")?,
         })
     }
+}
+
+/// A committee member's statement that the share sealed to its seat did not
+/// open, or opened to something that does not check against the dealer's
+/// commitments.
+///
+/// The first half of dealer accountability for a version-3 sealed envelope
+/// (see [`crate::crypto::vss`]). Nothing in it is checkable on its own -- the
+/// member alone holds the key that would show the share was garbage -- and it
+/// does not need to be: a complaint obliges the dealer to publish that seat's
+/// share in the clear as a [`ShareAnswer`], which anyone checks against the
+/// envelope. An honest dealer answers and the seat is restored; a dealer who
+/// sealed garbage cannot, and the submission can never be revealed. A member
+/// who complains falsely costs the dealer one record and learns nothing new,
+/// because the share answered is their own.
+///
+/// Signed by the seat's holder, like a [`CommitteeShare`]: a complaint from
+/// anyone would let a bystander force answers for every seat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareComplaint {
+    /// The id of the commitment record whose envelope sealed the share.
+    pub commitment: String,
+    /// The seat complaining. Its holder must be the signer.
+    pub seat: u8,
+    pub created_at: String,
+    /// Ed25519 public key of the seat's holder, hex.
+    pub identity: String,
+    /// Ed25519 signature over [`ShareComplaint::signing_payload`], hex.
+    /// Required.
+    pub signature: Option<String>,
+}
+
+impl ShareComplaint {
+    pub fn new(
+        commitment: impl Into<String>,
+        seat: u8,
+        created_at: impl Into<String>,
+    ) -> ShareComplaint {
+        ShareComplaint {
+            commitment: commitment.into(),
+            seat,
+            created_at: created_at.into(),
+            identity: String::new(),
+            signature: None,
+        }
+    }
+
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::ShareComplaint.as_str())),
+            ("commitment", Value::string(self.commitment.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("identity", Value::string(self.identity.clone())),
+            ("seat", Value::Int(i128::from(self.seat))),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Sign with `identity`, which becomes the record's `identity` field.
+    pub fn signed_with(mut self, identity: &crate::crypto::identity::Identity) -> ShareComplaint {
+        self.identity = identity.submitter_id();
+        self.signature = Some(identity.sign_value(&self.signing_payload()).to_hex());
+        self
+    }
+
+    pub fn verify_signature(&self) -> Result<(), SignatureError> {
+        const RECORD: &str = "share_complaint";
+        if signed_submitter(&self.identity).is_none() {
+            return Err(SignatureError::Invalid {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        }
+        let Some(signature) = self.signature.as_deref() else {
+            return Err(SignatureError::Missing {
+                record: RECORD,
+                submitter: self.identity.clone(),
+            });
+        };
+        verify_record_signature(
+            RECORD,
+            &self.identity,
+            &self.signing_payload(),
+            Some(signature),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "share_complaint";
+        validate_commitment_id(RECORD, &self.commitment)?;
+        if self.identity.len() != 64 || decode_hex(&self.identity).is_none() {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "identity",
+                expected: "64 lowercase hex characters of an ed25519 public key",
+            });
+        }
+        if self.seat == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "seat",
+                expected: "a seat number, 1..=255",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<ShareComplaint, RecordError> {
+        const RECORD: &str = "share_complaint";
+        let object = expect_object(value, RECORD)?;
+        Ok(ShareComplaint {
+            commitment: required_string(object, RECORD, "commitment")?,
+            seat: small_field(object, RECORD, "seat")?,
+            created_at: required_string(object, RECORD, "created_at")?,
+            identity: required_string(object, RECORD, "identity")?,
+            signature: optional_string(object, RECORD, "signature")?,
+        })
+    }
+}
+
+/// The dealer's answer to a [`ShareComplaint`]: the complained-of seat's
+/// share, `s ‖ r`, in the clear.
+///
+/// **Unsigned, because it proves itself.** It is admissible only if it checks
+/// against the commitments in the envelope it answers for, and only the
+/// dealer -- who chose the polynomials -- can produce one that does for a
+/// seat whose share they did not hand out. Whoever posts it, a share that
+/// checks is the dealer's, and it counts toward the reveal exactly as that
+/// seat's own published share would have.
+///
+/// Publishing it early reveals one share before the epoch closes, which is
+/// harmless below the threshold. If the dealer sealed garbage to several
+/// honest seats, answering exposes the dealer's own submission sooner; that
+/// is the dealer's doing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareAnswer {
+    pub commitment: String,
+    pub seat: u8,
+    /// `s ‖ r`, hex: two canonical scalars, 64 bytes.
+    pub share: String,
+    pub created_at: String,
+}
+
+impl ShareAnswer {
+    pub fn new(
+        commitment: impl Into<String>,
+        seat: u8,
+        share: &[u8],
+        created_at: impl Into<String>,
+    ) -> ShareAnswer {
+        ShareAnswer {
+            commitment: commitment.into(),
+            seat,
+            share: crate::hex::encode(share),
+            created_at: created_at.into(),
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("type", Value::string(RecordKind::ShareAnswer.as_str())),
+            ("commitment", Value::string(self.commitment.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("seat", Value::Int(i128::from(self.seat))),
+            ("share", Value::string(self.share.clone())),
+        ])
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// The share as the envelope wants it: abscissa `seat`, body `s ‖ r`.
+    pub fn to_share(&self) -> Result<crate::crypto::shamir::Share, RecordError> {
+        Ok(crate::crypto::shamir::Share {
+            index: self.seat,
+            data: decode_hex(&self.share).ok_or(RecordError::InvalidField {
+                record: "share_answer",
+                field: "share",
+                expected: "lowercase hex of even length",
+            })?,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        const RECORD: &str = "share_answer";
+        validate_commitment_id(RECORD, &self.commitment)?;
+        if self.seat == 0 {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "seat",
+                expected: "a seat number, 1..=255",
+            });
+        }
+        if decode_hex(&self.share).map(|bytes| bytes.len()) != Some(crate::crypto::vss::SHARE_LEN) {
+            return Err(RecordError::InvalidField {
+                record: RECORD,
+                field: "share",
+                expected: "128 lowercase hex characters: two 32-byte scalars",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<ShareAnswer, RecordError> {
+        const RECORD: &str = "share_answer";
+        let object = expect_object(value, RECORD)?;
+        Ok(ShareAnswer {
+            commitment: required_string(object, RECORD, "commitment")?,
+            seat: small_field(object, RECORD, "seat")?,
+            share: required_string(object, RECORD, "share")?,
+            created_at: required_string(object, RECORD, "created_at")?,
+        })
+    }
+}
+
+/// A commitment record id: `sha256:` and 64 lowercase hex.
+fn validate_commitment_id(record: &'static str, id: &str) -> Result<(), RecordError> {
+    let hex = id
+        .strip_prefix(crate::canonical::DIGEST_PREFIX)
+        .unwrap_or_default();
+    if hex.len() != 64 || decode_hex(hex).is_none() {
+        return Err(RecordError::InvalidField {
+            record,
+            field: "commitment",
+            expected: "a commitment record id: \"sha256:\" and 64 lowercase hex characters",
+        });
+    }
+    Ok(())
+}
+
+/// An integer field in `0..=255`.
+fn small_field(
+    object: &Value,
+    record: &'static str,
+    field: &'static str,
+) -> Result<u8, RecordError> {
+    object
+        .get(field)
+        .and_then(Value::as_i128)
+        .and_then(|n| u8::try_from(n).ok())
+        .ok_or(RecordError::InvalidField {
+            record,
+            field,
+            expected: "an integer in 0..=255",
+        })
 }
 
 /// Strict, lowercase-only hex. Same rule as everywhere else in this crate:

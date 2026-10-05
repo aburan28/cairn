@@ -8,13 +8,15 @@
 //! disagreeing about whether a claim was admissible, while both audited clean.
 //!
 //! Written from the primary's rules rather than shared with it (see the crate
-//! docs for why): an object of `type` "sealed_envelope", `version` 2, a
+//! docs for why): an object of `type` "sealed_envelope", `version` 2 or 3, a
 //! `threshold` in `1..=` the share count, a 12-byte `nonce`, hex `ciphertext`,
 //! a string `aad`, and `sealed_shares` -- at least one, distinct `index`es,
 //! each with a 12-byte `nonce`, hex `ciphertext`, and `kem` legs in suite
 //! order, each suite once, each ciphertext its suite's length, McEliece among
 //! them. Hex is lowercase. Unknown fields are ignored, as the primary ignores
-//! them.
+//! them -- except `commitments`, which version 3 requires and version 2 may
+//! not carry: one canonical Ristretto point (32 bytes, hex) per threshold
+//! share, and no sealed share at index 0, which is the secret's abscissa.
 
 use crate::canonical::Value;
 
@@ -70,8 +72,9 @@ pub fn check(value: &Value) -> Result<(), String> {
     if value.get("type").and_then(Value::as_str) != Some("sealed_envelope") {
         return Err("envelope type must be \"sealed_envelope\"".into());
     }
-    if value.get("version").and_then(Value::as_i128) != Some(2) {
-        return Err("envelope version must be 2".into());
+    let version = value.get("version").and_then(Value::as_i128);
+    if version != Some(2) && version != Some(3) {
+        return Err("envelope version must be 2 or 3".into());
     }
     let threshold = small(value, "threshold")?;
     fixed12(value, "nonce")?;
@@ -140,7 +143,57 @@ pub fn check(value: &Value) -> Result<(), String> {
     if threshold == 0 || usize::from(threshold) > seen.len() {
         return Err("envelope threshold must be between 1 and the share count".into());
     }
+    match (version, value.get("commitments")) {
+        (Some(2), None) => {}
+        (Some(2), Some(_)) => return Err("a version-2 envelope carries no commitments".into()),
+        (_, None) => return Err("missing commitments".into()),
+        (_, Some(_)) => {
+            let points = commitments(value)?;
+            if points.len() != usize::from(threshold) || crate::vss::decode(&points).is_none() {
+                return Err(
+                    "commitments must be one canonical Ristretto point per threshold share".into(),
+                );
+            }
+            if seen.contains(&0) {
+                return Err("a version-3 envelope addresses no share at index 0".into());
+            }
+        }
+    }
     Ok(())
+}
+
+/// The dealer's commitments as bytes, as the encoding spells them.
+fn commitments(envelope: &Value) -> Result<Vec<[u8; 32]>, String> {
+    let items = envelope
+        .get("commitments")
+        .ok_or("missing commitments")?
+        .as_array()
+        .ok_or("commitments must be an array")?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let holder = Value::object([("c", item.clone())]);
+        out.push(
+            hex(&holder, "c")?
+                .try_into()
+                .map_err(|_| "a commitment must be 32 bytes")?,
+        );
+    }
+    Ok(out)
+}
+
+/// Does the envelope commit to its sharing? Version 3 does.
+pub fn is_verifiable(envelope: &Value) -> bool {
+    envelope.get("version").and_then(Value::as_i128) == Some(3)
+}
+
+/// Does `(x, data)` check against the envelope's commitments? `None` when the
+/// envelope commits to nothing (version 2) or its commitments do not decode.
+pub fn verify_share(envelope: &Value, x: u8, data: &[u8]) -> Option<bool> {
+    if !is_verifiable(envelope) {
+        return None;
+    }
+    let points = crate::vss::decode(&commitments(envelope).ok()?)?;
+    Some(crate::vss::verify(&points, x, data))
 }
 
 /// The nonce and ciphertext of the share sealed at `index`, from an envelope
@@ -201,6 +254,46 @@ mod tests {
             ("aad", Value::string("sha256:00")),
             ("sealed_shares", Value::Array(shares)),
         ])
+    }
+
+    #[test]
+    fn a_version_3_envelope_carries_one_canonical_commitment_per_threshold_share() {
+        let good = || vec![leg("mceliece348864", 96)];
+        let point = "8062c406da79b2ffeb1975700cdb87c2e34f5f498be429b9aa822684af9f3167";
+        let v3 = |threshold: i128, commitments: Vec<&str>, index: i128| {
+            let mut value = envelope(
+                threshold,
+                vec![share(index, good()), share(index + 1, good())],
+            );
+            if let Value::Object(map) = &mut value {
+                map.insert("version".into(), Value::Int(3));
+                map.insert(
+                    "commitments".into(),
+                    Value::Array(commitments.into_iter().map(Value::string).collect()),
+                );
+            }
+            value
+        };
+        assert_eq!(check(&v3(2, vec![point, point], 1)), Ok(()));
+        assert!(is_verifiable(&v3(2, vec![point, point], 1)));
+        assert!(check(&v3(2, vec![point], 1)).is_err());
+        assert!(check(&v3(1, vec![point, point], 1)).is_err());
+        let bad = format!("{}80", "00".repeat(31));
+        assert!(check(&v3(2, vec![point, bad.as_str()], 1)).is_err());
+        assert!(check(&v3(2, vec![point, point], 0)).is_err());
+        // Missing on version 3; present on version 2.
+        let mut missing = v3(2, vec![point, point], 1);
+        if let Value::Object(map) = &mut missing {
+            map.remove("commitments");
+        }
+        assert!(check(&missing).is_err());
+        let mut legacy = v3(2, vec![point, point], 1);
+        if let Value::Object(map) = &mut legacy {
+            map.insert("version".into(), Value::Int(2));
+        }
+        assert!(check(&legacy).is_err());
+        assert!(check(&envelope(1, vec![share(1, good())])).is_ok());
+        assert!(!is_verifiable(&envelope(1, vec![share(1, good())])));
     }
 
     #[test]

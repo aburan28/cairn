@@ -63,7 +63,19 @@ pub const BUCKETS: usize = 256;
 /// would leave every reveal to whichever node happened to hold a threshold of
 /// seats, which on a real network is none of them. A peer that predates it
 /// refuses the kind one record at a time and keeps the session.
-pub const EXCHANGEABLE: &[&str] = &["objective", "commitment", "committee_share", "claim"];
+///
+/// `share_complaint` and `share_answer` travel for the same reason: a seat
+/// complains on its own node and the dealer answers on theirs, and a reveal
+/// anywhere waits on both. A complaint that stayed local would let a node that
+/// never saw it reveal a submission the rules hold back.
+pub const EXCHANGEABLE: &[&str] = &[
+    "objective",
+    "commitment",
+    "committee_share",
+    "share_complaint",
+    "share_answer",
+    "claim",
+];
 
 /// A record as it travels: the kind, and the canonical body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -787,7 +799,14 @@ mod tests {
     fn the_exchangeable_kinds_are_exactly_the_inputs() {
         assert_eq!(
             EXCHANGEABLE,
-            &["objective", "commitment", "committee_share", "claim"]
+            &[
+                "objective",
+                "commitment",
+                "committee_share",
+                "share_complaint",
+                "share_answer",
+                "claim"
+            ]
         );
         for kind in EXCHANGEABLE {
             assert!(Peer::new().insert(record(kind, 1)).is_ok(), "{kind}");

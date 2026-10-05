@@ -13,7 +13,9 @@ use super::sync::{Peer, SyncError};
 use super::transport::{self, Connection, TransportError};
 use crate::gossip::{Candidate, Population};
 use crate::node::Node;
-use crate::records::{Claim, Commitment, CommitteeShare, Objective, PeerRecord};
+use crate::records::{
+    Claim, Commitment, CommitteeShare, Objective, PeerRecord, ShareAnswer, ShareComplaint,
+};
 use crate::time::timestamp;
 use rand_core::OsRng;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1322,6 +1324,8 @@ fn decode_record(record: &super::sync::Record) -> Result<(), SyncError> {
         "commitment" => Commitment::from_value(&record.payload).map(|_| ()),
         "claim" => Claim::from_value(&record.payload).map(|_| ()),
         "committee_share" => CommitteeShare::from_value(&record.payload).map(|_| ()),
+        "share_complaint" => ShareComplaint::from_value(&record.payload).map(|_| ()),
+        "share_answer" => ShareAnswer::from_value(&record.payload).map(|_| ()),
         // No `peer` arm, on purpose: peer records travel as routing hints in
         // their own family (`super::peers`), and must never replay into the
         // log -- see `records_from_node`.
@@ -1419,7 +1423,16 @@ fn replay_records_with_horizon(
     // Shares before claims: a share opens a commitment the batch may also
     // carry, and the claim a committee reveal produces is replayed like any
     // other claim, so order within the batch matters only in that direction.
-    for kind in ["objective", "commitment", "committee_share", "claim"] {
+    // Complaints and answers sit between them for the same reason: a reveal
+    // waits on them, and an answer needs its complaint.
+    for kind in [
+        "objective",
+        "commitment",
+        "committee_share",
+        "share_complaint",
+        "share_answer",
+        "claim",
+    ] {
         let mut batch: Vec<&(String, crate::canonical::Value)> =
             records.iter().filter(|(k, _)| k == kind).collect();
         // RFC-3339 offsets make raw strings unsuitable as an instant order:
@@ -1464,6 +1477,16 @@ fn replay_records_with_horizon(
                 "committee_share" => {
                     if let Ok(value) = CommitteeShare::from_value(payload) {
                         let _ = node.post_committee_share(&value, &stamp);
+                    }
+                }
+                "share_complaint" => {
+                    if let Ok(value) = ShareComplaint::from_value(payload) {
+                        let _ = node.post_share_complaint(&value, &stamp);
+                    }
+                }
+                "share_answer" => {
+                    if let Ok(value) = ShareAnswer::from_value(payload) {
+                        let _ = node.post_share_answer(&value, &stamp);
                     }
                 }
                 "claim" => {

@@ -15,7 +15,7 @@ use crate::partition::{assign, beacon, epoch_of, epoch_seconds, settlement_rank,
 use crate::piecework::Piecework;
 use crate::records::{
     signed_submitter, Availability, AvailabilityPool, Claim, Commitment, CommitteeShare, Objective,
-    PeerRecord, Undertaking, MAX_UNDERTAKING_HEIGHT,
+    PeerRecord, ShareAnswer, ShareComplaint, Undertaking, MAX_UNDERTAKING_HEIGHT,
 };
 use crate::time::{timestamp, unix_seconds};
 use crate::verifiers::{self, Status, Verdict};
@@ -34,6 +34,31 @@ pub const AVAILABILITY: &str = "availability";
 pub const AVAILABILITY_POOL: &str = "availability_pool";
 pub const AVAILABILITY_SETTLEMENT: &str = "availability_settlement";
 pub const COMMITTEE_SHARE: &str = "committee_share";
+pub const SHARE_COMPLAINT: &str = "share_complaint";
+pub const SHARE_ANSWER: &str = "share_answer";
+
+/// Epochs after a version-3 sealed commitment's own in which a seat may
+/// complain that its share does not open: that epoch and the next.
+pub const COMPLAINT_EPOCHS: u64 = 1;
+
+/// Epochs after the commitment's own in which its dealer may answer. A
+/// complaint unanswered when this closes disqualifies the submission.
+pub const ANSWER_EPOCHS: u64 = 2;
+
+/// Which seats of one version-3 commitment complained, were answered, or
+/// published a share that checks -- replayed from the log in order.
+#[derive(Debug, Default)]
+struct Dealing {
+    complained: BTreeSet<u8>,
+    answered: BTreeSet<u8>,
+    shared: BTreeSet<u8>,
+}
+
+impl Dealing {
+    fn accounted(&self, seat: u8) -> bool {
+        self.shared.contains(&seat) || self.answered.contains(&seat)
+    }
+}
 pub const ISSUANCE: &str = "issuance";
 pub const CHALLENGE: &str = "challenge";
 pub const BISECTION: &str = "bisection";
@@ -1908,6 +1933,337 @@ impl Node {
         }
     }
 
+    /// The committee-share rules for one record at entry `seq`, apart from
+    /// its admission epoch and duplicate seats, which the audit checks on
+    /// their own. `Err` is the audit's message.
+    fn committee_share_problem(&self, record: &CommitteeShare, seq: u64) -> Result<(), String> {
+        let Some((commit_at, commitment)) = self.commitment_at(&record.commitment) else {
+            return Err(format!(
+                "committee_share names commitment {} which is not in this log",
+                short(&record.commitment)
+            ));
+        };
+        let Some(envelope) = &commitment.envelope else {
+            return Err(format!(
+                "committee_share opens commitment {}, which carries no envelope",
+                short(&record.commitment)
+            ));
+        };
+        if commit_at >= seq as usize {
+            return Err("committee_share precedes the commitment it opens".into());
+        }
+        let (Some(commit_seconds), Some(share_seconds)) = (
+            unix_seconds(&commitment.created_at),
+            unix_seconds(&record.created_at),
+        ) else {
+            return Err("committee_share or its commitment carries an unreadable timestamp".into());
+        };
+        let commit_epoch = epoch_of(commit_seconds, epoch_seconds());
+        let share_epoch = epoch_of(share_seconds, epoch_seconds());
+        // An embargo is this rule with a longer arm. A committee share is
+        // what opens a sealed artifact, so an objective that declared
+        // "revealed after N epochs" is enforced here or nowhere -- and
+        // derived here independently, because an embargo the two
+        // implementations disagreed about is a committee opening an
+        // artifact one of them still thinks is shut.
+        let embargo = self
+            .objectives()
+            .get(&commitment.objective_id)
+            .filter(|objective| objective.confidentiality == "embargoed")
+            .and_then(|objective| objective.embargo_epochs)
+            .unwrap_or(0);
+        let opens_at = commit_epoch.saturating_add(embargo);
+        if share_epoch <= opens_at {
+            return Err(format!(
+                "committee_share is in epoch {share_epoch} but its commitment opens at epoch \
+                 {opens_at}; a committee must wait for a strictly later epoch, and longer \
+                 still under an embargo"
+            ));
+        }
+        match self
+            .committee_for(commit_epoch, commit_at)
+            .iter()
+            .find(|(seat, _, _)| *seat == record.seat)
+        {
+            None => {
+                return Err(format!(
+                    "seat {} was not drawn for commitment {}",
+                    record.seat,
+                    short(&record.commitment)
+                ))
+            }
+            Some((_, _, identity)) if *identity != record.identity => {
+                return Err(format!(
+                    "seat {} of commitment {} belongs to another identity",
+                    record.seat,
+                    short(&record.commitment)
+                ))
+            }
+            Some(_) => {}
+        }
+        // A share that carries its key must be the one the dealer sealed:
+        // the sealed share opens under the key to exactly this point.
+        if record.share_key.is_some() {
+            let opens = record.share_and_key().is_some_and(|(share, key)| {
+                crate::envelope::share_opens(envelope, record.seat, &key, record.x, &share)
+            });
+            if !opens {
+                return Err(format!(
+                    "the key published with seat {} of commitment {} does not open that \
+                     seat's sealed share to the point it publishes",
+                    record.seat,
+                    short(&record.commitment)
+                ));
+            }
+        }
+        // On a version-3 envelope a share's abscissa is its seat, and the
+        // share must check against the dealer's commitments.
+        if crate::envelope::is_verifiable(envelope) {
+            if record.x != record.seat {
+                return Err(format!(
+                    "seat {} of commitment {} published a share at x = {}; on a version-3 \
+                     envelope a share's abscissa is its seat",
+                    record.seat,
+                    short(&record.commitment),
+                    record.x
+                ));
+            }
+            let bytes = ShareAnswer {
+                commitment: String::new(),
+                seat: record.seat,
+                share: record.share.clone(),
+                created_at: String::new(),
+            }
+            .share_bytes();
+            let checks =
+                bytes.and_then(|data| crate::envelope::verify_share(envelope, record.seat, &data));
+            if checks != Some(true) {
+                return Err(format!(
+                    "the share for seat {} of commitment {} does not check against the \
+                     dealer's commitments",
+                    record.seat,
+                    short(&record.commitment)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The commitment a complaint or answer names, if it is held to its
+    /// dealing: in the log below `seq`, sealed under a version-3 envelope.
+    fn accountable(
+        &self,
+        commitment_id: &str,
+        seq: u64,
+    ) -> Result<(usize, Commitment, u64), String> {
+        let Some((at, commitment)) = self.commitment_at(commitment_id) else {
+            return Err(format!(
+                "commitment {} is not in this log",
+                short(commitment_id)
+            ));
+        };
+        if at >= seq as usize {
+            return Err("the record precedes the commitment it names".into());
+        }
+        if !commitment
+            .envelope
+            .as_ref()
+            .is_some_and(crate::envelope::is_verifiable)
+        {
+            return Err(format!(
+                "commitment {} is not sealed under a version-3 envelope",
+                short(commitment_id)
+            ));
+        }
+        let epoch = self.epoch_of_ts("commitment", &commitment.created_at)?;
+        Ok((at, commitment, epoch))
+    }
+
+    fn complaint_problem(
+        &self,
+        record: &ShareComplaint,
+        seq: u64,
+        state: &Dealing,
+    ) -> Result<(), String> {
+        record.validate().map_err(|e| e.to_string())?;
+        record.verify_signature().map_err(|e| e.to_string())?;
+        let (at, _, commit_epoch) = self.accountable(&record.commitment, seq)?;
+        let epoch = self.epoch_of_ts("share_complaint", &record.created_at)?;
+        let last = commit_epoch.saturating_add(COMPLAINT_EPOCHS);
+        if epoch < commit_epoch || epoch > last {
+            return Err(format!(
+                "a share_complaint in epoch {epoch} is admissible in epochs {commit_epoch}..={last}"
+            ));
+        }
+        match self
+            .committee_for(commit_epoch, at)
+            .iter()
+            .find(|(seat, _, _)| *seat == record.seat)
+        {
+            None => return Err(format!("seat {} was not drawn", record.seat)),
+            Some((_, _, identity)) if *identity != record.identity => {
+                return Err(format!("seat {} belongs to another identity", record.seat))
+            }
+            Some(_) => {}
+        }
+        if state.accounted(record.seat) {
+            return Err(format!(
+                "seat {} already has a share on the log that checks",
+                record.seat
+            ));
+        }
+        if state.complained.contains(&record.seat) {
+            return Err(format!("seat {} already complained", record.seat));
+        }
+        Ok(())
+    }
+
+    fn answer_problem(
+        &self,
+        record: &ShareAnswer,
+        seq: u64,
+        state: &Dealing,
+    ) -> Result<(), String> {
+        record.validate().map_err(|e| e.to_string())?;
+        let (_, commitment, commit_epoch) = self.accountable(&record.commitment, seq)?;
+        let epoch = self.epoch_of_ts("share_answer", &record.created_at)?;
+        let last = commit_epoch.saturating_add(ANSWER_EPOCHS);
+        if epoch < commit_epoch || epoch > last {
+            return Err(format!(
+                "a share_answer in epoch {epoch} is admissible in epochs {commit_epoch}..={last}"
+            ));
+        }
+        if !state.complained.contains(&record.seat) {
+            return Err(format!("no complaint names seat {}", record.seat));
+        }
+        if state.answered.contains(&record.seat) {
+            return Err(format!("seat {} was already answered", record.seat));
+        }
+        if state.shared.contains(&record.seat) {
+            return Err(format!(
+                "seat {} already has a share on the log that checks",
+                record.seat
+            ));
+        }
+        let checks = record
+            .share_bytes()
+            .zip(commitment.envelope.as_ref())
+            .and_then(|(data, envelope)| {
+                crate::envelope::verify_share(envelope, record.seat, &data)
+            });
+        if checks != Some(true) {
+            return Err(format!(
+                "the answer for seat {} does not check against the dealer's commitments",
+                record.seat
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replay a commitment's committee shares, complaints and answers below
+    /// `positions` in log order, each admitted by the rules as they stood.
+    fn dealing(&self, commitment_id: &str, positions: u64) -> Dealing {
+        let mut state = Dealing::default();
+        for entry in self.ledger.entries() {
+            if entry.seq >= positions
+                || entry.payload.get("commitment").and_then(Value::as_str) != Some(commitment_id)
+            {
+                continue;
+            }
+            match entry.kind.as_str() {
+                COMMITTEE_SHARE => {
+                    if let Ok(record) = CommitteeShare::from_value(&entry.payload) {
+                        if record.validate().is_ok()
+                            && record.verify_signature().is_ok()
+                            && self.committee_share_problem(&record, entry.seq).is_ok()
+                        {
+                            state.shared.insert(record.seat);
+                        }
+                    }
+                }
+                SHARE_COMPLAINT => {
+                    if let Ok(record) = ShareComplaint::from_value(&entry.payload) {
+                        if self.complaint_problem(&record, entry.seq, &state).is_ok() {
+                            state.complained.insert(record.seat);
+                        }
+                    }
+                }
+                SHARE_ANSWER => {
+                    if let Ok(record) = ShareAnswer::from_value(&entry.payload) {
+                        if self.answer_problem(&record, entry.seq, &state).is_ok() {
+                            state.answered.insert(record.seat);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        state
+    }
+
+    /// May a claim opening `commitment` be admitted at `positions` in
+    /// `reveal_epoch`? An unanswered complaint holds it until the answer
+    /// window closes and disqualifies it after; inside the complaint window
+    /// a seat that is not yet accounted for holds it too.
+    fn reveal_gate(
+        &self,
+        commitment: &Commitment,
+        positions: u64,
+        reveal_epoch: u64,
+    ) -> Result<(), String> {
+        let Some(envelope) = commitment
+            .envelope
+            .as_ref()
+            .filter(|envelope| crate::envelope::is_verifiable(envelope))
+        else {
+            return Ok(());
+        };
+        let commit_epoch = self.epoch_of_ts("commitment", &commitment.created_at)?;
+        let state = self.dealing(&commitment.id(), positions);
+        let unanswered: Vec<u8> = state
+            .complained
+            .iter()
+            .copied()
+            .filter(|seat| !state.accounted(*seat))
+            .collect();
+        if !unanswered.is_empty() {
+            return Err(
+                if reveal_epoch > commit_epoch.saturating_add(ANSWER_EPOCHS) {
+                    format!(
+                        "commitment {} is disqualified: its dealer did not answer the complaints \
+                     of seats {unanswered:?} before the answer window closed",
+                        short(&commitment.id())
+                    )
+                } else {
+                    format!(
+                        "commitment {} has unanswered complaints from seats {unanswered:?}",
+                        short(&commitment.id())
+                    )
+                },
+            );
+        }
+        let seats: Vec<u8> = envelope
+            .get("sealed_shares")
+            .and_then(Value::as_array)
+            .map(|shares| {
+                shares
+                    .iter()
+                    .filter_map(|share| share.get("index").and_then(Value::as_i128))
+                    .filter_map(|index| u8::try_from(index).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if reveal_epoch <= commit_epoch.saturating_add(COMPLAINT_EPOCHS)
+            && !seats.iter().all(|seat| state.accounted(*seat))
+        {
+            return Err(format!(
+                "commitment {} is inside its complaint window with a seat not yet accounted for",
+                short(&commitment.id())
+            ));
+        }
+        Ok(())
+    }
+
     fn matching_commitment(&self, claim: &Claim) -> Option<(Value, String)> {
         let target = claim.commitment_hash();
         self.ledger
@@ -2036,6 +2392,18 @@ impl Node {
         {
             return Err("objective already settled".into());
         }
+        // The dealer must commit to the sharing; a version-2 envelope does not.
+        if commitment
+            .envelope
+            .as_ref()
+            .is_some_and(|envelope| !crate::envelope::is_verifiable(envelope))
+        {
+            return Err(
+                "a sealed commitment must carry a version-3 envelope, whose dealer \
+                        commits to the sharing"
+                    .into(),
+            );
+        }
         let entry = self.ledger.append(COMMITMENT, commitment.to_value(), ts)?;
         Ok(entry.hash)
     }
@@ -2104,6 +2472,9 @@ impl Node {
                 "epoch {reveal_epoch} has already settled; a reveal cannot join a batch \
                  that has been paid"
             ));
+        }
+        if let Ok(record) = Commitment::from_value(&commitment) {
+            self.reveal_gate(&record, self.ledger.entries().len() as u64, reveal_epoch)?;
         }
         let accepted = self.accepted_claims();
         for cited in &claim.cites {
@@ -2730,6 +3101,12 @@ impl Node {
                         Ok(r.to_value())
                     })
                     .map_err(|e| e.to_string()),
+                SHARE_COMPLAINT => ShareComplaint::from_value(&entry.payload)
+                    .map(|r| r.to_value())
+                    .map_err(|e| e.to_string()),
+                SHARE_ANSWER => ShareAnswer::from_value(&entry.payload)
+                    .map(|r| r.to_value())
+                    .map_err(|e| e.to_string()),
                 _ => continue,
             };
             match re_encoded {
@@ -2763,108 +3140,15 @@ impl Node {
             if record.validate().is_err() || record.verify_signature().is_err() {
                 continue;
             }
-            let Some((commit_at, commitment)) = self.commitment_at(&record.commitment) else {
-                problems.push(format!(
-                    "entry {}: committee_share names commitment {} which is not in this log",
-                    entry.seq,
-                    short(&record.commitment)
-                ));
-                continue;
-            };
-            if commitment.envelope.is_none() {
-                problems.push(format!(
-                    "entry {}: committee_share opens commitment {}, which carries no envelope",
-                    entry.seq,
-                    short(&record.commitment)
-                ));
-                continue;
-            }
-            if commit_at >= entry.seq as usize {
-                problems.push(format!(
-                    "entry {}: committee_share precedes the commitment it opens",
-                    entry.seq
-                ));
-                continue;
-            }
             if let Err(error) =
                 self.record_admission_epoch("committee_share", &record.created_at, &entry.ts)
             {
                 problems.push(format!("entry {}: {error}", entry.seq));
                 continue;
             }
-            let (Some(commit_seconds), Some(share_seconds)) = (
-                unix_seconds(&commitment.created_at),
-                unix_seconds(&record.created_at),
-            ) else {
-                problems.push(format!(
-                    "entry {}: committee_share or its commitment carries an unreadable timestamp",
-                    entry.seq
-                ));
+            if let Err(error) = self.committee_share_problem(&record, entry.seq) {
+                problems.push(format!("entry {}: {error}", entry.seq));
                 continue;
-            };
-            let commit_epoch = epoch_of(commit_seconds, epoch_seconds());
-            let share_epoch = epoch_of(share_seconds, epoch_seconds());
-            // An embargo is this rule with a longer arm. A committee share is
-            // what opens a sealed artifact, so an objective that declared
-            // "revealed after N epochs" is enforced here or nowhere -- and
-            // derived here independently, because an embargo the two
-            // implementations disagreed about is a committee opening an
-            // artifact one of them still thinks is shut.
-            let embargo = self
-                .objectives()
-                .get(&commitment.objective_id)
-                .filter(|objective| objective.confidentiality == "embargoed")
-                .and_then(|objective| objective.embargo_epochs)
-                .unwrap_or(0);
-            let opens_at = commit_epoch.saturating_add(embargo);
-            if share_epoch <= opens_at {
-                problems.push(format!(
-                    "entry {}: committee_share is in epoch {share_epoch} but its commitment \
-                     opens at epoch {opens_at}; a committee must wait for a strictly later \
-                     epoch, and longer still under an embargo",
-                    entry.seq
-                ));
-                continue;
-            }
-            match self
-                .committee_for(commit_epoch, commit_at)
-                .iter()
-                .find(|(seat, _, _)| *seat == record.seat)
-            {
-                None => problems.push(format!(
-                    "entry {}: seat {} was not drawn for commitment {}",
-                    entry.seq,
-                    record.seat,
-                    short(&record.commitment)
-                )),
-                Some((_, _, identity)) if *identity != record.identity => {
-                    problems.push(format!(
-                        "entry {}: seat {} of commitment {} belongs to another identity",
-                        entry.seq,
-                        record.seat,
-                        short(&record.commitment)
-                    ));
-                }
-                Some(_) => {}
-            }
-            // A share that carries its key must be the one the dealer sealed:
-            // the sealed share opens under the key to exactly this point.
-            if record.share_key.is_some() {
-                let opens = match (record.share_and_key(), &commitment.envelope) {
-                    (Some((share, key)), Some(envelope)) => {
-                        crate::envelope::share_opens(envelope, record.seat, &key, record.x, &share)
-                    }
-                    _ => false,
-                };
-                if !opens {
-                    problems.push(format!(
-                        "entry {}: the key published with seat {} of commitment {} does not \
-                         open that seat's sealed share to the point it publishes",
-                        entry.seq,
-                        record.seat,
-                        short(&record.commitment)
-                    ));
-                }
             }
             if !committee_seats.insert((record.commitment.clone(), record.seat)) {
                 problems.push(format!(
@@ -2873,6 +3157,80 @@ impl Node {
                     record.seat,
                     short(&record.commitment)
                 ));
+            }
+        }
+
+        // Dealer accountability for version-3 sealed commitments, re-derived
+        // as the primary does: a commitment that commits to nothing, each
+        // complaint and answer by the rules as they stood at its entry, and
+        // every claim that opened such a commitment held to the reveal gate.
+        for entry in self.ledger.entries_of_kind(COMMITMENT) {
+            if let Ok(record) = Commitment::from_value(&entry.payload) {
+                if record
+                    .envelope
+                    .as_ref()
+                    .is_some_and(|envelope| !crate::envelope::is_verifiable(envelope))
+                {
+                    problems.push(format!(
+                        "entry {}: a sealed commitment must carry a version-3 envelope",
+                        entry.seq
+                    ));
+                }
+            }
+        }
+        for entry in self.ledger.entries() {
+            let outcome = match entry.kind.as_str() {
+                SHARE_COMPLAINT => match ShareComplaint::from_value(&entry.payload) {
+                    Ok(record) => self
+                        .record_admission_epoch("share_complaint", &record.created_at, &entry.ts)
+                        .and_then(|_| {
+                            let state = self.dealing(&record.commitment, entry.seq);
+                            self.complaint_problem(&record, entry.seq, &state)
+                        }),
+                    Err(_) => continue,
+                },
+                SHARE_ANSWER => match ShareAnswer::from_value(&entry.payload) {
+                    Ok(record) => self
+                        .record_admission_epoch("share_answer", &record.created_at, &entry.ts)
+                        .and_then(|_| {
+                            let state = self.dealing(&record.commitment, entry.seq);
+                            self.answer_problem(&record, entry.seq, &state)
+                        }),
+                    Err(_) => continue,
+                },
+                _ => continue,
+            };
+            if let Err(error) = outcome {
+                problems.push(format!("entry {}: {error}", entry.seq));
+            }
+        }
+        for entry in self.ledger.entries_of_kind(CLAIM) {
+            let Ok(claim) = Claim::from_value(&entry.payload) else {
+                continue;
+            };
+            let Some(commitment) = self
+                .ledger
+                .entries_of_kind(COMMITMENT)
+                .into_iter()
+                .filter(|matched| matched.seq < entry.seq)
+                .find(|matched| {
+                    let payload = &matched.payload;
+                    payload.get("objective_id").and_then(Value::as_str)
+                        == Some(claim.objective_id.as_str())
+                        && payload.get("submitter").and_then(Value::as_str)
+                            == Some(claim.submitter.as_str())
+                        && payload.get("hash").and_then(Value::as_str)
+                            == Some(claim.commitment_hash().as_str())
+                })
+                .and_then(|matched| Commitment::from_value(&matched.payload).ok())
+            else {
+                continue;
+            };
+            let Ok(reveal_epoch) = self.epoch_of_ts("reveal", &entry.ts) else {
+                continue;
+            };
+            if let Err(error) = self.reveal_gate(&commitment, entry.seq, reveal_epoch) {
+                problems.push(format!("entry {}: {error}", entry.seq));
             }
         }
 

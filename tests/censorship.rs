@@ -298,13 +298,16 @@ fn committee_below_threshold_cannot_read_early() {
     let conspiracy = committee.publish(&submission.envelope, &[1, 3, 6]);
     assert_eq!(conspiracy.len(), 3, "one short of the threshold");
 
-    // Shamir cannot report "too few shares": any three points define some
-    // polynomial, and that is the information-theoretic security property
-    // rather than a defect. So the sub-threshold set reconstructs a perfectly
-    // well-formed *wrong* key, and the AEAD tag is what turns that into a
-    // refusal. It is load bearing, not decorative.
+    // The envelope's commitments say how many shares open it, so a
+    // sub-threshold set is refused as exactly that -- three checked shares of
+    // four. What three shares *hide* is unchanged: the polynomial has degree
+    // three, three points of it say nothing about its constant term, and
+    // Pedersen commitments hide the coefficients unconditionally.
     match open(&submission, &conspiracy) {
-        Err(SealedError::Envelope(EnvelopeError::Authentication { .. })) => {}
+        Err(SealedError::Envelope(EnvelopeError::NotEnoughValidShares {
+            valid: 3,
+            threshold: 4,
+        })) => {}
         other => panic!("t-1 colluding members must learn nothing, got {other:?}"),
     }
 

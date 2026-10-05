@@ -89,6 +89,23 @@ vectors happily and fails a cross-check. The root those proofs are checked
 against is one of the `merkle` vectors' descendants, so the frozen file still
 anchors the bottom of it.
 
+## `sealed/`: logs both implementations must audit alike
+
+`sealed/*.jsonl` are logs the primary wrote for the dealer-accountability rules
+of version-3 sealed envelopes (`docs/censorship.md` §2). Two are clean: an
+answered complaint, and a committee that published promptly. Each other log
+has one record appended beneath the rules engine: a claim revealed past an
+unanswered complaint, or inside the complaint window; an answer that does not
+check, or that nobody asked for; a complaint from the wrong identity, or too
+late; a committee share that does not check; a version-2 sealed commitment.
+`sealed/manifest.json` says which entry each must be flagged at.
+`the_sealed_fixtures_audit_as_their_manifest_says` (primary) and
+`the_primarys_sealed_fixtures_audit_as_their_manifest_says` (reference) hold
+both implementations to it. They are written by
+`CAIRN_WRITE_SEALED_FIXTURES=1 cargo test --test committee_reveal`, which draws
+fresh keys and so new bytes. Unlike the vectors above they are not frozen;
+regenerate them when a rule they exercise changes, and say so.
+
 ## Regenerating
 
 ```sh
