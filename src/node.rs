@@ -106,6 +106,22 @@ pub const VDF_SOURCE: &str = "vdf";
 /// makes sure the log's claim that somebody waited is never vacuous.
 pub const MIN_VDF_DIFFICULTY: u64 = 1 << 16;
 
+/// A reader's own minimum for delay beacons, above [`MIN_VDF_DIFFICULTY`].
+///
+/// The record names its difficulty, and a useful one fills most of an epoch,
+/// which no constant can know. So a reader who wants that says so here, and
+/// `audit` names every delay beacon under it. Reader policy, like
+/// [`REQUIRE_BEACON_ENV`]: it changes what the audit reports, never what is
+/// admitted or how anything settles.
+pub const MIN_VDF_DIFFICULTY_ENV: &str = "CAIRN_MIN_VDF_DIFFICULTY";
+
+fn reader_min_vdf_difficulty() -> Option<u64> {
+    std::env::var(MIN_VDF_DIFFICULTY_ENV)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .filter(|minimum| *minimum > MIN_VDF_DIFFICULTY)
+}
+
 /// Set to `1` to treat an epoch settled without a beacon as an audit fault.
 ///
 /// The beacon closes settlement grinding only if there *is* one, and the
@@ -7994,6 +8010,24 @@ impl Node {
             if payload_str(&entry.payload, "source") == Some(VDF_SOURCE) {
                 if let Err(error) = self.check_vdf_beacon(&entry.payload, entry.seq as usize) {
                     problems.push(format!("beacon at entry {}: {error}", entry.seq));
+                } else if let Some(minimum) = reader_min_vdf_difficulty() {
+                    // The reader's own bar, above the consensus floor: a beacon
+                    // that checks but claims less delay than this reader thinks
+                    // prices grinding is named, the way CAIRN_REQUIRE_BEACON
+                    // names an epoch with none. Reported, never consulted when
+                    // settling, so readers with different bars do not fork.
+                    let difficulty = entry
+                        .payload
+                        .get("difficulty")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    if difficulty < minimum {
+                        problems.push(format!(
+                            "beacon at entry {}: claims {difficulty} squarings, under this \
+                             reader's {MIN_VDF_DIFFICULTY_ENV}={minimum}",
+                            entry.seq
+                        ));
+                    }
                 }
             }
         }

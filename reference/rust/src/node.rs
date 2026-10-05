@@ -1851,6 +1851,63 @@ impl Node {
         out
     }
 
+    /// Why a `vdf` beacon does not show the delay it claims, if it does not:
+    /// a difficulty under the floor (or under this reader's
+    /// `CAIRN_MIN_VDF_DIFFICULTY`), a value or witness that is not strict
+    /// lowercase hex, or a proof that does not check against the seed the
+    /// log below it gives.
+    fn vdf_beacon_problem(&self, payload: &Value, orders: u64, positions: usize) -> Option<String> {
+        let Some(difficulty) = payload.get("difficulty").and_then(Value::as_u64) else {
+            return Some(format!(
+                "delay beacon for epoch {orders} names no difficulty"
+            ));
+        };
+        if difficulty < crate::vdf::MIN_DIFFICULTY {
+            return Some(format!(
+                "delay beacon for epoch {orders} claims {difficulty} squarings, under the \
+                 floor of {}",
+                crate::vdf::MIN_DIFFICULTY
+            ));
+        }
+        let reader_minimum = std::env::var("CAIRN_MIN_VDF_DIFFICULTY")
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok());
+        if let Some(minimum) = reader_minimum.filter(|minimum| difficulty < *minimum) {
+            return Some(format!(
+                "delay beacon for epoch {orders} claims {difficulty} squarings, under this \
+                 reader's CAIRN_MIN_VDF_DIFFICULTY={minimum}"
+            ));
+        }
+        let strict = |field: &str| -> Option<Vec<u8>> {
+            let text = payload.get(field)?.as_str()?;
+            if !text.len().is_multiple_of(2)
+                || !text
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return None;
+            }
+            (0..text.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+                .collect()
+        };
+        let (Some(output), Some(witness)) = (strict("value"), strict("witness")) else {
+            return Some(format!(
+                "delay beacon for epoch {orders} carries a value or witness that is not \
+                 lowercase hex"
+            ));
+        };
+        let seed = crate::vdf::seed(orders, self.ledger.root_at(positions).as_deref());
+        if crate::vdf::verify(&seed, difficulty, &output, &witness) {
+            None
+        } else {
+            Some(format!(
+                "the delay proof for epoch {orders} does not check against the log below it"
+            ))
+        }
+    }
+
     fn matching_commitment(&self, claim: &Claim) -> Option<(Value, String)> {
         let target = claim.commitment_hash();
         self.ledger
@@ -3595,6 +3652,16 @@ impl Node {
                          {claimed}'s signature, so its anchor is a value somebody chose",
                         entry.seq
                     ));
+                }
+            }
+            // A delay beacon carries its own evidence, checked against the log
+            // as it stood below the record. Reported, never consulted when
+            // settling, for the same reason as drand.
+            if entry.payload.get("source").and_then(Value::as_str) == Some("vdf") {
+                if let Some(problem) =
+                    self.vdf_beacon_problem(&entry.payload, orders, entry.seq as usize)
+                {
+                    problems.push(format!("entry {}: {problem}", entry.seq));
                 }
             }
         }

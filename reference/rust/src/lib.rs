@@ -26,5 +26,6 @@ pub mod piecework;
 pub mod records;
 pub mod sig;
 pub mod time;
+pub mod vdf;
 pub mod verifiers;
 pub mod workspace;
