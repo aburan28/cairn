@@ -6,35 +6,15 @@
 ### Features
 
 * readable reader, LAN workers with `cairn work`, and roles priced honestly ([#231](https://github.com/aburan28/cairn/issues/231)) ([749de36](https://github.com/aburan28/cairn/commit/749de36a54f066e71fd35b28c16a12eb2c8c6493))
-* **sealed:** committee shares are checkable on their own, and the reference decodes envelopes ([854307f](https://github.com/aburan28/cairn/commit/854307f90ea42f38d645d0c2e731756cc0f9c3a7))
-* **sealed:** the dealer commits to its sharing and answers for every seat, in both implementations ([c47d947](https://github.com/aburan28/cairn/commit/c47d94717df8946f75204bd0e8f691ad6a401df8))
 * **ui:** green palette, voice challenge entry, and network topology ([#232](https://github.com/aburan28/cairn/issues/232)) ([d82a65c](https://github.com/aburan28/cairn/commit/d82a65c6d50c6e83305ab87df546c7e25b8af7a6))
-* **vdf:** the reference checks delay proofs, and a reader can demand more delay than the floor ([919be6c](https://github.com/aburan28/cairn/commit/919be6c2bbb4a3d1a56d42119dd6a62cd7bf7934))
 
 
 ### Fixes
 
-* **agent,mcp:** no engine options through a job's image, the operator's sandbox is a floor, bounded node answers, create-only MCP secrets ([6cff3a3](https://github.com/aburan28/cairn/commit/6cff3a3df684d9f70018152c33582f17cda567ab))
-* **canonical:** parse JSON in linear time; one path buffer, not a copy per element ([60740aa](https://github.com/aburan28/cairn/commit/60740aa98f18056d28697165049bc06949928125))
-* **deposit:** S3 uploads are bound to an exact length and checksum, and one address cannot hold every grant ([aabb199](https://github.com/aburan28/cairn/commit/aabb1999d1728c8a77ef7f8a5b0cacb3a562819e))
-* **macos:** compile drafted Lean in the node's jail; open only clicked web links; keep SSE blank lines ([856e2be](https://github.com/aburan28/cairn/commit/856e2bed88d5f45a3a15935e73ee0088e0da2b24))
-* **mcp:** agents fund objectives only within the operator's ceiling, and take the network only with leave ([58da5e4](https://github.com/aburan28/cairn/commit/58da5e471b60f1e72ead1d81911ea6a925a76366))
-* **ops:** hardened units, a Pages build that cannot publish, signing secrets behind an environment, a drand fetch one relay cannot stop ([99bc5bb](https://github.com/aburan28/cairn/commit/99bc5bba5f2387b8de971a603c692231a50bb88f))
-* proxied requests are not fleet members, UPnP stays on the host that answered, secrets stay off argv, runs cannot fill the disk, leases have a ceiling ([359f9db](https://github.com/aburan28/cairn/commit/359f9db4bf64f56f34be4b48bb6cae51c11fd7a2))
-* **release:** scope write tokens per job, pin third-party actions, protect published assets and the feed ([8b7ebd8](https://github.com/aburan28/cairn/commit/8b7ebd829b0c9e254b1cfc8f0b1f10cddb3367cd))
-* **sealed:** decode published shares so early garbage cannot stall a reveal; say when a seat's share will not open; wipe AEAD keys ([3047a78](https://github.com/aburan28/cairn/commit/3047a788b4b9175cf6c0385c052a378dd15fde8d))
 * **security:** a review pass over the node, verifiers, p2p, apps and release pipeline ([#238](https://github.com/aburan28/cairn/issues/238)) ([c8a7b61](https://github.com/aburan28/cairn/commit/c8a7b61a01af675b1dfe612a59cfc9b5871eb56d))
 * **security:** round two — close what [#238](https://github.com/aburan28/cairn/issues/238) left open, and the two checks it left red on main ([f85bfc6](https://github.com/aburan28/cairn/commit/f85bfc602a754ad10ab4036d576b11deb72c6673))
-* **serve:** a refusal reaches the client whole; no private link in public docs ([b3ecbc1](https://github.com/aburan28/cairn/commit/b3ecbc163a40a4af67c4a87031e4f84219065093))
-* **serve:** bound request lines, cap connection lifetime and per-address slots, refuse rebinding writes ([0b0c1b8](https://github.com/aburan28/cairn/commit/0b0c1b8e855fb5637c61e812ef9a4f73bda42aa4))
 * **smoke:** node-smoke waits for the records it posted, not for any record of their kind ([1325957](https://github.com/aburan28/cairn/commit/1325957dbc4a55f3d54d3f9a814e5a4314ed18bb))
-* **smoke:** node-smoke waits for the records it posted, not for any record of their kind ([924de3f](https://github.com/aburan28/cairn/commit/924de3f1a5ce981e229676d70dd75bd7e9a766f9))
-* **ui:** patch Next.js, PostCSS and sharp advisories in the reader's toolchain ([3cabb1f](https://github.com/aburan28/cairn/commit/3cabb1fdfd406fdd09a404966fc760e91e58571c))
-* **vdf:** a delay beacon has one spelling, real elements and a difficulty floor ([73bbd7b](https://github.com/aburan28/cairn/commit/73bbd7b5d70276e6efd07011751daf6b97242de8))
-* **verifiers:** a Lean proof must open with `:=`, so it cannot widen the pinned statement ([4f8801b](https://github.com/aburan28/cairn/commit/4f8801b854b687c8d51c332e946bd2dbfaa42afa))
-* **verifiers:** audit what a compiled Lean theorem rests on, in both implementations ([1fd6b46](https://github.com/aburan28/cairn/commit/1fd6b46887ea55d914d5b1bd35dd14af59cf0a43))
 * **verifiers:** refuse a version-manager python shim up front, with the fix ([#234](https://github.com/aburan28/cairn/issues/234)) ([7a506b1](https://github.com/aburan28/cairn/commit/7a506b13afbd4dac36bf22cafc5ceaf856e6adcc))
-* **verifiers:** replay a compiled Lean claim through the kernel, in both implementations ([611ce76](https://github.com/aburan28/cairn/commit/611ce765ce31ec3b896dd69132d3318304e767c6))
 
 
 ### Documentation

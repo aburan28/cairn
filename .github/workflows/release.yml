@@ -505,7 +505,15 @@ jobs:
     # owner moves CAIRN_UPDATES_KEY and the MACOS_* secrets into it and limits
     # it to `v*` tags (Settings -> Environments -> release); after that, no
     # branch, pull request or other job can read them.
-    environment: release
+    #
+    # Only a `v*` tag asks for it. A job naming an environment its ref may not
+    # deploy to is refused, not run without the secrets, so once the tag rule
+    # is on, a plain `environment: release` would fail this job and the three
+    # below on every branch dry run -- the one path that builds the .dmg
+    # before a release. On a branch these four run outside the environment,
+    # where none of its secrets exist, and take the unsigned path they already
+    # have for a repository with no secrets. The same expression is on each.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     outputs:
       public_key: ${{ steps.key.outputs.public_key }}
       pq_public_key: ${{ steps.key.outputs.pq_public_key }}
@@ -553,7 +561,7 @@ jobs:
     # release did not arrive.
     if: ${{ !cancelled() && needs.updates-key.result == 'success' }}
     runs-on: macos-latest
-    environment: release
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     permissions:
       contents: write
     env:
@@ -699,7 +707,7 @@ jobs:
     needs: [build, installer, linux-packages, macos-dmg]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    environment: release
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     permissions:
       contents: write
     env:
@@ -780,7 +788,7 @@ jobs:
     if: ${{ !cancelled() && needs.macos-dmg.result == 'success' && needs.updates-key.outputs.public_key != '' }}
     # macOS for the same reason as updates-key: an OpenSSL with ML-DSA.
     runs-on: macos-latest
-    environment: release
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     permissions:
       contents: write
     steps:
