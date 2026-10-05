@@ -155,8 +155,8 @@ describe("the epoch clock and tones", () => {
     expect(leaseTone("held")).toBe("accent");
     expect(leaseTone("contended")).toBe("warn");
     expect(leaseTone("expired")).toBe("neutral");
-    expect(leaseTone("released")).toBe("info");
-    expect(taskTone("completed")).toBe("info");
+    expect(leaseTone("released")).toBe("neutral");
+    expect(taskTone("completed")).toBe("accent");
     expect(taskTone("open")).toBe("neutral");
   });
 

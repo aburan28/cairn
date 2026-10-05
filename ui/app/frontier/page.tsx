@@ -194,7 +194,7 @@ function Detail({
       <Card className="card-pad flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-[15px] font-semibold">{record.goal}</h2>
-          <Badge tone="info">{record.verifier?.kind ?? "?"}</Badge>
+          <Badge tone="accent">{record.verifier?.kind ?? "?"}</Badge>
         </div>
 
         <div>

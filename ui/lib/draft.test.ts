@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BRIEF_MAX, type Bridge, appBridge, briefProblem, handOff } from "./draft";
+import { BRIEF_MAX, type Bridge, appBridge, briefProblem, handOff, startDictation, stopDictation } from "./draft";
 
 function recorder(reply: () => Promise<unknown> = async () => true) {
   const sent: unknown[] = [];
@@ -23,6 +23,20 @@ describe("appBridge", () => {
     expect(appBridge(null)).toBeNull();
     expect(appBridge({ webkit: { messageHandlers: {} } })).toBeNull();
     expect(appBridge({ webkit: { messageHandlers: { cairn: {} } } })).toBeNull();
+  });
+});
+
+describe("dictation bridge", () => {
+  it("starts and stops without posting a challenge, returning editable text", async () => {
+    const { bridge, sent } = recorder(async () => ({ text: "  Find a shorter sorting network  " }));
+    await startDictation(bridge);
+    expect(await stopDictation(bridge)).toBe("Find a shorter sorting network");
+    expect(sent).toEqual([{ kind: "start-dictation" }, { kind: "stop-dictation" }]);
+  });
+
+  it("refuses an empty transcript", async () => {
+    const { bridge } = recorder(async () => ({ text: " " }));
+    await expect(stopDictation(bridge)).rejects.toThrow(/did not hear/);
   });
 });
 

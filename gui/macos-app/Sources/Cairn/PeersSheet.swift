@@ -124,10 +124,10 @@ struct PeersSheet: View {
                 .disabled(!transportOK || !addrOK || busy || node.isAttached || !node.hasIdentity)
                 if node.isAttached {
                     Text("Detach in Settings first.")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(.gray)
                 } else if !node.hasIdentity {
                     Text("Start the node once so it can create the identity that signs a peer record.")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(.gray)
                 } else if case .running = node.state {
                     Text("The node will stop briefly: a ledger has one writer.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -179,7 +179,7 @@ struct PeersSheet: View {
             if node.settings.listensLocallyOnly && !node.isAttached {
                 Label("This node listens on loopback, so only this Mac can reach it. Accept inbound in Settings before handing the pair out.",
                       systemImage: "info.circle")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(.gray)
             }
         }
     }

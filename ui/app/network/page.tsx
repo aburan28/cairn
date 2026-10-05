@@ -239,7 +239,7 @@ function Dashboard({
           <>
             {node.roles.declared.length > 0 ? (
               node.roles.declared.map((role) => (
-                <Badge key={role} tone="info" title={`declared with ${node.roles.source}`}>
+                <Badge key={role} tone="accent" title={`declared with ${node.roles.source}`}>
                   {role}
                 </Badge>
               ))
@@ -258,12 +258,14 @@ function Dashboard({
       <p className="mb-4 text-[12px] text-ink-3">
         Read from <span className="mono">{origin}</span>
         {readAt && <> at {readAt.toLocaleTimeString()}</>}, again every {REFRESH_SECONDS} s while
-        this tab is visible. <span className="text-info">Declared</span> is what this node says;{" "}
+        this tab is visible. <span className="text-accent">Declared</span> is what this node says;{" "}
         <span className="text-warn">reported</span> is what peers and workers did and said, held in
         memory and checked by nobody; <span className="text-accent">evidenced</span> is recomputed
         from the log.
         {stale && <span className="text-bad"> The last re-read failed: {stale}</span>}
       </p>
+
+      <NetworkTopology network={network} sessions={sessions} />
 
       {/* -- the numbers --------------------------------------------------- */}
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
@@ -307,7 +309,7 @@ function Dashboard({
 
       {/* -- this node --------------------------------------------------- */}
       <div className="mb-5 grid gap-4 lg:grid-cols-2">
-        <Box title="This node" aside={<span className="text-[11px] font-normal text-info">declared, and probed at startup</span>}>
+        <Box title="This node" aside={<span className="text-[11px] font-normal text-accent">declared, and probed at startup</span>}>
           <dl className="kv">
             <dt>roles</dt>
             <dd>
@@ -322,7 +324,7 @@ function Dashboard({
                     const known = node.roles.known.find((k) => k.role === role);
                     return (
                       <li key={role} className="flex flex-wrap items-baseline gap-2">
-                        <Badge tone={warning ? "warn" : "info"}>{role}</Badge>
+                        <Badge tone={warning ? "warn" : "accent"}>{role}</Badge>
                         <span className="text-[12px] text-ink-2">{known?.duty}</span>
                         {warning && <span className="text-[12px] text-warn">{warning}</span>}
                       </li>
@@ -624,8 +626,7 @@ function Dashboard({
       </SectionHeading>
       {shown.length === 0 ? (
         <EmptyState title="Nobody is heartbeating to this node">
-          A worker posts to <span className="mono">POST /progress</span> about once a minute; the
-          reference worker is <span className="mono">examples/certicom-ecdlp/tools/orbit_worker.py</span>.
+          A worker reports progress to this node about once a minute.
           What it is paid for is on each objective&rsquo;s{" "}
           <Link href="/objectives" className="text-accent">
             task dashboard
@@ -753,6 +754,98 @@ function Dashboard({
         </Box>
       </div>
     </>
+  );
+}
+
+function NetworkTopology({
+  network,
+  sessions,
+}: {
+  network: NetworkResponse;
+  sessions: SessionsResponse | null;
+}) {
+  const reached = sessions?.available
+    ? sessions.peers.filter((peer) => peer.status === "reached")
+    : [];
+  const hosts = network.compute.hosts?.hosts.filter((host) => host.status === "live") ?? [];
+  const workers = network.compute.workers.filter((worker) => worker.status === "live");
+  const roles = network.node.roles.declared;
+
+  return (
+    <div className="mb-5">
+      <Box title="Network topology" aside={<span className="text-[11px] font-normal text-ink-3">from this node's view</span>}>
+        <div className="grid items-stretch gap-3 md:grid-cols-[minmax(0,1fr)_2rem_minmax(0,1.1fr)_2rem_minmax(0,1fr)]">
+          <div className="rounded-lg border border-edge bg-surface-2 p-3">
+            <div className="text-[11px] font-semibold tracking-wide text-ink-3 uppercase">Peer sessions</div>
+            <div className="mt-1 text-[18px] font-semibold text-ink">
+              {sessions?.available || network.peers.available
+                ? `${sessions?.available ? reached.length : network.peers.reached} reached`
+                : "No sessions"}
+            </div>
+            {reached.length > 0 ? (
+              <ul className="mt-2 flex flex-col gap-1.5">
+                {reached.slice(0, 3).map((peer) => (
+                  <li key={peer.peer_id} className="flex items-center gap-2 text-[12px]">
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                    <Hash value={peer.peer_id} chars={8} />
+                    <span className="ml-auto text-ink-3">reached</span>
+                  </li>
+                ))}
+                {reached.length > 3 && <li className="text-[11px] text-ink-3">+{reached.length - 3} more</li>}
+              </ul>
+            ) : (
+              <p className="mt-2 text-[12px] text-ink-3">
+                {sessions?.available ? "No recent authenticated session to draw." : "Individual sessions are unavailable from this node."}
+              </p>
+            )}
+          </div>
+          <div className="hidden items-center md:flex" aria-hidden="true">
+            {reached.length > 0 && <div className="h-px w-full bg-accent-line" />}
+          </div>
+          <div className="rounded-lg border border-accent-line bg-accent-soft p-3">
+            <div className="text-[11px] font-semibold tracking-wide text-accent uppercase">This node</div>
+            <div className="mt-1 flex items-center gap-2 text-[16px] font-semibold text-ink">
+              <span className="h-2 w-2 rounded-full bg-accent" /> Cairn node
+            </div>
+            {sessions?.this_node?.peer_id && <div className="mt-1 text-[12px] text-ink-2"><Hash value={sessions.this_node.peer_id} chars={10} /></div>}
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {roles.length > 0
+                ? roles.map((role) => <Badge key={role} tone="accent" title="Declared by this node">{role}</Badge>)
+                : <Badge tone="neutral">no role declared</Badge>}
+            </div>
+            <p className="mt-2 text-[11px] text-ink-3">Roles are declared intent, not authority.</p>
+          </div>
+          <div className="hidden items-center md:flex" aria-hidden="true">
+            {hosts.length + workers.length > 0 && <div className="h-px w-full bg-accent-line" />}
+          </div>
+          <div className="rounded-lg border border-edge bg-surface-2 p-3">
+            <div className="text-[11px] font-semibold tracking-wide text-ink-3 uppercase">Reported compute</div>
+            <div className="mt-1 text-[18px] font-semibold text-ink">{hosts.length} hosts · {workers.length} workers</div>
+            <ul className="mt-2 flex flex-col gap-1 text-[12px] text-ink-2">
+              {hosts.slice(0, 2).map((host) => <li key={host.host} className="truncate" title={host.host}>Host {host.host}{host.roles.length ? ` · ${host.roles.join(", ")}` : ""}</li>)}
+              {workers.slice(0, 2).map((worker) => <li key={`${worker.worker}-${worker.objective_id}`} className="truncate" title={worker.worker}>Worker {worker.worker}</li>)}
+              {hosts.length + workers.length === 0 && <li className="text-ink-3">No live heartbeat reported.</li>}
+              {hosts.length + workers.length > 4 && <li className="text-ink-3">+{hosts.length + workers.length - 4} more below</li>}
+            </ul>
+          </div>
+        </div>
+        <p className="mt-3 text-[11.5px] text-ink-3">
+          Lines appear for this node's observed sessions and incoming reports. They do not show connections between other peers or prove their roles.
+        </p>
+      </Box>
+
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4" aria-label="Node types">
+        {network.node.roles.known.map((known) => (
+          <div key={known.role} className={`rounded-lg border p-3 ${roles.includes(known.role) ? "border-accent-line bg-accent-soft" : "border-edge bg-surface"}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold capitalize text-ink">{known.role}</span>
+              {roles.includes(known.role) && <span className="text-[11px] text-accent">this node</span>}
+            </div>
+            <p className="mt-1 text-[12px] leading-snug text-ink-2">{known.duty}</p>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

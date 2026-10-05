@@ -18,6 +18,7 @@ import { NODE_URL } from "@/lib/objectives";
 
 export const ROUTES = [
   { href: "/", label: "Overview", hint: "What cairn is, and this node's numbers" },
+  { href: "/network", label: "Network", hint: "This node, its peer connections, and node roles" },
   { href: "/objectives", label: "Objectives", hint: "What this node will pay for" },
   { href: "/goals", label: "Goals", hint: "What the network is trying to beat, and from which angles" },
   { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
@@ -25,11 +26,9 @@ export const ROUTES = [
   { href: "/contribute", label: "Contribute", hint: "Ways to take part, what each pays, and adding machines on your network" },
   { href: "/chain", label: "Chain", hint: "Epoch links, and whether you have forked" },
   { href: "/log", label: "Log", hint: "Every record, as the node stores it" },
-  { href: "/network", label: "Network", hint: "Peers reached, hardware heartbeating, roles declared and evidenced" },
   { href: "/coordination", label: "Coordination", hint: "A divided search's epoch, who holds which slice, and the task leases" },
   { href: "/peers", label: "Peers", hint: "The log's address book: who announced an address" },
   { href: "/how-it-works", label: "How it works", hint: "The protocol, in order" },
-  { href: "/docs", label: "Docs", hint: "The design notes" },
 ] as const;
 
 /**
@@ -47,6 +46,7 @@ const NAV: {
     group: "Node",
     items: [
       { href: "/", label: "Overview", icon: <IconHome /> },
+      { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers"] },
       {
         href: "/objectives",
         label: "Objectives",
@@ -56,7 +56,6 @@ const NAV: {
       { href: "/goals", label: "Goals", icon: <IconTarget /> },
       { href: "/chain", label: "Chain", icon: <IconChain /> },
       { href: "/log", label: "Log", icon: <IconList /> },
-      { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers"] },
       { href: "/coordination", label: "Coordination", icon: <IconCoordination /> },
     ],
   },
@@ -69,10 +68,7 @@ const NAV: {
   },
   {
     group: "Learn",
-    items: [
-      { href: "/how-it-works", label: "How it works", icon: <IconBook /> },
-      { href: "/docs", label: "Docs", icon: <IconDoc /> },
-    ],
+    items: [{ href: "/how-it-works", label: "How it works", icon: <IconBook /> }],
   },
 ];
 
@@ -256,7 +252,7 @@ function NodeStatus() {
   }, []);
 
   const tone =
-    state === "live" ? "bg-accent" : state === "down" ? "bg-ink-3" : "bg-warn animate-pulse";
+    state === "live" ? "bg-accent" : "bg-ink-3";
   const text = state === "live" ? "node live" : state === "down" ? "no node" : "checking";
 
   return (
@@ -435,12 +431,7 @@ function Footer() {
   return (
     <footer className="shell-footer site-only border-t border-edge">
       <div className="shell-gutter flex max-w-[90rem] flex-wrap items-center gap-x-5 gap-y-2 py-5 text-[12.5px] lg:px-8">
-        <span
-          className="text-ink-2"
-          title="The full accounting, attack by attack, is docs/threat-model.md in the repository."
-        >
-          threat model: <span className="mono">docs/threat-model.md</span>
-        </span>
+        <Link href="/how-it-works" className="text-accent hover:underline">How it works</Link>
         <span className="text-ink-2" title="LICENSE in the repository.">
           Apache-2.0
         </span>
@@ -599,14 +590,6 @@ function IconBook() {
   return (
     <Icon>
       <path d="M2.5 3.5h4A1.5 1.5 0 0 1 8 5v8a1 1 0 0 0-1-1H2.5ZM13.5 3.5h-4A1.5 1.5 0 0 0 8 5v8a1 1 0 0 1 1-1h4.5Z" />
-    </Icon>
-  );
-}
-
-function IconDoc() {
-  return (
-    <Icon>
-      <path d="M4 1.5h5l3 3v10H4ZM9 1.5v3h3M6 8h4M6 10.5h4" />
     </Icon>
   );
 }

@@ -108,8 +108,8 @@ public struct StatusBadge: View {
         switch kind {
         case .accent: return Color.green.opacity(0.15)
         case .neutral: return Color.primary.opacity(0.08)
-        case .info: return Color.blue.opacity(0.12)
-        case .warn: return Color.orange.opacity(0.14)
+        case .info: return Color.green.opacity(0.12)
+        case .warn: return Color.gray.opacity(0.14)
         case .bad: return Color.red.opacity(0.14)
         }
     }
@@ -118,8 +118,8 @@ public struct StatusBadge: View {
         switch kind {
         case .accent: return .green
         case .neutral: return .secondary
-        case .info: return .blue
-        case .warn: return .orange
+        case .info: return .green
+        case .warn: return .gray
         case .bad: return .red
         }
     }

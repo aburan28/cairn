@@ -55,7 +55,7 @@ public struct OverviewView: View {
         switch model.health {
         case .live: return .green
         case .down: return .secondary
-        case .checking: return .orange
+        case .checking: return .gray
         }
     }
 
@@ -91,7 +91,7 @@ public struct OverviewView: View {
                     .font(.caption.weight(.semibold))
                 ForEach(messages, id: \.self) { Text($0).font(.caption) }
             }
-            .foregroundStyle(.orange)
+            .foregroundStyle(.gray)
             .cairnCard()
         }
     }

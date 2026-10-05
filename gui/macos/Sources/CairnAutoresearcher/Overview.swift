@@ -16,12 +16,12 @@ struct OverviewView: View {
                 HStack(spacing: 12) {
                     Tile(title: "Solved", value: "\(model.solved.count)", color: .green,
                          caption: "\(model.solved.filter { $0.settled == true }.count) paid") { model.showObjectives("solved") }
-                    Tile(title: "Declined", value: "\(model.unreachable.count)", color: .orange,
+                    Tile(title: "Declined", value: "\(model.unreachable.count)", color: .gray,
                          caption: "with a reason each") { model.showObjectives("declined") }
-                    Tile(title: "Open", value: "\(model.open.count)", color: .blue,
+                    Tile(title: "Open", value: "\(model.open.count)", color: .green,
                          caption: "not yet looked at") { model.showObjectives("open") }
-                    Tile(title: "Earned", value: model.earned.formatted(), color: .purple, caption: "this identity, this log")
-                    Tile(title: "Spendable", value: model.mySpendable.map { $0.formatted() } ?? "–", color: .teal,
+                    Tile(title: "Earned", value: model.earned.formatted(), color: .green, caption: "this identity, this log")
+                    Tile(title: "Spendable", value: model.mySpendable.map { $0.formatted() } ?? "–", color: .green,
                          caption: "from cairn balances") { model.pane = .node }
                 }
                 if !model.pendingReveals.isEmpty { pendingCard }
@@ -77,7 +77,7 @@ struct OverviewView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
-            Label("Before it can run", systemImage: "wrench.and.screwdriver").foregroundStyle(.orange)
+            Label("Before it can run", systemImage: "wrench.and.screwdriver").foregroundStyle(.gray)
         }
     }
 
@@ -158,13 +158,13 @@ struct OverviewView: View {
         GroupBox {
             Chart(model.earningsSeries) { p in
                 BarMark(x: .value("Objective", p.label), y: .value("Reward", p.reward))
-                    .foregroundStyle(Color.purple.opacity(0.7))
+                    .foregroundStyle(Color.green.opacity(0.7))
                     .annotation(position: .top) { Text(p.reward.formatted()).font(.caption2).foregroundStyle(.secondary) }
                 LineMark(x: .value("Objective", p.label), y: .value("Cumulative", p.cumulative))
-                    .foregroundStyle(Color.teal)
+                    .foregroundStyle(Color.green)
                     .interpolationMethod(.monotone)
                 PointMark(x: .value("Objective", p.label), y: .value("Cumulative", p.cumulative))
-                    .foregroundStyle(Color.teal)
+                    .foregroundStyle(Color.green)
             }
             .chartYAxisLabel("units")
             .frame(height: 160)
@@ -179,7 +179,7 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(model.pendingReveals) { r in
                     HStack {
-                        Image(systemName: "lock.fill").foregroundStyle(.blue)
+                        Image(systemName: "lock.fill").foregroundStyle(.green)
                         Text(r.title).bold()
                         Spacer()
                         if let e = r.epoch {
@@ -202,7 +202,7 @@ struct OverviewView: View {
                 ForEach(model.declineGroups) { g in
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: g.label.hasPrefix("Out of") ? "questionmark.circle" : "hourglass")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.gray)
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 6) {
                                 Text(g.label).bold()

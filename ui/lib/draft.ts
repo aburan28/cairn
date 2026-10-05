@@ -41,6 +41,7 @@ export const BRIEF_MAX = 20_000;
 
 /** The message the app reads. `WebView.swift` parses exactly this. */
 export type DraftRequest = { kind: "draft-challenge"; brief: string };
+export type DictationRequest = { kind: "start-dictation" } | { kind: "stop-dictation" };
 
 /** Cairn.app's handler, when this page is in a window that has one. */
 export function appBridge(scope: unknown = globalThis): Bridge | null {
@@ -77,4 +78,18 @@ export async function handOff(brief: string, bridge: Bridge): Promise<void> {
     // WebKit rejects with an Error carrying the app's message verbatim.
     throw new Error(cause instanceof Error ? cause.message : String(cause));
   }
+}
+
+/** Cairn.app transcribes on device and returns editable text only when stopped. */
+export async function startDictation(bridge: Bridge): Promise<void> {
+  await bridge.postMessage({ kind: "start-dictation" } satisfies DictationRequest);
+}
+
+export async function stopDictation(bridge: Bridge): Promise<string> {
+  const answer = await bridge.postMessage({ kind: "stop-dictation" } satisfies DictationRequest);
+  const text = (answer as { text?: unknown } | null)?.text;
+  if (typeof text !== "string" || !text.trim()) {
+    throw new Error("Cairn did not hear a description. Try again or type it.");
+  }
+  return text.trim();
 }

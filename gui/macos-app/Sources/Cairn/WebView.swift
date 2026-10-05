@@ -14,6 +14,8 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     /// What to do when the reader's Post a challenge page hands over a
     /// description: open New Challenge… with it, or return why not.
     var onDraftChallenge: (@MainActor (String) -> String?)?
+    let pageDictation = PageDictation()
+    fileprivate var pageDictationActive = false
     private let bridge: PageBridge
 
     override init() {
@@ -72,6 +74,11 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         return ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "")
     }
 
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        pageDictation.cancel()
+        pageDictationActive = false
+    }
+
     // `target="_blank"` asks for a new web view; this app has one window.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
@@ -97,6 +104,24 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         if origin.port != 0 { parts.port = origin.port }
         guard let url = parts.url else { return false }
         return isNode(url)
+    }
+
+    fileprivate var isLocalChallengePage: Bool {
+        guard let nodeHost else { return false }
+        return ["localhost", "127.0.0.1", "::1"].contains(nodeHost)
+            && view.url?.lastPathComponent == "submit"
+    }
+
+    fileprivate func confirmPageDictation() -> Bool {
+        // A page is scriptable, so a bridge request alone cannot prove that
+        // the person clicked the microphone button. Require a native action
+        // for each recording, even after macOS remembers microphone access.
+        let prompt = NSAlert()
+        prompt.messageText = "Dictate a challenge?"
+        prompt.informativeText = "Cairn will listen on this Mac until you stop. The editable transcript will appear in the challenge form."
+        prompt.addButton(withTitle: "Start recording")
+        prompt.addButton(withTitle: "Cancel")
+        return prompt.runModal() == .alertFirstButtonReturn
     }
 
     private func isNode(_ url: URL) -> Bool {
@@ -148,6 +173,28 @@ final class PageBridge: NSObject, WKScriptMessageHandlerWithReply {
             guard let open = browser.onDraftChallenge else { return (nil, "New Challenge is not available.") }
             if let refusal = open(brief) { return (nil, refusal) }
             return (true, nil)
+        case .success(.startDictation):
+            guard browser.isLocalChallengePage else {
+                return (nil, "Voice entry is available only from this Mac's challenge page.")
+            }
+            guard browser.confirmPageDictation() else { return (nil, "Recording was cancelled.") }
+            do {
+                try await browser.pageDictation.start()
+                browser.pageDictationActive = true
+                return (true, nil)
+            } catch {
+                return (nil, error.localizedDescription)
+            }
+        case .success(.stopDictation):
+            guard browser.pageDictationActive else {
+                return (nil, "No page dictation is running.")
+            }
+            browser.pageDictationActive = false
+            do {
+                return (["text": try await browser.pageDictation.stop()], nil)
+            } catch {
+                return (nil, error.localizedDescription)
+            }
         }
     }
 }
