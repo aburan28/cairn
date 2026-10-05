@@ -11,6 +11,13 @@
       "http": "https://aburan28.github.io/cairn/node",
       "operator": "the repository maintainer",
       "note": "Key published by `cairn seeds publish` on the seed host and added by pull request; the file beside this list is named for the sha256 of its bytes and `cairn seeds resolve` re-derives that id before writing a bootstrap file. p2p dials addr directly and the handshake decides who answered. The http half is a mirror, not a live endpoint: the node serves plain HTTP and terminates no TLS by design, so workflows/node-sync.yml pulls its read endpoints every five minutes and re-serves them under /node/ on this site. The site is therefore at most one interval behind, and the reader re-derives the log either way -- it is hash-linked and carries a signed checkpoint. While the node is down the site keeps the last copy; before the first sync it serves nothing under /node/ and the reader falls back to the bundled launch log, labeled as such."
+    },
+    {
+      "name": "runpod",
+      "addr": "103.196.86.88:37775",
+      "transport": "66ce8565aee7869985fe11cb2102bc797e719d8204f00488f81cb541d1b097ea",
+      "operator": "the repository maintainer",
+      "note": "The node running on the Runpod. 37775 is that pod's public mapping of container port 9000. A node dials this address, asks for the transport key, and keeps it only if the key hashes to transport. No bootstrap file is involved."
     }
   ]
 }
