@@ -13,7 +13,9 @@
 # through `exec`, and show the unit `install` would write. On a runner with
 # gVisor or bubblewrap the job runs jailed; on one without, the `auto` job
 # must be refused with a receipt that says why, and only a job that asked for
-# `none` runs -- the same branch lab-demo.sh takes.
+# `none` runs -- the same branch lab-demo.sh takes. The operator's sandbox is a
+# floor, so that job runs only because this agent's operator chose `none`; the
+# last queue run shows a host at the default floor refusing it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -88,9 +90,11 @@ JSON
 echo '{"image":"x"}' > "$DATA/jobs/queue/broken.json"
 
 rule "register once, run the queue, exit"
+# `--sandbox none`: the operator's choice is a floor, and only an operator who
+# chose `none` runs a job that asks for it. The `auto` job still asks for a jail.
 set +e
 "$RUST" agent run --node "http://127.0.0.1:$PORT" --name demo-host --roles executor \
-  --data-dir "$DATA" --interval 5 --once > "$WORK/run.out" 2> "$WORK/run.err"
+  --data-dir "$DATA" --interval 5 --sandbox none --once > "$WORK/run.out" 2> "$WORK/run.err"
 STATUS=$?
 set -e
 cat "$WORK/run.err"
@@ -153,6 +157,23 @@ else:
     assert jailed["succeeded"] is False
     print("  demo-jailed: refused --", jailed["error"][:80], "...")
 PY
+
+rule "a job cannot go below the operator's sandbox"
+cat > "$WORK/floor.json" <<JSON
+{"id":"demo-floor","rootfs":"/","argv":["/bin/true"],"sandbox":"none","timeout_seconds":30}
+JSON
+"$RUST" agent submit "$WORK/floor.json" --data-dir "$DATA"
+set +e
+"$RUST" agent run --node "http://127.0.0.1:$PORT" --name demo-host --roles executor \
+  --data-dir "$DATA" --interval 5 --once > "$WORK/floor.out" 2> "$WORK/floor.err"
+STATUS=$?
+set -e
+[ "$STATUS" -eq 0 ] || [ "$STATUS" -eq 1 ] || { cat "$WORK/floor.err" >&2; fail "agent run exited $STATUS"; }
+grep -q "runs jobs under at least .auto.; the job asked for .none." "$WORK/floor.err" \
+  || { cat "$WORK/floor.err" >&2; fail "a host at the default floor did not refuse a job asking for none"; }
+[ -e "$DATA/jobs/done/demo-floor.json.invalid" ] || fail "the refused job was not moved aside"
+[ ! -e "$DATA/jobs/done/demo-floor" ] || fail "the refused job ran"
+echo "  at the default floor, a job asking for none is moved aside and never run"
 
 rule "exec runs one job now and prints its receipt"
 "$RUST" agent exec --rootfs / --sandbox none --id demo-exec --timeout 30 --data-dir "$DATA" --json \
