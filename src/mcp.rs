@@ -1369,6 +1369,13 @@ fn tool_definitions() -> Json {
                         "type": "integer",
                         "description": "Optional size cap for this grant; defaults to the deposit's."
                     },
+                    "size": {
+                        "type": "integer",
+                        "description":
+                            "Optional exact byte length of the body. With digest, an S3 grant is \
+                             presigned for exactly those bytes and the response lists the \
+                             headers the PUT must carry; without both it uploads through this node."
+                    },
                     "digest": {
                         "type": "string",
                         "description":
@@ -2458,16 +2465,16 @@ impl Server {
                 .unwrap_or_else(|| std::path::Path::new(".")),
         );
         let secrets_dir = secrets::default_dir();
-        let grant = deposit::issue_grant(
-            &deposits,
-            &deposit,
-            &submitter,
+        let request = deposit::GrantRequest {
+            deposit: &deposit,
+            submitter: &submitter,
             max_bytes,
+            size: args.get("size").and_then(Json::as_u64),
             digest,
-            None,
-            &secrets_dir,
-        )
-        .map_err(|e| e.to_string())?;
+            requester: None,
+        };
+        let grant = deposit::issue_grant(&deposits, &request, None, &secrets_dir)
+            .map_err(|e| e.to_string())?;
         // Compact JSON the agent can parse; no secret values by construction.
         Ok(grant.public_response(None).to_string())
     }

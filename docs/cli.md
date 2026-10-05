@@ -504,7 +504,9 @@ cairn deposit put --grant <grant_id> --file ./payload.bin
 
 For S3: `--provider s3 --bucket … --prefix dp/ --region us-west-2`, with
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` already set via `cairn secret`.
-Grants are issued as SigV4 presigned PUT URLs. Full design:
+With `--size N --digest HEX` an S3 grant is a SigV4 presigned PUT URL signed
+for exactly those bytes (send the `headers` the grant lists); without both, the
+upload goes through the node, which signs what it forwards. Full design:
 [design/deposit-grants.md](design/deposit-grants.md).
 
 ### `secret set <name> (<value> | --value V | --file PATH | --stdin)` · `secret get` · `secret list` · `secret delete` · `secret path` · `secret run [--env NAME[=ENVVAR]]... -- <cmd>`

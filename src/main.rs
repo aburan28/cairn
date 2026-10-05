@@ -1287,6 +1287,9 @@ enum DepositAction {
         deposit: String,
         submitter: String,
         bytes: Option<u64>,
+        /// The object's exact length. With `digest`, an S3 grant is presigned
+        /// for exactly those bytes; without both, it goes through the node.
+        size: Option<u64>,
         digest: Option<String>,
     },
     /// Redeem a grant by uploading a file through this node.
@@ -3264,10 +3267,14 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
             let mut deposit: Option<String> = None;
             let mut submitter: Option<String> = None;
             let mut bytes: Option<u64> = None;
+            let mut size: Option<u64> = None;
             let mut digest: Option<String> = None;
             while let Some(token) = cursor.take() {
                 match token.as_str() {
                     "--deposit" => deposit = Some(cursor.value("--deposit")?),
+                    "--size" => {
+                        size = Some(parse_u64(&cursor.value("--size")?, "deposit grant --size")?)
+                    }
                     "--submitter" => submitter = Some(cursor.value("--submitter")?),
                     "--bytes" => {
                         let raw = cursor.value("--bytes")?;
@@ -3298,6 +3305,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                 deposit,
                 submitter,
                 bytes,
+                size,
                 digest,
             }
         }
@@ -4331,7 +4339,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "      public location; never credential values");
     say(
         out,
-        "  deposit grant --deposit N --submitter S [--bytes N] [--digest HEX]",
+        "  deposit grant --deposit N --submitter S [--bytes N] [--size N] [--digest HEX]",
     );
     say(
         out,
@@ -8111,18 +8119,19 @@ fn cmd_deposit(
             deposit,
             submitter,
             bytes,
+            size,
             digest,
         } => {
-            let grant = deposit::issue_grant(
-                &dir,
+            let request = deposit::GrantRequest {
                 deposit,
                 submitter,
-                *bytes,
-                digest.as_deref(),
-                None,
-                &secrets_dir,
-            )
-            .map_err(CliError::Deposit)?;
+                max_bytes: *bytes,
+                size: *size,
+                digest: digest.as_deref(),
+                requester: None,
+            };
+            let grant = deposit::issue_grant(&dir, &request, None, &secrets_dir)
+                .map_err(CliError::Deposit)?;
             // JSON on stdout so scripts capture the grant id / put_url.
             say(out, grant.public_response(None).to_string());
             Ok(0)
@@ -11389,6 +11398,7 @@ mod tests {
                     deposit: "demo".into(),
                     submitter: "alice".into(),
                     bytes: Some(1024),
+                    size: None,
                     digest: None,
                 }
             }
@@ -11464,6 +11474,7 @@ mod tests {
                     deposit: "demo".into(),
                     submitter: "alice".into(),
                     bytes: Some(64),
+                    size: None,
                     digest: None,
                 }
             )

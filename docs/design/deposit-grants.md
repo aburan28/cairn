@@ -89,7 +89,13 @@ a key:
    A contributor cannot write outside the deposit's prefix, overwrite another
    submitter's objects, or pick a key the ingester will not recognise.
 2. **Size.** `max_bytes` is fixed at grant time; a PUT past it is refused
-   (proxy) or rejected by the store's content-length condition (presigned).
+   by the node (proxy). An S3 grant is presigned only when the request names
+   the exact `size` and `digest`: the URL then signs `Content-Length` and
+   `x-amz-checksum-sha256`, the response lists both under `headers`, and the
+   store refuses any other length or bytes however often the URL is used.
+   Without both, an S3 grant is proxy mode, and the node signs the exact
+   length and checksum of what it forwards. One remote address may hold at
+   most 64 unexpired grants, of the 1024 a node keeps.
 3. **Expiry.** Default 15 minutes. A stale grant is deleted, not renewed in
    place — renew by requesting again.
 4. **Single use.** The grant is consumed on the first successful PUT. A

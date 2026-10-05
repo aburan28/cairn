@@ -3314,17 +3314,40 @@ fn deposit_grant(
         },
     };
 
+    let size = match value.get("size") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n),
+            None => {
+                return respond(
+                    stream,
+                    400,
+                    "application/json",
+                    error_body("size must be a non-negative integer").as_bytes(),
+                );
+            }
+        },
+    };
+    // Counted per address, so one requester cannot hold every grant. Loopback
+    // is the operator's own machine and is not counted.
+    let requester = stream
+        .peer_addr()
+        .ok()
+        .map(|addr| addr.ip())
+        .filter(|ip| !ip.is_loopback())
+        .map(|ip| ip.to_string());
+
     let dir = DepositDir::at(&serving.deposits);
     let secrets_dir = secrets::default_dir();
-    match deposit::issue_grant(
-        &dir,
+    let grant_request = deposit::GrantRequest {
         deposit,
         submitter,
         max_bytes,
+        size,
         digest,
-        None,
-        &secrets_dir,
-    ) {
+        requester: requester.as_deref(),
+    };
+    match deposit::issue_grant(&dir, &grant_request, None, &secrets_dir) {
         Ok(grant) => {
             let body = grant.public_response(None).to_string();
             respond(stream, 200, "application/json", body.as_bytes())
