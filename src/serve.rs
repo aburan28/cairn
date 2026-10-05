@@ -3666,6 +3666,15 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
          \r\n",
         body.len()
     );
+    // The head and the body are two writes. With Nagle's algorithm the second
+    // waits for the peer to acknowledge the first, and a refusal often closes
+    // with the request still unread (an over-long line, a header flood): the
+    // close then sends a reset and discards whatever has not left yet. The
+    // peer got the status line and `content-length: 45` and no body. A peer
+    // that delays its acknowledgements, as a loaded host does, hit it every
+    // time; `an_endless_line_or_a_header_flood_is_refused_and_the_server_survives`
+    // hit it on CI about as often as it passed. Both writes leave at once.
+    let _ = stream.set_nodelay(true);
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()
