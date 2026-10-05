@@ -196,7 +196,10 @@ inbound in whatever stands in front of it, and a published key.
 [p2p.md](p2p.md), *Running a seed on a public host*, covers the three ways a
 cloud instance breaks the loopback assumptions. [`launch/seed.service`](../launch/seed.service)
 is a systemd unit that keeps one up across reboots and crashes, which is the
-difference between a seed and a shell window somebody closed. To publish it so
+difference between a seed and a shell window somebody closed. A Runpod CPU
+pod sized for the same job, with a hostname that follows the pod when its
+address changes, is [launch/runpod-seed/README.md](../launch/runpod-seed/README.md).
+To publish it so
 every build finds it, `cairn seeds publish` as above and open a pull request
 adding the key file and the entry ([launch/seeds/README.md](../launch/seeds/README.md)).
 

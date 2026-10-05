@@ -38,6 +38,9 @@ venv/
 
 # Local node state: transport identity, ML-DSA root key, checkpoints, and log.
 .local/
+# Public key fetched from a live seed pod. Publish it by copying the file
+# into launch/seeds/ in a pull request, not by committing this directory.
+launch/runpod-seed/out/
 
 # The content-addressed cache of pinned verifier code. Every blob in it is
 # recoverable from the pin in the objective that names it, so it is a cache and
