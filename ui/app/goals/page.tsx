@@ -182,7 +182,7 @@ function Goals() {
       {/* -- before you post: is it already here? ---------------------------- */}
       <Box
         title="Before you post"
-        aside={<span className="text-[11px] font-normal text-info">asked of this node&rsquo;s alias catalog</span>}
+        aside={<span className="text-[11px] font-normal text-accent">asked of this node&rsquo;s alias catalog</span>}
       >
         <p className="mb-2 text-[13px] text-ink-2">
           Say what you want solved. If somebody already funds it, post yours as an angle on the same goal
@@ -206,7 +206,7 @@ function Goals() {
             )}
             {(matches ?? []).map((goal) => (
               <div key={goal.key} className="flex flex-wrap items-baseline gap-2 text-[13px]">
-                <Badge tone={goal.objectives > 0 ? "accent" : "info"}>{goal.name}</Badge>
+                <Badge tone={goal.objectives > 0 ? "accent" : "neutral"}>{goal.name}</Badge>
                 <span className="text-ink-2">{describeMatch(goal)}</span>
                 {goal.objectives > 0 && (
                   <Link href={`/goals?key=${encodeURIComponent(goal.key)}`} className="text-accent">
@@ -260,7 +260,7 @@ function GoalCard({ goal }: { goal: Goal }) {
     >
       <div className="mb-3 flex flex-wrap items-baseline gap-2 text-[13px] text-ink-2">
         {goal.known ? (
-          <Badge tone="info" title={`in the catalog, family ${goal.family ?? "?"}`}>
+          <Badge tone="accent" title={`in the catalog, family ${goal.family ?? "?"}`}>
             known
           </Badge>
         ) : (

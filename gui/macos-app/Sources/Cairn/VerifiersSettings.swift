@@ -116,7 +116,7 @@ struct VerifiersSection: View {
                 .multilineTextAlignment(.trailing)
         } icon: {
             Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(ok ? Color.green : Color.orange)
+                .foregroundStyle(ok ? Color.green : Color.gray)
         }
     }
 
@@ -247,7 +247,7 @@ struct InstallLeanSheet: View {
                       : "The installer exited with status \(status). The lines above say why.",
                       systemImage: status == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     .font(.callout)
-                    .foregroundStyle(status == 0 ? Color.green : Color.orange)
+                    .foregroundStyle(status == 0 ? Color.green : Color.gray)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack {

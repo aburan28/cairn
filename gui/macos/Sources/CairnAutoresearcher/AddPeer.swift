@@ -95,7 +95,7 @@ struct AddPeerSheet: View {
                     .disabled(!transportOK || !addrOK || busy || model.isLive || model.isBuilding)
                 if model.isLive {
                     Text("Stop the researcher first: a ledger has one writer, and its node is it.")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(.gray)
                 }
             }
         }
@@ -123,7 +123,7 @@ struct AddPeerSheet: View {
                 ForEach(model.bootstrapPaths, id: \.self) { path in
                     HStack {
                         Image(systemName: FileManager.default.fileExists(atPath: path) ? "doc" : "doc.badge.gearshape")
-                            .foregroundStyle(FileManager.default.fileExists(atPath: path) ? Color.secondary : .orange)
+                            .foregroundStyle(FileManager.default.fileExists(atPath: path) ? Color.secondary : .gray)
                         Text(path).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
                         Spacer()
                         Button("Remove") { model.removeBootstrap(path) }.buttonStyle(.link)
@@ -170,7 +170,7 @@ struct AddPeerSheet: View {
             if model.p2pAddress.hasPrefix("127.") || model.p2pAddress.hasPrefix("localhost") {
                 Label("This node listens on loopback, so only this Mac can reach it. Give it a LAN or public address in Settings before handing the pair out.",
                       systemImage: "info.circle")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(.gray)
             }
             Text("Handing these out publishes where this node is. The transport key it proves is never in the log, so an id alone lets somebody dial you and nothing else.")
                 .font(.caption).foregroundStyle(.tertiary)

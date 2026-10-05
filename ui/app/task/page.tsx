@@ -334,7 +334,7 @@ function Dashboard({
         meta={
           <>
             <StatusPill settled={progress.settled} />
-            <Badge tone="info">{progress.kind}</Badge>
+            <Badge tone="accent">{progress.kind}</Badge>
             <LivePill live={reported.live} stale={reported.stale} />
             {funder && (
               <span>
@@ -377,11 +377,13 @@ function Dashboard({
               : "from the paid witnesses"
           }
           hint={derived.steps_method}
+          tone="accent"
         />
         <Stat
           label="Share of expected work"
           value={formatPercent(share)}
           from={expected ? `expected ${formatLog2(expected)} ops for ${job?.name}` : "job unknown to this reader"}
+          tone="accent"
         />
         <Stat
           label="Workers live"
@@ -418,6 +420,7 @@ function Dashboard({
           label="Odds a collision happened"
           value={formatPercent(odds)}
           from={odds !== null ? "birthday bound on the settled work" : "needs a known job"}
+          tone="accent"
         />
         <Stat
           label="Pool"
@@ -504,9 +507,8 @@ function Dashboard({
       </SectionHeading>
       {rows.length === 0 ? (
         <EmptyState title="Nobody has worked this objective yet">
-          No settlement names a submitter and no worker has posted a heartbeat. Start one with{" "}
-          <code className="mono">examples/certicom-ecdlp/tools/orbit_worker.py</code> pointed at
-          this node, and it appears here within a minute.
+          No settlement names a submitter and no worker has posted a heartbeat.
+          A worker connected to this node will appear here after its first report.
         </EmptyState>
       ) : (
         <div className="box mb-5 overflow-x-auto">
@@ -742,7 +744,7 @@ function CoverageStrip({
       </div>
       <p className="text-[11px] text-ink-3">
         <span className="text-accent">Green</span>: where paid elements came from, by seed, darker
-        with more. <span className="text-warn">Amber</span>: the unit ranges live workers report
+        with more. <span className="text-ink-2">Grey</span>: the unit ranges live workers report
         holding this epoch. {bins} bins.
       </p>
     </div>

@@ -279,7 +279,7 @@ export function leaseRows(tasks: TaskLeases[]): LeaseRow[] {
   });
 }
 
-export type Tone = "accent" | "warn" | "bad" | "neutral" | "info";
+export type Tone = "accent" | "warn" | "bad" | "neutral";
 
 export function leaseTone(status: LeaseStatus): Tone {
   switch (status) {
@@ -290,7 +290,7 @@ export function leaseTone(status: LeaseStatus): Tone {
     case "expired":
       return "neutral";
     case "released":
-      return "info";
+      return "neutral";
   }
 }
 
@@ -299,7 +299,7 @@ export function taskTone(status: TaskLeases["status"]): Tone {
     case "held":
       return "accent";
     case "completed":
-      return "info";
+      return "accent";
     case "open":
       return "neutral";
   }

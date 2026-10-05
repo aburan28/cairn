@@ -179,8 +179,8 @@ export default function Page() {
             value={String(openCount)}
             from={openCount ? "worth working on" : "all settled"}
           />
-          <Stat label="Still payable" value={amount(remaining)} from={`of ${amount(pool)} funded`} />
-          <Stat label="Paid out" value={amount(paidOut)} />
+          <Stat label="Still payable" value={amount(remaining)} from={`of ${amount(pool)} funded`} tone="accent" />
+          <Stat label="Paid out" value={amount(paidOut)} tone="accent" />
         </div>
       )}
 
@@ -380,7 +380,7 @@ function ObjectiveRow({
         )}
       </td>
       <td className="px-3 py-3">
-        <Badge>{objective.verifier_kind}</Badge>
+        <Badge tone="accent">{objective.verifier_kind}</Badge>
       </td>
       <td className="mono px-3 py-3 text-right text-ink">{amount(objective.reward)}</td>
       <td className="px-3 py-3">

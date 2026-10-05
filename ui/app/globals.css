@@ -60,8 +60,6 @@
   --color-warn-soft: var(--warn-soft);
   --color-bad: var(--bad);
   --color-bad-soft: var(--bad-soft);
-  --color-info: var(--info);
-  --color-info-soft: var(--info-soft);
 
   --radius-card: 0.75rem;
 
@@ -86,12 +84,10 @@
   --accent-soft: #0a7d520f;
   --accent-line: #0a7d5233;
 
-  --warn: #9a6206;
-  --warn-soft: #9a62060f;
+  --warn: #5c6169;
+  --warn-soft: #f5f5f4;
   --bad: #b3261e;
   --bad-soft: #b3261e0f;
-  --info: #1c5fb8;
-  --info-soft: #1c5fb80f;
 
   --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
@@ -118,12 +114,10 @@
     --accent-soft: #35d08a14;
     --accent-line: #35d08a3d;
 
-    --warn: #e0a83a;
-    --warn-soft: #e0a83a14;
+    --warn: #a0a6ae;
+    --warn-soft: #1b1e22;
     --bad: #f2827a;
     --bad-soft: #f2827a14;
-    --info: #6aa8f5;
-    --info-soft: #6aa8f514;
   }
 }
 
@@ -146,12 +140,10 @@
   --accent-soft: #35d08a14;
   --accent-line: #35d08a3d;
 
-  --warn: #e0a83a;
-  --warn-soft: #e0a83a14;
+  --warn: #a0a6ae;
+  --warn-soft: #1b1e22;
   --bad: #f2827a;
   --bad-soft: #f2827a14;
-  --info: #6aa8f5;
-  --info-soft: #6aa8f514;
 }
 
 @layer base {
@@ -353,9 +345,6 @@
     @apply border-bad/30 bg-bad-soft text-bad;
   }
 
-  .badge-info {
-    @apply border-info/30 bg-info-soft text-info;
-  }
 
   /* Every hash, id, key and amount on the site. Tabular figures so two
      numbers in a column line up digit for digit, and `anywhere` wrapping so a
@@ -465,15 +454,13 @@
     @apply m-0 min-w-0 text-ink;
   }
 
-  /* A stat tile. Plain surface, plain ink: a row of five tiles each tinted a
-     different colour read as a toy rather than a readout, and the colour was
-     carrying nothing the label beside it did not already say. Only the two
-     tones that mean "look at this" -- a warning and a fault -- colour the
-     number, and neither tints the tile. */
+  /* A stat tile. Keep every surface plain; green marks the few values that
+     call for attention, while warnings and faults colour only their number. */
   .tile {
     @apply min-w-0 rounded-[var(--radius-card)] border border-edge bg-surface px-4 py-3;
   }
 
+  .tile-accent .tile-value { @apply text-accent; }
   .tile-warn .tile-value { @apply text-warn; }
   .tile-bad .tile-value { @apply text-bad; }
 
@@ -531,7 +518,7 @@
 
 /* -- long-form prose pages --------------------------------------------------
 
-   `/how-it-works` and `/docs` are essays, not readouts. They carry their
+   `/how-it-works` is an essay, not a readout. It carries its
    structure in semantic class names rather than in utility strings, and that
    is the right shape for them: a paragraph of argument does not become clearer
    for having eight utilities on it, and the two pages are edited as writing.

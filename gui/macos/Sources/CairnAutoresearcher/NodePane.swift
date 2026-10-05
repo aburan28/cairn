@@ -17,22 +17,22 @@ struct NodeView: View {
                     HStack(spacing: 12) {
                         Tile(title: "Node", value: model.nodeReachable ? "up" : "down", color: model.nodeReachable ? .green : .gray,
                              caption: "http \(model.httpAddress) · p2p \(model.p2pAddress)")
-                        Tile(title: "Epoch", value: "\(model.currentEpoch)", color: .orange,
+                        Tile(title: "Epoch", value: "\(model.currentEpoch)", color: .gray,
                              caption: "next in \(model.secondsToNextEpoch)s · \(model.epochLength)s long")
-                        Tile(title: "Ledger height", value: model.chain?.height.map(String.init) ?? "–", color: .blue,
+                        Tile(title: "Ledger height", value: model.chain?.height.map(String.init) ?? "–", color: .green,
                              caption: model.chain?.ledger_head.map { String($0.prefix(18)) } ?? "entries in the log")
-                        Tile(title: "Epoch links", value: model.chain?.links.map(String.init) ?? "–", color: .indigo,
+                        Tile(title: "Epoch links", value: model.chain?.links.map(String.init) ?? "–", color: .green,
                              caption: model.brokenLinkEpoch.map { "breaks at epoch \($0)" }
                                 ?? model.chain?.head.flatMap { $0.isEmpty ? nil : String($0.prefix(18)) }
                                 ?? "settled epochs")
-                        Tile(title: "Peers", value: model.peerCount.map(String.init) ?? "–", color: .cyan, caption: "peer records in the log")
-                        Tile(title: "Objectives", value: model.nodeReachable ? "\(model.nodeObjectives.count)" : "–", color: .purple,
+                        Tile(title: "Peers", value: model.peerCount.map(String.init) ?? "–", color: .green, caption: "peer records in the log")
+                        Tile(title: "Objectives", value: model.nodeReachable ? "\(model.nodeObjectives.count)" : "–", color: .green,
                              caption: "\(model.frontiers.count) with a frontier")
                     }
                     if let broken = model.brokenLinkEpoch {
                         Label("Chain integrity: epoch \(broken) does not follow the previous link. The node published a chain this reader cannot walk.",
                               systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption).foregroundStyle(.orange)
+                            .font(.caption).foregroundStyle(.gray)
                     }
                     ProvenanceLine("tiles from GET /chain, /peers, /objectives · balances from cairn balances")
                     HStack(alignment: .top, spacing: 14) {
@@ -110,7 +110,7 @@ struct NodeView: View {
                         GridRow {
                             HStack(spacing: 6) {
                                 if let s = model.status?.submitter ?? model.identityPublic, s.hasPrefix(b.name) {
-                                    Image(systemName: "person.crop.circle.fill").foregroundStyle(.teal)
+                                    Image(systemName: "person.crop.circle.fill").foregroundStyle(.green)
                                 }
                                 Text(b.name).font(.body.monospaced())
                             }
@@ -141,7 +141,7 @@ struct NodeView: View {
                         switch d.beacon {
                         case .bound: return ("antenna.radiowaves.left.and.right", .green)
                         case .off: return ("antenna.radiowaves.left.and.right.slash", .secondary)
-                        case .failed: return ("exclamationmark.triangle.fill", .orange)
+                        case .failed: return ("exclamationmark.triangle.fill", .gray)
                         case .unknown: return ("circle.dashed", .secondary)
                         }
                     }()
@@ -161,7 +161,7 @@ struct NodeView: View {
                 }
                 if let b = d.bootstrap.last, b.contains("PLACEHOLDER") {
                     Text("The bootstrap file still carries the placeholder key; dials to that seed will fail their handshake. Put the seed's real public key in it.")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(.gray)
                 }
                 if d.multicast?.contains("already held") == true {
                     Text("Another node on this Mac bound the beacon port first without sharing it. Nodes built after this change share the port; restart the older node on a current build and both will hear each other.")

@@ -123,7 +123,7 @@ struct AgentsSheet: View {
             } else {
                 Label("Unsigned submissions: anyone can use the same submitter name. Create an identity to sign them.",
                       systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(.gray)
                 Button("Create Identity") { createIdentity() }
                     .font(.caption)
                     .disabled(identityBusy || node.isAttached)

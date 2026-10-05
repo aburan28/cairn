@@ -183,7 +183,7 @@ function Challenge() {
           <>
             <StatusPill settled={objective.settled} />
             {slug && <Badge title={objective.goal}>{slug}</Badge>}
-            <Badge>{objective.verifier_kind}</Badge>
+            <Badge tone="accent">{objective.verifier_kind}</Badge>
             <span>
               funded by <span className="mono text-ink">{objective.funder}</span>
             </span>
@@ -207,7 +207,7 @@ function Challenge() {
       />
 
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Stat label="Bounty" value={units(ratchet?.reward ?? objective.reward)} />
+        <Stat label="Bounty" value={units(ratchet?.reward ?? objective.reward)} tone="accent" />
         {ratchet && frontier ? (
           <Stat
             label="Best score"
@@ -221,8 +221,12 @@ function Challenge() {
             from={objective.settled ? "nothing left to win" : "first accepted answer wins"}
           />
         )}
-        <Stat label="Paid out" value={units(paid)} />
-        <Stat label="Still payable" value={units(remaining)} />
+        <Stat label="Paid out" value={units(paid)} tone="accent" />
+        <Stat
+          label="Still payable"
+          value={units(remaining)}
+          tone={remaining > 0 ? "accent" : "neutral"}
+        />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
@@ -844,8 +848,7 @@ function WorkOnThis({
             <p className="text-[12.5px] text-ink-2">
               Add the stanza to Claude Code, Codex or OpenCode, then run{" "}
               <span className="mono">get_objective → score_candidate → submit_claim</span>.{" "}
-              <span className="mono">docs/agents.md</span>{" "}
-              has the other clients&rsquo; spellings.
+              The developer documentation has the other clients&rsquo; spellings.
             </p>
             <CodeBlock value={MCP_STANZA} />
             <CodeBlock value={calls} />

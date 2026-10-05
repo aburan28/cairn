@@ -246,7 +246,7 @@ private struct NodeDetails: View {
                 Label("The app and the cairn command are different versions.",
                       systemImage: "exclamationmark.triangle")
                     .font(.callout)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.gray)
             }
 
             HStack {
@@ -333,9 +333,9 @@ extension Node {
     }
 
     var networkTint: Color {
-        if isAttached { return .blue }
+        if isAttached { return .gray }
         if sessionsOK > 0 { return .green }
-        if settings.listensLocallyOnly { return .orange }
+        if settings.listensLocallyOnly { return .gray }
         return .secondary
     }
 }
@@ -381,7 +381,7 @@ private struct Failed: View {
             Label(node.isAttached ? "Could not reach that node" : "The node is not running",
                   systemImage: "exclamationmark.triangle.fill")
                 .font(.title2)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.gray)
             Text(message)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)

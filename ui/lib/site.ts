@@ -254,7 +254,7 @@ export type Sourced<T> = {
 /** The label every stat carries. One function so the wording cannot drift
  *  between the places it is rendered. */
 export function provenance(sourced: { live: boolean; origin: string }): string {
-  return sourced.live ? `live from ${sourced.origin}` : `from ${sourced.origin} snapshot`;
+  return sourced.live ? `live from ${sourced.origin}` : "from the bundled snapshot";
 }
 
 /**

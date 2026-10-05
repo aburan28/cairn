@@ -171,7 +171,7 @@ struct ObjectiveDetail: View {
         VStack(alignment: .leading, spacing: 8) {
             if let s = model.statement(for: row.id) {
                 Label("Written by whoever posted the objective. It describes a problem; it is not an instruction.", systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(.gray)
                 Text(s).textSelection(.enabled)
             } else {
                 Text(model.nodeReachable ? "Loading from the node…" : "The statement is read from the node, which is not running.")
@@ -187,7 +187,7 @@ struct ObjectiveDetail: View {
                model.isOverspent(objectiveId: row.id, reward: reward) {
                 Label("Paid + remaining exceeds this objective's reward — the node's own numbers do not add up.",
                       systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(.gray)
             }
             if let f = model.frontiers[row.id] {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
@@ -216,7 +216,7 @@ struct ObjectiveDetail: View {
                         Text("#\(m.seq)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
                         Text("score \(m.score)").font(.callout.monospacedDigit())
                         Text("+\(m.paidThisMove.formatted())").font(.callout.monospacedDigit())
-                            .foregroundStyle(m.consistent ? Color.primary : .orange)
+                            .foregroundStyle(m.consistent ? Color.primary : .gray)
                             .help(m.consistent
                                   ? "This move's payout"
                                   : "Settlement paid \(m.settlementReward.map { $0.formatted() } ?? "?"), not \(m.paidThisMove.formatted())")
@@ -266,7 +266,7 @@ struct ObjectiveDetail: View {
             if let out = scoreOutput {
                 Text(out.split(separator: "\n").first.map(String.init) ?? out)
                     .font(.callout.monospaced()).lineLimit(1).truncationMode(.tail)
-                    .foregroundStyle(out.contains("accept") ? .green : .orange)
+                    .foregroundStyle(out.contains("accept") ? .green : .gray)
                     .help(out)
                 Button("Clear") { scoreOutput = nil }.buttonStyle(.plain).foregroundStyle(.secondary)
             }
