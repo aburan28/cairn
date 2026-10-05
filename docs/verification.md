@@ -73,7 +73,12 @@ Four rules, each learned from a way verifiers get gamed:
 **1. The statement comes from the objective, never the submitter.** The `lean`
 verifier concatenates the objective's pinned `statement` with the submitter's
 `proof`. If the submitter supplied both, they would prove an easier theorem and
-collect.
+collect. Concatenation alone does not guarantee that: text placed before the
+proof's `:=` continues the pinned header, so ` ∨ True := Or.inr trivial` after
+`theorem t : 2 + 2 = 5` is a clean compile of a different theorem. Both
+implementations therefore refuse a proof that does not open with `:=` (after
+whitespace) before Lean runs. `:=` cannot continue a term, so the header Lean
+checks is exactly the objective's.
 
 **2. Enumerate the escape hatches and screen them before the checker runs.**
 For Lean that means `sorry` and `admit` (explicit holes that compile and prove

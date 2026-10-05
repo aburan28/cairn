@@ -598,7 +598,10 @@ impl Loop {
             let Some(spec) = oldest_spec(&self.data.join("jobs/queue")) else {
                 break;
             };
-            let job = match Job::from_file(&spec) {
+            let job = match Job::from_file(&spec).and_then(|mut job| {
+                job.sandbox = super::sandbox::floor(self.preference, job.sandbox)?;
+                Ok(job)
+            }) {
                 Ok(job) => job,
                 Err(error) => {
                     log::warn!("agent: {}: {error}; moved aside", spec.display());

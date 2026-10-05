@@ -1055,9 +1055,14 @@ fn absorb(hasher: &mut Sha256, field: &[u8]) {
 
 /// Build an AEAD instance, wiping the copy of the key made on the way in.
 ///
-/// `ChaCha20Poly1305` zeroizes its own key on drop; the `GenericArray` used to
-/// hand it over is the one copy nobody else wipes.
+/// `ChaCha20Poly1305` zeroizes its own key on drop -- with the crate's
+/// `zeroize` feature, which `Cargo.toml` enables and the assertion below
+/// requires; without it the key stayed in freed memory and this comment was
+/// wrong. The `GenericArray` used to hand it over is the one copy nobody else
+/// wipes.
 fn cipher_for(key: &Secret32) -> ChaCha20Poly1305 {
+    const fn wipes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    const _: () = wipes_on_drop::<ChaCha20Poly1305>();
     let mut material = Key::from(*key.expose());
     let cipher = ChaCha20Poly1305::new(&material);
     Zeroize::zeroize(&mut material[..]);

@@ -48,14 +48,30 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     // The window is for this node's pages. A link anywhere else -- a GitHub
     // page, a paper an objective cites -- belongs in the person's browser,
     // where their bookmarks and logins are.
+    //
+    // Only a link the person clicked, and only to the web or mail. A page --
+    // script, a redirect, an iframe, anything on a plain-http LAN node a
+    // neighbour can tamper with -- must not hand `smb:`, `file:` or another
+    // app's scheme to the system unasked: `smb://` mounts a share and the
+    // next `file://` on it launches what is there, with no quarantine flag.
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
         if let url = action.request.url, !isNode(url) {
-            NSWorkspace.shared.open(url)
+            if Self.mayOpenExternally(url, action: action) {
+                NSWorkspace.shared.open(url)
+            }
             decisionHandler(.cancel)
         } else {
             decisionHandler(.allow)
         }
+    }
+
+    /// A clicked link, in the main frame or asking for a new window, to
+    /// http, https or mailto.
+    static func mayOpenExternally(_ url: URL, action: WKNavigationAction) -> Bool {
+        guard action.navigationType == .linkActivated else { return false }
+        if let frame = action.targetFrame, !frame.isMainFrame { return false }
+        return ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "")
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -67,7 +83,11 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if let url = action.request.url {
-            if isNode(url) { webView.load(URLRequest(url: url)) } else { NSWorkspace.shared.open(url) }
+            if isNode(url) {
+                webView.load(URLRequest(url: url))
+            } else if Self.mayOpenExternally(url, action: action) {
+                NSWorkspace.shared.open(url)
+            }
         }
         return nil
     }

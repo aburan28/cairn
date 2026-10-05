@@ -16,6 +16,11 @@ use std::time::Duration;
 use super::AgentError;
 use crate::canonical::Value;
 
+/// Largest answer this client reads from a node, in bytes.
+const MAX_RESPONSE_BYTES: u64 = 16 << 20;
+/// Longest status or header line read from a node.
+const MAX_LINE_BYTES: u64 = 8 * 1024;
+
 /// `http://host:port`, with an optional path prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeUrl {
@@ -170,6 +175,8 @@ fn request(
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();
     reader
+        .by_ref()
+        .take(MAX_LINE_BYTES)
         .read_line(&mut status_line)
         .map_err(|e| AgentError::Node(format!("{}: read: {e}", url.original)))?;
     let status = parse_status_line(&status_line).ok_or_else(|| {
@@ -183,6 +190,8 @@ fn request(
     loop {
         let mut line = String::new();
         let read = reader
+            .by_ref()
+            .take(MAX_LINE_BYTES)
             .read_line(&mut line)
             .map_err(|e| AgentError::Node(format!("{}: read: {e}", url.original)))?;
         if read == 0 || line == "\r\n" || line == "\n" {
@@ -194,8 +203,17 @@ fn request(
             }
         }
     }
+    // A node's word is not an allocation size: `content-length:
+    // 99999999999999` from a hostile node, or anyone on the plaintext path,
+    // aborted the agent. Nothing a node answers this client is near the cap.
     let mut raw = Vec::new();
     match length {
+        Some(n) if n as u64 > MAX_RESPONSE_BYTES => {
+            return Err(AgentError::Node(format!(
+                "{}: a {n}-byte answer is past this client's {MAX_RESPONSE_BYTES}-byte cap",
+                url.original
+            )));
+        }
         Some(n) => {
             raw.resize(n, 0);
             reader
@@ -204,8 +222,16 @@ fn request(
         }
         None => {
             reader
+                .by_ref()
+                .take(MAX_RESPONSE_BYTES + 1)
                 .read_to_end(&mut raw)
                 .map_err(|e| AgentError::Node(format!("{}: body: {e}", url.original)))?;
+            if raw.len() as u64 > MAX_RESPONSE_BYTES {
+                return Err(AgentError::Node(format!(
+                    "{}: answer past this client's {MAX_RESPONSE_BYTES}-byte cap",
+                    url.original
+                )));
+            }
         }
     }
     let text = String::from_utf8_lossy(&raw);
@@ -256,6 +282,29 @@ mod tests {
         assert_eq!(parse_status_line("HTTP/1.1 202 Accepted\r\n"), Some(202));
         assert_eq!(parse_status_line("HTTP/1.0 404 Not Found"), Some(404));
         assert_eq!(parse_status_line("garbage"), None);
+    }
+
+    #[test]
+    fn a_node_cannot_name_the_size_of_the_buffer_this_client_allocates() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let _ = write!(
+                socket,
+                "HTTP/1.1 200 OK\r\ncontent-length: 99999999999999\r\n\r\n{{}}"
+            );
+        });
+        let url = NodeUrl::parse(&format!("http://127.0.0.1:{}", addr.port())).unwrap();
+        let error = get(&url, "/health", Duration::from_secs(5)).unwrap_err();
+        assert!(error.to_string().contains("cap"), "{error}");
     }
 
     #[test]

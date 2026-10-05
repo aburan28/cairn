@@ -758,8 +758,9 @@ downstream is unbacked.
       `cairn beacon --orders E --delay T` computes `x^(2^T) mod N` over a
       seed derived from the log's own Merkle root, and records the answer with
       its proof. Grinding the anchor used to cost a hash per candidate ordering;
-      it now costs `T` sequential squarings per candidate, and they cannot be
-      parallelised. Better than the chain beacon in one further respect: a chain
+      it now costs `T` sequential squarings per candidate. One evaluation
+      cannot be parallelised; candidates over different seeds can, so `T` has
+      a floor (`MIN_VDF_DIFFICULTY`) and a useful one fills most of an epoch. Better than the chain beacon in one further respect: a chain
       beacon is *provenance* — "this is what block N held" — and checking it
       needs an RPC endpoint, while a delay proof is checked against the log
       alone, which is the one guarantee this project spends everything else to

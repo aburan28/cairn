@@ -506,7 +506,7 @@ enum ChallengeTest {
             progress(.hole)
             let hole = try verdict(ChallengeDraft.hole, named: "hole", timeout: 60)
             progress(.statement)
-            let statement = compile(draft, in: scratch, environment: environment)
+            let statement = compile(draft, cairn: binary, in: scratch, environment: environment)
             var proof: Verdict?
             if let text = draft.proof {
                 progress(.proof)
@@ -518,9 +518,16 @@ enum ChallengeTest {
     }
 
     /// The preamble and theorem with the hole, compiled by the Lean this Mac
-    /// gives the node. Unjailed: the text is the model's, written for the
-    /// person reading it, and it is what they are about to publish.
-    static func compile(_ draft: ChallengeDraft, in scratch: URL, environment: [String: String]) -> Statement {
+    /// gives the node, inside the node's own jail (`cairn lean-compile`).
+    ///
+    /// This runs before anyone has read the draft, on text a language model
+    /// wrote, and Lean elaboration runs code: `#eval` in a preamble is a
+    /// program with this person's files, keys and network. So it is compiled
+    /// where a submitter's proof would be -- no network, scratch-only
+    /// writes, a scrubbed environment -- and Lean's own words come back for
+    /// the redraft.
+    static func compile(_ draft: ChallengeDraft, cairn: URL, in scratch: URL,
+                        environment: [String: String]) -> Statement {
         let (toolchain, problem) = Toolchains.lean(environment: environment)
         guard let toolchain else {
             return .untested(problem ?? "No Lean toolchain was found on this Mac.")
@@ -532,18 +539,26 @@ enum ChallengeTest {
             return .untested(error.localizedDescription)
         }
         let timeout = TimeInterval(max(60, draft.timeoutSeconds))
-        let r = run(toolchain.binary, [file.path], in: scratch, environment: environment, timeout: timeout)
+        let r = run(cairn, ["lean-compile", file.path, "--timeout", String(Int(timeout))],
+                    in: scratch, environment: environment, timeout: timeout + 30)
         if r.status == Ran.timedOut {
             return .untested("Lean took longer than \(Int(timeout)) seconds on the theorem alone.")
         }
-        if r.status == 0 {
+        switch r.status {
+        case 0:
             return .elaborates(toolchain.version ?? toolchain.binary.path)
+        case 1:
+            let lines = r.out
+                .split(separator: "\n")
+                .map(String.init)
+                .filter { !$0.isEmpty && !$0.contains("declaration uses 'sorry'") }
+            return .broken(lines.prefix(8).joined(separator: "\n"))
+        default:
+            // 3: Lean could not run in the jail; 2: a cairn too old to have
+            // the command. Neither is a fact about the theorem.
+            let why = r.err.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .untested(why.isEmpty ? "cairn lean-compile exited \(r.status)" : why)
         }
-        let lines = (r.out + "\n" + r.err)
-            .split(separator: "\n")
-            .map { $0.replacingOccurrences(of: file.path, with: "Challenge.lean") }
-            .filter { !$0.isEmpty && !$0.contains("declaration uses 'sorry'") }
-        return .broken(lines.prefix(8).joined(separator: "\n"))
     }
 
     /// `propose` prints one line per artifact, `  <path>: <verdict>  (detail)`

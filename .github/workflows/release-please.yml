@@ -59,21 +59,39 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
-  # For the dispatch in the last step, and for nothing else.
-  actions: write
+# Nothing at the top: each job asks for what it uses. release-please-action is
+# third-party code and gets contents and pull requests, never `actions:
+# write`, so it cannot dispatch a workflow -- release.yml on a branch it
+# pushed, say, which would run that branch's scripts with the signing secrets.
+permissions: {}
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v5
+      # Pinned by commit: this action holds a write token. v5.
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
         id: release
         with:
           config-file: .github/release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  start-release:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    # The dispatch below is what `actions: write` is for, and the only job
+    # that holds it runs no third-party code.
+    permissions:
+      contents: write
+      actions: write
+    steps:
 
       # The step that makes a release have files in it.
       #
@@ -111,10 +129,9 @@ jobs:
       # fails, the draft stays a draft with no tag and no build: publish it
       # as a prerelease by hand and dispatch release.yml on the tag.
       - name: publish the draft as a prerelease and start the release build
-        if: steps.release.outputs.release_created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release.outputs.tag_name }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
           set -euo pipefail
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false

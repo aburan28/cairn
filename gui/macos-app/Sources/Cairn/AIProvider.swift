@@ -212,11 +212,19 @@ struct AIClient {
         var reader = AIStreamReader(wire: config.wire)
         var state = AIProgress()
         progress?(state)
-        for try await line in bytes.lines {
+        // Lines are split here rather than by `bytes.lines`, which drops
+        // empty lines -- and an empty line is what ends an SSE event, so
+        // every event of a stream would run together into one.
+        var lines = SSELineSplitter()
+        streaming: for try await byte in bytes {
+            guard let line = lines.take(byte) else { continue }
             try Task.checkCancellation()
             guard let event = parser.feed(line) else { continue }
             if try reader.take(event, into: &state) { progress?(state) }
-            if reader.finished { break }
+            if reader.finished { break streaming }
+        }
+        if !reader.finished, let rest = lines.finish(), let event = parser.feed(rest) {
+            if try reader.take(event, into: &state) { progress?(state) }
         }
         if !reader.finished, let event = parser.flush() {
             _ = try reader.take(event, into: &state)
@@ -512,6 +520,42 @@ struct AIProgress: Equatable, Sendable {
 struct SSEEvent: Equatable {
     var event: String?
     var data: String
+}
+
+/// Bytes to lines for text/event-stream, keeping the empty ones. A line ends
+/// at LF, CRLF or a lone CR, which is what the framing allows.
+struct SSELineSplitter {
+    private var buffer: [UInt8] = []
+    private var afterCR = false
+
+    /// The line `byte` completes, if it completes one.
+    mutating func take(_ byte: UInt8) -> String? {
+        switch byte {
+        case 0x0A:
+            if afterCR {
+                afterCR = false
+                return nil
+            }
+            return emit()
+        case 0x0D:
+            afterCR = true
+            return emit()
+        default:
+            afterCR = false
+            buffer.append(byte)
+            return nil
+        }
+    }
+
+    /// A last line the stream ended without terminating.
+    mutating func finish() -> String? {
+        buffer.isEmpty ? nil : emit()
+    }
+
+    private mutating func emit() -> String {
+        defer { buffer.removeAll(keepingCapacity: true) }
+        return String(decoding: buffer, as: UTF8.self)
+    }
 }
 
 /// The text/event-stream framing, fed one line at a time without its line

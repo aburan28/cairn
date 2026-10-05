@@ -201,6 +201,28 @@ fn commit_sealed(
     artifact: Value,
     threshold: u8,
 ) -> String {
+    commit_sealed_with(
+        node,
+        objective,
+        members,
+        submitter,
+        artifact,
+        threshold,
+        |envelope| envelope,
+    )
+}
+
+/// [`commit_sealed`], with the envelope's encoded form rewritten before the
+/// commitment carries it: what a dishonest submitter controls.
+fn commit_sealed_with(
+    node: &mut Node,
+    objective: &Objective,
+    members: &[Member],
+    submitter: &Identity,
+    artifact: Value,
+    threshold: u8,
+    rewrite: impl FnOnce(Value) -> Value,
+) -> String {
     let seats = node
         .committee_for(epoch_of(COMMIT_AT), node.ledger().len())
         .expect("enough peers are registered");
@@ -234,13 +256,17 @@ fn commit_sealed(
     )
     .expect("seals");
 
+    let envelope = cairn::crypto::envelope::SealedEnvelope::from_value(&rewrite(
+        submission.envelope.to_value(),
+    ))
+    .expect("the rewritten envelope still has its shape");
     let commitment = Commitment::new(
         objective.id(),
         submitter.submitter_id(),
         submission.commitment.clone(),
         COMMIT_AT,
     )
-    .sealed_with(submission.envelope.clone())
+    .sealed_with(envelope)
     .signed_with(submitter);
 
     node.commit(&commitment, COMMIT_AT).expect("commit")
@@ -1042,6 +1068,90 @@ fn members_serve_their_own_seats_and_anyone_opens() {
             .is_empty(),
         "an opened submission is no longer pending"
     );
+}
+
+/// A submitter can seal something to a seat that is not its share. `commit`
+/// checks the envelope's shape, not what it sealed, so it is admitted; the seat
+/// then has nothing honest to publish. It must say so rather than fall silent,
+/// because silence reads exactly like withholding -- and the others still open
+/// the submission.
+#[test]
+fn a_seat_sealed_a_share_it_cannot_open_says_so() {
+    let (_dir, mut node, objective, members) = network("framed");
+    let submitter = Identity::from_secret_bytes([202u8; 32]);
+    let seats = node
+        .committee_for(epoch_of(COMMIT_AT), node.ledger().len())
+        .expect("enough peers are registered");
+    let framed = seats[0].clone();
+    let commitment_id = commit_sealed_with(
+        &mut node,
+        &objective,
+        &members,
+        &submitter,
+        n(43),
+        COMMITTEE_THRESHOLD,
+        |envelope| {
+            let shares: Vec<Value> = envelope
+                .get("sealed_shares")
+                .and_then(Value::as_array)
+                .expect("sealed_shares")
+                .iter()
+                .map(|share| {
+                    if share.get("index").and_then(Value::as_i128) != Some(i128::from(framed.seat))
+                    {
+                        return share.clone();
+                    }
+                    let text = share
+                        .get("ciphertext")
+                        .and_then(Value::as_str)
+                        .expect("ciphertext");
+                    let mut bytes = cairn::hex::decode(text).expect("hex");
+                    bytes[0] ^= 1;
+                    let mut map = share.as_object().cloned().expect("an object");
+                    map.insert(
+                        "ciphertext".to_string(),
+                        Value::string(cairn::hex::encode(&bytes)),
+                    );
+                    Value::Object(map)
+                })
+                .collect();
+            let mut map = envelope.as_object().cloned().expect("an object");
+            map.insert("sealed_shares".to_string(), Value::array(shares));
+            Value::Object(map)
+        },
+    );
+
+    let owner = holder(&members, &framed);
+    let said = node.post_owed_committee_shares(
+        &owner.committee,
+        &owner.identity,
+        epoch_of(REVEAL_AT),
+        REVEAL_AT,
+    );
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert_eq!(said[0].0, commitment_id);
+    assert!(
+        matches!(
+            &said[0].1,
+            Err(RuleViolation::ShareWillNotOpen { seat, .. }) if *seat == framed.seat
+        ),
+        "{said:?}"
+    );
+
+    for seat in &seats[1..] {
+        let member = holder(&members, seat);
+        for (_, result) in node.post_owed_committee_shares(
+            &member.committee,
+            &member.identity,
+            epoch_of(REVEAL_AT),
+            REVEAL_AT,
+        ) {
+            result.expect("an honest seat's share is admitted");
+        }
+    }
+    let opened = node.open_due_sealed(epoch_of(REVEAL_AT), REVEAL_AT, |_, _| false);
+    assert_eq!(opened.len(), 1);
+    opened[0].2.as_ref().expect("the honest seats open it");
 }
 
 /// Shares written on one node open the submission on another. The reason

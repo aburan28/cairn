@@ -424,6 +424,9 @@ struct Committee {
     /// at the time. Retried only once more shares arrive: the subset search is
     /// bounded, but repeating a failed one every tick is pure waste.
     failed: BTreeMap<String, usize>,
+    /// Commitments whose share for this seat does not decrypt, already said
+    /// once. It stays owed every tick, and the warning is worth one line.
+    unopenable: BTreeSet<String>,
 }
 
 /// Publish owed committee shares and open what has become openable.
@@ -445,6 +448,11 @@ fn committee_tick(node: &mut Node, committee: &mut Committee, now: &str) -> bool
         {
             match result {
                 Ok(_) => log::info!("committee: published our share of {}", short(&commitment)),
+                Err(error @ crate::node::RuleViolation::ShareWillNotOpen { .. }) => {
+                    if committee.unopenable.insert(commitment.clone()) {
+                        log::warn!("committee: {error}");
+                    }
+                }
                 Err(error) => log::debug!(
                     "committee: share of {} refused: {error}",
                     short(&commitment)
@@ -1179,6 +1187,7 @@ pub fn run(config: Config) -> Result<(), String> {
             None => None,
         },
         failed: BTreeMap::new(),
+        unopenable: BTreeSet::new(),
     };
     match &committee.signer {
         Some(signer) => log::info!(

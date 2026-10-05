@@ -23,4 +23,14 @@ if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
     gh release create "$tag" --repo "$repo" --prerelease --title "$tag" \
         --notes "Building. release.yml fills this page in as the assets land."
 fi
+# A published release's assets are what people have already downloaded and
+# checksummed. Replacing them -- a re-run on the tag, which rebuilds with a
+# newer toolchain -- would make every recorded checksum stop matching, with
+# nothing saying why. Only a draft or a prerelease, which is every release
+# until release.yml's `publish` job promotes it, takes a replacement.
+unpublished=$(gh release view "$tag" --repo "$repo" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')
+if [ "$unpublished" != "true" ]; then
+    echo "release-upload: $tag is published; its assets are not replaced. Cut a new version instead." >&2
+    exit 1
+fi
 gh release upload "$tag" "$@" --clobber --repo "$repo"

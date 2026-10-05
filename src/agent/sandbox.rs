@@ -108,6 +108,43 @@ impl Preference {
     }
 }
 
+/// The sandbox a queued job runs under, given the operator's setting.
+///
+/// The operator's `--sandbox` / `CAIRN_AGENT_SANDBOX` is a floor, not a
+/// default: a job may ask for something at least as strong, never weaker,
+/// and asks for `none` only on a host whose operator chose `none`. Before
+/// this, a job's own field decided alone, so `"sandbox": "none"` ran on the
+/// host of an operator who had installed with `--sandbox strongest` -- while
+/// `/hosts` went on advertising `strongest`.
+pub fn floor(operator: Preference, requested: Preference) -> Result<Preference, AgentError> {
+    // How far each choice is from the host kernel; `None` for a set that
+    // only a run can narrow (`Auto`).
+    fn rank(choice: Preference) -> Option<u8> {
+        match choice {
+            Preference::None => Some(0),
+            Preference::Bwrap => Some(1),
+            Preference::Runsc | Preference::Strongest => Some(2),
+            Preference::Kata => Some(3),
+            Preference::Auto => None,
+        }
+    }
+    if operator == Preference::None || requested == operator {
+        return Ok(requested);
+    }
+    if requested == Preference::Auto {
+        return Ok(operator);
+    }
+    let floor = rank(operator).unwrap_or(1);
+    match rank(requested) {
+        Some(asked) if asked >= floor && requested != Preference::None => Ok(requested),
+        _ => Err(AgentError::Invalid(format!(
+            "this host runs jobs under at least `{}`; the job asked for `{}`",
+            operator.as_str(),
+            requested.as_str()
+        ))),
+    }
+}
+
 /// A container engine on this host and the OCI runtimes it will run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Engine {
@@ -723,6 +760,29 @@ mod tests {
             engine: engine.into(),
             runtime: runtime.into(),
         }
+    }
+
+    #[test]
+    fn the_operators_sandbox_is_a_floor_a_job_cannot_go_below() {
+        use Preference::*;
+        // An operator who chose a sandbox never runs a job unconfined.
+        for operator in [Auto, Strongest, Kata, Runsc, Bwrap] {
+            assert!(
+                floor(operator, None).is_err(),
+                "{operator:?} ran a `none` job"
+            );
+        }
+        assert_eq!(floor(None, None).unwrap(), None);
+        // `auto` in the job means "whatever the operator set".
+        assert_eq!(floor(Strongest, Auto).unwrap(), Strongest);
+        assert_eq!(floor(Bwrap, Auto).unwrap(), Bwrap);
+        // Asking for more is fine; asking for less is not.
+        assert_eq!(floor(Bwrap, Kata).unwrap(), Kata);
+        assert_eq!(floor(Strongest, Kata).unwrap(), Kata);
+        assert_eq!(floor(Strongest, Runsc).unwrap(), Runsc);
+        assert!(floor(Strongest, Bwrap).is_err());
+        assert!(floor(Kata, Runsc).is_err());
+        assert_eq!(floor(Auto, Bwrap).unwrap(), Bwrap);
     }
 
     #[test]

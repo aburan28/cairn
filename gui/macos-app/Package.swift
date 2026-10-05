@@ -20,7 +20,10 @@ let package = Package(
     name: "Cairn",
     platforms: [.macOS(.v13)],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
+        // Exact, not `from:`: Sparkle ships inside the signed app and runs
+        // the update installer with admin rights, so a new release of it is
+        // a change to review, not something the next tag picks up unread.
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
     ],
     targets: [
         .executableTarget(

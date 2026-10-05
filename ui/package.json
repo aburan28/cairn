@@ -14,7 +14,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "next": "^15.1.0",
+    "next": "^15.5.27",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -25,5 +25,10 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^5.7.0",
     "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "^8.5.28"
+    }
   }
 }

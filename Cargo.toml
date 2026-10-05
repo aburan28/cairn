@@ -80,7 +80,10 @@ hmac = "0.13"
 # self-consistent -- and a sealed store and a recorded transport frame both
 # outlive the binary that wrote them. The known-answer test is the check that
 # 0.10 and 0.11 produce the same bytes, which they do.
-chacha20poly1305 = "0.11"
+# `zeroize` is what makes the cipher wipe its key on drop; without it the
+# content keys, share keys and at-rest key copies stay in freed memory, and
+# `envelope::cipher_for` said otherwise. A compile-time check there pins it.
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 
 # Confidentiality layer. Censorship resistance needs unlinkable, sealed
 # submissions that can be revealed WITHOUT the submitter being online -- see

@@ -94,6 +94,17 @@ const FIELDS: [&str; 17] = [
     "note",
 ];
 
+/// An OCI image reference as `docker run` takes one: registry, path, tag and
+/// digest, and nothing an engine would parse as an option.
+pub fn valid_image_reference(image: &str) -> bool {
+    !image.is_empty()
+        && image.len() <= 255
+        && image.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && image
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@'))
+}
+
 impl Job {
     pub fn from_file(path: &Path) -> Result<Job, AgentError> {
         let text = fs::read_to_string(path)
@@ -150,6 +161,19 @@ impl Job {
             )));
         }
         let image = text("image")?;
+        // The image is a positional argument to `docker run` / `podman run`,
+        // after every option this agent sets. A value that starts with `-`
+        // is read as one more option -- `--volume=/:/host`, `--privileged`,
+        // `--runtime=runc` -- which is the host's root through the engine's
+        // daemon. A reference is a name, so it is held to a name's alphabet.
+        if let Some(image) = &image {
+            if !valid_image_reference(image) {
+                return Err(AgentError::Invalid(format!(
+                    "image {image:?} is not an image reference: 1-255 characters of \
+                     [A-Za-z0-9._/:@-], starting with a letter or digit"
+                )));
+            }
+        }
         let rootfs = text("rootfs")?.map(PathBuf::from);
         match (&image, &rootfs) {
             (None, None) => {
@@ -705,6 +729,36 @@ mod tests {
 
     fn job(json: &str) -> Result<Job, AgentError> {
         Job::from_value(&Value::from_json(json).unwrap(), "fallback")
+    }
+
+    #[test]
+    fn an_image_that_would_be_read_as_an_engine_option_is_refused() {
+        for image in [
+            "--volume=/:/host",
+            "--privileged",
+            "-v/:/host",
+            "alpine --privileged",
+            "alpine\nx",
+            " alpine",
+            "",
+        ] {
+            let spec = Value::object([
+                ("image", Value::string(image)),
+                ("argv", Value::Array(vec![Value::string("true")])),
+            ]);
+            assert!(
+                Job::from_value(&spec, "x").is_err(),
+                "{image:?} reached `docker run` as an image"
+            );
+        }
+        for image in [
+            "alpine",
+            "ghcr.io/x/y:1",
+            "localhost:5000/team/walker:v2.1",
+            "alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(valid_image_reference(image), "{image} refused");
+        }
     }
 
     #[test]

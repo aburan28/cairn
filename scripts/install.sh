@@ -170,9 +170,17 @@ if [ -z "$BIN_DIR" ]; then
     BIN_DIR="$HOME/.local/bin"
 fi
 
+umask 022
 mkdir -p "$BIN_DIR" || die "cannot create $BIN_DIR"
 [ -w "$BIN_DIR" ] || die "$BIN_DIR is not writable.
        Pick another with --bin-dir, or re-run with sudo if you meant a system path."
+# A directory anyone can write is one where anyone can swap the binary after
+# this script leaves -- or plant a symlink at the name it stages under, so the
+# copy writes wherever they chose. /tmp is the usual one; refuse them all.
+if [ -n "$(find "$BIN_DIR" -maxdepth 0 \( -perm -0002 -o -perm -0020 \) 2>/dev/null)" ]; then
+    die "$BIN_DIR is writable by other users; a binary there is anyone's to replace.
+       Pick another with --bin-dir."
+fi
 
 tar -C "$tmp" -xzf "$tmp/$name.tar.gz"
 
@@ -180,12 +188,15 @@ for bin in $BINS; do
     [ -f "$tmp/$bin" ] || die "the release tarball is missing $bin"
 done
 for bin in $BINS; do
-    # install(1) is not on every minimal image; cp + chmod is.
-    cp "$tmp/$bin" "$BIN_DIR/$bin.new" || die "cannot write to $BIN_DIR"
-    chmod 755 "$BIN_DIR/$bin.new"
+    # install(1) is not on every minimal image; cp + chmod is. Staged under a
+    # fresh name mktemp made, never a fixed `$bin.new` that could already be
+    # a symlink to somewhere else.
+    staged="$(mktemp "$BIN_DIR/.$bin.XXXXXX")" || die "cannot write to $BIN_DIR"
+    cp "$tmp/$bin" "$staged" || { rm -f "$staged"; die "cannot write to $BIN_DIR"; }
+    chmod 755 "$staged"
     # Rename last, so an interrupted install cannot leave a half-written binary
     # under a name somebody's service file already points at.
-    mv "$BIN_DIR/$bin.new" "$BIN_DIR/$bin"
+    mv "$staged" "$BIN_DIR/$bin"
 done
 
 # Only after the new binary is in place: an interrupted install must never

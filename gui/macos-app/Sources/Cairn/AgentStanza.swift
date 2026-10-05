@@ -130,8 +130,23 @@ enum AgentStanza {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// A TOML basic string. Control characters are escaped too: a raw
+    /// newline in a path would make the whole config.toml unparseable.
     static func tomlString(_ s: String) -> String {
-        "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        var out = "\""
+        for scalar in s.unicodeScalars {
+            switch scalar {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case _ where scalar.value < 0x20 || scalar.value == 0x7F:
+                out += String(format: "\\u%04X", scalar.value)
+            default: out.unicodeScalars.append(scalar)
+            }
+        }
+        return out + "\""
     }
 
     /// Single quotes around anything a shell would read, and nothing around

@@ -12,15 +12,38 @@ final class StreamingTests: XCTestCase {
         var parser = SSEParser()
         var reader = AIStreamReader(wire: wire)
         var progress = AIProgress()
-        for line in raw.split(separator: "\n", omittingEmptySubsequences: false) {
-            guard let event = parser.feed(String(line)) else { continue }
+        // Bytes through the same splitter the app uses, so a blank line the
+        // splitter lost would merge events here exactly as it would there.
+        var lines = SSELineSplitter()
+        bytes: for byte in Array(raw.utf8) {
+            guard let line = lines.take(byte) else { continue }
+            guard let event = parser.feed(line) else { continue }
             _ = try reader.take(event, into: &progress)
-            if reader.finished { break }
+            if reader.finished { break bytes }
+        }
+        if !reader.finished, let rest = lines.finish(), let event = parser.feed(rest) {
+            _ = try reader.take(event, into: &progress)
         }
         if !reader.finished, let event = parser.flush() {
             _ = try reader.take(event, into: &progress)
         }
         return (try reader.reply(), progress, reader)
+    }
+
+    func testLineSplittingKeepsTheBlankLinesThatEndEvents() {
+        func lines(_ raw: String) -> [String] {
+            var splitter = SSELineSplitter()
+            var out = Array(raw.utf8).compactMap { splitter.take($0) }
+            if let rest = splitter.finish() { out.append(rest) }
+            return out
+        }
+        XCTAssertEqual(lines("data: a\n\ndata: b\n\n"), ["data: a", "", "data: b", ""])
+        XCTAssertEqual(lines("data: a\r\n\r\ndata: b"), ["data: a", "", "data: b"])
+        XCTAssertEqual(lines("data: a\r\rdata: é\n"), ["data: a", "", "data: é"])
+        // Two events, two dispatches: nothing runs together.
+        var parser = SSEParser()
+        let events = lines("event: x\ndata: 1\n\nevent: y\ndata: 2\n\n").compactMap { parser.feed($0) }
+        XCTAssertEqual(events, [SSEEvent(event: "x", data: "1"), SSEEvent(event: "y", data: "2")])
     }
 
     func testSSEFramingJoinsDataLinesAndSkipsComments() {

@@ -533,6 +533,11 @@ const FORBIDDEN: &[Screen] = &[
     },
 ];
 
+/// Why a Lean proof that does not open with `:=` is refused. Shared wording
+/// with the reference implementation, which refuses the same text.
+const LEAN_PROOF_MUST_OPEN_WITH_ASSIGN: &str =
+    "the proof must begin with `:=`; text before it would extend the objective's statement";
+
 /// `native_decide` discharges goals via compiled evaluation, trusting the
 /// compiler and runtime rather than the kernel. A known soundness escape hatch,
 /// allowed only when the objective explicitly opts in.
@@ -1466,6 +1471,20 @@ impl VerifierRegistry {
                 );
             }
         }
+        // The statement comes from the objective, never the submitter -- and
+        // the proof is appended to it as text, so anything before the
+        // proof's `:=` would continue the pinned header. ` ∨ True :=
+        // Or.inr trivial` after `theorem t : 2 + 2 = 5` proves a different,
+        // easier theorem, with no hole, no axiom and a clean exit. `:=` cannot
+        // continue a term, so a proof that opens with it leaves the header
+        // exactly as the objective wrote it.
+        if !proof.trim_start().starts_with(":=") {
+            return Verdict::new(
+                Status::Reject,
+                LEAN_PROOF_MUST_OPEN_WITH_ASSIGN,
+                Value::object([("pattern", Value::string(r"^\s*:="))]),
+            );
+        }
 
         // `project_root` comes from the objective record -- attacker-authored,
         // like every other spec field -- and is made readable inside the jail.
@@ -1681,6 +1700,72 @@ impl VerifierRegistry {
                 } else {
                     Verdict::new(Status::Accept, "kernel accepted the proof", evidence)
                 }
+            }
+        }
+    }
+
+    /// Compile one Lean source under the jail the `lean` verifier uses, and
+    /// hand back what Lean said.
+    ///
+    /// For an author testing a theorem before posting it -- Cairn.app's
+    /// drafting sheet, whose source a language model wrote. Elaboration runs
+    /// code (`#eval`, `run_cmd`, `initialize`, macros), so text nobody has
+    /// read yet is compiled exactly where a submitter's would be: no
+    /// network, scratch-only writes, a scrubbed environment, the operator's
+    /// Lean and nothing else of theirs. Nothing here is a verdict.
+    pub fn compile_lean(&self, source: &str, timeout: Duration) -> LeanCompile {
+        let Some(binary) = which(&self.lean_binary) else {
+            return LeanCompile::Unavailable(format!(
+                "'{}' not on PATH; install a Lean toolchain",
+                self.lean_binary
+            ));
+        };
+        let timeout = self.bounded(timeout);
+        let workdir = match TempDir::new("leancompile") {
+            Ok(workdir) => workdir,
+            Err(error) => {
+                return LeanCompile::Unavailable(format!(
+                    "cannot create a working directory: {error}"
+                ))
+            }
+        };
+        let file = workdir.path().join("Challenge.lean");
+        if let Err(error) = fs::write(&file, source.as_bytes()) {
+            return LeanCompile::Unavailable(format!("cannot write the Lean source: {error}"));
+        }
+        let mut plan = Confinement::new(workdir.path(), workdir.path(), timeout.as_secs())
+            .reading(&binary)
+            .scrubbed();
+        if let Some(root) = &self.lean_root {
+            plan = plan.reading(root);
+        }
+        let jailed = match sandbox::confine(&binary, &sandbox::argv([file.as_os_str()]), &plan) {
+            Ok(jailed) => jailed,
+            Err(sandbox::Unavailable(why)) => {
+                return LeanCompile::Unavailable(format!("cannot jail lean: {why}"))
+            }
+        };
+        let mut command = jailed.command;
+        match run_bounded(&mut command, workdir.path(), None, timeout, plan.limits()) {
+            Ok(Completed {
+                code: Some(code),
+                stdout,
+                stderr,
+            }) => LeanCompile::Ran {
+                code,
+                output: format!("{stdout}{stderr}")
+                    .replace(&file.display().to_string(), "Challenge.lean"),
+            },
+            Ok(Completed { code: None, .. }) => {
+                LeanCompile::Unavailable("lean was killed by a signal".to_string())
+            }
+            Err(RunFailure::TimedOut(throttled)) => LeanCompile::Unavailable(format!(
+                "lean exceeded {}s{}",
+                timeout.as_secs(),
+                RunFailure::throttle_note(throttled)
+            )),
+            Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
+                LeanCompile::Unavailable(format!("cannot run lean: {error}"))
             }
         }
     }
@@ -2774,6 +2859,15 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
     fs::DirBuilder::new().create(path)
 }
 
+/// What [`VerifierRegistry::compile_lean`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeanCompile {
+    /// Lean ran to an exit code; `output` is what it printed.
+    Ran { code: i32, output: String },
+    /// Lean could not be run here, for the reason given.
+    Unavailable(String),
+}
+
 /// What a finished child produced. `code` is `None` if it died on a signal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Completed {
@@ -3322,6 +3416,45 @@ mod tests {
             let verdict = registry.run(&spec, &artifact);
             assert_eq!(verdict.status, Status::Reject, "proof: {proof}");
             assert!(verdict.evidence.get("pattern").is_some());
+        }
+    }
+
+    #[test]
+    fn a_proof_that_extends_the_statement_is_rejected_before_lean_runs() {
+        // Appended to `theorem t : 2 + 2 = 5`, each of these makes Lean check
+        // an easier theorem than the pinned one: no hole, no axiom, exit 0.
+        // The toolchain does not exist, so Unavailable would mean the check
+        // had moved below the lookup.
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            ("statement", Value::string("theorem t : 2 + 2 = 5")),
+        ]);
+        let registry = VerifierRegistry::new(".").with_lean_binary("lean-does-not-exist-xyz");
+        for widened in [
+            " ∨ True := Or.inr trivial",
+            "→ 2 + 2 = 5 := id",
+            "\n  ∨ True\n:= Or.inr trivial",
+            "|>.symm := rfl",
+            "-- a comment first\n:= rfl",
+        ] {
+            let artifact = Value::object([("proof", Value::string(widened))]);
+            let verdict = registry.run(&spec, &artifact);
+            assert_eq!(
+                verdict.status,
+                Status::Reject,
+                "{widened:?}: {}",
+                verdict.detail
+            );
+            assert_eq!(verdict.detail, LEAN_PROOF_MUST_OPEN_WITH_ASSIGN);
+        }
+        // Leading whitespace is fine: the header is still the objective's.
+        for honest in [":= by decide", "  := by decide", "\n:= by\n  decide"] {
+            let artifact = Value::object([("proof", Value::string(honest))]);
+            assert_eq!(
+                registry.run(&spec, &artifact).status,
+                Status::Unavailable,
+                "{honest:?} should reach the toolchain lookup"
+            );
         }
     }
 
@@ -4926,6 +5059,50 @@ mod tests {
         let again = registry.run(&spec, &artifact);
         assert_eq!(again.status, Status::Reject);
         assert!(again.evidence.get("control_returncode").is_none());
+    }
+
+    /// The author's pre-post compile: Lean's own words come back, and a
+    /// Lean that cannot run is said to be that rather than a broken theorem.
+    #[cfg(unix)]
+    #[test]
+    fn compile_lean_returns_what_lean_said_or_why_it_could_not_run() {
+        use std::os::unix::fs::PermissionsExt;
+        if !have("sh") {
+            return;
+        }
+        let missing = VerifierRegistry::new(".").with_lean_binary("lean-does-not-exist-xyz");
+        assert!(matches!(
+            missing.compile_lean("theorem t : True := trivial", Duration::from_secs(5)),
+            LeanCompile::Unavailable(_)
+        ));
+
+        let root = tmpdir("proofwork-lean-compile");
+        let lean = root.path().join("lean");
+        fs::write(
+            &lean,
+            "#!/bin/sh\ncase \"$(cat \"$1\")\" in *broken*) echo \"$1:1:0: error: unknown identifier\"; exit 1;; *) exit 0;; esac\n",
+        )
+        .expect("write stand-in");
+        fs::set_permissions(&lean, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let registry = VerifierRegistry::new(root.path()).with_lean_binary(lean.to_string_lossy());
+        assert_eq!(
+            registry.compile_lean("theorem t : True := trivial", Duration::from_secs(30)),
+            LeanCompile::Ran {
+                code: 0,
+                output: String::new()
+            }
+        );
+        match registry.compile_lean("theorem broken : True := nope", Duration::from_secs(30)) {
+            LeanCompile::Ran { code, output } => {
+                assert_eq!(code, 1);
+                // The jail's scratch path is not shown to the author.
+                assert_eq!(
+                    output.trim(),
+                    "Challenge.lean:1:0: error: unknown identifier"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

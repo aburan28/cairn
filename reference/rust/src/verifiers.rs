@@ -617,6 +617,15 @@ fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verd
             return Verdict::plain(Status::Reject, *why);
         }
     }
+    // The proof is appended to the pinned header as text, so anything before
+    // its `:=` would continue the statement: ` ∨ True := Or.inr trivial`
+    // proves an easier theorem with a clean exit. `:=` cannot continue a term.
+    if !proof.trim_start().starts_with(":=") {
+        return Verdict::plain(
+            Status::Reject,
+            "the proof must begin with `:=`; text before it would extend the objective's statement",
+        );
+    }
 
     // Attacker-authored, and the primary hands it to the jail as a *writable*
     // bind -- so unconfined, `"/"` would be a pass-through of the filesystem.
@@ -1316,6 +1325,36 @@ mod tests {
                 verdict.status,
                 Status::Reject,
                 "{hole:?}: {}",
+                verdict.detail
+            );
+        }
+    }
+
+    #[test]
+    fn a_proof_that_extends_the_statement_is_rejected_before_lean_is_ever_run() {
+        // Rule 1: the statement is the objective's. Text before `:=` would
+        // continue the pinned header into an easier theorem.
+        let spec = lean_spec(vec![("statement", Value::string("theorem t : 2 + 2 = 5"))]);
+        for widened in [
+            " ∨ True := Or.inr trivial",
+            "→ 2 + 2 = 5 := id",
+            "|>.symm := rfl",
+            "-- a comment first\n:= rfl",
+        ] {
+            let verdict = lean_using(NO_LEAN, root(), &spec, &proof(widened));
+            assert_eq!(
+                verdict.status,
+                Status::Reject,
+                "{widened:?}: {}",
+                verdict.detail
+            );
+        }
+        for honest in [":= by decide", "  := by decide", "\n:= by\n  decide"] {
+            let verdict = lean_using(NO_LEAN, root(), &spec, &proof(honest));
+            assert_eq!(
+                verdict.status,
+                Status::Unavailable,
+                "{honest:?}: {}",
                 verdict.detail
             );
         }
