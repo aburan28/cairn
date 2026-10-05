@@ -260,11 +260,15 @@ enum ChallengeWriter {
 /// A request from the reader, in the shape `ui/lib/draft.ts` sends it.
 enum PageRequest: Equatable {
     case draftChallenge(brief: String)
+    case startDictation
+    case stopDictation
 
     static func parse(_ body: Any) -> Result<PageRequest, AIError> {
         guard let object = body as? [String: Any], let kind = object["kind"] as? String else {
             return .failure(AIError("The page sent something this app does not read."))
         }
+        if kind == "start-dictation" { return .success(.startDictation) }
+        if kind == "stop-dictation" { return .success(.stopDictation) }
         guard kind == "draft-challenge" else {
             return .failure(AIError("This app does not know the request \(kind)."))
         }

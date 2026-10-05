@@ -426,7 +426,7 @@ struct SettingsView: View {
                         Image(systemName: FileManager.default.fileExists(atPath: path)
                               ? "doc" : "exclamationmark.triangle.fill")
                             .foregroundStyle(FileManager.default.fileExists(atPath: path)
-                                             ? Color.secondary : .orange)
+                                             ? Color.secondary : .gray)
                         Text(path)
                             .font(.caption.monospaced())
                             .lineLimit(1)

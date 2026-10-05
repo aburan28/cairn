@@ -121,8 +121,8 @@ export default function Page() {
         {chain && (
           <>
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <Stat label="Links" value={String(chain.links)} from="one per settled epoch" />
-              <Stat label="Claims settled" value={String(claims)} />
+              <Stat label="Links" value={String(chain.links)} from="one per settled epoch" tone="accent" />
+              <Stat label="Claims settled" value={String(claims)} tone="accent" />
               <Stat label="Log entries" value={String(chain.height)} />
               <Stat
                 label="Checkpoint"
@@ -136,7 +136,7 @@ export default function Page() {
                         ? "ahead of this log: not this log"
                         : "never signed"
                 }
-                tone={covers === "ahead" ? "bad" : "neutral"}
+                tone={covers === "ahead" ? "bad" : checkpoint ? "accent" : "neutral"}
               />
             </div>
 

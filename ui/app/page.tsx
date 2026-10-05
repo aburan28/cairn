@@ -149,14 +149,16 @@ export default function Page() {
         <p className="hint max-w-[46rem]">
           Linux and macOS, amd64 and arm64. The download&rsquo;s sha256 only catches
           corruption; the check that means something is re-deriving the log, below.
-          On a phone, Add to Home Screen, or use the native reader in{" "}
-          <span className="mono">gui/ios/</span>
-          .
+          On a phone, Add to Home Screen or use the native reader.
         </p>
       </section>
 
       <div className="app-only">
-        <PageHeader title="Overview" subtitle={objectivesFrom} />
+        <PageHeader
+          title="Overview"
+          subtitle={objectivesFrom}
+          actions={<Link href="/network" className="btn btn-sm">Network topology →</Link>}
+        />
       </div>
 
       <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
@@ -166,9 +168,9 @@ export default function Page() {
           value={String(open.length)}
           from={open.length ? "worth working on" : "all settled"}
         />
-        <Stat label="Pool" value={units(pool)} from="funded, all time" />
-        <Stat label="Paid out" value={units(paid)} from="to accepted claims" />
-        <Stat label="Chain links" value={String(links)} from={chainFrom} />
+        <Stat label="Pool" value={units(pool)} from="funded, all time" tone="accent" />
+        <Stat label="Paid out" value={units(paid)} from="to accepted claims" tone="accent" />
+        <Stat label="Chain links" value={String(links)} from={chainFrom} tone="warn" />
       </div>
 
       {/* A node that answered in a shape this page does not read, or that
@@ -296,16 +298,9 @@ export default function Page() {
               bundled log's signature are different facts, and the sentence that
               says which this is must sit beside the number. */}
           <p className="mt-3 text-[11.5px] leading-relaxed text-ink-3">{checkpointFrom}</p>
-          <details className="mt-3 text-[12.5px]">
-            <summary className="cursor-pointer text-accent">Re-derive it yourself</summary>
-            <p className="mt-2 text-ink-2">
-              Every settlement recomputed from the records, each batch checked against
-              the anchor it recorded:
-            </p>
-            <pre className="code mt-2 text-[11.5px]">{`git clone ${REPO}
-cd cairn
-cairn --log launch/cairn.jsonl --root . audit`}</pre>
-          </details>
+          <p className="mt-3 text-[12.5px] text-ink-2">
+            Each settlement can be independently checked against the recorded log.
+          </p>
         </Box>
       </div>
 
@@ -340,9 +335,8 @@ cairn --log launch/cairn.jsonl --root . audit`}</pre>
             </p>
             <pre className="code mt-auto">cairn run</pre>
             <p className="hint">
-              One stdio MCP server, live on the network.{" "}
-              <span className="mono">docs/agents.md</span>{" "}
-              has the config stanza for each client.
+              One stdio MCP server, live on the network. Agent setup is available
+              in the project's developer documentation.
             </p>
           </Card>
           <Card as="li" className="card-pad flex flex-col gap-2">
@@ -355,21 +349,15 @@ cairn --log launch/cairn.jsonl --root . audit`}</pre>
             </p>
             <pre className="code mt-auto">cairn run</pre>
             <p className="hint">
-              Loopback by default; pass a bootstrap file to join peers.{" "}
-              <span className="mono">docs/serving.md</span>{" "}
-              and{" "}
-              <span className="mono">docs/p2p.md</span>
-              .
+              Loopback by default; add a peer to join the network.
             </p>
           </Card>
         </ul>
       </section>
 
       <p className="site-only prose-block mt-8 text-[13px]">
-        A second implementation in{" "}
-        <code className="mono">reference/rust/</code>{" "}
-        re-derives the same log independently, and{" "}
-        448 frozen conformance vectors (<code className="mono">conformance/</code>){" "}
+        A second implementation re-derives the same log independently, and{" "}
+        448 frozen conformance vectors{" "}
         pin the byte encoding both must agree on. That is what &ldquo;verified&rdquo; is
         doing in the first sentence on this page.
       </p>

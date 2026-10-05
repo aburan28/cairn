@@ -39,7 +39,7 @@ struct JournalView: View {
                         Spacer(minLength: 0)
                         if let oid = e.fields["objective"], model.rows.contains(where: { $0.id.hasPrefix(oid) }) {
                             Button { model.open(objectivePrefix: oid) } label: { Image(systemName: "arrow.right.circle") }
-                                .buttonStyle(.plain).foregroundStyle(.blue).help("Open this objective")
+                                .buttonStyle(.plain).foregroundStyle(.green).help("Open this objective")
                         }
                     }
                     .listRowSeparator(.hidden)
@@ -74,8 +74,8 @@ struct JournalView: View {
         switch k {
         case .good: return .green
         case .bad: return .red
-        case .active: return .blue
-        case .muted: return .orange
+        case .active: return .green
+        case .muted: return .gray
         case .plain: return .primary
         }
     }

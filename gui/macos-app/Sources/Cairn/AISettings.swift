@@ -46,7 +46,7 @@ struct AISettingsSection: View {
                     ProgressView().controlSize(.small)
                 } else if let status {
                     Label(status.text, systemImage: status.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(status.ok ? Color.green : Color.orange)
+                        .foregroundStyle(status.ok ? Color.green : Color.gray)
                         .lineLimit(3)
                 } else if hasKey == false {
                     Text("No key saved for \(provider.title).").foregroundStyle(.secondary)

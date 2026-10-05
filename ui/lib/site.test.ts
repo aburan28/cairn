@@ -50,7 +50,7 @@ describe("provenance", () => {
       "live from http://127.0.0.1:8080",
     );
     expect(provenance({ live: false, origin: "launch/cairn.jsonl" })).toBe(
-      "from launch/cairn.jsonl snapshot",
+      "from the bundled snapshot",
     );
   });
 });

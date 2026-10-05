@@ -7,9 +7,10 @@ A small Next.js app that is two things at once, from one build:
 * **the node's own reader**, embedded in the binary and served at `/ui/`, where
   the same pages read the node that served them.
 
-Routes: `/` the landing page, `/how-it-works` the protocol, `/docs` an index of
-the design notes, `/challenge?id=…` one objective, `/frontier?id=…` its move
-history, `/chain` the epoch chain, `/objectives`, `/peers` (the log's address
+Routes: `/` the landing page, `/how-it-works` the protocol,
+`/challenge?id=…` one objective, `/frontier?id=…` its move
+history, `/chain` the epoch chain, `/objectives`, `/goals` (problem families and
+the angles funded under each), `/peers` (the log's address
 book), `/network` — the peers this node has actually reached, every worker
 heartbeating to it summed by device and class, its declared roles and hardware,
 and the roles the log evidences, kept apart as three kinds of fact —
@@ -23,26 +24,24 @@ the share of the expected Pollard rho cost and an ETA at the reported rate —
 `node.reach` it publishes on `GET /network` — and `/submit` — a form that posts
 an objective to the node that served the page.
 
-The first three are static prose and read no node; the rest are the reader. Both
+`/how-it-works` is static prose and reads no node; the rest are the reader. Both
 kinds ship in both mounts, which is the same "one app, not two" decision — an
 operator who followed a link to their own node's `/ui/` gets the explanation
 too, and the explanation cannot drift from the reader because there is only one
 of each.
 
-`/docs` is an index naming each note by its path, rather than rendering
-`docs/*.md` -- and nothing in the reader links to github.com at all, a node
-serving it stays the only host on the page (`REPO` in `lib/site.ts`). A
-markdown pipeline here would put a *copy* of every design note behind an
-official-looking URL, with no build step anywhere that could notice the copy
-going stale — and it would carry several hundred KB of prose into every node
-binary, since `build.rs` embeds this app whole.
+The reader no longer has a repository file index. The explanatory page talks
+about the network in product terms; developer documentation remains in the
+repository. Nothing in the reader links to github.com, so a node serving it
+stays the only host on the page (`REPO` in `lib/site.ts`).
 
 ## Posting a challenge, and what a wallet is doing there
 
-**In Cairn.app's window `/submit` is a single text box.** Its *Draft
-challenge* hands the description to the app's New Challenge… sheet, which has
-a model the funder holds a key for draft the statement, answer format and
-checker, tests the checker, and posts. `lib/draft.ts` has the bridge and
+**In Cairn.app's window `/submit` starts with one description box.** The
+microphone button transcribes on this Mac and leaves editable text for review.
+Its *Draft challenge* hands the description to the app's New Challenge… sheet, which
+uses the funder's model key to draft a Lean theorem, checks it, and posts it
+after review. `lib/draft.ts` has the bridge and
 explains why the page cannot draft on its own: the node has no TLS to call a
 model with, a key typed into a page it serves crosses plain HTTP, and there
 is nowhere a page may put a checker. The form described below is folded away

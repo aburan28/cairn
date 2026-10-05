@@ -187,7 +187,7 @@ function Chooser() {
                       {formatMagnitude(objective.piecework.pool_remaining)} left
                     </span>
                   )}
-                  {leased.includes(objective.id) && <Badge tone="info">leases</Badge>}
+                  {leased.includes(objective.id) && <Badge tone="accent">leases</Badge>}
                   <span className="ml-auto">
                     <Hash value={objective.id} chars={8} />
                   </span>
@@ -433,7 +433,7 @@ function Dashboard({
         meta={
           <>
             <StatusPill settled={progress.settled} />
-            <Badge tone="info">{progress.kind}</Badge>
+            <Badge tone="accent">{progress.kind}</Badge>
             <Badge tone={reported.live > 0 ? "accent" : "neutral"}>
               {reported.live} live{reported.stale > 0 && <>, {reported.stale} stale</>}
             </Badge>
@@ -448,7 +448,7 @@ function Dashboard({
         {readAt && <> at {readAt.toLocaleTimeString()}</>}, again every {REFRESH_SECONDS} s while this
         tab is visible. The <span className="text-accent">assignment</span> is arithmetic anyone can
         recompute; <span className="text-warn">reported</span> ranges and{" "}
-        <span className="text-info">leases</span> are what workers said, held in memory and checked by
+        <span className="text-accent">leases</span> are what workers said, held in memory and checked by
         nobody.
         {stale && <span className="text-bad"> The last re-read failed: {stale}</span>}
       </p>
@@ -485,6 +485,7 @@ function Dashboard({
                 ? "this node predates leases"
                 : "reading…"
           }
+          tone="accent"
         />
         <Stat
           label="Units"
@@ -714,8 +715,8 @@ function PartitionStrip({ cells, partitions }: { cells: PartitionCell[]; partiti
               ? "bg-surface-3"
               : cell.holders.length === 1
                 ? "bg-accent/70"
-                : "bg-warn/80";
-          const ring = cell.leased.length > 0 ? "ring-2 ring-inset ring-info" : "";
+                : "bg-ink-2/70";
+          const ring = cell.leased.length > 0 ? "ring-2 ring-inset ring-accent" : "";
           const title = [
             `partition ${cell.index}: units [${cell.first.toLocaleString("en-US")}, ${cell.end.toLocaleString("en-US")})`,
             cell.holders.length > 0 ? `reported by ${cell.holders.join(", ")}` : "nobody reports holding it",
@@ -728,8 +729,8 @@ function PartitionStrip({ cells, partitions }: { cells: PartitionCell[]; partiti
       </div>
       <p className="text-[11px] text-ink-3">
         <span className="text-accent">Green</span>: one live worker reports a range here.{" "}
-        <span className="text-warn">Amber</span>: more than one does, which wastes a little compute and
-        nothing else. Grey: nobody does. <span className="text-info">Blue ring</span>: a live lease
+        <span className="text-ink-2">Dark grey</span>: more than one does, which wastes a little compute and
+        nothing else. Light grey: nobody does. <span className="text-accent">Green ring</span>: a live lease
         covers it. Hover a cell for the unit range and the names.
       </p>
     </div>

@@ -125,9 +125,9 @@ private struct TaskRow: View {
                 Text(item.reward.formatted()).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 if let p = model.plan[path] { planBadge(p) }
             } else {
-                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                Image(systemName: "exclamationmark.triangle").foregroundStyle(.gray)
                 Text(path).font(.caption.monospaced()).foregroundStyle(.secondary)
-                Text("not in checkout").font(.caption2).foregroundStyle(.orange)
+                Text("not in checkout").font(.caption2).foregroundStyle(.gray)
             }
         }
     }
@@ -138,7 +138,7 @@ private struct TaskRow: View {
         case "solve":
             Text("autoresearcher would solve").font(.caption2).foregroundStyle(.green)
         case "decline":
-            Text("autoresearcher declines").font(.caption2).foregroundStyle(.orange)
+            Text("autoresearcher declines").font(.caption2).foregroundStyle(.gray)
         default:
             Text("not in repertoire").font(.caption2).foregroundStyle(.secondary)
         }

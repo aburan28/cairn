@@ -309,7 +309,7 @@ private struct ConnectivityRowView: View {
         switch row.status {
         case .checking: ProgressView().controlSize(.small)
         case .ok: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-        case .warning: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        case .warning: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.gray)
         case .failed: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
         case .info: Image(systemName: "info.circle").foregroundStyle(.secondary)
         }

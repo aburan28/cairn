@@ -5,8 +5,9 @@
 # reader are the surfaces a stranger meets first, and for a while each of them
 # sent that stranger to github.com for the documentation -- a page about a
 # network with no operator, pointing at docs hosted by one. The docs travel
-# with the reader (/ui/docs) and with every node, so a link to GitHub is a
-# regression, and this script is the check.
+# in the repository, while the reader explains the network without listing
+# files. A link from the reader to GitHub is a regression, and this script is
+# the check.
 #
 # ui/lib/site.test.ts already fails on an anchor in ui/; this covers the native
 # apps as well and needs no Node toolchain. What is allowed is listed by path
@@ -41,6 +42,7 @@ hits=$(grep -rn \
   --include='*.swift' --include='*.storyboard' --include='*.xib' --include='*.strings' \
   --include='*.plist' --include='*.json' \
   --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=out --exclude-dir=.build \
+  --exclude-dir=build \
   --exclude='package-lock.json' \
   'github\.com' ui gui 2>/dev/null || true)
 

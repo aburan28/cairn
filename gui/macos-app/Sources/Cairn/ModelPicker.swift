@@ -119,7 +119,7 @@ struct ModelPicker: View {
         if !served.isEmpty, !served.contains(effectiveModel) {
             HStack {
                 Label("\(provider.title) does not serve \(effectiveModel).", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.gray)
                     .lineLimit(2)
                 Spacer()
                 if let nearest = AIClient.nearest(to: effectiveModel, in: served) {
@@ -132,7 +132,7 @@ struct ModelPicker: View {
             .font(.callout)
         } else if let servedProblem {
             Label(servedProblem, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(.gray)
                 .font(.callout)
                 .lineLimit(3)
         } else if !served.isEmpty {
