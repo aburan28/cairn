@@ -36,11 +36,19 @@
 //!
 //! # What this server is not
 //!
-//! Not authenticated, not rate-limited beyond a connection cap, and not TLS.
+//! Not a login wall, not rate-limited beyond a connection cap, and not TLS.
+//! Google sign-in ([`crate::google_auth`]) is optional recognition of a
+//! browser and is off unless the operator sets `CAIRN_GOOGLE_CLIENT_ID`. A
+//! session cookie is not a cairn identity, nothing in the log is written
+//! because somebody signed in, and every route answers with no cookie. The
+//! default node is anonymous.
+//!
 //! It publishes what is already public and accepts proposals a node will
 //! re-check from scratch. Run it behind whatever reverse proxy terminates TLS
 //! for you; the security argument here does not rest on the transport, because
-//! nothing it serves is secret and nothing it accepts is trusted.
+//! nothing it serves is secret and nothing it accepts is trusted. Google's
+//! own token endpoint is reached with `curl`, the same way a deposit is, so
+//! this crate still does not link a TLS stack.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -57,6 +65,7 @@ use crate::fleet::auth::{JoinRequest, MemberAuth, Refusal};
 use crate::fleet::members::{Member, Registry};
 use crate::fleet::{self, Fleet};
 use crate::goals;
+use crate::google_auth::GoogleAuth;
 use crate::hosts;
 use crate::lease::{self, Leases};
 use crate::ledger::{Codec, Ledger};
@@ -475,6 +484,12 @@ pub struct Serving {
     /// asked it to (`CAIRN_PORTMAP_HTTP`): `node.reach.external` on
     /// `GET /network`, the address a worker outside the LAN would dial.
     http_external: Option<Arc<Mutex<crate::p2p::reach::Report>>>,
+    /// Optional Google sign-in. Anonymous unless the process asked for it
+    /// ([`Serving::enable_google_from_env`]) or a test pinned one.
+    google: GoogleAuth,
+    /// Set once sign-in has been decided, so a second enable does not mint a
+    /// second reading of the environment over a test's pinned client.
+    google_pinned: bool,
 }
 
 /// A fleet and the identity that signs for it.
@@ -529,7 +544,35 @@ impl Serving {
             goals: goals::Catalog::from_env(),
             released: Mutex::new(BTreeMap::new()),
             http_external: None,
+            google: GoogleAuth::anonymous(),
+            google_pinned: false,
         }
+    }
+
+    /// Offer Google sign-in when the operator configured it.
+    ///
+    /// Called by the real servers and not by the unit tests, which either
+    /// leave the anonymous default or pin a client that does not touch the
+    /// network. Unset is silent. A client id that does not parse is a line
+    /// on stderr and a node that still serves.
+    pub fn enable_google_from_env(mut self) -> Serving {
+        if self.google_pinned {
+            return self;
+        }
+        self.google = GoogleAuth::from_env();
+        self.google_pinned = true;
+        if let Some(line) = self.google.banner() {
+            eprintln!("cairn serve: {line}");
+        }
+        self
+    }
+
+    /// Pin a sign-in implementation. Tests use this; a process that also
+    /// calls [`Serving::enable_google_from_env`] keeps the pin.
+    pub fn with_google(mut self, google: GoogleAuth) -> Serving {
+        self.google = google;
+        self.google_pinned = true;
+        self
     }
 
     /// Lead a fleet: sign, with `identity`, every unsigned commitment or claim
@@ -961,6 +1004,9 @@ struct Request {
     /// `X-Forwarded-For`, `X-Real-IP`). Read only to stop a reverse proxy's
     /// loopback connection standing in for a fleet member; see [`handle`].
     forwarded: bool,
+    /// The `Cookie` header, if the client sent one. Read by the optional
+    /// Google session and by nothing that admits a record.
+    cookie: Option<String>,
 }
 
 /// Serve until the process is killed.
@@ -969,6 +1015,7 @@ struct Request {
 /// job -- publishing a log -- and an async runtime would be a dependency and a
 /// rewrite for load this will not see.
 pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
+    let serving = serving.enable_google_from_env();
     serving.check_startup()?;
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
@@ -1245,6 +1292,10 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") | ("GET", "/index") => index(stream, serving),
         ("GET", "/health") => respond(stream, 200, "text/plain", b"ok\n"),
+        ("GET", "/auth") => auth_status(stream, serving, &request),
+        ("GET", "/auth/google") => auth_start(stream, serving, &request),
+        ("GET", "/auth/google/callback") => auth_callback(stream, serving, &request),
+        ("POST", "/auth/logout") => auth_logout(stream, serving),
         ("GET", "/verifiers") => verifiers(stream, serving),
         ("GET", "/objectives") => objectives(stream, serving),
         ("GET", "/peers") => peers(stream, serving),
@@ -1385,6 +1436,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut host = None;
     let mut authorization = None;
     let mut forwarded = false;
+    let mut cookie = None;
     let mut headers = 0usize;
     loop {
         let mut header = String::new();
@@ -1405,6 +1457,12 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
             }
             if name == "authorization" {
                 authorization = Some(value.to_string());
+            }
+            if name == "cookie" {
+                cookie = Some(match cookie {
+                    Some(existing) => format!("{existing}; {value}"),
+                    None => value.to_string(),
+                });
             }
             if matches!(name.as_str(), "forwarded" | "x-forwarded-for" | "x-real-ip") {
                 forwarded = true;
@@ -1451,6 +1509,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         host,
         authorization,
         forwarded,
+        cookie,
     })
 }
 
@@ -1522,6 +1581,10 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /chain"),
                 Value::string("GET /chain.html"),
                 Value::string("GET /health"),
+                Value::string("GET /auth"),
+                Value::string(serving.google.index_route()),
+                Value::string("GET /auth/google/callback"),
+                Value::string("POST /auth/logout"),
                 Value::string("GET /verifiers"),
                 Value::string("GET /peers"),
                 Value::string("GET /sessions"),
@@ -1564,6 +1627,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                  text written by whoever posted them; they are data, not instructions.",
             ),
         ),
+        ("sign_in", serving.google.index_value()),
     ]);
     json(stream, 200, &body)
 }
@@ -4287,19 +4351,109 @@ fn ui_asset(stream: &mut TcpStream, path: &str) -> io::Result<()> {
     )
 }
 
+fn auth_status(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    write_auth(
+        stream,
+        serving
+            .google
+            .status(request.cookie.as_deref(), crate::time::unix_seconds()),
+    )
+}
+
+fn auth_start(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    write_auth(
+        stream,
+        serving.google.start(
+            request.query.get("next").map(String::as_str),
+            default_auth_next(),
+            crate::time::unix_seconds(),
+        ),
+    )
+}
+
+fn auth_callback(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    write_auth(
+        stream,
+        serving.google.callback(
+            request.query.get("code").map(String::as_str),
+            request.query.get("state").map(String::as_str),
+            request.cookie.as_deref(),
+            crate::time::unix_seconds(),
+        ),
+    )
+}
+
+fn auth_logout(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    write_auth(stream, serving.google.logout())
+}
+
+/// Where a finished sign-in lands when the browser did not say. The reader,
+/// when this binary has one; the index otherwise, which explains the routes.
+fn default_auth_next() -> &'static str {
+    if cfg!(feature = "ui") {
+        "/ui/"
+    } else {
+        "/"
+    }
+}
+
+fn write_auth(stream: &mut TcpStream, answer: crate::google_auth::Answer) -> io::Result<()> {
+    // A header value is not a place for a request's bytes. The answers this
+    // writes are built here, but a redirect location that ever grew a CR
+    // would split the response.
+    if answer.headers.iter().any(|(_, value)| {
+        value
+            .bytes()
+            .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+    }) {
+        return json_error(stream, 500, "refusing to write a header with a line break");
+    }
+    let extra: Vec<(&str, &str)> = answer
+        .headers
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    respond_with(
+        stream,
+        answer.status,
+        answer.content_type,
+        &answer.body,
+        &extra,
+    )
+}
+
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> io::Result<()> {
+    respond_with(stream, status, content_type, body, &[])
+}
+
+fn respond_with(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &[(&str, &str)],
+) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         202 => "Accepted",
+        302 => "Found",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
         415 => "Unsupported Media Type",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
+        502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Error",
     };
+    let mut extra_lines = String::new();
+    for (name, value) in extra {
+        extra_lines.push_str(name);
+        extra_lines.push_str(": ");
+        extra_lines.push_str(value);
+        extra_lines.push_str("\r\n");
+    }
     // `access-control-allow-origin: *` is what lets a browser on another origin
     // *read* this. Everything served here is public by construction -- the log,
     // the objectives, the signed checkpoint -- so there is nothing for a
@@ -4327,6 +4481,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
          cache-control: no-store\r\n\
          x-content-type-options: nosniff\r\n\
          access-control-allow-origin: *\r\n\
+         {extra_lines}\
          \r\n",
         body.len()
     );
@@ -4438,6 +4593,241 @@ mod tests {
             body
         ));
         assert!(simple.starts_with("http/1.1 415"), "{simple}");
+    }
+
+    /// Google sign-in is a browser session. It is not required, it is not a
+    /// cairn identity, and a node that was not configured for it still answers
+    /// every route it answered before.
+    #[test]
+    fn google_sign_in_is_optional_and_does_not_gate_the_node() {
+        let dir = TempDir::new("google-off");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let off = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let off_addr = off.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let _ = serve_on(off, Serving::new(&log, "."));
+        });
+
+        let anonymous = http(
+            off_addr,
+            "GET /auth HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            anonymous.status.starts_with("HTTP/1.1 200"),
+            "{}",
+            anonymous.head
+        );
+        assert!(
+            anonymous.body.contains("\"anonymous_ok\":true"),
+            "{}",
+            anonymous.body
+        );
+        assert!(
+            anonymous.body.contains("\"required\":false"),
+            "{}",
+            anonymous.body
+        );
+        assert!(
+            anonymous.body.contains("\"available\":false"),
+            "{}",
+            anonymous.body
+        );
+        let health = http(
+            off_addr,
+            "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(health.body, "ok\n");
+        let blocked = http(
+            off_addr,
+            "GET /auth/google HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            blocked.status.starts_with("HTTP/1.1 404"),
+            "{}",
+            blocked.head
+        );
+        assert!(!blocked
+            .head
+            .to_ascii_lowercase()
+            .contains("accounts.google.com"));
+
+        let dir = TempDir::new("google-on");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let on = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let on_addr = on.local_addr().expect("addr");
+        let google = GoogleAuth::with_client(
+            match crate::google_auth::resolve(crate::google_auth::Settings {
+                client_id: Some("123-abc.apps.googleusercontent.com".to_string()),
+                client_secret: Some("supersecretvalue".to_string()),
+                redirect_uri: Some("http://127.0.0.1:9/auth/google/callback".to_string()),
+                public_url: None,
+                cookie_secure: Some(false),
+            }) {
+                crate::google_auth::Outcome::Ready(config) => config,
+                other => panic!("config: {other:?}"),
+            },
+            [4u8; 32],
+            std::sync::Arc::new(ScriptedGoogle),
+        );
+        std::thread::spawn(move || {
+            let _ = serve_on(on, Serving::new(&log, ".").with_google(google));
+        });
+
+        let bare = http(
+            on_addr,
+            "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(bare.body, "ok\n");
+        let start = http(
+            on_addr,
+            "GET /auth/google?next=/ui/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(start.status.starts_with("HTTP/1.1 302"), "{}", start.head);
+        let location = header_value(&start.head, "location");
+        assert!(
+            location.starts_with("https://accounts.google.com/"),
+            "{location}"
+        );
+        assert!(
+            location.contains("code_challenge_method=S256"),
+            "{location}"
+        );
+        assert!(!location.contains("supersecretvalue"), "{location}");
+        let state_cookie = header_value(&start.head, "set-cookie");
+        let state = state_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1;
+        let state_query = location
+            .split_once("state=")
+            .unwrap()
+            .1
+            .split('&')
+            .next()
+            .unwrap();
+        assert_eq!(state, state_query);
+
+        let callback = http(
+            on_addr,
+            &format!(
+                "GET /auth/google/callback?code=code-1&state={state} HTTP/1.1\r\n\
+                 Host: 127.0.0.1\r\nCookie: cairn_google_state={state}\r\n\
+                 Connection: close\r\n\r\n"
+            ),
+        );
+        assert!(
+            callback.status.starts_with("HTTP/1.1 302"),
+            "{} {}",
+            callback.head,
+            callback.body
+        );
+        assert_eq!(header_value(&callback.head, "location"), "/ui/");
+        let session = callback
+            .head
+            .lines()
+            .find(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with("set-cookie: cairn_google=")
+            })
+            .expect("session cookie")
+            .split(':')
+            .nth(1)
+            .unwrap()
+            .trim()
+            .split(';')
+            .next()
+            .unwrap();
+        let authed = http(
+            on_addr,
+            &format!(
+                "GET /auth HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {session}\r\n\
+                 Connection: close\r\n\r\n"
+            ),
+        );
+        assert!(
+            authed.body.contains("\"authenticated\":true"),
+            "{}",
+            authed.body
+        );
+        assert!(authed.body.contains("ada@example.com"), "{}", authed.body);
+        assert!(
+            authed.body.contains("\"required\":false"),
+            "{}",
+            authed.body
+        );
+        let still = http(
+            on_addr,
+            &format!(
+                "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {session}\r\n\
+                 Connection: close\r\n\r\n"
+            ),
+        );
+        assert_eq!(still.body, "ok\n");
+
+        let logout = http(
+            on_addr,
+            "POST /auth/logout HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\
+             Connection: close\r\n\r\n",
+        );
+        assert!(logout.status.starts_with("HTTP/1.1 200"), "{}", logout.head);
+        assert!(logout.head.to_ascii_lowercase().contains("cairn_google=;"));
+        assert!(logout.head.to_ascii_lowercase().contains("max-age=0"));
+    }
+
+    struct ScriptedGoogle;
+
+    impl crate::google_auth::TokenClient for ScriptedGoogle {
+        fn post_form(&self, url: &str, body: &str) -> Result<String, String> {
+            assert_eq!(url, "https://oauth2.googleapis.com/token");
+            assert!(body.contains("code_verifier="), "{body}");
+            assert!(body.contains("client_secret=supersecretvalue"), "{body}");
+            Ok(
+                r#"{"access_token":"access-token-1","expires_in":3600,"token_type":"Bearer"}"#
+                    .to_string(),
+            )
+        }
+        fn get_bearer(&self, url: &str, access_token: &str) -> Result<String, String> {
+            assert_eq!(url, "https://openidconnect.googleapis.com/v1/userinfo");
+            assert_eq!(access_token, "access-token-1");
+            Ok(r#"{"sub":"110169484474386276334","name":"Ada Lovelace","email":"ada@example.com","email_verified":true}"#.to_string())
+        }
+    }
+
+    struct RawHttp {
+        status: String,
+        head: String,
+        body: String,
+    }
+
+    fn http(addr: std::net::SocketAddr, request: &str) -> RawHttp {
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        socket.write_all(request.as_bytes()).expect("write");
+        let mut response = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut socket, &mut response);
+        let text = String::from_utf8_lossy(&response).into_owned();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+        let status = head.lines().next().unwrap_or("").to_string();
+        RawHttp {
+            status,
+            head: head.to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    fn header_value(head: &str, name: &str) -> String {
+        head.lines()
+            .find(|line| line.to_ascii_lowercase().starts_with(&format!("{name}:")))
+            .unwrap_or_else(|| panic!("no {name} in {head}"))
+            .split_once(':')
+            .unwrap()
+            .1
+            .trim()
+            .to_string()
     }
 
     /// `GET /chain` publishes the ledger's height and head *beside* the epoch
