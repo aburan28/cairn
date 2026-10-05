@@ -93,6 +93,19 @@ const BEACON: &str = "beacon";
 /// against an RPC endpoint". See [`Node::record_beacon_with`].
 pub const VDF_SOURCE: &str = "vdf";
 
+/// The fewest sequential squarings a delay beacon may claim.
+///
+/// The record names its own difficulty, and before this floor nothing stopped
+/// it naming 0: `y = x`, `π = 1`, a beacon that checked and cost one hash, so
+/// a sequencer could try orderings exactly as cheaply as with no beacon at all
+/// while the log said a delay had been paid. 2^16 is a few hundred
+/// milliseconds here and a fraction of that on a fast bignum, so it is a floor
+/// against a *free* beacon, not a recommendation. Grinding resistance comes
+/// from a `T` that fills a large part of the epoch, because a sequencer can
+/// evaluate different seeds in parallel (see [`crate::vdf`]); the floor only
+/// makes sure the log's claim that somebody waited is never vacuous.
+pub const MIN_VDF_DIFFICULTY: u64 = 1 << 16;
+
 /// Set to `1` to treat an epoch settled without a beacon as an audit fault.
 ///
 /// The beacon closes settlement grinding only if there *is* one, and the
@@ -537,6 +550,12 @@ pub enum RuleViolation {
     },
     /// A delay beacon whose proof does not show the work it claims.
     BeaconDoesNotVerify { epoch: u64 },
+    /// A delay beacon that claims less work than [`MIN_VDF_DIFFICULTY`].
+    BeaconDelayTooShort {
+        epoch: u64,
+        difficulty: u64,
+        minimum: u64,
+    },
     /// An undertaking that does not cover the whole log as it stood.
     ///
     /// The promiser does not choose how much to promise, because when they
@@ -1062,6 +1081,16 @@ impl fmt::Display for RuleViolation {
                 "the delay proof for epoch {epoch} does not check; a beacon nobody had \
                  to wait for is a value the sequencer chose, which is the grinding this \
                  record exists to price"
+            ),
+            RuleViolation::BeaconDelayTooShort {
+                epoch,
+                difficulty,
+                minimum,
+            } => write!(
+                f,
+                "the delay beacon for epoch {epoch} claims {difficulty} squarings, under \
+                 the floor of {minimum}; a delay that short costs a sequencer about what \
+                 a hash does, so it prices no grinding at all"
             ),
             RuleViolation::MintedAfterGenesis { holder, units, seq } => write!(
                 f,
@@ -5790,10 +5819,23 @@ impl Node {
             .get("difficulty")
             .and_then(Value::as_u64)
             .ok_or_else(fail)?;
+        if difficulty < MIN_VDF_DIFFICULTY {
+            return Err(RuleViolation::BeaconDelayTooShort {
+                epoch,
+                difficulty,
+                minimum: MIN_VDF_DIFFICULTY,
+            });
+        }
+        // Strict lowercase hex, one spelling per byte string. The anchor
+        // settlement sorts by is the `value` *string*, so a lenient decoder
+        // (uppercase, a `+` sign) made one honest delay into 2^195 different
+        // anchors that all verified -- grinding at a hash per candidate
+        // again. It also sliced the text by byte index and panicked the audit
+        // on a multi-byte character.
         let output =
-            decode_hex(payload_str(payload, "value").ok_or_else(fail)?).ok_or_else(fail)?;
-        let witness =
-            decode_hex(payload_str(payload, "witness").ok_or_else(fail)?).ok_or_else(fail)?;
+            crate::hex::decode(payload_str(payload, "value").ok_or_else(fail)?).ok_or_else(fail)?;
+        let witness = crate::hex::decode(payload_str(payload, "witness").ok_or_else(fail)?)
+            .ok_or_else(fail)?;
         let proof = crate::vdf::Proof { output, witness };
         if crate::vdf::verify(&self.vdf_seed(epoch, positions), difficulty, &proof) {
             Ok(())
@@ -8380,24 +8422,6 @@ fn mul_div_floor(value: u128, weight: u128, total: u128) -> Option<u128> {
         }
     }
     whole.checked_add(quotient)
-}
-
-/// Hex, leniently: `from_str_radix` accepts uppercase, so this and
-/// [`crate::hex::decode`] are two decoders with two answers about the same
-/// bytes. That is a wart and it is deliberately not fixed here. `crate::hex`
-/// is strict because it reads values other implementations write, where two
-/// spellings would be two spellings a record id could disagree about; this one
-/// reads a VDF witness and tightening it would move an admission boundary,
-/// which is a consensus-visible change and belongs in its own commit rather
-/// than in a merge.
-fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&text[index..index + 2], 16).ok())
-        .collect()
 }
 
 fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
@@ -13003,10 +13027,10 @@ mod tests {
         let mut honest_node = node(&dir);
         let orders = epoch_at(EPOCH);
 
-        // Small on purpose: this test is about the rule, not the delay. A real
-        // difficulty is chosen so one beacon takes most of an epoch, which is
-        // what makes trying a hundred orderings unaffordable.
-        const DIFFICULTY: u64 = 256;
+        // The floor, because this test is about the rule, not the delay. A
+        // real difficulty is chosen so one beacon takes most of an epoch,
+        // which is what makes trying a hundred orderings unaffordable.
+        const DIFFICULTY: u64 = crate::node::MIN_VDF_DIFFICULTY;
         let seed = honest_node.vdf_seed(orders, honest_node.ledger().len());
         let proof = crate::vdf::prove(&seed, DIFFICULTY);
 
@@ -13027,8 +13051,10 @@ mod tests {
         // behind it. Refused on admission.
         let forged_dir = TempDir::new("vdf-beacon-forged");
         let mut node = node(&forged_dir);
-        let seed = node.vdf_seed(orders, node.ledger().len());
-        let honest = crate::vdf::prove(&seed, DIFFICULTY);
+        // Two empty logs share a seed, so the honest proof above is this
+        // node's honest proof too, and the floor is paid once.
+        assert_eq!(node.vdf_seed(orders, node.ledger().len()), seed);
+        let honest = proof.clone();
         let preferred =
             crate::vdf::element(b"the answer I wanted").to_be_bytes(crate::vdf::ELEMENT_BYTES);
         let error = node
@@ -13067,6 +13093,133 @@ mod tests {
                 .iter()
                 .any(|problem: &String| problem.contains("does not check")),
             "a forged delay went unreported: {problems:?}"
+        );
+    }
+
+    /// Three ways a delay beacon used to check while costing a sequencer
+    /// about a hash: another spelling of an honest value, the all-zero pair,
+    /// and a difficulty the record chose to be tiny. Each is refused on the way
+    /// in and named by the audit when a log carries it anyway, and a value
+    /// that is not even ASCII is reported rather than panicking the audit.
+    #[test]
+    fn a_delay_beacon_has_one_spelling_real_elements_and_a_floor() {
+        let orders = epoch_at(EPOCH);
+        let raw = |node: &mut Node, value: &str, difficulty: u64, witness: &str| {
+            node.append(
+                BEACON,
+                Value::object([
+                    ("orders", Value::Int(i128::from(orders))),
+                    ("source", Value::string(crate::node::VDF_SOURCE)),
+                    ("block", Value::Int(0)),
+                    ("value", Value::string(value)),
+                    ("difficulty", Value::Int(i128::from(difficulty))),
+                    ("witness", Value::string(witness)),
+                ]),
+                &stamp(EPOCH),
+            )
+            .expect("append");
+            node.audit(false)
+        };
+        let named = |problems: &[String], what: &str| {
+            assert!(
+                problems.iter().any(|p| p.contains("beacon at entry")),
+                "{what} went unreported: {problems:?}"
+            );
+        };
+
+        // Another spelling. Settlement sorts by the value *string*, so an
+        // uppercase copy of an honest value is a different order.
+        let dir = TempDir::new("vdf-spelling");
+        let mut spelled = node(&dir);
+        let seed = spelled.vdf_seed(orders, spelled.ledger().len());
+        let honest = crate::vdf::prove(&seed, MIN_VDF_DIFFICULTY);
+        let upper = honest.output_hex().to_ascii_uppercase();
+        assert_ne!(upper, honest.output_hex());
+        let error = spelled
+            .record_beacon_with(
+                orders,
+                crate::node::VDF_SOURCE,
+                0,
+                &upper,
+                Some((MIN_VDF_DIFFICULTY, &honest.witness_hex())),
+                &stamp(EPOCH),
+            )
+            .expect_err("a second spelling of an honest value");
+        assert!(
+            matches!(error, RuleViolation::BeaconDoesNotVerify { .. }),
+            "got {error:?}"
+        );
+        named(
+            &raw(
+                &mut spelled,
+                &upper,
+                MIN_VDF_DIFFICULTY,
+                &honest.witness_hex(),
+            ),
+            "an uppercase delay value",
+        );
+
+        // The all-zero pair, at a difficulty no one could compute.
+        let dir = TempDir::new("vdf-zero");
+        let mut zeroed = node(&dir);
+        let zero = "00".repeat(crate::vdf::ELEMENT_BYTES);
+        let error = zeroed
+            .record_beacon_with(
+                orders,
+                crate::node::VDF_SOURCE,
+                0,
+                &zero,
+                Some((1 << 40, &zero)),
+                &stamp(EPOCH),
+            )
+            .expect_err("zero proves nothing");
+        assert!(
+            matches!(error, RuleViolation::BeaconDoesNotVerify { .. }),
+            "got {error:?}"
+        );
+        named(&raw(&mut zeroed, &zero, 1 << 40, &zero), "the zero pair");
+
+        // A difficulty the record chose to be nothing: x itself, proved by 1.
+        let dir = TempDir::new("vdf-free");
+        let mut free = node(&dir);
+        let seed = free.vdf_seed(orders, free.ledger().len());
+        let instant = crate::vdf::prove(&seed, 0);
+        assert!(
+            crate::vdf::verify(&seed, 0, &instant),
+            "the primitive is right at 0"
+        );
+        let error = free
+            .record_beacon_with(
+                orders,
+                crate::node::VDF_SOURCE,
+                0,
+                &instant.output_hex(),
+                Some((0, &instant.witness_hex())),
+                &stamp(EPOCH),
+            )
+            .expect_err("a delay of nothing");
+        assert!(
+            matches!(
+                error,
+                RuleViolation::BeaconDelayTooShort {
+                    difficulty: 0,
+                    minimum: MIN_VDF_DIFFICULTY,
+                    ..
+                }
+            ),
+            "got {error:?}"
+        );
+        named(
+            &raw(&mut free, &instant.output_hex(), 0, &instant.witness_hex()),
+            "a zero-difficulty delay",
+        );
+
+        // Not hex, and not ASCII: a byte-indexed decoder split the `é`.
+        let dir = TempDir::new("vdf-utf8");
+        let mut odd = node(&dir);
+        named(
+            &raw(&mut odd, "a\u{e9}a", MIN_VDF_DIFFICULTY, "00"),
+            "a non-ASCII delay value",
         );
     }
 

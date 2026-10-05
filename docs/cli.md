@@ -386,7 +386,8 @@ already hold, later and you are picking who gets paid first.
 is pinned and the round is a function of the epoch, so a wrong signature is
 falsifiable by anyone holding 96 bytes of public key. `--delay N` computes the
 value as a verifiable delay of N sequential squarings instead of taking it from
-the caller.
+the caller. N must be at least 65,536 (`MIN_VDF_DIFFICULTY`), a floor against a
+free beacon; a delay that resists grinding takes most of an epoch.
 
 ### `drand-round [--orders EPOCH]`
 
