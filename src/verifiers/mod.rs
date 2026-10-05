@@ -531,7 +531,358 @@ const FORBIDDEN: &[Screen] = &[
         pattern: "@\\[implemented_by",
         why: "replaces an implementation outside the kernel",
     },
+    // The rest guard the axiom audit rather than the proof itself. The audit
+    // appends `#print axioms` after the proof, and a proof may write
+    // commands after its term; one that redefines how `#print axioms` or
+    // `#eval` elaborate, runs metaprograms that do, or stops the file before
+    // the audit, would make the audit say what the proof chose. A proof term
+    // needs none of these.
+    Screen {
+        token: "macro",
+        whole_word: true,
+        pattern: r"\bmacro\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "macro_rules",
+        whole_word: true,
+        pattern: r"\bmacro_rules\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "elab",
+        whole_word: true,
+        pattern: r"\belab\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "elab_rules",
+        whole_word: true,
+        pattern: r"\belab_rules\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "syntax",
+        whole_word: true,
+        pattern: r"\bsyntax\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "command_elab",
+        whole_word: true,
+        pattern: r"\bcommand_elab\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "term_elab",
+        whole_word: true,
+        pattern: r"\bterm_elab\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "run_cmd",
+        whole_word: true,
+        pattern: r"\brun_cmd\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "run_elab",
+        whole_word: true,
+        pattern: r"\brun_elab\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "run_meta",
+        whole_word: true,
+        pattern: r"\brun_meta\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "run_tac",
+        whole_word: true,
+        pattern: r"\brun_tac\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "initialize",
+        whole_word: true,
+        pattern: r"\binitialize\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "builtin_initialize",
+        whole_word: true,
+        pattern: r"\bbuiltin_initialize\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "#eval",
+        whole_word: false,
+        pattern: "#eval",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "#exit",
+        whole_word: false,
+        pattern: "#exit",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "skipKernelTC",
+        whole_word: false,
+        pattern: "skipKernelTC",
+        why: "turns off the kernel's type check",
+    },
 ];
+
+/// Why a proof that writes or runs metaprograms is refused. Shared wording
+/// with the reference implementation.
+const METAPROGRAM: &str =
+    "defines or runs a metaprogram: a proof term needs none, and one could rewrite the axiom audit";
+
+/// The axioms every Lean proof may use: the three the core library itself
+/// rests on. Anything else -- `sorryAx`, an axiom a metaprogram added, the
+/// compiler trust `native_decide` brings -- has to be allowed by the
+/// objective.
+const LEAN_STANDARD_AXIOMS: &[&str] = &["propext", "Classical.choice", "Quot.sound"];
+
+/// What `native_decide` adds, allowed only with `allow_native_decide`.
+const LEAN_NATIVE_AXIOMS: &[&str] = &["Lean.ofReduceBool", "Lean.trustCompiler"];
+
+/// Where a word starts in `text`, under the same rule as the screens.
+fn find_word(text: &str, word: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(found) = text[from..].find(word) {
+        let start = from + found;
+        let end = start + word.len();
+        let clear_before = start == 0 || !is_word_byte(bytes[start - 1]);
+        let clear_after = end == bytes.len() || !is_word_byte(bytes[end]);
+        if clear_before && clear_after {
+            return Some(start);
+        }
+        from = start + word.len();
+    }
+    None
+}
+
+/// The identifier that follows position `at`, up to whitespace or the
+/// characters that begin a binder or a type.
+fn lean_identifier_after(text: &str, at: usize) -> Option<String> {
+    let name: String = text[at..]
+        .trim_start()
+        .chars()
+        .take_while(|c| !c.is_whitespace() && !matches!(c, ':' | '(' | '{' | '[' | '⦃'))
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The theorem the axiom audit asks about: the first `theorem` or `lemma`
+/// the objective's statement declares. `None` for an `example`, which has no
+/// name to ask about; the audit is then skipped and the verdict rests on the
+/// screens and the kernel, as before it existed.
+fn lean_theorem_name(statement: &str) -> Option<String> {
+    let at = ["theorem", "lemma"]
+        .iter()
+        .filter_map(|keyword| find_word(statement, keyword).map(|at| (at, keyword.len())))
+        .min()?;
+    lean_identifier_after(statement, at.0 + at.1)
+}
+
+/// Axioms the objective's own preamble declares, by the name written after
+/// `axiom`. A funder may rest a question on assumptions of their choosing;
+/// the submitter may not add any (the `axiom` screen and the metaprogram
+/// screens see to that), so a printed name that *ends with* one of these is
+/// the preamble's even when a namespace prefixes it.
+fn lean_preamble_axioms(preamble: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut from = 0;
+    while let Some(found) = find_word(&preamble[from..], "axiom") {
+        let after = from + found + "axiom".len();
+        if let Some(name) = lean_identifier_after(preamble, after) {
+            names.push(name);
+        }
+        from = after;
+    }
+    names
+}
+
+/// The text the audit appends after the proof. The marker is random per
+/// run, so nothing the proof prints can stand in for what follows it.
+fn lean_audit_suffix(marker: &str, theorem: &str) -> String {
+    format!("\n#eval IO.println \"{marker}\"\n#print axioms {theorem}\n")
+}
+
+/// What `#print axioms` said, read from Lean's output after the marker.
+#[derive(Debug, PartialEq, Eq)]
+enum AxiomAudit {
+    /// The marker never printed: something stopped the file before the audit.
+    NoMarker,
+    /// The marker printed and no axiom report followed it.
+    Unreadable,
+    /// More than one report followed it: something besides the audit printed
+    /// one.
+    Ambiguous,
+    /// The theorem's axioms, possibly none.
+    Axioms(Vec<String>),
+}
+
+fn read_axiom_audit(output: &str, marker: &str) -> AxiomAudit {
+    const DEPENDS: &str = "' depends on axioms: [";
+    const INDEPENDENT: &str = "' does not depend on any axioms";
+    let Some(at) = output.find(marker) else {
+        return AxiomAudit::NoMarker;
+    };
+    // Lean wraps a long list across lines; whitespace is not meaningful in it.
+    let after = output[at + marker.len()..]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut reports: Vec<Vec<String>> = Vec::new();
+    let mut rest = after.as_str();
+    loop {
+        match (rest.find(DEPENDS), rest.find(INDEPENDENT)) {
+            (None, None) => break,
+            (Some(depends), independent) if independent.is_none_or(|i| depends < i) => {
+                let start = depends + DEPENDS.len();
+                let Some(length) = rest[start..].find(']') else {
+                    return AxiomAudit::Unreadable;
+                };
+                reports.push(
+                    rest[start..start + length]
+                        .split(',')
+                        .map(|name| name.trim().to_string())
+                        .filter(|name| !name.is_empty())
+                        .collect(),
+                );
+                rest = &rest[start + length + 1..];
+            }
+            (_, Some(independent)) => {
+                reports.push(Vec::new());
+                rest = &rest[independent + INDEPENDENT.len()..];
+            }
+            (Some(_), None) => unreachable!("covered by the guard above"),
+        }
+    }
+    match reports.len() {
+        0 => AxiomAudit::Unreadable,
+        1 => AxiomAudit::Axioms(reports.pop().unwrap_or_default()),
+        _ => AxiomAudit::Ambiguous,
+    }
+}
+
+/// The axioms a proof of this objective may use, or why the spec is
+/// malformed. Exact names for the standard set, `native_decide`'s when the
+/// objective opts in, and the objective's `allowed_axioms`; the preamble's
+/// own, by suffix (see [`lean_preamble_axioms`]).
+fn lean_allowed_axioms(
+    spec: &Value,
+    preamble: &str,
+    allow_native_decide: bool,
+) -> Result<(Vec<String>, Vec<String>), Verdict> {
+    let mut exact: Vec<String> = LEAN_STANDARD_AXIOMS.iter().map(|a| a.to_string()).collect();
+    if allow_native_decide {
+        exact.extend(LEAN_NATIVE_AXIOMS.iter().map(|a| a.to_string()));
+    }
+    match spec.get("allowed_axioms") {
+        None => {}
+        Some(Value::Array(items)) => {
+            for item in items {
+                match item.as_str() {
+                    Some(name) if !name.trim().is_empty() => exact.push(name.trim().to_string()),
+                    _ => {
+                        return Err(Verdict::invalid_spec(
+                            "allowed_axioms must be a list of axiom names",
+                        ))
+                    }
+                }
+            }
+        }
+        Some(_) => {
+            return Err(Verdict::invalid_spec(
+                "allowed_axioms must be a list of axiom names",
+            ))
+        }
+    }
+    Ok((exact, lean_preamble_axioms(preamble)))
+}
+
+/// A fresh marker for one audit: 128 random bits, so a proof cannot print it.
+fn audit_marker() -> String {
+    use rand_core::RngCore as _;
+    let mut bytes = [0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    format!("cairn-axiom-audit-{}", crate::hex::encode(&bytes))
+}
+
+/// The verdict once the kernel accepted and no `sorry` was reported: what the
+/// theorem actually rests on decides it.
+///
+/// A report that never arrived is Unavailable, not Reject or Accept: the audit
+/// is this node's check, and when it cannot be read nothing is learned about
+/// the proof -- but nothing is paid either. Two reports after the marker can
+/// only mean the proof printed one, so that is the proof's doing.
+fn lean_audit_verdict(
+    audit: AxiomAudit,
+    allowed: &(Vec<String>, Vec<String>),
+    evidence: Value,
+) -> Verdict {
+    let with = |field: &str, value: Value| -> Value {
+        let mut map = evidence.as_object().cloned().unwrap_or_default();
+        map.insert(field.to_string(), value);
+        Value::Object(map)
+    };
+    match audit {
+        AxiomAudit::NoMarker => Verdict::new(
+            Status::Unavailable,
+            "the axiom audit did not run: something in the file stopped Lean before it",
+            evidence,
+        ),
+        AxiomAudit::Unreadable => Verdict::new(
+            Status::Unavailable,
+            "lean printed no axiom report the audit could read",
+            evidence,
+        ),
+        AxiomAudit::Ambiguous => Verdict::new(
+            Status::Reject,
+            "more than one axiom report followed the audit's marker",
+            evidence,
+        ),
+        AxiomAudit::Axioms(used) => {
+            let listed = Value::Array(used.iter().map(|a| Value::string(a.as_str())).collect());
+            match lean_disallowed_axiom(&used, allowed) {
+                Some(axiom) => Verdict::new(
+                    Status::Reject,
+                    format!(
+                        "the theorem depends on axiom {axiom}, which the objective does not allow"
+                    ),
+                    with("axioms", listed),
+                ),
+                None => Verdict::new(
+                    Status::Accept,
+                    "kernel accepted the proof",
+                    with("axioms", listed),
+                ),
+            }
+        }
+    }
+}
+
+/// The first axiom in `used` the objective does not allow, if any.
+fn lean_disallowed_axiom<'a>(
+    used: &'a [String],
+    allowed: &(Vec<String>, Vec<String>),
+) -> Option<&'a str> {
+    let (exact, preamble) = allowed;
+    used.iter()
+        .find(|name| {
+            !exact.iter().any(|a| a == *name)
+                && !preamble
+                    .iter()
+                    .any(|a| *name == a || name.ends_with(&format!(".{a}")))
+        })
+        .map(String::as_str)
+}
 
 /// Why a Lean proof that does not open with `:=` is refused. Shared wording
 /// with the reference implementation, which refuses the same text.
@@ -1485,6 +1836,17 @@ impl VerifierRegistry {
                 Value::object([("pattern", Value::string(r"^\s*:="))]),
             );
         }
+        // What the compiled theorem may rest on, read from the spec before the
+        // toolchain lookup like every other spec check.
+        let allowed_axioms = match lean_allowed_axioms(
+            spec,
+            spec.get("preamble").and_then(Value::as_str).unwrap_or(""),
+            allow_native_decide,
+        ) {
+            Ok(allowed) => allowed,
+            Err(verdict) => return verdict,
+        };
+        let theorem = lean_theorem_name(statement);
 
         // `project_root` comes from the objective record -- attacker-authored,
         // like every other spec field -- and is made readable inside the jail.
@@ -1522,7 +1884,14 @@ impl VerifierRegistry {
         };
 
         let preamble = spec.get("preamble").and_then(Value::as_str).unwrap_or("");
-        let source = format!("{preamble}\n{statement} {proof}\n");
+        // The axiom audit rides after the proof, behind a marker nobody could
+        // have written into it. See [`read_axiom_audit`].
+        let marker = audit_marker();
+        let audit = theorem
+            .as_deref()
+            .map(|name| lean_audit_suffix(&marker, name))
+            .unwrap_or_default();
+        let source = format!("{preamble}\n{statement} {proof}\n{audit}");
 
         let workdir = match TempDir::new("proofwork-lean") {
             Ok(workdir) => workdir,
@@ -1558,21 +1927,33 @@ impl VerifierRegistry {
         // that does not elaborate, neither of which is the proof's doing.
         // Remembered per process once it passes, so the cost is one extra
         // elaboration per objective rather than per claim.
+        //
+        // The control also carries the axiom audit, so it checks the audit
+        // too: a statement proved by `sorry` must be reported as depending on
+        // `sorryAx`. A Lean that does not print axioms the way the audit reads
+        // them is found here, as Unavailable, rather than by misjudging a
+        // proof.
         let control_key = blobs::address(
             format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\naxiom-audit {}",
                 binary.display(),
                 cwd.display(),
                 preamble,
-                statement
+                statement,
+                theorem.is_some()
             )
             .as_bytes(),
         );
         if !lean_control_passed(&control_key) {
             let control = workdir.path().join("Control.lean");
+            let control_marker = audit_marker();
+            let control_audit = theorem
+                .as_deref()
+                .map(|name| lean_audit_suffix(&control_marker, name))
+                .unwrap_or_default();
             if let Err(error) = fs::write(
                 &control,
-                format!("{preamble}\n{statement} := by sorry\n").as_bytes(),
+                format!("{preamble}\n{statement} := by sorry\n{control_audit}").as_bytes(),
             ) {
                 return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
             }
@@ -1600,7 +1981,28 @@ impl VerifierRegistry {
                     }
                 };
             match completed.code {
-                Some(0) => remember_lean_control(&control_key),
+                Some(0) => {
+                    if theorem.is_some() {
+                        let output = format!("{}{}", completed.stdout, completed.stderr);
+                        match read_axiom_audit(&output, &control_marker) {
+                            AxiomAudit::Axioms(used) if used.iter().any(|a| a == "sorryAx") => {}
+                            reading => {
+                                return Verdict::new(
+                                    Status::Unavailable,
+                                    "this node's Lean did not report the axioms of the \
+                                     objective's statement proved by `sorry` the way the axiom \
+                                     audit reads them, so the audit cannot be trusted here. That \
+                                     is a fact about this node's Lean, not the proof",
+                                    Value::object([
+                                        ("control_audit", Value::string(format!("{reading:?}"))),
+                                        ("lean_binary", Value::string(binary.to_string_lossy())),
+                                    ]),
+                                );
+                            }
+                        }
+                    }
+                    remember_lean_control(&control_key)
+                }
                 Some(code) => {
                     let output = format!("{}{}", completed.stdout, completed.stderr);
                     return Verdict::new(
@@ -1696,10 +2098,16 @@ impl VerifierRegistry {
                 // Lean *warns* rather than errors on a declaration that depends
                 // on `sorryAx`, so a clean exit code is not sufficient.
                 if output.contains("declaration uses 'sorry'") {
-                    Verdict::new(Status::Reject, "proof depends on sorryAx", evidence)
-                } else {
-                    Verdict::new(Status::Accept, "kernel accepted the proof", evidence)
+                    return Verdict::new(Status::Reject, "proof depends on sorryAx", evidence);
                 }
+                let Some(_) = theorem else {
+                    return Verdict::new(Status::Accept, "kernel accepted the proof", evidence);
+                };
+                lean_audit_verdict(
+                    read_axiom_audit(&output, &marker),
+                    &allowed_axioms,
+                    evidence,
+                )
             }
         }
     }
@@ -4981,14 +5389,233 @@ mod tests {
         );
         let registry =
             VerifierRegistry::new(root.path()).with_lean_binary(binary.to_string_lossy());
+        // An `example`, which names nothing for the axiom audit to ask
+        // about: `true` prints no report, and this test is about the jail.
         let spec = Value::object([
             ("kind", Value::string("lean")),
-            ("statement", Value::string("theorem t : True")),
+            ("statement", Value::string("example : True")),
             ("project_root", Value::string("project")),
         ]);
         let artifact = Value::object([("proof", Value::string(":= trivial"))]);
         let verdict = registry.run(&spec, &artifact);
         assert_eq!(verdict.status, Status::Accept, "{}", verdict.detail);
+    }
+
+    /// A stand-in Lean that answers the axiom audit the way Lean does: the
+    /// marker the file's `#eval` prints, then `#print axioms`'s report, with
+    /// `sorryAx` for a `sorry` (and its warning) and `Lean.ofReduceBool` for a
+    /// file that names it.
+    #[cfg(unix)]
+    fn auditing_lean(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let lean = dir.join("auditing-lean");
+        fs::write(
+            &lean,
+            "#!/bin/sh\nf=\"$1\"\n\
+             marker=$(sed -n 's/^#eval IO.println \"\\(.*\\)\"$/\\1/p' \"$f\")\n\
+             name=$(sed -n 's/^#print axioms //p' \"$f\")\n\
+             axioms='[propext]'\n\
+             case \"$(cat \"$f\")\" in\n\
+             *sorry*) echo \"$f:2:0: warning: declaration uses 'sorry'\"; axioms='[sorryAx]';;\n\
+             *ofReduceBool*) axioms='[propext,\n Lean.ofReduceBool]';;\n\
+             esac\n\
+             if [ -n \"$marker\" ]; then echo \"$marker\"; echo \"'$name' depends on axioms: $axioms\"; fi\n\
+             exit 0\n",
+        )
+        .expect("write stand-in");
+        fs::set_permissions(&lean, fs::Permissions::from_mode(0o755)).expect("chmod");
+        lean
+    }
+
+    /// What the compiled theorem rests on decides the verdict: the standard
+    /// axioms pass, an axiom the objective did not allow is refused, and the
+    /// objective can allow one by name or with `allow_native_decide`.
+    #[cfg(unix)]
+    #[test]
+    fn the_axiom_audit_decides_what_a_clean_compile_rests_on() {
+        if !have("sh") || !have("sed") {
+            return;
+        }
+        let root = tmpdir("proofwork-lean-audit");
+        let lean = auditing_lean(root.path());
+        let registry = VerifierRegistry::new(root.path()).with_lean_binary(lean.to_string_lossy());
+        let spec = |extra: Vec<(&str, Value)>| {
+            let mut fields = vec![
+                ("kind", Value::string("lean")),
+                ("statement", Value::string("theorem audited : 2 + 2 = 4")),
+            ];
+            fields.extend(extra);
+            Value::object(fields)
+        };
+        let honest = Value::object([("proof", Value::string(":= rfl"))]);
+        let verdict = registry.run(&spec(vec![]), &honest);
+        assert_eq!(verdict.status, Status::Accept, "{}", verdict.detail);
+        assert_eq!(
+            verdict.evidence.get("axioms"),
+            Some(&Value::Array(vec![Value::string("propext")]))
+        );
+
+        // `Lean.ofReduceBool` named directly, not through `native_decide`, so
+        // the token screen never saw it. The audit does, across a wrapped list.
+        let compiler = Value::object([("proof", Value::string(":= Lean.ofReduceBool _ _ rfl"))]);
+        let verdict = registry.run(&spec(vec![]), &compiler);
+        assert_eq!(verdict.status, Status::Reject, "{}", verdict.detail);
+        assert!(
+            verdict.detail.contains("Lean.ofReduceBool"),
+            "{}",
+            verdict.detail
+        );
+        let opted = registry.run(
+            &spec(vec![("allow_native_decide", Value::Bool(true))]),
+            &compiler,
+        );
+        assert_eq!(opted.status, Status::Accept, "{}", opted.detail);
+        let listed = registry.run(
+            &spec(vec![(
+                "allowed_axioms",
+                Value::Array(vec![Value::string("Lean.ofReduceBool")]),
+            )]),
+            &compiler,
+        );
+        assert_eq!(listed.status, Status::Accept, "{}", listed.detail);
+
+        // A malformed allow-list is the objective's fault, found before Lean.
+        let bad = VerifierRegistry::new(root.path()).with_lean_binary("lean-does-not-exist-xyz");
+        let verdict = bad.run(
+            &spec(vec![("allowed_axioms", Value::string("Lean.ofReduceBool"))]),
+            &honest,
+        );
+        assert_eq!(verdict.status, Status::InvalidSpec, "{}", verdict.detail);
+    }
+
+    /// A Lean whose output the audit cannot read is found by the control and
+    /// reported Unavailable -- never a verdict about the proof.
+    #[cfg(unix)]
+    #[test]
+    fn a_lean_the_audit_cannot_read_is_unavailable() {
+        let Some(silent) = which("true") else {
+            return;
+        };
+        let root = tmpdir("proofwork-lean-silent");
+        let registry =
+            VerifierRegistry::new(root.path()).with_lean_binary(silent.to_string_lossy());
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            ("statement", Value::string("theorem silent_audit : True")),
+        ]);
+        let verdict = registry.run(
+            &spec,
+            &Value::object([("proof", Value::string(":= trivial"))]),
+        );
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+        assert!(verdict.evidence.get("control_audit").is_some());
+    }
+
+    #[test]
+    fn the_audit_reads_only_what_follows_its_marker() {
+        let marker = "cairn-axiom-audit-00ff";
+        // A proof can print a report of its own; it lands before the marker.
+        let spoofed = "'t' does not depend on any axioms\ncairn-axiom-audit-00ff\n\
+                       't' depends on axioms: [propext, sorryAx]\n";
+        assert_eq!(
+            read_axiom_audit(spoofed, marker),
+            AxiomAudit::Axioms(vec!["propext".into(), "sorryAx".into()])
+        );
+        assert_eq!(
+            read_axiom_audit(
+                "cairn-axiom-audit-00ff\n't' does not depend on any axioms\n",
+                marker
+            ),
+            AxiomAudit::Axioms(Vec::new())
+        );
+        // Wrapped the way Lean's formatter wraps a long list.
+        assert_eq!(
+            read_axiom_audit(
+                "cairn-axiom-audit-00ff\n'Foo.t' depends on axioms: [propext,\n  Classical.choice,\n  Quot.sound]\n",
+                marker
+            ),
+            AxiomAudit::Axioms(vec![
+                "propext".into(),
+                "Classical.choice".into(),
+                "Quot.sound".into()
+            ])
+        );
+        assert_eq!(
+            read_axiom_audit("'t' does not depend on any axioms", marker),
+            AxiomAudit::NoMarker
+        );
+        assert_eq!(
+            read_axiom_audit("cairn-axiom-audit-00ff\n", marker),
+            AxiomAudit::Unreadable
+        );
+        assert_eq!(
+            read_axiom_audit(
+                "cairn-axiom-audit-00ff\n't' does not depend on any axioms\n't' depends on axioms: [sorryAx]\n",
+                marker
+            ),
+            AxiomAudit::Ambiguous
+        );
+    }
+
+    #[test]
+    fn the_audit_names_the_statements_theorem_and_the_preambles_axioms() {
+        assert_eq!(lean_theorem_name("theorem t : True").as_deref(), Some("t"));
+        assert_eq!(
+            lean_theorem_name("@[simp] theorem Foo.bar (n : Nat) : n = n").as_deref(),
+            Some("Foo.bar")
+        );
+        assert_eq!(
+            lean_theorem_name("lemma l{α : Type} : True").as_deref(),
+            Some("l")
+        );
+        assert_eq!(lean_theorem_name("example : True"), None);
+        // A word that merely contains the keyword is not one.
+        assert_eq!(lean_theorem_name("def theorems : Nat"), None);
+
+        let preamble =
+            "namespace Assume\naxiom choice_free : True\nend Assume\naxiom   bare: False";
+        let allowed =
+            lean_allowed_axioms(&Value::Object(BTreeMap::new()), preamble, false).expect("valid");
+        assert_eq!(
+            allowed.1,
+            vec!["choice_free".to_string(), "bare".to_string()]
+        );
+        let used = vec!["Assume.choice_free".to_string(), "propext".to_string()];
+        assert_eq!(lean_disallowed_axiom(&used, &allowed), None);
+        let foreign = vec!["Evil.propext".to_string()];
+        assert_eq!(
+            lean_disallowed_axiom(&foreign, &allowed),
+            Some("Evil.propext"),
+            "the standard names are exact: a namespace in front is a different axiom"
+        );
+    }
+
+    /// A proof that could rewrite the audit is refused by its text, before
+    /// Lean is looked up -- the same place every other screen runs.
+    #[test]
+    fn a_proof_that_writes_metaprograms_is_refused_before_lean_runs() {
+        let registry = VerifierRegistry::new(".").with_lean_binary("lean-does-not-exist-xyz");
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            ("statement", Value::string("theorem t : True")),
+        ]);
+        for proof in [
+            ":= trivial\nmacro_rules | `(#print axioms $x) => `(#check True)",
+            ":= trivial\nelab \"x\" : command => pure ()",
+            ":= by run_tac pure ()",
+            ":= trivial\n#eval IO.println \"'t' does not depend on any axioms\"",
+            ":= trivial\n#exit",
+            ":= trivial\nset_option debug.skipKernelTC true",
+            ":= trivial\nattribute [command_elab Lean.Parser.Command.printAxioms] x",
+        ] {
+            let verdict = registry.run(&spec, &Value::object([("proof", Value::string(proof))]));
+            assert_eq!(
+                verdict.status,
+                Status::Reject,
+                "{proof}: {}",
+                verdict.detail
+            );
+        }
     }
 
     /// A `lean` that cannot run here at all -- elan's proxy without its
@@ -5035,10 +5662,18 @@ mod tests {
 
         // The converse: a stand-in that compiles the statement alone and then
         // refuses the proof is the kernel saying no, and that is a verdict.
+        // Its control answers the axiom audit, as a working Lean does.
+        if !have("sed") {
+            return;
+        }
+        let auditing = auditing_lean(root.path());
         let judging = root.path().join("judging-lean");
         fs::write(
             &judging,
-            "#!/bin/sh\ncase \"$1\" in *Control.lean) exit 0;; *) echo 'error: type mismatch' >&2; exit 1;; esac\n",
+            format!(
+                "#!/bin/sh\ncase \"$1\" in *Control.lean) exec '{}' \"$1\";; *) echo 'error: type mismatch' >&2; exit 1;; esac\n",
+                auditing.display()
+            ),
         )
         .expect("write stand-in");
         fs::set_permissions(&judging, fs::Permissions::from_mode(0o755)).expect("chmod");

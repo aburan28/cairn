@@ -88,6 +88,28 @@ evaluation, trusting the compiler rather than the kernel — allowed only if the
 objective opts in). Every verifier needs its own version of this list, and
 writing it *is* the work of authoring an objective.
 
+A list over text misses what the text does not spell out: `Lean.ofReduceBool`
+named directly instead of through `native_decide`, `sorryAx` instead of
+`sorry`, an axiom a metaprogram adds without the keyword. So after a clean
+compile both implementations **audit the compiled theorem**: the file gains
+`#eval IO.println "<marker>"` and `#print axioms <name>` after the proof, where
+`<name>` is the first `theorem` or `lemma` the statement declares and the marker
+is random per run, and only the report that follows the marker counts. The
+theorem may rest on `propext`, `Classical.choice` and `Quot.sound`; on
+`Lean.ofReduceBool` and `Lean.trustCompiler` only with `allow_native_decide`;
+on axioms the objective's preamble declares; and on any the spec lists in
+`allowed_axioms` (exact names). Anything else is `Reject`, naming the axiom. A
+report that never arrives is `Unavailable` (nothing learned, nothing paid), and
+two reports after the marker are `Reject`, because only the proof could have
+printed the second. The screens grew to protect the audit: a proof that defines
+or runs a metaprogram (`macro`, `macro_rules`, `elab`, `syntax`,
+`command_elab`, `run_cmd`, `run_tac`, `initialize`, `#eval`, `#exit`, …) or
+names `skipKernelTC` is refused, since a proof term needs none of them and any
+of them could make `#print axioms` say what the proof chose. The primary's
+control compile carries the audit too, so a Lean that does not print axioms
+the way the audit reads them is found as `Unavailable` before any proof is
+judged. An `example` names nothing to audit, and is judged as before.
+
 **3. Score invalid input, don't crash on it.** The cap-set evaluator scores a
 non-cap-set as zero rather than raising. An invalid submission is a bad
 artifact; an exception is a broken verifier. Confusing the two decides whether
