@@ -649,6 +649,14 @@ repository is what keeps the anchor replaceable by somebody other than whoever
 holds the server. If you also front `cairn serve` with TLS, put that base URL in
 the entry's `http` field and the published site can read your node too.
 
+A GPU is the wrong machine for this. The process is one binary and two
+listening ports, and [launch/runpod-seed/README.md](../launch/runpod-seed/README.md)
+rents the smallest Runpod CPU pod that can hold them, deletes the pod if
+the quote comes back above a cap or with a volume attached, and keeps a
+hostname pointed at the pod's current address. The hostname is a dial
+hint: a community pod's IP moves, and the name in the compiled seed list
+is resolved when a node dials. The handshake is what decides who answered.
+
 **Open the port inbound.** A security group that does not admit the p2p port
 does not refuse connections, it *drops* them. There is no RST, so nothing on
 either side reports an error until a timeout expires — which is why this looks

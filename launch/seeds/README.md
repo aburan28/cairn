@@ -42,7 +42,8 @@ A seed that is down costs every new node its first peer, and the site's
 minute. [`../seed.service`](../seed.service) is the systemd unit that keeps
 one up across reboots and crashes; [docs/two-nodes.md](../../docs/two-nodes.md)
 says how to check it from outside and what the daemon publishes about its own
-reachability.
+reachability. A pod that is not a GPU, and a name that survives the pod's
+address changing, is [../runpod-seed/README.md](../runpod-seed/README.md).
 
 ## Why the keys are not in `seeds.json`
 
