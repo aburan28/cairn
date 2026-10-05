@@ -1255,6 +1255,9 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", path) if path.starts_with("/objective/") => {
             one_objective(stream, serving, &path["/objective/".len()..])
         }
+        ("GET", path) if path.starts_with("/claim/") => {
+            one_claim(stream, serving, &path["/claim/".len()..])
+        }
         ("GET", path) if path.starts_with("/frontier/") => {
             frontier(stream, serving, &path["/frontier/".len()..])
         }
@@ -1506,6 +1509,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             Value::array([
                 Value::string("GET /objectives"),
                 Value::string("GET /objective/{id}"),
+                Value::string("GET /claim/{id}"),
                 Value::string("GET /goals"),
                 Value::string("GET /goals?q={what you want solved}"),
                 Value::string("GET /goals/{key}"),
@@ -1847,6 +1851,25 @@ fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Res
     ];
     fields.extend(lifecycle_fields(&node, id, objective));
     json(stream, 200, &Value::object(fields))
+}
+
+/// A claim's record bytes, addressed by their content id for receipt checks.
+/// The log is already public; this avoids making clients reimplement canonical
+/// encoding just to bind a settled claim to the artifact they submitted.
+fn one_claim(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let claims = node.all_claims();
+    let Some(claim) = claims.get(id) else {
+        return json_error(stream, 404, "no such claim in this log");
+    };
+    json(
+        stream,
+        200,
+        &Value::object([("id", Value::string(id)), ("record", claim.to_value())]),
+    )
 }
 
 /// Where one objective stands: `settled`, `open`, `settlement`, and
@@ -5862,6 +5885,16 @@ mod tests {
         assert_eq!(int(&body, "attestations.accept"), 1);
         assert_eq!(int(&body, "attestations.reject"), 0);
         assert_eq!(int(&body, "attestations.slashed"), 0);
+        let (claim_status, claim_body) = get_json(addr, &format!("/claim/{accepted_claim}"));
+        assert!(claim_status.starts_with("HTTP/1.1 200"));
+        assert_eq!(
+            claim_body.get("id").and_then(Value::as_str),
+            Some(accepted_claim.as_str())
+        );
+        assert_eq!(
+            at(&claim_body, "record.objective_id").as_str(),
+            Some(objective_id.as_str())
+        );
         let rows = at(&body, "attestations.attestations").as_array().unwrap();
         assert_eq!(
             rows[0].get("attestor").unwrap().as_str(),

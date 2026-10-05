@@ -871,9 +871,9 @@ fn lean_replay_verdict(
                 );
             }
             let refused = axioms.iter().find(|name| {
-                !allowed.iter().any(|a| a == *name)
-                    && !pinned.iter().any(|a| a == *name)
-                    && !(allow_native_decide && is_native_decide_axiom(name))
+                !(allowed.iter().any(|a| a == *name)
+                    || pinned.iter().any(|a| a == *name)
+                    || (allow_native_decide && is_native_decide_axiom(name)))
             });
             match refused {
                 Some(axiom) => Verdict::new(
